@@ -76,6 +76,47 @@ impl Default for TerminalThemeColors {
     }
 }
 
+impl TerminalThemeColors {
+    /// The built-in light palette, used under a light appearance when the Ghostty import
+    /// declares no theme and no background of its own.
+    pub fn light() -> Self {
+        Self {
+            background: "#fafafa".to_string(),
+            foreground: "#383a42".to_string(),
+            cursor: "#526eff".to_string(),
+            cursor_accent: "#fafafa".to_string(),
+            selection_background: "#bfceff99".to_string(),
+            selection_foreground: None,
+            black: "#383a42".to_string(),
+            red: "#e45649".to_string(),
+            green: "#50a14f".to_string(),
+            yellow: "#c18401".to_string(),
+            blue: "#4078f2".to_string(),
+            magenta: "#a626a4".to_string(),
+            cyan: "#0184bc".to_string(),
+            white: "#a0a1a7".to_string(),
+            bright_black: "#696c77".to_string(),
+            bright_red: "#ca1243".to_string(),
+            bright_green: "#3e953a".to_string(),
+            bright_yellow: "#986801".to_string(),
+            bright_blue: "#2f5af3".to_string(),
+            bright_magenta: "#950095".to_string(),
+            bright_cyan: "#0997b3".to_string(),
+            bright_white: "#fafafa".to_string(),
+            extended_ansi: Vec::new(),
+            palette_overrides: Vec::new(),
+        }
+    }
+
+    /// Default colors for `appearance`.
+    pub fn for_appearance(appearance: TerminalAppearance) -> Self {
+        match appearance {
+            TerminalAppearance::Light => Self::light(),
+            TerminalAppearance::Dark => Self::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GhosttyTerminalConfig {
     pub font_family: Option<String>,
@@ -699,26 +740,53 @@ pub fn load_terminal_preferences_from_path_for(
 ) -> TerminalPreferences {
     match fs::read_to_string(path) {
         Ok(contents) => match parse_ghostty_config(&contents) {
-            Ok(config) => TerminalPreferences::imported(
-                resolve_theme(config, appearance),
-                path.to_path_buf(),
-            ),
-            Err(_) => TerminalPreferences::defaults(
+            Ok(config) => imported_for(resolve_theme(config, appearance), path.to_path_buf(), appearance),
+            Err(_) => defaults_for(
                 TerminalPreferencesStatus::Malformed,
                 Some(path.to_path_buf()),
+                appearance,
             ),
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            TerminalPreferences::defaults(
-                TerminalPreferencesStatus::Absent,
-                Some(path.to_path_buf()),
-            )
+            defaults_for(TerminalPreferencesStatus::Absent, Some(path.to_path_buf()), appearance)
         }
-        Err(_) => TerminalPreferences::defaults(
+        Err(_) => defaults_for(
             TerminalPreferencesStatus::Malformed,
             Some(path.to_path_buf()),
+            appearance,
         ),
     }
+}
+
+/// Defaults with the palette for `appearance`.
+fn defaults_for(
+    status: TerminalPreferencesStatus,
+    source_path: Option<PathBuf>,
+    appearance: TerminalAppearance,
+) -> TerminalPreferences {
+    let mut preferences = TerminalPreferences::defaults(status, source_path);
+    preferences.theme = TerminalThemeColors::for_appearance(appearance);
+    preferences
+}
+
+/// An import that declares no theme and no colors of its own takes the built-in palette for
+/// `appearance`; any declared theme or color keeps the import exactly as written.
+fn imported_for(
+    config: GhosttyTerminalConfig,
+    source_path: PathBuf,
+    appearance: TerminalAppearance,
+) -> TerminalPreferences {
+    let declares_colors = config.theme_name.is_some()
+        || config.background.is_some()
+        || config.foreground.is_some()
+        || config.cursor_color.is_some()
+        || config.selection_background.is_some()
+        || !config.palette.is_empty();
+    let mut preferences = TerminalPreferences::imported(config, source_path);
+    if !declares_colors {
+        preferences.theme = TerminalThemeColors::for_appearance(appearance);
+    }
+    preferences
 }
 
 fn ghostty_config_candidates() -> Vec<PathBuf> {
@@ -757,7 +825,7 @@ pub fn load_terminal_preferences() -> TerminalPreferences {
 /// Imports the Ghostty configuration, resolving a `light:`/`dark:` theme for `appearance`.
 pub fn load_terminal_preferences_for(appearance: TerminalAppearance) -> TerminalPreferences {
     if let Some(cli_config) = try_load_from_ghostty_cli(appearance) {
-        return TerminalPreferences::imported(cli_config, PathBuf::from("ghostty"));
+        return imported_for(cli_config, PathBuf::from("ghostty"), appearance);
     }
 
     // An empty candidate list means no config root is known on this platform: the import is
@@ -768,10 +836,7 @@ pub fn load_terminal_preferences_for(appearance: TerminalAppearance) -> Terminal
         return load_terminal_preferences_from_path_for(path, appearance);
     }
 
-    TerminalPreferences::defaults(
-        TerminalPreferencesStatus::Absent,
-        candidates.into_iter().next(),
-    )
+    defaults_for(TerminalPreferencesStatus::Absent, candidates.into_iter().next(), appearance)
 }
 
 /// Local, user-set terminal preferences that take precedence over the Ghostty import.
@@ -1010,6 +1075,28 @@ mod tests {
             assert_eq!(theme_name_for_appearance("   ", appearance), None);
         }
         assert_eq!(TerminalAppearance::default(), TerminalAppearance::Dark);
+    }
+
+    #[test]
+    fn light_appearance_without_a_declared_theme_uses_the_light_palette() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("absent-config");
+        let light = load_terminal_preferences_from_path_for(&missing, TerminalAppearance::Light);
+        let dark = load_terminal_preferences_from_path_for(&missing, TerminalAppearance::Dark);
+        assert_eq!(light.theme, TerminalThemeColors::light());
+        assert_eq!(dark.theme, TerminalThemeColors::default());
+
+        let fonts_only = temp.path().join("fonts-only");
+        fs::write(&fonts_only, "font-size = 14\n").expect("write config");
+        let light = load_terminal_preferences_from_path_for(&fonts_only, TerminalAppearance::Light);
+        assert_eq!(light.theme.background, "#fafafa");
+        assert_eq!(light.font_size, 14.0);
+
+        // A declared background is the user's choice and is kept under both appearances.
+        let declared = temp.path().join("declared");
+        fs::write(&declared, "background = #101010\n").expect("write config");
+        let light = load_terminal_preferences_from_path_for(&declared, TerminalAppearance::Light);
+        assert_eq!(light.theme.background, "#101010");
     }
 
     #[test]

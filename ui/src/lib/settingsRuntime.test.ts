@@ -14,6 +14,11 @@ vi.mock("./tauri", async (importOriginal) => {
   return { ...actual, setTerminalAppearance: terminalIpc.setTerminalAppearance };
 });
 
+// The desktop-shell cases subscribe to the native window theme event; no event fires here.
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ onThemeChanged: async () => () => undefined }),
+}));
+
 import {
   APPEARANCE_SETTINGS_EVENT,
   applyAppearanceSettings,

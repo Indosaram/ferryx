@@ -1,10 +1,11 @@
 // Attach (read-only) to a session's output ring and print the tail.
+import { existsSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
 
 // Resolves the live daemon endpoint the way src-tauri/src/daemon/server.rs::get_runtime_dir does:
-// FERRYX_RUNTIME_DIR wins, then /tmp/rorca-<uid>{-dev} on unix or %LOCALAPPDATA%\Ferryx\runtime{,-dev}
+// FERRYX_RUNTIME_DIR wins, then /tmp/ferryx-<uid>{-dev} on unix (falling back to the pre-rename /tmp/rorca-<uid>{-dev}) or %LOCALAPPDATA%\Ferryx\runtime{,-dev}
 // on Windows. Fails with a clear message instead of a TypeError where neither applies.
 function daemonSocketPath(dev = false) {
   const override = process.env.FERRYX_RUNTIME_DIR;
@@ -14,10 +15,13 @@ function daemonSocketPath(dev = false) {
     return path.join(base, "Ferryx", dev ? "runtime-dev" : "runtime", "daemon.port");
   }
   if (typeof process.getuid !== "function") {
-    console.error(`Cannot resolve the Ferryx daemon runtime dir on ${process.platform}: expected /tmp/rorca-<uid> on unix or %LOCALAPPDATA%\\Ferryx\\runtime on Windows; set FERRYX_RUNTIME_DIR to override.`);
+    console.error(`Cannot resolve the Ferryx daemon runtime dir on ${process.platform}: expected /tmp/ferryx-<uid> on unix or %LOCALAPPDATA%\\Ferryx\\runtime on Windows; set FERRYX_RUNTIME_DIR to override.`);
     process.exit(2);
   }
-  return path.join("/tmp", `rorca-${process.getuid()}${dev ? "-dev" : ""}`, "daemon.sock");
+  const [current, legacy] = [`ferryx-${process.getuid()}`, `rorca-${process.getuid()}`]
+    .map((name) => path.join("/tmp", `${name}${dev ? "-dev" : ""}`, "daemon.sock"));
+  // A daemon from before the rename serves only the legacy path.
+  return !existsSync(current) && existsSync(legacy) ? legacy : current;
 }
 
 const SOCKET_PATH = daemonSocketPath();

@@ -533,8 +533,8 @@ mod session_path_tests {
     }
 }
 
-/// Returns the daemon runtime directory. Debug builds use a separate directory to prevent
-/// dev and release daemons from sharing endpoints; release paths intentionally remain unchanged.
+/// Returns the daemon runtime directory (`/tmp/ferryx-{uid}`). Debug builds use a separate
+/// directory to prevent dev and release daemons from sharing endpoints.
 #[cfg(unix)]
 pub fn get_runtime_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("FERRYX_RUNTIME_DIR") {
@@ -546,7 +546,83 @@ pub fn get_runtime_dir() -> PathBuf {
     // takes no arguments, dereferences no pointers, and always returns the current process's UID.
     let uid = unsafe { libc::getuid() };
     let suffix = if is_dev_runtime() { "-dev" } else { "" };
-    PathBuf::from(format!("/tmp/rorca-{uid}{suffix}"))
+    PathBuf::from(format!("/tmp/ferryx-{uid}{suffix}"))
+}
+
+/// The runtime directory used before the rename (`/tmp/rorca-{uid}`). For one release the daemon
+/// also listens on `daemon.sock` here, so a GUI from before the rename still connects, and a new
+/// client still finds a daemon from before the rename. Under a `FERRYX_RUNTIME_DIR` override
+/// there is no legacy directory unless `FERRYX_LEGACY_RUNTIME_DIR` names one (isolated tests/QA).
+#[cfg(unix)]
+pub fn get_legacy_runtime_dir() -> Option<PathBuf> {
+    if std::env::var_os("FERRYX_RUNTIME_DIR").is_some() {
+        return std::env::var_os("FERRYX_LEGACY_RUNTIME_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from);
+    }
+    // SAFETY: `getuid` takes no arguments and returns the current process UID.
+    let uid = unsafe { libc::getuid() };
+    let suffix = if is_dev_runtime() { "-dev" } else { "" };
+    Some(PathBuf::from(format!("/tmp/rorca-{uid}{suffix}")))
+}
+
+#[cfg(not(unix))]
+pub fn get_legacy_runtime_dir() -> Option<PathBuf> {
+    None
+}
+
+/// `daemon.sock` in [`get_legacy_runtime_dir`].
+pub fn get_legacy_socket_path() -> Option<PathBuf> {
+    get_legacy_runtime_dir().map(|dir| dir.join("daemon.sock"))
+}
+
+/// True when a daemon from before the rename still holds the legacy directory's `daemon.lock`.
+#[cfg(unix)]
+fn legacy_lock_held_elsewhere(legacy_dir: &Path) -> bool {
+    crate::daemon::handover_socket::lock_is_held_elsewhere(&legacy_dir.join("daemon.lock"))
+        .unwrap_or(false)
+}
+
+/// The legacy socket, when nothing serves the canonical socket and a daemon from before the
+/// rename owns the legacy one (it holds the legacy `daemon.lock`). Blocking.
+#[cfg(unix)]
+pub fn legacy_owner_socket_path() -> Option<PathBuf> {
+    if fs::symlink_metadata(get_socket_path()).is_ok() {
+        return None;
+    }
+    let legacy = get_legacy_socket_path()?;
+    let dir = legacy.parent()?;
+    (legacy_lock_held_elsewhere(dir) && fs::symlink_metadata(&legacy).is_ok()).then_some(legacy)
+}
+
+#[cfg(not(unix))]
+pub fn legacy_owner_socket_path() -> Option<PathBuf> {
+    None
+}
+
+/// The legacy runtime dir's `daemon.lock`, held while this daemon serves the legacy socket so a
+/// launcher from before the rename sees an owner instead of starting a second daemon.
+#[cfg(unix)]
+static LEGACY_COMPAT_LOCK: Mutex<Option<DaemonLockFile>> = parking_lot::const_mutex(None);
+
+/// Takes the legacy `daemon.lock`. Without `wait` a held lock is Ok(None); with `wait` the call
+/// blocks until a daemon from before the rename that still owns it exits.
+#[cfg(unix)]
+fn take_legacy_lock(path: &Path, wait: bool) -> Result<Option<DaemonLockFile>, String> {
+    use std::os::unix::io::AsRawFd;
+    let file = open_secure_lock_file(path)?;
+    if !wait {
+        return Ok(DaemonLockFile::try_lock(file).ok());
+    }
+    // SAFETY: `file` stays open for the whole call; LOCK_EX blocks until the lock is granted.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!(
+            "Failed to lock {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(Some(DaemonLockFile::from_locked_file(file)))
 }
 
 #[cfg(not(unix))]
@@ -3616,7 +3692,7 @@ impl DaemonServer {
             machine_controllers: tokio::sync::Mutex::new(HashMap::new()),
             machine_lifecycles: Arc::new(Mutex::new(HashMap::new())),
             remote_persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
-            // The runtime dir (/tmp/rorca-{uid}) is wiped on reboot, which erased every
+            // The runtime dir (/tmp/ferryx-{uid}) is wiped on reboot, which erased every
             // persisted remote descriptor even though the host-side helper daemons survived.
             // Durable remote identity belongs next to the machine identity.
             remote_sessions_path: isolated_dir
@@ -4748,13 +4824,35 @@ impl DaemonServer {
         #[cfg(unix)]
         if handover_from.is_none() {
             let dir = runtime_dir.clone();
+            // A daemon from before the rename writes its request for this generation into its
+            // own runtime dir; only a request for this generation is taken from there.
+            let legacy_dir = get_legacy_runtime_dir().filter(|legacy| *legacy != dir);
             let role = crate::ipc::run_blocking(move || {
-                Ok(crate::daemon::handover_request::take_startup_request(
-                    &dir,
-                    crate::daemon::handover_request::own_generation_key().as_deref(),
-                    crate::daemon::owner_admission::unix_now_ms(),
-                    &crate::daemon::owner_admission::process_start_time,
-                ))
+                use crate::daemon::handover_request::{
+                    own_generation_key, request_path, take_startup_request, HandoverRequest,
+                    StartupRole,
+                };
+                let own_key = own_generation_key();
+                let take = |dir: &Path| {
+                    take_startup_request(
+                        dir,
+                        own_key.as_deref(),
+                        crate::daemon::owner_admission::unix_now_ms(),
+                        &crate::daemon::owner_admission::process_start_time,
+                    )
+                };
+                let role = take(dir.as_path());
+                if role != StartupRole::Ordinary {
+                    return Ok(role);
+                }
+                let Some(legacy_dir) = legacy_dir else {
+                    return Ok(role);
+                };
+                let for_this_generation = matches!(
+                    crate::daemon::owner_admission::read_record::<HandoverRequest>(&request_path(&legacy_dir)),
+                    Ok(Some(request)) if own_key.as_deref() == Some(request.generation_key.as_str())
+                );
+                Ok(if for_this_generation { take(legacy_dir.as_path()) } else { role })
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -4795,6 +4893,17 @@ impl DaemonServer {
         // path never disappears.
         #[cfg(unix)]
         let mut inherited_canonical: Option<std::os::unix::net::UnixListener> = None;
+        // Set when the predecessor ran before the rename: its public socket is the legacy one,
+        // which this daemon keeps serving for one release, and its locks are already installed.
+        #[cfg(unix)]
+        let mut inherited_legacy_compat: Option<std::os::unix::net::UnixListener> = None;
+        #[cfg(unix)]
+        let mut cross_rename_locks_installed = false;
+        #[cfg(unix)]
+        let cross_rename = handover_from.as_deref().and_then(Path::parent).is_some_and(|parent| {
+            parent != runtime_dir.as_path()
+                && get_legacy_runtime_dir().as_deref() == Some(parent)
+        });
 
         if let Some(ref legacy_path) = handover_from {
             tracing::info!(
@@ -5130,13 +5239,29 @@ impl DaemonServer {
                     // none. Any failure here aborts before commit and the predecessor keeps
                     // serving. A pre-plan predecessor closes the stream without answering; only
                     // then does this candidate fall back to taking the locks after commit.
+                    // A predecessor from before the rename serves every endpoint from the legacy
+                    // runtime dir, so its authority is validated against those paths.
+                    let authority_dir = if cross_rename {
+                        legacy_path.parent().map(Path::to_path_buf).unwrap_or_else(|| runtime_dir.clone())
+                    } else {
+                        runtime_dir.clone()
+                    };
                     let expected = crate::daemon::handover_socket::ExpectedAuthority {
-                        canonical_socket: socket_path.clone(),
-                        legacy_lock: lock_path.clone(),
+                        canonical_socket: if cross_rename { authority_dir.join("daemon.sock") } else { socket_path.clone() },
+                        legacy_lock: if cross_rename { authority_dir.join("daemon.lock") } else { lock_path.clone() },
                         persistent_lock: get_persistent_lock_path(),
-                        control_socket: (!control_server::control_disabled_for_qa())
-                            .then(control_server::control_socket_path),
-                        agent_state_socket: Some(get_agent_state_socket_path()),
+                        control_socket: (!control_server::control_disabled_for_qa()).then(|| {
+                            if cross_rename {
+                                authority_dir.join(crate::daemon::control::CONTROL_SOCKET_FILE)
+                            } else {
+                                control_server::control_socket_path()
+                            }
+                        }),
+                        agent_state_socket: Some(if cross_rename {
+                            authority_dir.join("agent-state.sock")
+                        } else {
+                            get_agent_state_socket_path()
+                        }),
                     };
                     let authority_transfer_id = transfer_id.clone();
                     received_authority = tokio::task::spawn_blocking(move || {
@@ -5207,7 +5332,12 @@ impl DaemonServer {
                 match transfer_outcome {
                     Ok((offered, accepted, restorable, commit_latency_ms)) => {
                         if let Some(authority) = received_authority.take() {
-                            inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                            if cross_rename {
+                                inherited_legacy_compat = Some(self.install_cross_rename_authority(authority)?);
+                                cross_rename_locks_installed = true;
+                            } else {
+                                inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                            }
                             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
                             crate::daemon::qa_producers::note_authority_stage(
                                 "authority-adopted",
@@ -5264,6 +5394,13 @@ impl DaemonServer {
                         if let Err(error) = self.session_router.adopt_routes_from_manifest().await {
                             tracing::error!(%error, "Could not adopt the retained-session routes after commit");
                         }
+                        if let Some(legacy_manifest) = cross_rename
+                            .then(|| legacy_path.with_file_name("handover_routes.json"))
+                        {
+                            if let Err(error) = self.session_router.adopt_routes_from_manifest_at(legacy_manifest).await {
+                                tracing::error!(%error, "Could not adopt the pre-rename retained-session routes after commit");
+                            }
+                        }
                         if let Err(error) = self
                             .restore_remote_sessions_at(self.remote_sessions_path.clone())
                             .await
@@ -5282,7 +5419,12 @@ impl DaemonServer {
                             {
                                 tracing::info!("Recovered committed handover from recorded transaction decision");
                                 if let Some(authority) = received_authority.take() {
-                                    inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                                    if cross_rename {
+                                        inherited_legacy_compat = Some(self.install_cross_rename_authority(authority)?);
+                                        cross_rename_locks_installed = true;
+                                    } else {
+                                        inherited_canonical = Some(self.install_adopted_authority(authority)?);
+                                    }
                                 }
                                 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
                                 crate::daemon::qa_producers::note_authority_stage("authority-recovered", &self.handover_manager).await;
@@ -5434,9 +5576,13 @@ impl DaemonServer {
         let adopted_authority = inherited_canonical.is_some();
         #[cfg(not(unix))]
         let adopted_authority = false;
+        #[cfg(unix)]
+        let locks_installed = adopted_authority || cross_rename_locks_installed;
+        #[cfg(not(unix))]
+        let locks_installed = adopted_authority;
         // The ordinary acquire/bind path is skipped when authority was adopted: the inherited
         // lock fds were already installed by install_adopted_authority.
-        if !adopted_authority {
+        if !locks_installed {
             let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
             self.handover_manager.set_lock_files(lock_files);
         }
@@ -5505,7 +5651,11 @@ impl DaemonServer {
         #[cfg(not(unix))]
         self.note_published_endpoint(&get_transport_token_path());
 
-        tracing::info!("rorca daemon listening on {}", socket_path.display());
+        tracing::info!("Ferryx daemon listening on {}", socket_path.display());
+
+        // One release of compatibility: GUIs from before the rename dial /tmp/rorca-{uid}.
+        #[cfg(unix)]
+        Arc::clone(&self).spawn_legacy_socket_listener(inherited_legacy_compat.take());
 
         // control-v1: bound right after the data listener, only while this process holds the
         // daemon locks. A committed HandoverCandidate binds it here too: without it the next GUI
@@ -5516,6 +5666,13 @@ impl DaemonServer {
         // direct, so a successor talks to each generation that still owns sessions over that
         // generation's own legacy socket. adopt_routes_from_manifest skips peers already added.
         self.session_router.adopt_routes_from_manifest().await?;
+        // Routes a daemon from before the rename wrote live in its own runtime dir.
+        if let Some(legacy_manifest) = get_legacy_runtime_dir().map(|dir| dir.join("handover_routes.json")) {
+            // Only a pre-rename daemon writes this file; a bad one must not stop this start.
+            if let Err(error) = self.session_router.adopt_routes_from_manifest_at(legacy_manifest).await {
+                tracing::warn!(%error, "Could not adopt the pre-rename handover routes");
+            }
+        }
 
         if handover_from.is_none() {
             self.restore_remote_sessions_at(self.remote_sessions_path.clone())
@@ -7658,6 +7815,161 @@ impl DaemonServer {
         });
     }
 
+    /// Serves the data protocol on `/tmp/rorca-{uid}/daemon.sock` for one release, so a GUI from
+    /// before the rename still reaches this daemon. `inherited` is the listener a predecessor from
+    /// before the rename handed over. Otherwise the socket is bound right away when the legacy
+    /// `daemon.lock` is free, or once a daemon from before the rename that still holds it exits.
+    /// Public accepts follow the canonical socket's gate, and a commit hands the legacy lock and
+    /// path to the successor.
+    #[cfg(unix)]
+    pub(crate) fn spawn_legacy_socket_listener(
+        self: Arc<Self>,
+        inherited: Option<std::os::unix::net::UnixListener>,
+    ) {
+        let Some(legacy_socket) = get_legacy_socket_path() else {
+            return;
+        };
+        if legacy_socket == get_socket_path() {
+            return;
+        }
+        // On commit the successor takes the legacy path over: release the lock it waits for.
+        self.handover_manager.on_commit(|| {
+            LEGACY_COMPAT_LOCK.lock().take();
+        });
+        let runtime = tokio::runtime::Handle::current();
+        let listener = match inherited {
+            Some(listener) => Some(listener),
+            None => match self.bind_legacy_socket(&legacy_socket, false) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::warn!(%error, path = %legacy_socket.display(), "Legacy daemon socket not served");
+                    return;
+                }
+            },
+        };
+        if let Some(listener) = listener {
+            self.serve_legacy_socket(&runtime, listener, &legacy_socket);
+            return;
+        }
+        // A plain thread, not the blocking pool: the lock wait can last for the daemon's whole
+        // life, and runtime shutdown must not wait for it.
+        let spawned = std::thread::Builder::new()
+            .name("legacy-socket".to_string())
+            .spawn(move || match self.bind_legacy_socket(&legacy_socket, true) {
+                Ok(Some(listener)) => self.serve_legacy_socket(&runtime, listener, &legacy_socket),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, path = %legacy_socket.display(), "Legacy daemon socket not served");
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "Could not start the legacy daemon socket thread");
+        }
+    }
+
+    #[cfg(unix)]
+    fn serve_legacy_socket(
+        self: Arc<Self>,
+        runtime: &tokio::runtime::Handle,
+        listener: std::os::unix::net::UnixListener,
+        path: &Path,
+    ) {
+        let _entered = runtime.enter();
+        let listener = match UnixListener::from_std(listener) {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to serve the legacy daemon socket");
+                return;
+            }
+        };
+        tracing::info!(path = %path.display(), "Also serving the pre-rename daemon socket");
+        runtime.spawn(async move {
+            let manager = Arc::clone(&self.handover_manager);
+            loop {
+                // None: this daemon handed over; the successor binds the legacy path itself.
+                let Some(accepted) = manager.gated_accept(|| listener.accept()).await else {
+                    drop(listener);
+                    break;
+                };
+                match accepted {
+                    Ok((stream, _)) => {
+                        let server = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            server.handle_client(stream).await;
+                        });
+                    }
+                    Err(error) => {
+                        tracing::error!("Legacy daemon socket accept error: {error}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Takes the legacy lock (see [`take_legacy_lock`]), then binds the legacy socket with the
+    /// same 0700 dir and 0600 socket modes as the canonical one. Ok(None) when the lock is held
+    /// and `wait` is false, or when this daemon handed its listeners over while it waited.
+    /// Blocking.
+    #[cfg(unix)]
+    fn bind_legacy_socket(
+        &self,
+        legacy_socket: &Path,
+        wait: bool,
+    ) -> Result<Option<std::os::unix::net::UnixListener>, String> {
+        let dir = legacy_socket
+            .parent()
+            .ok_or_else(|| format!("{} has no parent", legacy_socket.display()))?;
+        ensure_runtime_directory(dir)?;
+        let Some(lock) = take_legacy_lock(&dir.join("daemon.lock"), wait)? else {
+            return Ok(None);
+        };
+        if !self.handover_manager.holds_lock_files() {
+            return Ok(None);
+        }
+        remove_stale_socket_after_lock(legacy_socket)?;
+        let listener = std::os::unix::net::UnixListener::bind(legacy_socket)
+            .map_err(|error| format!("Failed to bind {}: {error}", legacy_socket.display()))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("Failed to configure the legacy socket: {error}"))?;
+        validate_safe_ownership_and_type(legacy_socket, RuntimeNodeKind::Socket)?;
+        fs::set_permissions(legacy_socket, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Failed to secure the legacy socket: {error}"))?;
+        self.note_published_endpoint(legacy_socket);
+        *LEGACY_COMPAT_LOCK.lock() = Some(lock);
+        Ok(Some(listener))
+    }
+
+    /// Takes over the authority of a predecessor from before the rename, whose locks are the
+    /// persistent lock and the legacy dir's `daemon.lock`. The persistent lock plus a freshly
+    /// taken canonical `daemon.lock` become this daemon's lock files, the legacy lock is kept for
+    /// the legacy socket, and the returned legacy listener keeps serving older GUIs. Its control
+    /// and agent-state listeners are closed; this daemon binds its own in the new runtime dir.
+    #[cfg(unix)]
+    fn install_cross_rename_authority(
+        &self,
+        authority: crate::daemon::handover_socket::TransferredAuthority,
+    ) -> Result<std::os::unix::net::UnixListener, String> {
+        let adopted = crate::daemon::handover_socket::adopt_validated_authority(authority)
+            .map_err(|error| format!("Failed to adopt the pre-rename authority: {error}"))?;
+        let (persistent, legacy) = adopted.lock_files.detach_without_unlock();
+        let canonical_lock = lock_file_with_optional_wait(
+            &get_lock_path(),
+            crate::daemon::handover::successor_wait_from_env()
+                .map(|wait| std::time::Instant::now() + wait),
+        )?;
+        self.handover_manager.set_lock_files(DaemonLockFiles::from_locked_files(
+            persistent,
+            canonical_lock.detach_without_unlock(),
+        ));
+        *LEGACY_COMPAT_LOCK.lock() = Some(DaemonLockFile::from_locked_file(legacy));
+        drop(adopted.control_listener);
+        drop(adopted.agent_state_listener);
+        tracing::info!("Adopted a pre-rename predecessor; serving its socket as the legacy path");
+        Ok(adopted.canonical_listener)
+    }
+
     /// Takes over a validated authority after the predecessor's decision is Retired: installs
     /// the inherited locks, parks the control and agent-state listeners for their serve paths,
     /// and returns the canonical data listener. Never binds and never locks.
@@ -9647,19 +9959,26 @@ mod tests {
         // SAFETY: `getuid` takes no arguments and returns the current process UID.
         let uid = unsafe { libc::getuid() };
         let expected = if cfg!(debug_assertions) {
-            PathBuf::from(format!("/tmp/rorca-{uid}-dev"))
+            PathBuf::from(format!("/tmp/ferryx-{uid}-dev"))
         } else {
-            PathBuf::from(format!("/tmp/rorca-{uid}"))
+            PathBuf::from(format!("/tmp/ferryx-{uid}"))
         };
         assert_eq!(get_runtime_dir(), expected);
 
         let expected = if cfg!(debug_assertions) {
+            PathBuf::from(format!("/tmp/ferryx-{uid}-dev/daemon.sock"))
+        } else {
+            PathBuf::from(format!("/tmp/ferryx-{uid}/daemon.sock"))
+        };
+        assert_eq!(get_socket_path(), expected);
+        assert_eq!(get_lock_path(), get_runtime_dir().join("daemon.lock"));
+
+        let legacy = if cfg!(debug_assertions) {
             PathBuf::from(format!("/tmp/rorca-{uid}-dev/daemon.sock"))
         } else {
             PathBuf::from(format!("/tmp/rorca-{uid}/daemon.sock"))
         };
-        assert_eq!(get_socket_path(), expected);
-        assert_eq!(get_lock_path(), get_runtime_dir().join("daemon.lock"));
+        assert_eq!(get_legacy_socket_path(), Some(legacy));
     }
 
     #[test]
