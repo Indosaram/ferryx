@@ -11,3 +11,46 @@ Thanks for helping. Before you open a pull request:
 3. **Describe the user-visible result** in the pull request and how you checked it.
 
 Ferryx is source-available under the license in [`LICENSE`](LICENSE). It is not OSI open source.
+
+## Build prerequisites
+
+- [Bun](https://bun.sh/) 1.1+
+- [Rust](https://www.rust-lang.org/) stable (at least 1.82)
+- [Node.js](https://nodejs.org/) 20+
+- [Zig](https://ziglang.org/download/) 0.16.0 (required for the pinned Ghostty build)
+- [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
+
+On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
+[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop or CLI binary.
+
+Clone and install:
+
+```bash
+git clone https://github.com/Indosaram/ferryx.git
+cd ferryx
+git submodule update --init --recursive
+bun install
+bun install --cwd ui
+bun install --cwd site
+```
+
+## Tests
+
+JavaScript and TypeScript run on Bun only: use `bun install`, `bun run`, `bun test`, and `bunx`,
+never `node`, `npx`, or `npm`.
+
+```bash
+# Frontend build and tests
+bun run --cwd ui build
+bun run --cwd ui test
+
+# Rust core
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+# Site and docs
+BASE_URL=/ bun run --cwd site build
+```
+
+Contributions are accepted under the [Ferryx License](LICENSE) and require the
+[Contributor License Agreement](CLA.md) described above.
