@@ -112,7 +112,8 @@ const isActivityRecord = (value: unknown) => {
 function isSessionSignals(value: unknown): boolean {
   const s = objectOf(value);
   return s !== null && isFlagRecord(s.unreadWorktreePaths) && isAgentStateRecord(s.agentStateByPath) &&
-    (s.activityByWorktreePath === undefined || isActivityRecord(s.activityByWorktreePath));
+    (s.activityByWorktreePath === undefined || isActivityRecord(s.activityByWorktreePath)) &&
+    (s.attentionCount === undefined || (Number.isInteger(s.attentionCount) && (s.attentionCount as number) >= 0));
 }
 
 /** Structural guard for the wire model: one malformed node rejects the whole snapshot. */

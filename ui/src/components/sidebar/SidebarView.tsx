@@ -37,6 +37,8 @@ export type SidebarReorder = {
 
 export type SidebarInbox = {
   readonly rows: readonly AttentionRow[];
+  /** The tab's count when it is not this list's length (the remote shows the desktop's published count). */
+  readonly count?: number;
   readonly onOpen: (row: AttentionRow) => void;
   readonly onDismiss: (row: AttentionRow) => void;
   readonly onDismissAll?: () => void;
@@ -177,7 +179,7 @@ export function SidebarView({
         <SidebarViewTabs
           view={activeView}
           onViewChange={actions.onViewChange}
-          inboxCount={inbox.rows.length}
+          inboxCount={inbox.count ?? inbox.rows.length}
           supervisor={showSupervisor && supervisor ? { typing: supervisor.typing } : null}
           inboxShortcut={shortcuts.inbox}
         />

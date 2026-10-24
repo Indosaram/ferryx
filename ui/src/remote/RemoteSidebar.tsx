@@ -115,9 +115,24 @@ type SectionProps = {
   readonly sidebar: RemoteSidebarProps;
   readonly first: boolean;
   readonly heading: boolean;
+  /** The Inbox tab count the machines' desktops published; null when none publishes one. */
+  readonly inboxCount: number | null;
 };
 
-function MachineSection({ section, sidebar, first, heading }: SectionProps) {
+/**
+ * The Inbox tab's count as the desktops draw it: the sum of the counts their snapshots publish
+ * (one desktop: exactly its own). Null when no section carries one (inventory fallback or an older
+ * desktop), so the remote counts its own rows as before.
+ */
+export function publishedInboxCount(sections: readonly Pick<RemoteSidebarSection, "model">[]): number | null {
+  const counts = sections.flatMap((section) => {
+    const count = section.model?.source === "desktop" ? section.model.signals?.attentionCount : undefined;
+    return count === undefined ? [] : [count];
+  });
+  return counts.length === 0 ? null : counts.reduce((sum, count) => sum + count, 0);
+}
+
+function MachineSection({ section, sidebar, first, heading, inboxCount }: SectionProps) {
   const [collapsed, setCollapsed] = useState<string[] | null>(() => readCollapsed(section.machineId));
   const [query, setQuery] = useState("");
   const model: SidebarModel | null = section.model
@@ -172,7 +187,7 @@ function MachineSection({ section, sidebar, first, heading }: SectionProps) {
           }}
           filter={{ query, onChange: setQuery }}
           view={first ? sidebar.view : "worktrees"}
-          {...(first && sidebar.inbox ? { inbox: sidebar.inbox } : {})}
+          {...(first && sidebar.inbox ? { inbox: inboxCount === null ? sidebar.inbox : { ...sidebar.inbox, count: inboxCount } } : {})}
           {...(first && sidebar.supervisor ? { supervisor: sidebar.supervisor } : {})}
           renderRow={(project, node, live) => (
             <div
@@ -202,10 +217,11 @@ export function RemoteSidebar(sidebar: RemoteSidebarProps) {
   const heading = sidebar.sections.length > 1;
   const sections = sidebar.view === "worktrees" ? sidebar.sections : sidebar.sections.slice(0, 1);
   if (sections.length === 0) return <>{sidebar.status}</>;
+  const inboxCount = publishedInboxCount(sidebar.sections);
   return (
     <>
       {sections.map((section, index) => (
-        <MachineSection key={section.machineId} section={section} sidebar={sidebar} first={index === 0} heading={heading} />
+        <MachineSection key={section.machineId} section={section} sidebar={sidebar} first={index === 0} heading={heading} inboxCount={inboxCount} />
       ))}
     </>
   );

@@ -1123,17 +1123,6 @@ function WorkspaceApp({
     },
   );
   const inactiveProjectWorktreesRef = useRef(inactiveProjectWorktrees);
-  useDesktopSidebarPublisher({
-    enabled: isNativeRuntime,
-    projects,
-    activeProjectId: activeProject.workspaceId,
-    worktrees: state.worktrees,
-    inactiveProjectWorktrees,
-    emptyWorkspaceIds: emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots()),
-    activityByWorktreePath: worktreeActivity,
-    unreadWorktreePaths: state.unreadWorktreePaths,
-    agents,
-  });
 
   // Dag journals: watch every known project root, worktree and live session root so any omo
   // graph run anywhere lights up the activity badge, regardless of which cwd the app started in.
@@ -2096,6 +2085,19 @@ function WorkspaceApp({
     // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
     [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
+  // Publishes what the Sidebar draws, Inbox count included (declared here, after attentionRows).
+  useDesktopSidebarPublisher({
+    enabled: isNativeRuntime,
+    projects,
+    activeProjectId: activeProject.workspaceId,
+    worktrees: state.worktrees,
+    inactiveProjectWorktrees,
+    emptyWorkspaceIds: emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots()),
+    activityByWorktreePath: worktreeActivity,
+    unreadWorktreePaths: state.unreadWorktreePaths,
+    agents,
+    attentionCount: attentionRows.length,
+  });
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;

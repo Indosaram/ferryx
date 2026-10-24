@@ -17,6 +17,11 @@ export type SidebarSessionSignals = {
   readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
   /** Bare agent state for rows the desktop has no activity summary for (the slot's fallback). */
   readonly agentStateByPath: Readonly<Record<string, AgentState>>;
+  /**
+   * The count on the desktop's Inbox tab (its notification centre's attention rows). Published so
+   * the remote's Inbox tab shows the same number; absent from older snapshots.
+   */
+  readonly attentionCount?: number;
 };
 
 export const AGENT_STATES: readonly AgentState[] = ["starting", "working", "waiting", "exited", "failed"];
@@ -29,6 +34,7 @@ export function sidebarSessionSignals(model: SidebarModel, raw: {
   readonly activityByWorktreePath?: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths?: Readonly<Record<string, boolean>>;
   readonly agentStateByPath?: Readonly<Record<string, AgentState | undefined>>;
+  readonly attentionCount?: number;
 }): SidebarSessionSignals {
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
   const unreadWorktreePaths: Record<string, boolean> = {};
@@ -41,5 +47,10 @@ export function sidebarSessionSignals(model: SidebarModel, raw: {
     const agentState = raw.agentStateByPath?.[node.path];
     if (summary === undefined && agentState) agentStateByPath[node.path] = agentState;
   }
-  return { activityByWorktreePath, unreadWorktreePaths, agentStateByPath };
+  return {
+    activityByWorktreePath,
+    unreadWorktreePaths,
+    agentStateByPath,
+    ...(raw.attentionCount === undefined ? {} : { attentionCount: raw.attentionCount }),
+  };
 }

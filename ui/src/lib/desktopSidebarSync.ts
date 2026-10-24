@@ -69,6 +69,8 @@ export type DesktopSidebarInput = {
   readonly activityByWorktreePath: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
   readonly agents: readonly ActiveAgent[];
+  /** The desktop Inbox tab's count, published so the remote's Inbox tab shows the same number. */
+  readonly attentionCount: number;
 };
 
 /** Publishes the model the desktop sidebar renders, from the same builder hook the Sidebar calls. */
@@ -95,7 +97,7 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- persistenceVersion invalidates the storage reads inside
   }, [projects, activeProjectId, emptyKey, persistenceVersion]);
   const built = useSidebarModel({ projects, activeProjectId, worktrees, inactiveProjectWorktrees }, persisted).model;
-  const { activityByWorktreePath, unreadWorktreePaths, agents } = input;
+  const { activityByWorktreePath, unreadWorktreePaths, agents, attentionCount } = input;
   const model = useMemo(() => enabled
     ? {
         ...built,
@@ -103,9 +105,10 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
           activityByWorktreePath,
           unreadWorktreePaths,
           agentStateByPath: agentStatesByPath(agents.map((agent) => [agent.worktreePath, agent] as const)),
+          attentionCount,
         }),
       }
-    : null, [activityByWorktreePath, agents, built, enabled, unreadWorktreePaths]);
+    : null, [activityByWorktreePath, agents, attentionCount, built, enabled, unreadWorktreePaths]);
 
   const modelRef = useRef(model);
   modelRef.current = model;

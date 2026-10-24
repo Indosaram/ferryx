@@ -130,6 +130,7 @@ function DesktopSidebar() {
     activityByWorktreePath: fx.desktopActivity,
     unreadWorktreePaths: fx.desktopUnread,
     agents: fx.desktopAgents,
+    attentionCount: fx.desktopAttention.length,
   });
   return (
     <Sidebar
@@ -146,7 +147,7 @@ function DesktopSidebar() {
       onCreateWorktree={noop}
       onOpenSettings={noop}
       onOpenResources={noop}
-      attention={{ rows: [], onOpen: noop, onDismiss: noop, onDismissAll: noop, inboxOpen: false, onInboxOpenChange: noop }}
+      attention={{ rows: [...fx.desktopAttention], onOpen: noop, onDismiss: noop, onDismissAll: noop, inboxOpen: false, onInboxOpenChange: noop }}
     />
   );
 }
@@ -174,6 +175,9 @@ function supervisorSnapshot(): SupervisorSnapshot {
   };
 }
 
+/** The remote's own pane-derived inbox rows: one row, where the desktop's notification centre has two. */
+const REMOTE_PANE_ATTENTION = [{ id: "pane-1", revision: 0, workspaceId: "ferryx", sessionId: "pane-1", state: "done" as const, who: "Coder" }];
+
 /** The phone/browser side: one machine whose gateway answers with the desktop's published model. */
 function RemoteSidebarHarness({ machine }: { readonly machine: RemoteSidebarMachine }) {
   const [supervisors] = useState(() => ({ [machine.machineId]: { snapshot: supervisorSnapshot(), now: Date.now() } }));
@@ -186,7 +190,7 @@ function RemoteSidebarHarness({ machine }: { readonly machine: RemoteSidebarMach
       onSelect={noop}
       view="worktrees"
       onViewChange={noop}
-      inbox={{ rows: [], onOpen: noop, onDismiss: noop }}
+      inbox={{ rows: REMOTE_PANE_ATTENTION, onOpen: noop, onDismiss: noop }}
       supervisor={{ typing: remoteSupervisorTyping(supervisors), content: null }}
     />
   );
@@ -259,6 +263,8 @@ describe("desktop and remote sidebar parity", () => {
     expect(desktopTree.filter((line) => line.startsWith("listitem")).length).toBeGreaterThanOrEqual(5);
     // A remote that ignores the desktop's collapsed set must fail, so the fixture folds a group.
     expect(desktopTree.filter((line) => line.includes("aria-expanded=false")).length).toBeGreaterThanOrEqual(1);
+    // The Inbox tab count is the desktop's (notification centre), not the remote's pane rows.
+    expect(desktopTree).toContain(`tab name="Inbox (${fx.desktopAttention.length})" testid=- aria-selected=false`);
     expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
   });
 
