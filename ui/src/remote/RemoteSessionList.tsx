@@ -64,6 +64,11 @@ export type RemoteContextOption = {
    * row identity. It is never rendered; the picker shows worktrees exactly like the desktop.
    */
   machineId?: string;
+  /**
+   * Open only what the machine already runs: never start a terminal for this choice. Set on a
+   * desktop-published Inbox row, which names an existing pane, so a stale row cannot spawn a shell.
+   */
+  attachOnly?: boolean;
 };
 
 export type RemoteWorkspaceModel = {
@@ -514,21 +519,26 @@ export function sidebarRowOption(model: RemoteWorkspaceModel, target: RemoteSide
 }
 
 /**
- * The option a desktop-published Inbox row opens: that machine's session when the inventory knows
- * it, otherwise that machine's workspace (its root worktree first). Read-only: nothing is written
- * back to the desktop.
+ * The option a desktop-published Inbox row opens, read-only and never creating a terminal: that
+ * machine's session by the pane's backend session id, otherwise the pane's worktree, otherwise the
+ * workspace (its root worktree first). The row's own `sessionId` is the desktop's local pane id and
+ * is never matched against the inventory.
  */
 export function publishedAttentionOption(model: RemoteWorkspaceModel, target: PublishedAttentionTarget): RemoteContextOption {
   const { machineId, row } = target;
   const accountMachines = model.options.some((option) => option.machineId !== undefined);
   const onMachine = (option: RemoteContextOption) =>
     !option.unavailable && option.workspaceId === row.workspaceId && (!accountMachines || option.machineId === machineId);
-  const session = model.options.find((option) => onMachine(option) && option.sessionId === row.sessionId);
-  if (session) return session;
+  const attachOnly = (option: RemoteContextOption): RemoteContextOption => ({ ...option, attachOnly: true });
+  const session = row.backendSessionId
+    ? model.options.find((option) => onMachine(option) && option.sessionId === row.backendSessionId)
+    : undefined;
+  if (session) return attachOnly(session);
   const worktrees = model.options.filter((option) => onMachine(option) && !option.sessionId);
-  const known = worktrees.find((option) => option.worktreeSlug === null) ?? worktrees[0];
-  if (known) return known;
-  return { workspaceId: row.workspaceId, worktreeSlug: null, worktreeLabel: null, ...(accountMachines ? { machineId } : {}) };
+  const known = (row.worktreeSlug !== undefined ? worktrees.find((option) => option.worktreeSlug === row.worktreeSlug) : undefined) ??
+    worktrees.find((option) => option.worktreeSlug === null) ?? worktrees[0];
+  if (known) return attachOnly(known);
+  return attachOnly({ workspaceId: row.workspaceId, worktreeSlug: null, worktreeLabel: null, ...(accountMachines ? { machineId } : {}) });
 }
 
 export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({

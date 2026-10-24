@@ -1292,6 +1292,8 @@ export const RemoteHostConnection: React.FC<{
        of the worktree's first one. */
     sessionId?: string | null;
     daemonEpoch?: string | null;
+    /** Ephemeral like sessionId: a published Inbox row opens only what already runs. */
+    attachOnly?: boolean;
   } | null>(null);
   // Read by selection callbacks so their identities (and the event socket that depends
   // on them) do not churn every time the account target changes.
@@ -2394,6 +2396,27 @@ export const RemoteHostConnection: React.FC<{
           }
         }
 
+        if (!targetSession && option.attachOnly) {
+          /* A desktop Inbox row names a pane the desktop already runs. When the machine no longer
+             lists one here, open the worktree with no terminal instead of starting a shell. */
+          const contextLabel = option.worktreeLabel ?? option.worktreeSlug ?? "main";
+          const workspaceOnly = {
+            workspaceId: option.workspaceId,
+            worktreeSlug: option.worktreeSlug ?? null,
+            worktreeLabel: contextLabel,
+            activeTerminal: null,
+            activeTabId: null,
+            terminalTabs: machineTabsFromInventory(inventory?.entries ?? [], option.workspaceId, option.worktreeSlug ?? null, contextLabel),
+          };
+          workspaceRefreshVersionRef.current += 1;
+          modelRef.current = { ...modelRef.current, context: workspaceOnly };
+          setModel((prev) => ({ ...prev, context: workspaceOnly }));
+          setInitialAccountTarget(null);
+          setCreationError(null);
+          clearPendingSelection(true);
+          return true;
+        }
+
         if (!targetSession) {
           /* The machine API cannot start a terminal on an SSH-host project (the desktop
              answers INVALID_PATH); say so instead of surfacing a bare status code. */
@@ -2539,6 +2562,7 @@ export const RemoteHostConnection: React.FC<{
       worktreeLabel: target.worktreeLabel,
       ...(target.sessionId ? { sessionId: target.sessionId } : {}),
       ...(target.daemonEpoch ? { daemonEpoch: target.daemonEpoch } : {}),
+      ...(target.attachOnly ? { attachOnly: true } : {}),
     });
   }, [token, activeTunnelConnection, initialAccountTarget, selectContext]);
 
@@ -4308,6 +4332,7 @@ export const RemoteHostConnection: React.FC<{
       ...target,
       sessionId: accountOpt.sessionId ?? null,
       daemonEpoch: (accountOpt as { daemonEpoch?: string | null }).daemonEpoch ?? inventoryEpoch,
+      ...(accountOpt.attachOnly ? { attachOnly: true } : {}),
     };
     setCreationError(null);
 
