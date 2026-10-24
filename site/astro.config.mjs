@@ -57,7 +57,7 @@ export default defineConfig({
         { tag: 'meta', attrs: { property: 'og:image:type', content: 'image/png' } },
         {
           tag: 'meta',
-          attrs: { property: 'og:image:alt', content: 'Ferryx — parallel agentic development workspace' },
+          attrs: { property: 'og:image:alt', content: 'Ferryx — your agents, supervised' },
         },
         { tag: 'meta', attrs: { name: 'twitter:image', content: socialImage } },
       ],
