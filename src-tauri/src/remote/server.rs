@@ -401,6 +401,9 @@ async fn pair_exchange(
             )
                 .into_response(),
             AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+            AuthError::TokenExpired => {
+                machine_error(StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED")
+            }
             AuthError::Storage(err) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Auth storage error: {err}"),
@@ -7354,7 +7357,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([axum::http::HeaderName::from_static(ROTATED_TOKEN_HEADER)]);
 
     let mut router = Router::new()
         .route("/api/v1/health", get(health_check))
@@ -7531,6 +7535,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .fallback(remote_fallback)
         .method_not_allowed_fallback(remote_method_not_allowed)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            token_lifetime_middleware,
+        ))
         .layer(cors)
         .layer(axum::Extension(Arc::new(
             super::filesystem::BrowseLimits::default(),
@@ -7552,6 +7560,53 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
     router
 }
 
+/// Response header carrying the replacement bearer token after a transparent rotation.
+pub const ROTATED_TOKEN_HEADER: &str = "x-ferryx-rotated-token";
+
+/// The routes a client calls when it (re)connects; only these rotate a token near its expiry.
+fn is_reconnect_route(path: &str) -> bool {
+    matches!(path, "/api/v1/capabilities" | "/api/v1/socket-ticket")
+}
+
+/// Enforces the bearer token's absolute lifetime on every route and rotates it on reconnect.
+///
+/// An expired token is refused here with the typed `TOKEN_EXPIRED` envelope, before any handler
+/// maps the failure to a generic 401. A successful reconnect inside the last week of the token's
+/// lifetime answers the replacement in [`ROTATED_TOKEN_HEADER`]; the presented token keeps working
+/// until its own expiry, so a client that misses the header loses nothing and retries next time.
+async fn token_lifetime_middleware(
+    State(state): State<Arc<RemoteGatewayState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let token = extract_token(request.headers());
+    if token
+        .as_deref()
+        .is_some_and(|token| state.auth_manager.token_is_expired(token))
+    {
+        return machine_error(StatusCode::UNAUTHORIZED, "TOKEN_EXPIRED");
+    }
+    let rotates = is_reconnect_route(request.uri().path());
+    let mut response = next.run(request).await;
+    let Some(token) = token.filter(|token| {
+        rotates
+            && response.status().is_success()
+            && state.auth_manager.token_near_expiry(token)
+    }) else {
+        return response;
+    };
+    match state.auth_manager.rotate_if_near_expiry(&token) {
+        Ok(Some(fresh)) => {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&fresh) {
+                response.headers_mut().insert(ROTATED_TOKEN_HEADER, value);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!("device token rotation failed: {error}"),
+    }
+    response
+}
+
 pub static ALLOW_INSECURE_DIRECT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -7561,12 +7616,7 @@ pub fn set_allow_insecure_direct(allow: bool) {
 
 pub fn is_insecure_direct_allowed() -> bool {
     ALLOW_INSECURE_DIRECT.load(std::sync::atomic::Ordering::Relaxed)
-        || std::env::var("FERRYX_ALLOW_INSECURE_DIRECT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        || std::env::var("FERRYX_ALLOW_INSECURE_LAN")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        || crate::remote::security_settings::insecure_direct_env_enabled()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8005,6 +8055,10 @@ mod p19_insecure_direct_tests;
 #[cfg(test)]
 #[path = "p20_insecure_relay_tests.rs"]
 mod p20_insecure_relay_tests;
+
+#[cfg(test)]
+#[path = "token_lifetime_tests.rs"]
+mod token_lifetime_tests;
 
 #[cfg(test)]
 #[path = "preference_http_tests.rs"]

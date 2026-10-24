@@ -220,6 +220,7 @@ type Result<T> = std::result::Result<T, ClientError>;
 fn project_remote_error(error: m::MachineError) -> m::MachineError {
     let code = match error.code.as_str() {
         "UNAUTHORIZED"
+        | "TOKEN_EXPIRED"
         | "MACHINE_ACCESS_REQUIRED"
         | "MACHINE_OWNER_UNSUPPORTED"
         | "MACHINE_SERVICE_UNAVAILABLE"
@@ -318,7 +319,7 @@ pub(crate) fn probe_outcome(result: &Result<m::Capabilities>, host: &HostView) -
             // apart. request_id can: it is Some exactly when a JSON error envelope was parsed
             // (its id may be empty), and None for the bodyless relay answer.
             "NOT_FOUND" if error.request_id.is_none() => ProbeOutcome::Unreachable,
-            "UNAUTHORIZED" => ProbeOutcome::Unauthorized,
+            "UNAUTHORIZED" | "TOKEN_EXPIRED" => ProbeOutcome::Unauthorized,
             other => ProbeOutcome::Failed(other.to_owned()),
         },
     }
@@ -326,6 +327,24 @@ pub(crate) fn probe_outcome(result: &Result<m::Capabilities>, host: &HostView) -
 
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|_| ClientError::local("PAIRED_HOST_INVALID_RESPONSE"))
+}
+/// Stores a token the host rotated on this reconnect for the lease's exact credential.
+async fn adopt_rotation(
+    service: &PairedHostService,
+    lease: &CredentialLease,
+    rotated: Option<String>,
+) {
+    let (Some(fresh), Ok(previous)) = (rotated, lease.token()) else {
+        return;
+    };
+    service
+        .adopt_rotated_token(
+            lease.host_id().to_owned(),
+            lease.generation(),
+            previous.to_owned(),
+            fresh,
+        )
+        .await;
 }
 struct Route {
     method: Method,
@@ -1100,6 +1119,28 @@ impl MachineClient {
         route: &Route,
         directory: bool,
     ) -> Result<Vec<u8>> {
+        self.http_with_rotation(host, lease, route, directory)
+            .await
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// The reconnect probe: also answers the replacement token the host rotated, if any.
+    async fn http_rotating(
+        &self,
+        host: &HostView,
+        lease: &CredentialLease,
+        route: &Route,
+    ) -> Result<(Vec<u8>, Option<String>)> {
+        self.http_with_rotation(host, lease, route, false).await
+    }
+
+    async fn http_with_rotation(
+        &self,
+        host: &HostView,
+        lease: &CredentialLease,
+        route: &Route,
+        directory: bool,
+    ) -> Result<(Vec<u8>, Option<String>)> {
         let base = super::direct_client::request_base(host)?;
         let first = self.http_at(base.url, lease, route, directory).await;
         match (first, base.direct_epoch) {
@@ -1122,7 +1163,7 @@ impl MachineClient {
         lease: &CredentialLease,
         route: &Route,
         directory: bool,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, Option<String>)> {
         let mut url = base;
         {
             let mut segments = url
@@ -1170,6 +1211,11 @@ impl MachineClient {
                     .get(crate::remote::relay_server::RELAY_STAGE_HEADER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(sanitize_relay_stage);
+                let rotated = response
+                    .headers()
+                    .get(crate::remote::server::ROTATED_TOKEN_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
                 let bytes=tokio::time::timeout(Duration::from_secs(budget),async {
                     let mut bytes=Vec::new();
                     while let Some(chunk)=response.chunk().await.map_err(|_| ClientError::local("HOST_UNAVAILABLE"))? {
@@ -1177,7 +1223,7 @@ impl MachineClient {
                     } Ok(bytes)
                 }).await.map_err(|_| ClientError::local("TIMEOUT"))??;
                 if !status.is_success() { return Err(map_operation_http_error(status, content_type.as_ref(), relay_stage, &bytes)); }
-                Ok(bytes)
+                Ok((bytes, rotated))
             })=> result.map_err(|_|ClientError::local("TIMEOUT"))?
         }
     }
@@ -1195,8 +1241,11 @@ impl MachineClient {
             return ReachabilityState::Checking;
         };
         let result = match Operation::Capabilities.route() {
-            Ok(route) => match self.http(&host, &lease, &route, false).await {
-                Ok(bytes) => decode::<m::Capabilities>(&bytes),
+            Ok(route) => match self.http_rotating(&host, &lease, &route).await {
+                Ok((bytes, rotated)) => {
+                    adopt_rotation(service, &lease, rotated).await;
+                    decode::<m::Capabilities>(&bytes)
+                }
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
@@ -1244,10 +1293,13 @@ impl MachineClient {
             .capture_operation(request.host_id.clone(), request.generation)
             .await?;
         let caps = match self
-            .http(&host, &lease, &Operation::Capabilities.route()?, false)
+            .http_rotating(&host, &lease, &Operation::Capabilities.route()?)
             .await
         {
-            Ok(bytes) => decode::<m::Capabilities>(&bytes)?,
+            Ok((bytes, rotated)) => {
+                adopt_rotation(service, &lease, rotated).await;
+                decode::<m::Capabilities>(&bytes)?
+            }
             Err(error) => {
                 // Only a "cannot reach the host" answer says anything about reachability.
                 if probe_outcome(&Err(error.clone()), &host) == ProbeOutcome::Unreachable {
