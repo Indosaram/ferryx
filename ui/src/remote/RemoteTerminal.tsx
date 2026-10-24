@@ -1264,6 +1264,24 @@ export function RemoteTerminal({
         return;
       }
 
+      if (createWebSocket) {
+        // A relay host reached end-to-end encrypted: the same gateway terminal protocol, carried
+        // inside the attach tunnel (bearer in the tunnel, no socket ticket).
+        const query = new URLSearchParams({ render: "grid" });
+        if (!followHostSize) {
+          query.set("cols", String(socketRequest.geometry.cols));
+          query.set("rows", String(socketRequest.geometry.rows));
+        }
+        try {
+          Promise.resolve(createWebSocket(`/api/v1/terminal/${socketRequest.sessionId}?${query.toString()}`))
+            .then(initSocket)
+            .catch(reportDialFailure);
+        } catch (error) {
+          reportDialFailure(error);
+        }
+        return;
+      }
+
       let syncOrPromiseUrl: string | Promise<string>;
       try {
         syncOrPromiseUrl = terminalSocketUrl(

@@ -21,6 +21,9 @@ export interface HostEndpoint {
   grantScope?: "mirror" | "machine";
   lastSeenAt?: number | null;
   directHints?: CandidateEndpoint[];
+  /** The machine's attach public key; with enrollmentEpoch, relay traffic can be end-to-end encrypted. */
+  attachPublicKey?: string;
+  enrollmentEpoch?: string;
 }
 
 export interface PairedRemoteHost {
@@ -30,6 +33,8 @@ export interface PairedRemoteHost {
   deviceToken: string | null;
   lastSeenAt: number | null;
   directHints: CandidateEndpoint[];
+  attachPublicKey?: string;
+  enrollmentEpoch?: string;
 }
 
 export const REMOTE_HOST_STORAGE_KEY = "ferryx_remote_hosts";
@@ -61,6 +66,8 @@ function normalizeHost(input: HostEndpoint | PairedRemoteHost, storage?: Storage
     deviceToken,
     lastSeenAt: input.lastSeenAt ?? null,
     directHints: input.directHints ?? [],
+    attachPublicKey: input.attachPublicKey || undefined,
+    enrollmentEpoch: input.enrollmentEpoch || undefined,
   };
 }
 
@@ -212,6 +219,8 @@ export function createRemoteHostStore(
     return normalizeHost({ ...existing, ...host,
       deviceToken: input.deviceToken === undefined ? existing?.deviceToken ?? host.deviceToken : input.deviceToken,
       directHints: input.directHints ?? existing?.directHints ?? host.directHints,
+      attachPublicKey: host.attachPublicKey ?? existing?.attachPublicKey,
+      enrollmentEpoch: host.enrollmentEpoch ?? existing?.enrollmentEpoch,
     });
   }
 

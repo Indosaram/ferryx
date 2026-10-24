@@ -6813,6 +6813,21 @@ impl DaemonServer {
                     Ok(receipt) => DaemonResponse::PairedHostMigrateLegacyOk { receipt },
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostRedeemGrant { request }) => match self.paired_hosts.redeem_grant(request).await {
+                    Ok(host) => DaemonResponse::PairedHostPairOk { host },
+                    Err(error) => DaemonResponse::PairedHostError { error },
+                },
+                Ok(DaemonRequest::PairedHostClientAttachKey) => match crate::ipc::run_blocking(|| {
+                    Ok(crate::paired_host::secure_http::client_attach_public_key())
+                }).await {
+                    Ok(Ok(public_key)) => DaemonResponse::PairedHostClientAttachKeyOk { public_key },
+                    Ok(Err(error)) => DaemonResponse::PairedHostError {
+                        error: crate::paired_host::service::ServiceError::new(error.code, "client attach identity unavailable"),
+                    },
+                    Err(_) => DaemonResponse::PairedHostError {
+                        error: crate::paired_host::service::ServiceError::unavailable(),
+                    },
+                },
                 Ok(DaemonRequest::PairedHostForget { host_id, expected_generation }) => match self.paired_hosts.forget(host_id, expected_generation).await {
                     Ok(()) => DaemonResponse::PairedHostForgetOk,
                     Err(error) => DaemonResponse::PairedHostError { error },
@@ -6827,6 +6842,7 @@ impl DaemonServer {
                         capabilities.push("pairedHostInventoryV1".into());
                         capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());
                         capabilities.push(crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY.into());
+                        capabilities.push("pairedHostE2EV1".into());
                     }
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]

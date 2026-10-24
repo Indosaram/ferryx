@@ -92,9 +92,8 @@ import {
   hostTransportUrl,
   noteTokenRotation,
   onDeviceTokenRotated,
-  remoteApiUrl,
-  remoteApiUrl as apiUrl,
-  remoteSocketUrl,
+  remoteFetch,
+  remoteOpenSocket,
 } from "./remoteClient";
 
 import { AccountLoginPage } from "./AccountLoginPage";
@@ -159,6 +158,15 @@ import { usePhoneNavigation } from "./home/usePhoneNavigation";
 import { usePhoneSupervisor } from "./home/usePhoneSupervisor";
 import { WorktreesHome } from "./home/WorktreesHome";
 import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
+import { getOrCreateAttachKey } from "./accountAttach";
+import {
+  openRelayE2ETransport,
+  RELAY_REPAIR_MESSAGE,
+  registerRelayE2E,
+  RelayRepairRequiredError,
+  relayE2EState,
+  REPAIR_REQUIRED,
+} from "./relayE2E";
 
 const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
 /// How long a selection may stay unconfirmed before the picker is released for
@@ -549,7 +557,7 @@ export async function readChatGatewayIdentity(args: {
 }): Promise<ChatGatewayIdentity | null> {
   let response: Response;
   try {
-    response = await fetch(remoteApiUrl(args.baseUrl, "/api/v1/capabilities"), {
+    response = await remoteFetch(args.baseUrl, "/api/v1/capabilities", {
       headers: { Authorization: `Bearer ${args.token}` },
       signal: args.signal,
     });
@@ -628,7 +636,7 @@ export async function fetchChatSessionRows(args: {
       if (res.status < 200 || res.status >= 300) return [];
       return readRows(JSON.parse(new TextDecoder().decode(res.body)));
     }
-    const response = await fetch(remoteApiUrl(args.baseUrl, "/api/v1/sessions"), {
+    const response = await remoteFetch(args.baseUrl, "/api/v1/sessions", {
       headers: { Authorization: `Bearer ${args.token}` },
       signal: args.signal,
     });
@@ -909,7 +917,7 @@ async function postChatMutation(
 ): Promise<ChatMutationOutcome> {
   let response: Response;
   try {
-    response = await fetch(remoteApiUrl(baseUrl, referenceChatRoute(sessionId, route)), {
+    response = await remoteFetch(baseUrl, referenceChatRoute(sessionId, route), {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1018,7 +1026,7 @@ async function readChatHistory(args: {
       args.signal?.throwIfAborted();
       response = new Response(raw.body.slice(), { status: raw.status, headers: raw.headers });
     } else {
-      response = await fetch(remoteApiUrl(args.baseUrl, path), {
+      response = await remoteFetch(args.baseUrl, path, {
         headers: { Authorization: `Bearer ${args.token}` },
         signal: args.signal,
       });
@@ -1315,6 +1323,61 @@ export const RemoteHostConnection: React.FC<{
     if (!activeTunnelConnection) return;
     return () => activeTunnelConnection.close();
   }, [activeTunnelConnection]);
+
+  // Relay traffic is end-to-end encrypted whenever this client can: account mode rides the
+  // active tunnel, and a relay-paired host with attach info gets its own encrypted transport.
+  // remoteFetch/remoteOpenSocket route every request for the registered base through it.
+  const relayE2EMode = activeTunnelConnection ? "e2e" : relayE2EState(activeHost, transport.url);
+  const e2eHost = !activeTunnelConnection && relayE2EMode === "e2e" ? activeHost : null;
+  const e2eRelayOrigin = e2eHost?.relayOrigin ?? null;
+  const e2eMachineId = e2eHost?.machineId ?? null;
+  const e2eEnrollmentEpoch = e2eHost?.enrollmentEpoch ?? null;
+  const e2eMachineKey = e2eHost?.attachPublicKey ?? null;
+  const [relayE2EBase, setRelayE2EBase] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeTunnelConnection && accountHostBaseUrl) {
+      const unregister = registerRelayE2E(accountHostBaseUrl, {
+        fetchLike: (pathAndQuery, init) => activeTunnelConnection.transport.fetchLike(pathAndQuery, init),
+        openWebSocket: (pathAndQuery) => activeTunnelConnection.openWebSocket(pathAndQuery),
+      });
+      setRelayE2EBase(accountHostBaseUrl);
+      return () => {
+        unregister();
+        setRelayE2EBase(null);
+      };
+    }
+    if (!e2eRelayOrigin || !e2eMachineId || !e2eEnrollmentEpoch || !e2eMachineKey || !token) return;
+    const connection = openRelayE2ETransport({
+      relayOrigin: e2eRelayOrigin,
+      machineId: e2eMachineId,
+      enrollmentEpoch: e2eEnrollmentEpoch,
+      machineAttachPublicKey: e2eMachineKey,
+      attachKey: getOrCreateAttachKey(),
+      bearer: token,
+    });
+    const unregister = registerRelayE2E(transportBaseUrl, connection);
+    setRelayE2EBase(transportBaseUrl);
+    return () => {
+      unregister();
+      connection.close();
+      setRelayE2EBase(null);
+    };
+  }, [
+    activeTunnelConnection,
+    accountHostBaseUrl,
+    e2eRelayOrigin,
+    e2eMachineId,
+    e2eEnrollmentEpoch,
+    e2eMachineKey,
+    token,
+    transportBaseUrl,
+  ]);
+  // A relay that refused plaintext (E2E_REQUIRED) for this base; reconnecting stops until re-pair.
+  const [relayRepairErrorBase, setRelayRepairErrorBase] = useState<string | null>(null);
+  const [relayRepairDismissedBase, setRelayRepairDismissedBase] = useState<string | null>(null);
+  const relayRepairError = relayRepairErrorBase !== null && relayRepairErrorBase === transportBaseUrl;
+  const showRelayRepairNotice = relayRepairError
+    || (relayE2EMode === REPAIR_REQUIRED && relayRepairDismissedBase !== transportBaseUrl);
 
   const [planLimitNotice, setPlanLimitNotice] = useState<PlanLimitState | null>(null);
   const planLimitSuspendedRef = useRef(false);
@@ -1720,7 +1783,7 @@ export const RemoteHostConnection: React.FC<{
       if (wsId) params.set("workspaceId", wsId);
       if (wtSlug) params.set("worktreeSlug", wtSlug);
       const query = params.toString() ? `?${params.toString()}` : "";
-      const response = await fetch(apiUrl(transportBaseUrl, `/api/v1/browser/sessions${query}`), {
+      const response = await remoteFetch(transportBaseUrl, `/api/v1/browser/sessions${query}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (response.ok) {
@@ -1901,7 +1964,7 @@ export const RemoteHostConnection: React.FC<{
           options: accountDiscoveryRef.current.accountOptions,
         };
       }
-      const response = await fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/state"), {
+      const response = await remoteFetch(transportBaseUrl, "/api/v1/workspace/state", {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
@@ -2151,12 +2214,17 @@ export const RemoteHostConnection: React.FC<{
           current = await activeTunnelConnection.openWebSocket("/api/v1/events");
           if (disposed) { current.close(); return; }
         } else {
-          const url = await remoteSocketUrl(transportBaseUrl, "/api/v1/events", token, abort.signal);
-          if (disposed) return;
-          current = new WebSocket(url);
+          current = await remoteOpenSocket(transportBaseUrl, "/api/v1/events", token, abort.signal);
+          if (disposed) { current.close(); return; }
         }
       } catch (error) {
         if (disposed) return;
+        if (error instanceof RelayRepairRequiredError) {
+          // The relay only carries encrypted traffic and this device cannot encrypt to the host:
+          // retrying cannot succeed, so surface the re-pair prompt and stop.
+          setRelayRepairErrorBase(transportBaseUrl);
+          return;
+        }
         const limitState = planLimitStateFromError(error);
         if (limitState) {
           handlePlanLimit(limitState);
@@ -2488,8 +2556,9 @@ export const RemoteHostConnection: React.FC<{
           return true;
         }
       } else {
-        const response = await fetch(
-          apiUrl(transportBaseUrl, "/api/v1/workspace/select"),
+        const response = await remoteFetch(
+          transportBaseUrl,
+          "/api/v1/workspace/select",
           {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -2867,7 +2936,14 @@ export const RemoteHostConnection: React.FC<{
   }, []);
 
   const terminalCreateWebSocket = useMemo(() => {
-    if (!activeTunnelConnection) return undefined;
+    if (!activeTunnelConnection) {
+      // A relay-paired host reached through its encrypted transport: the gateway terminal route
+      // inside the tunnel, bearer in the tunnel instead of a socket ticket.
+      if (!token || relayE2EBase === null || relayE2EBase !== transportBaseUrl) return undefined;
+      const base = relayE2EBase;
+      // The base is registered, so remoteOpenSocket answers with a tunnel socket.
+      return (path: string) => remoteOpenSocket(base, path, token) as Promise<TunnelWebSocket>;
+    }
     return async (path: string) => {
       let targetPath = path;
       if (!targetPath.includes("daemonEpoch=") && effectiveSessionId) {
@@ -2882,7 +2958,7 @@ export const RemoteHostConnection: React.FC<{
       }
       return activeTunnelConnection.openWebSocket(targetPath);
     };
-  }, [activeTunnelConnection, effectiveSessionId, getSessionDaemonEpoch]);
+  }, [activeTunnelConnection, effectiveSessionId, getSessionDaemonEpoch, relayE2EBase, token, transportBaseUrl]);
 
   const activeTunnelMachineId = activeTunnelConnection?.machine.machineId ?? null;
   const sessionEpochsActiveMachine = activeTunnelMachineId;
@@ -3008,11 +3084,9 @@ export const RemoteHostConnection: React.FC<{
           // target's live queue, not the displayed rows (which a pane switch already cleared).
           if (heldChatFileIsReferenced(target, file)) return null;
           try {
-            const response = await fetch(
-              remoteApiUrl(
-                route.baseUrl,
-                `${referenceChatRoute(target.target.backendSessionId, `files/${encodeURIComponent(id)}`)}?${query}`,
-              ),
+            const response = await remoteFetch(
+              route.baseUrl,
+              `${referenceChatRoute(target.target.backendSessionId, `files/${encodeURIComponent(id)}`)}?${query}`,
               { method: "DELETE", headers: { Authorization: `Bearer ${bearer}` } },
             );
             return response.ok ? id : null;
@@ -3120,11 +3194,9 @@ export const RemoteHostConnection: React.FC<{
       undefined,
       null,
     );
-    void fetch(
-      remoteApiUrl(
-        chatBaseUrlRef.current,
-        `${referenceChatRoute(rehydrateTarget.target.backendSessionId, "files")}?${query}`,
-      ),
+    void remoteFetch(
+      chatBaseUrlRef.current,
+      `${referenceChatRoute(rehydrateTarget.target.backendSessionId, "files")}?${query}`,
       { headers: { Authorization: `Bearer ${bearer}` }, signal },
     )
       .then(async (response) => (response.ok ? response.json() : null))
@@ -3375,7 +3447,7 @@ export const RemoteHostConnection: React.FC<{
       fetching = true;
       try {
         const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, chatAgentType)}`;
-        const response = await fetch(remoteApiUrl(transportBaseUrl, path), {
+        const response = await remoteFetch(transportBaseUrl, path, {
           headers: { Authorization: `Bearer ${token}` },
           signal: controller.signal,
         });
@@ -3793,11 +3865,9 @@ export const RemoteHostConnection: React.FC<{
           null,
         );
         try {
-          const response = await fetch(
-            remoteApiUrl(
-              chatBaseUrlRef.current,
-              `${referenceChatRoute(sessionId, `files/${encodeURIComponent(attachmentId)}`)}?${query}`,
-            ),
+          const response = await remoteFetch(
+            chatBaseUrlRef.current,
+            `${referenceChatRoute(sessionId, `files/${encodeURIComponent(attachmentId)}`)}?${query}`,
             { method: "DELETE", headers: { Authorization: `Bearer ${bearer}` } },
           );
           return response.ok;
@@ -3811,11 +3881,9 @@ export const RemoteHostConnection: React.FC<{
         if (!sessionId || !bearer) return false;
         const query = referenceChatReadQuery({ target }, chatAgentTypeRef.current ?? "", undefined, null);
         try {
-          const response = await fetch(
-            remoteApiUrl(
-              chatBaseUrlRef.current,
-              `${referenceChatRoute(sessionId, `files/${encodeURIComponent(attachmentId)}`)}?${query}`,
-            ),
+          const response = await remoteFetch(
+            chatBaseUrlRef.current,
+            `${referenceChatRoute(sessionId, `files/${encodeURIComponent(attachmentId)}`)}?${query}`,
             { method: "DELETE", headers: { Authorization: `Bearer ${bearer}` } },
           );
           return response.ok;
@@ -4108,7 +4176,7 @@ export const RemoteHostConnection: React.FC<{
     }
     setCreationError(null);
     try {
-      const response = await fetch(apiUrl(transportBaseUrl, "/api/v1/workspace/worktrees"), {
+      const response = await remoteFetch(transportBaseUrl, "/api/v1/workspace/worktrees", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4650,6 +4718,37 @@ export const RemoteHostConnection: React.FC<{
         onCreateWorktree={createWorktree}
         creationError={initialAccountTarget || accountPreselection ? null : creationError}
       >
+        {showRelayRepairNotice ? (
+          <div
+            data-testid="relay-repair-notice"
+            role={relayRepairError ? "alert" : "status"}
+            data-code={REPAIR_REQUIRED}
+            className={`mx-3 mt-2 rounded-md border px-3 py-2 text-xs ${relayRepairError ? "border-destructive/50 text-destructive" : "border-border text-muted-foreground"}`}
+          >
+            <p>{RELAY_REPAIR_MESSAGE}</p>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                className="rounded border border-border px-2 py-1 font-medium text-foreground"
+                onClick={() => {
+                  setRelayRepairErrorBase(null);
+                  disconnect();
+                }}
+              >
+                Re-pair through account
+              </button>
+              {!relayRepairError ? (
+                <button
+                  type="button"
+                  className="rounded px-2 py-1"
+                  onClick={() => setRelayRepairDismissedBase(transportBaseUrl)}
+                >
+                  Not now
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {planLimitNotice ? (
           <PlanLimitNotice
             state={planLimitNotice}

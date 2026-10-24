@@ -37,7 +37,7 @@ use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        ConnectInfo, Path as AxumPath, Query, State,
+        ConnectInfo, Path as AxumPath, Query, RawQuery, State,
     },
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     response::{IntoResponse, Response},
@@ -49,7 +49,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -151,6 +151,74 @@ pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
 const RELAY_EXPOSED_HEADERS: &str = "x-ferryx-relay-stage, x-ferryx-rotated-token";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
+
+/// Logged once per plaintext relay-proxied request so operators can see which clients still
+/// bypass end-to-end encryption before the relay starts refusing them.
+pub(crate) const RELAY_PLAINTEXT_DEPRECATION: &str = "plaintext relay proxy is deprecated and will be refused in the next release; update this client so it connects end-to-end encrypted (?e2e=1)";
+const CLIENT_BUILD_HEADER: &str = "x-ferryx-client-build";
+const MAX_CLIENT_BUILD_LEN: usize = 128;
+
+/// `FERRYX_RELAY_REQUIRE_E2E=1` makes every plaintext relay proxy route refuse with 426.
+fn require_e2e_from_env() -> AtomicBool {
+    AtomicBool::new(std::env::var("FERRYX_RELAY_REQUIRE_E2E").is_ok_and(|value| value == "1"))
+}
+
+/// The client build a request names: `X-Ferryx-Client-Build`, else `User-Agent`, else
+/// `unknown`. Control characters are stripped and the value is bounded so a log line cannot
+/// be forged or inflated by the caller.
+fn client_build(headers: &HeaderMap) -> String {
+    [CLIENT_BUILD_HEADER, "user-agent"]
+        .iter()
+        .filter_map(|name| headers.get(*name))
+        .filter_map(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_CLIENT_BUILD_LEN)
+                .collect::<String>()
+        })
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Admits one plaintext relay-proxied request: logs the deprecation, or, when the relay
+/// requires end-to-end encryption, answers 426 `E2E_REQUIRED` before any data channel opens.
+// The refusal is a full `Response`, matching what every caller hands back to axum.
+#[allow(clippy::result_large_err)]
+fn plaintext_gate(
+    state: &RelayState,
+    headers: &HeaderMap,
+    machine: &str,
+    route: &str,
+) -> Result<(), Response> {
+    if state.inner.require_e2e.load(Ordering::Relaxed) {
+        return Err(crate::remote::server::machine_error_with_details(
+            StatusCode::UPGRADE_REQUIRED,
+            "E2E_REQUIRED",
+            "This relay only carries end-to-end encrypted traffic. Update the client or re-pair this device through your Ferryx account.",
+            serde_json::Map::new(),
+        ));
+    }
+    let build = client_build(headers);
+    tracing::warn!(
+        target: "ferryx::relay::e2e",
+        client_build = %build,
+        machine = %machine,
+        route = %route,
+        "{}",
+        RELAY_PLAINTEXT_DEPRECATION
+    );
+    #[cfg(test)]
+    {
+        state
+            .inner
+            .plaintext_deprecations
+            .fetch_add(1, Ordering::Relaxed);
+        *state.inner.last_plaintext_build.lock() = Some(build);
+    }
+    Ok(())
+}
 
 fn relay_timeout_response(stage: &'static str) -> Response {
     let mut response = StatusCode::GATEWAY_TIMEOUT.into_response();
@@ -478,8 +546,14 @@ struct RelayInner {
     pending_socket_tickets: Mutex<HashMap<String, (String, String, String, u64)>>,
     /// Lock order: always after `control_channels`.
     data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
+    /// Refuse plaintext relay proxy routes (`FERRYX_RELAY_REQUIRE_E2E=1`).
+    require_e2e: AtomicBool,
     #[cfg(test)]
     spliced_taps: Mutex<HashMap<String, Arc<Mutex<Vec<u8>>>>>,
+    #[cfg(test)]
+    plaintext_deprecations: AtomicU64,
+    #[cfg(test)]
+    last_plaintext_build: Mutex<Option<String>>,
 }
 
 /// Audience used before challenges carried one.
@@ -572,8 +646,13 @@ impl RelayState {
                 control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
+                require_e2e: require_e2e_from_env(),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                plaintext_deprecations: AtomicU64::new(0),
+                #[cfg(test)]
+                last_plaintext_build: Mutex::new(None),
             }),
         })
     }
@@ -623,10 +702,20 @@ impl RelayState {
                 control_suspensions: Mutex::new(HashMap::new()),
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
+                require_e2e: require_e2e_from_env(),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                plaintext_deprecations: AtomicU64::new(0),
+                #[cfg(test)]
+                last_plaintext_build: Mutex::new(None),
             }),
         })
+    }
+
+    #[cfg(test)]
+    pub fn set_require_e2e(&self, on: bool) {
+        self.inner.require_e2e.store(on, Ordering::Relaxed);
     }
 
     /// Cache a token just issued or revalidated by this machine's gateway.
@@ -1451,6 +1540,10 @@ impl RelayState {
         machine: &str,
         expected_generation: Option<u64>,
     ) -> Result<(WebSocket, SessionGuard, u64), StatusCode> {
+        // The relay's own proxied channel is plaintext by construction: this is the legacy
+        // `/host/...` path, where the relay itself speaks HTTP to the machine. Encrypted
+        // sessions are only issued to clients through `attach_session_handler` (`?e2e=1`),
+        // because the relay holds no attach key and cannot run the Noise handshake itself.
         let session_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         let generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
@@ -1517,6 +1610,9 @@ async fn socket_ticket_handler(
     headers: HeaderMap,
     Json(mut body): Json<serde_json::Value>,
 ) -> Result<Response, StatusCode> {
+    if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/socket-ticket") {
+        return Ok(refusal);
+    }
     let device_token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1659,9 +1755,13 @@ async fn browser_events_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
     let target = "/api/v1/events";
+    if let Err(refusal) = plaintext_gate(&state, &headers, &machine, target) {
+        return Ok(refusal);
+    }
     let device_token = consume_socket_ticket(&state, query, &machine, target)?;
     browser_socket(state, machine, target.into(), device_token, ws).await
 }
@@ -1670,8 +1770,12 @@ async fn browser_screencast_handler(
     State(state): State<RelayState>,
     AxumPath((machine, browser_id)): AxumPath<(String, String)>,
     query: Result<Query<SocketQuery>, axum::extract::rejection::QueryRejection>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/browser") {
+        return Ok(refusal);
+    }
     let target = format!("/api/v1/browser/{browser_id}");
     if !valid_socket_target(&target) {
         return Err(StatusCode::BAD_REQUEST);
@@ -1686,8 +1790,17 @@ async fn dag_stream_handler(
     State(state): State<RelayState>,
     AxumPath(machine): AxumPath<String>,
     query: Result<Query<DagSocketQuery>, axum::extract::rejection::QueryRejection>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    if let Err(refusal) = plaintext_gate(
+        &state,
+        &headers,
+        &machine,
+        crate::remote::dag_api::DAG_SOCKET_TARGET,
+    ) {
+        return Ok(refusal);
+    }
     let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
     if query.workspace_id.is_empty()
         || query.workspace_id.len() > 256
@@ -1715,8 +1828,12 @@ async fn browser_terminal_handler(
     State(state): State<RelayState>,
     AxumPath((machine, terminal)): AxumPath<(String, String)>,
     query: Result<Query<TerminalSocketQuery>, axum::extract::rejection::QueryRejection>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    if let Err(refusal) = plaintext_gate(&state, &headers, &machine, "/api/v1/terminal") {
+        return Ok(refusal);
+    }
     let Query(query) = query.map_err(|_| StatusCode::UNAUTHORIZED)?;
     let target = format!("/api/v1/terminal/{terminal}");
     if !valid_socket_target(&target)
@@ -1944,10 +2061,63 @@ pub struct AttachSessionResponse {
     pub opaque: bool,
 }
 
+/// Reads the allocation query: absent or empty means the account-only allocation, `e2e=1`
+/// (exactly once) admits a device token too. Anything else is `None` and answers 400.
+fn attach_e2e_query(query: Option<&str>) -> Option<bool> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return Some(false);
+    };
+    let mut e2e = false;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key != "e2e" || value != "1" || e2e {
+            return None;
+        }
+        e2e = true;
+    }
+    Some(e2e)
+}
+
+/// The billing gate both attach authorizations share: an owner whose remote access is
+/// suspended gets 402 `REMOTE_SUSPENDED` with the entitlement details clients branch on.
+fn remote_entitlement_gate(
+    account: &crate::account::service::AccountState,
+    owner_user_id: &str,
+) -> Result<(), crate::account::service::ApiError> {
+    let now = crate::account::billing::routes::billing_now();
+    let entitlement =
+        crate::account::billing::routes::entitlement_for_user(account, owner_user_id, now)?;
+    if entitlement.remote_allowed {
+        return Ok(());
+    }
+    Err(crate::account::service::ApiError::new(
+        StatusCode::PAYMENT_REQUIRED,
+        "REMOTE_SUSPENDED",
+        "remote access is suspended for this account",
+    )
+    .with_details(serde_json::json!({
+        "plan": match entitlement.effective_plan {
+            crate::account::billing::entitlement::PlanKey::Free => "free",
+            crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
+            crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
+            crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
+            crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
+        },
+        "status": match entitlement.status {
+            crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
+            crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
+            crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
+            crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
+        },
+        "graceEndsAt": entitlement.grace_ends_at,
+        "stoppedAt": crate::account::service::owner_stopped_at(account, owner_user_id),
+    })))
+}
+
 async fn attach_session_handler(
     State(state): State<RelayState>,
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
+    RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
     let ip = peer_ip(peer);
@@ -1960,14 +2130,24 @@ async fn attach_session_handler(
         .into_response();
     }
 
-    let Some(account_state) = state.account_state() else {
+    let Some(e2e) = attach_e2e_query(query.as_deref()) else {
+        return crate::account::service::ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "the only admissible query is e2e=1",
+        )
+        .into_response();
+    };
+
+    let account_state = state.account_state();
+    if account_state.is_none() && !e2e {
         return crate::account::service::ApiError::new(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
             "relay is not an account origin",
         )
         .into_response();
-    };
+    }
 
     let request: AttachSessionRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
@@ -1981,67 +2161,118 @@ async fn attach_session_handler(
         }
     };
 
-    let auth_headers = headers.clone();
-    let auth_machine_id = request.machine_id.clone();
-    let account_state_clone = account_state.clone();
+    // An account session bearer is resolved first, exactly as before. Only an `?e2e=1`
+    // caller whose bearer is not an account session falls through to the device-token check.
+    let authorized_by_account = match account_state.clone() {
+        None => false,
+        Some(account_state_clone) => {
+            let auth_headers = headers.clone();
+            let auth_machine_id = request.machine_id.clone();
+            let auth_res: Result<bool, crate::account::service::ApiError> =
+                crate::ipc::run_blocking(move || {
+                    Ok((|| -> Result<bool, crate::account::service::ApiError> {
+                        let user = match crate::account::service::authenticate_user(
+                            &account_state_clone,
+                            &auth_headers,
+                        ) {
+                            Ok(user) => user,
+                            Err(_) if e2e => return Ok(false),
+                            Err(error) => return Err(error),
+                        };
+                        let machine = crate::account::service::machine_for_owner(
+                            &account_state_clone,
+                            &user.user_id,
+                            &auth_machine_id,
+                        );
+                        if machine.is_none() {
+                            return Err(crate::account::service::ApiError::new(
+                                StatusCode::NOT_FOUND,
+                                "MACHINE_NOT_FOUND",
+                                "no such machine on this account",
+                            ));
+                        }
+                        if account_state_clone.deployment_mode.is_billing_enabled() {
+                            remote_entitlement_gate(&account_state_clone, &user.user_id)?;
+                        }
+                        Ok(true)
+                    })())
+                })
+                .await
+                .map_err(|error| crate::account::service::ApiError::internal(error.to_string()))
+                .and_then(|res| res);
+            match auth_res {
+                Ok(authorized) => authorized,
+                Err(error) => return error.into_response(),
+            }
+        }
+    };
 
-    let auth_res: Result<(), crate::account::service::ApiError> =
-        crate::ipc::run_blocking(move || {
-            Ok((|| -> Result<(), crate::account::service::ApiError> {
-                let user = crate::account::service::authenticate_user(&account_state_clone, &auth_headers)?;
-                let machine = crate::account::service::machine_for_owner(
-                    &account_state_clone,
-                    &user.user_id,
-                    &auth_machine_id,
-                );
-                if machine.is_none() {
-                    return Err(crate::account::service::ApiError::new(
-                        StatusCode::NOT_FOUND,
-                        "MACHINE_NOT_FOUND",
-                        "no such machine on this account",
-                    ));
-                }
-                if account_state_clone.deployment_mode.is_billing_enabled() {
-                    let now = crate::account::billing::routes::billing_now();
-                    let entitlement = crate::account::billing::routes::entitlement_for_user(
-                        &account_state_clone,
-                        &user.user_id,
-                        now,
-                    )?;
-                    if !entitlement.remote_allowed {
-                        return Err(crate::account::service::ApiError::new(
-                            StatusCode::PAYMENT_REQUIRED,
-                            "REMOTE_SUSPENDED",
-                            "remote access is suspended for this account",
-                        )
-                        .with_details(serde_json::json!({
-                            "plan": match entitlement.effective_plan {
-                                crate::account::billing::entitlement::PlanKey::Free => "free",
-                                crate::account::billing::entitlement::PlanKey::ProMonthly => "pro_monthly",
-                                crate::account::billing::entitlement::PlanKey::ProAnnual => "pro_annual",
-                                crate::account::billing::entitlement::PlanKey::TeamMonthly => "team_monthly",
-                                crate::account::billing::entitlement::PlanKey::TeamAnnual => "team_annual",
-                            },
-                            "status": match entitlement.status {
-                                crate::account::billing::entitlement::EntitlementStatus::Ok => "ok",
-                                crate::account::billing::entitlement::EntitlementStatus::OverLimit => "over_limit",
-                                crate::account::billing::entitlement::EntitlementStatus::PastDue => "past_due",
-                                crate::account::billing::entitlement::EntitlementStatus::Stopped => "stopped",
-                            },
-                            "graceEndsAt": entitlement.grace_ends_at,
-                            "stoppedAt": crate::account::service::owner_stopped_at(&account_state_clone, &user.user_id),
-                        })));
-                    }
-                }
-                Ok(())
-            })())
-        })
-        .await
-        .map_err(|error| crate::account::service::ApiError::internal(error.to_string()))
-        .and_then(|res| res);
-
-    if let Err(error) = auth_res {
-        return error.into_response();
+    if !authorized_by_account {
+        // Reached only with `?e2e=1`: the bearer must be a device token this machine accepts.
+        let unauthorized = || {
+            crate::account::service::ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "bearer is neither an account session nor a device token for this machine",
+            )
+            .into_response()
+        };
+        let Some(token) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+        else {
+            return unauthorized();
+        };
+        match state.authorize_device_token(&request.machine_id, &token).await {
+            Ok(true) => {}
+            Ok(false) => return unauthorized(),
+            // The token could not be checked because no control channel reaches the machine.
+            Err(status) if status == StatusCode::NOT_FOUND || status == StatusCode::GONE => {
+                return crate::account::service::ApiError::new(
+                    StatusCode::CONFLICT,
+                    "MACHINE_OFFLINE",
+                    "machine is offline",
+                )
+                .into_response();
+            }
+            Err(_) => {
+                return crate::account::service::ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "HOST_UNAVAILABLE",
+                    "the machine could not confirm this device token",
+                )
+                .into_response();
+            }
+        }
+        if let Some(account) = account_state
+            .clone()
+            .filter(|account| account.deployment_mode.is_billing_enabled())
+        {
+            // The same owner entitlement gate host_http_handler applies to device tokens.
+            let machine_id = request.machine_id.clone();
+            let gate: Result<(), crate::account::service::ApiError> =
+                crate::ipc::run_blocking(move || {
+                    Ok(
+                        match crate::account::service::enrolled_machine_by_id(&account, &machine_id)
+                        {
+                            Some(record) => {
+                                remote_entitlement_gate(&account, &record.owner_user_id)
+                            }
+                            None => Ok(()),
+                        },
+                    )
+                })
+                .await
+                .map_err(|error| crate::account::service::ApiError::internal(error.to_string()))
+                .and_then(|res| res);
+            if let Err(error) = gate {
+                return error.into_response();
+            }
+        }
     }
 
     let channel = {
@@ -2110,6 +2341,14 @@ async fn host_http_handler(
     }
     if path == "pair/exchange" && request.method() == Method::POST {
         return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
+    }
+    if let Err(refusal) = plaintext_gate(
+        &state,
+        request.headers(),
+        &machine,
+        &format!("/api/v1/{path}"),
+    ) {
+        return Ok(refusal);
     }
     let (parts, body) = request.into_parts();
     if let Some(account_state) = state.account_state() {
@@ -3025,7 +3264,7 @@ fn apply_cors_headers(headers: &mut HeaderMap) {
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
-            "Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept",
+            "Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept, X-Ferryx-Client-Build",
         ),
     );
     headers.insert(
@@ -6101,6 +6340,435 @@ mod tests {
         server.abort();
     }
 
+    fn e2e_attach_identity() -> crate::remote::attach_identity::AttachIdentity {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        crate::remote::attach_identity::AttachIdentity {
+            public_key: STANDARD.encode(x25519_dalek::PublicKey::from(&secret).as_bytes()),
+            private_key: STANDARD.encode(secret.to_bytes()),
+        }
+    }
+
+    /// Allocates one `?e2e=1` attach session with `bearer` and returns the parsed answer.
+    async fn allocate_e2e(http: &str, bearer: &str, machine: &str) -> AttachSessionResponse {
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .post(format!("{http}/api/v1/attach/session?e2e=1"))
+            .bearer_auth(bearer)
+            .header("X-Ferryx-Client-Build", "web-test-e2e")
+            .json(&serde_json::json!({ "machineId": machine }))
+            .send()
+            .await
+            .expect("allocation request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let allocated: AttachSessionResponse = response.json().await.expect("allocation body");
+        assert!(allocated.opaque, "an e2e allocation must be opaque");
+        assert_eq!(allocated.machine_id, machine);
+        allocated
+    }
+
+    /// The daemon half of an e2e session: the responder `relay_client::handle_session` runs,
+    /// reached through the relay's data route, carrying decrypted bytes to `gateway`.
+    fn spawn_e2e_daemon(
+        base: String,
+        session: String,
+        machine_id: &'static str,
+        machine: crate::remote::attach_identity::AttachIdentity,
+        device_public: String,
+        gateway: tokio::io::DuplexStream,
+    ) -> tokio::task::JoinHandle<()> {
+        use crate::remote::attach_crypto::WebSocketByteStream;
+        use crate::remote::session_transport::{
+            establish_session, proxy_secure_to_gateway, SessionTransport,
+        };
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        tokio::spawn(async move {
+            let (ws, _) =
+                tokio_tungstenite::connect_async(format!("{base}/tunnel/data/{session}"))
+                    .await
+                    .expect("daemon data half");
+            let expected = STANDARD.decode(&device_public).expect("device key");
+            let transport = establish_session(
+                WebSocketByteStream::new(ws),
+                true,
+                Some(&machine),
+                machine_id,
+                &session,
+                "7",
+                move |key: &[u8; 32]| key.as_slice() == expected.as_slice(),
+            )
+            .await
+            .expect("attached session");
+            let SessionTransport::Attached(secure) = transport else {
+                panic!("expected an attached transport");
+            };
+            let _ = proxy_secure_to_gateway(secure, gateway).await;
+        })
+    }
+
+    fn http_response_complete(raw: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(raw);
+        let Some(split) = text.find("\r\n\r\n") else {
+            return false;
+        };
+        let length = text[..split]
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        raw.len() >= split + 4 + length
+    }
+
+    #[tokio::test]
+    async fn an_e2e_host_proxy_request_never_reaches_the_relay_in_plaintext() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const MACHINE: &str = "e2e-machine";
+        const TOKEN: &str = "e2e-device-token";
+
+        // No account state: a self-hosted relay must still allocate with a device token.
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let http = base.replace("ws://", "http://");
+        let (_generation, mut notices, _grants) = state.register_control_channel(MACHINE.into());
+        state.register_device_token(MACHINE, TOKEN);
+
+        let machine = e2e_attach_identity();
+        let client_dir = tempfile::tempdir().unwrap();
+        let device_public = crate::remote::attach_client::load_or_generate_client_attach_identity(
+            client_dir.path(),
+        )
+        .expect("client identity")
+        .public_key;
+
+        // HTTP over one encrypted session.
+        let allocated = allocate_e2e(&http, TOKEN, MACHINE).await;
+        let notice = timeout(Duration::from_secs(5), notices.recv())
+            .await
+            .expect("control notice in time")
+            .expect("control notice");
+        assert_eq!(notice.session_id, allocated.session_id);
+        assert!(notice.opaque, "the daemon must be told to attach securely");
+        let http_tap = state.tap_session_traffic(&allocated.session_id);
+
+        let (mut gateway_peer, gateway_local) = tokio::io::duplex(64 * 1024);
+        let daemon = spawn_e2e_daemon(
+            base.clone(),
+            allocated.session_id.clone(),
+            MACHINE,
+            machine.clone(),
+            device_public.clone(),
+            gateway_local,
+        );
+        let gateway = tokio::spawn(async move {
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = gateway_peer.read(&mut buffer).await.expect("gateway read");
+                assert!(read > 0, "gateway closed before the request head");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let text = String::from_utf8(request).expect("plaintext request at the gateway");
+            let marker = text
+                .split_once("workspaceId=")
+                .and_then(|(_, rest)| rest.split(' ').next())
+                .expect("marker in the request line")
+                .to_string();
+            let body = format!(r#"{{"workspaceId":"{marker}"}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            gateway_peer
+                .write_all(response.as_bytes())
+                .await
+                .expect("gateway write");
+            (text, gateway_peer)
+        });
+
+        let mut secure = crate::paired_host::attach::attach_relay_session(
+            &base,
+            &allocated.session_id,
+            MACHINE,
+            &machine.public_key,
+            "7",
+            client_dir.path(),
+        )
+        .await
+        .expect("client attach handshake");
+        secure
+            .send_frame(
+                format!(
+                    "GET /api/v1/sessions?workspaceId=MARKER_E2E_HTTP_7f3a HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 0\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("send request");
+        let mut response = Vec::new();
+        while !http_response_complete(&response) {
+            let frame = timeout(Duration::from_secs(10), secure.recv_frame())
+                .await
+                .expect("response frame in time")
+                .expect("response frame");
+            response.extend_from_slice(&frame);
+        }
+        let response = String::from_utf8(response).expect("utf-8 response");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("MARKER_E2E_HTTP_7f3a"));
+        let (seen, _gateway_peer) = timeout(Duration::from_secs(5), gateway)
+            .await
+            .expect("gateway in time")
+            .expect("gateway task");
+        assert!(seen.starts_with("GET /api/v1/sessions?workspaceId=MARKER_E2E_HTTP_7f3a HTTP/1.1\r\n"));
+
+        // A WebSocket-style stream gets its own fresh encrypted session.
+        let socket_allocated = allocate_e2e(&http, TOKEN, MACHINE).await;
+        assert_ne!(socket_allocated.session_id, allocated.session_id);
+        let socket_notice = timeout(Duration::from_secs(5), notices.recv())
+            .await
+            .expect("socket notice in time")
+            .expect("socket notice");
+        assert_eq!(socket_notice.session_id, socket_allocated.session_id);
+        assert!(socket_notice.opaque);
+        let socket_tap = state.tap_session_traffic(&socket_allocated.session_id);
+
+        let (mut echo_peer, echo_local) = tokio::io::duplex(64 * 1024);
+        let socket_daemon = spawn_e2e_daemon(
+            base.clone(),
+            socket_allocated.session_id.clone(),
+            MACHINE,
+            machine.clone(),
+            device_public,
+            echo_local,
+        );
+        let echo = tokio::spawn(async move {
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = echo_peer.read(&mut buffer).await.unwrap_or(0);
+                if read == 0 {
+                    return;
+                }
+                if echo_peer.write_all(&buffer[..read]).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut socket = crate::paired_host::attach::attach_relay_session(
+            &base,
+            &socket_allocated.session_id,
+            MACHINE,
+            &machine.public_key,
+            "7",
+            client_dir.path(),
+        )
+        .await
+        .expect("socket attach handshake");
+        let payload = b"terminal input: echo MARKER_E2E\n".to_vec();
+        socket.send_frame(&payload).await.expect("send payload");
+        let mut echoed = Vec::new();
+        while echoed.len() < payload.len() {
+            let frame = timeout(Duration::from_secs(10), socket.recv_frame())
+                .await
+                .expect("echo frame in time")
+                .expect("echo frame");
+            echoed.extend_from_slice(&frame);
+        }
+        assert_eq!(echoed, payload);
+
+        for (name, tap) in [("http", &http_tap), ("socket", &socket_tap)] {
+            let spliced = tap.lock().clone();
+            assert!(!spliced.is_empty(), "the relay must have spliced the {name} session");
+            let spliced = String::from_utf8_lossy(&spliced);
+            assert!(
+                !spliced.contains("MARKER_E2E"),
+                "the {name} session must never cross the relay in plaintext"
+            );
+            assert!(
+                !spliced.contains(TOKEN),
+                "the bearer inside the {name} session must never cross the relay in plaintext"
+            );
+        }
+        echo.abort();
+        daemon.abort();
+        socket_daemon.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_legacy_client_without_e2e_still_works_and_logs_deprecation() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) = state.register_control_channel("m".into());
+        let device_token = "legacy-device-token";
+        state.register_device_token("m", device_token);
+        let (base, server) = spawn_test_relay_with_account_state(state.clone(), None).await;
+        let http_base = base.replace("ws://", "http://");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        let mut request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/m/api/v1/health");
+            async move {
+                client
+                    .get(url)
+                    .bearer_auth(device_token)
+                    .header("X-Ferryx-Client-Build", "web-0.9.0-legacy")
+                    .send()
+                    .await
+            }
+        });
+        let (served, settled) = serve_machine_sessions_until(
+            &base,
+            &mut notices,
+            &mut request,
+            "GET /api/v1/health HTTP/1.1",
+            StatusCode::OK,
+            br#"{"status":"healthy"}"#,
+        )
+        .await;
+        assert_eq!(served, 1);
+        let response = settled
+            .expect("request task must not panic")
+            .expect("plaintext proxy request must still answer");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.inner.plaintext_deprecations.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            state.inner.last_plaintext_build.lock().as_deref(),
+            Some("web-0.9.0-legacy")
+        );
+
+        let ticket = client
+            .post(format!("{http_base}/host/m/api/v1/socket-ticket"))
+            .bearer_auth(device_token)
+            .header("X-Ferryx-Client-Build", "web-0.9.0-legacy")
+            .json(&serde_json::json!({ "target": "/api/v1/events" }))
+            .send()
+            .await
+            .expect("socket-ticket request");
+        assert_eq!(ticket.status(), StatusCode::OK);
+        let issued: SocketTicketResponse = ticket.json().await.expect("ticket body");
+        assert!(!issued.ticket.is_empty());
+        assert_eq!(state.inner.plaintext_deprecations.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            state.inner.last_plaintext_build.lock().as_deref(),
+            Some("web-0.9.0-legacy")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_relay_requiring_e2e_refuses_plaintext_with_a_typed_error() {
+        let state = test_state(vec![]);
+        state.set_require_e2e(true);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("strict-machine".into());
+        let device_token = "strict-device-token";
+        state.register_device_token("strict-machine", device_token);
+        let (base, server) = spawn_test_relay_with_account_state(state.clone(), None).await;
+        let http_base = base.replace("ws://", "http://");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let plain = timeout(
+            Duration::from_secs(5),
+            client
+                .get(format!("{http_base}/host/strict-machine/api/v1/health"))
+                .bearer_auth(device_token)
+                .send(),
+        )
+        .await
+        .expect("a refusal must not wait on the machine")
+        .expect("plaintext request");
+        assert_eq!(plain.status(), StatusCode::UPGRADE_REQUIRED);
+        let body: serde_json::Value = plain.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "E2E_REQUIRED");
+        assert_eq!(body["error"]["retryable"], false);
+
+        let ticket = timeout(
+            Duration::from_secs(5),
+            client
+                .post(format!("{http_base}/host/strict-machine/api/v1/socket-ticket"))
+                .bearer_auth(device_token)
+                .json(&serde_json::json!({ "target": "/api/v1/events" }))
+                .send(),
+        )
+        .await
+        .expect("a refusal must not wait on the machine")
+        .expect("socket-ticket request");
+        assert_eq!(ticket.status(), StatusCode::UPGRADE_REQUIRED);
+        let body: serde_json::Value = ticket.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "E2E_REQUIRED");
+
+        // A WebSocket route answers the same 426 instead of upgrading.
+        assert_socket_rejected(
+            &base,
+            "/host/strict-machine/api/v1/events?ticket=never-issued",
+            StatusCode::UPGRADE_REQUIRED,
+        )
+        .await;
+        assert!(
+            notices.try_recv().is_err(),
+            "a refused plaintext request must never open a data channel"
+        );
+        assert_eq!(state.inner.plaintext_deprecations.load(Ordering::Relaxed), 0);
+
+        // Only `e2e=1` is admissible on the allocation route.
+        let bad = client
+            .post(format!("{http_base}/api/v1/attach/session?e2e=0"))
+            .bearer_auth(device_token)
+            .json(&serde_json::json!({ "machineId": "strict-machine" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let unknown = client
+            .post(format!("{http_base}/api/v1/attach/session?e2e=1&x=1"))
+            .bearer_auth(device_token)
+            .json(&serde_json::json!({ "machineId": "strict-machine" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        let stranger = client
+            .post(format!("{http_base}/api/v1/attach/session?e2e=1"))
+            .bearer_auth("not-a-device-token")
+            .json(&serde_json::json!({ "machineId": "strict-machine" }))
+            .send();
+        // An uncached token is probed on the machine; answer the probe 401.
+        let (stranger, ()) = tokio::join!(stranger, async {
+            let (line, mut data) = next_machine_request(&base, &mut notices).await;
+            assert_eq!(line, DEVICE_PROBE_REQUEST_LINE);
+            reply_http(&mut data, StatusCode::UNAUTHORIZED, b"").await;
+        });
+        let stranger = stranger.unwrap();
+        assert_eq!(stranger.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = stranger.json().await.unwrap();
+        assert_eq!(body["code"], "UNAUTHORIZED");
+
+        // The encrypted allocation still succeeds.
+        let allocated = allocate_e2e(&http_base, device_token, "strict-machine").await;
+        let notice = timeout(Duration::from_secs(5), notices.recv())
+            .await
+            .expect("control notice in time")
+            .expect("control notice");
+        assert_eq!(notice.session_id, allocated.session_id);
+        assert!(notice.opaque);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn an_opaque_session_splices_frames_the_relay_never_parses() {
         let state = test_state(vec![]);
@@ -7658,7 +8326,7 @@ mod tests {
                 res.headers()
                     .get("access-control-allow-headers")
                     .and_then(|v| v.to_str().ok()),
-                Some("Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept")
+                Some("Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept, X-Ferryx-Client-Build")
             );
             assert_eq!(
                 res.headers()
@@ -7691,7 +8359,7 @@ mod tests {
             res.headers()
                 .get("access-control-allow-headers")
                 .and_then(|v| v.to_str().ok()),
-            Some("Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept")
+            Some("Authorization, Content-Type, X-Device-Name, X-Requested-With, Accept, X-Ferryx-Client-Build")
         );
         assert_eq!(
             res.headers()

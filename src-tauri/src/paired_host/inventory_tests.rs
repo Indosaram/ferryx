@@ -603,3 +603,66 @@ fn pair_with_device_persists_explicit_device_id_across_reopen() {
     assert_eq!(list[0].device_id.as_deref(), Some("dev-authenticated-99"));
     root.close().unwrap();
 }
+
+fn host_attach() -> HostAttach {
+    HostAttach {
+        // base64 of 32 bytes
+        machine_attach_public_key: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=".into(),
+        enrollment_epoch: "7".into(),
+    }
+}
+
+#[test]
+fn a_host_attach_round_trips_through_the_inventory_file() {
+    let root = fixture();
+    let input = pairing("attach-persist");
+    let mut store = Inventory::open(root.path()).unwrap();
+    let row = store
+        .pair_attached(&input, Some("dev-attach".into()), host_attach())
+        .expect("pair_attached succeeds");
+    let disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path())).unwrap()).unwrap();
+    assert_eq!(
+        disk["hosts"][&row.host_id]["attach"]["machineAttachPublicKey"],
+        host_attach().machine_attach_public_key
+    );
+    assert_eq!(disk["hosts"][&row.host_id]["attach"]["enrollmentEpoch"], "7");
+
+    drop(store);
+    let mut reopened = Inventory::open(root.path()).expect("reopen inventory");
+    let lease = reopened.capture(&row.host_id, row.generation).unwrap();
+    assert_eq!(lease.attach(), Some(&host_attach()));
+    root.close().unwrap();
+}
+
+#[test]
+fn an_old_row_without_attach_still_loads_and_leases_no_attach() {
+    let root = fixture();
+    let input = pairing("attach-legacy");
+    let mut store = Inventory::open(root.path()).unwrap();
+    let row = store.pair(&input).unwrap();
+    let disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path())).unwrap()).unwrap();
+    assert!(disk["hosts"][&row.host_id].get("attach").is_none());
+
+    drop(store);
+    let mut reopened = Inventory::open(root.path()).expect("old row loads");
+    let lease = reopened.capture(&row.host_id, row.generation).unwrap();
+    assert!(lease.attach().is_none());
+    root.close().unwrap();
+}
+
+#[test]
+fn an_invalid_host_attach_is_refused() {
+    let root = fixture();
+    let mut store = Inventory::open(root.path()).unwrap();
+    let short = HostAttach {
+        machine_attach_public_key: "AQID".into(),
+        enrollment_epoch: "7".into(),
+    };
+    assert_eq!(
+        store.pair_attached(&pairing("attach-bad"), None, short).unwrap_err(),
+        InventoryError::InvalidInput
+    );
+    root.close().unwrap();
+}
