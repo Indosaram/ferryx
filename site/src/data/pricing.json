@@ -10,9 +10,9 @@
       "annual": "$0",
       "monthly_num": 0,
       "annual_num": 0,
-      "machine_limit": 1,
+      "machine_limit": 3,
       "extra_host_pack": null,
-      "description": "Essential remote terminal for personal use on 1 connected computer. Local terminal multiplexing and self-hosted relays remain completely free and open."
+      "description": "Essential remote terminal for personal use on up to 3 registered machines. Local terminal multiplexing and self-hosted relays remain free for personal and internal business use; source-available under the Sustainable Use License."
     },
     "pro": {
       "name": "Pro",

@@ -46,13 +46,13 @@ Related reading:
 
 Editorial policy: unmeasured numbers go stale and mislead. Claims here map to sources on the product facts page instead.
 
-### Is Ferryx open source?
+### Is Ferryx open source or source-available?
 
 Source-available under SUL-1.0, which is not an OSI license. It permits your own internal business purposes, non-commercial, or personal use.
 
 ### Which tool should I pick?
 
-Write down your constraints first. If you need OSI copyleft, a tool with AGPL/MIT client code may fit better; if you need daemon-owned sessions and worktree isolation today, evaluate Ferryx against that checklist.
+Write down your constraints first. If you need OSI copyleft, a tool with AGPL/MIT client code may fit better than source-available Ferryx; if you need daemon-owned sessions and worktree isolation today, evaluate Ferryx against that checklist.
 
 ## Limits and non-goals
 

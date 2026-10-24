@@ -42,7 +42,7 @@ The official Ferryx plans and approved prices are defined as follows:
 
 | Plan Key | Target Audience | Base Capacity | Price (Monthly) | Price (Annual) | Extra Host Packs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Free** (`free`) | Personal developers | 1 registered machine | $0 | $0 | None |
+| **Free** (`free`) | Personal developers | 3 registered machines | $0 | $0 | None |
 | **Pro** (`pro_monthly` / `pro_annual`) | Power users | 10 registered machines | $5 / month | $50 / year | +5 machines per pack ($2/mo or $20/yr) |
 | **Team** (`team_monthly` / `team_annual`) | Organizations (min 2 seats) | 10 machines / seat (pooled) | $7 / seat / month | $70 / seat / year | +5 machines per pack ($20/yr, annual only) |
 
@@ -464,4 +464,4 @@ export FERRYX_LS_API_BASE_URL="http://127.0.0.1:9999/v1"
 | `502 Bad Gateway (BILLING_PROVIDER_ERROR)` | Lemon Squeezy configuration variables are present, but the API key/store ID is invalid, upstream Lemon Squeezy returns an HTTP error, or network connectivity failed during checkout creation or subscription item quantity PATCH. | Verify Lemon Squeezy API credentials and store permissions. If running staging/test suites, ensure `FERRYX_LS_API_BASE_URL` points to an active loopback mock fixture. |
 | `401 Unauthorized (WEBHOOK_SIGNATURE_INVALID)` | Webhook secret in Lemon Squeezy dashboard does not match `FERRYX_LS_WEBHOOK_SECRET`. | Verify secret hex string in Lemon Squeezy settings and reload service. |
 | Customer reports "over limit" immediately after upgrade | Checkout completed but webhook has not yet arrived. | Check Lemon Squeezy webhook logs for delivery errors, or trigger manual resend. |
-| Customer cannot enroll second machine on Free plan | Account is on Free tier (`machine_limit = 1`). | Customer must either unregister the first machine or upgrade to Pro via Settings > Billing. |
+| Customer cannot enroll a fourth machine on Free plan | Account is on Free tier (`machine_limit = 3`). | Customer must unregister an existing machine. Paid checkout is not open yet (`FERRYX_BILLING_PAID_PLANS` unset), so upgrading to Pro is not available until paid plans launch. |

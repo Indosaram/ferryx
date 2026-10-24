@@ -26,7 +26,7 @@ pseudoterminals so sessions outlive the window.
 | Source repository | `github.com/Indosaram/ferryx` | GitHub |
 | Price | Free to download | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 
-SUL-1.0 is not an OSI open-source license. It permits use and modification for your own internal
+SUL-1.0 is a source-available license, not an OSI open-source license. It permits use and modification for your own internal
 business purposes or for non-commercial or personal use. Distribution must be free of charge
 and for non-commercial purposes, with the required notices preserved. Read the license for its
 full terms.
