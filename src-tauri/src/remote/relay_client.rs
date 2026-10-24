@@ -315,6 +315,12 @@ pub struct RelayClient {
     /// Base HTTP(S) URL of the relay, e.g. `https://relay.example.com`.
     /// Scheme is upgraded to `ws`/`wss` when building tunnel URLs.
     relay_url: String,
+    /// Further relay origins tried in order when the current one refuses or drops the control
+    /// channel (a warm standby reached directly, bypassing DNS failover). Empty by default.
+    fallback_urls: Arc<Vec<String>>,
+    /// Index into `[relay_url, fallback_urls..]` of the endpoint in use. Data channels follow
+    /// the control channel, so both always reach the same relay process.
+    active_endpoint: Arc<std::sync::atomic::AtomicUsize>,
     /// This daemon's Machine Token, presented as a bearer credential on
     /// the control channel.
     machine_token: String,
@@ -379,6 +385,8 @@ impl RelayClient {
         let (attach_tx, attach_rx) = mpsc::channel(1);
         Self {
             relay_url: relay_url.into(),
+            fallback_urls: Arc::new(Vec::new()),
+            active_endpoint: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pairing: PairingCoordinator::new(machine_token.clone(), tx),
             machine_token,
             gateway_addr: gateway_addr.into(),
@@ -417,6 +425,8 @@ impl RelayClient {
         let (attach_tx, attach_rx) = mpsc::channel(1);
         Self {
             relay_url: relay_url.into(),
+            fallback_urls: Arc::new(Vec::new()),
+            active_endpoint: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pairing: PairingCoordinator::new_with_auth(identity.machine_id.clone(), tx, auth),
             machine_token: String::new(),
             gateway_addr: gateway_addr.into(),
@@ -432,6 +442,60 @@ impl RelayClient {
     pub fn with_enrollment_token(mut self, token: impl Into<String>) -> Self {
         self.machine_token = token.into();
         self
+    }
+
+    /// Adds relay origins to fail over to when the primary refuses or drops the control
+    /// channel. Blank entries and duplicates of the primary are ignored.
+    pub fn with_fallback_urls<I, S>(mut self, urls: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let primary = self.relay_url.trim_end_matches('/').to_string();
+        let mut fallbacks: Vec<String> = Vec::new();
+        for url in urls {
+            let url: String = url.into();
+            let url = url.trim().trim_end_matches('/').to_string();
+            if !url.is_empty() && url != primary && !fallbacks.contains(&url) {
+                fallbacks.push(url);
+            }
+        }
+        self.fallback_urls = Arc::new(fallbacks);
+        self.active_endpoint
+            .store(0, std::sync::atomic::Ordering::Release);
+        self
+    }
+
+    /// The relay origin the control and data channels currently target.
+    pub fn active_relay_url(&self) -> &str {
+        let index = self
+            .active_endpoint
+            .load(std::sync::atomic::Ordering::Acquire);
+        match index {
+            0 => self.relay_url.as_str(),
+            n => self
+                .fallback_urls
+                .get(n - 1)
+                .map(String::as_str)
+                .unwrap_or(self.relay_url.as_str()),
+        }
+    }
+
+    /// Moves to the next configured endpoint after a failed or dropped control session.
+    /// A single-endpoint client stays where it is.
+    fn advance_endpoint(&self) {
+        let count = self.fallback_urls.len() + 1;
+        if count == 1 {
+            return;
+        }
+        let next = (self
+            .active_endpoint
+            .load(std::sync::atomic::Ordering::Acquire)
+            + 1)
+            % count;
+        self.active_endpoint
+            .store(next, std::sync::atomic::Ordering::Release);
+        tracing::warn!("relay failover: switching control channel to {}", self.active_relay_url());
     }
 
     /// Shares the daemon's authority, including in-memory gateway configurations.
@@ -516,16 +580,18 @@ impl RelayClient {
     }
 
     fn control_url(&self) -> String {
+        let relay_url = self.active_relay_url();
         format!(
             "{}/tunnel/control",
-            to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone())
+            to_ws_base(relay_url).unwrap_or_else(|_| relay_url.to_string())
         )
     }
 
     fn data_url(&self, session_id: &str) -> String {
+        let relay_url = self.active_relay_url();
         format!(
             "{}/tunnel/data/{}",
-            to_ws_base(&self.relay_url).unwrap_or_else(|_| self.relay_url.clone()),
+            to_ws_base(relay_url).unwrap_or_else(|_| relay_url.to_string()),
             session_id
         )
     }
@@ -545,12 +611,17 @@ impl RelayClient {
                     // since the prior session was healthy.
                     tracing::info!("relay control channel closed; reconnecting");
                     backoff = INITIAL_BACKOFF;
+                    // A healthy session ended: return to the primary so a failover is
+                    // temporary and the standby is only used while the primary is down.
+                    self.active_endpoint
+                        .store(0, std::sync::atomic::Ordering::Release);
                 }
                 Err(err) => {
                     tracing::warn!(
                         "relay control channel error: {err}; retrying in {:.1}s",
                         backoff.as_secs_f64()
                     );
+                    self.advance_endpoint();
                 }
             }
 
@@ -936,6 +1007,33 @@ pub fn validate_relay_url(
 /// appended directly.
 pub fn to_ws_base(url: &str) -> Result<String, RelayUrlSecurityError> {
     validate_relay_url(&live_relay_url(url), is_insecure_relay_allowed())
+}
+
+/// Comma-separated relay origins a daemon fails over to when its configured relay is down.
+pub const RELAY_FALLBACK_URLS_ENV: &str = "FERRYX_RELAY_FALLBACK_URLS";
+
+/// Parses [`RELAY_FALLBACK_URLS_ENV`], dropping entries that fail relay URL validation (and
+/// the retired relay.checka.cc origin), so a typo can never downgrade the transport.
+pub fn fallback_relay_urls_from(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .filter(|url| {
+            let retired = url.trim_end_matches('/') == RETIRED_RELAY_ORIGIN;
+            let valid = validate_relay_url(url, is_insecure_relay_allowed()).is_ok();
+            if retired || !valid {
+                tracing::warn!("ignoring relay fallback URL {url}");
+            }
+            !retired && valid
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn fallback_relay_urls_from_env() -> Vec<String> {
+    fallback_relay_urls_from(std::env::var(RELAY_FALLBACK_URLS_ENV).ok().as_deref())
 }
 
 /// The retired public relay hostname. Pairings and daemon configs saved before the move to
@@ -1496,6 +1594,46 @@ mod tests {
             client.data_url("abc123"),
             "wss://relay.example.com/tunnel/data/abc123"
         );
+    }
+
+    #[test]
+    fn failover_rotates_control_and_data_urls_together_and_returns_home() {
+        let client = RelayClient::new("https://relay.example.com", "tok").with_fallback_urls([
+            "https://relay.example.com/",
+            " https://standby.example.com/ ",
+            "",
+            "https://standby.example.com",
+        ]);
+        assert_eq!(
+            *client.fallback_urls,
+            vec!["https://standby.example.com".to_string()]
+        );
+        assert_eq!(client.control_url(), "wss://relay.example.com/tunnel/control");
+
+        client.advance_endpoint();
+        assert_eq!(client.active_relay_url(), "https://standby.example.com");
+        assert_eq!(client.control_url(), "wss://standby.example.com/tunnel/control");
+        // A clone (the per-session task) follows the same endpoint as the control channel.
+        assert_eq!(client.clone().data_url("s1"), "wss://standby.example.com/tunnel/data/s1");
+
+        client.advance_endpoint();
+        assert_eq!(client.active_relay_url(), "https://relay.example.com");
+    }
+
+    #[test]
+    fn single_endpoint_client_never_rotates() {
+        let client = RelayClient::new("https://relay.example.com", "tok");
+        client.advance_endpoint();
+        assert_eq!(client.active_relay_url(), "https://relay.example.com");
+    }
+
+    #[test]
+    fn fallback_env_rejects_insecure_and_retired_origins() {
+        let urls = fallback_relay_urls_from(Some(
+            "https://standby.example.com, http://public.example.com,https://relay.checka.cc,,",
+        ));
+        assert_eq!(urls, vec!["https://standby.example.com".to_string()]);
+        assert!(fallback_relay_urls_from(None).is_empty());
     }
 
     #[test]

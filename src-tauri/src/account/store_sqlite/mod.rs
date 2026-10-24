@@ -10,6 +10,31 @@ use crate::account::store::{now_secs, AccountStore};
 pub const STORE_SQLITE_FILENAME: &str = "account-store.sqlite3";
 pub const STORE_JSON_FILENAME: &str = "account-store.json";
 
+/// Marker file that turns this data directory into a read-only replica.
+///
+/// A warm-standby relay restores the primary's account database from the Litestream replica
+/// and must never write it: two writable account databases would fork the account state.
+/// The marker is created before the first restore and removed only by a promotion, so the
+/// read-only state survives restarts and needs no environment variable to stay in force.
+pub const STANDBY_MARKER_FILENAME: &str = "standby.readonly";
+
+/// Prefix of the error every refused write returns, so callers can branch on it.
+pub const READ_ONLY_ERROR_CODE: &str = "ACCOUNT_STORE_READ_ONLY";
+
+pub fn is_read_only(dir: &Path) -> bool {
+    dir.join(STANDBY_MARKER_FILENAME).exists()
+}
+
+fn ensure_writable(dir: &Path) -> Result<(), String> {
+    if is_read_only(dir) {
+        return Err(format!(
+            "{READ_ONLY_ERROR_CODE}: this relay is a warm standby; its account store is a \
+             read-only replica until a failover promotes it"
+        ));
+    }
+    Ok(())
+}
+
 pub fn sqlite_store_path(dir: &Path) -> PathBuf {
     dir.join(STORE_SQLITE_FILENAME)
 }
@@ -61,6 +86,7 @@ where
     E: From<String>,
     F: FnOnce(&mut AccountStore) -> Result<T, E>,
 {
+    ensure_writable(dir).map_err(E::from)?;
     let mut conn = open_sqlite_connection(dir).map_err(E::from)?;
     migration::maybe_import_legacy_json(&mut conn, dir).map_err(E::from)?;
 
@@ -95,6 +121,7 @@ pub fn load_sqlite_store(dir: &Path) -> Result<AccountStore, String> {
 }
 
 pub fn save_sqlite_store(dir: &Path, store: &AccountStore) -> Result<(), String> {
+    ensure_writable(dir)?;
     let mut conn = open_sqlite_connection(dir)?;
     migration::maybe_import_legacy_json(&mut conn, dir)?;
     let tx = conn

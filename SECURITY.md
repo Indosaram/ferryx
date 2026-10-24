@@ -36,6 +36,10 @@ fixes. Fixes ship in a new release; older releases are not patched. See
 - **Self-hosting.** Running your own relay moves the relay and account trust onto
   infrastructure you operate; see the
   [self-hosted relay guide](https://ferryx.dev/docs/self-hosted-relay/).
+- **Hosted relay availability.** `relay.ferryx.dev` runs on a primary host with a read-only
+  warm standby behind a health-checked failover; there is no SLA. Measured uptime of both
+  hosts is public at [status.ferryx.dev](https://status.ferryx.dev/), and the operations
+  runbook is [docs/relay-failover.md](docs/relay-failover.md).
 
 In scope: the desktop app, the headless daemon and `ferryx-cli`, the remote gateway, the
 mobile web client, `ferryx-relay` and its account service, and the install scripts published
