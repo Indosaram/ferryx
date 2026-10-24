@@ -1,15 +1,11 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useReducer, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useReducer, useRef } from "react";
 
-import { buildSidebarModel, type SidebarModel } from "../components/sidebar/sidebarModel";
+import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import { emptyProjectGroupIds, initialCollapsedProjects } from "../components/sidebar/sidebarRows";
-import { remoteHostStore } from "../state/remoteHostStore";
-import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
-import { useAdvancedFeatures } from "./advancedFeatures";
-import { getPairedHostReachability, subscribePairedHostReachability } from "./pairedHostReachability";
+import { useSidebarModel } from "../components/sidebar/useSidebarModel";
 import { groupProjects } from "./projectGrouping";
 import { loadCollapsedProjects, loadWorktreeOrder, subscribeSidebarPersistence } from "./sidebarPersistence";
-import { useSshHosts } from "./sshHosts";
 import { syncDesktopSidebar, type RegisteredProject } from "./tauri";
 import type { Worktree } from "./types";
 
@@ -69,16 +65,10 @@ export type DesktopSidebarInput = {
   readonly emptyWorkspaceIds: readonly string[];
 };
 
-/** Publishes the model the desktop sidebar renders, built from the same inputs the Sidebar receives. */
+/** Publishes the model the desktop sidebar renders, from the same builder hook the Sidebar calls. */
 export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
   const { enabled, projects, activeProjectId, worktrees, inactiveProjectWorktrees } = input;
-  const { hosts } = useSshHosts();
-  const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const listingFailures = useSyncExternalStore(worktreeListingFailureStore.subscribe, worktreeListingFailureStore.getState);
-  const advancedFeatures = useAdvancedFeatures();
-  const [reachabilityVersion, bumpReachability] = useReducer((version: number) => version + 1, 0);
   const [persistenceVersion, bumpPersistence] = useReducer((version: number) => version + 1, 0);
-  useEffect(() => subscribePairedHostReachability(bumpReachability), []);
   useEffect(() => {
     const unsubscribe = subscribeSidebarPersistence(bumpPersistence);
     window.addEventListener("storage", bumpPersistence);
@@ -89,28 +79,17 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
   }, []);
   // The caller derives this list on every render; key on its content so identical lists do not rebuild.
   const emptyKey = input.emptyWorkspaceIds.join("\n");
-
-  const model = useMemo(() => {
-    if (!enabled) return null;
+  // The Sidebar holds these in React state and persists every change; read them back from storage.
+  const persisted = useMemo(() => {
     const emptyGroupIds = emptyProjectGroupIds(groupProjects(projects), emptyKey === "" ? [] : emptyKey.split("\n"));
-    return buildSidebarModel({
-      source: "desktop",
-      generatedAt: "",
-      projects,
-      activeProjectId,
-      worktrees,
-      inactiveProjectWorktrees,
-      hosts,
-      remoteState,
-      reachability: getPairedHostReachability,
+    return {
       worktreeOrder: loadWorktreeOrder(),
       collapsedGroupIds: initialCollapsedProjects({ stored: loadCollapsedProjects(), projects, activeProjectId, emptyGroupIds }),
-      advancedFeatures,
-      listingFailures,
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the versions invalidate non-reactive store reads inside
-  }, [enabled, projects, activeProjectId, worktrees, inactiveProjectWorktrees, emptyKey, hosts, remoteState,
-    listingFailures, advancedFeatures, reachabilityVersion, persistenceVersion]);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- persistenceVersion invalidates the storage reads inside
+  }, [projects, activeProjectId, emptyKey, persistenceVersion]);
+  const built = useSidebarModel({ projects, activeProjectId, worktrees, inactiveProjectWorktrees }, persisted).model;
+  const model = enabled ? built : null;
 
   const modelRef = useRef(model);
   modelRef.current = model;

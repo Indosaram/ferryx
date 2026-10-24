@@ -14,7 +14,7 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
 
 import type { ActivitySummary } from "../lib/activity";
 import { projectRootWorktree } from "../lib/projectIdentity";
@@ -22,9 +22,7 @@ import { groupProjects } from "../lib/projectGrouping";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
 import type { RemoteContext } from "../lib/machineNavigation";
-import { getPairedHostReachability, subscribePairedHostReachability } from "../lib/pairedHostReachability";
 import { remoteHostStore } from "../state/remoteHostStore";
-import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
   clampSidebarWidth,
@@ -52,9 +50,10 @@ import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type Side
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
 import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
 import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
-import { buildSidebarModel, sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
+import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
 import { SidebarProjectHeader } from "./sidebar/SidebarProjectHeader";
+import { useSidebarModel } from "./sidebar/useSidebarModel";
 import { supervisorTypingIn } from "./sidebar/sidebarSupervisor";
 import { SidebarView, type SidebarReorder } from "./sidebar/SidebarView";
 import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
@@ -225,32 +224,15 @@ export function Sidebar({
 
   const { hosts } = useSshHosts();
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const listingFailures = useSyncExternalStore(worktreeListingFailureStore.subscribe, worktreeListingFailureStore.getState);
-  // Paired rows read reachability non-reactively, so regroup whenever it changes.
-  const [reachabilityVersion, bumpReachabilityVersion] = useReducer((version: number) => version + 1, 0);
-  useEffect(() => {
-    const unsubscribe = subscribePairedHostReachability(bumpReachabilityVersion);
-    return () => { unsubscribe(); };
-  }, []);
-  const rowsInput = useMemo(
-    () => ({ worktrees, projects, activeProjectId, inactiveProjectWorktrees, hosts, remoteState, reachability: getPairedHostReachability }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store read inside
-    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState, reachabilityVersion],
+  const { model, rowsInput } = useSidebarModel(
+    { projects, activeProjectId, worktrees, inactiveProjectWorktrees },
+    { worktreeOrder, collapsedGroupIds: collapsedProjects },
   );
   const naturalWorktreesByProject = useMemo(() => groupWorktreesByProject(rowsInput), [rowsInput]);
   const worktreesByProject = useMemo(
     () => applyWorktreeOrder(naturalWorktreesByProject, worktreeOrder),
     [naturalWorktreesByProject, worktreeOrder],
   );
-  const model = useMemo(() => buildSidebarModel({
-    ...rowsInput,
-    source: "desktop",
-    generatedAt: "",
-    worktreeOrder,
-    collapsedGroupIds: collapsedProjects,
-    advancedFeatures,
-    listingFailures,
-  }), [advancedFeatures, collapsedProjects, listingFailures, rowsInput, worktreeOrder]);
   const projectById = useMemo(() => new Map(projects.map((project) => [project.workspaceId, project])), [projects]);
   const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.groupId, group])), [projectGroups]);
   const worktreeByKey = useMemo(() => {
