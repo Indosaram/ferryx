@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   findPreviousReleaseTag,
   parseConventionalCommits,
   fetchGitHubReleaseNotes,
   generateChangelog,
+  runChangelogCli,
 } from "./lib/release-changelog.mjs";
 
 test("parseConventionalCommits: groups commits by type and strips scopes", () => {
@@ -90,4 +94,60 @@ test("generateChangelog: seamlessly incorporates GitHub PR notes when available"
   assert.match(changelog, /pull\/42/);
   assert.match(changelog, /## Bug Fixes/);
   assert.match(changelog, /- \*\*core\*\*: quick fix \(abc1234\)/);
+});
+
+const fakeTags = () => "v2026.09.20.1\nv2026.09.17.1\ndaemon-lifetime-handover-v1\nv2026.09.11.1\n";
+const fakeLog = ({ tag }) => ({
+  "v2026.09.20.1": "aaa1111\tfeat(remote): third release",
+  "v2026.09.17.1": "bbb2222\tfix(pty): second release",
+  "v2026.09.11.1": "ccc3333\tfirst release",
+})[tag];
+
+function runCli(argv) {
+  const out = [];
+  const err = [];
+  const code = runChangelogCli(argv, {
+    stdout: (s) => out.push(s),
+    stderr: (s) => err.push(s),
+    listTagsFn: fakeTags,
+    execGitFn: fakeLog,
+  });
+  return { code, out: out.join(""), err: err.join("") };
+}
+
+test("--write-changelog: prepends only missing tag sections, newest first", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "ferryx-changelog-")), "CHANGELOG.md");
+  writeFileSync(file, "# Changelog\n\nintro\n\n## v2026.09.11.1\n\n- kept by hand (ccc3333)\n");
+
+  const { code } = runCli(["--write-changelog", "--file", file]);
+  assert.equal(code, 0);
+  const written = readFileSync(file, "utf8");
+  const headings = [...written.matchAll(/^## (\S+)/gm)].map((m) => m[1]);
+  assert.deepEqual(headings, ["v2026.09.20.1", "v2026.09.17.1", "v2026.09.11.1"]);
+  assert.match(written, /### Features\n\n- \*\*remote\*\*: third release \(aaa1111\)/);
+  assert.match(written, /compare\/v2026\.09\.17\.1\.\.\.v2026\.09\.20\.1/);
+  assert.match(written, /- kept by hand \(ccc3333\)/);
+  assert.doesNotMatch(written, /daemon-lifetime-handover-v1/);
+
+  // A second run is a no-op.
+  assert.equal(runCli(["--write-changelog", "--file", file]).code, 0);
+  assert.equal(readFileSync(file, "utf8"), written);
+});
+
+test("--write-changelog --dry-run prints the selected range without writing", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "ferryx-changelog-")), "CHANGELOG.md");
+  const { code, out } = runCli(["--write-changelog", "--dry-run", "--from", "v2026.09.17.1", "--file", file]);
+  assert.equal(code, 0);
+  assert.deepEqual([...out.matchAll(/^## (\S+)/gm)].map((m) => m[1]), ["v2026.09.20.1", "v2026.09.17.1"]);
+  assert.throws(() => readFileSync(file, "utf8"));
+});
+
+test("--write-changelog fails with a message on an unknown or inverted tag range", () => {
+  const unknown = runCli(["--write-changelog", "--dry-run", "--from", "v2099.01.01.1"]);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.err, /--from v2099\.01\.01\.1 is not a release tag/);
+
+  const inverted = runCli(["--write-changelog", "--dry-run", "--from", "v2026.09.20.1", "--to", "v2026.09.11.1"]);
+  assert.equal(inverted.code, 1);
+  assert.match(inverted.err, /empty tag range/);
 });

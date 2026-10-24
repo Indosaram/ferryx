@@ -39,6 +39,7 @@ export function isRowActionable(row: AttentionRow): boolean {
 
 function sectionOf(entry: NotificationEntry | null, agent: Agent | null): AttentionSection {
   if (entry?.reason === "bell") return "mentions";
+  if (entry?.reason === "supervisor" && "unread" in entry.read) return "needs-you";
   if (agent?.state === "working") return "working";
   if (agent?.state === "waiting" || entry?.reason === "waiting") return "needs-you";
   return "finished";
@@ -158,7 +159,7 @@ export function rowDotState(row: AttentionRow): StatusDotState {
   if (row.agent?.state === "waiting") return "waiting";
   if (row.agent?.state === "failed") return "failed";
   if (row.agent?.state === "exited") return "exited";
-  if (row.entry?.reason === "waiting") return "waiting";
+  if (row.entry?.reason === "waiting" || row.entry?.reason === "supervisor") return "waiting";
   if (row.entry?.reason === "done") return "done";
   return "unread";
 }
@@ -166,6 +167,7 @@ export function rowDotState(row: AttentionRow): StatusDotState {
 export function actionableEntryCount(entries: readonly NotificationEntry[]): number {
   return entries.reduce((count, entry) => {
     if (entry.reason === "waiting") return count + 1;
+    if (entry.reason === "supervisor" && "unread" in entry.read) return count + 1;
     if (entry.reason === "done" && "unread" in entry.read) return count + 1;
     return count;
   }, 0);

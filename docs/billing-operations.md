@@ -465,3 +465,95 @@ export FERRYX_LS_API_BASE_URL="http://127.0.0.1:9999/v1"
 | `401 Unauthorized (WEBHOOK_SIGNATURE_INVALID)` | Webhook secret in Lemon Squeezy dashboard does not match `FERRYX_LS_WEBHOOK_SECRET`. | Verify secret hex string in Lemon Squeezy settings and reload service. |
 | Customer reports "over limit" immediately after upgrade | Checkout completed but webhook has not yet arrived. | Check Lemon Squeezy webhook logs for delivery errors, or trigger manual resend. |
 | Customer cannot enroll second machine on Free plan | Account is on Free tier (`machine_limit = 1`). | Customer must either unregister the first machine or upgrade to Pro via Settings > Billing. |
+
+---
+
+## 10. Account Data Deletion Requests
+
+There is no account deletion API. Deletion requests arrive through the private reporting channel in
+`SECURITY.md`, and the operator removes the data by hand. The public description of what is stored is the
+"Relay and account data" section of `site/src/content/docs/privacy.md`.
+
+### 10.1 Before deleting
+
+1. Confirm the requester controls the account email: the request comes from that address, or they reply to
+   a confirmation sent to it.
+2. Look up the account and record its identifiers. Keep the output; step 10.2 needs the machine IDs.
+   ```bash
+   sqlite3 /var/lib/ferryx/account/account-store.sqlite3 <<'EOF'
+   SELECT user_id, email, created_at FROM users WHERE email = '<email>';
+   SELECT machine_id, display_name FROM machines WHERE user_id = '<user_id>';
+   SELECT org_id, name FROM orgs WHERE owner_user_id = '<user_id>';
+   SELECT subscription_id, plan_key, status, ls_customer_id FROM subscriptions WHERE owner_user_id = '<user_id>';
+   EOF
+   ```
+3. If the user owns an org with other members, tell the requester that deleting the account deletes the org
+   and its pooled plan for every member, and get confirmation.
+4. Cancel every active subscription in the Lemon Squeezy dashboard first, so no further renewals are billed.
+5. Take a WAL-safe backup (section 7.2). Backups taken before the deletion still contain the account; delete or
+   age them out according to your backup rotation and say so in the reply.
+
+### 10.2 Delete the records
+
+The account service is hosted inside `ferryx-relay`, and the relay keeps the machine ownership map in memory
+and merges it back into `machine_keys.json` on the next enrollment. Stop the relay for this procedure.
+
+```bash
+# 1. Stop the relay (and the account service it hosts)
+sudo systemctl stop ferryx-relay
+
+# 2. Delete account rows. foreign_keys is per connection in the sqlite3 CLI: set it, or the
+#    ON DELETE CASCADE rows (sessions, enrollment_codes, machines, grants, subscriptions, orgs,
+#    org_members, org_invites of owned orgs) are left behind.
+sqlite3 /var/lib/ferryx/account/account-store.sqlite3 <<'EOF'
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+BEGIN IMMEDIATE;
+
+-- Rows keyed by email or machine, not by user_id, do not cascade.
+DELETE FROM machine_requests
+ WHERE email_hint = '<email>'
+    OR decided_by = '<user_id>'
+    OR machine_id IN (SELECT machine_id FROM machines WHERE user_id = '<user_id>');
+DELETE FROM login_codes  WHERE email = '<email>';
+DELETE FROM device_auths WHERE email = '<email>';
+DELETE FROM org_invites  WHERE email = '<email>';
+DELETE FROM billing_states
+ WHERE owner_key = '<user_id>'
+    OR owner_key IN (SELECT 'org:' || org_id FROM orgs WHERE owner_user_id = '<user_id>');
+
+-- Cascades to everything that references users(user_id).
+DELETE FROM users WHERE user_id = '<user_id>';
+
+-- Verify nothing is left before committing; every count must be 0.
+SELECT COUNT(*) FROM users          WHERE user_id = '<user_id>' OR email = '<email>';
+SELECT COUNT(*) FROM machines       WHERE user_id = '<user_id>';
+SELECT COUNT(*) FROM sessions       WHERE user_id = '<user_id>';
+SELECT COUNT(*) FROM subscriptions  WHERE owner_user_id = '<user_id>';
+SELECT COUNT(*) FROM org_members    WHERE user_id = '<user_id>';
+COMMIT;
+EOF
+
+# 3. Remove the account's machine IDs from the relay ownership map (default
+#    ~/.ferryx/relay/machine_keys.json of the relay user, or $FERRYX_RELAY_DATA_DIR/machine_keys.json,
+#    or $FERRYX_RELAY_KEY_FILE). Use the machine IDs recorded in 10.1 step 2.
+KEYS=/var/lib/ferryx/relay/machine_keys.json   # set to this relay's actual path
+cp "$KEYS" "$KEYS.pre-delete-$(date +%Y%m%d%H%M%S)"
+jq 'del(.["<machine_id_1>"], .["<machine_id_2>"])' "$KEYS" > "$KEYS.tmp" \
+  && chmod 0600 "$KEYS.tmp" && mv "$KEYS.tmp" "$KEYS"
+rm -f "$KEYS".pre-delete-*   # after confirming the relay starts cleanly
+
+# 4. Remove file-mailer copies, if this host uses the file mailer (no RESEND_API_KEY or webhook)
+grep -l '<email>' /var/lib/ferryx/account/mail/* 2>/dev/null | xargs -r rm -f
+
+# 5. Start the relay again
+sudo systemctl start ferryx-relay
+```
+
+### 10.3 After deleting
+
+1. In the Lemon Squeezy dashboard, request deletion of the customer record (`ls_customer_id` from 10.1).
+   Lemon Squeezy keeps tax and invoice records it is legally required to keep.
+2. If the account received mail through Resend, remove the address from Resend's logs or suppression list
+   if the requester asked for it.
+3. Reply to the requester with what was deleted, the date, and the backup expiry date from 10.1 step 5.

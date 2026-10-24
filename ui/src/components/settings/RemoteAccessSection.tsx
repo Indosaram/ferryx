@@ -4,10 +4,13 @@ import { AlertTriangle, Radio, Trash2 } from "lucide-react";
 import {
   disableRemoteGateway,
   enableRemoteGateway,
+  getDirectAutoTrustStatus,
   getRemoteStatus,
   listRemoteDevices,
   revokeRemoteDevice,
+  setDirectAutoTrustDisabled,
   type DeviceInfo,
+  type DirectAutoTrustStatus,
   type RemoteGatewayStatus,
 } from "../../lib/tauri";
 
@@ -44,6 +47,8 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
   const previousMode = useRef<RemoteGatewayStatus["mode"] | null>(null);
   const [statusError, setStatusError] = useState(false);
   const [devicesError, setDevicesError] = useState(false);
+  const [autoTrust, setAutoTrust] = useState<DirectAutoTrustStatus | null>(null);
+  const [autoTrustBusy, setAutoTrustBusy] = useState(false);
 
   const refreshStatus = useCallback(async (): Promise<RemoteGatewayStatus | null> => {
     const [s, devList] = await Promise.all([
@@ -65,6 +70,28 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
   useEffect(() => {
     void refreshStatus();
   }, [refreshStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Optional surface: a host without the command (or a browser build) simply hides the panel.
+    void Promise.resolve()
+      .then(() => getDirectAutoTrustStatus())
+      .then((next) => { if (!cancelled && next) setAutoTrust(next); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleAutoTrustToggle = async (enabled: boolean) => {
+    setAutoTrustBusy(true);
+    setActionError(null);
+    try {
+      setAutoTrust(await setDirectAutoTrustDisabled(!enabled));
+    } catch (error: unknown) {
+      setActionError(error instanceof Error ? error.message : "Failed to update automatic trust");
+    } finally {
+      setAutoTrustBusy(false);
+    }
+  };
 
   const handleToggle = async (enabled: boolean) => {
     setLoading(true);
@@ -204,6 +231,34 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
             </Button>
           </div>
         </div>
+
+        {autoTrust ? (
+          <SettingRow
+            label="Automatic direct trust"
+            description={
+              <>
+                <span data-testid="auto-trust-state">
+                  {autoTrust.enabled
+                    ? "On: machines attested by your account are trusted for direct connections automatically."
+                    : autoTrust.disabledByEnv
+                      ? "Off: disabled by FERRYX_DIRECT_AUTO_TRUST on this machine."
+                      : "Off: only manually trusted machines may connect directly."}
+                </span>
+                <span className="mt-1 block break-all font-mono" data-testid="pinned-account-key">
+                  Pinned account key: {autoTrust.pinnedAccountKey ?? "None"}
+                </span>
+              </>
+            }
+          >
+            <Switch
+              id="remote-auto-trust"
+              aria-label="Automatic direct trust"
+              checked={!autoTrust.disabledBySetting}
+              disabled={autoTrustBusy}
+              onCheckedChange={(checked) => void handleAutoTrustToggle(checked)}
+            />
+          </SettingRow>
+        ) : null}
       </div>
 
       <div className="mt-8 space-y-3">

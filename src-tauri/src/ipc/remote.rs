@@ -151,6 +151,10 @@ pub struct RemoteGatewayStatusResponse {
     pub gate_status: Option<crate::remote::server::DirectGatewayGateStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_reason: Option<String>,
+    /// Insecure transport modes in effect (`direct`, `relay`) in the gateway process or this one.
+    /// Non-empty means the desktop shows its persistent insecure-transport banner.
+    #[serde(default)]
+    pub insecure_modes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,10 +186,20 @@ pub async fn cmd_remote_status(
     manager: State<'_, Arc<RemoteGatewayManager>>,
 ) -> Result<RemoteGatewayStatusResponse, IpcError> {
     let local_ip = get_local_ip();
+    let local_insecure = crate::ipc::run_blocking(|| {
+        Ok(crate::remote::security_settings::active_insecure_modes())
+    })
+    .await?;
 
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => {
             let status = client.remote_get_status().await?;
+            let mut insecure_modes = status.insecure_modes;
+            for mode in local_insecure {
+                if !insecure_modes.contains(&mode) {
+                    insecure_modes.push(mode);
+                }
+            }
             Ok(RemoteGatewayStatusResponse {
                 enabled: status.is_running,
                 mode: status.mode,
@@ -199,6 +213,7 @@ pub async fn cmd_remote_status(
                 control_channel_connected: status.control_channel_connected,
                 gate_status: status.gate_status,
                 gate_reason: status.gate_reason,
+                insecure_modes,
             })
         }
         RemoteGatewayManagerInner::State {
@@ -242,6 +257,7 @@ pub async fn cmd_remote_status(
                         _ => None,
                     })
                 },
+                insecure_modes: local_insecure,
             })
         }
     }

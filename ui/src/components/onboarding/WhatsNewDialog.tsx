@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import type { Components } from "react-markdown";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { handleExternalLinkClick } from "../../lib/externalLinks";
 
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
@@ -43,6 +44,7 @@ const markdownComponents: Components = {
     <a
       href={href}
       target="_blank"
+      onClick={handleExternalLinkClick}
       rel="noreferrer"
       className="text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
     >

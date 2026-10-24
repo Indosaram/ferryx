@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Eye } from "lucide-react";
 import { PlatformIcon } from "@/components/ui/PlatformIcons";
 
 const FRAME_MS = 900;
@@ -24,6 +25,43 @@ function Chrome({ label, children }: { label: string; children: React.ReactNode 
       {/* Fixed body height: a growing visual would reflow the whole page on every frame. */}
       <div className="h-[168px] overflow-hidden">{children}</div>
     </div>
+  );
+}
+
+export function SupervisorVisual() {
+  const step = useCycle(3, 1400);
+  const prompts = [
+    { agent: "claude", ask: "Run the test suite? (y/n)", typed: "yes" },
+    { agent: "codex", ask: "Use pnpm or npm?", typed: "pnpm" },
+    { agent: "claude", ask: "git push --force origin main?", typed: null },
+  ];
+  const current = prompts[step];
+  return (
+    <Chrome label="supervisor">
+      <div className="flex h-full flex-col justify-center gap-3 px-4 font-mono text-[13px]">
+        <div className="truncate text-white/65">
+          <span className="text-white/85">{current.agent}</span> {current.ask}
+        </div>
+        <div
+          className={`flex h-[26px] items-center gap-2 rounded-md px-2.5 text-[12px] transition-colors duration-300 ${current.typed ? "bg-white/[0.12] text-white/90" : "bg-white/[0.05] text-white/70"}`}
+        >
+          <Eye className="h-3 w-3 shrink-0" />
+          {current.typed ? (
+            <>
+              <span className="min-w-0 truncate">Supervisor typed</span>
+              <span className="shrink-0 text-emerald-300/80">{current.typed}</span>
+              <span className="ml-auto shrink-0 rounded bg-white/10 px-1.5 text-[11px] text-white/80">Take over</span>
+            </>
+          ) : (
+            <>
+              <span className="shrink-0">Left to you</span>
+              <span className="min-w-0 flex-1 truncate text-white/55">it is in your Inbox</span>
+            </>
+          )}
+        </div>
+        <div className="text-[12px] text-white/50">answered {current.typed ? step + 1 : 2} · asked you {current.typed ? 0 : 1}</div>
+      </div>
+    </Chrome>
   );
 }
 

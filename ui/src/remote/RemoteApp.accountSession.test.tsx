@@ -68,6 +68,7 @@ function emitFailureTrace(label: string, ...mocks: unknown[]): void {
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
+import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import { storeAccountSessionToken, clearStoredAccountSessionToken } from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
 import * as accountAttachModule from "./accountAttach";
@@ -422,13 +423,12 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     render(<RemoteApp />);
 
-    const topContextTrigger = await waitFor(() =>
-      screen.getByRole("button", { name: /Change workspace context/i })
-    );
-    expect(topContextTrigger).toBeDefined();
-    expect(topContextTrigger.getAttribute("aria-expanded")).toBe("false");
+    const worktreesTab = await waitFor(() => screen.getByTestId("mobile-home-tab-worktrees"));
+    expect(screen.getByTestId("mobile-home")).toBeDefined();
+    expect(worktreesTab.getAttribute("aria-selected")).toBe("false");
+    expect(screen.queryByTestId("remote-worktrees-inline")).toBeNull();
 
-    // The body is the preselection placeholder here, and the header's status cluster - which owns
+    // The phone home is the body here, and the session header's status cluster - which owns
     // the mode switch - is not rendered yet, so no terminal can be mounted whichever mode the app
     // will end up in.
     expect(screen.queryByTestId("remote-terminal-grid")).toBeNull();
@@ -442,19 +442,16 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       ),
     ).toBe(false);
     // The header's status cluster, which owns the mode switch, is only rendered once a worktree
-    // is chosen (account preselection renders the collapsed picker alone). Asking for the
+    // is chosen (the phone home renders no session header). Asking for the
     // terminal before that is a silent no-op - the switch does not exist yet - so the request is
     // made below, after the selection has landed.
-    act(() => {
-      fireEvent.click(topContextTrigger);
-    });
-    expect(topContextTrigger.getAttribute("aria-expanded")).toBe("true");
+    const picker = await openWorkspacePicker();
+    expect(worktreesTab.getAttribute("aria-selected")).toBe("true");
 
     const optionBtn = await waitFor(() =>
-      screen.getByRole("button", { name: "ws-ferryx / main" })
+      within(picker).getByRole("button", { name: "ws-ferryx / main" })
     );
     // Desktop-style worktree list only: no machine names, machine groups, or machine choice.
-    const picker = screen.getByRole("dialog", { name: "Workspace context" });
     expect(picker.textContent).not.toContain("Work MacBook Pro");
     expect(picker.textContent).not.toContain("mach-phone-1");
     expect(within(picker).queryByRole("button", { name: /Work MacBook Pro|mach-phone-1/i })).toBeNull();
@@ -986,16 +983,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     render(<RemoteApp />);
     await switchToTerminalMode();
 
-    const topContextTrigger = await waitFor(() =>
-      screen.getByRole("button", { name: /Change workspace context/i })
-    );
-
-    act(() => {
-      fireEvent.click(topContextTrigger);
-    });
+    const picker = await openWorkspacePicker();
 
     const selectWsBBtn = await waitFor(() =>
-      screen.getByRole("button", { name: /feature-b/i })
+      within(picker).getByRole("button", { name: /feature-b/i })
     );
     fireEvent.click(selectWsBBtn);
 
@@ -1235,16 +1226,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     render(<RemoteApp />);
     await switchToTerminalMode();
 
-    const topContextTrigger = await waitFor(() =>
-      screen.getByRole("button", { name: /Change workspace context/i })
-    );
-
-    act(() => {
-      fireEvent.click(topContextTrigger);
-    });
+    const picker = await openWorkspacePicker();
 
     const selectWsBBtn = await waitFor(() =>
-      screen.getByRole("button", { name: /feature-b/i })
+      within(picker).getByRole("button", { name: /feature-b/i })
     );
 
     vi.useFakeTimers();
@@ -1296,11 +1281,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       privateKey: "phone-initiator-priv-key-base64",
     });
     render(<RemoteApp />);
-    const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-    act(() => {
-      fireEvent.click(trigger);
-    });
-    return screen.getByRole("dialog", { name: "Workspace context" });
+    return openWorkspacePicker();
   }
 
   it("names an offline desktop instead of the generic empty picker line", async () => {
@@ -1502,16 +1483,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     const { unmount } = render(<RemoteApp />);
 
-    const trigger = await waitFor(() =>
-      screen.getByRole("button", { name: /Change workspace context/i }),
-    );
-    act(() => {
-      fireEvent.click(trigger);
-    });
+    const picker = await openWorkspacePicker();
 
     const worktreeOptionBtn = await waitFor(() => {
-      const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-      return within(dialog).getByRole("button", {
+      return within(picker).getByRole("button", {
         name: (content, element) =>
           element?.getAttribute("aria-label") === "project-2a54aface19a497491abc9ed791fd65d / main" ||
           content.trim() === "project-2a54aface19a497491abc9ed791fd65d / main",
@@ -1569,16 +1544,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     render(<RemoteApp />);
 
-    const remountTrigger = await waitFor(() =>
-      screen.getByRole("button", { name: /Change workspace context/i }),
-    );
-    act(() => {
-      fireEvent.click(remountTrigger);
-    });
+    const remountPicker = await openWorkspacePicker();
 
     const remountWorktreeBtn = await waitFor(() => {
-      const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-      return within(dialog).getByRole("button", {
+      return within(remountPicker).getByRole("button", {
         name: (content, element) =>
           element?.getAttribute("aria-label") === "project-2a54aface19a497491abc9ed791fd65d / main" ||
           content.trim() === "project-2a54aface19a497491abc9ed791fd65d / main",
@@ -1663,11 +1632,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     render(<RemoteApp />);
 
     const pickWorktree = async () => {
-      const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-      act(() => { fireEvent.click(trigger); });
+      const picker = await openWorkspacePicker();
       const option = await waitFor(() => {
-        const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-        return within(dialog).getByRole("button", {
+        return within(picker).getByRole("button", {
           name: (content, element) =>
             element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
         });
@@ -1755,11 +1722,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     render(<RemoteApp />);
 
     const pickWorktree = async () => {
-      const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-      act(() => { fireEvent.click(trigger); });
+      const picker = await openWorkspacePicker();
       const option = await waitFor(() => {
-        const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-        return within(dialog).getByRole("button", {
+        return within(picker).getByRole("button", {
           name: (content, element) =>
             element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
         });
@@ -1769,7 +1734,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     // Given discovery finished and left its probe tunnel open for the machine
     await waitFor(() => expect(transports.length).toBeGreaterThan(0));
-    await waitFor(() => expect(screen.getByRole("button", { name: /Change workspace context/i })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument());
 
     // When the relay drops the idle probe tunnel before the user picks the first worktree
     for (const t of transports) t.isClosed = true;
@@ -1836,11 +1801,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     render(<RemoteApp />);
-    const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-    act(() => { fireEvent.click(trigger); });
+    const picker = await openWorkspacePicker();
     const option = await waitFor(() => {
-      const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-      return within(dialog).getByRole("button", {
+      return within(picker).getByRole("button", {
         name: (content, element) =>
           element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
       });
@@ -1926,11 +1889,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
     const storedSessionIds = () => Object.keys(localStorage).map((key) => localStorage.getItem(key));
     const pickMain = async () => {
-      const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-      act(() => { fireEvent.click(trigger); });
+      const picker = await openWorkspacePicker();
       return await waitFor(() => {
-        const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-        return within(dialog).getByRole("button", {
+        return within(picker).getByRole("button", {
           name: (content, element) =>
             element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
         });
@@ -2065,11 +2026,9 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     // Given the phone shows X, the session the desktop focuses
     render(<RemoteApp />);
-    const trigger = await waitFor(() => screen.getByRole("button", { name: /Change workspace context/i }));
-    act(() => { fireEvent.click(trigger); });
+    const picker = await openWorkspacePicker();
     const option = await waitFor(() => {
-      const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-      return within(dialog).getByRole("button", {
+      return within(picker).getByRole("button", {
         name: (content, element) =>
           element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
       });
@@ -2283,15 +2242,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     render(<RemoteApp />);
 
-    const trigger = await waitFor(() =>
-      screen.getByRole("button", { name: /Change workspace context/i }),
-    );
-    act(() => {
-      fireEvent.click(trigger);
-    });
+    const picker = await openWorkspacePicker();
 
     const worktreeOptionBtn = await waitFor(() =>
-      screen.getByRole("button", { name: /main/i }),
+      within(picker).getByRole("button", { name: /main/i }),
     );
 
     await act(async () => {
@@ -2473,16 +2427,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     render(<RemoteApp />);
 
-    const trigger = await waitFor(() =>
-      screen.getByRole("button", { name: /Change workspace context/i }),
-    );
-    act(() => {
-      fireEvent.click(trigger);
-    });
+    const picker = await openWorkspacePicker();
 
     const worktreeOptionBtn = await waitFor(() => {
-      const dialog = screen.getByRole("dialog", { name: "Workspace context" });
-      return within(dialog).getByRole("button", {
+      return within(picker).getByRole("button", {
         name: (content, element) =>
           element?.getAttribute("aria-label") === "ws-chat / main" ||
           content.trim() === "ws-chat / main",
