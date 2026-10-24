@@ -5222,6 +5222,19 @@ impl DaemonServer {
                             commit_latency_ms,
                             "Handover committed after adopting the transferred sessions"
                         );
+                        // This successor now owns the sessions, so the next login must start its
+                        // generation, not the retiring predecessor's. A GUI-free upgrade has no GUI
+                        // that would register it, and the candidate job was started without login
+                        // autostart. A failure only costs the login registration, never the commit.
+                        match crate::ipc::run_blocking(|| {
+                            crate::daemon::supervisor::register_running_generation_for_login()
+                                .map_err(crate::ipc::IpcError::internal)
+                        })
+                        .await
+                        {
+                            Ok(changed) => tracing::info!(changed, "Registered the committed generation for login"),
+                            Err(error) => tracing::warn!(%error, "Could not register the committed generation for login"),
+                        }
                         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
                         {
                             if let Some(channel) = crate::daemon::qa_producers::channel().await {

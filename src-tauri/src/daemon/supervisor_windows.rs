@@ -1012,7 +1012,12 @@ mod platform {
     /// collects runtime generations that neither a process nor a recorded task uses.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
         let staged = stage(executable)?;
-        let changed = register_for_login_with(env, &staged, &mut SystemScheduler)?;
+        register_staged_for_login(env, &staged)
+    }
+
+    /// [`register_for_login`] for an already staged generation (the running daemon's own).
+    pub fn register_staged_for_login(env: Env<'_>, staged: &StagedRuntime) -> Result<bool> {
+        let changed = register_for_login_with(env, staged, &mut SystemScheduler)?;
         if let Some(root) = crate::daemon::server::daemon_runtime_root() {
             let usage = SystemRuntimeUsage {
                 registered_job_executables: registered_executables(env),

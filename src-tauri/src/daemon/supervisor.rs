@@ -262,6 +262,28 @@ pub fn reconcile_login_registration() -> Result<bool> {
     backend::register_for_login(&process_env, &executable)
 }
 
+/// Registers the generation this daemon itself runs from for the next login and demotes every
+/// older generation, exactly as [`reconcile_login_registration`] does for the GUI's build. A
+/// handover successor calls it once it owns the sessions: its job was started with no login
+/// autostart (`start_candidate`), and a GUI-free upgrade (control-channel `RequestUpgrade`) has
+/// no new GUI that would register it, so without this the next login starts the retired
+/// predecessor. A daemon that is not a staged runtime copy (dev build), a user who opted out, or
+/// an unsupported runtime is a no-op. Never starts, stops or reloads a job.
+pub(crate) fn register_running_generation_for_login() -> Result<bool> {
+    if user_opted_out() || !supported() {
+        return Ok(false);
+    }
+    let Some(key) = crate::daemon::handover_request::own_generation_key() else {
+        return Ok(false);
+    };
+    let executable =
+        std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
+    backend::register_staged_for_login(
+        &process_env,
+        &crate::daemon::runtime_stage::StagedRuntime { key, executable },
+    )
+}
+
 /// HandoverCandidate admission (todo 8): the only start allowed while an owner is Alive. Called
 /// only by the control-channel RequestUpgrade handler, after it verified the staged executable and
 /// wrote handover-request.json. Takes the admission lock, re-reads the request and starts the
@@ -435,18 +457,34 @@ mod backend {
     /// legacy `com.ferryx.daemon` job is left as it is (its migration is separate).
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
         let job = current_job(env, executable)?;
-        let dir = agents_dir(env)?;
-        let base = label_base(env);
-        let mut changed = generation::register_newest_for_login(&job)?;
-        changed |= generation::retire_older_generations(
-            &generation::SystemLaunchctl,
-            uid(),
-            &dir,
-            &base,
-            &job.label,
-        )?;
+        register_job_for_login(env, &job)
+    }
+
+    /// [`register_for_login`] for an already staged generation (the running daemon's own).
+    pub fn register_staged_for_login(env: Env<'_>, staged: &runtime_stage::StagedRuntime) -> Result<bool> {
+        let job = job_for(env, staged)?;
+        register_job_for_login(env, &job)
+    }
+
+    fn register_job_for_login(env: Env<'_>, job: &generation::GenerationJob) -> Result<bool> {
+        let (changed, dir, base) = login_registration_with(&generation::SystemLaunchctl, uid(), env, job)?;
         collect_unused_runtimes(env, &dir, &base);
         Ok(changed)
+    }
+
+    /// The plist half of login registration: `job` gets `RunAtLoad` true, every other generation
+    /// in the agents dir loses its load-time launch. No runtime garbage collection.
+    pub(super) fn login_registration_with(
+        launchctl: &dyn generation::Launchctl,
+        uid: u32,
+        env: Env<'_>,
+        job: &generation::GenerationJob,
+    ) -> Result<(bool, PathBuf, String)> {
+        let dir = agents_dir(env)?;
+        let base = label_base(env);
+        let mut changed = generation::register_newest_for_login(job)?;
+        changed |= generation::retire_older_generations(launchctl, uid, &dir, &base, &job.label)?;
+        Ok((changed, dir, base))
     }
 
     /// Every executable a registered job references is kept, including the legacy job's. When any
@@ -597,6 +635,13 @@ mod backend {
         task::register_for_login(env, executable)
     }
 
+    pub fn register_staged_for_login(
+        env: Env<'_>,
+        staged: &crate::daemon::runtime_stage::StagedRuntime,
+    ) -> Result<bool> {
+        task::register_staged_for_login(env, staged)
+    }
+
     pub fn reload(env: Env<'_>) -> Result<()> {
         task::reload(env)
     }
@@ -711,7 +756,19 @@ mod backend {
     /// runs after registration, so the unit just written already protects its runtime.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
         let (base, name, path, staged) = generation_unit(env, executable)?;
-        let rewritten = supervisor_linux::register_for_login(&base, &name, &path, &staged)?;
+        register_unit_for_login(&base, &name, &path, &staged)
+    }
+
+    /// [`register_for_login`] for an already staged generation (the running daemon's own).
+    pub fn register_staged_for_login(env: Env<'_>, staged: &runtime_stage::StagedRuntime) -> Result<bool> {
+        let (base, base_path) = unit(env)?;
+        let name = supervisor_linux::generation_unit_name(&base, &staged.key)?;
+        let path = base_path.with_file_name(format!("{name}.service"));
+        register_unit_for_login(&base, &name, &path, &staged.executable)
+    }
+
+    fn register_unit_for_login(base: &str, name: &str, path: &Path, staged: &Path) -> Result<bool> {
+        let rewritten = supervisor_linux::register_for_login(base, name, path, staged)?;
         if let Some(unit_dir) = path.parent() {
             collect_runtime_garbage(unit_dir);
         }
@@ -787,6 +844,13 @@ mod backend {
     }
 
     pub fn register_for_login(_env: Env<'_>, _executable: &Path) -> Result<bool> {
+        Ok(false)
+    }
+
+    pub fn register_staged_for_login(
+        _env: Env<'_>,
+        _staged: &crate::daemon::runtime_stage::StagedRuntime,
+    ) -> Result<bool> {
         Ok(false)
     }
 
@@ -992,5 +1056,57 @@ mod tests {
             backend::legacy_jobs(&qa).unwrap(),
             vec![("ferryx-qa-1".to_string(), qa_agents.join("ferryx-qa-1.plist"))]
         );
+    }
+
+    /// A handover successor registers its own staged generation for login. Its job was started
+    /// with no load-time launch and the predecessor's plist still has `RunAtLoad` true; afterwards
+    /// the successor autostarts at login and the predecessor does not, while the predecessor's
+    /// plist is kept because its daemon is still running (draining). Only `print` runs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_successor_registers_its_staged_generation_and_demotes_the_predecessor() {
+        use crate::daemon::launchd::generation::{Launchctl, LaunchctlOutput};
+        struct Printer(std::cell::RefCell<Vec<Vec<String>>>);
+        impl Launchctl for Printer {
+            fn run(&self, args: &[&str]) -> std::io::Result<LaunchctlOutput> {
+                self.0.borrow_mut().push(args.iter().map(|a| a.to_string()).collect());
+                Ok(LaunchctlOutput {
+                    success: true,
+                    stdout: "state = running\n\tpid = 4242\n".to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let env = env_of(&[("HOME", home.path().to_str().unwrap())]);
+        let staged = |key: &str| crate::daemon::runtime_stage::StagedRuntime {
+            key: key.to_string(),
+            executable: home
+                .path()
+                .join(format!("daemon-runtime/{key}/Ferryx Daemon.app/Contents/MacOS/ferryx")),
+        };
+        let old = backend::job_for(&env, &staged("2026.1023.3-8f33b601")).unwrap();
+        let new = backend::job_for(&env, &staged("2026.1024.1-f83e7ee2")).unwrap();
+        std::fs::create_dir_all(old.plist_path.parent().unwrap()).unwrap();
+        std::fs::write(&old.plist_path, old.render(true)).unwrap();
+        std::fs::write(&new.plist_path, new.render(false)).unwrap();
+        let run_at_load = |path: &std::path::Path| {
+            let content = std::fs::read_to_string(path).unwrap();
+            content.contains("<key>RunAtLoad</key>\n    <true/>")
+        };
+        assert!(run_at_load(&old.plist_path) && !run_at_load(&new.plist_path));
+
+        let launchctl = Printer(Default::default());
+        let (changed, _, _) = backend::login_registration_with(&launchctl, 501, &env, &new).unwrap();
+        assert!(changed);
+        assert!(run_at_load(&new.plist_path), "the successor must autostart at the next login");
+        assert!(old.plist_path.exists(), "a running predecessor keeps its plist");
+        assert!(!run_at_load(&old.plist_path), "the predecessor must lose login autostart");
+        assert!(
+            launchctl.0.borrow().iter().all(|call| call[0] == "print"),
+            "registration never starts, stops or reloads a job"
+        );
+        let (again, _, _) = backend::login_registration_with(&launchctl, 501, &env, &new).unwrap();
+        assert!(!again, "a second registration changes nothing");
     }
 }
