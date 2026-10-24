@@ -7,7 +7,7 @@ description: "How Ferryx is built: Tauri v2 instead of Electron, a pinned libgho
 Ferryx는 여러 코딩 에이전트의 터미널 세션을 병렬로 관리하기 위해 설계된 워크스페이스입니다. 데스크톱 셸은 Tauri v2, 렌더링 파이프라인은 libghostty-vt 파서와 WGPU 네이티브 캔버스로 구성했습니다. 백그라운드 Rust 데몬이 PTY 세션을 독립적으로 관리하므로 GUI가 종료되거나 다시 로드되어도 에이전트 프로세스는 계속 실행됩니다. 연결이 끊기면 단조 증가 시퀀스 번호와 링 버퍼를 통해 누락된 출력을 재생합니다. 모바일 원격 클라이언트는 xterm.js 의존성을 제거하고 커스텀 DOM 그리드로 교체했습니다. 저장소에 측정되지 않은 타사 비교 벤치마크는 게시하지 않으며, 실측 수치와 측정 범위를 함께 공개합니다.
 :::
 
-Ferryx runs multiple coding-agent terminal sessions in parallel. Agents such as Claude Code, Codex, or Gemini CLI produce continuous ANSI streams, operate in separate Git worktrees, and may need remote steering.
+Ferryx runs multiple coding-agent terminal sessions in parallel. Agents such as Claude Code, Codex, or Antigravity (agy) produce continuous ANSI streams, operate in separate Git worktrees, and may need remote steering.
 
 Ferryx uses Tauri v2, a pinned `libghostty-vt` engine, a WGPU rendering pipeline, and an independent Rust PTY daemon. The sections below describe the measured parts of that architecture without claiming a performance advantage over another product.
 

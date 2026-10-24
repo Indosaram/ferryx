@@ -37,7 +37,8 @@ const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventIni
   ["focus terminal pane up", "terminal.focusUp", { key: "ArrowUp", metaKey: true, altKey: true }],
   ["focus terminal pane down", "terminal.focusDown", { key: "ArrowDown", metaKey: true, altKey: true }],
   ["find in terminal", "terminal.search", { key: "f", metaKey: true }],
-  ["toggle terminal copy mode", "terminal.copyMode", { key: "x", metaKey: true, shiftKey: true }],
+  ["toggle terminal copy mode", "terminal.copyMode", { key: " ", code: "Space", metaKey: true, shiftKey: true }],
+  ["toggle terminal copy mode alias cmd-shift-x", "terminal.copyMode", { key: "x", metaKey: true, shiftKey: true }],
   ["toggle sidebar", "sidebar.left.toggle", { key: "b", metaKey: true }],
   ["add project primary", "project.add", { key: "o", metaKey: true }],
   ["add project alias cmd-n", "project.add", { key: "n", metaKey: true }],
@@ -176,8 +177,9 @@ describe("shortcut registry", () => {
     expect(shortcutAliasesLabels("tab.previous", true)).toEqual(["⌃PgUp", "⌃⇧Tab"]);
     expect(shortcutLabel("terminal.search", true)).toBe("⌘F");
     expect(shortcutLabel("terminal.search", false)).toBe("Ctrl+F");
-    expect(shortcutLabel("terminal.copyMode", true)).toBe("⌘⇧X");
-    expect(shortcutLabel("terminal.copyMode", false)).toBe("Ctrl+Shift+X");
+    expect(shortcutLabel("terminal.copyMode", true)).toBe("⌘⇧Space");
+    expect(shortcutLabel("terminal.copyMode", false)).toBe("Ctrl+Shift+Space");
+    expect(shortcutAliasesLabels("terminal.copyMode", false)).toEqual(["Ctrl+Shift+X"]);
     expect(shortcutLabel("settings.toggle", true)).toBe("⌘,");
     expect(shortcutLabel("settings.toggle", false)).toBe("Ctrl+,");
     expect(shortcutLabel("workspace.select1", true)).toBe("⌘1");
@@ -549,7 +551,7 @@ describe("shortcut chord collision invariants", () => {
       "Mod+]": ["browser.forward", "terminal.focusNext"],
       "Mod+f": ["browser.find", "terminal.search"],
     });
-    // terminal.copyMode (Mod+Shift+X / Ctrl+Shift+X off macOS) shares its chord with nothing.
+    // terminal.copyMode (Mod+Shift+Space) shares its chord with nothing.
     expect(Object.values(collisions).flat()).not.toContain("terminal.copyMode");
   });
 

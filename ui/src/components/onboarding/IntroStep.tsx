@@ -8,10 +8,6 @@ const OVERVIEW_ROWS: Record<OverviewStepId, { title: string; description: string
     title: "Features tour",
     description: "A quick look at the parts you'll use every day.",
   },
-  permissions: {
-    title: "System access",
-    description: "Grant the operating system access Ferryx needs.",
-  },
   agents: {
     title: "Default agent",
     description: "Pick the coding agent new agent tabs start with.",

@@ -21,7 +21,7 @@ Both carry boundaries their own docs state.
 
 Claude Code Remote Control needs a claude.ai subscription on a Pro, Max, Team, or Enterprise plan; API keys aren't supported. It's unavailable on Amazon Bedrock, Google Cloud's Agent Platform, and Microsoft Foundry, and unavailable when `ANTHROPIC_BASE_URL` points anywhere other than `api.anthropic.com`, which rules out an LLM gateway or proxy. While the session is connected, the transcript is stored on Anthropic's servers, so organisations with Zero Data Retention requirements can't enable it. The local `claude` process also has to keep running: quit the terminal and the session goes offline, which is why Anthropic's docs suggest starting it inside tmux or screen on a remote machine. And it drives Claude Code, not the build script or the database shell in the next pane.
 
-Warp's version publishes session state to Warp's cloud and stops syncing when you stop publishing. Warp's client is open source under AGPL-3.0, but the infrastructure the session publishes to isn't, so the session lives on Warp's servers while it's shared.
+Warp's version publishes session state to Warp's cloud and stops syncing when you stop publishing. Warp's client is open source under AGPL-3.0 (Ferryx is source-available under the Ferryx License), but the infrastructure the session publishes to isn't, so the session lives on Warp's servers while it's shared.
 
 ## What Ferryx does instead
 

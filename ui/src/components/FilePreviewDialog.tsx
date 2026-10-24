@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type Co
 import { ExternalLink, RotateCcw, X } from "lucide-react";
 
 import { filePreviewController, type FilePreviewController, type FilePreviewNotice, type FilePreviewState } from "../lib/filePreview";
+import { openPermissionsSystemSettings } from "../lib/tauri";
 import type {
   FilePreviewAudioProps,
   FilePreviewErrorReason,
@@ -290,6 +291,25 @@ export function FilePreviewDialog({
           >
             <p className="text-[13px] font-semibold text-foreground">{failureHeadline(open.failure.reason)}</p>
             <p className="selectable max-w-prose break-words text-[11px] text-muted-foreground">{open.failure.message}</p>
+            {open.failure.details?.fullDiskAccessRequired === true ? (
+              <div
+                data-testid="file-preview-fda-explainer"
+                className="flex max-w-prose flex-col items-center gap-2 rounded-md border border-border bg-muted/20 px-4 py-3"
+              >
+                <p className="text-[12px] text-foreground">
+                  macOS blocked this read because the file is in a protected folder. Turn on Full Disk Access for Ferryx, then reload.
+                </p>
+                <button
+                  type="button"
+                  data-testid="file-preview-open-fda-settings"
+                  onClick={() => void openPermissionsSystemSettings("full_disk_access").catch(() => {})}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-[11px] text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <ExternalLink className="size-3.5" aria-hidden />
+                  Open System Settings
+                </button>
+              </div>
+            ) : null}
             <div className="flex flex-wrap items-center justify-center gap-2">
               <button
                 type="button"

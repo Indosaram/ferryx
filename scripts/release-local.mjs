@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateRawSync } from "node:zlib";
 
 import { assembleRelease } from "./build-latest-json.mjs";
 import { generateChangelog } from "./lib/release-changelog.mjs";
@@ -41,6 +42,145 @@ function assertNotInCI(stageName) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export const STORE_MSIX_NAME = "Ferryx_x64.msix";
+export const STORE_PRODUCT_ID = "9NLHQL5JNLM4";
+
+/** Typed refusal raised when a Windows build lacks the Store-ingestion MSIX at the plan version. */
+export class StoreMsixError extends Error {
+  constructor(code, message) {
+    super(`${code}: ${message}`);
+    this.name = "StoreMsixError";
+    this.code = code;
+  }
+}
+
+const ZIP_U16_MAX = 0xffff;
+const ZIP_U32_MAX = 0xffffffff;
+
+/**
+ * Reads one entry from a zip (MSIX) archive; supports stored and deflated entries and ZIP64
+ * archives (MakeAppx always writes MSIX packages as ZIP64: saturated EOCD fields, a ZIP64 EOCD
+ * locator/record, and 0x0001 extended-information extra fields on central directory entries).
+ */
+function readZipEntry(buffer, entryName) {
+  const eocdMin = buffer.length - 22;
+  let eocd = -1;
+  for (let i = eocdMin; i >= Math.max(0, eocdMin - 0xffff); i -= 1) {
+    if (buffer.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+  let entries = buffer.readUInt16LE(eocd + 10);
+  let offset = buffer.readUInt32LE(eocd + 16);
+  if (entries === ZIP_U16_MAX || offset === ZIP_U32_MAX) {
+    const locator = eocd - 20;
+    if (locator < 0 || buffer.readUInt32LE(locator) !== 0x07064b50) return null;
+    const record = Number(buffer.readBigUInt64LE(locator + 8));
+    if (buffer.readUInt32LE(record) !== 0x06064b50) return null;
+    entries = Number(buffer.readBigUInt64LE(record + 32));
+    offset = Number(buffer.readBigUInt64LE(record + 48));
+  }
+  for (let n = 0; n < entries; n += 1) {
+    if (buffer.readUInt32LE(offset) !== 0x02014b50) return null;
+    const method = buffer.readUInt16LE(offset + 10);
+    let compressedSize = buffer.readUInt32LE(offset + 20);
+    const uncompressedSize = buffer.readUInt32LE(offset + 24);
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    let localOffset = buffer.readUInt32LE(offset + 42);
+    const name = buffer.toString("utf8", offset + 46, offset + 46 + nameLength);
+    // ZIP64 extended information: 8-byte values present only for saturated fields, in the
+    // order uncompressed size, compressed size, local header offset.
+    let extra = offset + 46 + nameLength;
+    const extraEnd = extra + extraLength;
+    while (extra + 4 <= extraEnd) {
+      const id = buffer.readUInt16LE(extra);
+      const size = buffer.readUInt16LE(extra + 2);
+      if (id === 0x0001) {
+        let field = extra + 4;
+        if (uncompressedSize === ZIP_U32_MAX) field += 8;
+        if (compressedSize === ZIP_U32_MAX) {
+          compressedSize = Number(buffer.readBigUInt64LE(field));
+          field += 8;
+        }
+        if (localOffset === ZIP_U32_MAX) localOffset = Number(buffer.readBigUInt64LE(field));
+        break;
+      }
+      extra += 4 + size;
+    }
+    if (name === entryName) {
+      const localNameLength = buffer.readUInt16LE(localOffset + 26);
+      const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+      const start = localOffset + 30 + localNameLength + localExtraLength;
+      const data = buffer.subarray(start, start + compressedSize);
+      if (method === 0) return data;
+      if (method === 8) return inflateRawSync(data);
+      return null;
+    }
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return null;
+}
+
+export function storeSubmissionLine(plan) {
+  return `Store submission pending: ${plan.msixVersion}`;
+}
+
+/**
+ * Store gate: a run with a Windows build must carry the Store-ingestion MSIX (published as
+ * Ferryx_x64.msix) whose package Identity version is the plan's canonical quad version. The
+ * MSIX is located through the maho-win receipt, else at artifacts/windows/Ferryx_x64.msix.
+ * Returns the release-summary line.
+ */
+export function assertStoreMsix({ runDir, plan }) {
+  let msixPath = join(runDir, "artifacts", "windows", STORE_MSIX_NAME);
+  const receiptPath = join(runDir, "receipts", "build-receipt-maho-win.json");
+  if (existsSync(receiptPath)) {
+    let artifact = null;
+    try {
+      artifact = JSON.parse(readFileSync(receiptPath, "utf8")).artifacts?.find((entry) => entry?.kind === "msix") ?? null;
+    } catch {
+      artifact = null;
+    }
+    msixPath = artifact && typeof artifact.relPath === "string" ? join(runDir, "artifacts", artifact.relPath) : null;
+  }
+  if (!msixPath || !existsSync(msixPath) || statSync(msixPath).size === 0) {
+    throw new StoreMsixError(
+      "STORE_MSIX_MISSING",
+      `Windows build has no ${STORE_MSIX_NAME}${msixPath ? ` at ${msixPath}` : " in the maho-win receipt"}; every Windows release must produce the Store-ingestion MSIX (scripts/build-msix.ps1)`,
+    );
+  }
+  let manifest = null;
+  try {
+    manifest = readZipEntry(readFileSync(msixPath), "AppxManifest.xml");
+  } catch {
+    manifest = null;
+  }
+  if (!manifest) {
+    throw new StoreMsixError("STORE_MSIX_INVALID", `${STORE_MSIX_NAME} has no readable AppxManifest.xml`);
+  }
+  const identity = manifest.toString("utf8").match(/<Identity\b[^>]*>/);
+  const version = identity?.[0].match(/\bVersion="([^"]*)"/)?.[1] ?? null;
+  if (version !== plan.msixVersion) {
+    throw new StoreMsixError(
+      "STORE_MSIX_VERSION_MISMATCH",
+      `${STORE_MSIX_NAME} Identity version is ${JSON.stringify(version)}, expected canonical quad ${plan.msixVersion}`,
+    );
+  }
+  return storeSubmissionLine(plan);
+}
+
+function hasWindowsBuild(runDir) {
+  const windowsDir = join(runDir, "artifacts", "windows");
+  return (
+    existsSync(join(runDir, "receipts", "build-receipt-maho-win.json")) ||
+    (existsSync(windowsDir) && readdirSync(windowsDir).length > 0)
+  );
 }
 
 function directoryDigest(directory) {
@@ -369,6 +509,10 @@ export function assembleReleaseRun({
   const resolvedRunDir = resolve(runDir);
 
   const { plan, state, configPath } = validatePreparedRun(resolvedRunDir);
+  // Store gate runs before assembly so a Windows build without the MSIX fails with a typed error.
+  const storeSubmission = hasWindowsBuild(resolvedRunDir)
+    ? assertStoreMsix({ runDir: resolvedRunDir, plan })
+    : null;
   const planPath = join(resolvedRunDir, "plan.json");
   const receiptsDir = join(resolvedRunDir, "receipts");
   const artifactsDir = join(resolvedRunDir, "artifacts");
@@ -394,6 +538,7 @@ export function assembleReleaseRun({
     throw err;
   }
   result.files = readdirSync(outDir).sort();
+  result.storeSubmission = storeSubmission;
   writeFileSync(join(resolvedRunDir, "assembly-state.json"), JSON.stringify({
     schemaVersion: 1,
     planDigest: state.planDigest,
@@ -695,7 +840,7 @@ export async function publishRelease({
     throw new Error(`Failed to undraft release: ${editRes.stderr || editRes.stdout}`);
   }
 
-  return { published: true, tag: plan.tag, runId: plan.runId };
+  return { published: true, tag: plan.tag, runId: plan.runId, storeSubmission: storeSubmissionLine(plan) };
 }
 
 /**
@@ -794,6 +939,7 @@ Subcommands:
         const pubkey = options.get("pubkey") || null;
         const result = assembleReleaseRun({ runDir, pubkey });
         console.log(`Release assembled successfully with ${result.files.length} files`);
+        if (result.storeSubmission) console.log(result.storeSubmission);
         break;
       }
       case "verify": {
@@ -808,6 +954,8 @@ Subcommands:
         const approvePublish = flags.has("approve-publish");
         const result = await publishRelease({ runDir, approvePublish });
         console.log(`Release published successfully: ${result.tag}`);
+        console.log(result.storeSubmission);
+        console.log(`Submit via docs/releases/MS_STORE_RESUBMISSION_RECOVERY.md (product ${STORE_PRODUCT_ID})`);
         break;
       }
       case "verify-remote": {

@@ -1,26 +1,28 @@
 ---
-title: "Gemini CLI Multi-Session Setups That Actually Scale"
-description: "Keep multiple Gemini CLI runs organized with panes, worktrees, and attention indicators instead of juggling windows. Built for parallel AI agent workflows."
+title: "Gemini CLI and Antigravity Multi-Session Setups That Actually Scale"
+description: "Run several Google agent sessions in panes and worktrees. Antigravity (agy) gets status and resume in Ferryx; Gemini CLI runs as a plain command."
 ---
 
-**Gemini CLI Multi-Session Setups That Actually Scale.** Keep multiple Gemini CLI runs organized with panes, worktrees, and attention indicators instead of juggling windows. Built for parallel AI agent workflows.
+> **Note:** Gemini CLI runs in a Ferryx pane like any command but has no status detection or resume; Google's supported agent is Antigravity (agy).
+
+**Gemini CLI and Antigravity Multi-Session Setups That Actually Scale.** Keep several Google agent sessions organized with panes and worktrees instead of juggling windows. For attention indicators and resume, run them as Antigravity (`agy`): that is the Google agent Ferryx detects.
 
 ![gemini-cli-multi-session cover](/images/blog/gemini-cli-multi-session/cover.png)
 
 ## Session sprawl without a workspace
 
-Running more than one coding agent against a single checkout is how teams lose work: both agents see the same files, both commit into the same history, and a refactor from one invalidates an edit the other is halfway through. Ferryx turns the clone-per-agent workaround into a managed feature so parallel runs stay visible in one window without stepping on each other. In the specific case of “Gemini CLI Multi-Session Setups That Actually Scale”, the Ferryx angle is straightforward: keep multiple gemini cli runs organized with panes, worktrees, and attention indicators instead of juggling windows. built for parallel ai agent workflows. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Running more than one coding agent against a single checkout is how teams lose work: both agents see the same files, both commit into the same history, and a refactor from one invalidates an edit the other is halfway through. Ferryx turns the clone-per-agent workaround into a managed feature so parallel runs stay visible in one window without stepping on each other. In the specific case of “Gemini CLI Multi-Session Setups That Actually Scale”, the Ferryx angle is straightforward: every session gets a pane and, on request, a worktree; Antigravity (agy) sessions also report working, waiting on you, or idle, while Gemini CLI sessions run as plain commands without a status read. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
 
 ## Pane and tab layout that works
 
-Ferryx is a desktop terminal workspace for running several CLI coding agents at the same time. Each agent runs in its own terminal pane and, when isolation is requested, its own managed Git worktree under `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`. Applied to “gemini cli multiple sessions”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Ferryx is a desktop terminal workspace for running several CLI coding agents at the same time. Each agent runs in its own terminal pane and, when isolation is requested, its own managed Git worktree under `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`. Applied to running several Google agent sessions at once, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
 
 ## Practical steps
 
 1. Open the project as a Ferryx workspace so tabs, panes, and sessions share one sidebar.
 2. Request a managed worktree for each agent that needs isolation; Ferryx creates it inside the repository root and names the branch for you.
-3. Start each agent (Claude Code, Codex, Gemini CLI, or any shell command) in its own pane with ⌘T and ⌘D splits.
-4. Watch status badges and the attention counter instead of polling every pane; open a browser tab with ⌘⇧B for CI or PR checks.
+3. Start each session (`agy` for Antigravity, or `gemini` as a plain command) in its own pane with ⌘T and ⌘D splits.
+4. Watch status badges and the attention counter for the Antigravity panes instead of polling them (Gemini CLI panes have no badge, so check them yourself); open a browser tab with ⌘⇧B for CI or PR checks.
 5. When an agent finishes, review its diff from that worktree and merge in a deliberate order before cleaning the branch up.
 
 | Checkpoint | What good looks like |
@@ -34,7 +36,7 @@ Ferryx is a desktop terminal workspace for running several CLI coding agents at 
 
 Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
-![Gemini CLI Multi-Session Setups That Actually Scale illustration](/images/blog/gemini-cli-multi-session/body-1.png)
+![Gemini CLI and Antigravity Multi-Session Setups That Actually Scale illustration](/images/blog/gemini-cli-multi-session/body-1.png)
 
 Related reading:
 - [/use-cases/parallel-ai-agents/](/use-cases/parallel-ai-agents/)
@@ -46,13 +48,17 @@ Related reading:
 
 No. Managed worktrees share one repository object database while keeping independent checkouts, so disk cost stays low and history stays unified.
 
+### Does Ferryx detect Gemini CLI or resume its sessions?
+
+No. Gemini CLI runs in a pane like any command, but Ferryx ships no status-detection manifest or resume support for it. Antigravity (`agy`) has both: its pane reports state, and Ferryx reopens a session with `agy --conversation <id>` after a restart.
+
 ### Will agents corrupt each other's edits?
 
 Not when each agent has its own worktree. Shared-checkout collisions (including index.lock fights) are the failure mode isolation removes.
 
 ### Which agents are supported?
 
-Anything you can run in a shell works. Ferryx additionally ships status-detection manifests for eleven named agents so panes report working, waiting, or idle.
+Anything you can run in a shell works. Ferryx additionally ships status-detection manifests for <!-- agents:count -->16<!-- /agents:count --> named agents so panes report working, waiting, or idle. Antigravity (agy) is one of them; Gemini CLI is not.
 
 ## Limits and non-goals
 

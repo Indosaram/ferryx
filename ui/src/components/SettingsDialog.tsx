@@ -15,7 +15,7 @@ import {
 
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
-import { useShortcutOverrides } from "../lib/shortcutOverrides";
+import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
 import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
 import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../remote/accountSession";
 import { AgentsSection } from "./settings/AgentsSection";
@@ -100,6 +100,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
   const isMac = isMacShortcutPlatform();
   const advancedFeatures = useAdvancedFeatures();
   const { overrides: shortcutOverrides, setOverride: setShortcutOverride, resetOverrides: resetShortcutOverrides } = useShortcutOverrides();
+  const { preset: shortcutPreset, setPreset: setShortcutPreset } = useShortcutPreset(isMac);
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const handleAccountSessionChange = useCallback((token: string | null, origin: string) => {
@@ -239,6 +240,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
             <ShortcutsSection
               isMac={isMac}
               overrides={shortcutOverrides}
+              preset={shortcutPreset}
+              onChangePreset={setShortcutPreset}
               onChangeOverride={setShortcutOverride}
               onResetAll={resetShortcutOverrides}
             />

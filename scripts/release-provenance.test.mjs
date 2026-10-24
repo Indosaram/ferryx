@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { assembleReleaseRun, verifyReleaseRun } from "./release-local.mjs";
+import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
 import {
   attachReleaseProvenance,
   CHECKSUMS_NAME,
@@ -284,9 +285,10 @@ function writeRun(tmp, key) {
     "linux/Ferryx_2026.908.1_amd64.AppImage": "appimage",
     "linux/Ferryx_2026.908.1_amd64.deb": "deb",
     "linux/ferryx-cli-linux-amd64": "linux cli",
-    "windows/Ferryx_2026.908.1.0_x64.msix": "msix",
   };
   for (const [rel, body] of Object.entries(files)) writeFileSync(join(artifacts, rel), body);
+  // The release-local Store gate reads the MSIX Identity version, so this one is a real zip.
+  writeFileSync(join(artifacts, "windows", "Ferryx_2026.908.1.0_x64.msix"), msixWithVersion(p.msixVersion));
   for (const rel of ["darwin/Ferryx.app.tar.gz", "linux/Ferryx_2026.908.1_amd64.AppImage"]) {
     execFileSync(MINISIGN, ["-S", "-s", key.keyPath, "-m", join(artifacts, rel), "-x", join(artifacts, `${rel}.sig`)], { input: "\n" });
   }

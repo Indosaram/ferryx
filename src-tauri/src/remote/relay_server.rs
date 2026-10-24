@@ -9673,7 +9673,8 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                // More machines owned by the user create an active over_limit violation on Free
+                // (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-owned-2".into(),
                     crate::account::store::MachineRecord {
@@ -9690,6 +9691,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -9800,7 +9802,8 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine owned by user creates an active over_limit violation on Free (2 > 1)
+                // More machines owned by the user create an active over_limit violation on Free
+                // (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-stopped-ctrl-2".into(),
                     crate::account::store::MachineRecord {
@@ -9817,6 +9820,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -10128,7 +10132,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
-                // Second machine creates an active over_limit violation on Free (2 > 1)
+                // More machines create an active over_limit violation on Free (FREE_HOSTS + 1 > FREE_HOSTS).
                 store.machines.insert(
                     "rec-owned-2".into(),
                     crate::account::store::MachineRecord {
@@ -10145,6 +10149,7 @@ mod tests {
                         last_seen_at: now,
                     },
                 );
+                seed_free_over_limit_fillers(store, user_id, now);
                 store.billing_states.insert(
                     user_id.into(),
                     crate::account::store::BillingStateRecord {
@@ -10283,10 +10288,38 @@ mod tests {
         )
     }
 
+    /// Seeds `FREE_HOSTS - 1` extra machines for `user_id`. Added to a fixture that already
+    /// holds two machines, the owner is one machine over the Free limit.
+    fn seed_free_over_limit_fillers(
+        store: &mut crate::account::store::AccountStore,
+        user_id: &str,
+        now: u64,
+    ) {
+        for index in 0..crate::account::billing::entitlement::FREE_HOSTS - 1 {
+            let id = format!("filler-{user_id}-{index}");
+            store.machines.insert(
+                format!("rec-{id}"),
+                crate::account::store::MachineRecord {
+                    machine_record_id: format!("rec-{id}"),
+                    owner_user_id: user_id.into(),
+                    machine_id: id.clone(),
+                    display_name: id.clone(),
+                    public_key: format!("pubkey-{id}"),
+                    attach_public_key: format!("attachkey-{id}"),
+                    relay_origin: "https://relay.test".into(),
+                    platform: "linux".into(),
+                    enrollment_epoch: 1,
+                    enrolled_at: now,
+                    last_seen_at: now,
+                },
+            );
+        }
+    }
+
     /// Enrolls `machine_count` machines for `user_id` — the first carrying `public_key` and
     /// `machine_id` — and seeds the owner's grace start when one is given.
     ///
-    /// Two machines on the Free plan are over the limit of one, so an owner seeded with a
+    /// `FREE_HOSTS + 1` machines on the Free plan are over its limit, so an owner seeded with a
     /// grace start is a real violation rather than a hypothetical one.
     fn seed_suspension_owner(
         account: &Arc<crate::account::service::AccountState>,
@@ -10415,7 +10448,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let (base, server) =
             spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
@@ -10488,7 +10521,7 @@ mod tests {
             stopped_id,
             &stopped_identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let healthy_id = "healthy-owner-machine";
         let healthy_identity = identity(203, healthy_id);
@@ -10588,7 +10621,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         let (base, server) =
             spawn_test_relay_with_account_state(state.clone(), Some(account.clone())).await;
@@ -10655,7 +10688,7 @@ mod tests {
             "the sweep persists the stop through the billing store"
         );
 
-        // Resolution: the owner upgrades to Pro, so both machines fit the plan limit.
+        // Resolution: the owner upgrades to Pro, so every machine fits the plan limit.
         account
             .mutate(|store| {
                 store.subscriptions.insert(
@@ -10712,7 +10745,7 @@ mod tests {
             machine_id,
             &identity.public_key,
             Some(now.saturating_sub(crate::account::billing::entitlement::GRACE_SECS + 30)),
-            2,
+            crate::account::billing::entitlement::FREE_HOSTS as usize + 1,
         );
         state.set_account_state(account);
 

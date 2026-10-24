@@ -327,6 +327,41 @@ produce an unsigned `Ferryx_x64.msix` for Store ingestion, but attaching it to G
 GitHub Release public does not submit it to the Store. Verify the reserved Store identity and
 MSIX version, then obtain Store-submission approval before uploading in Partner Center.
 
+### 6. Store submission
+
+The Microsoft Store is the signed Windows channel: the Store signs the MSIX it publishes, so Store
+installs show no SmartScreen warning. No code-signing certificate is bought and SignPath is not
+used. Every release with a Windows build must therefore produce `Ferryx_x64.msix` at the plan's
+canonical quad version (`plan.json.msixVersion`, e.g. `2026.1024.1.0`).
+
+`assemble` enforces this. When a `maho-win` receipt or Windows artifacts exist, it reads the
+receipt's MSIX, opens its `AppxManifest.xml`, and refuses to assemble with a typed error:
+`STORE_MSIX_MISSING` (no MSIX), `STORE_MSIX_INVALID` (no readable manifest), or
+`STORE_MSIX_VERSION_MISMATCH` (Identity version is not the canonical quad). On success,
+`assemble` and `publish` both print:
+
+```text
+Store submission pending: <msixVersion>
+```
+
+That line is a to-do, not a status. After publication, submit the release's `Ferryx_x64.msix` to
+the existing product `9NLHQL5JNLM4` by following
+[MS_STORE_RESUBMISSION_RECOVERY.md](MS_STORE_RESUBMISSION_RECOVERY.md), either through the
+Partner Center UI or with `msstore submission`. Executors use the `ferryx-store-resubmission`
+skill (Maho/Aside browser, per the owner's rules). Submission acceptance is not certification,
+and certification is not public availability. Check the public listing with:
+
+```bash
+bun scripts/store-listing-status.mjs
+```
+
+It reports `live` only when `https://apps.microsoft.com/detail/9NLHQL5JNLM4` serves the Ferryx
+product page. Until it reports `live`, the site and READMEs keep the `.exe` row labeled "not
+code-signed; Store version pending certification" and do not link the Store. Once it is live, make
+the Store the first Windows download in `site/src/lib/downloads.ts`, `README.md`, and
+`README.zh-CN.md`, keep the `.exe` as a secondary unsigned installer, and document
+`winget install --source msstore 9NLHQL5JNLM4`.
+
 ## Installing locally onto this Mac
 
 `release-local.mjs` never replaces `/Applications/Ferryx.app`. Any local install
@@ -511,7 +546,7 @@ updater manifest; stores update the app.
 - [ ] `SHA256SUMS`, `SHA256SUMS.minisig`, both `*.cdx.json` SBOMs and `provenance.json` are in `$RUN/publish`, and `minisign -Vm SHA256SUMS -P <pubkey>` plus `shasum -a 256 -c SHA256SUMS` pass there.
 - [ ] Draft bytes and inventory are reviewed before the separate publication approval.
 - [ ] `verify-remote` passes after publication.
-- [ ] Store submission, if performed, has its own approval and Partner Center result.
+- [ ] `assemble` printed `Store submission pending: <msixVersion>`; the MSIX was submitted per step 6 with its own approval and Partner Center result, and `bun scripts/store-listing-status.mjs` was recorded.
 - [ ] Mobile store builds, if any, were built and signed locally and versionCode/build number increased.
 
 ### Failure recovery

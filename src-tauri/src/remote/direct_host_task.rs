@@ -435,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn test_enrolled_host_direct_route_active_suspended_recovery_lifecycle() {
         use base64::Engine;
-        use crate::account::billing::entitlement::GRACE_SECS;
+        use crate::account::billing::entitlement::{FREE_HOSTS, GRACE_SECS};
         use crate::account::billing::lemonsqueezy::LemonSqueezyConfig;
         use crate::account::billing::routes::billing_routes;
         use crate::account::enroll_client::AccountEnrollmentRecord;
@@ -486,9 +486,9 @@ mod tests {
                     .await;
             }));
 
-            // 2. Provision user and two machines in SQLite store.
-            // On default Free plan (limit = 1 machine), 2 registered machines means
-            // machines_used (2) > machine_limit (1). This constitutes an OverLimit violation.
+            // 2. Provision user and FREE_HOSTS + 1 machines in SQLite store.
+            // On the default Free plan (limit = FREE_HOSTS machines), that means
+            // machines_used > machine_limit. This constitutes an OverLimit violation.
             let machine_signing_key = SigningKey::from_bytes(&[11u8; 32]);
             let machine_public_key = base64::engine::general_purpose::STANDARD
                 .encode(machine_signing_key.verifying_key().as_bytes());
@@ -551,10 +551,10 @@ mod tests {
                         format!("rec-{m2}"),
                         MachineRecord {
                             machine_record_id: format!("rec-{m2}"),
-                            owner_user_id: user_id,
+                            owner_user_id: user_id.clone(),
                             machine_id: m2,
                             display_name: "Test Machine 2".to_string(),
-                            public_key: m_pub,
+                            public_key: m_pub.clone(),
                             attach_public_key: String::new(),
                             relay_origin: "https://relay.test".to_string(),
                             platform: "test".to_string(),
@@ -563,6 +563,24 @@ mod tests {
                             last_seen_at: base_time,
                         },
                     );
+                    for index in 0..FREE_HOSTS - 1 {
+                        store.machines.insert(
+                            format!("rec-filler-{index}"),
+                            MachineRecord {
+                                machine_record_id: format!("rec-filler-{index}"),
+                                owner_user_id: user_id.clone(),
+                                machine_id: format!("m-test-direct-filler-{index}"),
+                                display_name: format!("Filler Machine {index}"),
+                                public_key: m_pub.clone(),
+                                attach_public_key: String::new(),
+                                relay_origin: "https://relay.test".to_string(),
+                                platform: "test".to_string(),
+                                enrollment_epoch: 1,
+                                enrolled_at: base_time,
+                                last_seen_at: base_time,
+                            },
+                        );
+                    }
                     store.save(&db_path).expect("save store");
                 })
                 .await
@@ -981,7 +999,7 @@ mod tests {
                 "non-acct closed peer matches"
             );
 
-            // 11. Recovery: Remove second machine so machines_used (1) <= limit (1) and clear billing_states
+            // 11. Recovery: Remove the extra machines so machines_used (1) <= limit and clear billing_states
             {
                 let db_path = tmp.path().to_path_buf();
                 let user_id = owner_user_id.clone();
@@ -989,6 +1007,9 @@ mod tests {
                 tokio::task::spawn_blocking(move || {
                     let mut store = AccountStore::load(&db_path).expect("load store");
                     store.machines.remove(&format!("rec-{m2}"));
+                    for index in 0..FREE_HOSTS - 1 {
+                        store.machines.remove(&format!("rec-filler-{index}"));
+                    }
                     store.billing_states.remove(&user_id);
                     store.save(&db_path).expect("save store");
                 })

@@ -8,6 +8,7 @@ import { Benchmarks } from '../components/Benchmarks';
 import { Footer } from '../components/Footer';
 import LiveFerryxDemo from '../components/LazyLiveDemo';
 import SiteAnalytics from '../components/SiteAnalytics.astro';
+import AgentSupport from '../components/landing/AgentSupport.astro';
 import { THEME_STORAGE_KEY } from '../lib/theme';
 
 const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
@@ -18,8 +19,8 @@ const title = language === 'en' ? 'Ferryx — Parallel AI Coding Agents with a S
 // Concrete over evocative: the words a crawler and an answer engine need are the ones a
 // person would search for — the agents, the isolation mechanism, and the platforms.
 const description = language === 'en'
-  ? 'Run Claude Code, Codex, and other CLI agents in parallel Git worktrees. A supervisor answers routine prompts like you and sends risky ones to you.'
-  : '在独立 Git worktree 中并行运行 Claude Code、Codex 等 CLI 编码智能体。监督者按你的方式回答常规提示，只把有风险的操作交给你。';
+  ? 'Run Claude Code, Codex and any CLI agent side by side in one repo — each in its own worktree, alive when the app closes, steerable from your phone.'
+  : '在同一个仓库中并行运行 Claude Code、Codex 以及任意 CLI 智能体——每个都在独立的 worktree 中，关闭应用后继续运行，还能用手机操控。';
 const socialDescription = language === 'en' ? 'Your agents, supervised. Ferryx remembers what you approve, answers routine agent prompts the way you would, and sends risky ones to you.' : description;
 const socialImageAlt = language === 'en' ? 'Ferryx — your agents, supervised' : 'Ferryx — 你的智能体，有人监督';
 // Crawlers reject relative social URLs, so resolve everything against the deployed origin.
@@ -47,7 +48,7 @@ const structuredData = {
       softwareHelp: new URL(`${baseUrl}docs/introduction/`, Astro.site ?? Astro.url).href,
       featureList: [
         'A supervisor answers routine agent prompts the way the owner would and escalates risky or destructive prompts to the owner',
-        'Runs CLI coding agents such as Claude Code, Codex, and Gemini CLI in parallel terminal panes',
+        'Runs CLI coding agents such as Claude Code, Codex, and Antigravity (agy) in parallel terminal panes',
         'Managed Git worktree per agent, created and removed by the app and jailed to the repository root',
         'Headless Rust PTY daemon keeps sessions alive when the window closes, and replays missed output on reconnect',
         'libghostty-vt terminal parsing with WGPU native-surface rendering, on Tauri v2 instead of Electron',
@@ -159,6 +160,8 @@ const structuredData = {
           </div>
         </section>
         <Features client:visible locale={locale} basePath={baseUrl} />
+        {/* The generated agent list (src/data/agents.json); its copy is English-only. */}
+        {language === 'en' && <AgentSupport />}
         <Benchmarks client:visible locale={locale} />
       </main>
       <Footer client:visible basePath={baseUrl} locale={locale} />

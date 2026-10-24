@@ -4,7 +4,7 @@ import { Check, X } from "lucide-react";
 import type { ResolvedAgent } from "../../lib/agentsSettings";
 import { cn } from "../../lib/cn";
 import type { OnboardingStepId } from "../../lib/onboarding";
-import type { CliLauncherStatus, SystemPermissionsStatus } from "../../lib/types";
+import type { CliLauncherStatus } from "../../lib/types";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
 import { AccountStep } from "./AccountStep";
@@ -13,12 +13,10 @@ import { CliStep } from "./CliStep";
 import { FeaturesStep } from "./FeaturesStep";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { IntroStep } from "./IntroStep";
-import { PermissionsStep } from "./PermissionsStep";
 
 export type WelcomeWizardProps = {
   steps: readonly OnboardingStepId[];
   doneSteps?: readonly OnboardingStepId[];
-  permissionsStatus: SystemPermissionsStatus | null;
   agents: ReadonlyArray<ResolvedAgent>;
   isMac: boolean;
   onAddProject: () => void;
@@ -27,7 +25,6 @@ export type WelcomeWizardProps = {
   onFinish: () => void;
   onSkip: () => void;
   onRemindLater: () => void;
-  fetchPermissions?: () => Promise<SystemPermissionsStatus>;
   loadCliStatus?: () => Promise<CliLauncherStatus>;
   installCli?: () => Promise<CliLauncherStatus>;
   initialStepIndex?: number;
@@ -37,7 +34,6 @@ const STEP_TITLES: Record<OnboardingStepId, string> = {
   account: "Sign in",
   intro: "Welcome",
   features: "Features",
-  permissions: "Permissions",
   agents: "Agents",
   cli: "Command line",
   project: "First project",
@@ -47,7 +43,6 @@ const STEP_HEADINGS: Record<OnboardingStepId, string> = {
   account: "Sign in to Ferryx",
   intro: "Set up Ferryx",
   features: "What Ferryx does",
-  permissions: "Grant system access",
   agents: "Choose your default agent",
   cli: "Install the command-line tool",
   project: "Open your first project",
@@ -64,7 +59,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const {
     steps,
     doneSteps = [],
-    permissionsStatus,
     agents,
     isMac,
     onAddProject,
@@ -73,7 +67,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     onFinish,
     onSkip,
     onRemindLater,
-    fetchPermissions,
     loadCliStatus,
     installCli,
     initialStepIndex = 0,
@@ -155,10 +148,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return "A short setup, then we'll get your first project open.";
       case "features":
         return "The parts you'll use every day.";
-      case "permissions":
-        return isMac
-          ? "These let agents and git work without macOS prompts. Change them anytime in Settings > Permissions."
-          : "Your operating system controls whether Ferryx can show notifications.";
       case "agents":
         return "New agent tabs start with this one. You can switch per tab, or change it later in Settings > Agents.";
       case "cli":
@@ -176,13 +165,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return <IntroStep steps={steps} />;
       case "features":
         return <FeaturesStep isMac={isMac} />;
-      case "permissions":
-        return (
-          <PermissionsStep
-            initialStatus={permissionsStatus}
-            fetchStatus={fetchPermissions}
-          />
-        );
       case "agents":
         return <AgentsCliStep agents={agents} />;
       case "cli":

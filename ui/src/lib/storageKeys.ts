@@ -13,6 +13,7 @@ export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
 export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabled";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
+export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";
 export const DISMISSED_UPDATE_VERSION_STORAGE_KEY = "ferryx.update.dismissedVersion";
 export const UPDATE_CHANNEL_STORAGE_KEY = "ferryx.update.channel";
 export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.onboarding-dismissed";
