@@ -433,10 +433,89 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
 /// The hub also relays a person's own words into panes over the owner socket: a Slack approval
 /// click, a chat message, a reply in a lane thread. Those are the person typing, not the supervisor.
 fn relayed_from_a_person(request_id: Option<&str>) -> bool {
-    let Some(id) = request_id else { return false };
-    id.starts_with("slack-approval:")
-        || id.starts_with("chat-")
-        || (id.starts_with("lane-") && id.contains("-owner-"))
+    ferryx_hub::goals::turns::relayed_from_a_person(request_id)
+}
+
+/// Coalesces raw typing into bursts: at most one admitted note per pane per
+/// `HUMAN_TYPING_WINDOW_MS`.
+#[derive(Default)]
+struct KeystrokeBursts {
+    recorded_at: parking_lot::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl KeystrokeBursts {
+    fn admit(&self, session_id: &str, now_ms: u64) -> bool {
+        let window = crate::agent_control::policy::HUMAN_TYPING_WINDOW_MS;
+        let mut recorded = self.recorded_at.lock();
+        // Only stamps inside the window can still coalesce, so the map stays as small as the
+        // set of panes typed into just now.
+        recorded.retain(|_, at| now_ms.saturating_sub(*at) < window);
+        if recorded.contains_key(session_id) {
+            return false;
+        }
+        recorded.insert(session_id.to_owned(), now_ms);
+        true
+    }
+}
+
+static KEYSTROKE_BURSTS: std::sync::LazyLock<KeystrokeBursts> = std::sync::LazyLock::new(KeystrokeBursts::default);
+
+/// One human_correction turn, with no text, for the first note of a typing burst on a lane's
+/// pane. Returns whether a turn was recorded.
+async fn record_human_keystrokes(
+    pool: &ferryx_hub::goals::SqlitePool,
+    bursts: &KeystrokeBursts,
+    session_id: &str,
+    now_ms: u64,
+) -> Result<bool, HubError> {
+    if !bursts.admit(session_id, now_ms) {
+        return Ok(false);
+    }
+    Ok(ferryx_hub::goals::turns::record_keystroke_turn(pool, session_id).await?.is_some())
+}
+
+/// A person typed raw keys into `session_id`. When the pane belongs to a lane, the hub records
+/// one human_correction turn per typing burst. The keys themselves are never stored.
+pub(crate) fn note_lane_keystrokes(session_id: &str, now_ms: u64) {
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let pool = hub.pool.clone();
+    let session_id = session_id.to_owned();
+    runtime.spawn(async move {
+        if let Err(error) = record_human_keystrokes(&pool, &KEYSTROKE_BURSTS, &session_id, now_ms).await {
+            tracing::warn!(%error, session_id = %session_id, "a human typing turn was not recorded");
+        }
+    });
+}
+
+/// The turn an accepted agent-control send drove on a lane's pane: a person's relayed words
+/// (chat, lane-thread reply, Slack approval) as human_correction, a `hub-goal-*` supervisor
+/// send as supervisor_proposal. Other request ids record nothing.
+async fn record_control_turn(pool: &ferryx_hub::goals::SqlitePool, op: &AgentControlOp) -> Result<bool, HubError> {
+    let (session_id, request_id) = match op {
+        AgentControlOp::Send { session_id, request_id, .. } | AgentControlOp::Answer { session_id, request_id, .. } => {
+            (session_id, request_id.as_deref())
+        }
+        _ => return Ok(false),
+    };
+    let text = crate::agent_control::policy::audit_text(op).unwrap_or_default();
+    Ok(ferryx_hub::goals::turns::record_send_turn(pool, session_id, request_id, &text).await?.is_some())
+}
+
+/// Called after an agent-control mutation succeeded. Records the lane turn it drove, if any.
+pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
+    if ferryx_hub::goals::turns::origin_for_request_id(op.mutation_request_id().as_deref()).is_none() {
+        return;
+    }
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let pool = hub.pool.clone();
+    let op = op.clone();
+    runtime.spawn(async move {
+        if let Err(error) = record_control_turn(&pool, &op).await {
+            tracing::warn!(%error, "a lane turn was not recorded");
+        }
+    });
 }
 
 /// True once this daemon opened the hub, so the Supervisor view has lanes to show.
@@ -1332,6 +1411,88 @@ mod tests {
         assert_eq!(control_exit_code("{\"status\":\"ok\",\"healthy\":false}", false), 0);
         assert_eq!(control_exit_code("{\"status\":\"ok\",\"healthy\":false}", true), 1);
         assert_eq!(control_exit_code("{\"status\":\"ok\",\"healthy\":true}", true), 0);
+    }
+
+    async fn lane_pool() -> ferryx_hub::goals::SqlitePool {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::lanes::state::insert_lane(&pool, "ledger", "Ledger", "lead", "/tmp", "file marker")
+            .await
+            .unwrap();
+        ferryx_hub::lanes::state::set_pane(&pool, "ledger", "pane-1").await.unwrap();
+        pool
+    }
+
+    async fn turn_rows(pool: &ferryx_hub::goals::SqlitePool) -> Vec<(String, Option<String>)> {
+        ferryx_hub::goals::turns::turns_of(pool, "ledger")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|turn| (turn.origin.as_str().to_owned(), turn.text_excerpt))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn five_keystroke_notes_in_one_window_record_one_turn_without_text() {
+        let pool = lane_pool().await;
+        let bursts = KeystrokeBursts::default();
+        let start = 1_000_000;
+        let mut recorded = 0;
+        for offset in 0..5 {
+            if record_human_keystrokes(&pool, &bursts, "pane-1", start + offset * 100).await.unwrap() {
+                recorded += 1;
+            }
+        }
+        assert_eq!(recorded, 1);
+        assert_eq!(turn_rows(&pool).await, vec![("human_correction".to_owned(), None)]);
+        let window = crate::agent_control::policy::HUMAN_TYPING_WINDOW_MS;
+        assert!(record_human_keystrokes(&pool, &bursts, "pane-1", start + window).await.unwrap());
+        assert_eq!(turn_rows(&pool).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn keystrokes_in_a_pane_without_a_lane_record_nothing() {
+        let pool = lane_pool().await;
+        let bursts = KeystrokeBursts::default();
+        assert!(!record_human_keystrokes(&pool, &bursts, "pane-9", 1_000).await.unwrap());
+        assert!(turn_rows(&pool).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_relayed_send_records_a_human_correction_with_a_short_excerpt() {
+        let pool = lane_pool().await;
+        let op = AgentControlOp::Send {
+            session_id: "pane-1".into(),
+            text: format!("please also fix the docs {}", "and more ".repeat(80)),
+            request_id: Some("lane-ledger-owner-msg7".into()),
+        };
+        assert!(record_control_turn(&pool, &op).await.unwrap());
+        let rows = turn_rows(&pool).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "human_correction");
+        let excerpt = rows[0].1.clone().unwrap();
+        assert!(excerpt.starts_with("please also fix the docs"));
+        assert!(excerpt.chars().count() <= 240);
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_goal_send_records_a_supervisor_proposal() {
+        let pool = lane_pool().await;
+        let op = AgentControlOp::Send {
+            session_id: "pane-1".into(),
+            text: "run the tests".into(),
+            request_id: Some("hub-goal-ledger-1".into()),
+        };
+        assert!(record_control_turn(&pool, &op).await.unwrap());
+        let auto = AgentControlOp::Send {
+            session_id: "pane-1".into(),
+            text: "1".into(),
+            request_id: Some("hub-auto-prompt-3".into()),
+        };
+        assert!(!record_control_turn(&pool, &auto).await.unwrap());
+        assert_eq!(
+            turn_rows(&pool).await,
+            vec![("supervisor_proposal".to_owned(), Some("run the tests".to_owned()))]
+        );
     }
 
     #[test]
