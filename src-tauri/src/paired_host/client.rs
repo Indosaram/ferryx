@@ -1049,19 +1049,18 @@ impl MachineClient {
             bearer: &bearer,
         };
         let mut cancelled = lease.cancellation();
-        tokio::select! { biased;
+        let result = tokio::select! { biased;
             _ = cancelled.changed() => Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
             result = super::secure_http::open_secure_websocket(&target, &path, config) => result,
-        }
-        .or_else(|error| async move {
-            if error.code != "E2E_UNSUPPORTED" {
-                return Err(error);
+        };
+        match result {
+            Err(error) if error.code == "E2E_UNSUPPORTED" => {
+                super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
+                self.open_socket_at(relay, lease, segments, query, ticket_target, max_frame)
+                    .await
             }
-            super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
-            self.open_socket_at(relay, lease, segments, query, ticket_target, max_frame)
-                .await
-        })
-        .await
+            other => other,
+        }
     }
 
     async fn open_socket_at(

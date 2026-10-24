@@ -190,13 +190,17 @@ export async function remoteFetch(baseUrl: string, path: string, init: RequestIn
   return response;
 }
 
-/** One host WebSocket: inside the registered tunnel (bearer in the tunnel) or by a single-use ticket. */
-export async function remoteOpenSocket(
+/**
+ * Where one host WebSocket comes from: an open socket inside the registered tunnel (bearer in the
+ * tunnel), or a single-use ticketed URL the caller dials itself. Returning the URL lets the caller
+ * construct the native socket and attach its handlers in the same tick, so no early frame is lost.
+ */
+export async function remoteSocketTarget(
   baseUrl: string,
   target: string,
   token: string,
   signal?: AbortSignal,
-): Promise<WebSocket | TunnelWebSocket> {
+): Promise<string | TunnelWebSocket> {
   const e2e = relayE2EFor(baseUrl);
   if (e2e) {
     try {
@@ -222,7 +226,18 @@ export async function remoteOpenSocket(
     url = socketUrl.toString();
   }
   signal?.throwIfAborted();
-  return new WebSocket(url);
+  return url;
+}
+
+/** One host WebSocket: inside the registered tunnel (bearer in the tunnel) or by a single-use ticket. */
+export async function remoteOpenSocket(
+  baseUrl: string,
+  target: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<WebSocket | TunnelWebSocket> {
+  const opened = await remoteSocketTarget(baseUrl, target, token, signal);
+  return typeof opened === "string" ? new WebSocket(opened) : opened;
 }
 
 type OpenedTunnel = { transport: TunnelTransport; close: () => void };

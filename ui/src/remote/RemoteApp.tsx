@@ -94,6 +94,7 @@ import {
   onDeviceTokenRotated,
   remoteFetch,
   remoteOpenSocket,
+  remoteSocketTarget,
 } from "./remoteClient";
 
 import { AccountLoginPage } from "./AccountLoginPage";
@@ -2214,8 +2215,13 @@ export const RemoteHostConnection: React.FC<{
           current = await activeTunnelConnection.openWebSocket("/api/v1/events");
           if (disposed) { current.close(); return; }
         } else {
-          current = await remoteOpenSocket(transportBaseUrl, "/api/v1/events", token, abort.signal);
-          if (disposed) { current.close(); return; }
+          const opened = await remoteSocketTarget(transportBaseUrl, "/api/v1/events", token, abort.signal);
+          if (disposed) {
+            if (typeof opened !== "string") opened.close();
+            return;
+          }
+          // Dial a ticketed URL here so the handlers below attach in the same tick.
+          current = typeof opened === "string" ? new WebSocket(opened) : opened;
         }
       } catch (error) {
         if (disposed) return;
@@ -4681,6 +4687,37 @@ export const RemoteHostConnection: React.FC<{
         />
       ) : null}
 
+      {showRelayRepairNotice ? (
+        <div
+          data-testid="relay-repair-notice"
+          role={relayRepairError ? "alert" : "status"}
+          data-code={REPAIR_REQUIRED}
+          className={`mx-3 mt-2 rounded-md border px-3 py-2 text-xs ${relayRepairError ? "border-destructive/50 text-destructive" : "border-border text-muted-foreground"}`}
+        >
+          <p>{RELAY_REPAIR_MESSAGE}</p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="rounded border border-border px-2 py-1 font-medium text-foreground"
+              onClick={() => {
+                setRelayRepairErrorBase(null);
+                disconnect();
+              }}
+            >
+              Re-pair through account
+            </button>
+            {!relayRepairError ? (
+              <button
+                type="button"
+                className="rounded px-2 py-1"
+                onClick={() => setRelayRepairDismissedBase(transportBaseUrl)}
+              >
+                Not now
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
       <RemoteWorkspaceMirror
         model={effectiveModel}
         pending={pending}
@@ -4718,37 +4755,6 @@ export const RemoteHostConnection: React.FC<{
         onCreateWorktree={createWorktree}
         creationError={initialAccountTarget || accountPreselection ? null : creationError}
       >
-        {showRelayRepairNotice ? (
-          <div
-            data-testid="relay-repair-notice"
-            role={relayRepairError ? "alert" : "status"}
-            data-code={REPAIR_REQUIRED}
-            className={`mx-3 mt-2 rounded-md border px-3 py-2 text-xs ${relayRepairError ? "border-destructive/50 text-destructive" : "border-border text-muted-foreground"}`}
-          >
-            <p>{RELAY_REPAIR_MESSAGE}</p>
-            <div className="mt-2 flex gap-2">
-              <button
-                type="button"
-                className="rounded border border-border px-2 py-1 font-medium text-foreground"
-                onClick={() => {
-                  setRelayRepairErrorBase(null);
-                  disconnect();
-                }}
-              >
-                Re-pair through account
-              </button>
-              {!relayRepairError ? (
-                <button
-                  type="button"
-                  className="rounded px-2 py-1"
-                  onClick={() => setRelayRepairDismissedBase(transportBaseUrl)}
-                >
-                  Not now
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
         {planLimitNotice ? (
           <PlanLimitNotice
             state={planLimitNotice}
