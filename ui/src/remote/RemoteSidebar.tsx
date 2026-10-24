@@ -8,6 +8,7 @@ import type { SidebarModel, SidebarProjectNode, SidebarWorktreeNode } from "../c
 import { SidebarView, type SidebarInbox } from "../components/sidebar/SidebarView";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow, type SidebarDensity } from "../components/sidebar/SidebarWorktreeRow";
+import { cn } from "../lib/cn";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 
 export const REMOTE_COLLAPSED_KEY_PREFIX = "ferryx.remote.sidebarCollapsed.";
@@ -88,6 +89,27 @@ function SectionState({ section }: { readonly section: RemoteSidebarSection }) {
   );
 }
 
+/**
+ * A reachable machine with a list takes the remaining height. An offline machine (even one still
+ * showing its last list) or one with nothing to list yet sizes to its content, capped, so it never
+ * squeezes the list the user can actually open.
+ */
+export function sectionFillsHeight(section: Pick<RemoteSidebarSection, "state" | "model">): boolean {
+  switch (section.state) {
+    case "offline":
+    case "loading":
+      return false;
+    case "ok":
+    case "disconnected":
+    case "error":
+      return section.model !== null;
+    default: {
+      const unreachable: never = section.state;
+      return unreachable;
+    }
+  }
+}
+
 type SectionProps = {
   readonly section: RemoteSidebarSection;
   readonly sidebar: RemoteSidebarProps;
@@ -123,7 +145,7 @@ function MachineSection({ section, sidebar, first, heading }: SectionProps) {
       data-testid="remote-sidebar-section"
       data-machine-id={section.machineId}
       aria-label={section.label}
-      className="flex min-h-0 flex-1 flex-col"
+      className={cn("flex min-h-0 flex-col", sectionFillsHeight(section) ? "flex-1" : "max-h-[40%] flex-none")}
     >
       {heading || notSynced ? (
         <div className="flex min-h-6 shrink-0 items-center gap-2 px-3 pt-1.5 text-[11px]">
