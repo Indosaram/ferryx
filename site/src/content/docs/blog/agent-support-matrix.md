@@ -63,6 +63,8 @@ Any other command still runs in a pane: a test runner, a migration script, or an
 
 ## How this fits Ferryx today
 
+Ferryx is a source-available desktop terminal under the Ferryx License, free for individuals and small companies, written in Rust on Tauri v2 with a headless daemon. Comparisons on this site stick to licensing, architecture, and workflow facts rather than unmeasured performance claims.
+
 Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
 ![CLI Agent Support Matrix: Who Works Where illustration](/images/blog/agent-support-matrix/body-1.png)
@@ -79,7 +81,7 @@ Editorial policy: unmeasured numbers go stale and mislead. Claims here map to so
 
 ### Is Ferryx open source?
 
-Source-available under SUL-1.0, which is not an OSI license. It permits your own internal business purposes, non-commercial, or personal use.
+Source-available under the Ferryx License, which is not an OSI license. It is free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue; larger companies need a Team subscription for work use. Releases before the change remain under SUL-1.0.
 
 ### Which tool should I pick?
 
