@@ -165,7 +165,7 @@ export async function Q14(ctx, result) {
 
   // (d) The GUI restored the seeded workspace (its marker is gone from the saved session), then
   // within SETTLE_DEADLINE_MS no saved pane is still bound to a pre-boot backend id.
-  const restored = await ctx.agent.call('waitLog', { file: sessionFile, pattern: absentPattern([seed]), deadlineMs: RESTORE_DEADLINE_MS });
+  const restored = await ctx.agent.call('waitLog', { file: sessionFile, pattern: absentPattern([`"qaRebootSeed":"${seed}"`]), deadlineMs: RESTORE_DEADLINE_MS });
   const restoredAt = Date.now();
   const guiLog = hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`);
   const override = await ctx.agent.call('waitLog', { file: guiLog, pattern: BOOT_OVERRIDE_RECEIPT, deadlineMs: 5_000 });

@@ -68,6 +68,20 @@ test('absentPattern matches only a saved session that no longer names any of the
   assert.equal(new RegExp(absentPattern(['a.b'])).test('{"timestamp":1,"v":"axb"}'), true, 'texts are literal');
 });
 
+test('the restore check keys on the qaRebootSeed marker, not on seeded tab ids the GUI keeps', () => {
+  const seed = 'SEED42';
+  const target = rebootTarget(null, { workspaceId: 'qa', repoDir: '/r' });
+  const seeded = preBootSession(null, { target, panes, daemonEpoch: 1700, seed, now: 5 });
+  const restoreCheck = new RegExp(absentPattern([`"qaRebootSeed":"${seed}"`]));
+  assert.equal(restoreCheck.test(JSON.stringify(seeded)), false, 'the seeded file still carries the marker');
+  const resaved = structuredClone(seeded);
+  delete resaved.workspaces.qa.qaRebootSeed;
+  resaved.timestamp = 6;
+  const text = JSON.stringify(resaved);
+  assert.ok(text.includes(`q14-tab-0-${seed}`), 'the GUI re-save keeps the seeded tab ids');
+  assert.equal(restoreCheck.test(text), true);
+});
+
 test('classifyPreBootPanes counts panes still bound to a pre-boot id as Reconnecting', () => {
   const saved = (bindings) => ({ workspaces: { qa: { terminalSessions: Object.fromEntries(Object.entries(bindings).map(([k, v]) => [k, { backendSessionId: v }])) } } });
   const fixed = classifyPreBootPanes(saved({ 'q14-pane-0-r': null, 'q14-pane-1-r': 'b-new' }), { workspaceId: 'qa', panes, liveIds: ['b-new'] });
