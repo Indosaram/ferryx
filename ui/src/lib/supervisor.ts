@@ -11,13 +11,26 @@ export {
   nextSupervisionExpiry,
   normalizeSnapshot,
   paneSupervision,
+  proposalAwaitingApproval,
   SUPERVISOR_ACTING_MS,
+  SUPERVISOR_AWAITING_APPROVAL_LABEL,
   SUPERVISOR_HELD_MS,
+  SUPERVISOR_STOP_REASON_LABELS,
+  SUPERVISOR_STOP_REASONS,
+  SUPERVISOR_STOPPED_FALLBACK_LABEL,
+  supervisorHandoffs,
+  supervisorStopReasonLabel,
   type PaneSupervision,
   type SupervisorAction,
+  type SupervisorGoalMode,
+  type SupervisorGoalView,
+  type SupervisorHandoff,
   type SupervisorLane,
+  type SupervisorRequirementStatus,
   type SupervisorSnapshot,
+  type SupervisorStopReason,
 } from "./supervisorModel";
+import type { SupervisorGoalMode } from "./supervisorModel";
 
 export const SUPERVISOR_CHANGED_EVENT = "supervisor_changed";
 let snapshot: SupervisorSnapshot = EMPTY_SNAPSHOT;
@@ -63,6 +76,20 @@ export async function setSupervisorLanePaused(laneKey: string, paused: boolean):
   await refreshSupervisor();
 }
 
+export type SupervisorGoalRequest =
+  | { action: "set"; laneKey: string; requirements: unknown[]; mode?: SupervisorGoalMode; turnLimit?: number }
+  | { action: "mode"; laneKey: string; mode: SupervisorGoalMode }
+  | { action: "approve"; laneKey: string }
+  | { action: "discard"; laneKey: string }
+  | { action: "acceptRevision"; id: number }
+  | { action: "rejectRevision"; id: number };
+
+/** Steer a lane goal through the daemon (cmd_supervisor_goal), then refetch the snapshot. */
+export async function supervisorGoal(request: SupervisorGoalRequest): Promise<void> {
+  await invoke<unknown>("cmd_supervisor_goal", { request });
+  await refreshSupervisor();
+}
+
 export function supervisorFeedSupported(): boolean {
   return supported;
 }
@@ -70,6 +97,16 @@ export function supervisorFeedSupported(): boolean {
 function subscribe(listener: () => void) {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+/** Snapshot access for non-React consumers (the Inbox hand-off recorder). */
+export function getSupervisorSnapshot(): SupervisorSnapshot {
+  return snapshot;
+}
+
+export function subscribeSupervisorSnapshot(listener: () => void): () => void {
+  const unsubscribe = subscribe(listener);
+  return () => { unsubscribe(); };
 }
 
 /** For tests and previews: replace the snapshot without the daemon. */
