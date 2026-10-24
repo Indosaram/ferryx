@@ -11,7 +11,7 @@ This page compares the two on what can be verified: source availability, licensi
 
 Both codebases are readable, under licenses that permit very different things.
 
-Warp's client is open source. The [`warpdotdev/warp`](https://github.com/warpdotdev/Warp) repository carries the client crates, and the README states that the `warpui_core` and `warpui` crates are MIT licensed while the rest of the repository is under AGPL v3. The server portion is not in that repository. So Warp is an open-source client talking to a closed, commercial backend, with community contributions accepted through a labelled issue-to-PR flow.
+Warp's client is open source. The [`warpdotdev/warp`](https://github.com/warpdotdev/Warp) repository carries the client crates, and the README states that the `warpui_core` and `warpui` crates are MIT licensed while the rest of the repository is under AGPL v3. The server portion is not in that repository. So Warp is an open-source client talking to a closed, commercial backend, with community contributions accepted through a labelled issue-to-PR flow. Ferryx, by contrast, is source-available.
 
 Ferryx's source is public on GitHub under the Ferryx License, which is free for individuals, education, open-source work, non-profits, and companies under 50 people and USD 5M revenue; larger companies need a Team subscription for work use. The Ferryx License is not an OSI open-source license, and AGPL-3.0 is. If reciprocal-copyleft open source is what you need, Warp's client qualifies on that axis and Ferryx doesn't; say so plainly rather than around it.
 

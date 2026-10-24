@@ -19,12 +19,12 @@ This baseline is genuinely good. Many engineers should keep using it. Nothing on
 
 Plenty of people have automated the recipe, and a comparison that pretends otherwise isn't useful. The ones worth knowing, all read 2026-09-19:
 
-- **[workmux](https://github.com/raine/workmux)** (MIT, Rust): git worktrees plus tmux windows as isolated dev environments, with kitty, WezTerm, and Zellij as alternative backends. The most direct expression of the pattern.
-- **[worktrunk](https://worktrunk.dev/)** ([source](https://github.com/max-sixty/worktrunk), MIT or Apache-2.0): a worktree CLI built for parallel agents, where worktrees are addressed by branch name and paths come from a configurable template. The most popular of the group by stars.
+- **[workmux](https://github.com/raine/workmux)** (MIT, Rust; OSI open source, where Ferryx is source-available): git worktrees plus tmux windows as isolated dev environments, with kitty, WezTerm, and Zellij as alternative backends. The most direct expression of the pattern.
+- **[worktrunk](https://worktrunk.dev/)** ([source](https://github.com/max-sixty/worktrunk), MIT or Apache-2.0, OSI open source rather than source-available): a worktree CLI built for parallel agents, where worktrees are addressed by branch name and paths come from a configurable template. The most popular of the group by stars.
 - **[lazyworktree](https://github.com/chmouel/lazyworktree)** (Apache-2.0, Go): a keyboard-first TUI for worktrees with CI and PR status, tmux and Zellij integration, and a pane showing active Claude, Codex, Copilot, and pi sessions per worktree.
-- **[tmux-worktree](https://github.com/denesbeck/tmux-worktree)** (MIT): a tmux plugin that creates, switches, and removes worktrees from a floating popup, each in its own tmux window.
+- **[tmux-worktree](https://github.com/denesbeck/tmux-worktree)** (MIT, OSI open source rather than source-available): a tmux plugin that creates, switches, and removes worktrees from a floating popup, each in its own tmux window.
 
-If you already live in the terminal and want the bookkeeping gone, one of these is probably a better fit than a desktop app. They're smaller, they're open source in the OSI sense, and they compose with the setup you have. Ferryx isn't trying to be a better workmux.
+If you already live in the terminal and want the bookkeeping gone, one of these is probably a better fit than a desktop app. They're smaller, they're open source in the OSI sense where Ferryx is source-available, and they compose with the setup you have. Ferryx isn't trying to be a better workmux.
 
 ## What Ferryx actually changes
 
