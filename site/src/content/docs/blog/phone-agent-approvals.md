@@ -24,7 +24,7 @@ The phone fixes (1) by definition and (3) by context design — provided the app
 The working pipeline, end to end:
 
 1. **Pair once, at the desk.** Phone app scans a QR (or enters a short PIN) against the host's gateway; the pair issues a *device-scoped credential* — not host shell keys — with the gateway reachable over the outbound relay (no inbound ports). The whole flow takes under a minute and is the same trust bootstrapping any remote client uses; the [pairing guide](/blog/pair-ferryx-with-phone/) walks it concretely.
-2. **Detect prompt states in the session.** The gateway reads session streams it already owns and classifies state: running, blocked-on-approval, blocked-on-question, done. Detection is per-CLI (Claude Code's dialog, Codex CLI's modes, Gemini CLI's confirmations each have shapes) — this is the keystone: a missed detection means silent stall, a false detection means noise.
+2. **Detect prompt states in the session.** The gateway reads session streams it already owns and classifies state: running, blocked-on-approval, blocked-on-question, done. Detection is per-CLI (Claude Code's dialog, Codex CLI's modes, Antigravity's permission prompt each have shapes) — this is the keystone: a missed detection means silent stall, a false detection means noise.
 3. **Publish a context-rich card.** The phone receives: agent identity, task/worktree, the *command or action requested*, the files touched if derivable, and how long it has been parked. Approve/deny/escalate buttons sit beneath — each answer returns over the paired channel.
 4. **Deliver the answer as input.** The gateway writes the chosen response into the session's PTY exactly as the CLI expects it (keystroke or selection), unblocking the run. From the agent's perspective, you were at the keyboard.
 5. **Record the decision.** Approval, actor (device), timestamp, and command land in the run's log — so a later "what did the agent delete at 14:03" has an answer that does not involve forensics.
@@ -52,7 +52,7 @@ You can relay the keystroke — the pipeline above is exactly that, with context
 
 ### Which agents' permission prompts can be detected?
 
-Any CLI whose prompt shape is observable in its terminal output — mainstream coding agents (Claude Code, Codex CLI, Gemini CLI, Cursor CLI) all emit recognizable dialog states, and detectors are per-CLI by nature. Detection must be maintained against CLI version changes (prompt wording and layout shift across releases), which is why fleets treat detectors as versioned integrations with a fallback: unknown-blocked-for-N-minutes still surfaces as "parked, needs eyes" rather than being misclassified as healthy.
+Any CLI whose prompt shape is observable in its terminal output — mainstream coding agents (Claude Code, Codex CLI, Antigravity, Cursor CLI) all emit recognizable dialog states, and detectors are per-CLI by nature. Detection must be maintained against CLI version changes (prompt wording and layout shift across releases), which is why fleets treat detectors as versioned integrations with a fallback: unknown-blocked-for-N-minutes still surfaces as "parked, needs eyes" rather than being misclassified as healthy.
 
 ### Is approving commands from my phone a security downgrade?
 

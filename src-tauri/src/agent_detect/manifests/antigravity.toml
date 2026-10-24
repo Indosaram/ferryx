@@ -4,6 +4,8 @@
 # resolveAgentLogo(manifest_id), whose key is "antigravity". Keeping "agy" would
 # leave antigravity panes unidentified. herdr's original id is kept as an alias.
 id = "antigravity"
+display_name = "Antigravity"
+homepage = "https://antigravity.google"
 version = "2026.06.24.1"
 min_engine_version = 1
 updated_at = "2026-06-24T00:00:00Z"

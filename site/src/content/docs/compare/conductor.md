@@ -15,7 +15,7 @@ That's the practical difference. The rest of this page covers what Conductor act
 | Windows | x64 installer (not code-signed yet) | Not available yet |
 | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | Not available yet |
 | Licensing | Source-available under SUL-1.0, free for personal and non-commercial use | Closed source; free tier plus paid plans from $50/mo |
-| Agents | Any command you can start in a shell; status detection ships for eleven | Claude Code, Codex, Cursor, and OpenCode |
+| Agents | Any command you can start in a shell; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Claude Code, Codex, Cursor, and OpenCode |
 | Cloud service | None | Conductor Cloud, on paid plans |
 
 Verified 2026-09-19 against Ferryx v2026.09.18.1 and Conductor's published docs and pricing. Both products move quickly, so check the linked pages before you decide anything on them.
@@ -32,7 +32,7 @@ So the honest framing isn't local versus cloud. Both tools run agents locally by
 
 **Who owns the session.** This is the sharpest architectural split. Conductor's pricing FAQ states that local workspace sessions run on your machine and that "when your machine shuts off or you close the app, sessions terminate," which is why the cloud tier exists. In Ferryx, a headless Rust PTY daemon owns the pseudoterminals and the GUI is only a client, so closing or reloading the window leaves agents running. Output goes into a 512 KiB ring buffer per session with monotonic sequence numbers, and a reconnect replays what you missed. If the buffer wrapped while you were away, the client is told there's a gap instead of being shown a mangled transcript.
 
-**Which agents run.** Conductor supports Claude Code, Codex, Cursor, and OpenCode, and bundles its own copies of Claude Code and Codex so versions stay compatible. Ferryx treats agents as ordinary commands: anything you can start in a terminal runs in a pane. What's agent-specific is status detection, and manifests ship for eleven of them, including Claude Code, Codex, Cursor, Cline, GitHub Copilot CLI, OpenCode, Grok, and Kimi.
+**Which agents run.** Conductor supports Claude Code, Codex, Cursor, and OpenCode, and bundles its own copies of Claude Code and Codex so versions stay compatible. Ferryx treats agents as ordinary commands: anything you can start in a terminal runs in a pane. What's agent-specific is status detection, and manifests ship for <!-- agents:count -->16<!-- /agents:count --> of them, including Claude Code, Codex, Cursor, Cline, GitHub Copilot CLI, OpenCode, Grok, and Kimi.
 
 **Where worktrees live.** Conductor puts workspaces outside the repository, under `~/conductor/workspaces/`. Ferryx keeps managed worktrees inside it, at `.orca-worktrees/wt-<slug>` on a branch named `orca/<workspace-id>/<slug>`, with worktree paths jailed to the repository root. Neither is better in the abstract; they trade a tidy home directory against a repository that carries its own worktrees.
 

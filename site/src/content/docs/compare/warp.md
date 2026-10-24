@@ -19,7 +19,7 @@ Ferryx's stack is Rust and Tauri v2, parsing terminal output with libghostty-vt 
 
 ## How each handles running multiple agents
 
-Warp's answer spans products. The Warp Terminal recognises third-party CLI agents automatically and layers features on them: a rich input editor, agent notifications, inline code review, and Remote Control. Its [docs](https://docs.warp.dev/agents/cli-agents/overview/) list fifteen supported agents, including Claude Code, Codex, OpenCode, Amp, Auggie, Copilot CLI, Cursor CLI, Gemini CLI, Droid, and Grok Build. The Warp Agent CLI is Warp's own coding agent, usable in any terminal. Warp Factories is the cloud tier: infrastructure for running fleets of agents across the development lifecycle, with documented enterprise use cases in code review, bug investigation, refactors and migration, and incident response, plus named solutions for financial services, insurance, and telecommunications.
+Warp's answer spans products. The Warp Terminal recognises third-party CLI agents automatically and layers features on them: a rich input editor, agent notifications, inline code review, and Remote Control. Its [docs](https://docs.warp.dev/agents/cli-agents/overview/) list fifteen supported agents, including Claude Code, Codex, OpenCode, Amp, Auggie, Copilot CLI, Cursor CLI, Droid, and Grok Build. The Warp Agent CLI is Warp's own coding agent, usable in any terminal. Warp Factories is the cloud tier: infrastructure for running fleets of agents across the development lifecycle, with documented enterprise use cases in code review, bug investigation, refactors and migration, and incident response, plus named solutions for financial services, insurance, and telecommunications.
 
 Remote Control is worth calling out because Ferryx has a counterpart. In Warp you click the `/remote-control` chip in the agent utility bar and the session publishes to Warp's cloud with a shareable link, viewable from any browser with nothing installed and steerable if you grant edit access.
 
@@ -33,7 +33,7 @@ Ferryx approaches the same problem locally and without a cloud. The daemon owns 
 - **Where work runs.** Ferryx runs entirely locally. Warp runs locally too, and Warp Factories runs fleets of agents in cloud infrastructure.
 - **Process survival.** Closing or reloading the Ferryx GUI doesn't kill running agent processes, and reconnecting replays missed output from a ring buffer with monotonic sequence numbers.
 - **Remote viewing.** Warp publishes a session to its cloud and hands you a link. Ferryx pairs a device directly with your daemon over your own gateway or relay.
-- **Agent breadth.** Warp documents enhanced support for fifteen named CLI agents. Ferryx runs any command in a pane and ships status detection for eleven agents.
+- **Agent breadth.** Warp documents enhanced support for fifteen named CLI agents. Ferryx runs any command in a pane and ships status detection for <!-- agents:count -->16<!-- /agents:count --> agents.
 - **Worktree isolation.** Ferryx manages worktrees at `.orca-worktrees/<workspace-id>/<slug>` on `orca/<workspace-id>/<slug>` branches; Warp leaves worktrees to you or to the agent.
 - **Enterprise surface.** Warp markets named solutions for financial services, insurance, and telecommunications and holds SOC 2 certification. Ferryx has no enterprise program; it's an early local desktop app.
 

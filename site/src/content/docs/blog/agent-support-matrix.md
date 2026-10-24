@@ -1,32 +1,63 @@
 ---
 title: "CLI Agent Support Matrix: Who Works Where"
-description: "Claude Code, Codex, Gemini CLI, OpenCode and others: status manifests, known quirks, and plain shells still work. Built for parallel AI agent workflows."
+description: "Claude Code, Codex, Antigravity, OpenCode and others: status detection, resume, hooks, known quirks, and plain shells still work. Built for parallel AI agent workflows."
 ---
 
-**CLI Agent Support Matrix: Who Works Where.** Claude Code, Codex, Gemini CLI, OpenCode and others: status manifests, known quirks, and plain shells still work. Built for parallel AI agent workflows.
+**CLI Agent Support Matrix: Who Works Where.** Claude Code, Codex, Antigravity, OpenCode and others: status detection, resume, hooks, known quirks, and plain shells still work. Built for parallel AI agent workflows.
 
 ![agent-support-matrix cover](/images/blog/agent-support-matrix/cover.png)
 
-## Manifest coverage
+## Per-agent support
 
-Choosing a terminal for agent-heavy work is less about ANSI rendering and more about process lifetime, isolation, licensing, and remote access. Different tools optimise for different constraints; an honest comparison states what each does well and where the other wins. In the specific case of “CLI Agent Support Matrix: Who Works Where”, the Ferryx angle is straightforward: claude code, codex, gemini cli, opencode and others: status manifests, known quirks, and plain shells still work. built for parallel ai agent workflows. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Every agent below ships a status-detection manifest, so its pane reports working, waiting on you, or idle. The table is generated from those manifests by `scripts/gen-site-agents.mjs`; the agent names, links, and count come straight from `src-tauri/src/agent_detect/manifests/`, so it cannot drift from what the app actually detects. Ferryx currently detects <!-- agents:count -->16<!-- /agents:count --> agents.
 
-## Agents without manifests
+<!-- agents:matrix -->
 
-Ferryx is a source-available desktop terminal under the Sustainable Use License (SUL-1.0), free for personal and non-commercial use, written in Rust on Tauri v2 with a headless daemon. Comparisons on this site stick to licensing, architecture, and workflow facts rather than unmeasured performance claims. Applied to “cli agent support matrix”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+| Agent | Status detection | Resume | Hooks | Remote history | Managed chat |
+| --- | --- | --- | --- | --- | --- |
+| [Aider](https://aider.chat) | Yes | No | No | No | No |
+| [Antigravity](https://antigravity.google) | Yes | Yes | Yes | Yes | No |
+| [Claude Code](https://www.anthropic.com/claude-code) | Yes | Yes | Yes | Yes | No |
+| [Cline](https://cline.bot) | Yes | Yes | Yes | Yes | No |
+| [Codex](https://github.com/openai/codex) | Yes | Yes | Yes | Yes | Yes |
+| [Crush](https://github.com/charmbracelet/crush) | Yes | Yes | Yes | Yes | No |
+| [Cursor CLI](https://cursor.com/cli) | Yes | Yes | Yes | Yes | No |
+| [Droid](https://factory.ai) | Yes (blocked states only) | Yes | No | No | No |
+| [GitHub Copilot CLI](https://github.com/features/copilot/cli) | Yes | Yes | No | Yes | No |
+| [GJC](https://github.com/Yeachan-Heo/gajae-code) | Yes | Yes | No | Yes | No |
+| [Grok](https://x.ai/build) | Yes | Yes | Yes | Yes | No |
+| [Kimi](https://github.com/MoonshotAI/kimi-cli) | Yes | Yes | No | Yes | No |
+| [OmO](https://github.com/code-yeongyu/oh-my-openagent) | Yes | Yes | No | Yes | No |
+| [omp](https://github.com/can1357/oh-my-pi) | Yes | Yes | No | Yes | No |
+| [OpenCode](https://opencode.ai) | Yes | Yes | No | Yes | No |
+| [pi](https://github.com/badlogic/pi-mono) | Yes | Yes | No | Yes | No |
 
-## Practical steps
+<!-- /agents:matrix -->
 
-1. List your hard requirements: license constraints, platforms, isolation model, remote access, persistence.
-2. Map each candidate tool against those requirements using primary sources (docs, LICENSE, pricing pages) with today's date.
-3. Ignore benchmark numbers you cannot reproduce; prefer architectural facts you can verify from repositories.
-4. Try the top two on a real multi-agent task for a day before committing the team.
-5. Record the decision with verification dates so the next re-evaluation is cheap.
+What each column means, and where it is sourced:
+
+- **Status detection.** A shipped manifest reads the pane's screen. Droid's manifest covers only its login and tool-confirmation screens, so a Droid pane reports blocked but never working or idle.
+- **Resume.** Ferryx can reopen the agent's own session after a restart with that agent's resume flag (`ui/src/lib/agentResume.ts`).
+- **Hooks.** Ferryx installs the agent's native lifecycle hooks, so state arrives from the agent itself and the screen read is the fallback (`src-tauri/src/ferryx_scope/ssh/agent_hook_core.rs`).
+- **Remote history.** The remote client can read the agent's transcript store to show past turns (`src-tauri/src/remote/reference_chat/history_*.rs`).
+- **Managed chat.** Ferryx drives the agent through its app-server protocol instead of a terminal. Only Codex is supported (`src-tauri/src/ferryx_scope/chat/mod.rs`).
+
+## Agents without a manifest
+
+Any other command still runs in a pane: a test runner, a migration script, or an agent that is not in the table. It just runs without a status read, so the pane shows output but no working, waiting, or idle badge. Google's Gemini command-line tool is one of these: it runs in a Ferryx pane like any command, but has no status detection or resume. Google's supported agent is Antigravity (agy).
+
+## How to read the table
+
+1. Check the agent you plan to run. If it is in the table, its pane reports state without you reading the scrollback.
+2. Prefer agents with **Hooks** for unattended runs: hook events report state the moment the agent changes it.
+3. Use **Resume** agents for long tasks you may close the laptop on; the session reopens where it stopped.
+4. Use **Remote history** agents if you plan to check in from a phone and want past turns, not just the live screen.
+5. Re-check this page after upgrading Ferryx; the table is regenerated on every site build.
 
 | Checkpoint | What good looks like |
 | --- | --- |
 | Isolation | Each parallel actor has its own worktree or a documented reason not to |
-| Visibility | Status badges or attention counters answer “who needs me?” without polling |
+| Visibility | Status badges or attention counters answer "who needs me?" without polling |
 | Persistence | Closing the window does not end agent processes |
 | Evidence | Claims map to [product facts](/docs/facts/) or a linked source |
 

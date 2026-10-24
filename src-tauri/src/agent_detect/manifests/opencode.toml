@@ -1,4 +1,6 @@
 id = "opencode"
+display_name = "OpenCode"
+homepage = "https://opencode.ai"
 version = "2026.08.27.1"
 min_engine_version = 1
 aliases = ["open-code", "herdr:opencode"]

@@ -1,4 +1,10 @@
 ---
+// Generated from the shipped detection manifests by scripts/gen-site-agents.mjs (prebuild).
+import agents from '../../data/agents.json';
+
+const agentNames = agents.map((agent) => agent.displayName);
+const agentList = `${agentNames.slice(0, -1).join(', ')}, and ${agentNames[agentNames.length - 1]}`;
+
 const faqs: { q: string; a: string }[] = [
   {
     q: "Is Ferryx free?",
@@ -6,7 +12,7 @@ const faqs: { q: string; a: string }[] = [
   },
   {
     q: "Which agents does it support?",
-    a: "Any command that runs in a terminal runs in a pane, including Claude Code, Codex, and Gemini CLI. Status detection for working, waiting on you, and idle ships for 11 agents: Antigravity, Claude Code, Cline, Codex, GitHub Copilot CLI, Cursor, Gajae Code, Grok, Kimi, OMO, and OpenCode.",
+    a: `Any command that runs in a terminal runs in a pane, including Claude Code, Codex, and Antigravity (agy). Status detection for working, waiting on you, and idle ships for ${agents.length} agents: ${agentList}.`,
   },
   {
     q: "Will my agents keep running if I close the app?",
