@@ -130,6 +130,8 @@ pub enum NativeTerminalEvent {
 
 pub type NativeTerminalEventSink = Arc<dyn Fn(NativeTerminalEvent) + Send + Sync>;
 pub type NativeTerminalPtyResizeSink = Arc<dyn Fn(&str, u16, u16) + Send + Sync>;
+/// Asks the PTY owner to make the program repaint at the given size without changing it.
+pub type NativeTerminalPtyRedrawSink = Arc<dyn Fn(&str, u16, u16) + Send + Sync>;
 
 fn validate_session_id(session_id: &str) -> Result<(), NativeTerminalError> {
     if session_id.trim().is_empty() {
@@ -625,6 +627,7 @@ pub struct NativeTerminalSurfaceHostState {
     sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
     pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
+    pty_redraw_sink: Arc<RwLock<Option<NativeTerminalPtyRedrawSink>>>,
     pending_startups: Arc<Mutex<HashSet<String>>>,
     gpu_worker: Arc<GpuWorker>,
     /// True while a DOM overlay (dialog or search surface) owns input over the
@@ -2419,6 +2422,7 @@ impl Clone for NativeTerminalSurfaceHostState {
             sessions: Arc::clone(&self.sessions),
             event_sink: Arc::clone(&self.event_sink),
             pty_resize_sink: Arc::clone(&self.pty_resize_sink),
+            pty_redraw_sink: Arc::clone(&self.pty_redraw_sink),
             pending_startups: Arc::clone(&self.pending_startups),
             gpu_worker: Arc::clone(&self.gpu_worker),
             dom_overlay_owns_input: Arc::clone(&self.dom_overlay_owns_input),
@@ -2433,6 +2437,7 @@ impl Default for NativeTerminalSurfaceHostState {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             event_sink: Arc::new(RwLock::new(None)),
             pty_resize_sink: Arc::new(RwLock::new(None)),
+            pty_redraw_sink: Arc::new(RwLock::new(None)),
             pending_startups: Arc::new(Mutex::new(HashSet::new())),
             dom_overlay_owns_input: Arc::new(AtomicBool::new(false)),
             gpu_worker: Arc::new(
@@ -3304,6 +3309,21 @@ impl NativeTerminalSurfaceHostState {
         }
     }
 
+    pub fn set_pty_redraw_sink_if_absent(&self, sink: NativeTerminalPtyRedrawSink) -> bool {
+        let mut current = self.pty_redraw_sink.write();
+        if current.is_some() {
+            return false;
+        }
+        *current = Some(sink);
+        true
+    }
+
+    fn notify_pty_redraw(&self, session_id: &str, cols: u16, rows: u16) {
+        if let Some(sink) = self.pty_redraw_sink.read().clone() {
+            sink(session_id, cols, rows);
+        }
+    }
+
     pub fn session_layout(&self, session_id: &str) -> Option<SurfaceCompositionLayout> {
         self.sessions
             .lock()
@@ -3951,7 +3971,15 @@ impl NativeTerminalSurfaceHostState {
         let initial_generation = attachment.remote_generation;
         let initial_dims = (80, 24);
 
-        let (update_sender, render_coordinator, events, slot, pump_generation, absorbs_replay_burst) = {
+        let (
+            update_sender,
+            render_coordinator,
+            events,
+            slot,
+            pump_generation,
+            absorbs_replay_burst,
+            redraw_dims,
+        ) = {
             let mut sessions = self.sessions.lock();
             // The ownership check lives INSIDE the mutation lock. Checking it under a separate
             // lock first would leave a window where a newer attach takes ownership between the
@@ -4001,6 +4029,10 @@ impl NativeTerminalSurfaceHostState {
                 attachment.stream_task.abort();
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
+            // Replay rebuilds a grid from raw history, which cannot reproduce the last frame of a
+            // full-screen or inline TUI. The PTY is usually already at the pane size, so nothing
+            // sends SIGWINCH; ask the program to repaint once the grid has been rebuilt.
+            let mut redraw_dims = None;
             let (update_sender, render_coordinator) = if let Some(session) =
                 sessions.get_mut(session_id)
             {
@@ -4125,6 +4157,9 @@ impl NativeTerminalSurfaceHostState {
                         .terminal
                         .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
                 }
+                if !is_fresh_startup && verdict == ReplayVerdict::Rebuild {
+                    redraw_dims = Some(session.terminal.dimensions()?);
+                }
                 // Sequences only order within one epoch, and a stale snapshot may end below what
                 // the grid already applied; neither may rewind the replay cursor. A new epoch
                 // discards the old cursor outright, including when it carries no end of its own:
@@ -4190,6 +4225,9 @@ impl NativeTerminalSurfaceHostState {
                     }
                 }
                 let _ = terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
+                if !is_fresh_startup {
+                    redraw_dims = Some(terminal.dimensions()?);
+                }
                 let bracketed_paste_seen = terminal.bracketed_paste_enabled().unwrap_or(false);
                 // A fresh session created by an attach owns a surface by definition.
                 let (update_sender, _) = tokio::sync::watch::channel(());
@@ -4263,11 +4301,15 @@ impl NativeTerminalSurfaceHostState {
                 slot,
                 pump_generation,
                 absorbs_replay_burst,
+                redraw_dims,
             )
         };
 
         for event in events {
             emit_native_terminal_event(app.as_ref(), &self.event_sink, event);
+        }
+        if let Some((cols, rows)) = redraw_dims {
+            self.notify_pty_redraw(session_id, cols, rows);
         }
 
         let stream_task = attachment.stream_task;
@@ -8471,6 +8513,55 @@ mod tests {
             harness.dispatched.try_recv().is_err(),
             "the direct drop must not submit duplicate work"
         );
+    }
+
+    fn redraw_test_attachment(session_id: &str, epoch: u64) -> DaemonAttachment {
+        let (_tx, messages) = tokio::sync::mpsc::channel(1);
+        DaemonAttachment {
+            session_id: session_id.into(),
+            epoch,
+            start_sequence: Some(1),
+            end_sequence: Some(1),
+            gap: None,
+            history: bytes::Bytes::from(b"retained screen".to_vec()),
+            history_segments: Vec::new(),
+            pty_cols: Some(80),
+            pty_rows: Some(24),
+            remote_generation: None,
+            messages,
+            stream_task: tokio::spawn(std::future::pending()),
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuilt_attach_asks_the_program_to_repaint_but_fresh_startup_does_not() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let redraws = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&redraws);
+        assert!(state.set_pty_redraw_sink_if_absent(Arc::new(move |id, cols, rows| {
+            observed.lock().push((id.to_string(), cols, rows));
+        })));
+
+        state.mark_pending_startup("fresh");
+        state
+            .attach_daemon_attachment::<tauri::Wry>("fresh", redraw_test_attachment("fresh", 1), None)
+            .expect("fresh attach");
+        assert!(redraws.lock().is_empty(), "a freshly spawned program paints on its own");
+
+        // Window restart: no resident grid, history replayed into a new one.
+        state
+            .attach_daemon_attachment::<tauri::Wry>("cold", redraw_test_attachment("cold", 1), None)
+            .expect("cold attach");
+        assert_eq!(*redraws.lock(), vec![("cold".to_string(), 80, 24)]);
+
+        // Resident grid rebuilt because the PTY lifetime changed (new epoch).
+        redraws.lock().clear();
+        state.detach_session("cold");
+        state
+            .attach_daemon_attachment::<tauri::Wry>("cold", redraw_test_attachment("cold", 2), None)
+            .expect("rebuild attach");
+        assert_eq!(*redraws.lock(), vec![("cold".to_string(), 80, 24)]);
+        state.teardown();
     }
 
     #[tokio::test]
