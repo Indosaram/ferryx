@@ -1202,7 +1202,7 @@ impl MachineClient {
                 if status.is_redirection() { return Err(ClientError::local("PAIRED_HOST_REDIRECT_REJECTED")); }
                 let limit=if directory {m::DIRECTORY_JSON_MAX_BYTES} else {route.response_limit};
                 if response.content_length().is_some_and(|n| n>limit as u64) { return Err(ClientError::local("PAYLOAD_TOO_LARGE")); }
-                if status.as_u16()==204 { return Ok(b"null".to_vec()); }
+                if status.as_u16() == 204 { return Ok((b"null".to_vec(), None)); }
                 let json=response.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(';').next().map(str::trim)==Some("application/json"));
                 if status.is_success() && !json { return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE")); }
                 let content_type = response.headers().get("content-type").cloned();
