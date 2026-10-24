@@ -36,6 +36,7 @@ pub mod runtime_stage;
 pub mod server;
 pub mod session_lifecycle;
 pub mod session_service;
+pub mod sidebar_snapshot;
 pub mod split_journal;
 // Portable facade over the OS service manager that owns the daemon's lifetime (macOS: `launchd`).
 pub mod supervisor;

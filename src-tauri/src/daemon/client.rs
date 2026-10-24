@@ -589,6 +589,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::DeleteWorktree { .. } => "deleteWorktree",
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
         DaemonRequest::SyncDesktopLocalProjects { .. } => "syncDesktopLocalProjects",
+        DaemonRequest::SyncDesktopSidebar { .. } => "syncDesktopSidebar",
         DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
         DaemonRequest::Spawn { .. } => "spawn",
         DaemonRequest::SpawnOperationStatus { .. } => "spawnOperationStatus",
@@ -3333,6 +3334,21 @@ impl DaemonClient {
         match self.send_request(DaemonRequest::SyncDesktopLocalProjects { projects }).await? {
             DaemonResponse::RegisterWorkspaceOk => Ok(()),
             DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
+    }
+
+    pub async fn sync_desktop_sidebar(&self, model: serde_json::Value) -> Result<u64, IpcError> {
+        match self.send_request(DaemonRequest::SyncDesktopSidebar { model }).await? {
+            DaemonResponse::SyncDesktopSidebarOk { revision } => Ok(revision),
+            DaemonResponse::Error { message, code, details } => {
+                let mut error = IpcError::new(
+                    code.as_deref().map_or(IpcErrorCode::InternalError, IpcErrorCode::from_code_str),
+                    message,
+                );
+                error.details = details;
+                Err(error)
+            }
             _ => Err(IpcError::internal("Unexpected daemon response")),
         }
     }

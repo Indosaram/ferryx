@@ -6026,6 +6026,18 @@ impl DaemonServer {
                         Err(error) => daemon_error(error.to_string()),
                     }
                 }
+                Ok(DaemonRequest::SyncDesktopSidebar { model }) => {
+                    let service = Arc::clone(&self.session_service.workspace_service);
+                    match crate::ipc::run_blocking(move || Ok(service.sync_desktop_sidebar(model))).await {
+                        Ok(Ok(revision)) => DaemonResponse::SyncDesktopSidebarOk { revision },
+                        Ok(Err(rejection)) => DaemonResponse::Error {
+                            code: Some(rejection.code().into()),
+                            message: rejection.to_string(),
+                            details: None,
+                        },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::RegisterWorkspace {
                     workspace_id,
                     repo_root,

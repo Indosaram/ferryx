@@ -577,6 +577,10 @@ pub enum DaemonRequest {
     SyncDesktopLocalProjects {
         projects: Vec<crate::remote::workspace_catalog::DesktopLocalProject>,
     },
+    /// The desktop's rendered sidebar model (opaque JSON, schemaVersion 1).
+    SyncDesktopSidebar {
+        model: serde_json::Value,
+    },
     #[serde(rename_all = "camelCase")]
     RegisterWorkspace {
         workspace_id: String,
@@ -1065,6 +1069,9 @@ pub enum DaemonResponse {
         received_version: u32,
     },
     RegisterWorkspaceOk,
+    SyncDesktopSidebarOk {
+        revision: u64,
+    },
     UnregisterWorkspaceOk,
     #[serde(rename_all = "camelCase")]
     CreateWorktreeOk {
