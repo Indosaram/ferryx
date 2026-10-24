@@ -170,6 +170,16 @@ unmeasured performance claims:
 - [Ferryx vs tmux + git worktree](https://ferryx.dev/compare/tmux-git-worktree/)
 - [Ferryx and Ghostty](https://ferryx.dev/compare/ghostty/) — Ferryx embeds libghostty-vt; it is not a Ghostty competitor
 
+## Docs and support
+
+- [User guide](https://ferryx.dev/docs/guide/): first run, workspaces and worktrees, panes, remote access, and agents
+- [Troubleshooting](https://ferryx.dev/docs/troubleshooting/): guides indexed by symptom
+- [Privacy declaration](https://ferryx.dev/privacy/)
+- [Security policy](SECURITY.md): how to report a vulnerability privately, supported versions, threat model
+- [Contributing](CONTRIBUTING.md): build prerequisites, test commands, and the license for contributions
+- [Changelog](CHANGELOG.md): changes per release tag
+- Questions: [Discord](https://discord.gg/Z2hBkQEHUG)
+
 ## Build from source
 
 ### Prerequisites
