@@ -26,9 +26,8 @@ pseudoterminals so sessions outlive the window.
 | Source repository | `github.com/Indosaram/ferryx` | GitHub |
 | Price | Free to download; larger companies need a Team subscription for work use ([pricing](/docs/pricing/)) | [Releases](https://github.com/Indosaram/ferryx/releases/latest) |
 
-The Ferryx License is a source-available license, not an OSI open-source license.
-Use and modification of this source-available code are free for personal use, education, open-source work,
-non-profits, and companies with fewer than 50 employees and
+The Ferryx License is not an OSI open-source license. Use and modification are free for personal
+use, education, open-source work, non-profits, and companies with fewer than 50 employees and
 contractors and less than USD 5M in annual revenue. Larger companies need a Team subscription to
 use Ferryx for work, after a transition period that ends 90 days after the Team plan opens.
 Self-hosted relays are free for everyone. Distribution must be free of charge and for

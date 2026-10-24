@@ -11,7 +11,7 @@ You can keep using Ferryx at no cost if you are:
 
 - an individual, including for side projects that make money;
 - a student, teacher, or academic researcher;
-- working on an open-source project (the Ferryx License itself is source-available);
+- working on an open-source project;
 - a non-profit; or
 - a company with fewer than 50 employees and contractors **and** less than USD 5M in annual revenue.
 

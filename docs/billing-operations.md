@@ -43,8 +43,8 @@ The official Ferryx plans and approved prices are defined as follows:
 | Plan Key | Target Audience | Base Capacity | Price (Monthly) | Price (Annual) | Extra Host Packs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Free** (`free`) | Personal developers | 3 registered machines | $0 | $0 | None |
-| **Pro** (`pro_monthly` / `pro_annual`) | Power users | 10 registered machines | $5 / month | $50 / year | +5 machines per pack ($2/mo or $20/yr) |
-| **Team** (`team_monthly` / `team_annual`) | Organizations (min 2 seats) | 10 machines / seat (pooled) | $7 / seat / month | $70 / seat / year | +5 machines per pack ($20/yr, annual only) |
+| **Pro** (`pro_monthly` / `pro_annual`) | Power users | 10 registered machines | $8 / month | $80 / year | +5 machines per pack ($2/mo or $20/yr) |
+| **Team** (`team_monthly` / `team_annual`) | Organizations (min 3 seats) | 10 machines / seat (pooled) | $12 / seat / month launch ($16 list) | $120 / seat / year launch ($160 list) | +5 machines per pack ($20/yr, annual only) |
 
 ### 2.2 Configured Lemon Squeezy Variants: Five Variants Contract
 
