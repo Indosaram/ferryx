@@ -1130,6 +1130,9 @@ function WorkspaceApp({
     worktrees: state.worktrees,
     inactiveProjectWorktrees,
     emptyWorkspaceIds: emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots()),
+    activityByWorktreePath: worktreeActivity,
+    unreadWorktreePaths: state.unreadWorktreePaths,
+    agents,
   });
 
   // Dag journals: watch every known project root, worktree and live session root so any omo

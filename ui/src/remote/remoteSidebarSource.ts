@@ -3,7 +3,8 @@
 // builder from the machine's project inventory.
 import { buildSidebarModel, type SidebarModel } from "../components/sidebar/sidebarModel";
 import type { RegisteredProject } from "../lib/tauri";
-import type { Worktree } from "../lib/types";
+import type { AgentState, Worktree } from "../lib/types";
+import { AGENT_STATES } from "../components/sidebar/sidebarSessionSignals";
 import type { SupervisorFetch, SupervisorHttpResponse } from "./remoteSupervisor";
 
 /** Same adapter as the supervisor feed: the device token is already bound, callers pass a path. */
@@ -85,13 +86,29 @@ function isProjectNode(value: unknown): boolean {
     Array.isArray(p.worktrees) && p.worktrees.every(isWorktreeNode) && isNullableString(p.worktreesEmptyHint);
 }
 
+const isFlagRecord = (value: unknown) => {
+  const r = objectOf(value);
+  return r !== null && Object.values(r).every((flag) => typeof flag === "boolean");
+};
+const isAgentStateRecord = (value: unknown) => {
+  const r = objectOf(value);
+  return r !== null && Object.values(r).every((state) => AGENT_STATES.includes(state as AgentState));
+};
+
+function isSessionSignals(value: unknown): boolean {
+  const s = objectOf(value);
+  return s !== null && isFlagRecord(s.unreadWorktreePaths) && isAgentStateRecord(s.agentStateByPath);
+}
+
 /** Structural guard for the wire model: one malformed node rejects the whole snapshot. */
 function isSidebarModel(value: unknown): value is SidebarModel {
   const m = objectOf(value);
   return m !== null && m.schemaVersion === 1 && typeof m.revision === "number" && isString(m.generatedAt) &&
     (m.source === "desktop" || m.source === "inventory") && isStringList(m.collapsedGroupIds) &&
     typeof m.advancedFeatures === "boolean" && (m.emptyState === null || m.emptyState === "noProjects") &&
-    Array.isArray(m.projects) && m.projects.every(isProjectNode);
+    Array.isArray(m.projects) && m.projects.every(isProjectNode) &&
+    // Optional: snapshots from desktops older than this field still parse.
+    (m.signals === undefined || isSessionSignals(m.signals));
 }
 
 function projectOf(raw: unknown): { project: RegisteredProject; ready: boolean } | null {

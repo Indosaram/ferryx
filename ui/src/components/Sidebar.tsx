@@ -53,7 +53,8 @@ import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "
 import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
 import { SidebarProjectHeader } from "./sidebar/SidebarProjectHeader";
-import { useSidebarModel } from "./sidebar/useSidebarModel";
+import { agentStatesByPath, useSidebarModel } from "./sidebar/useSidebarModel";
+import { sidebarSessionSignals } from "./sidebar/sidebarSessionSignals";
 import { supervisorTypingIn } from "./sidebar/sidebarSupervisor";
 import { SidebarView, type SidebarReorder } from "./sidebar/SidebarView";
 import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
@@ -251,8 +252,8 @@ export function Sidebar({
   const { snapshot: supervisorSnapshot, now: supervisorNow } = useSupervisor();
   const live = useMemo(() => sidebarLiveState(model, {
     activityByWorktreePath,
-    unreadWorktreePaths,
-    agentStateByPath: Object.fromEntries([...agentsByPath].map(([path, agent]) => [path, agent.state])),
+    // The same reduced signals the publisher sends to the remote.
+    ...sidebarSessionSignals(model, { activityByWorktreePath, unreadWorktreePaths, agentStateByPath: agentStatesByPath(agentsByPath) }),
     activeWorkspaceId: activeProjectId,
     activePath,
     isSupervisorTyping: (path) => supervisorTypingIn(supervisorSnapshot, supervisorNow, path),

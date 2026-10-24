@@ -30,6 +30,7 @@ import {
   type ProjectSlot,
   type SidebarStatus,
 } from "./sidebarSlots";
+import type { SidebarSessionSignals } from "./sidebarSessionSignals";
 import type { SidebarSlotState } from "./SidebarStateSlot";
 
 export type { SidebarStatus } from "./sidebarSlots";
@@ -71,6 +72,8 @@ export type SidebarModel = {
   collapsedGroupIds: string[];
   advancedFeatures: boolean;
   emptyState: "noProjects" | null;
+  /** Set only on a published snapshot: the desktop's live-only signals at publish time. */
+  signals?: SidebarSessionSignals;
 };
 
 export type SidebarModelInput = SidebarRowsInput & {

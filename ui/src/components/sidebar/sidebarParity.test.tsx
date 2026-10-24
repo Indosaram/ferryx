@@ -127,6 +127,9 @@ function DesktopSidebar() {
     worktrees: fx.worktrees,
     inactiveProjectWorktrees: fx.inactiveProjectWorktrees,
     emptyWorkspaceIds: [],
+    activityByWorktreePath: fx.desktopActivity,
+    unreadWorktreePaths: fx.desktopUnread,
+    agents: fx.desktopAgents,
   });
   return (
     <Sidebar
@@ -136,8 +139,9 @@ function DesktopSidebar() {
       activePath={fx.active.path}
       worktrees={fx.worktrees}
       inactiveProjectWorktrees={fx.inactiveProjectWorktrees}
-      agents={[]}
+      agents={fx.desktopAgents}
       activityByWorktreePath={fx.desktopActivity}
+      unreadWorktreePaths={fx.desktopUnread}
       onSelectWorktree={noop}
       onCreateWorktree={noop}
       onOpenSettings={noop}

@@ -3,11 +3,13 @@ import { useEffect, useMemo, useReducer, useRef } from "react";
 
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import { emptyProjectGroupIds, initialCollapsedProjects } from "../components/sidebar/sidebarRows";
-import { useSidebarModel } from "../components/sidebar/useSidebarModel";
+import { sidebarSessionSignals } from "../components/sidebar/sidebarSessionSignals";
+import { agentStatesByPath, useSidebarModel } from "../components/sidebar/useSidebarModel";
 import { groupProjects } from "./projectGrouping";
 import { loadCollapsedProjects, loadWorktreeOrder, subscribeSidebarPersistence } from "./sidebarPersistence";
 import { syncDesktopSidebar, type RegisteredProject } from "./tauri";
-import type { Worktree } from "./types";
+import type { ActiveAgent, Worktree } from "./types";
+import type { ActivitySummary } from "./activity";
 
 /** The daemon owns the revision and the clock only stamps the snapshot, so neither decides "changed". */
 function modelContentKey(model: SidebarModel) {
@@ -63,6 +65,10 @@ export type DesktopSidebarInput = {
   readonly worktrees: readonly Worktree[];
   readonly inactiveProjectWorktrees: Readonly<Record<string, Worktree[]>>;
   readonly emptyWorkspaceIds: readonly string[];
+  /** The live-only signals the Sidebar receives; published so the remote shows the same rows. */
+  readonly activityByWorktreePath: Readonly<Record<string, ActivitySummary | undefined>>;
+  readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
+  readonly agents: readonly ActiveAgent[];
 };
 
 /** Publishes the model the desktop sidebar renders, from the same builder hook the Sidebar calls. */
@@ -89,7 +95,17 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- persistenceVersion invalidates the storage reads inside
   }, [projects, activeProjectId, emptyKey, persistenceVersion]);
   const built = useSidebarModel({ projects, activeProjectId, worktrees, inactiveProjectWorktrees }, persisted).model;
-  const model = enabled ? built : null;
+  const { activityByWorktreePath, unreadWorktreePaths, agents } = input;
+  const model = useMemo(() => enabled
+    ? {
+        ...built,
+        signals: sidebarSessionSignals(built, {
+          activityByWorktreePath,
+          unreadWorktreePaths,
+          agentStateByPath: agentStatesByPath(agents.map((agent) => [agent.worktreePath, agent] as const)),
+        }),
+      }
+    : null, [activityByWorktreePath, agents, built, enabled, unreadWorktreePaths]);
 
   const modelRef = useRef(model);
   modelRef.current = model;

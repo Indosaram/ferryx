@@ -20,7 +20,7 @@ export function slotStateFor(indicator: StatusDotState | null): SidebarSlotState
   return null;
 }
 
-/** A worktree row's slot: its aggregate activity, else the bare agent state when no summary exists. */
+/** A worktree row's slot: its aggregate activity, else the bare agent state or the bell when no summary exists. */
 export function worktreeRowSlot(input: {
   readonly activitySummary: ActivitySummary | undefined;
   readonly unread: boolean;
@@ -33,7 +33,11 @@ export function worktreeRowSlot(input: {
       : { ...activitySummary, hasUnread: unread }
     : undefined;
   const aggregateIndicator = resolveActivityIndicator(displaySummary);
-  return slotStateFor(aggregateIndicator ?? (activitySummary === undefined && agentState ? agentState : null));
+  if (aggregateIndicator) return slotStateFor(aggregateIndicator);
+  // No activity summary (a row the publishing side has no sessions for): the bare agent state, then
+  // the bell mark, so the row reads the same whether or not an empty summary was attached.
+  if (activitySummary !== undefined) return null;
+  return slotStateFor(agentState ?? (unread ? "unread" : null));
 }
 
 /** Needs input outranks the supervisor; the supervisor typing outranks running and unread. */

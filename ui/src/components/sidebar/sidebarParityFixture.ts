@@ -3,7 +3,7 @@
 import type { ActivitySummary } from "../../lib/activity";
 import type { HostEndpoint } from "../../state/remoteHostStore";
 import type { RegisteredProject } from "../../lib/tauri";
-import type { Worktree } from "../../lib/types";
+import type { ActiveAgent, Worktree } from "../../lib/types";
 import type { WorktreeOrder } from "../../lib/sidebarPersistence";
 import type { SidebarHost } from "./sidebarLabels";
 
@@ -33,6 +33,10 @@ export type SidebarParityFixture = {
   readonly worktreeOrder: WorktreeOrder;
   /** One running agent as the desktop sees it (by worktree path). */
   readonly desktopActivity: Readonly<Record<string, ActivitySummary>>;
+  /** A bell mark on an idle row: only the published snapshot carries it to the remote. */
+  readonly desktopUnread: Readonly<Record<string, boolean>>;
+  /** An agent with no terminal activity yet: its bare state is the row's slot. */
+  readonly desktopAgents: readonly ActiveAgent[];
   /** The hub supervisor lane typing into one worktree right now (relative to the render clock). */
   readonly supervisorLane: { readonly sessionId: string; readonly cwd: string };
   /** The same agent as the remote session inventory reports it. */
@@ -41,8 +45,9 @@ export type SidebarParityFixture = {
 
 /**
  * A local + SSH member of one repo with a custom row order, a standalone SSH project whose
- * listing fails, a collapsed local project with a waiting agent, an offline and an online paired
- * project, an unseen finished agent, and the hub supervisor typing into the active row.
+ * listing fails, a local project with a waiting agent and a bell-marked idle row, an offline and an online paired
+ * project, an unseen finished agent, the hub supervisor typing into the active row, a bell mark on
+ * an idle row and an agent known only by its bare state.
  */
 export const sidebarParityFixture: SidebarParityFixture = {
   activeProjectId: "ferryx",
@@ -59,6 +64,7 @@ export const sidebarParityFixture: SidebarParityFixture = {
     row(FERRYX, "main"),
     row(`${FERRYX}/.orca-worktrees/ferryx/remote-settings`, "orca/ferryx/remote-settings"),
     row(`${FERRYX}/.orca-worktrees/ferryx/sidebar-polish`, "orca/ferryx/sidebar-polish"),
+    row(`${FERRYX}/.orca-worktrees/ferryx/sidebar-polish-2`, "orca/ferryx/sidebar-polish-2"),
   ],
   inactiveProjectWorktrees: {
     "ssh:omarchy:ferryx": [row(FERRYX_SSH, "main", { workspaceId: "ssh:omarchy:ferryx", hostLabel: "omarchy" })],
@@ -77,7 +83,7 @@ export const sidebarParityFixture: SidebarParityFixture = {
     },
   },
   listingFailures: { "ssh:omarchy:relay": "Connection reset by peer" },
-  collapsedGroupIds: ["site"],
+  collapsedGroupIds: [],
   // Custom order: the dragged sidebar-polish row and the SSH root sit above the local root.
   worktreeOrder: {
     ferryx: [
@@ -103,6 +109,11 @@ export const sidebarParityFixture: SidebarParityFixture = {
       hasWorking: false, hasWaiting: true, hasDone: false, hasUnread: false,
     },
   },
+  desktopUnread: { [`${SITE}/.orca-worktrees/site/launch-page`]: true },
+  desktopAgents: [{
+    id: "agent-1", name: "Coder", task: "", state: "starting", worktree: null, sessionId: "agent-session-1",
+    worktreePath: `${FERRYX}/.orca-worktrees/ferryx/sidebar-polish-2`,
+  }],
   supervisorLane: { sessionId: "hub-lane-1", cwd: `${FERRYX}/.orca-worktrees/ferryx/remote-settings` },
   remoteActivity: [
     { workspaceId: "ferryx", worktreeSlug: "sidebar-polish", activityState: "working" },

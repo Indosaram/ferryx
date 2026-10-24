@@ -9,10 +9,14 @@ import { getPairedHostReachability, subscribePairedHostReachability } from "../.
 import type { WorktreeOrder } from "../../lib/sidebarPersistence";
 import { useSshHosts } from "../../lib/sshHosts";
 import type { RegisteredProject } from "../../lib/tauri";
-import type { Worktree } from "../../lib/types";
+import type { ActiveAgent, AgentState, Worktree } from "../../lib/types";
 import { remoteHostStore } from "../../state/remoteHostStore";
 import { worktreeListingFailureStore } from "../../state/worktreeListingFailures";
 import { buildSidebarModel } from "./sidebarModel";
+
+export function agentStatesByPath(agents: Iterable<readonly [string, Pick<ActiveAgent, "state">]>): Record<string, AgentState> {
+  return Object.fromEntries([...agents].map(([path, agent]) => [path, agent.state]));
+}
 
 export type DesktopSidebarSource = {
   readonly projects: RegisteredProject[];

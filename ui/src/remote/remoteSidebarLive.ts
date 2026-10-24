@@ -44,6 +44,8 @@ export function remoteSidebarSignals(
     activityByWorktreePath,
     ...(activeWorkspaceId === undefined ? {} : { activeWorkspaceId }),
     ...(activePath === undefined ? {} : { activePath }),
+    // The desktop's bell marks and bare agent states, published with the snapshot.
+    ...(model.signals ?? {}),
     ...(supervisor ? { isSupervisorTyping: (path: string) => supervisorTypingIn(supervisor.snapshot, supervisor.now, path) } : {}),
   };
 }
