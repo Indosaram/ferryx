@@ -2,6 +2,7 @@ pub mod disk;
 pub mod git;
 pub mod manager;
 pub mod model;
+pub mod naming;
 pub mod registry;
 pub mod rescan;
 
@@ -31,7 +32,9 @@ pub mod tests {
         fs::write(repo_path.join("README.md"), "# Test Repo\n").expect("write README");
         git::run_git(repo_path, &["add", "README.md"]).expect("git add failed");
         git::run_git(repo_path, &["commit", "-m", "Initial commit"]).expect("git commit failed");
-        let manager = WorktreeManager::new(repo_path);
+        // An isolated settings file keeps the user's worktree settings out of the tests.
+        let settings = repo_path.join(".git").join("ferryx-test-worktree-settings.json");
+        let manager = WorktreeManager::new(repo_path).with_settings_path(Some(settings));
         (temp_dir, manager)
     }
 
@@ -65,11 +68,11 @@ pub mod tests {
     fn branch_namespace_formatting_and_validation() {
         assert_eq!(
             WorktreeManager::format_branch_name("ws-123", "task-a").unwrap(),
-            "orca/ws-123/task-a"
+            "ferryx/ws-123/task-a"
         );
         assert_eq!(
             WorktreeManager::format_branch_name("session_1", "feature/subtask").unwrap(),
-            "orca/session_1/feature/subtask"
+            "ferryx/session_1/feature/subtask"
         );
         assert!(WorktreeManager::format_branch_name("", "slug").is_err());
         assert!(WorktreeManager::format_branch_name("ws", "").is_err());
@@ -81,10 +84,141 @@ pub mod tests {
         assert!(WorktreeManager::format_branch_name("ws/extra", "slug").is_err());
         assert!(WorktreeManager::format_branch_name("ws", "nested/-slug").is_err());
 
-        let info = WorktreeManager::parse_branch_name("refs/heads/orca/ws-abc/my-task").unwrap();
+        let info = WorktreeManager::parse_branch_name("refs/heads/ferryx/ws-abc/my-task").unwrap();
         assert_eq!(info.ws_id, "ws-abc");
         assert_eq!(info.slug, "my-task");
+        // Legacy input: Orca-era branches still parse.
+        let legacy = WorktreeManager::parse_branch_name("refs/heads/orca/ws-abc/my-task").unwrap();
+        assert_eq!(legacy.ws_id, "ws-abc");
+        assert_eq!(legacy.slug, "my-task");
         assert!(WorktreeManager::parse_branch_name("refs/heads/main").is_none());
+    }
+
+    const LEGACY_DIR: &str = naming::LEGACY_WORKTREE_DIRS[0];
+    const LEGACY_PREFIX: &str = naming::LEGACY_BRANCH_PREFIXES[0];
+
+    /// Creates an Orca-era managed worktree the way older builds did: `.orca-worktrees/<ws>/<slug>`
+    /// on branch `orca/<ws>/<slug>`, without going through the manager.
+    fn create_legacy_orca_worktree(manager: &WorktreeManager, ws: &str, slug: &str) -> std::path::PathBuf {
+        let path = manager.repo_root().join(LEGACY_DIR).join(ws).join(slug);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        git::run_git(
+            manager.repo_root(),
+            &["worktree", "add", "-b", &format!("{LEGACY_PREFIX}/{ws}/{slug}"), path.to_str().unwrap()],
+        )
+        .unwrap();
+        fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn a_new_worktree_uses_the_ferryx_names() {
+        let (_temp, manager) = setup_test_repo();
+        let path = manager.worktree_path_for("ws1", "b").unwrap();
+        assert_eq!(path, manager.repo_root().join(".ferryx-worktrees/ws1/b"));
+        let created = manager
+            .create_worktree(CreateWorktreeOptions::new("ws1", "b", &path))
+            .unwrap();
+        assert_eq!(created.branch_short_name(), Some("ferryx/ws1/b"));
+        assert!(!manager.repo_root().join(LEGACY_DIR).exists());
+        let found = manager.find_worktree_by_slug("ws1", "b").unwrap().unwrap();
+        assert_eq!(found.path, created.path);
+    }
+
+    #[test]
+    fn a_legacy_orca_worktree_is_still_managed() {
+        let (_temp, manager) = setup_test_repo();
+        let registry = WorkspaceRegistry::new();
+        registry.register("workspace-legacy", manager.repo_root()).unwrap();
+        let legacy = create_legacy_orca_worktree(&manager, "ws1", "a");
+        let identity = WorktreeIdentity {
+            ws_id: "ws1".into(),
+            slug: "a".into(),
+        };
+
+        // Resolution, lookup and identity parsing all recognize the legacy layout.
+        assert_eq!(manager.worktree_path_for("ws1", "a").unwrap(), legacy);
+        let found = manager.find_worktree_by_slug("ws1", "a").unwrap().unwrap();
+        assert_eq!(found.path, legacy);
+        assert_eq!(found.orca_info().unwrap().slug, "a");
+        let (_, resolved) = registry.resolve_worktree("workspace-legacy", &identity).unwrap();
+        assert_eq!(resolved.path, legacy);
+
+        // A new worktree in the same repo keeps the repo's legacy layout (no mixed layouts).
+        let next = manager.worktree_path_for("ws1", "b").unwrap();
+        let created = manager
+            .create_worktree(CreateWorktreeOptions::new("ws1", "b", &next))
+            .unwrap();
+        assert_eq!(created.branch_short_name(), Some(format!("{LEGACY_PREFIX}/ws1/b").as_str()));
+
+        // Both are listed, and deleting the legacy one deletes its legacy branch.
+        assert_eq!(manager.list_worktrees().unwrap().len(), 3);
+        manager.delete_worktree_and_branch(&legacy, true).unwrap();
+        assert!(!legacy.exists());
+        let branches = git::run_git(manager.repo_root(), &["branch", "--list"]).unwrap();
+        assert!(!branches.contains(&format!("{LEGACY_PREFIX}/ws1/a")));
+    }
+
+    #[test]
+    fn a_repo_with_legacy_worktrees_keeps_the_legacy_names_by_default() {
+        let (_temp, manager) = setup_test_repo();
+        assert_eq!(manager.layout().branch_prefix, "ferryx");
+        assert_eq!(manager.layout().worktree_dir, ".ferryx-worktrees");
+        create_legacy_orca_worktree(&manager, "ws1", "a");
+        let layout = manager.layout();
+        assert_eq!(layout.branch_prefix, LEGACY_PREFIX);
+        assert_eq!(layout.worktree_dir, LEGACY_DIR);
+        assert_eq!(
+            manager.worktree_path_for("ws1", "b").unwrap(),
+            manager.repo_root().join(LEGACY_DIR).join("ws1/b")
+        );
+        // Choosing a prefix explicitly moves new worktrees to the Ferryx dir; the legacy
+        // worktree stays where it is and is still found.
+        naming::write_configured_prefix(
+            manager.settings_path().unwrap(),
+            manager.repo_root(),
+            Some("ferryx"),
+        )
+        .unwrap();
+        assert_eq!(manager.layout().worktree_dir, ".ferryx-worktrees");
+        assert!(manager.find_worktree_by_slug("ws1", "a").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_custom_prefix_is_used_and_validated() {
+        let (_temp, manager) = setup_test_repo();
+        assert!(matches!(
+            WorktreeManager::format_branch_name_with_prefix("Bad Prefix!", "ws", "slug", false),
+            Err(WorktreeError::InvalidNamespace { .. })
+        ));
+        assert!(naming::validate_branch_prefix("Bad Prefix!").is_err());
+
+        naming::write_configured_prefix(
+            manager.settings_path().unwrap(),
+            manager.repo_root(),
+            Some("team"),
+        )
+        .unwrap();
+        let path = manager.worktree_path_for("ws1", "c").unwrap();
+        assert_eq!(path, manager.repo_root().join(".ferryx-worktrees/ws1/c"));
+        let created = manager
+            .create_worktree(CreateWorktreeOptions::new("ws1", "c", &path))
+            .unwrap();
+        assert_eq!(created.branch_short_name(), Some("team/ws1/c"));
+        // The custom prefix is a known managed prefix: the worktree is found and owned.
+        let found = manager.find_worktree_by_slug("ws1", "c").unwrap().unwrap();
+        assert_eq!(found.path, created.path);
+        assert_eq!(
+            manager.parse_managed_branch("team/ws1/c"),
+            Some(OrcaWorktreeInfo {
+                ws_id: "ws1".into(),
+                slug: "c".into()
+            })
+        );
+        assert!(manager.is_identity_branch(Some("team/ws1/c"), "ws1", "c"));
+        // Clearing the setting restores the default for new worktrees.
+        naming::write_configured_prefix(manager.settings_path().unwrap(), manager.repo_root(), None)
+            .unwrap();
+        assert_eq!(manager.layout().branch_prefix, "ferryx");
     }
 
     #[test]
@@ -112,7 +246,18 @@ prunable reason gitdir gone
 "#;
         let worktrees = git::parse_worktree_list_porcelain(sample).expect("parse failed");
         assert_eq!(worktrees.len(), 5);
-        assert_eq!(worktrees[1].branch_short_name(), Some("orca/ws-1/task-1"));
+        assert_eq!(
+            worktrees[1].branch_short_name(),
+            Some(format!("{LEGACY_PREFIX}/ws-1/task-1").as_str())
+        );
+        // Legacy input: an Orca branch still yields its managed identity.
+        assert_eq!(
+            worktrees[1].orca_info(),
+            Some(OrcaWorktreeInfo {
+                ws_id: "ws-1".into(),
+                slug: "task-1".into()
+            })
+        );
         assert_eq!(
             worktrees[2].locked.as_deref(),
             Some("maintenance in progress")
@@ -148,7 +293,7 @@ prunable reason gitdir gone
             .expect("create worktree");
         assert_eq!(
             created.branch_short_name(),
-            Some("orca/ws-alpha/feat-login")
+            Some("ferryx/ws-alpha/feat-login")
         );
         assert!(path.join("README.md").exists());
         assert_eq!(manager.list_worktrees().unwrap().len(), 2);
@@ -198,7 +343,7 @@ prunable reason gitdir gone
             .expect("destructive deletion removes dirty worktree");
         assert!(!path.exists());
         let branches = git::run_git(manager.repo_root(), &["branch", "--list"]).unwrap();
-        assert!(!branches.contains("orca/ws-dirty/task-dirty"));
+        assert!(!branches.contains("ferryx/ws-dirty/task-dirty"));
     }
 
     #[test]
@@ -213,7 +358,7 @@ prunable reason gitdir gone
             .expect("delete merged branch");
         assert!(!path.exists());
         let branches = git::run_git(manager.repo_root(), &["branch", "--list"]).unwrap();
-        assert!(!branches.contains("orca/ws-branch/task-del"));
+        assert!(!branches.contains("ferryx/ws-branch/task-del"));
     }
 
     #[test]
@@ -295,7 +440,7 @@ prunable reason gitdir gone
             .expect("create worktree");
 
         // Newly branched from HEAD is an ancestor of HEAD
-        let branch = "orca/ws-merge/task-merge";
+        let branch = "ferryx/ws-merge/task-merge";
         assert!(git::git_merge_base_is_ancestor(manager.repo_root(), branch, "HEAD").unwrap());
         assert!(manager.branch_is_merged(branch).unwrap());
 
@@ -344,7 +489,7 @@ prunable reason gitdir gone
             .expect("create worktree");
         assert_eq!(
             created.branch_short_name(),
-            Some("orca/ws-direct/direct-task")
+            Some("ferryx/ws-direct/direct-task")
         );
 
         // After creation, resolve succeeds and returns matching canonical path

@@ -437,7 +437,8 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
 
     assert!(!created.path.exists());
     let branches = run_git(repo.path(), &["branch", "--list"]).expect("list branches");
-    assert!(!branches.contains("orca/ws-ipc/task-ipc"));
+    assert!(created.path.ends_with(".ferryx-worktrees/ws-ipc/task-ipc"));
+    assert!(!branches.contains("ferryx/ws-ipc/task-ipc"));
 
     let final_list = cmd_worktree_list(
         app.handle().clone(),
@@ -1248,7 +1249,7 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
         ws_id: "agent-1".into(),
         slug: "feat-remote".into(),
     };
-    let wt_path = PathBuf::from("/srv/project/.orca-worktrees/wt-feat-remote");
+    let wt_path = PathBuf::from("/srv/project/.ferryx-worktrees/agent-1/feat-remote");
 
     let request = SpawnTerminalRequest {
         workspace_id: ws_id.clone(),
@@ -1369,14 +1370,14 @@ fn paired_machine_worktree_spawn_target_resolution() {
     use std::path::Path;
 
     let repo_root = Path::new("/srv/repo");
-    let wt_cwd = Path::new("/srv/repo/.orca-worktrees/wt-my-feature");
-    let sub_cwd = Path::new("/srv/repo/.orca-worktrees/wt-my-feature/src/lib");
+    let wt_cwd = Path::new("/srv/repo/.ferryx-worktrees/remote-ws/my-feature");
+    let sub_cwd = Path::new("/srv/repo/.ferryx-worktrees/remote-ws/my-feature/src/lib");
     let explicit_wt = WorktreeIdentity {
         ws_id: "remote-ws".into(),
         slug: "my-feature".into(),
     };
 
-    // 1. Explicit worktree + worktree root cwd: cwd_relative MUST be None (never .orca-worktrees/wt-...)
+    // 1. Explicit worktree + worktree root cwd: cwd_relative MUST be None (never .ferryx-worktrees/...)
     let slug = infer_worktree_slug(Some(&explicit_wt), Some(wt_cwd));
     assert_eq!(slug.as_deref(), Some("my-feature"));
     let (ws, wt_ident, cwd_rel) =
@@ -1418,7 +1419,7 @@ fn paired_machine_worktree_spawn_target_resolution() {
     assert_eq!(recovered, Path::new("/srv/repo"));
 
     // 5. Effective repo root recovery when stored repo root was corrupted with worktree path
-    let corrupted_root = Path::new("/srv/repo/.orca-worktrees/wt-old-worktree");
+    let corrupted_root = Path::new("/srv/repo/.ferryx-worktrees/remote-ws/old-worktree");
     let recovered_corr = effective_paired_repo_root(corrupted_root, Some(wt_cwd));
     assert_eq!(recovered_corr, Path::new("/srv/repo"));
 
@@ -1435,6 +1436,23 @@ fn paired_machine_worktree_spawn_target_resolution() {
         Some("win-feature")
     );
     assert_eq!(cwd_rel.as_deref(), Some("sub"));
+
+    // 7. Legacy input: the Orca-era `.orca-worktrees/wt-<slug>` layout still resolves.
+    let legacy_cwd = Path::new("/srv/repo/.orca-worktrees/wt-my-feature/src/lib");
+    assert_eq!(
+        infer_worktree_slug(None, Some(legacy_cwd)).as_deref(),
+        Some("my-feature")
+    );
+    let (_ws, _wt, cwd_rel) =
+        resolve_paired_spawn_target("remote-ws", repo_root, Some(legacy_cwd), Some("my-feature"));
+    assert_eq!(cwd_rel.as_deref(), Some("src/lib"));
+    assert_eq!(
+        effective_paired_repo_root(
+            Path::new("/srv/repo/.orca-worktrees/wt-old"),
+            Some(legacy_cwd)
+        ),
+        Path::new("/srv/repo")
+    );
 }
 
 #[tokio::test]

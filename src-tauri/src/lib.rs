@@ -1706,6 +1706,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::native_menu::cmd_native_sidebar_context_menu,
         cmd_worktree_list,
         cmd_worktree_list_external,
+        cmd_worktree_settings_get,
+        cmd_worktree_settings_set,
         cmd_worktree_create,
         cmd_worktree_delete,
         cmd_worktree_delete_destructive,

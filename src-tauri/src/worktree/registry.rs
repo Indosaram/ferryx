@@ -194,8 +194,9 @@ impl WorkspaceRegistry {
                 slug: identity.slug.clone(),
             })?;
         manager.canonical_allowed_path(&worktree.path)?;
-        let expected_branch = WorktreeManager::format_branch_name(&identity.ws_id, &identity.slug)?;
-        if worktree.branch_short_name() != Some(expected_branch.as_str()) {
+        WorktreeManager::format_branch_name(&identity.ws_id, &identity.slug)?;
+        if !manager.is_identity_branch(worktree.branch_short_name(), &identity.ws_id, &identity.slug)
+        {
             return Err(WorktreeError::WorktreeIdentityNotFound {
                 workspace_id: workspace_id.to_string(),
                 ws_id: identity.ws_id.clone(),
@@ -213,8 +214,8 @@ impl WorkspaceRegistry {
         let manager = self.manager(workspace_id)?;
         let target = manager.worktree_path_for(&identity.ws_id, &identity.slug)?;
         let record = manager.deletion_record(&target)?;
-        let branch = WorktreeManager::format_branch_name(&identity.ws_id, &identity.slug)?;
-        if record.branch_short_name() != Some(branch.as_str()) {
+        WorktreeManager::format_branch_name(&identity.ws_id, &identity.slug)?;
+        if !manager.is_identity_branch(record.branch_short_name(), &identity.ws_id, &identity.slug) {
             return Err(WorktreeError::WorktreeIdentityNotFound {
                 workspace_id: workspace_id.into(),
                 ws_id: identity.ws_id.clone(),

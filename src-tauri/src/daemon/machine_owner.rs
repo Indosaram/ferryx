@@ -62,7 +62,8 @@ impl DaemonSessionService {
     /// registered it. A rolling handover transfers only the PTY fd and a snapshot with a
     /// worktree path, so adopted sessions carry no workspace anywhere; the catalog is the
     /// authority for which repo root a path belongs to. Managed worktrees live under
-    /// `<root>/.orca-worktrees/<workspace>/<slug>`, which also recovers the worktree identity.
+    /// `<root>/<managed-dir>/<workspace>/<slug>` (`.ferryx-worktrees`, or the legacy
+    /// `.orca-worktrees`), which also recovers the worktree identity.
     fn derive_workspace_for_path(
         &self,
         cwd: &std::path::Path,
@@ -81,7 +82,10 @@ impl DaemonSessionService {
                 let parts: Vec<_> = relative.components().collect();
                 if parts.len() >= 3 {
                     let (first, second, third) = (parts[0], parts[1], parts[2]);
-                    if first.as_os_str() == ".orca-worktrees"
+                    if first
+                        .as_os_str()
+                        .to_str()
+                        .is_some_and(crate::worktree::naming::is_worktree_dir)
                         && second.as_os_str() == workspace_id.as_str()
                     {
                         worktree = Some(crate::worktree::model::WorktreeIdentity {

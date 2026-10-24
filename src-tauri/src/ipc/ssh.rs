@@ -1284,8 +1284,12 @@ pub async fn cmd_ssh_create_remote_worktree<R: Runtime>(
     let (project, host) = run_blocking(move || crate::ssh::projects::resolve(&store, &id)).await?;
     let environment = crate::ssh::runtime::detect_for(&host, project.platform).await?;
     let ws_segment = crate::ssh::worktree::derive_ws_segment(&workspace_id)?;
-    let wt_path =
-        crate::ssh::worktree::remote_worktree_path(environment.platform, &project.repo_root, &slug);
+    let wt_path = crate::ssh::worktree::remote_worktree_path(
+        environment.platform,
+        &project.repo_root,
+        &ws_segment,
+        &slug,
+    );
     crate::ssh::worktree::create_remote(
         &host,
         &environment,
@@ -1348,13 +1352,8 @@ pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
         force.unwrap_or(false),
     )
     .await?;
-    let slug = path
-        .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .last()
-        .and_then(|name| name.strip_prefix("wt-"))
-        .unwrap_or("")
-        .to_string();
+    // Both `<dir>/<ws>/<slug>` and the legacy `<dir>/wt-<slug>` layout name their slug.
+    let slug = crate::worktree::naming::slug_from_worktree_path(&path).unwrap_or_default();
     let identity = crate::worktree::WorktreeIdentity {
         ws_id: workspace_id.clone(),
         slug,

@@ -1,7 +1,7 @@
 import { createPairedDaemonProjectAdapter, PairedOperationError, type PairedDaemonProjectAdapter } from "./pairedDaemonProject";
 import { remoteHostStore } from "../state/remoteHostStore";
 import { safeRandomUUID } from "./uuid";
-import { worktreeIdentity, type RegisteredProject, type Worktree } from "./types";
+import { isManagedBranchPrefix, worktreeIdentity, type RegisteredProject, type Worktree } from "./types";
 
 export function pairedActionMessage(cause: unknown): string {
   if (!(cause instanceof PairedOperationError)) return cause instanceof Error ? cause.message : "The paired operation failed.";
@@ -66,7 +66,7 @@ export function createPairedWorktreeActions(project: RegisteredProject, supplied
     async previewDelete(worktree: Worktree) {
       const identity = worktreeIdentity(worktree);
       const branchParts = worktree.branch?.replace(/^refs\/heads\//, "").split("/");
-      const branchWsId = branchParts && branchParts[0] === "orca" ? branchParts[1] : null;
+      const branchWsId = branchParts && isManagedBranchPrefix(branchParts[0]) ? branchParts[1] : null;
       if (!identity || identity.wsId !== workspaceId || (branchWsId && branchWsId !== workspaceId)) throw new PairedOperationError("INVALID_NAMESPACE");
       const a = await ready();
       const status = await a.worktreeStatus(workspaceId, identity);
@@ -80,7 +80,7 @@ export function createPairedWorktreeActions(project: RegisteredProject, supplied
       if (pending) { await reconcile(a, "delete"); return; }
       const identity = worktreeIdentity(worktree);
       const branchParts = worktree.branch?.replace(/^refs\/heads\//, "").split("/");
-      const branchWsId = branchParts && branchParts[0] === "orca" ? branchParts[1] : null;
+      const branchWsId = branchParts && isManagedBranchPrefix(branchParts[0]) ? branchParts[1] : null;
       if (!identity || identity.wsId !== workspaceId || (branchWsId && branchWsId !== workspaceId) || revision === null) throw new PairedOperationError("INVALID_NAMESPACE");
       const requestId = safeRandomUUID();
       try {

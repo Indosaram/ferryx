@@ -393,6 +393,23 @@ export async function listExternalWorktrees(workspaceId: string) {
   return invokeCommand<ExternalWorktree[]>("cmd_worktree_list_external", { workspaceId });
 }
 
+/** Worktree naming of a local repository, stored backend-side in `worktree-settings.json`. */
+export type WorktreeSettings = {
+  workspaceId: string;
+  branchPrefix: string;
+  worktreeDir: string;
+  configuredPrefix: string | null;
+};
+
+export async function getWorktreeSettings(workspaceId: string) {
+  return invokeCommand<WorktreeSettings>("cmd_worktree_settings_get", { workspaceId });
+}
+
+/** Stores the branch prefix (`^[a-z0-9][a-z0-9._-]{0,30}$`); `null` restores the default. */
+export async function setWorktreeSettings(request: { workspaceId: string; branchPrefix: string | null }) {
+  return invokeCommand<WorktreeSettings>("cmd_worktree_settings_set", { request });
+}
+
 export async function createWorktree(request: {
   workspaceId: string;
   worktree: WorktreeIdentity;

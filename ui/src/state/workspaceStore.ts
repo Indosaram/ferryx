@@ -39,7 +39,7 @@ import {
   hasLocalSplit,
   type LocalSplitSession,
 } from "../lib/localSplitLifecycle";
-import { createBrowserPaneContent, isTerminalTab, worktreeIdentity } from "../lib/types";
+import { createBrowserPaneContent, isManagedBranchPrefix, isTerminalTab, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
   ActiveAgent,
@@ -4768,7 +4768,7 @@ function getActiveWorktree(state: WorkspaceState) {
 function nextTabLabel(worktree: Worktree) {
   const branch = worktree.branch?.replace(/^refs\/heads\//, "") ?? "";
   const parts = branch.split("/");
-  return parts[0] === "orca" && parts.length > 2
+  return isManagedBranchPrefix(parts[0]) && parts.length > 2
     ? parts.slice(2).join("/")
     : branch && branch !== "orca-lite"
       ? branch

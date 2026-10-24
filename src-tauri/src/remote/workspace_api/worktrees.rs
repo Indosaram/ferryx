@@ -324,7 +324,11 @@ pub async fn read(
                 }
             }
             if missing || row.prunable.is_some() {
-                let branch_name = WorktreeManager::format_branch_name(&identity.ws_id, &identity.slug).map_err(domain)?;
+                // The managed row's own branch: legacy rows keep their legacy prefix.
+                let branch_name = match row.branch.as_deref().map(|b| b.strip_prefix("refs/heads/").unwrap_or(b)) {
+                    Some(branch) => branch.to_string(),
+                    None => manager.branch_name_for(&identity.ws_id, &identity.slug).map_err(domain)?,
+                };
                 let (branch, branch_error) = match manager.branch_deletion_preview_for_ref(&branch_name) {
                     Ok(branch) => (Some(branch), None),
                     Err(error) => {
@@ -402,11 +406,9 @@ pub(crate) async fn owner_mutation(
                 }
                 // Local registry keys and branch namespaces are independent identities.
                 // Machine HTTP requests retain their stricter identity() contract.
-                let expected_branch = match WorktreeManager::format_branch_name(&id.ws_id, &id.slug)
-                {
-                    Ok(branch) => branch,
-                    Err(error) => return Ok(typed(error)),
-                };
+                if let Err(error) = WorktreeManager::format_branch_name(&id.ws_id, &id.slug) {
+                    return Ok(typed(error));
+                }
                 if !service.catalog()?.workspaces.contains_key(&workspace) {
                     return Ok(typed(WorktreeError::WorkspaceNotFound {
                         workspace_id: workspace,
@@ -437,7 +439,11 @@ pub(crate) async fn owner_mutation(
                             // worktree and branch. This mirrors `resolve_deletion_worktree`,
                             // which the deletion preview already uses, so preview and delete
                             // agree on what a stale identity is.
-                            if record.branch_short_name() != Some(expected_branch.as_str()) {
+                            if !manager.is_identity_branch(
+                                record.branch_short_name(),
+                                &id.ws_id,
+                                &id.slug,
+                            ) {
                                 return Ok(typed(WorktreeError::WorktreeIdentityNotFound {
                                     workspace_id: workspace,
                                     ws_id: id.ws_id,
@@ -481,8 +487,15 @@ pub(crate) async fn owner_mutation(
                         Err(source) if !path.exists() => {
                             Ok(typed(WorktreeError::WorktreeRemovedBranchRetained {
                                 path,
-                                branch: WorktreeManager::format_branch_name(&id.ws_id, &id.slug)
-                                    .map_err(domain)?,
+                                branch: match row.branch.as_deref() {
+                                    Some(branch) => branch
+                                        .strip_prefix("refs/heads/")
+                                        .unwrap_or(branch)
+                                        .to_string(),
+                                    None => manager
+                                        .branch_name_for(&id.ws_id, &id.slug)
+                                        .map_err(domain)?,
+                                },
                                 source: Box::new(source),
                             }))
                         }
@@ -976,11 +989,19 @@ pub async fn mutate_worktree(
                         } else {
                             removal.map_err(domain)?;
                             if payload.delete_branch == Some(true) {
-                                let branch = WorktreeManager::format_branch_name(
-                                    &payload.workspace_id,
-                                    &payload.worktree.slug,
-                                )
-                                .map_err(domain)?;
+                                // Delete the branch the removed row was on, legacy or current.
+                                let branch = match event_row.branch.as_deref() {
+                                    Some(branch) => branch
+                                        .strip_prefix("refs/heads/")
+                                        .unwrap_or(branch)
+                                        .to_string(),
+                                    None => manager
+                                        .branch_name_for(
+                                            &payload.workspace_id,
+                                            &payload.worktree.slug,
+                                        )
+                                        .map_err(domain)?,
+                                };
                                 if crate::worktree::git_branch_delete(
                                     manager.repo_root(),
                                     &branch,

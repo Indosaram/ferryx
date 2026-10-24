@@ -240,8 +240,8 @@ async fn swapped_checked_out_branches_cannot_delete_a_stale_identity_slot() {
 
     run_git(&created_a.path, &["checkout", "--detach"]).expect("detach slot A");
     run_git(&created_b.path, &["checkout", "--detach"]).expect("detach slot B");
-    run_git(&created_a.path, &["checkout", "orca/agent/slot-b"]).expect("swap branch into slot A");
-    run_git(&created_b.path, &["checkout", "orca/agent/slot-a"]).expect("swap branch into slot B");
+    run_git(&created_a.path, &["checkout", "ferryx/agent/slot-b"]).expect("swap branch into slot A");
+    run_git(&created_b.path, &["checkout", "ferryx/agent/slot-a"]).expect("swap branch into slot B");
 
     let err = cmd_worktree_delete(
         app.handle().clone(),
@@ -259,11 +259,11 @@ async fn swapped_checked_out_branches_cannot_delete_a_stale_identity_slot() {
     assert!(created_b.path.exists(), "slot B must survive");
     let branches = run_git(repo.path(), &["branch", "--list"]).expect("list managed branches");
     assert!(
-        branches.contains("orca/agent/slot-a"),
+        branches.contains("ferryx/agent/slot-a"),
         "branch A must survive"
     );
     assert!(
-        branches.contains("orca/agent/slot-b"),
+        branches.contains("ferryx/agent/slot-b"),
         "branch B must survive"
     );
 }

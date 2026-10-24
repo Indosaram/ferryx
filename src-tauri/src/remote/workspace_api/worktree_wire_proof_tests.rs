@@ -260,7 +260,7 @@ async fn wires(root: &Path) {
         let endpoint = format!("http://{address}/api/v1/workspace/worktrees");
         let (status, row) = http(&client, reqwest::Method::POST, &endpoint, &machine, json!({"requestId":uuid::Uuid::new_v4(),"workspaceId":workspace,"worktree":{"wsId":workspace,"slug":"non-head"},"baseRef":"HEAD~1"})).await;
         assert_eq!(status, 201, "first fault-free response");
-        let path = repo.join(".orca-worktrees").join(&workspace).join("non-head");
+        let path = repo.join(".ferryx-worktrees").join(&workspace).join("non-head");
         assert_eq!(row["path"], path.to_str().unwrap());
         assert_eq!(row["head"], base);
         assert_eq!(git(&path, &["rev-parse", "HEAD"]).await.unwrap(), base);
@@ -302,7 +302,7 @@ async fn wires(root: &Path) {
             assert_eq!(error["code"], "WORKTREE_REMOVED_PRUNE_FAILED");
             assert_eq!(error["details"]["worktreeRemoved"], true);
             assert_eq!(error["details"]["pruned"], false);
-            let path = repo.join(".orca-worktrees").join(&workspace).join(slug);
+            let path = repo.join(".ferryx-worktrees").join(&workspace).join(slug);
             if legacy {
                 assert_eq!(error["details"]["branchDeleted"], false);
                 assert!(!error.to_string().contains(repo.to_str().unwrap()));
@@ -317,7 +317,7 @@ async fn wires(root: &Path) {
                 assert!(cause["details"]["stderr"].as_str().unwrap().contains("999"));
             }
             assert!(!tokio::fs::try_exists(&path).await.unwrap());
-            assert_eq!(git(&repo, &["rev-parse", &format!("refs/heads/orca/{workspace}/{slug}")]).await.unwrap(), head);
+            assert_eq!(git(&repo, &["rev-parse", &format!("refs/heads/ferryx/{workspace}/{slug}")]).await.unwrap(), head);
             assert_eq!(git(&repo, &["config", "core.repositoryformatversion"]).await.unwrap(), "0");
             assert!(!tokio::fs::try_exists(repo.join("prune-config-backup")).await.unwrap());
             eprintln!("A08_WIRE_PRUNE legacy={legacy} removed=true branch_preserved=true config_restored=true publication_received=true");

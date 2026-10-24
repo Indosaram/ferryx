@@ -2377,13 +2377,25 @@ impl DaemonSessionService {
                         machine.request.cwd_relative.as_ref().map(|relative| {
                             let rel_norm = relative.replace('\\', "/");
                             if let Some(ref w) = spawn_worktree {
-                                let expected_wt_rel = format!(".orca-worktrees/wt-{}", w.slug);
-                                if rel_norm == expected_wt_rel {
-                                    default_cwd.to_string_lossy().into_owned()
-                                } else if let Some(sub) =
-                                    rel_norm.strip_prefix(&format!("{}/", expected_wt_rel))
-                                {
-                                    default_cwd.join(sub).to_string_lossy().into_owned()
+                                // A path naming this worktree in any managed layout (current,
+                                // legacy or the old `wt-<slug>`) is relative to its root.
+                                let managed = (rel_norm.starts_with('.')
+                                    && rel_norm.split('/').next().is_some_and(
+                                        crate::worktree::naming::is_worktree_dir,
+                                    ))
+                                .then(|| {
+                                    crate::worktree::naming::managed_worktree_subdir(
+                                        &rel_norm, &w.slug,
+                                    )
+                                })
+                                .flatten();
+                                if let Some(sub) = managed {
+                                    match sub {
+                                        Some(sub) => {
+                                            default_cwd.join(sub).to_string_lossy().into_owned()
+                                        }
+                                        None => default_cwd.to_string_lossy().into_owned(),
+                                    }
                                 } else if default_cwd
                                     .to_string_lossy()
                                     .replace('\\', "/")

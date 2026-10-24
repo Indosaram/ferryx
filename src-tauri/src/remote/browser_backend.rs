@@ -627,8 +627,8 @@ pub fn matches_worktree_slug(
     let slug = scope_worktree_slug;
     if norm.ends_with(&format!("/{slug}"))
         || norm.ends_with(&format!("/wt-{slug}"))
-        || norm.contains(&format!(".orca-worktrees/wt-{slug}"))
         || norm.contains(&format!("/wt-{slug}/"))
+        || crate::worktree::naming::managed_worktree_subdir(&norm, slug).is_some()
     {
         return true;
     }

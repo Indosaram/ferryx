@@ -6,13 +6,12 @@ use crate::worktree::model::{
     BranchDeletionPreview, CreateWorktreeOptions, DirtyState, ExternalWorktree, OrcaWorktreeInfo,
     Worktree, WorktreeError,
 };
+use crate::worktree::naming;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-
-const ORCA_WORKTREE_DIR: &str = ".orca-worktrees";
 
 #[cfg(test)]
 thread_local! {
@@ -125,6 +124,8 @@ impl Drop for WriterLeaseGuard {
 pub struct WorktreeManager {
     repo_root: PathBuf,
     git_backed: bool,
+    /// `<data>/worktree-settings.json`; `None` when no data directory resolves.
+    settings_path: Option<PathBuf>,
     writer_leases: WriterLeaseRegistry,
     delete_lock: Arc<Mutex<()>>,
     dirty_snapshots: Arc<Mutex<HashMap<PathBuf, bool>>>,
@@ -149,6 +150,7 @@ impl WorktreeManager {
         Self {
             repo_root: root,
             git_backed: false,
+            settings_path: None,
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
             dirty_snapshots: Arc::new(Mutex::new(HashMap::new())),
@@ -178,6 +180,7 @@ impl WorktreeManager {
         Ok(Self {
             repo_root,
             git_backed,
+            settings_path: naming::settings_path(),
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
             dirty_snapshots: Arc::new(Mutex::new(HashMap::new())),
@@ -197,6 +200,74 @@ impl WorktreeManager {
 
     pub fn repo_root(&self) -> &Path {
         &self.repo_root
+    }
+
+    /// Uses another worktree settings file (tests and isolated QA daemons).
+    pub fn with_settings_path(mut self, settings_path: Option<PathBuf>) -> Self {
+        self.settings_path = settings_path;
+        self
+    }
+
+    pub fn settings_path(&self) -> Option<&Path> {
+        self.settings_path.as_deref()
+    }
+
+    /// Directory and branch prefix new worktrees of this repository use.
+    pub fn layout(&self) -> naming::WorktreeLayout {
+        naming::layout_for_repo(self.settings_path.as_deref(), &self.repo_root)
+    }
+
+    /// The branch a new worktree for `ws_id/slug` is created on.
+    pub fn branch_name_for(&self, ws_id: &str, slug: &str) -> Result<String, WorktreeError> {
+        Self::format_branch_name_with_prefix(
+            &self.layout().branch_prefix,
+            ws_id,
+            slug,
+            cfg!(windows),
+        )
+    }
+
+    /// Every branch prefix this repository's managed worktrees may carry.
+    pub fn known_branch_prefixes(&self) -> Vec<String> {
+        let mut known: Vec<String> = naming::builtin_branch_prefixes()
+            .map(str::to_string)
+            .collect();
+        for prefix in naming::configured_prefixes(self.settings_path.as_deref()) {
+            if !known.contains(&prefix) {
+                known.push(prefix);
+            }
+        }
+        known
+    }
+
+    /// Parses a managed branch with every prefix this repository may use.
+    pub fn parse_managed_branch(&self, branch: &str) -> Option<OrcaWorktreeInfo> {
+        let known = self.known_branch_prefixes();
+        naming::parse_branch(branch, known.iter().map(String::as_str))
+            .map(|(ws_id, slug)| OrcaWorktreeInfo { ws_id, slug })
+    }
+
+    /// True when `branch` is the managed branch of `ws_id/slug` under any known prefix.
+    pub fn is_identity_branch(&self, branch: Option<&str>, ws_id: &str, slug: &str) -> bool {
+        branch
+            .and_then(|branch| self.parse_managed_branch(branch))
+            .is_some_and(|info| info.ws_id == ws_id && info.slug == slug)
+    }
+
+    fn managed_path_in(&self, dir: &str, ws_id: &str, slug: &str) -> PathBuf {
+        let mut target = self.repo_root.join(dir).join(ws_id);
+        for segment in slug.split('/') {
+            target.push(segment);
+        }
+        target
+    }
+
+    /// Managed dirs to probe for `ws_id/slug`: this repository's layout dir first.
+    fn managed_dirs(&self) -> Vec<&'static str> {
+        let current = self.layout().worktree_dir;
+        std::iter::once(current)
+            .chain(naming::all_worktree_dirs().filter(|dir| *dir != current))
+            .collect()
     }
 
     /// Whether this workspace root is a Git repository (worktree operations
@@ -301,12 +372,16 @@ impl WorktreeManager {
         self.canonical_allowed_path(path)
     }
 
+    /// The managed path of `ws_id/slug`: an existing checkout in any managed dir (current or
+    /// legacy) wins, otherwise the location a new worktree is created at.
     pub fn worktree_path_for(&self, ws_id: &str, slug: &str) -> Result<PathBuf, WorktreeError> {
         Self::format_branch_name(ws_id, slug)?;
-        let mut target = self.repo_root.join(ORCA_WORKTREE_DIR).join(ws_id);
-        for segment in slug.split('/') {
-            target.push(segment);
-        }
+        let dirs = self.managed_dirs();
+        let target = dirs
+            .iter()
+            .map(|dir| self.managed_path_in(dir, ws_id, slug))
+            .find(|candidate| fs::symlink_metadata(candidate).is_ok())
+            .unwrap_or_else(|| self.managed_path_in(dirs[0], ws_id, slug));
         self.validate_new_worktree_path(&target)?;
         Ok(target)
     }
@@ -351,6 +426,8 @@ impl WorktreeManager {
         ))
     }
 
+    /// Branch for `ws_id/slug` under the default Ferryx prefix. Creation uses the repository's
+    /// prefix through [`Self::branch_name_for`]; this static form also validates an identity.
     pub fn format_branch_name(ws_id: &str, slug: &str) -> Result<String, WorktreeError> {
         Self::format_branch_name_platform(ws_id, slug, cfg!(windows))
     }
@@ -360,6 +437,18 @@ impl WorktreeManager {
         slug: &str,
         is_windows: bool,
     ) -> Result<String, WorktreeError> {
+        Self::format_branch_name_with_prefix(naming::DEFAULT_BRANCH_PREFIX, ws_id, slug, is_windows)
+    }
+
+    pub fn format_branch_name_with_prefix(
+        prefix: &str,
+        ws_id: &str,
+        slug: &str,
+        is_windows: bool,
+    ) -> Result<String, WorktreeError> {
+        naming::validate_branch_prefix(prefix).map_err(|error| WorktreeError::InvalidNamespace {
+            reason: error.reason,
+        })?;
         let ws_id = ws_id.trim();
         let slug = slug.trim();
         if ws_id.is_empty() {
@@ -379,20 +468,12 @@ impl WorktreeManager {
         }
         Self::validate_ref_component_platform(ws_id, "workspace ID", is_windows)?;
         Self::validate_ref_component_platform(slug, "slug", is_windows)?;
-        Ok(format!("orca/{ws_id}/{slug}"))
+        Ok(format!("{prefix}/{ws_id}/{slug}"))
     }
 
+    /// Parses a managed branch under the current, legacy or any configured prefix.
     pub fn parse_branch_name(branch: &str) -> Option<OrcaWorktreeInfo> {
-        let short = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-        let parts: Vec<&str> = short.split('/').collect();
-        if parts.len() >= 3 && parts[0] == "orca" {
-            Some(OrcaWorktreeInfo {
-                ws_id: parts[1].to_string(),
-                slug: parts[2..].join("/"),
-            })
-        } else {
-            None
-        }
+        naming::parse_known_branch(branch).map(|(ws_id, slug)| OrcaWorktreeInfo { ws_id, slug })
     }
 
     fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
@@ -477,7 +558,7 @@ impl WorktreeManager {
         options: CreateWorktreeOptions,
     ) -> Result<Worktree, WorktreeError> {
         self.require_git_backed()?;
-        let branch_name = Self::format_branch_name(&options.ws_id, &options.slug)?;
+        let branch_name = self.branch_name_for(&options.ws_id, &options.slug)?;
         self.validate_new_worktree_path(&options.path)?;
         if options.path.exists() {
             self.canonical_allowed_path(&options.path)?;
@@ -592,24 +673,24 @@ impl WorktreeManager {
         slug: &str,
     ) -> Result<Option<Worktree>, WorktreeError> {
         Self::format_branch_name(ws_id, slug)?;
-        let mut target = self.repo_root.join(ORCA_WORKTREE_DIR).join(ws_id);
-        for segment in slug.split('/') {
-            target.push(segment);
+        for dir in self.managed_dirs() {
+            let target = self.managed_path_in(dir, ws_id, slug);
+            if !target.exists() {
+                continue;
+            }
+            let canonical = match self.canonical_allowed_path(&target) {
+                Ok(path) => path,
+                Err(WorktreeError::PathOutsideWorkspace { .. })
+                | Err(WorktreeError::WorktreeNotFound { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            match inspect_worktree(&canonical) {
+                Ok(worktree) => return Ok(Some(worktree)),
+                Err(WorktreeError::GitError { .. }) => continue,
+                Err(error) => return Err(error),
+            }
         }
-        if !target.exists() {
-            return Ok(None);
-        }
-        let canonical = match self.canonical_allowed_path(&target) {
-            Ok(path) => path,
-            Err(WorktreeError::PathOutsideWorkspace { .. })
-            | Err(WorktreeError::WorktreeNotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        match inspect_worktree(&canonical) {
-            Ok(worktree) => Ok(Some(worktree)),
-            Err(WorktreeError::GitError { .. }) => Ok(None),
-            Err(error) => Err(error),
-        }
+        Ok(None)
     }
 
     pub fn check_dirty(&self, worktree_path: &Path) -> Result<DirtyState, WorktreeError> {
@@ -663,7 +744,10 @@ impl WorktreeManager {
                 continue;
             }
             if let Some(info) = record.orca_info() {
-                if self.worktree_path_for(&info.ws_id, &info.slug)? == path {
+                Self::format_branch_name(&info.ws_id, &info.slug)?;
+                let managed = naming::all_worktree_dirs()
+                    .any(|dir| self.managed_path_in(dir, &info.ws_id, &info.slug) == path);
+                if managed {
                     return Ok(record);
                 }
             }

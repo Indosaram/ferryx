@@ -16,25 +16,19 @@ pub struct Worktree {
 
 impl Worktree {
     /// Returns the short branch name if this worktree is checked out on a branch.
-    /// For example, `refs/heads/orca/ws1/feat` -> `orca/ws1/feat`.
+    /// For example, `refs/heads/ferryx/ws1/feat` -> `ferryx/ws1/feat`.
     pub fn branch_short_name(&self) -> Option<&str> {
         self.branch
             .as_deref()
             .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b))
     }
 
-    /// Extracts Orca workspace ID and slug if the worktree branch follows `orca/<ws-id>/<slug>`.
+    /// Extracts the workspace ID and slug when the branch follows `<prefix>/<ws-id>/<slug>` for
+    /// the Ferryx prefix, a legacy prefix (`orca`) or a configured one.
     pub fn orca_info(&self) -> Option<OrcaWorktreeInfo> {
         let branch = self.branch_short_name()?;
-        let parts: Vec<&str> = branch.split('/').collect();
-        if parts.len() >= 3 && parts[0] == "orca" {
-            Some(OrcaWorktreeInfo {
-                ws_id: parts[1].to_string(),
-                slug: parts[2..].join("/"),
-            })
-        } else {
-            None
-        }
+        crate::worktree::naming::parse_known_branch(branch)
+            .map(|(ws_id, slug)| OrcaWorktreeInfo { ws_id, slug })
     }
 }
 

@@ -17,7 +17,7 @@ ferryx/
 │   ├── src/remote/    # Axum gateway, PIN auth, active desktop session lock
 │   ├── src/terminal/  # portable-pty lifecycle, 512 KiB sequenced ring buffers, Ghostty config
 │   ├── src/native_terminal/ # libghostty-vt FFI and WGPU child view rendering engine
-│   ├── src/worktree/  # Git worktree isolation in .orca-worktrees/ with root jail
+│   ├── src/worktree/  # Git worktree isolation in .ferryx-worktrees/ with root jail (naming.rs)
 │   └── src/notification/ # OS notification dispatch, Rodio audio player, Dock badge sync
 └── ui/                 # React frontend (Tauri desktop app & standalone remote web client)
     ├── src/components/ # Workspaces, settings modals, and DnD pane split overlays
@@ -33,7 +33,7 @@ ferryx/
 | Remote Gateway & Auth | `src-tauri/src/remote/` | Axum server, 6-digit PIN pairing, active desktop session lock |
 | Terminal Ring Buffer & PTY | `src-tauri/src/terminal/` | `portable-pty`, 512 KiB ring buffer with `ReplayGap` detection |
 | Native Terminal Engine | `src-tauri/src/native_terminal/` | `libghostty-vt` FFI, WGPU child view rendering across OS targets |
-| Worktree Git Management | `src-tauri/src/worktree/` | `orca/<ws-id>/<slug>` branch allocation, root jail safety |
+| Worktree Git Management | `src-tauri/src/worktree/` | `<prefix>/<ws-id>/<slug>` branch allocation (`naming.rs`), root jail safety |
 | Native OS Notifications | `src-tauri/src/notification/` | Rodio audio cues, macOS Cocoa Dock badges, preflight checks |
 | UI Component Hierarchy | `ui/src/components/` | Multi-pane split views, DnD tab transplants, native surface canvas bridge |
 | UI IPC & Output Scheduling | `ui/src/lib/` | Native terminal lifecycle, PTY event bus and transport, IPC error mapping |
@@ -54,7 +54,7 @@ ferryx/
 - **Storage Keys**: Use canonical `ferryx.*` key prefix; auto-migrates legacy `rorca.*` and `orca.*` keys on read.
 - **Thread Safety**: All synchronous disk I/O, Git subprocesses, and OS dialogs must run via `crate::ipc::run_blocking`.
 - **Identity Triad**: Strict separation between visual `leafId`, frontend `sessionId`, and daemon `backendSessionId`.
-- **Worktree Isolation**: Managed worktrees must reside in `.orca-worktrees/<ws-id>/<slug>` using branch `orca/<ws-id>/<slug>`.
+- **Worktree Isolation**: Managed worktrees reside in `.ferryx-worktrees/<ws-id>/<slug>` on branch `<prefix>/<ws-id>/<slug>`, where `<prefix>` defaults to `ferryx` and is configurable per repo in `<data>/worktree-settings.json` (`cmd_worktree_settings_get/set`). `src-tauri/src/worktree/naming.rs` is the single source of these names; never hardcode them elsewhere. A repo that already has `.orca-worktrees` keeps the `orca` prefix and dir unless the user sets a prefix. Every parser also accepts the legacy `.orca-worktrees` dir, the `orca/` prefix and the old SSH `.orca-worktrees/wt-<slug>` layout; existing worktrees and branches are never moved or renamed.
 - **Agent Worktree Location (dev/verify checkouts)**: Every throwaway checkout an agent creates for development, verification, gates, or QA must be a `git worktree` of the host's canonical clone under ONE fixed root per host, never a loose copy or extracted tarball in `$HOME`, `/tmp`, `%TEMP%`, or ad-hoc names (`ferryx-*-2026xxxx`, `task*`, `wt-*`, `herdr-*`, `plv-*`, `fx-*`):
   | Host | Canonical clone | Worktree root | Cargo target |
   |------|-----------------|---------------|--------------|

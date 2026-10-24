@@ -1,4 +1,4 @@
-import type { Worktree } from "./types";
+import { isManagedBranchPrefix, type Worktree } from "./types";
 
 export function branchName(worktree: Worktree): string {
   return worktree.branch?.replace(/^refs\/heads\//, "") ?? "detached HEAD";
@@ -9,7 +9,7 @@ export function displayWorkspaceTitle(worktree: Worktree): string {
     return "detached HEAD";
   }
   const parts = branchName(worktree).split("/");
-  if (parts[0] === "orca" && parts.length > 2) {
+  if (isManagedBranchPrefix(parts[0]) && parts.length > 2) {
     return parts.slice(2).join("/");
   }
   // A plain-folder project has no branch at all; its row must show the folder

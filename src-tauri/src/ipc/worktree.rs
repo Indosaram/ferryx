@@ -124,6 +124,101 @@ pub async fn cmd_worktree_list<R: Runtime>(
     .await
 }
 
+/// Branch prefix and managed directory new worktrees of a repository use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeSettingsResponse {
+    pub workspace_id: String,
+    /// The prefix new worktree branches get (`<prefix>/<ws>/<slug>`).
+    pub branch_prefix: String,
+    /// The directory, under the repository root, new worktrees are created in.
+    pub worktree_dir: String,
+    /// The prefix explicitly stored for this repository, if any.
+    pub configured_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeSettingsSetRequest {
+    pub workspace_id: String,
+    /// `None` clears the stored prefix and restores the default for the repository.
+    pub branch_prefix: Option<String>,
+}
+
+fn worktree_settings_for(
+    workspace_id: &str,
+    manager: &crate::worktree::WorktreeManager,
+) -> WorktreeSettingsResponse {
+    let layout = manager.layout();
+    WorktreeSettingsResponse {
+        workspace_id: workspace_id.to_string(),
+        branch_prefix: layout.branch_prefix,
+        worktree_dir: layout.worktree_dir.to_string(),
+        configured_prefix: crate::worktree::naming::configured_prefix(
+            manager.settings_path(),
+            manager.repo_root(),
+        ),
+    }
+}
+
+/// Reads the worktree naming of a local repository. The values live backend-side in
+/// `<data>/worktree-settings.json`, so the daemon, SSH helper and CLI read the same setting.
+pub fn worktree_settings_get(
+    registry: &WorkspaceRegistry,
+    workspace_id: &str,
+) -> Result<WorktreeSettingsResponse, IpcError> {
+    WorkspaceRegistry::validate_workspace_id(workspace_id).map_err(IpcError::from)?;
+    let manager = registry.manager(workspace_id).map_err(IpcError::from)?;
+    Ok(worktree_settings_for(workspace_id, &manager))
+}
+
+/// Stores the branch prefix of a local repository after validating it
+/// (`^[a-z0-9][a-z0-9._-]{0,30}$`). An invalid prefix fails with `INVALID_NAMESPACE`.
+pub fn worktree_settings_set(
+    registry: &WorkspaceRegistry,
+    request: &WorktreeSettingsSetRequest,
+) -> Result<WorktreeSettingsResponse, IpcError> {
+    WorkspaceRegistry::validate_workspace_id(&request.workspace_id).map_err(IpcError::from)?;
+    let manager = registry
+        .manager(&request.workspace_id)
+        .map_err(IpcError::from)?;
+    if let Some(prefix) = request.branch_prefix.as_deref() {
+        crate::worktree::naming::validate_branch_prefix(prefix).map_err(|error| {
+            IpcError::from(crate::worktree::WorktreeError::InvalidNamespace {
+                reason: error.reason,
+            })
+        })?;
+    }
+    let path = manager.settings_path().ok_or_else(|| {
+        IpcError::internal("No Ferryx data directory; set FERRYX_DATA_DIR to store worktree settings")
+    })?;
+    crate::worktree::naming::write_configured_prefix(
+        path,
+        manager.repo_root(),
+        request.branch_prefix.as_deref(),
+    )
+    .map_err(|error| IpcError::from(crate::worktree::WorktreeError::Io(error)))?;
+    Ok(worktree_settings_for(&request.workspace_id, &manager))
+}
+
+#[tauri::command]
+pub async fn cmd_worktree_settings_get(
+    registry: State<'_, WorkspaceRegistry>,
+    workspace_id: String,
+) -> Result<WorktreeSettingsResponse, IpcError> {
+    let registry = (*registry).clone();
+    run_blocking(move || worktree_settings_get(&registry, &workspace_id)).await
+}
+
+#[tauri::command]
+pub async fn cmd_worktree_settings_set(
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeSettingsSetRequest,
+) -> Result<WorktreeSettingsResponse, IpcError> {
+    let registry = (*registry).clone();
+    run_blocking(move || worktree_settings_set(&registry, &request)).await
+}
+
 /// Lists the registered local repository's worktrees that Git knows about but that live outside
 /// the project folder (for example Orca's). The UI asks before importing any of them; remote and
 /// paired projects have no local Git state to inspect and report none.

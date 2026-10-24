@@ -2185,12 +2185,12 @@ mod tests {
         apply_session_env(
             &mut cmd,
             "session-test-42",
-            r"\\?\C:\repo\.orca-worktrees\wt-slug",
+            r"\\?\C:\repo\.ferryx-worktrees\ws\slug",
             None,
         );
         assert_eq!(
             cmd.get_env("FERRYX_WORKTREE_PATH").and_then(|s| s.to_str()),
-            Some(r"C:\repo\.orca-worktrees\wt-slug")
+            Some(r"C:\repo\.ferryx-worktrees\ws\slug")
         );
 
         // A verbatim UNC path keeps its share and loses the prefix.

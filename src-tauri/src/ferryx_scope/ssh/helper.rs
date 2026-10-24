@@ -15,6 +15,11 @@ use crate::scoped_contracts::{Epoch, TargetRef};
 #[path = "../../dag/paths.rs"]
 mod dag_paths;
 
+/// Shared worktree naming; the standalone helper uses only part of it.
+#[path = "../../worktree/naming.rs"]
+#[allow(dead_code)]
+mod worktree_naming;
+
 #[path = "../../dag/journal.rs"]
 pub mod dag_journal;
 
@@ -279,7 +284,22 @@ impl Runtime {
                 {
                     return Err("INVALID_REQUEST: invalid slug".into());
                 }
-                let base = repo.join(".orca-worktrees");
+                // `wsId` is optional so requests from older desktops (projectId + slug only)
+                // keep working; they land in the `remote` namespace.
+                let ws = p.get("wsId").and_then(Value::as_str).unwrap_or("remote");
+                if ws.is_empty()
+                    || ws.starts_with('-')
+                    || !ws
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                {
+                    return Err("INVALID_REQUEST: invalid wsId".into());
+                }
+                let layout = worktree_naming::layout_for_repo(
+                    worktree_naming::settings_path().as_deref(),
+                    repo,
+                );
+                let base = repo.join(layout.worktree_dir).join(ws);
                 std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
                 if !base
                     .canonicalize()
@@ -288,14 +308,15 @@ impl Runtime {
                 {
                     return Err("FORBIDDEN".into());
                 }
-                let destination = base.join(format!("wt-{slug}"));
+                let destination = base.join(slug);
+                let branch = format!("{}/{ws}/{slug}", layout.branch_prefix);
                 let mut command = std::process::Command::new("git");
                 #[cfg(windows)]
                 std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
                 let output = command
                     .arg("-C")
                     .arg(repo)
-                    .args(["worktree", "add", "-b", &format!("orca/{slug}"), "--"])
+                    .args(["worktree", "add", "-b", &branch, "--"])
                     .arg(&destination)
                     .arg("HEAD")
                     .output()
@@ -308,7 +329,8 @@ impl Runtime {
                 }
                 Ok(json!({
                     "projectId": text(p, "projectId")?,
-                    "worktree": format!(".orca-worktrees/wt-{slug}"),
+                    "worktree": worktree_naming::worktree_rel_path(layout.worktree_dir, ws, slug),
+                    "branch": branch,
                 }))
             }
             "dag.subscribe" => {
@@ -465,8 +487,7 @@ impl Runtime {
                 let projects = self.projects.lock().map_err(|e| e.to_string())?;
                 let root = projects.get(text(p, "projectId")?).ok_or("NOT_FOUND")?;
                 let worktree_rel = p.get("worktree").and_then(Value::as_str).unwrap_or(".");
-                let cwd = root
-                    .join(worktree_rel)
+                let cwd = resolve_managed_worktree_rel(root, worktree_rel)
                     .canonicalize()
                     .map_err(|e| format!("INVALID_REQUEST: invalid cwd: {e}"))?;
                 if !cwd.starts_with(root) {
@@ -1101,6 +1122,33 @@ fn default_platform_login_shell() -> (String, Vec<String>) {
             });
         (shell, vec!["-l".to_string()])
     }
+}
+
+/// Resolves a requested worktree path under `root`. A managed path `<dir>/<ws>/<slug>` that does
+/// not exist falls back to the same worktree in a legacy layout: `<legacy-dir>/<ws>/<slug>` or the
+/// old SSH `<legacy-dir>/wt-<slug>`. Any other request resolves exactly as given.
+fn resolve_managed_worktree_rel(root: &Path, worktree_rel: &str) -> PathBuf {
+    let requested = root.join(worktree_rel);
+    if requested.exists() {
+        return requested;
+    }
+    let parts: Vec<&str> = worktree_rel
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() < 3 || !worktree_naming::is_worktree_dir(parts[0]) {
+        return requested;
+    }
+    let (ws, slug, rest) = (parts[1], parts[2], &parts[3..]);
+    for dir in worktree_naming::all_worktree_dirs() {
+        let wt = format!("{}{slug}", worktree_naming::LEGACY_SLUG_DIR_PREFIX);
+        for base in [root.join(dir).join(ws).join(slug), root.join(dir).join(&wt)] {
+            if base.is_dir() {
+                return rest.iter().fold(base, |path, part| path.join(part));
+            }
+        }
+    }
+    requested
 }
 
 // Normalize a process cwd so that callers handing the path to a platform shell
