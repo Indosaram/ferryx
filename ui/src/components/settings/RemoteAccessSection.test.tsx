@@ -42,6 +42,9 @@ vi.mock("../../lib/tauri", () => ({
   enableRemoteGateway: (req: unknown) => enableRemoteGateway(req),
   disableRemoteGateway: () => disableRemoteGateway(),
   revokeRemoteDevice: (id: string) => revokeRemoteDevice(id),
+  // The agent-control card is covered by RemoteAccessSection.agentControl.test.tsx; null hides it here.
+  getAgentControlSettings: () => Promise.resolve(null),
+  setAgentControlSettings: vi.fn(),
 }));
 
 const { RemoteAccessSection } = await import("./RemoteAccessSection");

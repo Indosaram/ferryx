@@ -1,5 +1,6 @@
 pub mod account;
 pub mod agent_history;
+pub mod agent_control_settings;
 pub mod agent_integration;
 pub mod agents;
 pub mod browser;

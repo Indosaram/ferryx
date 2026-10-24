@@ -951,6 +951,15 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host_id: Option<String>,
     },
+    /// The Settings card: the agent-control switch, excluded devices and the newest audit lines.
+    AgentControlSettingsGet,
+    /// Save the agent-control switch and excluded devices to `agent-control.json`.
+    #[serde(rename_all = "camelCase")]
+    AgentControlSettingsSet {
+        enabled: bool,
+        #[serde(default)]
+        excluded_device_ids: Vec<String>,
+    },
 }
 
 /// Authenticated identity of a paired DAG subscription. The desktop names the host
@@ -1205,6 +1214,10 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     AgentControlOk {
         result: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentControlSettingsOk {
+        settings: crate::agent_control::policy::AgentControlSettings,
     },
     #[serde(rename_all = "camelCase")]
     AgentIntegrationOk {
