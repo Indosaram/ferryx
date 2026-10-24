@@ -184,20 +184,21 @@ pub(crate) fn tool_list() -> Vec<Value> {
         ),
         (
             "lane_goal_set",
-            "Set or replace a lane's goal contract. Refused while a supervisor turn is in flight.",
+            "Set a lane's goal contract (owner meta-agent channel only). Replacing a contract that already has requirements or a recorded stop needs replace: true; prefer a criteria revision proposal. Refused while a supervisor turn is in flight.",
             schema(
                 json!({"key": {"type": "string"},
                 "requirements": {"type": "array", "items": {"type": "object",
                     "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "verifier": {"type": "string"}},
                     "required": ["id", "text", "verifier"]}},
                 "mode": {"type": "string", "enum": ["off", "supervised", "full"]},
-                "turnLimit": {"type": "integer", "minimum": 1}}),
+                "turnLimit": {"type": "integer", "minimum": 1},
+                "replace": {"type": "boolean", "description": "explicit owner reset of an existing contract"}}),
                 &["key", "requirements"],
             ),
         ),
         (
             "lane_goal_approve",
-            "Approve and send the lane's proposal awaiting approval, once.",
+            "Approve and send the lane's proposal awaiting approval, once (owner meta-agent channel only).",
             schema(json!({"key": {"type": "string"}}), &["key"]),
         ),
         ("cron.list", "List scheduled jobs.", schema(json!({}), &[])),
@@ -464,6 +465,9 @@ async fn call_tool(
                 .map_err(|error| error.to_string())?;
             Ok(json!({"key": key, "goalContract": view}))
         }
+        // The hub MCP server is the owner's meta-agent control plane (`ferryx-cli mcp`), never a
+        // worker tool server, so goal set/approve here act with the owner's authority. A lane's
+        // existing contract is still not overwritten without an explicit reset.
         "lane_goal_set" => {
             let key = required(args, "key")?;
             let requirements: Vec<crate::goals::contract::RequirementSpec> = serde_json::from_value(
@@ -473,6 +477,14 @@ async fn call_tool(
             let existing = crate::goals::contract::contract_of(&context.pool, &key)
                 .await
                 .map_err(|error| error.to_string())?;
+            let replace = args.get("replace").and_then(Value::as_bool).unwrap_or(false);
+            if let Some(contract) = existing.as_ref() {
+                if !replace && (contract.stop_reason.is_some() || !contract.requirements.is_empty()) {
+                    return Err(format!(
+                        "CONTRACT_EXISTS: lane {key} already has a goal contract; propose a criteria revision with the owner's words, or pass replace: true for an explicit owner reset"
+                    ));
+                }
+            }
             let mode = match args.get("mode").and_then(Value::as_str) {
                 Some(mode) => mode
                     .parse::<crate::goals::GoalMode>()

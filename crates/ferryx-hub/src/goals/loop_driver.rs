@@ -22,6 +22,10 @@ use crate::lanes::state::{self, LaneStatus, GOAL_CONVERGED_REASON};
 /// Refusal code of a send a person's typing blocked. Nothing was typed; the proposal is stale.
 pub const CONTROL_CONFLICT: &str = "CONTROL_CONFLICT";
 
+/// Refusal code of a send the caller could not confirm (no in-process observer, e.g. the
+/// standalone `ferryx-cli mcp`). Nothing was typed; the proposal goes back to awaiting approval.
+pub const OBSERVER_UNAVAILABLE: &str = "OBSERVER_UNAVAILABLE";
+
 /// Consecutive refused `complete` decisions that stop the lane.
 pub const DIVERGENCE_STOP_AFTER: u32 = 2;
 
@@ -155,6 +159,18 @@ async fn dispatch<C: AgentControl + ?Sized>(
             contract::set_proposal_state(pool, lane_key, ProposalState::Superseded, None).await?;
             Ok(LoopOutcome::new(lane_key))
         }
+        super::SendOutcome::Refused { code } if code == OBSERVER_UNAVAILABLE => {
+            contract::set_proposal_state(
+                pool,
+                lane_key,
+                ProposalState::AwaitingApproval,
+                Some(&[ProposalState::Pending]),
+            )
+            .await?;
+            Err(GoalError::InvalidContract(
+                "approving a proposal requires the daemon observer".into(),
+            ))
+        }
         super::SendOutcome::Uncertain { code } | super::SendOutcome::Refused { code } => {
             contract::set_proposal_state(pool, lane_key, ProposalState::Uncertain, None).await?;
             stop(pool, lane_key, StopReason::DeliveryUncertain, Some(&code)).await
@@ -182,10 +198,15 @@ async fn propose<C: AgentControl + ?Sized>(
         Err(error) => return Err(error),
     };
     let request_id = format!("{}{lane_key}-{turn}", turns::SUPERVISOR_REQUEST_PREFIX);
-    contract::set_proposal(pool, lane_key, instruction, gap_ids, ProposalState::Pending, Some(&request_id)).await?;
+    // A supervised proposal is written straight as awaiting approval: only `pending` means a
+    // send may be in flight, so a crash here is never mistaken for an interrupted delivery.
+    let initial = match contract.mode {
+        GoalMode::Supervised => ProposalState::AwaitingApproval,
+        GoalMode::Full | GoalMode::Off => ProposalState::Pending,
+    };
+    contract::set_proposal(pool, lane_key, instruction, gap_ids, initial, Some(&request_id)).await?;
     match contract.mode {
         GoalMode::Supervised => {
-            contract::set_proposal_state(pool, lane_key, ProposalState::AwaitingApproval, None).await?;
             Ok(LoopOutcome {
                 awaiting_approval: true,
                 ..LoopOutcome::new(lane_key)
@@ -346,7 +367,9 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
 }
 
 /// The owner approved the lane's awaiting proposal: send it through the same path full mode
-/// uses.
+/// uses. The proposal is atomically claimed (`awaiting_approval` -> `pending`) before the
+/// send, so a racing or repeated approval, even after a crash mid-send, is refused and the
+/// proposal is never sent twice.
 pub async fn approve_proposal<C: AgentControl + ?Sized>(
     pool: &SqlitePool,
     control: &C,
@@ -365,6 +388,19 @@ pub async fn approve_proposal<C: AgentControl + ?Sized>(
     let Some((Some(session_id), _)) = lane_row(pool, lane_key).await? else {
         return Err(GoalError::InvalidContract(format!("lane {lane_key} has no pane")));
     };
+    if let Some(proposal) = contract.proposal.as_ref() {
+        if human_after(pool, lane_key, proposal).await? {
+            contract::set_proposal_state(
+                pool,
+                lane_key,
+                ProposalState::Superseded,
+                Some(&[ProposalState::AwaitingApproval]),
+            )
+            .await?;
+            return Ok(LoopOutcome::new(lane_key));
+        }
+    }
+    contract::claim_approval(pool, lane_key).await?;
     dispatch(pool, control, lane_key, &session_id).await
 }
 
@@ -613,6 +649,79 @@ mod tests {
         assert!(control.sends().is_empty());
         assert!(approve_proposal(&pool, &control, LANE).await.is_err());
         assert!(control.sends().is_empty());
+    }
+
+    /// Records a send, signals that it is in flight, then never finishes: an approval whose
+    /// process dies while delivery is still unconfirmed.
+    struct ParkedControl {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        sends: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl AgentControl for ParkedControl {
+        async fn execute(&self, _host_id: Option<&str>, op: AgentOp) -> Result<Value> {
+            Err(HubError::message(format!("unexpected op {op:?}")))
+        }
+
+        async fn send_confirmed(
+            &self,
+            _host_id: Option<&str>,
+            _session_id: &str,
+            _text: &str,
+            _request_id: &str,
+        ) -> SendOutcome {
+            *self.sends.lock().unwrap() += 1;
+            let entered = self.entered.lock().unwrap().take();
+            if let Some(entered) = entered {
+                let _ = entered.send(());
+            }
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_approval_cannot_be_approved_twice_and_stops_uncertain_on_settle() {
+        let pool = lane_pool(Some(GoalMode::Supervised)).await;
+        let model = ScriptedModel::new(&[CONTINUE]);
+        let control = FakeControl::default();
+        let outcome = on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(outcome.awaiting_approval);
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let parked = Arc::new(ParkedControl {
+            entered: Mutex::new(Some(entered_tx)),
+            sends: Mutex::new(0),
+        });
+        let approving = {
+            let pool = pool.clone();
+            let parked = Arc::clone(&parked);
+            tokio::spawn(async move { approve_proposal(&pool, parked.as_ref(), LANE).await })
+        };
+        entered_rx.await.unwrap();
+        approving.abort();
+        assert!(approving.await.unwrap_err().is_cancelled());
+        assert_eq!(*parked.sends.lock().unwrap(), 1);
+        assert_eq!(goal(&pool).await.proposal.unwrap().state, ProposalState::Pending);
+
+        let again = approve_proposal(&pool, &control, LANE).await;
+        assert!(matches!(again, Err(GoalError::InvalidContract(_))), "{again:?}");
+        assert!(control.sends().is_empty());
+
+        let settled = on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.stop_reason, Some(StopReason::DeliveryUncertain));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::DeliveryUncertain));
+        assert_eq!(contract.proposal.unwrap().state, ProposalState::Uncertain);
+        assert!(control.sends().is_empty());
+        assert_eq!(*parked.sends.lock().unwrap(), 1, "exactly one write");
+        assert_eq!(model.calls(), 1);
     }
 
     #[tokio::test]

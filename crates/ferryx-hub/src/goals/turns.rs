@@ -1,6 +1,11 @@
 //! Ledger of who drove each lane turn. A person's relayed words and raw typing are recorded
 //! as `human_correction`, a confirmed supervisor send as `supervisor_proposal`. Raw keystrokes
 //! are never stored as text, and the ledger is never summarized into a profile.
+//!
+//! `lane_turns` references `lanes(key)`, not `lane_goal`: the ledger is lane provenance and is
+//! kept whether or not a goal contract exists, so a contract set later can tell a person's
+//! earlier corrections from supervisor sends. Only the goal loop reads it, and the loop never
+//! touches a lane without a contract (IS-9), so recording here adds no supervision.
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -153,7 +158,8 @@ pub async fn record_keystroke_turn(
 
 /// Every turn of a lane, oldest first.
 pub async fn turns_of(pool: &SqlitePool, lane_key: &str) -> Result<Vec<Turn>, GoalError> {
-    let rows: Vec<(i64, String, Option<String>, Option<String>, String)> = sqlx::query_as(
+    type TurnRow = (i64, String, Option<String>, Option<String>, String);
+    let rows: Vec<TurnRow> = sqlx::query_as(
         "SELECT seq, origin, text_excerpt, screen_revision, at FROM lane_turns
          WHERE lane_key = ? ORDER BY seq",
     )

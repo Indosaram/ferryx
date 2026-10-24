@@ -131,6 +131,14 @@ impl AgentControl for DaemonBridge {
         request_id: &str,
     ) -> ferryx_hub::goals::SendOutcome {
         let local = host_id.is_none_or(|host| host.is_empty() || host == "local");
+        // A local send is confirmed only by the in-process observer. Without one (the
+        // standalone `ferryx-cli mcp` process) a raw send could never be confirmed, so it is
+        // not attempted and never reported as started.
+        if local && self.gateway.is_none() {
+            return ferryx_hub::goals::SendOutcome::Refused {
+                code: ferryx_hub::goals::loop_driver::OBSERVER_UNAVAILABLE.into(),
+            };
+        }
         let Some(gateway) = self.gateway.as_ref().filter(|_| local) else {
             let op = AgentOp::Send {
                 session_id: session_id.to_owned(),

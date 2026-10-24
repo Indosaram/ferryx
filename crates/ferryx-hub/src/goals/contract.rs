@@ -376,6 +376,29 @@ pub async fn set_proposal(
     require_written(pool, lane_key, updated.rows_affected()).await
 }
 
+/// Atomically claims the lane's awaiting proposal for sending: moves it from
+/// `awaiting_approval` to `pending` in one statement. At most one approver (across processes)
+/// wins; a proposal left `pending` by a crash mid-send is never approved again, and the next
+/// settle stops the lane as `delivery_uncertain` instead of resending.
+pub async fn claim_approval(pool: &SqlitePool, lane_key: &str) -> Result<(), GoalError> {
+    let updated = sqlx::query(
+        "UPDATE lane_goal SET proposal_state = 'pending', updated_at = ?
+         WHERE lane_key = ? AND proposal_state = 'awaiting_approval'",
+    )
+    .bind(now_rfc3339())
+    .bind(lane_key)
+    .execute(pool)
+    .await?;
+    require_written(pool, lane_key, updated.rows_affected()).await?;
+    if updated.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(GoalError::InvalidContract(format!(
+            "lane {lane_key} has no proposal awaiting approval"
+        )))
+    }
+}
+
 /// Moves the proposal to `state`. With `from`, only a proposal currently in one of those
 /// states moves. Returns whether it moved.
 pub async fn set_proposal_state(
