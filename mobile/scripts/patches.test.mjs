@@ -58,6 +58,11 @@ describe("ios patches", () => {
     expect(out).not.toContain("DEVELOPMENT_TEAM: undefined");
   });
 
+  test("tauri.conf.json sets minimumSystemVersion >= 15.0 for Xcode 27 SDK compatibility", () => {
+    const conf = JSON.parse(readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+    expect(Number.parseFloat(conf.bundle.iOS.minimumSystemVersion)).toBeGreaterThanOrEqual(15);
+  });
+
   test("development team comes from the provided env value", () => {
     expect(patchProjectYml(yml, "ABCDE12345")).toContain("        DEVELOPMENT_TEAM: ABCDE12345\n");
   });
