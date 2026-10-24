@@ -4,9 +4,11 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
+import { PUBLISHED_ATTENTION_ROWS_CAP, sidebarSessionSignals } from "../components/sidebar/sidebarSessionSignals";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { publishedInbox, RemoteSidebar, type PublishedAttentionTarget } from "./RemoteSidebar";
 import { publishedAttentionOption, type RemoteWorkspaceModel } from "./RemoteSessionList";
+import { loadRemoteSidebar } from "./remoteSidebarSource";
 import { sidebarModelFixture } from "./remoteSidebarTestUtils";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 
@@ -104,6 +106,18 @@ describe("remote Inbox: the tab counts the rows listed under it", () => {
 });
 
 describe("publishedInbox", () => {
+  it("publishes the desktop's first 50 rows, which the remote's validator accepts", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => row(`r${i}`, "done"));
+    const built = sidebarModelFixture(ROWS);
+    const wire = { ...built, signals: sidebarSessionSignals(built, { attentionRows: many }) };
+    const body = new TextEncoder().encode(JSON.stringify({ model: wire }));
+    const res = await loadRemoteSidebar(async () => ({ status: 200, body }) as never);
+
+    expect(res.kind === "ok" && res.model.source).toBe("desktop");
+    const rows = res.kind === "ok" ? res.model.signals?.attentionRows : undefined;
+    expect(rows).toEqual(many.slice(0, PUBLISHED_ATTENTION_ROWS_CAP));
+    expect(PUBLISHED_ATTENTION_ROWS_CAP).toBe(50);
+  });
   it("keeps two desktops' rows with the same id apart", () => {
     const inbox = publishedInbox([
       { machineId: "a", model: model("desktop", [row("same", "done")]) },
