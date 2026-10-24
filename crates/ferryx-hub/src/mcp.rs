@@ -184,7 +184,7 @@ pub(crate) fn tool_list() -> Vec<Value> {
         ),
         (
             "lane_goal_set",
-            "Set a lane's goal contract (owner meta-agent channel only). Replacing a contract that already has requirements or a recorded stop needs replace: true; prefer a criteria revision proposal. Refused while a supervisor turn is in flight.",
+            "Set a lane's goal contract (owner meta-agent channel only). The first call creates the contract. On a lane that already has a contract, the call proposes a pending criteria revision replacing the requirements and needs instruction_quote: an exact quote (at least 8 chars) of the owner's own words (lane title, session goal, or owner reply). Nothing is applied until the revision is accepted.",
             schema(
                 json!({"key": {"type": "string"},
                 "requirements": {"type": "array", "items": {"type": "object",
@@ -192,7 +192,7 @@ pub(crate) fn tool_list() -> Vec<Value> {
                     "required": ["id", "text", "verifier"]}},
                 "mode": {"type": "string", "enum": ["off", "supervised", "full"]},
                 "turnLimit": {"type": "integer", "minimum": 1},
-                "replace": {"type": "boolean", "description": "explicit owner reset of an existing contract"}}),
+                "instruction_quote": {"type": "string", "description": "required when the lane already has a contract: exact owner-authored quote justifying the proposed requirement change"}}),
                 &["key", "requirements"],
             ),
         ),
@@ -467,7 +467,7 @@ async fn call_tool(
         }
         // The hub MCP server is the owner's meta-agent control plane (`ferryx-cli mcp`), never a
         // worker tool server, so goal set/approve here act with the owner's authority. A lane's
-        // existing contract is still not overwritten without an explicit reset.
+        // existing contract is never overwritten here: changes go through the revision guard.
         "lane_goal_set" => {
             let key = required(args, "key")?;
             let requirements: Vec<crate::goals::contract::RequirementSpec> = serde_json::from_value(
@@ -477,13 +477,24 @@ async fn call_tool(
             let existing = crate::goals::contract::contract_of(&context.pool, &key)
                 .await
                 .map_err(|error| error.to_string())?;
-            let replace = args.get("replace").and_then(Value::as_bool).unwrap_or(false);
-            if let Some(contract) = existing.as_ref() {
-                if !replace && (contract.stop_reason.is_some() || !contract.requirements.is_empty()) {
-                    return Err(format!(
-                        "CONTRACT_EXISTS: lane {key} already has a goal contract; propose a criteria revision with the owner's words, or pass replace: true for an explicit owner reset"
-                    ));
-                }
+            if existing.is_some() {
+                let quote = args
+                    .get("instruction_quote")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!(
+                            "CONTRACT_EXISTS: lane {key} already has a goal contract; pass instruction_quote with the owner's exact words to propose a criteria revision"
+                        )
+                    })?;
+                let revision = crate::goals::revision::propose(
+                    &context.pool,
+                    &key,
+                    &crate::goals::revision::RevisionChange::Replace { requirements },
+                    quote,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                return Ok(json!({"key": key, "proposedRevision": revision}));
             }
             let mode = match args.get("mode").and_then(Value::as_str) {
                 Some(mode) => mode
@@ -729,5 +740,68 @@ mod tests {
         assert_eq!(body["goalContract"]["requirements"][0]["id"], "r1");
         let approve = dispatch(&context, &call("lane_goal_approve", json!({"key": "ledger"}))).await;
         assert!(approve.get("error").is_some(), "{approve}");
+    }
+
+    #[tokio::test]
+    async fn lane_goal_set_on_an_existing_contract_requires_an_owner_quote_and_creates_a_pending_revision() {
+        let pool = crate::storage::memory().await.unwrap();
+        crate::lanes::state::insert_lane(
+            &pool,
+            "ledger",
+            "Ledger must reconcile nightly",
+            "lead",
+            "/repo",
+            "file marker",
+        )
+        .await
+        .unwrap();
+        let context = McpContext {
+            control: Arc::new(RecordingControl::default()),
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool: pool.clone(),
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+        };
+        let call = |arguments: Value| {
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": "lane_goal_set", "arguments": arguments}})
+        };
+        let first = dispatch(
+            &context,
+            &call(json!({"key": "ledger",
+                "requirements": [{"id": "r1", "text": "tests pass", "verifier": "cargo test"}]})),
+        )
+        .await;
+        assert!(first.get("error").is_none(), "{first}");
+        let replacement = json!([{"id": "r2", "text": "reconcile runs", "verifier": "cargo test reconcile"}]);
+        let unquoted = dispatch(
+            &context,
+            &call(json!({"key": "ledger", "requirements": replacement.clone()})),
+        )
+        .await;
+        assert!(unquoted.get("error").is_some(), "{unquoted}");
+        let misquoted = dispatch(
+            &context,
+            &call(json!({"key": "ledger", "requirements": replacement.clone(),
+                "instruction_quote": "words the owner never wrote"})),
+        )
+        .await;
+        assert!(misquoted.get("error").is_some(), "{misquoted}");
+        let quoted = dispatch(
+            &context,
+            &call(json!({"key": "ledger", "requirements": replacement,
+                "instruction_quote": "reconcile nightly"})),
+        )
+        .await;
+        assert!(quoted.get("error").is_none(), "{quoted}");
+        let text = quoted["result"]["content"][0]["text"].as_str().unwrap();
+        let body: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["proposedRevision"]["state"], "proposed");
+        assert_eq!(body["proposedRevision"]["instruction_quote"], "reconcile nightly");
+        let contract = crate::goals::contract::contract_of(&pool, "ledger")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(contract.requirements.len(), 1);
+        assert_eq!(contract.requirements[0].id, "r1", "active requirements untouched");
     }
 }

@@ -725,6 +725,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_observer_unavailable_refusal_restores_awaiting_approval_without_stopping() {
+        let pool = lane_pool(Some(GoalMode::Supervised)).await;
+        contract::set_proposal(
+            &pool,
+            LANE,
+            "run the tests",
+            &["g1".to_owned()],
+            ProposalState::AwaitingApproval,
+            Some("hub-goal-goal-a-1"),
+        )
+        .await
+        .unwrap();
+        let control = FakeControl::scripted(vec![SendOutcome::Refused {
+            code: OBSERVER_UNAVAILABLE.into(),
+        }]);
+        let result = approve_proposal(&pool, &control, LANE).await;
+        assert!(matches!(result, Err(GoalError::InvalidContract(_))), "{result:?}");
+        let contract = goal(&pool).await;
+        assert_eq!(contract.proposal.unwrap().state, ProposalState::AwaitingApproval);
+        assert_eq!(contract.stop_reason, None);
+        assert_eq!(control.sends().len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_person_typing_refuses_the_send_and_supersedes_the_proposal() {
         let pool = lane_pool(Some(GoalMode::Full)).await;
         let model = ScriptedModel::new(&[CONTINUE]);

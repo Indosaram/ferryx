@@ -99,7 +99,8 @@ fn validate(requirements: &[RequirementSpec], turn_limit: u32) -> Result<(), Goa
 
 /// Creates a lane's contract, or replaces it when no supervisor turn is in flight (the
 /// proposal is not `sent`). A replacement bumps the revision, resets every requirement to
-/// pending, clears the stop and discards a proposal that was not sent. Turns used carry over.
+/// pending, clears the stop, discards a proposal that was not sent and forgets an uncertain
+/// one. Turns used carry over.
 pub async fn set_contract(
     pool: &SqlitePool,
     lane_key: &str,
@@ -119,8 +120,18 @@ pub async fn set_contract(
             stop_reason = NULL,
             stop_detail = NULL,
             converge_misses = 0,
-            proposal_state = CASE WHEN lane_goal.proposal_state IN ('pending','awaiting_approval')
-                THEN 'discarded' ELSE lane_goal.proposal_state END,
+            proposal_text = CASE WHEN lane_goal.proposal_state = 'uncertain'
+                THEN NULL ELSE lane_goal.proposal_text END,
+            proposal_gap_ids = CASE WHEN lane_goal.proposal_state = 'uncertain'
+                THEN NULL ELSE lane_goal.proposal_gap_ids END,
+            proposal_request_id = CASE WHEN lane_goal.proposal_state = 'uncertain'
+                THEN NULL ELSE lane_goal.proposal_request_id END,
+            proposal_at = CASE WHEN lane_goal.proposal_state = 'uncertain'
+                THEN NULL ELSE lane_goal.proposal_at END,
+            proposal_state = CASE
+                WHEN lane_goal.proposal_state IN ('pending','awaiting_approval') THEN 'discarded'
+                WHEN lane_goal.proposal_state = 'uncertain' THEN NULL
+                ELSE lane_goal.proposal_state END,
             updated_at = excluded.updated_at
          WHERE lane_goal.proposal_state IS NULL OR lane_goal.proposal_state <> 'sent'",
     )
@@ -735,5 +746,31 @@ mod tests {
             .unwrap();
         assert_eq!(replaced.revision, 2);
         assert_eq!(replaced.requirements[0].id, "r2");
+    }
+
+    #[tokio::test]
+    async fn set_contract_clears_an_uncertain_proposal_and_stop_reason() {
+        let pool = lane_pool().await;
+        set_contract(&pool, "lane-a", &[spec("r1")], GoalMode::Full, 20)
+            .await
+            .unwrap();
+        set_proposal(&pool, "lane-a", "do it", &["g1".to_owned()], ProposalState::Pending, Some("hub-goal-lane-a-1"))
+            .await
+            .unwrap();
+        assert!(set_proposal_state(&pool, "lane-a", ProposalState::Uncertain, None)
+            .await
+            .unwrap());
+        record_stop(&pool, "lane-a", StopReason::DeliveryUncertain, Some("SEND_TIMEOUT"))
+            .await
+            .unwrap();
+        let replaced = set_contract(&pool, "lane-a", &[spec("r2")], GoalMode::Full, 20)
+            .await
+            .unwrap();
+        assert_eq!(replaced.revision, 2);
+        assert_eq!(replaced.stop_reason, None);
+        assert_eq!(replaced.proposal, None);
+        let read = contract_of(&pool, "lane-a").await.unwrap().unwrap();
+        assert_eq!(read.stop_reason, None);
+        assert_eq!(read.proposal, None);
     }
 }

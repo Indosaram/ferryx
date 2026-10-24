@@ -7,7 +7,7 @@ use super::contract::Contract;
 use super::evidence::EvidenceBundle;
 use super::prompts::{gap_assess_prompt, retry_prompt};
 use super::turns::Turn;
-use super::types::{Assessment, Decision, GoalError};
+use super::types::{Assessment, Decision, EvidenceSource, GapKind, GoalError, StopReason};
 use crate::judge::{Judge, Purpose};
 
 /// Strictly parses and validates one assessment against the contract.
@@ -57,6 +57,53 @@ pub fn parse_assessment(text: &str, contract: &Contract) -> Result<Assessment, G
     Ok(assessment)
 }
 
+/// True when Ferryx itself attested a failure or a block: a failed check or a blocked
+/// observer state. Agent claims never count.
+fn has_attested_failure_or_block(evidence: &EvidenceBundle) -> bool {
+    evidence.items.iter().any(|item| {
+        item.source != EvidenceSource::AgentClaim
+            && (item.passed == Some(false)
+                || item.reference == "observer:blocked"
+                || (item.source == EvidenceSource::FerryxObserver
+                    && item.detail.contains("state=blocked")))
+    })
+}
+
+/// IS-7: a claim of missing access without an observed attempt is work, not external
+/// input. Without an attested failure or block, a stop for the user on an `external_input`
+/// gap is refused, and every `external_input` gap of any other decision becomes `work`.
+fn enforce_attested_external_input(
+    mut assessment: Assessment,
+    evidence: &EvidenceBundle,
+) -> Result<Assessment, GoalError> {
+    if has_attested_failure_or_block(evidence) {
+        return Ok(assessment);
+    }
+    let claims_external_input = assessment
+        .gaps
+        .iter()
+        .any(|gap| gap.kind == GapKind::ExternalInput);
+    if claims_external_input
+        && matches!(
+            assessment.decision,
+            Decision::Stop {
+                reason: StopReason::HighStakesUserRequired,
+                ..
+            }
+        )
+    {
+        return Err(GoalError::InvalidDecision(
+            "an unattested missing-access claim cannot stop for external input".into(),
+        ));
+    }
+    for gap in &mut assessment.gaps {
+        if gap.kind == GapKind::ExternalInput {
+            gap.kind = GapKind::Work;
+        }
+    }
+    Ok(assessment)
+}
+
 /// Grades the lane once. Never treats the agent's claim as authoritative; the prompt labels
 /// it unattested. Returns `JudgeUnavailable` when the evaluator cannot run or answers
 /// invalidly twice.
@@ -67,8 +114,12 @@ pub async fn assess(
     recent_turns: &[Turn],
 ) -> Result<Assessment, GoalError> {
     let prompt = gap_assess_prompt(contract, evidence, recent_turns);
+    let accept = |text: &str| {
+        parse_assessment(text, contract)
+            .and_then(|assessment| enforce_attested_external_input(assessment, evidence))
+    };
     let first = judge.structured(Purpose::GapAssess, &prompt).await?;
-    let error = match parse_assessment(&first, contract) {
+    let error = match accept(&first) {
         Ok(assessment) => return Ok(assessment),
         Err(error) => error,
     };
@@ -76,7 +127,7 @@ pub async fn assess(
     let second = judge
         .structured(Purpose::GapAssess, &retry_prompt(&prompt, &error.to_string()))
         .await?;
-    parse_assessment(&second, contract).map_err(|error| {
+    accept(&second).map_err(|error| {
         tracing::warn!(%error, lane = %contract.lane_key, "gap assessment refused twice");
         GoalError::JudgeUnavailable
     })
@@ -333,6 +384,66 @@ mod tests {
         assert!(prompt.contains("human_correction: OWNER CORRECTION: use the long flag"));
         assert!(prompt.contains("#3 human_correction: OWNER KEYSTROKES"));
         assert_eq!(prompt.matches("</evidence>").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unattested_no_access_claim_cannot_produce_an_external_input_gap_or_stop() {
+        let answer = r#"{"gaps":[{"id":"g1","kind":"external_input","requirement_ids":["r2"],"summary":"no credentials"}],"decision":{"decision":"continue","instruction":"run the command and report its output","gap_ids":["g1"],"expected_change":"an attested attempt","verification":"sig:0"}}"#;
+        let model = ScriptedModel::new(&[answer]);
+        let (judge, _pool) = judge_with(model).await;
+        let bundle = EvidenceBundle {
+            lane_key: "lane-a".into(),
+            items: vec![
+                EvidenceItem {
+                    reference: "observer:state".into(),
+                    source: EvidenceSource::FerryxObserver,
+                    passed: None,
+                    detail: "state=idle stateSource=hook tier=1".into(),
+                },
+                EvidenceItem {
+                    reference: CLAIM_REF.into(),
+                    source: EvidenceSource::AgentClaim,
+                    passed: Some(false),
+                    detail: "I do not have credentials/access to run this".into(),
+                },
+            ],
+        };
+        let assessment = assess(&judge, &contract(), &bundle, &turns())
+            .await
+            .unwrap();
+        assert_eq!(assessment.gaps.len(), 1);
+        assert_eq!(assessment.gaps[0].kind, GapKind::Work);
+        assert!(matches!(assessment.decision, Decision::Continue { .. }));
+
+        // A stop for the user on the same unattested claim is refused, retried once, and
+        // fails closed instead of stopping for external input.
+        let stop = r#"{"gaps":[{"id":"g1","kind":"external_input","requirement_ids":["r2"],"summary":"no credentials"}],"decision":{"decision":"stop","reason":"high_stakes_user_required"}}"#;
+        let model = ScriptedModel::new(&[stop, stop]);
+        let (judge, pool) = judge_with(model.clone()).await;
+        let result = assess(&judge, &contract(), &bundle, &turns()).await;
+        assert!(matches!(result, Err(GoalError::JudgeUnavailable)));
+        let prompts = model.prompts();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].starts_with(&prompts[0]));
+        assert!(prompts[1]
+            .contains("an unattested missing-access claim cannot stop for external input"));
+        assert_eq!(calls(&pool).await.len(), 2);
+
+        // A retry that turns the claim into work is accepted, never as a user stop.
+        let model = ScriptedModel::new(&[stop, answer]);
+        let (judge, _pool) = judge_with(model.clone()).await;
+        let assessment = assess(&judge, &contract(), &bundle, &turns())
+            .await
+            .unwrap();
+        assert_eq!(model.prompts().len(), 2);
+        assert_eq!(assessment.gaps[0].kind, GapKind::Work);
+        assert!(!matches!(
+            assessment.decision,
+            Decision::Stop {
+                reason: StopReason::HighStakesUserRequired,
+                ..
+            }
+        ));
     }
 
     #[test]
