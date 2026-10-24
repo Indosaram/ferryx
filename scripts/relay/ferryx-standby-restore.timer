@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the Ferryx warm-standby account database every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::remote::reference_chat::types::ReferencePromptAnswer;
 
+pub mod delivery;
 pub mod events;
 pub mod policy;
 
@@ -395,7 +396,9 @@ pub fn failure(code: &str, message: &str) -> (Value, i32) {
 #[cfg(unix)]
 async fn connect_daemon() -> Result<tokio::net::UnixStream, (Value, i32)> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let path = crate::daemon::server::get_socket_path();
+    // A daemon from before the rename serves only the legacy socket.
+    let path = crate::daemon::server::legacy_owner_socket_path()
+        .unwrap_or_else(crate::daemon::server::get_socket_path);
     let not_running = || {
         let (value, _) = failure("NOT_FOUND", &format!("no Ferryx daemon is listening at {}", path.display()));
         (value, EXIT_NOT_FOUND)

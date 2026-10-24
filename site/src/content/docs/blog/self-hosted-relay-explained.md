@@ -52,9 +52,9 @@ No. SSH assumes inbound reachability and hands you a raw shell. Ferryx pairs an 
 
 Typically no inbound ports: the client reaches the host through the gateway or your own outbound relay.
 
-### What does a pairing QR contain?
+### What does pairing grant?
 
-Enough information for the client to complete an authenticated pairing handshake with your host; revoke the device from host settings if the phone is lost.
+An account sign-in, or a 6-digit PIN that expires after 60 seconds, lets the client complete an authenticated pairing handshake with your host; revoke the device from host settings if the phone is lost.
 
 ## Limits and non-goals
 

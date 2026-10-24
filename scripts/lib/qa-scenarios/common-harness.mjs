@@ -543,7 +543,7 @@ function isProductionRuntimeRoot(candidate) {
   const p = resolve(candidate);
   const uid = process.getuid?.() ?? 0;
   const productionRoots = [
-    `/tmp/rorca-${uid}`, `/tmp/rorca-${uid}-dev`, '/app/rorca', '/app/rorca-dev',
+    `/tmp/ferryx-${uid}`, `/tmp/ferryx-${uid}-dev`, `/tmp/rorca-${uid}`, `/tmp/rorca-${uid}-dev`, '/app/rorca', '/app/rorca-dev',
     join(homedir(), '.rorca'),
   ];
   return productionRoots.some(root => p === root || p.startsWith(`${root}/`) || p.startsWith(`${root}\\`));

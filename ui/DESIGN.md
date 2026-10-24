@@ -419,3 +419,58 @@ sidebar slot also uses. The label is always text; color never carries status alo
   tinted borders for state.
 - No new tokens. `--destructive` and `--border` are the existing shadcn set (§3 Token
   Alignment); every other value is a §1 token.
+
+## 13. Phone home (supervisor-first)
+
+Applies to the remote web client below 768px when signed in to an account
+(`ui/src/remote/home/`). Desktop (>= 768px) and paired-host mode are unchanged.
+
+### Navigation
+
+- Three home destinations behind a bottom tab bar: Supervisor (default after sign-in),
+  Inbox, Worktrees. `MobileHomeTabBar`: `role="tablist"`, 56px (`h-14`) plus `.pb-safe`,
+  icon above a one-word text label, roving tabindex with Arrow keys. Inbox shows a count
+  badge on `bg-status-warning` when sessions wait; the count is also in the tab's
+  accessible name.
+- Opening a session from any destination shows the Session screen (the existing
+  `MobileTopBar` plus chat/terminal body). The tab bar is hidden there so the composer and
+  keyboard keep the full height. `MobileTopBar` gains a back control (`mobile-session-back`).
+- `usePhoneNavigation` pushes a history entry on each tab switch and on entering a session;
+  `popstate` returns to the destination the session came from, so the platform back gesture
+  stays inside the app.
+
+### Surfaces
+
+- Supervisor: header card (`bg-chat-surface-raised`) with the headline `off | paused |
+  typing | watching N` (same derivation as the desktop `SupervisorPanelView`) and one
+  sentence. Then one section per machine, with a state note when it is loading, offline,
+  not connected, unsupported ("Update Ferryx on this computer to see its supervisor") or
+  has the hub stopped. Lane cards show the name (cwd leaf · title), one status slot (paused
+  > typing > needs you > hub status), Goal, "Stopped: <reason>", and a 44px Pause/Resume
+  button. A typing lane uses the active fill `bg-accent`. Then a "Recent" audit list (time,
+  op or held, text), newest first, max 20.
+- Inbox: needs-you sessions from every machine. Waiting and supervisor-held come first,
+  then finished; each row states why in text ("Waiting for your answer", "Supervisor paused
+  this lane", "Finished"). The dot colour only repeats that text.
+- Worktrees: the drawer's inventory rendered inline (`RemoteWorkspaceMirror inline`) with
+  New terminal, New worktree and Sign out, plus an Account button. The Account sheet holds
+  the email, Sign out and Delete account. Deletion asks the person to type their email; the
+  server's `CONFIRMATION_MISMATCH` / `SUBSCRIPTION_ACTIVE` answers are shown in text on
+  `--chat-danger`.
+- Session strip (`SupervisorSessionStrip`) sits under the top bar only for a supervised
+  session. Priority follows `paneSupervision`: paused (Resume) > left to you > held >
+  acting (quoted sent text on `bg-accent`, "Take over" pauses the lane, then focuses the
+  composer or terminal input) > watching (Pause here).
+
+### Test ids
+
+`mobile-home` (`data-destination`), `mobile-home-tabs`, `mobile-home-tab-{supervisor,inbox,
+worktrees}`, `mobile-home-inbox-count`, `mobile-home-resume`, `supervisor-home`,
+`supervisor-home-headline`, `supervisor-machine-<machineId>`, `supervisor-lane-card`
+(`data-lane-key`, `data-machine-id`), `supervisor-lane-pause`, `supervisor-recent-action`,
+`inbox-home`, `inbox-row` (`data-machine-id`, `data-session-id`), `worktrees-home`,
+`remote-worktrees-inline`, `account-open`, `account-delete-open`, `account-delete-email`,
+`account-delete-confirm`, `account-delete-error` (`data-code`), `supervisor-session-strip`
+(`data-state`), `supervisor-take-over`, `supervisor-resume`, `mobile-session-back`.
+
+No new tokens: every colour is an existing `chat-*`, `status-*` or `accent` token.

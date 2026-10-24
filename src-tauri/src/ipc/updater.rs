@@ -344,9 +344,36 @@ fn stall_window() -> Duration {
     DEFAULT_STALL_WINDOW
 }
 
-fn build_updater<R: Runtime>(app: &AppHandle<R>) -> Result<Updater, IpcError> {
-    #[allow(unused_mut)]
+/// Stable update manifest; the same URL as `plugins.updater.endpoints` in tauri.conf.json.
+pub const STABLE_UPDATE_ENDPOINT: &str =
+    "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json";
+/// Beta update manifest, uploaded next to `latest.json` on the latest release.
+pub const BETA_UPDATE_ENDPOINT: &str =
+    "https://github.com/Indosaram/ferryx/releases/latest/download/latest-beta.json";
+
+/// Endpoints for the update channel the user picked in Settings. Stable (the default, also for
+/// any unknown value) keeps the configured endpoints. Beta asks `latest-beta.json` first and falls
+/// back to the stable manifest, which the plugin tries next when the beta one is missing.
+fn channel_endpoints(channel: Option<&str>) -> Option<[&'static str; 2]> {
+    match channel {
+        Some("beta") => Some([BETA_UPDATE_ENDPOINT, STABLE_UPDATE_ENDPOINT]),
+        _ => None,
+    }
+}
+
+fn build_updater<R: Runtime>(
+    app: &AppHandle<R>,
+    update_channel: Option<&str>,
+) -> Result<Updater, IpcError> {
     let mut builder = app.updater_builder();
+    if let Some(endpoints) = channel_endpoints(update_channel) {
+        let urls = endpoints
+            .iter()
+            .map(|endpoint| endpoint.parse())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(IpcError::internal)?;
+        builder = builder.endpoints(urls).map_err(IpcError::internal)?;
+    }
     #[cfg(debug_assertions)]
     if let Ok(endpoint) = std::env::var("FERRYX_UPDATER_ENDPOINT") {
         let url = endpoint.trim().parse().map_err(|error| {
@@ -390,8 +417,11 @@ impl From<&Update> for UpdaterOffer {
 #[tauri::command]
 pub async fn cmd_updater_check<R: Runtime>(
     app: AppHandle<R>,
+    update_channel: Option<String>,
 ) -> Result<Option<UpdaterOffer>, IpcError> {
-    let updater = gate_updater(updater_managed_externally(), || build_updater(&app))??;
+    let updater = gate_updater(updater_managed_externally(), || {
+        build_updater(&app, update_channel.as_deref())
+    })??;
     let offered = updater.check().await.map_err(IpcError::internal)?;
     Ok(offered.as_ref().map(UpdaterOffer::from))
 }
@@ -405,8 +435,11 @@ pub async fn cmd_updater_download<R: Runtime>(
     state: State<'_, UpdaterDownloadState>,
     expected_version: String,
     on_event: Channel<UpdaterDownloadEvent>,
+    update_channel: Option<String>,
 ) -> Result<(), IpcError> {
-    let updater = gate_updater(updater_managed_externally(), || build_updater(&app))??;
+    let updater = gate_updater(updater_managed_externally(), || {
+        build_updater(&app, update_channel.as_deref())
+    })??;
     let offered = updater.check().await.map_err(IpcError::internal)?;
     let update = select_expected_update(&expected_version, offered, |update: &Update| {
         update.version.as_str()
@@ -492,6 +525,26 @@ pub async fn cmd_updater_install(state: State<'_, UpdaterDownloadState>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_channel_endpoints() {
+        assert_eq!(channel_endpoints(None), None);
+        assert_eq!(channel_endpoints(Some("stable")), None);
+        assert_eq!(channel_endpoints(Some("nightly")), None);
+        assert_eq!(
+            channel_endpoints(Some("beta")),
+            Some([BETA_UPDATE_ENDPOINT, STABLE_UPDATE_ENDPOINT])
+        );
+        for endpoint in [BETA_UPDATE_ENDPOINT, STABLE_UPDATE_ENDPOINT] {
+            assert!(endpoint.parse::<tauri::Url>().is_ok(), "{endpoint}");
+        }
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["plugins"]["updater"]["endpoints"][0].as_str(),
+            Some(STABLE_UPDATE_ENDPOINT)
+        );
+    }
 
     #[test]
     fn test_distribution_channel_non_windows() {

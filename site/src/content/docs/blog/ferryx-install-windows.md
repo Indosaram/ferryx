@@ -9,11 +9,17 @@ description: "x64 installer walkthrough: SmartScreen warnings, SHA-256 verificat
 
 ## Installer download
 
-Terminal tooling fails in confusing ways because several layers (OS, WebView, PTY, daemon, renderer) can each produce similar symptoms. A structured triage path saves you from restarting blindly and killing sessions that were fine. In the specific case of “Installing Ferryx on Windows and Reading SmartScreen”, the Ferryx angle is straightforward: x64 installer walkthrough: smartscreen warnings, sha-256 verification, and what the msix package is not. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+The Microsoft Store is Ferryx's signed Windows channel. The Store signs the MSIX package it publishes, so a Store install shows no SmartScreen warning, and Store installs are updated by the Store rather than by Ferryx's own updater. Ferryx does not buy a separate code-signing certificate. The Store listing (product ID `9NLHQL5JNLM4`) is still pending certification, so the Store is not offered as a download yet. Until it is, the installer to use is the GitHub release `Ferryx_x64-setup.exe`, which is not code-signed.
 
 ## SmartScreen warning
 
-Most Ferryx issues cluster into install/platform quirks, IME and rendering oddities, daemon socket permissions, and overlay states like Shell exited. The product facts page and architecture doc are the first places to confirm expected behavior before changing anything. Applied to “install ferryx windows”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Install in this order:
+
+1. **Microsoft Store (signed, once certified).** When the download page lists the Microsoft Store as the first Windows option, install from there, or run `winget install --source msstore 9NLHQL5JNLM4` in a terminal. SmartScreen does not warn on a Store install. Until the listing is certified, the download page does not link the Store.
+2. **GitHub installer (unsigned).** Download `Ferryx_x64-setup.exe` and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest). Before running the installer, check its hash in PowerShell: `Get-FileHash .\Ferryx_x64-setup.exe -Algorithm SHA256` must match the `Ferryx_x64-setup.exe` line in `SHA256SUMS.txt`.
+3. **Expect the SmartScreen prompt for the unsigned installer.** Because the `.exe` has no Authenticode signature, Windows shows "Windows protected your PC". Run it only if the hash matched: choose **More info**, then **Run anyway**. The installer installs for the current user and updates itself in place.
+
+The `Ferryx_x64.msix` attached to GitHub releases is the unsigned package that is submitted to the Store. It is not a sideloading installer, so install from the Store or the `.exe` instead.
 
 ## Practical steps
 

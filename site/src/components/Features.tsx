@@ -4,12 +4,13 @@ import {
   MobileVisual,
   PersistenceVisual,
   SplitVisual,
+  SupervisorVisual,
   ZeroElectronVisual,
 } from "@/components/FeatureVisuals";
 import type { LandingLocale } from "@/lib/locale";
 
 export function Features({ locale, basePath }: { locale: LandingLocale; basePath: string }) {
-  const visuals = [GhosttyVisual, AgentsVisual, SplitVisual, MobileVisual, ZeroElectronVisual, PersistenceVisual];
+  const visuals = [SupervisorVisual, GhosttyVisual, AgentsVisual, SplitVisual, MobileVisual, ZeroElectronVisual, PersistenceVisual];
 
   return (
     <section id="features" className="py-24 sm:py-28 border-t border-line bg-page-raised relative">

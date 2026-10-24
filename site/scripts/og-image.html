@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ferryx OG image - Supervisor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=block" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    position: relative;
+    background:
+      linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px) 0 0 / 40px 40px,
+      linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px) 0 0 / 40px 40px,
+      radial-gradient(ellipse at 20% 0%, #1c1c20 0%, #0e0e10 65%);
+    background-color: #0e0e10;
+    color: #fff;
+    font-family: "Inter", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px;
+    background: linear-gradient(90deg, #2a2a2e, #3a3a40, #2a2a2e);
+  }
+  .mono { font-family: "JetBrains Mono", monospace; }
+  .frame { position: absolute; inset: 0; padding: 60px 96px 0 96px; }
+
+  .brand { display: flex; align-items: center; gap: 24px; }
+  .brand img { width: 80px; height: 80px; border-radius: 18px; display: block; }
+  .brand .name { font-size: 38px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.1; }
+  .brand .tag { margin-top: 6px; font-size: 19px; color: #8b8b93; }
+
+  .hero { margin-top: 44px; display: flex; justify-content: space-between; align-items: center; }
+  h1 { font-size: 76px; font-weight: 600; line-height: 1.06; letter-spacing: -0.025em; }
+
+  .bars { width: 500px; display: flex; flex-direction: column; gap: 8px; }
+  .bar {
+    height: 34px; border-radius: 8px; display: flex; align-items: center; gap: 10px;
+    padding: 0 8px 0 12px; font-family: "JetBrains Mono", monospace; font-size: 18px;
+    white-space: nowrap; overflow: hidden;
+  }
+  .bar svg { flex: none; width: 18px; height: 18px; }
+  .bar.on { background: #26262b; color: #fff; }
+  .bar.off { background: #17171a; color: #8b8b93; }
+  .bar .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #34d399; }
+  .bar .ans { color: #fff; background: #333339; border-radius: 5px; padding: 0 7px; line-height: 24px; }
+  .bar .spacer { flex: 1; }
+  .bar .btn {
+    flex: none; font-family: "Inter", sans-serif; font-size: 14px; font-weight: 500; color: #e4e4e7;
+    background: #3a3a41; border-radius: 6px; padding: 0 10px; line-height: 24px;
+  }
+  .bar .muted { color: #6b6b73; }
+  .bar .sep { color: #4a4a52; }
+
+  .body { margin-top: 28px; font-size: 28px; line-height: 1.4; color: #a1a1aa; max-width: 960px; }
+
+  .foot {
+    position: absolute; left: 96px; right: 96px; bottom: 52px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .chips { display: flex; gap: 14px; }
+  .chip {
+    font-family: "JetBrains Mono", monospace; font-size: 18px; color: #d4d4d8;
+    border: 1px solid #2e2e33; background: #141417; border-radius: 8px;
+    width: 140px; height: 44px; display: flex; align-items: center; justify-content: center;
+  }
+  .url { font-family: "JetBrains Mono", monospace; font-size: 19px; color: #8b8b93; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>
+      <circle cx="12" cy="12" r="3"/>
+    </symbol>
+  </defs>
+</svg>
+<div class="frame">
+  <div class="brand">
+    <img src="../public/ferryx-icon.png" alt="">
+    <div>
+      <div class="name">Ferryx</div>
+      <div class="tag mono">Agent supervisor &middot; Rust &middot; no Electron</div>
+    </div>
+  </div>
+
+  <div class="hero">
+    <h1>Your agents,<br>supervised.</h1>
+    <div class="bars">
+      <div class="bar on">
+        <svg><use href="#eye"/></svg>
+        <span>Supervisor typed</span>
+        <span class="ans">yes</span>
+        <span class="spacer"></span>
+        <span class="dot"></span>
+        <span class="btn">Take over</span>
+      </div>
+      <div class="bar off">
+        <svg><use href="#eye"/></svg>
+        <span>Left to you</span>
+        <span class="sep">&middot;</span>
+        <span class="muted">force-push is in your Inbox</span>
+      </div>
+    </div>
+  </div>
+
+  <p class="body">It remembers what you approve, answers routine prompts the way you would, and sends risky ones to you.</p>
+</div>
+
+<div class="foot">
+  <div class="chips">
+    <div class="chip">macOS</div>
+    <div class="chip">Windows</div>
+    <div class="chip">Linux</div>
+  </div>
+  <div class="url">ferryx.dev</div>
+</div>
+</body>
+</html>
