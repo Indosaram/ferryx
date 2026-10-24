@@ -2643,3 +2643,46 @@ fn helper_spawn_injects_agent_state_env_when_integration_enabled() {
         assert_eq!(seen, format!("{port}|{registered}"));
     }
 }
+
+#[test]
+fn helper_worktree_create_uses_the_shared_layout_and_accepts_old_requests() {
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let project_dir = tempfile::tempdir().unwrap();
+    let repo = project_dir.path();
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "i"],
+    ] {
+        assert!(std::process::Command::new("git").arg("-C").arg(repo).args(&args).status().unwrap().success());
+    }
+    let runtime = make_runtime(&runtime_dir, "tok-wt");
+    register_project(&runtime, "tok-wt", "proj", repo).unwrap();
+    let create = |params: Value| {
+        runtime.handle(Request {
+            protocol: 1,
+            token: "tok-wt".to_string(),
+            op: "worktree.create".to_string(),
+            params,
+        })
+    };
+
+    // A current request names its workspace: `<dir>/<ws>/<slug>` on `<prefix>/<ws>/<slug>`.
+    let created = create(json!({"projectId": "proj", "wsId": "ssh-ab", "slug": "feat"})).unwrap();
+    let dir = created["worktree"].as_str().unwrap().split('/').next().unwrap().to_string();
+    assert!(worktree_naming::is_worktree_dir(&dir));
+    assert_eq!(created["worktree"], format!("{dir}/ssh-ab/feat"));
+    assert!(created["branch"].as_str().unwrap().ends_with("/ssh-ab/feat"));
+    assert!(repo.join(&dir).join("ssh-ab/feat").is_dir());
+
+    // An old request (projectId + slug only) is still accepted.
+    let old = create(json!({"projectId": "proj", "slug": "old"})).unwrap();
+    assert_eq!(old["worktree"], format!("{dir}/remote/old"));
+
+    // Legacy input: a spawn path in the new layout reaches an existing `wt-<slug>` checkout.
+    let legacy = repo.join(worktree_naming::LEGACY_WORKTREE_DIRS[0]).join("wt-legacy");
+    std::fs::create_dir_all(legacy.join("sub")).unwrap();
+    let resolved = resolve_managed_worktree_rel(repo, &format!("{}/ssh-ab/legacy/sub", worktree_naming::WORKTREE_DIR));
+    assert_eq!(resolved, legacy.join("sub"));
+    // Anything else resolves exactly as requested.
+    assert_eq!(resolve_managed_worktree_rel(repo, "src"), repo.join("src"));
+}

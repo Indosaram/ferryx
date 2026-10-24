@@ -872,14 +872,14 @@ pub(crate) fn effective_paired_repo_root(
     target_cwd: Option<&std::path::Path>,
 ) -> std::path::PathBuf {
     let repo_root_str = repo_root.to_string_lossy();
-    if !repo_root.as_os_str().is_empty() && !repo_root_str.contains(".orca-worktrees") {
+    if !repo_root.as_os_str().is_empty()
+        && crate::worktree::naming::split_repo_root(&repo_root_str).is_none()
+    {
         repo_root.to_path_buf()
     } else if let Some(cwd) = target_cwd {
         let s = cwd.to_string_lossy();
-        if let Some(idx) = s.find("/.orca-worktrees") {
-            std::path::PathBuf::from(&s[..idx])
-        } else if let Some(idx) = s.find("\\.orca-worktrees") {
-            std::path::PathBuf::from(&s[..idx])
+        if let Some(root) = crate::worktree::naming::split_repo_root(&s) {
+            std::path::PathBuf::from(root)
         } else {
             repo_root.to_path_buf()
         }
@@ -893,23 +893,7 @@ pub(crate) fn infer_worktree_slug(
     target_cwd: Option<&std::path::Path>,
 ) -> Option<String> {
     request_worktree.map(|w| w.slug.clone()).or_else(|| {
-        target_cwd.and_then(|cwd| {
-            let s = cwd.to_string_lossy();
-            let marker_unix = ".orca-worktrees/wt-";
-            let marker_win = ".orca-worktrees\\wt-";
-            let start_idx = s
-                .find(marker_unix)
-                .map(|i| i + marker_unix.len())
-                .or_else(|| s.find(marker_win).map(|i| i + marker_win.len()))?;
-            let rem = &s[start_idx..];
-            let end_idx = rem.find(['/', '\\']).unwrap_or(rem.len());
-            let slug = &rem[..end_idx];
-            if !slug.is_empty() {
-                Some(slug.to_string())
-            } else {
-                None
-            }
-        })
+        target_cwd.and_then(|cwd| crate::worktree::naming::infer_slug(&cwd.to_string_lossy()))
     })
 }
 
@@ -934,33 +918,14 @@ pub(crate) fn resolve_paired_spawn_target(
         let sub_rel = if let Some(cwd_path) = target_cwd {
             let cwd_norm = cwd_path.to_string_lossy().replace('\\', "/");
             let repo_norm = effective_repo_root.to_string_lossy().replace('\\', "/");
-            let expected_wt_rel = format!(".orca-worktrees/wt-{}", slug);
-
-            if !repo_norm.is_empty() && cwd_norm.starts_with(&repo_norm) {
-                let rel = cwd_norm[repo_norm.len()..].trim_start_matches('/');
-                if rel == expected_wt_rel {
-                    None
-                } else if let Some(sub) = rel.strip_prefix(&format!("{}/", expected_wt_rel)) {
-                    if !sub.is_empty() {
-                        Some(sub.to_string())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else if cwd_norm.ends_with(&expected_wt_rel) {
-                None
-            } else if let Some(idx) = cwd_norm.find(&format!("{}/", expected_wt_rel)) {
-                let sub = &cwd_norm[idx + expected_wt_rel.len() + 1..];
-                if !sub.is_empty() {
-                    Some(sub.to_string())
-                } else {
-                    None
-                }
+            // Only the part below the repo root is matched, so a managed dir name further up the
+            // repo path itself is never mistaken for this worktree.
+            let rel = if !repo_norm.is_empty() && cwd_norm.starts_with(&repo_norm) {
+                cwd_norm[repo_norm.len()..].trim_start_matches('/')
             } else {
-                None
-            }
+                cwd_norm.as_str()
+            };
+            crate::worktree::naming::managed_worktree_subdir(rel, slug).flatten()
         } else {
             None
         };
@@ -4757,13 +4722,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                 effective_repo_root.to_string_lossy().to_string()
             } else {
                 let s = &remote_session.cwd;
-                if let Some(idx) = s.find("/.orca-worktrees") {
-                    s[..idx].to_string()
-                } else if let Some(idx) = s.find("\\.orca-worktrees") {
-                    s[..idx].to_string()
-                } else {
-                    s.clone()
-                }
+                crate::worktree::naming::split_repo_root(s)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| s.clone())
             };
             let p = crate::paired_host::projects::Project {
                 metadata: crate::remote::machine_protocol::Project {

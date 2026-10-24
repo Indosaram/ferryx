@@ -19,7 +19,7 @@ fn p10_windows_namespace_rejects_invalid_path_components() {
 fn p10_namespace_accepts_nested_unicode_and_non_devices() {
     for name in ["feature/项目", "console", "COM10", "auxiliary.txt", "nested/LPT0.log"] {
         assert_eq!(WorktreeManager::format_branch_name("workspace", name).unwrap(),
-            format!("orca/workspace/{name}"));
+            format!("ferryx/workspace/{name}"));
     }
 }
 
@@ -112,7 +112,7 @@ fn default_delete_rejects_clean_unmerged_branch() {
     );
     let branches = ferryx_lib::worktree::run_git(manager.repo_root(), &["branch", "--list"])
         .expect("list branches");
-    assert!(branches.contains("orca/ws-safety/unmerged-default"));
+    assert!(branches.contains("ferryx/ws-safety/unmerged-default"));
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn explicit_destructive_delete_removes_clean_unmerged_branch() {
     let preview = manager
         .branch_deletion_preview(&wt)
         .expect("destructive preview");
-    assert_eq!(preview.branch, "orca/ws-safety/unmerged-force");
+    assert_eq!(preview.branch, "ferryx/ws-safety/unmerged-force");
     assert!(!preview.head.is_empty());
     assert!(!preview.merged);
 
@@ -138,7 +138,7 @@ fn explicit_destructive_delete_removes_clean_unmerged_branch() {
     assert!(!wt.exists());
     let branches = ferryx_lib::worktree::run_git(manager.repo_root(), &["branch", "--list"])
         .expect("list branches");
-    assert!(!branches.contains("orca/ws-safety/unmerged-force"));
+    assert!(!branches.contains("ferryx/ws-safety/unmerged-force"));
 }
 
 #[tokio::test]
@@ -309,6 +309,7 @@ fn unavailable_base_ref_leaves_no_managed_parent_directory() {
     let result = manager.create_worktree(CreateWorktreeOptions::new("ws-base", "feature", &target));
     assert!(result.is_err());
     assert!(!target.exists());
+    assert!(!manager.repo_root().join(".ferryx-worktrees").exists());
     assert!(!manager.repo_root().join(".orca-worktrees").exists());
     root.close().unwrap();
 }

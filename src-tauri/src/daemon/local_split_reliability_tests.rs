@@ -176,7 +176,7 @@ async fn local_split_reliability_wire_delete_publication() {
     let id = uuid::Uuid::new_v4().to_string();
     let mut request = fixture.create(&id, "a");
     request["worktree"] = serde_json::json!({"wsId":"a","slug":"held"});
-    request["cwd"] = serde_json::json!(fixture.repo.join(".orca-worktrees/a/held"));
+    request["cwd"] = serde_json::json!(fixture.repo.join(".ferryx-worktrees/a/held"));
     let mut hold = Hold::install(&fixture.owner, &id, "childCreated");
     let create = tokio::spawn(wire(fixture.owner.clone(), request));
     hold.entered().await;
@@ -537,7 +537,7 @@ async fn preparation_registered_split_has_no_registration_or_list() {
     let outcome = std::panic::AssertUnwindSafe(async {
         assert!(matches!(wire(fixture.owner.clone(), serde_json::json!({"type":"createWorktree","workspaceId":"a","worktree":{"wsId":"a","slug":"managed"},"baseRef":null})).await,
             DaemonResponse::CreateWorktreeOk { .. }));
-        let managed = fixture.repo.join(".orca-worktrees/a/managed");
+        let managed = fixture.repo.join(".ferryx-worktrees/a/managed");
         let subdir = managed.join("sub");
         let path = subdir.clone();
         crate::ipc::run_blocking(move || { fs::create_dir(path).unwrap(); Ok(()) }).await.unwrap();

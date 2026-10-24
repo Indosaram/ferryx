@@ -191,7 +191,7 @@ async fn followthrough_write_failures_non_head_and_prunable_preview() {
                 // Catalog may be fenced: inspect the actual private Git target directly.
                 let catalog = crate::remote::workspace_catalog::load(if journal_failure { &service.catalog_path } else { &backup }).unwrap();
                 let repo = &catalog.workspaces[&workspace].repo_root;
-                let path = repo.join(".orca-worktrees").join(&workspace).join("write-failure");
+                let path = repo.join(".ferryx-worktrees").join(&workspace).join("write-failure");
                 let head = crate::worktree::run_git(&path, &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
                 std::fs::remove_dir(&failure_path).unwrap();
                 std::fs::rename(backup, failure_path).unwrap();
@@ -589,8 +589,8 @@ async fn typed_owner_repair_private_uds_and_native_adapter() {
             .unwrap()
             .unwrap();
             assert!(matches!(created, DaemonResponse::CreateWorktreeOk { .. }));
-            let path = repo.join(".orca-worktrees/typed").join(slug);
-            let branch = format!("orca/typed/{slug}");
+            let path = repo.join(".ferryx-worktrees/typed").join(slug);
+            let branch = format!("ferryx/typed/{slug}");
             if slug == "busy" {
                 let spawned = client
                     .send_request(DaemonRequest::Spawn {
@@ -830,7 +830,7 @@ fn local_worktree_error_wire_roundtrip() {
             files: vec!["untracked.txt".into()],
         },
         WorktreeError::UnmergedBranch {
-            branch: "orca/local/feature".into(),
+            branch: "ferryx/local/feature".into(),
             head: "abc123".into(),
         },
         WorktreeError::WorktreeNotFound {
@@ -962,7 +962,7 @@ async fn owner_http_gate_and_eight_admissions() {
         };
         jobs.spawn(async move { call.send().await.unwrap().status().as_u16() });
         let ready = tokio::time::timeout(Duration::from_secs(10), reached).await;
-        let repo = if managed_child { root.path().join("repo/.orca-worktrees").join(&workspace).join("ipc") } else { root.path().join("repo") };
+        let repo = if managed_child { root.path().join("repo/.ferryx-worktrees").join(&workspace).join("ipc") } else { root.path().join("repo") };
         let original = repo.with_extension("original"); let outside = root.path().join(if managed_child {"outside-child"} else {"outside"});
         let paths = (repo.clone(), original.clone(), outside.clone());
         tokio::task::spawn_blocking(move || { std::fs::rename(&paths.0, &paths.1).unwrap(); std::fs::create_dir(&paths.2).unwrap(); std::fs::write(paths.2.join("sentinel"), "untouched").unwrap(); std::os::unix::fs::symlink(&paths.2, &paths.0).unwrap(); }).await.unwrap();

@@ -9907,7 +9907,7 @@ mod tests {
         assert!(
             worktrees.iter().any(|wt| {
                 wt["identity"]["slug"] == "feat-b"
-                    || wt["branch"] == "refs/heads/orca/workspace-b/feat-b"
+                    || wt["branch"] == "refs/heads/ferryx/workspace-b/feat-b"
                     || wt["path"]
                         .as_str()
                         .is_some_and(|p: &str| p.contains("wt_b"))

@@ -603,8 +603,9 @@ async fn exercise_child(root: &Path) {
         }
     }
     let wt_dir = Path::new(&response.repo_root)
-        .join(".orca-worktrees")
-        .join("wt-feature");
+        .join(".ferryx-worktrees")
+        .join("agent")
+        .join("feature");
     std::fs::create_dir_all(&wt_dir).unwrap();
     phase!("Phase 6: Remote worktree spawn starting");
     let wt_identity = crate::worktree::WorktreeIdentity {

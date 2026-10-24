@@ -147,13 +147,25 @@ export type LegacyScrollFields = {
   scrollY?: unknown;
 };
 
+/**
+ * Branch prefixes of managed worktrees: `ferryx` for new worktrees and the legacy `orca`.
+ * Mirrors `src-tauri/src/worktree/naming.rs`; a custom per-repo prefix is identified through the
+ * backend-provided `identity` instead.
+ */
+export const MANAGED_BRANCH_PREFIXES: readonly string[] = ["ferryx", "orca"];
+
+/** True when a short branch name's first segment is a managed worktree prefix. */
+export function isManagedBranchPrefix(segment: string | undefined): boolean {
+  return segment !== undefined && MANAGED_BRANCH_PREFIXES.includes(segment);
+}
+
 export function worktreeIdentity(worktree: Worktree): WorktreeIdentity | null {
   if (worktree.identity?.wsId && worktree.identity?.slug) {
     return worktree.identity;
   }
   const branch = worktree.branch?.replace(/^refs\/heads\//, "");
   const parts = branch?.split("/");
-  if (!parts || parts.length < 3 || parts[0] !== "orca") return null;
+  if (!parts || parts.length < 3 || !isManagedBranchPrefix(parts[0])) return null;
 
   return { wsId: parts[1], slug: parts.slice(2).join("/") };
 }

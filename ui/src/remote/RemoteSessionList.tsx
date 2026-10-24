@@ -271,8 +271,9 @@ function optionFromGitWorktree(value: unknown, workspaceId: string): RemoteConte
 
   const branch = safeContextText(item.branch)?.replace(/^refs\/heads\//, "") ?? null;
   if (!branch) return { workspaceId, worktreeSlug: null, worktreeLabel: null, ...(attention ? { attention } : {}) };
-  const prefix = `orca/${workspaceId}/`;
-  const slug = branch.startsWith(prefix) ? branch.slice(prefix.length) : null;
+  // Managed branches are `<prefix>/<workspace>/<slug>` with the Ferryx or legacy Orca prefix.
+  const managed = ["ferryx", "orca"].map((root) => `${root}/${workspaceId}/`).find((prefix) => branch.startsWith(prefix));
+  const slug = managed ? branch.slice(managed.length) : null;
   return {
     workspaceId,
     worktreeSlug: safeContextText(slug),

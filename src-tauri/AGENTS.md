@@ -14,7 +14,7 @@ Rust backend powering Ferryx: Tauri v2 desktop shell, headless background PTY da
 | Remote HTTP & WebSocket gateway | `src/remote/` | Axum server, pairing PIN auth, active session lock |
 | PTY lifecycle & output hub | `src/terminal/` | `portable-pty`, 512 KiB ring buffer, Ghostty config auto-import |
 | Native terminal & WGPU renderer | `src/native_terminal/` | `libghostty-vt` FFI, WGPU child surface, input/mouse translation |
-| Git worktree & workspace engine | `src/worktree/` | `git worktree` operations, `orca/<ws-id>/<slug>` naming, dirty check |
+| Git worktree & workspace engine | `src/worktree/` | `git worktree` operations, `<prefix>/<ws-id>/<slug>` naming in `naming.rs` (`.ferryx-worktrees`, `ferryx` prefix; legacy `.orca-worktrees`/`orca` still recognized), dirty check |
 | Native audio & notifications | `src/notification/` | Rodio audio player, UNUserNotificationCenter, dock badge sync |
 | Integration test contracts | `tests/` | Deterministic lifecycle, persistence, and hardening tests |
 

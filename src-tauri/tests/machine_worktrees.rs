@@ -301,7 +301,7 @@ async fn machine_worktree_http_contract() {
             let status = response.status().as_u16(); let body = response.text().await.unwrap();
             assert_eq!(status, if dirty {409} else {204}, "{body}");
         }
-        let retained_repo = repo.clone(); let branch = format!("orca/{ws}/feature");
+        let retained_repo = repo.clone(); let branch = format!("ferryx/{ws}/feature");
         assert!(!exists(&path).await);
         tokio::task::spawn_blocking(move || ferryx_lib::worktree::run_git(retained_repo, &["show-ref","--verify",&format!("refs/heads/{branch}")]).unwrap()).await.unwrap();
         for scenario in ["locked", "unmerged", "partial", "remove-branch"] {
@@ -310,7 +310,7 @@ async fn machine_worktree_http_contract() {
             let row: serde_json::Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
             let path = std::path::PathBuf::from(row["path"].as_str().unwrap());
             let fixture_path = path.clone(); let fixture_repo = repo.clone();
-            let branch = format!("orca/{ws}/{scenario}"); let fixture_branch = branch.clone();
+            let branch = format!("ferryx/{ws}/{scenario}"); let fixture_branch = branch.clone();
             tokio::task::spawn_blocking(move || {
                 if scenario == "locked" { ferryx_lib::worktree::run_git(&fixture_repo, &["worktree","lock",fixture_path.to_str().unwrap()]).unwrap(); }
                 if scenario == "unmerged" { ferryx_lib::worktree::run_git(&fixture_path, &["commit","--allow-empty","-m","unmerged"]).unwrap(); }
@@ -382,7 +382,7 @@ async fn machine_worktree_http_contract() {
         assert_eq!(legacy["worktreeSlug"], "mirror-compatible");
         assert!(legacy.get("path").is_none());
         assert!(legacy.get("head").is_none());
-        let lock = repo.join(".git/refs/heads").join(format!("orca/{ws}/mirror-compatible.lock"));
+        let lock = repo.join(".git/refs/heads").join(format!("ferryx/{ws}/mirror-compatible.lock"));
         tokio::task::spawn_blocking(move || std::fs::write(lock, "branch lock").unwrap()).await.unwrap();
         let mut removal = server.remote_state().machine_services.as_ref().unwrap().workspaces.subscribe_worktree_changes();
         let partial = client.delete(&endpoint).bearer_auth(&mirror).body(serde_json::json!({"workspaceId":ws,"worktree":{"wsId":ws,"slug":"mirror-compatible"},"deleteBranch":true}).to_string()).send().await.unwrap();
@@ -405,6 +405,7 @@ async fn machine_worktree_http_contract() {
             assert_eq!(response.status().as_u16(), 422);
             let error: serde_json::Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
             assert_eq!(error["error"]["code"], if git {"BASE_REF_UNAVAILABLE"} else {"NOT_A_GIT_REPOSITORY"});
+            assert!(!exists(&folder.join(".ferryx-worktrees")).await);
             assert!(!exists(&folder.join(".orca-worktrees")).await);
         }
         let external = root.path().join(if cfg!(windows) { "external space 'quote'" } else { "external space \"quote\"" });

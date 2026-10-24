@@ -448,7 +448,7 @@ mod tests {
             "source": "agentTaskComplete",
             "notificationId": "agent-42",
             "workspaceLabel": "orca-lite",
-            "worktreeLabel": "orca/ws-1/feat-login",
+            "worktreeLabel": "ferryx/ws-1/feat-login",
             "terminalTitle": "claude",
             "agentLabel": "Claude",
         }))

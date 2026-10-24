@@ -88,18 +88,37 @@ pub fn derive_ws_segment(workspace_id: &str) -> Result<String, IpcError> {
     Ok(format!("ssh-{segment}"))
 }
 
-pub fn remote_worktree_path(platform: RemotePlatform, repo_root: &str, slug: &str) -> String {
+/// `<repo>/<WORKTREE_DIR>/<ws_segment>/<slug>`, the same shape as local managed worktrees.
+pub fn remote_worktree_path(
+    platform: RemotePlatform,
+    repo_root: &str,
+    ws_segment: &str,
+    slug: &str,
+) -> String {
+    let dir = crate::worktree::naming::WORKTREE_DIR;
     match platform {
         RemotePlatform::Posix => {
             let root = repo_root.trim_end_matches('/');
-            format!("{root}/.orca-worktrees/wt-{slug}")
+            format!("{root}/{dir}/{ws_segment}/{slug}")
         }
         RemotePlatform::Windows => {
             let root = repo_root.trim_end_matches(['/', '\\']);
-            format!("{root}\\.orca-worktrees\\wt-{slug}")
+            let slug = slug.replace('/', "\\");
+            format!("{root}\\{dir}\\{ws_segment}\\{slug}")
         }
     }
 }
+
+/// The path segment a remote identity's `ws_id` maps to: raw `ssh:<hex>` workspace IDs use
+/// [`derive_ws_segment`], anything else already is a segment.
+pub fn remote_ws_segment(ws_id: &str) -> Result<String, IpcError> {
+    if ws_id.starts_with(crate::ssh::projects::REMOTE_PREFIX) {
+        derive_ws_segment(ws_id)
+    } else {
+        Ok(ws_id.to_string())
+    }
+}
+
 
 pub fn validate_base_ref(base_ref: Option<&str>) -> Result<(), IpcError> {
     if let Some(base) = base_ref {
@@ -217,7 +236,10 @@ pub fn resolve_remote_spawn_root(
                 "Worktree slug must not contain '..'",
             ));
         }
-        let path = remote_worktree_path(platform, repo_root, &identity.slug);
+        // Identities name the workspace; the managed path uses its sanitized segment, exactly as
+        // `cmd_ssh_create_remote_worktree` laid it out.
+        let ws_segment = remote_ws_segment(&identity.ws_id)?;
+        let path = remote_worktree_path(platform, repo_root, &ws_segment, &identity.slug);
         validate_path_inside_root(platform, repo_root, &path)?;
         Ok(path)
     } else {
@@ -431,12 +453,26 @@ mod tests {
 
     #[test]
     fn red_parse_porcelain_entries() {
-        let output = "worktree /home/sook/repo\nHEAD abc1234\nbranch refs/heads/main\n\nworktree /home/sook/repo/.orca-worktrees/wt-feat\nHEAD def5678\nbranch refs/heads/orca/ws1/wt-feat\n\nworktree /tmp/detached-wt\ndetached\n\n";
+        // Legacy input (.orca-worktrees/wt-<slug> on orca/...) next to the Ferryx layout.
+        let output = "worktree /home/sook/repo\nHEAD abc1234\nbranch refs/heads/main\n\nworktree /home/sook/repo/.orca-worktrees/wt-feat\nHEAD def5678\nbranch refs/heads/orca/ws1/wt-feat\n\nworktree /tmp/detached-wt\ndetached\n\nworktree /home/sook/repo/.ferryx-worktrees/ssh-ab/new\nHEAD 0a0b0c0\nbranch refs/heads/ferryx/ssh-ab/new\n\n";
         let parsed = parse_worktree_porcelain(output);
-        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed.len(), 4);
         assert_eq!(parsed[0].branch.as_deref(), Some("main"));
-        assert_eq!(parsed[1].branch.as_deref(), Some("orca/ws1/wt-feat"));
+        let legacy_branch = format!(
+            "{}/ws1/wt-feat",
+            crate::worktree::naming::LEGACY_BRANCH_PREFIXES[0]
+        );
+        assert_eq!(parsed[1].branch.as_deref(), Some(legacy_branch.as_str()));
         assert!(parsed[2].detached);
+        assert_eq!(parsed[3].branch.as_deref(), Some("ferryx/ssh-ab/new"));
+        assert_eq!(
+            crate::worktree::naming::slug_from_worktree_path(&parsed[1].path).as_deref(),
+            Some("feat")
+        );
+        assert_eq!(
+            crate::worktree::naming::slug_from_worktree_path(&parsed[3].path).as_deref(),
+            Some("new")
+        );
         assert!(!parsed[0].bare);
     }
 
@@ -521,21 +557,22 @@ mod tests {
 
         let branch =
             WorktreeManager::format_branch_name(&ws_segment, "my-feature").expect("valid branch");
-        assert_eq!(branch, "orca/ssh-0123456789ab/my-feature");
+        assert_eq!(branch, "ferryx/ssh-0123456789ab/my-feature");
 
         // Posix create script with base_ref
         let posix = worktree_create_script(
             RemotePlatform::Posix,
             "/home/user/repo with spaces",
             &branch,
-            "/home/user/repo with spaces/.orca-worktrees/wt-my-feature",
+            "/home/user/repo with spaces/.ferryx-worktrees/ssh-0123456789ab/my-feature",
             Some("origin/main"),
         );
         // The raw hash with colon must never reach the script
         assert!(!posix.contains("ssh:0123456789ab"));
-        assert!(posix.contains("orca/ssh-0123456789ab/my-feature"));
+        assert!(posix.contains("ferryx/ssh-0123456789ab/my-feature"));
         assert!(posix.contains("'/home/user/repo with spaces'"));
-        assert!(posix.contains("'/home/user/repo with spaces/.orca-worktrees/wt-my-feature'"));
+        assert!(posix
+            .contains("'/home/user/repo with spaces/.ferryx-worktrees/ssh-0123456789ab/my-feature'"));
         assert!(posix.contains("'origin/main'"));
 
         // Windows create script without base_ref
@@ -543,7 +580,7 @@ mod tests {
             RemotePlatform::Windows,
             r"C:\Users\sook\repo",
             &branch,
-            r"C:\Users\sook\repo\.orca-worktrees\wt-my-feature",
+            r"C:\Users\sook\repo\.ferryx-worktrees\ssh-0123456789ab\my-feature",
             None,
         );
         assert!(!win.contains("ssh:0123456789ab"));
@@ -735,7 +772,9 @@ mod tests {
         let ws_segment = derive_ws_segment("ssh:0123456789abcdef").expect("valid segment");
         let branch =
             WorktreeManager::format_branch_name(&ws_segment, "feat-test").expect("valid branch");
-        let wt_path = format!("{repo_root}/.orca-worktrees/wt-feat-test");
+        let wt_path =
+            remote_worktree_path(RemotePlatform::Posix, repo_root, &ws_segment, "feat-test");
+        assert_eq!(wt_path, format!("{repo_root}/.ferryx-worktrees/ssh-0123456789ab/feat-test"));
 
         let create_script =
             worktree_create_script(RemotePlatform::Posix, repo_root, &branch, &wt_path, None);
@@ -797,18 +836,18 @@ mod tests {
             .expect("created worktree in porcelain listing");
         assert_eq!(
             created_wt.branch.as_deref(),
-            Some("orca/ssh-0123456789ab/feat-test")
+            Some("ferryx/ssh-0123456789ab/feat-test")
         );
     }
 
     #[test]
     fn red_porcelain_parsing_of_created_output() {
-        let output = "worktree /srv/repo/.orca-worktrees/wt-new\nHEAD e4d8c2\nbranch refs/heads/orca/ssh-abc/new\n\n";
+        let output = "worktree /srv/repo/.ferryx-worktrees/ssh-abc/new\nHEAD e4d8c2\nbranch refs/heads/ferryx/ssh-abc/new\n\n";
         let parsed = parse_worktree_porcelain(output);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].path, "/srv/repo/.orca-worktrees/wt-new");
+        assert_eq!(parsed[0].path, "/srv/repo/.ferryx-worktrees/ssh-abc/new");
         assert_eq!(parsed[0].head.as_deref(), Some("e4d8c2"));
-        assert_eq!(parsed[0].branch.as_deref(), Some("orca/ssh-abc/new"));
+        assert_eq!(parsed[0].branch.as_deref(), Some("ferryx/ssh-abc/new"));
         assert!(!parsed[0].bare);
         assert!(!parsed[0].detached);
     }
@@ -859,20 +898,31 @@ mod tests {
         )
         .is_err());
 
-        // worktree-derived path equals <root>/.orca-worktrees/wt-<slug> (posix)
+        // worktree-derived path equals <root>/.ferryx-worktrees/<ws>/<slug> (posix)
         let wt = WorktreeIdentity {
             ws_id: "agent".into(),
             slug: "feature-1".into(),
         };
         let res_posix =
             resolve_remote_spawn_root(RemotePlatform::Posix, "/srv/repo", Some(&wt), None).unwrap();
-        assert_eq!(res_posix, "/srv/repo/.orca-worktrees/wt-feature-1");
+        assert_eq!(res_posix, "/srv/repo/.ferryx-worktrees/agent/feature-1");
 
         // backslash variant (windows)
         let res_win =
             resolve_remote_spawn_root(RemotePlatform::Windows, r"C:\Repo", Some(&wt), None)
                 .unwrap();
-        assert_eq!(res_win, r"C:\Repo\.orca-worktrees\wt-feature-1");
+        assert_eq!(res_win, r"C:\Repo\.ferryx-worktrees\agent\feature-1");
+
+        // A raw remote workspace ID maps to the same sanitized segment creation uses.
+        let raw = WorktreeIdentity {
+            ws_id: "ssh:0123456789abcdef".into(),
+            slug: "feature-1".into(),
+        };
+        assert_eq!(
+            resolve_remote_spawn_root(RemotePlatform::Posix, "/srv/repo", Some(&raw), None)
+                .unwrap(),
+            "/srv/repo/.ferryx-worktrees/ssh-0123456789ab/feature-1"
+        );
 
         // empty slug rejected with IpcErrorCode::InvalidArgument
         let empty_wt = WorktreeIdentity {

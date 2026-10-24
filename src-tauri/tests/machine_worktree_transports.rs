@@ -140,7 +140,7 @@ async fn scenario(root: &Path) {
         assert!(path.starts_with(&expected_root), "A08_MUTATION actual owner target must match original Git root: {} versus {}", path.display(), expected_root.display());
         assert_eq!(row["head"], head);
         assert_eq!(git(&path, &["rev-parse", "HEAD"]).await.unwrap().trim(), head);
-        assert_eq!(git(&path, &["branch", "--show-current"]).await.unwrap().trim(), format!("orca/{ws}/{slug}"));
+        assert_eq!(git(&path, &["branch", "--show-current"]).await.unwrap().trim(), format!("ferryx/{ws}/{slug}"));
         let (status, list) = http(&client, GET, &format!("{endpoint}?workspaceId={ws}"), token, Value::Null).await;
         assert_eq!(status, 200);
         assert_eq!(list["worktrees"].as_array().unwrap().iter().filter(|v| v["path"] == row["path"]).count(), 1);
@@ -148,7 +148,7 @@ async fn scenario(root: &Path) {
         assert_eq!(status, 200); assert_eq!(preview["dirtyCount"], 0);
         let (status, _) = http(&client, DELETE, &endpoint, token, json!({"requestId":uuid::Uuid::new_v4(),"workspaceId":ws,"worktree":{"wsId":ws,"slug":slug},"deleteBranch":delete_branch,"expectedRevision":preview["revision"]})).await;
         assert_eq!(status, 204); assert!(!tokio::fs::try_exists(&path).await.unwrap());
-        assert_eq!(git(&repo, &["show-ref", "--verify", &format!("refs/heads/orca/{ws}/{slug}")]).await.is_ok(), !delete_branch);
+        assert_eq!(git(&repo, &["show-ref", "--verify", &format!("refs/heads/ferryx/{ws}/{slug}")]).await.is_ok(), !delete_branch);
     }
     // Real lost reply: downstream sends to relay; intermediary consumes complete relay response and returns zero bytes.
     let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -177,13 +177,13 @@ async fn scenario(root: &Path) {
     assert_eq!(status, 200); assert_eq!(operation["outcome"]["worktree"], original);
     let (_, list) = http(&client, GET, &format!("{endpoint}?workspaceId={ws}"), token, Value::Null).await;
     assert_eq!(list["worktrees"].as_array().unwrap().iter().filter(|v| v["path"] == original["path"]).count(), 1);
-    let lost_path = canonical.join(".orca-worktrees").join(ws).join("relay-lost");
+    let lost_path = canonical.join(".ferryx-worktrees").join(ws).join("relay-lost");
     assert_eq!(original["path"], lost_path.to_str().unwrap());
     assert_eq!(git(&lost_path, &["rev-parse", "HEAD"]).await.unwrap().trim(), head);
     eprintln!("A08_RELAY_LOST original={original} same_device=true replay_equal=true journal_equal=true actual_target_count=1 forwarded_reply_bytes=0 intermediary_joined=true");
     let row = uds(&local, json!({"type":"createWorktree","workspaceId":ws,"worktree":{"wsId":ws,"slug":"uds-owned"},"baseRef":"HEAD"})).await;
     assert_eq!(row["type"], "createWorktreeOk");
-    let path = canonical.join(".orca-worktrees").join(ws).join("uds-owned");
+    let path = canonical.join(".ferryx-worktrees").join(ws).join("uds-owned");
     assert_eq!(git(&path, &["rev-parse", "HEAD"]).await.unwrap().trim(), head);
     tokio::fs::write(path.join("dirty.txt"), "owned dirty fixture").await.unwrap();
     let delete = json!({"type":"deleteWorktree","workspaceId":ws,"worktree":{"wsId":ws,"slug":"uds-owned"},"deleteBranch":true});
@@ -197,8 +197,8 @@ async fn scenario(root: &Path) {
     tokio::fs::remove_file(path.join("dirty.txt")).await.unwrap();
     assert_eq!(uds(&local, delete).await["type"], "deleteWorktreeOk");
     assert!(!tokio::fs::try_exists(&path).await.unwrap());
-    assert!(git(&repo, &["show-ref", "--verify", &format!("refs/heads/orca/{ws}/uds-owned")]).await.is_err());
-    assert!(!tokio::fs::try_exists(root.join("wrong-root/.orca-worktrees")).await.unwrap());
+    assert!(git(&repo, &["show-ref", "--verify", &format!("refs/heads/ferryx/{ws}/uds-owned")]).await.is_err());
+    assert!(!tokio::fs::try_exists(root.join("wrong-root/.ferryx-worktrees")).await.unwrap());
     drop(local);
     for task in [control, gateway, relay, uds_task] { task.abort(); assert!(task.await.unwrap_err().is_cancelled()); }
     drop(owner);
