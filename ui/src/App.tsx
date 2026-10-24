@@ -4053,7 +4053,6 @@ function WorkspaceApp({
             steps={onboardingSteps}
             initialStepIndex={onboardingInitialStepIndex}
             doneSteps={onboardingDoneSteps}
-            permissionsStatus={onboardingPermissions}
             agents={resolvedAgents}
             isMac={isMacShortcutPlatform()}
             onStepCompleted={(step) => markOnboardingStepsCompleted([step])}
