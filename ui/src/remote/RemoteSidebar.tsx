@@ -7,6 +7,7 @@ import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import type { SidebarModel, SidebarProjectNode, SidebarWorktreeNode } from "../components/sidebar/sidebarModel";
 import { SidebarView, type SidebarInbox } from "../components/sidebar/SidebarView";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
+import type { PublishedAttentionRow } from "../components/sidebar/sidebarSessionSignals";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { SidebarWorktreeRow, type SidebarDensity } from "../components/sidebar/SidebarWorktreeRow";
 import { cn } from "../lib/cn";
@@ -126,7 +127,7 @@ type SectionProps = {
 };
 
 /** A desktop-published Inbox row and the machine whose desktop published it. */
-export type PublishedAttentionTarget = { readonly machineId: string; readonly row: AttentionRow };
+export type PublishedAttentionTarget = { readonly machineId: string; readonly row: PublishedAttentionRow };
 
 /**
  * The Inbox rows the machines' desktops published, every machine's in section order. Row ids are

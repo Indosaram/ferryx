@@ -4,11 +4,54 @@
 // slots and footer from the identical inputs instead of reconstructing them.
 import type { ActivitySummary } from "../../lib/activity";
 import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
-import type { AgentState } from "../../lib/types";
+import { worktreeIdentity, type AgentState, type TerminalSession, type Worktree } from "../../lib/types";
 import type { SidebarModel } from "./sidebarModel";
 
 /** At most this many Inbox rows ride in one snapshot (the desktop's first, most urgent rows). */
 export const PUBLISHED_ATTENTION_ROWS_CAP = 50;
+
+/**
+ * A desktop Inbox row as published. `sessionId` is the desktop's local pane id, which means nothing
+ * to the remote; `backendSessionId` is that pane's PTY id (the id the machine's session inventory
+ * lists) and `worktreeSlug` its worktree (null for the root). Both are absent when the desktop no
+ * longer holds the pane, and on snapshots published before they existed.
+ */
+export type PublishedAttentionRow = AttentionRow & {
+  readonly backendSessionId?: string;
+  readonly worktreeSlug?: string | null;
+};
+
+/** One workspace's sessions and worktrees, as the mounted state and the parked snapshots hold them. */
+export type AttentionSessionSource = readonly [
+  workspaceId: string | null | undefined,
+  state: { readonly sessions: Readonly<Record<string, TerminalSession | undefined>>; readonly worktrees: readonly Worktree[] },
+];
+
+/**
+ * Adds each row's backend session id and worktree slug, read from the workspace that owns the row's
+ * local session (the first source naming a workspace owns it, so pass the mounted state first).
+ */
+export function withBackendSessions(
+  rows: readonly AttentionRow[],
+  sources: Iterable<AttentionSessionSource>,
+): PublishedAttentionRow[] {
+  const byWorkspace = new Map<string, AttentionSessionSource[1]>();
+  for (const [workspaceId, state] of sources) {
+    if (workspaceId && !byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, state);
+  }
+  return rows.map((row) => {
+    const state = byWorkspace.get(row.workspaceId);
+    const session = state?.sessions[row.sessionId];
+    if (!state || !session) return row;
+    const path = session.worktreePath ?? session.cwd;
+    const worktree = state.worktrees.find((candidate) => candidate.path === path);
+    return {
+      ...row,
+      ...(session.backendSessionId ? { backendSessionId: session.backendSessionId } : {}),
+      ...(worktree ? { worktreeSlug: worktreeIdentity(worktree)?.slug ?? null } : {}),
+    };
+  });
+}
 
 export type SidebarSessionSignals = {
   /**
@@ -26,7 +69,7 @@ export type SidebarSessionSignals = {
    * exactly these and counts them, so its Inbox tab and list agree with each other and with the
    * desktop. Absent from older snapshots.
    */
-  readonly attentionRows?: readonly AttentionRow[];
+  readonly attentionRows?: readonly PublishedAttentionRow[];
 };
 
 export const AGENT_STATES: readonly AgentState[] = ["starting", "working", "waiting", "exited", "failed"];
@@ -39,7 +82,7 @@ export function sidebarSessionSignals(model: SidebarModel, raw: {
   readonly activityByWorktreePath?: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths?: Readonly<Record<string, boolean>>;
   readonly agentStateByPath?: Readonly<Record<string, AgentState | undefined>>;
-  readonly attentionRows?: readonly AttentionRow[];
+  readonly attentionRows?: readonly PublishedAttentionRow[];
 }): SidebarSessionSignals {
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
   const unreadWorktreePaths: Record<string, boolean> = {};

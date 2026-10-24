@@ -126,7 +126,8 @@ function isAttentionRow(value: unknown): boolean {
   return r !== null && isString(r.id) && isFiniteNumber(r.revision) && isString(r.workspaceId) && isString(r.sessionId) &&
     (r.state === "needs-you" || r.state === "done") && isString(r.who) &&
     isOptional(r.location, isString) && isOptional(r.text, isString) && isOptional(r.at, isFiniteNumber) &&
-    isOptional(r.supervisorLabel, isString);
+    isOptional(r.supervisorLabel, isString) && isOptional(r.backendSessionId, isString) &&
+    isOptional(r.worktreeSlug, isNullableString);
 }
 
 /** Structural guard for the wire model: one malformed node rejects the whole snapshot. */

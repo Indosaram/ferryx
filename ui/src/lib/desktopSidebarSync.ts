@@ -10,7 +10,7 @@ import { loadCollapsedProjects, loadWorktreeOrder, subscribeSidebarPersistence }
 import { syncDesktopSidebar, type RegisteredProject } from "./tauri";
 import type { ActiveAgent, Worktree } from "./types";
 import type { ActivitySummary } from "./activity";
-import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
+import type { PublishedAttentionRow } from "../components/sidebar/sidebarSessionSignals";
 
 /** The daemon owns the revision and the clock only stamps the snapshot, so neither decides "changed". */
 function modelContentKey(model: SidebarModel) {
@@ -71,7 +71,7 @@ export type DesktopSidebarInput = {
   readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
   readonly agents: readonly ActiveAgent[];
   /** The desktop Inbox's rows, published so the remote's Inbox lists and counts the same rows. */
-  readonly attentionRows: readonly AttentionRow[];
+  readonly attentionRows: readonly PublishedAttentionRow[];
 };
 
 /** Publishes the model the desktop sidebar renders, from the same builder hook the Sidebar calls. */
