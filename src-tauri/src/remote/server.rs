@@ -2,6 +2,8 @@
 mod machine_owner_socket;
 #[path = "agent_control_service.rs"]
 pub(crate) mod agent_control_service;
+#[path = "supervisor_api.rs"]
+pub(crate) mod supervisor_api;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
 use crate::remote::browser_admission::AdmissionController;
@@ -3903,6 +3905,9 @@ async fn get_capabilities(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            if crate::hub_runtime::supervisor_available() {
+                capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
+            }
             capabilities
         } else { vec![] },
         "browser": {
@@ -7495,6 +7500,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/agent-control/sessions/{sessionId}/stop",
             post(agent_control_service::http_stop).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
+        .route(
+            "/api/v1/supervisor/pause",
+            post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )

@@ -22,16 +22,30 @@ pub struct SupervisedLane {
     pub goal: Option<String>,
     pub paused: bool,
     pub last_activity_at: String,
+    /// The reason on the lane's newest history row (a transition, a pause or a resume).
+    pub last_reason: Option<String>,
 }
 
-type LaneRow = (String, String, String, Option<String>, String, Option<String>, bool, String);
+type LaneRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    bool,
+    String,
+    Option<String>,
+);
 
 /// Lanes that are still live, most recently active first.
 pub async fn supervised_lanes(pool: &SqlitePool) -> Result<Vec<SupervisedLane>> {
     let rows: Vec<LaneRow> = sqlx::query_as(&format!(
         "SELECT lanes.key, lanes.title, lanes.status, lanes.omo_thread_id, lanes.cwd, external_sessions.goal,
                 EXISTS(SELECT 1 FROM lane_pauses WHERE lane_pauses.lane_key = lanes.key AND lane_pauses.resumed_at IS NULL),
-                COALESCE(lanes.last_activity_at, lanes.updated_at)
+                COALESCE(lanes.last_activity_at, lanes.updated_at),
+                (SELECT lane_history.reason FROM lane_history WHERE lane_history.lane_key = lanes.key
+                 ORDER BY lane_history.id DESC LIMIT 1)
          FROM lanes LEFT JOIN external_sessions ON external_sessions.lane_key = lanes.key
          WHERE lanes.status NOT IN {ENDED}
          ORDER BY 8 DESC, lanes.key"
@@ -41,7 +55,7 @@ pub async fn supervised_lanes(pool: &SqlitePool) -> Result<Vec<SupervisedLane>> 
     Ok(rows
         .into_iter()
         .map(
-            |(key, title, status, session_id, cwd, goal, paused, last_activity_at)| SupervisedLane {
+            |(key, title, status, session_id, cwd, goal, paused, last_activity_at, last_reason)| SupervisedLane {
                 key,
                 title,
                 status,
@@ -50,6 +64,7 @@ pub async fn supervised_lanes(pool: &SqlitePool) -> Result<Vec<SupervisedLane>> 
                 goal,
                 paused,
                 last_activity_at,
+                last_reason,
             },
         )
         .collect())
@@ -118,10 +133,13 @@ mod tests {
         assert_eq!(lanes[0].session_id.as_deref(), Some("pane-1"));
         assert_eq!(lanes[0].goal.as_deref(), Some("Get tests green"));
         assert!(!lanes[0].paused);
+        assert_eq!(lanes[0].last_reason.as_deref(), Some("launched"));
         assert!(!session_paused(&pool, "pane-1").await.unwrap());
 
         assert!(pause(&pool, "ledger", "desktop").await.unwrap());
-        assert!(supervised_lanes(&pool).await.unwrap()[0].paused);
+        let paused = &supervised_lanes(&pool).await.unwrap()[0];
+        assert!(paused.paused);
+        assert_eq!(paused.last_reason.as_deref(), Some("paused"));
         assert!(session_paused(&pool, "pane-1").await.unwrap());
         assert!(!session_paused(&pool, "pane-2").await.unwrap());
 
@@ -129,5 +147,17 @@ mod tests {
             watched_local_sessions(&pool).await.unwrap(),
             vec!["pane-2".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn a_lane_without_history_has_no_last_reason() {
+        let pool = crate::storage::memory().await.unwrap();
+        insert_lane(&pool, "fresh", "Fresh", "lead", "/repo", "file marker")
+            .await
+            .unwrap();
+
+        let lanes = supervised_lanes(&pool).await.unwrap();
+
+        assert_eq!(lanes[0].last_reason, None);
     }
 }
