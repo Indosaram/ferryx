@@ -106,7 +106,13 @@ pub mod tests {
         let path_arg = git::strip_verbatim_prefix(path.to_str().unwrap());
         git::run_git(
             manager.repo_root(),
-            &["worktree", "add", "-b", &format!("{LEGACY_PREFIX}/{ws}/{slug}"), &path_arg],
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("{LEGACY_PREFIX}/{ws}/{slug}"),
+                &path_arg,
+            ],
         )
         .unwrap();
         fs::canonicalize(path).unwrap()
