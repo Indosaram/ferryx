@@ -194,6 +194,63 @@ fn process_is_stopped(_pid: u32) -> bool {
     false
 }
 
+/// The process groups of every process in the terminal session `leader` leads.
+///
+/// Empty unless `leader` really is a session leader (its session id is its own pid) of a session
+/// other than this process's own, so a caller can never be pointed at a process outside the
+/// shell's session or at the daemon's own session.
+#[cfg(unix)]
+fn session_process_groups(leader: u32) -> Vec<u32> {
+    let sid = unsafe { libc::getsid(leader as libc::pid_t) };
+    if sid <= 1 || sid as u32 != leader || sid == unsafe { libc::getsid(0) } {
+        return Vec::new();
+    }
+    let mut groups: Vec<u32> = all_process_ids()
+        .into_iter()
+        .filter(|pid| *pid > 1 && unsafe { libc::getsid(*pid) } == sid)
+        .filter_map(|pid| {
+            let group = unsafe { libc::getpgid(pid) };
+            (group > 1).then_some(group as u32)
+        })
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn all_process_ids() -> Vec<libc::pid_t> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn all_process_ids() -> Vec<libc::pid_t> {
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    // Headroom for processes started between the two calls.
+    let mut pids: Vec<libc::pid_t> = vec![0; count as usize + 64];
+    let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    pids.truncate(listed.max(0) as usize);
+    pids
+}
+
+/// No process table reader here: Close still reaches the shell's group and the foreground job.
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
+))]
+fn all_process_ids() -> Vec<libc::pid_t> {
+    Vec::new()
+}
+
 pub(crate) enum ProcessHandle {
     Spawned(Box<dyn Child + Send + Sync>),
     Adopted(AdoptedProcess),
@@ -548,6 +605,12 @@ pub struct PtySession {
     close_grace: Arc<Mutex<Option<Duration>>>,
     #[cfg(unix)]
     relinquish_wake: Option<std::os::unix::net::UnixStream>,
+    /// Unix, spawned sessions: the write end of the socketpair the reader polls beside the PTY.
+    /// A background job that keeps the slave open means the PTY never reports EOF, so without this
+    /// a reader waiting in `poll` could never observe `request_reader_stop`. Kept apart from
+    /// `relinquish_wake`, whose presence marks an adopted session as relinquishing.
+    #[cfg(unix)]
+    reader_wake: Option<std::os::unix::net::UnixStream>,
     /// Unix: the EOF-on-drop switch of this session's [PtyInputWriter]. Cleared before a session
     /// another daemon still serves is let go, so dropping the writer here never sends EOF to that
     /// daemon's child. `None` on Windows, whose ConPTY writer is portable-pty's own.
@@ -652,6 +715,15 @@ impl PtySession {
                 .try_clone_to_owned()
                 .expect("duplicate PTY poll descriptor")
         };
+        #[cfg(unix)]
+        let (reader_wake_read, reader_wake) = match std::os::unix::net::UnixStream::pair() {
+            // Non-blocking write end: a wake that finds the buffer full has nothing left to add.
+            Ok((read, write)) => (Some(read), write.set_nonblocking(true).ok().map(|()| write)),
+            Err(error) => {
+                tracing::warn!(%error, "PTY reader wake socketpair unavailable; stop waits for output");
+                (None, None)
+            }
+        };
         let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
@@ -728,10 +800,21 @@ impl PtySession {
                     #[cfg(unix)]
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         use std::os::fd::AsRawFd;
-                        let mut poll = libc::pollfd {
+                        // Nothing is buffered, so a requested stop has drained everything there was:
+                        // end here rather than wait for output a held-open slave may never send.
+                        if reader_stop_requested_task.load(Ordering::Acquire) {
+                            break;
+                        }
+                        // The wake end is polled beside the PTY so `request_reader_stop` can end this
+                        // wait; its byte is never consumed because the loop ends on the next pass.
+                        // A negative fd (no socketpair) is ignored by poll.
+                        let wake_fd = reader_wake_read.as_ref().map_or(-1, |wake| wake.as_raw_fd());
+                        let mut poll = [libc::pollfd {
                             fd: reader_poll.as_raw_fd(), events: libc::POLLIN, revents: 0,
-                        };
-                        if unsafe { libc::poll(&mut poll, 1, -1) } < 0
+                        }, libc::pollfd {
+                            fd: wake_fd, events: libc::POLLIN, revents: 0,
+                        }];
+                        if unsafe { libc::poll(poll.as_mut_ptr(), 2, -1) } < 0
                             && std::io::Error::last_os_error().kind()
                                 != std::io::ErrorKind::Interrupted
                         {
@@ -752,6 +835,8 @@ impl PtySession {
             id: config.id,
             #[cfg(unix)]
             relinquish_wake: None,
+            #[cfg(unix)]
+            reader_wake,
             writer_eof,
             incarnation: config.incarnation,
             suspension_receipt: Mutex::new(None),
@@ -1358,22 +1443,48 @@ impl PtySession {
         // Addressing the negative group signals the shell's whole process group rather
         // than only the shell process.
         let shell_group = self.pgid().unwrap_or(pid);
+        let terminating = matches!(signal, TerminalSignal::Terminate | TerminalSignal::Kill);
         // Termination must also reach a job that currently owns the terminal from its own
         // group (job control puts every foreground job in a separate group). Read it before
         // signalling, while the shell still holds the terminal.
-        let foreground_group = match signal {
-            TerminalSignal::Terminate | TerminalSignal::Kill => self
-                .foreground_process_group()
+        let foreground_group = if terminating {
+            self.foreground_process_group()
                 .ok()
                 .flatten()
-                .filter(|group| *group > 1 && *group != shell_group),
-            _ => None,
+                .filter(|group| *group > 1 && *group != shell_group)
+        } else {
+            None
+        };
+        // ...and every other job of the shell's terminal session: background and disowned jobs
+        // sit in groups of their own that neither of the two above reaches. Read from the process
+        // table while the shell, which leads the session, is still alive.
+        let session_groups = if terminating {
+            session_process_groups(pid)
+        } else {
+            Vec::new()
+        };
+        let other_groups = || {
+            foreground_group
+                .into_iter()
+                .chain(session_groups.iter().copied())
+                .filter(move |group| *group != shell_group)
         };
 
-        let mut delivered = unsafe { libc::kill(-(shell_group as i32), sig) } == 0
+        let mut delivered = false;
+        if signal == TerminalSignal::Terminate {
+            // SIGHUP first, as a terminal emulator does when its window closes: an interactive shell
+            // ignores SIGTERM, but exits on SIGHUP and forwards it to each of its jobs. Every group
+            // of the session gets it directly too, which covers jobs the shell no longer tracks.
+            delivered |= unsafe { libc::kill(-(shell_group as i32), libc::SIGHUP) } == 0;
+            for group in other_groups() {
+                delivered |= unsafe { libc::kill(-(group as i32), libc::SIGHUP) } == 0;
+            }
+        }
+
+        delivered |= unsafe { libc::kill(-(shell_group as i32), sig) } == 0
             // Fallback to direct PID if process group signaling failed
             || unsafe { libc::kill(pid as i32, sig) } == 0;
-        if let Some(group) = foreground_group {
+        for group in other_groups() {
             delivered |= unsafe { libc::kill(-(group as i32), sig) } == 0;
         }
         if delivered {
@@ -1526,6 +1637,14 @@ impl PtySession {
         let interrupt = self.reader_interrupt.lock().clone();
         if let Some(interrupt) = interrupt {
             interrupt.request();
+        }
+        // Unix: a reader waiting in poll on a PTY whose slave a background job holds open would
+        // otherwise never see the flag.
+        #[cfg(unix)]
+        if let Some(wake) = &self.reader_wake {
+            if let Err(error) = std::io::Write::write_all(&mut &*wake, &[1]) {
+                tracing::warn!(%error, "failed to wake PTY reader");
+            }
         }
     }
 
@@ -1869,6 +1988,8 @@ impl PtySession {
             input_gate: tokio::sync::Mutex::new(()),
             id: snapshot.session_id,
             relinquish_wake: Some(wake_write),
+            // The adopted reader has its own wake (above); its stop semantics stay unchanged.
+            reader_wake: None,
             writer_eof,
             suspension_receipt: Mutex::new(snapshot.suspension_receipt.filter(|receipt|
                 receipt.matches(snapshot.pid, snapshot.incarnation.as_deref()))),

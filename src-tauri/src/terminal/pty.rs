@@ -800,7 +800,12 @@ impl PtyManager {
         // the stream; the cancellation inside is the bounded fallback for a host that never exits,
         // never the first move.
         session.close_io();
-        let _ = Self::end_reader_after_close(&session).await;
+        if let Err(error) = Self::end_reader_after_close(&session).await {
+            // Reported, not ignored: a reader that outlives its session leaks a thread and holds
+            // the output channel open. Wake it once more so it ends as soon as it can.
+            tracing::warn!(session_id, %error, "PTY reader did not end after the shell exited");
+            session.request_reader_stop();
+        }
         session.mark_exited(Some(code));
         session.close_output();
         self.remove_from_registry(session_id);
