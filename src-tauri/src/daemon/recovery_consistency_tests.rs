@@ -5,6 +5,32 @@ mod tests {
         DaemonResponse, DaemonSessionDetails, RecoveryAuthorityEvidence,
     };
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recovery_consistency_commit_retires_a_generation_with_only_dead_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Arc::new(crate::terminal::TerminalService::default());
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "backendSessionId":"dead-at-commit", "target":{"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"target"},
+            "config":{"host":{"id":"host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:dead","projectPath":"/project","worktree":null,"agentIdentity":null},
+            "clientRequestId":"dead-request","remoteCursor":"0","cols":80,"rows":24
+        })).unwrap();
+        terminals.remote().live_import(crate::terminal::remote::RemoteExportState {
+            descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+        }, None).unwrap();
+        terminals.remote().entry_for_test("dead-at-commit").unwrap().state.lock().details.state = crate::terminal::remote::RemoteConnectionState::Expired;
+        let manager = Arc::new(crate::daemon::handover::HandoverManager::new(dir.path().join("daemon.sock")));
+        let legacy = dir.path().join("legacy.sock");
+        let _listener = tokio::net::UnixListener::bind(&legacy).unwrap();
+        manager.force_prepared_for_test(legacy);
+        let (done, mut retired) = tokio::sync::watch::channel(false);
+        manager.set_retirement_action(move || { done.send_replace(true); });
+        let committing = manager.clone();
+        tokio::task::spawn_blocking(move || committing.commit_handover_v5(&terminals)).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
+        assert_eq!(manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+    }
+
     #[test]
     fn recovery_consistency_inv6_old_optional_metadata_backward_decode() {
         let legacy_json = r#"{

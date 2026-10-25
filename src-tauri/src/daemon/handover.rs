@@ -1766,6 +1766,8 @@ impl HandoverManager {
                 retained = retained.len(),
                 "Committed handover; draining the retained SSH/paired sessions on the legacy socket"
             );
+            drop(status_guard);
+            self.check_retirement_if_empty(_terminal_service);
             return Ok(());
         }
 
