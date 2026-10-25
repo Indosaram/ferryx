@@ -285,6 +285,78 @@ pub fn worktree_rel_path(dir: &str, ws: &str, slug: &str) -> String {
     format!("{dir}/{ws}/{slug}")
 }
 
+/// The root-anchored `info/exclude` pattern for one directory under the repository root.
+pub fn exclude_pattern(rel_dir: &str) -> String {
+    format!("/{}/", rel_dir.trim_matches('/'))
+}
+
+/// Exclude patterns for a new managed worktree under `current_dir`: that dir, plus every legacy
+/// managed dir already present in `repo_root`.
+pub fn managed_exclude_patterns(repo_root: &Path, current_dir: &str) -> Vec<String> {
+    let mut patterns = vec![exclude_pattern(current_dir)];
+    for dir in all_worktree_dirs() {
+        if dir != current_dir && repo_root.join(dir).is_dir() {
+            patterns.push(exclude_pattern(dir));
+        }
+    }
+    patterns
+}
+
+/// `<common_dir>/info/exclude`, resolving a relative `git rev-parse --git-common-dir` result
+/// against the directory git ran in.
+pub fn exclude_file(git_cwd: &Path, common_dir_output: &str) -> PathBuf {
+    let common = PathBuf::from(common_dir_output.trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        git_cwd.join(common)
+    };
+    common.join("info").join("exclude")
+}
+
+/// Appends each pattern missing from the repository-local `info/exclude` file and returns how
+/// many were added. Running it again adds nothing. Only `info/exclude` is written; tracked
+/// files such as `.gitignore` are never touched.
+pub fn ensure_excluded(exclude_file: &Path, patterns: &[String]) -> std::io::Result<usize> {
+    let existing = match std::fs::read_to_string(exclude_file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let present = |pattern: &str| {
+        let bare = pattern.trim_matches('/');
+        existing.lines().map(str::trim).any(|line| {
+            line == pattern
+                || line == bare
+                || line.strip_prefix('/') == Some(bare)
+                || line.strip_suffix('/') == Some(bare)
+        })
+    };
+    let mut addition = String::new();
+    for pattern in patterns {
+        if !present(pattern) && !addition.lines().any(|line| line == pattern) {
+            addition.push_str(pattern);
+            addition.push('\n');
+        }
+    }
+    if addition.is_empty() {
+        return Ok(0);
+    }
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        addition.insert(0, '\n');
+    }
+    if let Some(parent) = exclude_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(exclude_file)?;
+    file.write_all(addition.as_bytes())?;
+    Ok(addition.lines().filter(|line| !line.is_empty()).count())
+}
+
 /// The text before the first managed worktree dir component of `path` (either separator).
 pub fn split_repo_root(path: &str) -> Option<&str> {
     let bytes = path.as_bytes();

@@ -285,7 +285,7 @@ pub fn worktree_create_script(
             };
             format!(
                 "out=$(git -C {quoted_root} worktree add -b {quoted_branch} {quoted_path}{quoted_base} 2>&1) || {{ rc=$?; [ \"$rc\" -ne 0 ] || rc=1; printf '%s\\n' \"$out\" >&2; exit $rc; }}"
-            )
+            ) + "\n" + &posix_exclude_script(&quoted_root)
         }
         RemotePlatform::Windows => {
             let p = powershell_data(repo_root);
@@ -300,9 +300,43 @@ pub fn worktree_create_script(
                  $args=@('-C',$p,'worktree','add','-b',$br,$wt);{base_code} \
                  $g=Invoke-FerryxGit $args; \
                  if ($g.Code -ne 0) {{ $err = if ($g.Error) {{ $g.Error }} elseif ($g.Output) {{ $g.Output }} else {{ 'git worktree add failed' }}; throw $err }}"
-            )
+            ) + "\n" + &windows_exclude_script()
         }
     }
+}
+
+/// Printed on stdout by the create script when the best-effort `info/exclude` update fails.
+pub const EXCLUDE_FAILED_MARKER: &str = "FERRYX_WT_EXCLUDE_FAILED";
+
+fn managed_dirs_words(quote: impl Fn(&str) -> String) -> String {
+    crate::worktree::naming::all_worktree_dirs()
+        .map(quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Runs after a successful `worktree add`: appends `/<dir>/` to the repository's `info/exclude`
+/// once for every managed worktree dir present. A failure prints [`EXCLUDE_FAILED_MARKER`] and
+/// never fails the script. `.gitignore` is never touched.
+fn posix_exclude_script(quoted_root: &str) -> String {
+    let dirs = managed_dirs_words(direct::quote_posix);
+    let marker = EXCLUDE_FAILED_MARKER;
+    format!(
+        "( gcd=$(git -C {quoted_root} rev-parse --git-common-dir) && \
+         case \"$gcd\" in /*) ;; *) gcd={quoted_root}/\"$gcd\" ;; esac && \
+         mkdir -p \"$gcd/info\" && ex=\"$gcd/info/exclude\" && \
+         for d in {dirs}; do [ -d {quoted_root}/\"$d\" ] || continue; pat=\"/$d/\"; \
+         grep -qxF -- \"$pat\" \"$ex\" 2>/dev/null && continue; \
+         if [ -s \"$ex\" ] && [ -n \"$(tail -c 1 \"$ex\")\" ]; then printf '\\n' >> \"$ex\" || exit 1; fi; \
+         printf '%s\\n' \"$pat\" >> \"$ex\" || exit 1; done ) 2>/dev/null || printf '{marker}\\n'"
+    )
+}
+
+fn windows_exclude_script() -> String {
+    let dirs = managed_dirs_words(|dir| format!("'{dir}'")).replace(' ', ",");
+    r#"try { $c=Invoke-FerryxGit @('-C',$p,'rev-parse','--git-common-dir'); if ($c.Code -ne 0) { throw 'rev-parse failed' }; $cd=$c.Output.Trim(); if (-not [IO.Path]::IsPathRooted($cd)) { $cd=Join-Path $p $cd }; $info=Join-Path $cd 'info'; [void](New-Item -ItemType Directory -Force -Path $info); $ex=Join-Path $info 'exclude'; $have=if (Test-Path -LiteralPath $ex) { [IO.File]::ReadAllText($ex) } else { '' }; foreach ($d in @(__DIRS__)) { if (-not (Test-Path -LiteralPath (Join-Path $p $d))) { continue }; $pat='/'+$d+'/'; if (($have -split "`r?`n") -contains $pat) { continue }; $pre=if ($have.Length -gt 0 -and -not $have.EndsWith("`n")) { "`n" } else { '' }; [IO.File]::AppendAllText($ex, $pre+$pat+"`n"); $have+=$pre+$pat+"`n" } } catch { [Console]::Out.WriteLine('__MARKER__') }"#
+        .replace("__DIRS__", &dirs)
+        .replace("__MARKER__", EXCLUDE_FAILED_MARKER)
 }
 
 pub fn worktree_remove_script(
@@ -391,9 +425,20 @@ pub async fn create_remote(
     .map_err(|err| IpcError::new(IpcErrorCode::InvalidNamespace, err.to_string()))?;
     let script = worktree_create_script(environment.platform, repo_root, &branch, path, base_ref);
     let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
-    direct::bounded_output(&plan, Duration::from_secs(30))
+    let output = direct::bounded_output(&plan, Duration::from_secs(30))
         .await
         .map_err(|err| tag_error(err, "worktree-create"))?;
+    if String::from_utf8_lossy(&output)
+        .lines()
+        .any(|line| line.trim() == EXCLUDE_FAILED_MARKER)
+    {
+        tracing::warn!(
+            target: "worktree",
+            kind = "worktree_exclude_failed",
+            repo = %repo_root,
+            "could not add managed worktree dir to the remote info/exclude"
+        );
+    }
     Ok(())
 }
 
@@ -812,6 +857,24 @@ mod tests {
             create_output.status,
             String::from_utf8_lossy(&create_output.stdout),
             String::from_utf8_lossy(&create_output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&create_output.stdout).contains(EXCLUDE_FAILED_MARKER),
+            "exclude step failed"
+        );
+        let status = std::process::Command::new("git")
+            .args(["-C", repo_root, "status", "--porcelain"])
+            .output()
+            .expect("git status");
+        assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
+        let exclude = std::fs::read_to_string(repo_root_path.join(".git/info/exclude"))
+            .expect("info/exclude");
+        assert_eq!(
+            exclude
+                .lines()
+                .filter(|line| *line == "/.ferryx-worktrees/")
+                .count(),
+            1
         );
 
         let marker = format!("FERRYX_WT_LIST_V1_{}", uuid::Uuid::new_v4().simple());

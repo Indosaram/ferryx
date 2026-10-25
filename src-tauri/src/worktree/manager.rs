@@ -591,6 +591,7 @@ impl WorktreeManager {
         fs::create_dir_all(parent)?;
         let canonical_parent = fs::canonicalize(parent)?;
         self.ensure_canonical_inside_root(&options.path, canonical_parent)?;
+        self.exclude_from_status(&options.path);
 
         git_worktree_add(
             &self.repo_root,
@@ -611,6 +612,46 @@ impl WorktreeManager {
         });
         self.bump_revision();
         Ok(result)
+    }
+
+    /// Best-effort: lists the managed worktree dir that holds `worktree_path` (and any legacy
+    /// managed dir present) in the repository's `info/exclude`, so new checkouts never show up in
+    /// the user's `git status`. A failure is logged and never blocks creation.
+    fn exclude_from_status(&self, worktree_path: &Path) {
+        let Ok(relative) = worktree_path.strip_prefix(&self.repo_root) else {
+            return;
+        };
+        let Some(top) = relative
+            .components()
+            .next()
+            .and_then(|c| c.as_os_str().to_str())
+        else {
+            return;
+        };
+        // Only the top-level managed dir is excluded; an ad hoc path elsewhere in the repo is
+        // left visible rather than hiding it whole.
+        let current = if naming::is_worktree_dir(top) {
+            top.to_string()
+        } else {
+            relative.to_string_lossy().replace('\\', "/")
+        };
+        let result = run_git(&self.repo_root, &["rev-parse", "--git-common-dir"])
+            .map_err(|error| error.to_string())
+            .and_then(|common| {
+                let file = naming::exclude_file(&self.repo_root, &common);
+                let patterns = naming::managed_exclude_patterns(&self.repo_root, &current);
+                naming::ensure_excluded(&file, &patterns)
+                    .map_err(|error| format!("{}: {error}", file.display()))
+            });
+        if let Err(error) = result {
+            tracing::warn!(
+                target: "worktree",
+                kind = "worktree_exclude_failed",
+                repo = %self.repo_root.display(),
+                error = %error,
+                "could not add managed worktree dir to info/exclude"
+            );
+        }
     }
 
     pub fn list_worktrees(&self) -> Result<Vec<Worktree>, WorktreeError> {

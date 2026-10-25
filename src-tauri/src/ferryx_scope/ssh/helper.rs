@@ -308,6 +308,7 @@ impl Runtime {
                 {
                     return Err("FORBIDDEN".into());
                 }
+                exclude_managed_dir(repo, layout.worktree_dir);
                 let destination = base.join(slug);
                 // git rejects Windows verbatim (`\\?\`) paths that come from the canonicalized repo.
                 let repo_str = repo.to_string_lossy();
@@ -1132,6 +1133,38 @@ fn default_platform_login_shell() -> (String, Vec<String>) {
 /// Resolves a requested worktree path under `root`. A managed path `<dir>/<ws>/<slug>` that does
 /// not exist falls back to the same worktree in a legacy layout: `<legacy-dir>/<ws>/<slug>` or the
 /// old SSH `<legacy-dir>/wt-<slug>`. Any other request resolves exactly as given.
+/// Best-effort: lists the managed worktree dir (and any legacy dir present) in the repository's
+/// `info/exclude` so remote worktrees stay out of `git status`. Failures are reported on stderr
+/// and never block creation.
+fn exclude_managed_dir(repo: &Path, worktree_dir: &str) {
+    let repo_str = repo.to_string_lossy();
+    let repo_arg = repo_str.strip_prefix(r"\\?\").unwrap_or(&repo_str);
+    let mut command = std::process::Command::new("git");
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
+    let result = command
+        .arg("-C")
+        .arg(repo_arg)
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .map_err(|e| e.to_string())
+        .and_then(|output| {
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+            }
+            let file = worktree_naming::exclude_file(
+                Path::new(repo_arg),
+                &String::from_utf8_lossy(&output.stdout),
+            );
+            let patterns = worktree_naming::managed_exclude_patterns(repo, worktree_dir);
+            worktree_naming::ensure_excluded(&file, &patterns)
+                .map_err(|e| format!("{}: {e}", file.display()))
+        });
+    if let Err(error) = result {
+        eprintln!("WORKTREE_EXCLUDE_FAILED: {error}");
+    }
+}
+
 fn resolve_managed_worktree_rel(root: &Path, worktree_rel: &str) -> PathBuf {
     let requested = root.join(worktree_rel);
     if requested.exists() {
