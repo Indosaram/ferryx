@@ -78,11 +78,70 @@ describe("createDesktopSidebarSync", () => {
     expect(sentGroupIds()).toEqual([["a"], ["a"]]);
   });
 
-  it("retries a model whose publish failed instead of treating it as sent", async () => {
-    tauri.invoke.mockRejectedValueOnce({ code: "INTERNAL_ERROR", message: "daemon unavailable" });
+  it("resends an unchanged model when requested during an in-flight publish", async () => {
+    let release: (revision: number) => void = () => undefined;
+    tauri.invoke.mockImplementationOnce(() => new Promise<number>((resolve) => { release = resolve; }));
+    const send = createDesktopSidebarSync();
+    const snapshot = model([project("a")]);
+    const first = send(snapshot);
+
+    const resend = send(snapshot, true);
+    expect(tauri.invoke).toHaveBeenCalledTimes(1);
+    release(1);
+    await Promise.all([first, resend]);
+
+    expect(sentGroupIds()).toEqual([["a"], ["a"]]);
+  });
+
+  it("resends the latest model when it changes during an in-flight publish", async () => {
+    let release: (revision: number) => void = () => undefined;
+    tauri.invoke.mockImplementationOnce(() => new Promise<number>((resolve) => { release = resolve; }));
+    const send = createDesktopSidebarSync();
+    const first = send(model([project("a")]));
+
+    void send(model([project("obsolete")]), true);
+    const latest = send(model([project("b")]));
+    expect(tauri.invoke).toHaveBeenCalledTimes(1);
+    release(1);
+    await Promise.all([first, latest]);
+
+    expect(sentGroupIds()).toEqual([["a"], ["b"]]);
+  });
+
+  it("sends a pending resend when the in-flight publish rejects", async () => {
+    let reject: (reason: unknown) => void = () => undefined;
+    tauri.invoke.mockImplementationOnce(() => new Promise<number>((_resolve, fail) => { reject = fail; }));
+    const send = createDesktopSidebarSync();
+    const snapshot = model([project("a")]);
+    const first = send(snapshot);
+
+    const resend = send(snapshot, true);
+    expect(tauri.invoke).toHaveBeenCalledTimes(1);
+    reject({ code: "STALE_EPOCH", message: "stale sidebar lifetime" });
+    await Promise.all([first, resend]);
+
+    expect(sentGroupIds()).toEqual([["a"], ["a"]]);
+  });
+
+  it("deduplicates an unchanged non-forced model after a deferred publish succeeds", async () => {
+    let release: (revision: number) => void = () => undefined;
+    tauri.invoke.mockImplementationOnce(() => new Promise<number>((resolve) => { release = resolve; }));
+    const send = createDesktopSidebarSync();
+    const snapshot = model([project("a")]);
+    const first = send(snapshot);
+    release(1);
+    await first;
+
+    await send(snapshot);
+
+    expect(sentGroupIds()).toEqual([["a"]]);
+  });
+
+  it.each(["INTERNAL_ERROR", "STALE_EPOCH"])("retries a model rejected with %s instead of treating it as sent", async (code) => {
+    tauri.invoke.mockRejectedValueOnce({ code, message: "publish rejected" });
     const send = createDesktopSidebarSync();
 
-    await expect(send(model([project("a")]))).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
+    await expect(send(model([project("a")]))).rejects.toMatchObject({ code });
     await send(model([project("a")]));
 
     expect(sentGroupIds()).toEqual([["a"], ["a"]]);

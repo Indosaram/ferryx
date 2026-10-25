@@ -19,14 +19,16 @@ function modelContentKey(model: SidebarModel) {
 
 /**
  * Sends each distinct sidebar model once with at most one call in flight; models queued behind a
- * running call collapse to the latest. `resend` republishes an unchanged model after a reconnect.
+ * running call collapse to the latest. `resend` forces the next queued publish, even if an older
+ * in-flight call succeeds with unchanged content after the resend request.
  */
 export function createDesktopSidebarSync() {
   let lastSentKey: string | null = null;
   let pending: SidebarModel | null = null;
+  let forceNext = false;
   let running: Promise<void> | null = null;
   return (model: SidebarModel, resend = false): Promise<void> => {
-    if (resend) lastSentKey = null;
+    if (resend) forceNext = true;
     pending = model;
     if (running) return running;
     running = (async () => {
@@ -34,8 +36,10 @@ export function createDesktopSidebarSync() {
         while (pending !== null) {
           const snapshot = pending;
           pending = null;
+          const force = forceNext;
+          forceNext = false;
           const key = modelContentKey(snapshot);
-          if (key === lastSentKey) continue;
+          if (!force && key === lastSentKey) continue;
           try {
             await syncDesktopSidebar({ ...snapshot, generatedAt: new Date().toISOString() });
             lastSentKey = key;
