@@ -35,7 +35,7 @@ Here is the exact architecture, along with real repository measurements and thei
 |  |        v                                                 v        |  |
 |  |  +---------------------------+     +---------------------------+  |  |
 |  |  | libghostty-vt Core (FFI)  |     | Axum WebSocket Gateway    |  |  |
-|  |  | ANSI parser & grid state  |     | Authenticated token / PIN |  |  |
+|  |  | ANSI parser & grid state  |     | Authenticated device token|  |  |
 |  |  +-------------+-------------+     +-------------+-------------+  |  |
 |  |                v                                 v                |  |
 |  |  +---------------------------+     +---------------------------+  |  |

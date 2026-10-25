@@ -1,23 +1,23 @@
 ---
 title: "Pairing Security: What Signing In Grants"
-description: "What account sign-in and a pairing PIN actually grant, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only."
+description: "What account sign-in actually grants, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only."
 ---
 
-**Pairing Security: What Signing In Grants.** What account sign-in and a pairing PIN actually grant, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only.
+**Pairing Security: What Signing In Grants.** What account sign-in actually grants, expiry behavior, and how to revoke a paired device when a phone is lost. Claims map to Ferryx docs and cited sources only.
 
 ![Pairing security cover](/images/blog/qr-pairing-security/cover.svg)
 
 ## What pairing grants
 
-Long agent runs do not wait for you to be at the desk. Remote access that does not require inbound SSH or a vendor-hosted jump box keeps you checking progress, sending input, and watching CI from a phone without exposing a raw shell to the internet. In the specific case of “Pairing Security: What Signing In Grants”, the Ferryx angle is straightforward: what account sign-in and a pairing pin actually grant, expiry behavior, and how to revoke a paired device when a phone is lost. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces. This post keeps its original address but describes the pairing flows that ship today.
+Long agent runs do not wait for you to be at the desk. Remote access that does not require inbound SSH or a vendor-hosted jump box keeps you checking progress, sending input, and watching CI from a phone without exposing a raw shell to the internet. In the specific case of “Pairing Security: What Signing In Grants”, the Ferryx angle is straightforward: what account sign-in actually grants, expiry behavior, and how to revoke a paired device when a phone is lost. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces. This post keeps its original address but describes the pairing flows that ship today.
 
 ## Lifetime and revocation
 
-Ferryx pairs a mobile or browser client to your daemon through an authenticated gateway. The primary path is signing in to your Ferryx account with an email magic link, which links the machine and the client to the same account without copying codes; a local gateway can also issue a 6-digit PIN that expires 60 seconds after creation. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. Applied to “pairing security ferryx”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Ferryx pairs a mobile or browser client to your daemon through an authenticated gateway. The primary path is signing in to your Ferryx account with an email magic link, which links the machine and the client to the same account without copying codes. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. Applied to “pairing security ferryx”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
 
 ## Practical steps
 
-1. Enable the gateway on the host and sign in to your Ferryx account there (or generate a 6-digit pairing PIN).
+1. Enable the gateway on the host and sign in to your Ferryx account there.
 2. Open the Ferryx remote client on the phone or browser and complete pairing; the session binds to the host identity.
 3. Browse sessions, tap into a pane, and type as if you were local; the DOM grid keeps layout stable on small screens.
 4. For off-LAN access, point the client at your own outbound relay instead of depending on a third-party tunnel.
@@ -52,7 +52,7 @@ Typically no inbound ports: the client reaches the host through the gateway or y
 
 ### What does pairing grant?
 
-A device-scoped grant tied to your account or to a single PIN handshake, not your host shell credentials. PINs expire after 60 seconds; revoke the device from host settings if the phone is lost.
+A device-scoped grant tied to your account, not your host shell credentials. Revoke the device from host settings if the phone is lost.
 
 ## Limits and non-goals
 

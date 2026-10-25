@@ -41,7 +41,7 @@ described in [SECURITY.md](https://github.com/Indosaram/ferryx/blob/main/SECURIT
 
 | Symptom | Guide |
 | :--- | :--- |
-| PIN rejected, device will not connect, relay unreachable | [Remote pairing troubleshooting checklist](/blog/pairing-troubleshooting/) |
+| Sign-in link not arriving, device will not connect, relay unreachable | [Remote pairing troubleshooting checklist](/blog/pairing-troubleshooting/) |
 | Typing on a remote session feels slow | [Understanding remote terminal input latency](/blog/remote-input-latency/) |
 | Remote sessions after the VPN dropped | [Remote terminals when the VPN drops](/blog/remote-when-vpn-down/) |
 | An SSH session froze | [Recovering an unresponsive SSH session](/blog/unresponsive-ssh-recovery/) |
