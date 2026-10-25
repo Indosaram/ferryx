@@ -9091,20 +9091,21 @@ mod idle_cost_tests {
 
         let taken = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&taken);
-        // The shell sits idle at its prompt from here on. Virtual time makes the window exact;
-        // tokio does not auto-advance it while the observer's blocking capture runs.
-        tokio::time::pause();
+        // The shell sits idle at its prompt from here on. The sampling rate is the behavior
+        // under test, so this window is measured in real time: paused virtual time cannot
+        // auto-advance while the daemon holds a long-lived blocking task.
         server.spawn_foreground_observer_with(Arc::new(move || {
             counter.fetch_add(1, Ordering::SeqCst);
             crate::terminal::foreground::capture_process_snapshot()
         }));
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
         let taken = taken.load(Ordering::SeqCst);
-        tokio::time::resume();
         assert!(taken >= 1, "the observer must still classify the idle session");
+        // Windows starting at 0s, 2s and 4s: at most three listings in five idle seconds,
+        // where a per-tick listing takes about twenty.
         assert!(
-            taken <= 6,
-            "10s idle allows at most one full snapshot per 2s window, took {taken}"
+            taken <= 3,
+            "an idle session allows at most one full snapshot per 2s window, took {taken} in 5s"
         );
 
         session.write_input(b"exit\n").unwrap();
