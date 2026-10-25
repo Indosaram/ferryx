@@ -7,7 +7,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn recovery_consistency_commit_retires_a_generation_with_only_dead_ssh() {
+    async fn recovery_consistency_commit_retains_unsettled_expired_ssh() {
         let dir = tempfile::tempdir().unwrap();
         let terminals = Arc::new(crate::terminal::TerminalService::default());
         let descriptor = serde_json::from_value(serde_json::json!({
@@ -23,12 +23,12 @@ mod tests {
         let legacy = dir.path().join("legacy.sock");
         let _listener = tokio::net::UnixListener::bind(&legacy).unwrap();
         manager.force_prepared_for_test(legacy);
-        let (done, mut retired) = tokio::sync::watch::channel(false);
+        let (done, retired) = tokio::sync::watch::channel(false);
         manager.set_retirement_action(move || { done.send_replace(true); });
         let committing = manager.clone();
         tokio::task::spawn_blocking(move || committing.commit_handover_v5(&terminals)).await.unwrap().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
-        assert_eq!(manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+        assert!(!*retired.borrow());
+        assert_eq!(manager.status(), crate::daemon::handover::HandoverStatus::Draining);
     }
 
     #[test]

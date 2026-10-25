@@ -729,13 +729,21 @@ impl RemoteRuntime {
                 RemoteConnectionState::Connected
                 | RemoteConnectionState::Reconnecting
                 | RemoteConnectionState::Disconnected => true,
-                RemoteConnectionState::Expired => false,
+                // Expiry is not completed settlement. The watcher retains the entry
+                // until terminal publication, claim release and durable cleanup finish.
+                RemoteConnectionState::Expired => true,
             }
         })
     }
     #[cfg(test)]
     pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
         self.entry(id)
+    }
+    pub(crate) async fn settlement_gate(
+        &self,
+        id: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, RemoteFailure> {
+        Ok(self.entry(id)?.control.clone().lock_owned().await)
     }
     #[cfg(test)]
     pub(crate) fn take_recovery_owner_for_test(

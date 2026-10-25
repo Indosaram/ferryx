@@ -68,6 +68,23 @@ tokio::task_local! { pub(crate) static MACHINE_SPAWN: Arc<MachineSpawn>; }
 tokio::task_local! { static LOCAL_SPLIT_SPAWN: tokio::time::Instant; }
 tokio::task_local! { static REQUESTED_SESSION_ID: Option<String>; }
 
+#[cfg(test)]
+pub(super) struct SettlementTestBarrier {
+    pub(super) reached: tokio::sync::mpsc::UnboundedSender<&'static str>,
+    pub(super) proceed: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+tokio::task_local! { pub(super) static SETTLEMENT_TEST_BARRIER: Arc<SettlementTestBarrier>; }
+
+#[cfg(test)]
+impl SettlementTestBarrier {
+    async fn checkpoint(&self, stage: &'static str) {
+        self.reached.send(stage).unwrap();
+        self.proceed.acquire().await.unwrap().forget();
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SpawnCacheEntry {
     session_id: String,
@@ -187,6 +204,8 @@ impl From<String> for SpawnError {
 struct DurableRemoteSession {
     descriptor: crate::terminal::remote::RemoteSessionDescriptor,
     metadata: Option<StoredSessionMeta>,
+    #[serde(default)]
+    terminal: bool,
 }
 
 /// Blocking cross-process guard for durable remote snapshot read-modify-write
@@ -1480,6 +1499,7 @@ impl DaemonSessionService {
                 runtime.details(id).map(|d| DurableRemoteSession {
                     descriptor: d.descriptor,
                     metadata: metadata.read().get(id).cloned(),
+                    terminal: d.state == crate::terminal::remote::RemoteConnectionState::Expired,
                 })
             })
             .collect();
@@ -1488,7 +1508,11 @@ impl DaemonSessionService {
         for record in durable_records {
             merged.insert(record.descriptor.backend_session_id.clone(), record);
         }
-        for record in records {
+        for mut record in records {
+            // Terminal evidence is absorbing, including across daemon checkpoints.
+            record.terminal |= merged
+                .get(&record.descriptor.backend_session_id)
+                .is_some_and(|prior| prior.terminal);
             merged.insert(record.descriptor.backend_session_id.clone(), record);
         }
         let records: Vec<DurableRemoteSession> = merged.into_values().collect();
@@ -1507,6 +1531,35 @@ impl DaemonSessionService {
         })
         .await
         .map_err(|e| e.to_string())
+    }
+
+    /// Commit terminal evidence before removing a controller or publishing exit.
+    /// A later deletion failure leaves this record as a restart-safe obligation.
+    async fn mark_remote_terminal(
+        path: PathBuf,
+        lock: Arc<tokio::sync::Mutex<()>>,
+        descriptor: crate::terminal::remote::RemoteSessionDescriptor,
+    ) -> Result<(), String> {
+        let _guard = lock.lock().await;
+        crate::ipc::run_blocking(move || {
+            let _file_lock = RemoteSnapshotFileLock::acquire(&path.with_extension("lock"))
+                .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))?;
+            let mut persisted = load_session_from_path(&path)?.unwrap_or_default();
+            let value = persisted.extra.remove("remoteSessions")
+                .unwrap_or_else(|| serde_json::json!([]));
+            let mut records: Vec<DurableRemoteSession> = serde_json::from_value(value)
+                .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))?;
+            if let Some(record) = records.iter_mut()
+                .find(|record| record.descriptor.backend_session_id == descriptor.backend_session_id)
+            {
+                record.terminal = true;
+            } else {
+                records.push(DurableRemoteSession { descriptor, metadata: None, terminal: true });
+            }
+            persisted.extra.insert("remoteSessions".into(), serde_json::to_value(records)
+                .map_err(|error| crate::ipc::IpcError::internal(error.to_string()))?);
+            save_session_to_path(&path, &persisted)
+        }).await.map_err(|error| error.to_string())
     }
 
     /// Targeted durable-record removal used by the session teardown path.
@@ -1562,8 +1615,9 @@ impl DaemonSessionService {
         self.migrate_legacy_remote_persistence(&path).await?;
         let paired_path = path.with_file_name("paired_descriptors.json");
         self.terminal_service.paired().set_store_path(paired_path);
+        let read_path = path.clone();
         let records: Vec<DurableRemoteSession> = crate::ipc::run_blocking(move || {
-            let value = load_session_from_path(&path)?
+            let value = load_session_from_path(&read_path)?
                 .and_then(|mut s| s.extra.remove("remoteSessions"))
                 .unwrap_or_else(|| serde_json::json!([]));
             serde_json::from_value(value).map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
@@ -1571,6 +1625,16 @@ impl DaemonSessionService {
         .await
         .map_err(|e| e.to_string())?;
         for mut record in records {
+            if record.terminal {
+                // Cleanup may fail again; retained terminal evidence must never restore.
+                if let Err(error) = Self::remove_persisted_remote_record(
+                    path.clone(), Arc::clone(&self.remote_persistence_lock),
+                    record.descriptor.backend_session_id,
+                ).await {
+                    tracing::warn!(%error, "Retaining terminal remote cleanup obligation");
+                }
+                continue;
+            }
             // A new daemon has no hub backlog. Replay retained remote output from zero;
             // Attach emits a reset boundary instead of treating old local sequences as cursors.
             record.descriptor.remote_cursor = crate::ssh::bridge::RemoteCursor(0);
@@ -1720,6 +1784,8 @@ impl DaemonSessionService {
         let claims = self.provider_session_claims.clone();
         let spawn_cache = self.spawn_idempotency_cache.clone();
         let epoch = self.epoch.to_string();
+        #[cfg(test)]
+        let barrier = SETTLEMENT_TEST_BARRIER.try_with(Arc::clone).ok();
         let mut record_removable = false;
         tokio::spawn(async move {
             loop {
@@ -1739,11 +1805,17 @@ impl DaemonSessionService {
                 if expired || vanished {
                     if expired {
                         let Some(runtime) = runtime.upgrade() else { break; };
-                        if !runtime.settle_ended(&cleanup_session_id) {
+                        let Ok(_settlement) = runtime.settlement_gate(&cleanup_session_id).await else { break; };
+                        #[cfg(test)]
+                        if let Some(barrier) = &barrier { barrier.checkpoint("before_terminal").await; }
+                        if !runtime.details(&cleanup_session_id).is_some_and(|current|
+                            current.state == crate::terminal::remote::RemoteConnectionState::Expired)
+                        {
                             // The observed Expired snapshot is not settlement authority.
                             // A late control response or close may have changed ownership.
                             // Keep claims and durable state until the current owner ends.
                             if runtime.contains(&cleanup_session_id) {
+                                drop(_settlement);
                                 if rx.changed().await.is_err() {
                                     record_removable = !runtime.contains(&cleanup_session_id);
                                     break;
@@ -1753,6 +1825,24 @@ impl DaemonSessionService {
                             record_removable = true;
                             break;
                         }
+                        loop {
+                            match Self::mark_remote_terminal(
+                                path.clone(), Arc::clone(&lock), details.descriptor.clone(),
+                            ).await {
+                                Ok(()) => break,
+                                Err(error) => {
+                                    tracing::error!(%error, "Remote terminal evidence commit failed; retaining owner");
+                                    #[cfg(test)]
+                                    if let Some(barrier) = &barrier {
+                                        barrier.checkpoint("terminal_failed").await;
+                                        continue;
+                                    }
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                }
+                            }
+                        }
+                        #[cfg(test)]
+                        if let Some(barrier) = &barrier { barrier.checkpoint("terminal_committed").await; }
                         // Deliver terminal status before dropping the runtime sender. Do not clear
                         // agent_states or startup metadata: the ended pane can still resume its agent.
                         let _ = tx.send(DaemonRemoteEvent {
@@ -1765,6 +1855,29 @@ impl DaemonSessionService {
                             event: "terminal_lifecycle".into(),
                             payload: serde_json::json!({"sessionId":cleanup_session_id,"state":"exited","exitCode":null,"reason":details.failure.as_ref().map(|failure| failure.message.as_str()).unwrap_or("Remote session ended"),"incarnation":details.descriptor.client_request_id,"daemonEpoch":epoch}),
                         });
+                        #[cfg(test)]
+                        if let Some(barrier) = &barrier { barrier.checkpoint("exit_published").await; }
+                        loop {
+                            match Self::remove_persisted_remote_record(
+                                path.clone(), Arc::clone(&lock), cleanup_session_id.clone(),
+                            ).await {
+                                Ok(()) => break,
+                                Err(error) => {
+                                    tracing::error!(%error, "Remote terminal cleanup pending; retaining owner");
+                                    #[cfg(test)]
+                                    if let Some(barrier) = &barrier {
+                                        barrier.checkpoint("cleanup_failed").await;
+                                        continue;
+                                    }
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                }
+                            }
+                        }
+                        runtime.settle_ended(&cleanup_session_id);
+                        if let (Some(manager), Some(terminals)) = (handover.upgrade(), terminals.upgrade()) {
+                            manager.check_retirement_if_empty(&terminals);
+                        }
+                        break;
                     }
                     record_removable = true;
                     break;
