@@ -54,7 +54,7 @@ Typically no inbound ports: the client reaches the host through the gateway or y
 
 ### What does pairing grant?
 
-An account sign-in, or a 6-digit PIN that expires after 60 seconds, lets the client complete an authenticated pairing handshake with your host; revoke the device from host settings if the phone is lost.
+An account sign-in lets the client complete an authenticated pairing handshake with your host; revoke the device from host settings if the phone is lost.
 
 ## Limits and non-goals
 

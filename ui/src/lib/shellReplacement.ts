@@ -35,7 +35,13 @@ function hasReplaceableBackend(session: TerminalSession): boolean {
     session.backendSessionId === null ||
     isStandbyBackendSessionId(session.backendSessionId) ||
     session.lifecycle === "exited" ||
-    session.lifecycle === "failed"
+    session.lifecycle === "failed" ||
+    // A local pane stuck reconnecting (e.g. its PTY died with an OS reboot) offers "Open new shell"
+    // as its escape; the retained backend id must not make that escape fail. The old PTY is left
+    // untouched: if recovery wins the race, `requireCurrent` sees it rebound and discards the spawn.
+    (session.remoteConnectionState === "reconnecting" &&
+      !isRemoteWorkspaceId(session.workspaceId) &&
+      !isPairedWorkspaceId(session.workspaceId))
   );
 }
 

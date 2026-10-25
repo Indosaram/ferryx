@@ -40,7 +40,7 @@ The trade is honest. There's no push notification to your lock screen, no vendor
 
 ## A note on security
 
-The verifiable parts are the ones listed above: the gateway requires authentication, pairing uses a 6-digit PIN, and the relay URL is configurable. That's the extent of what's documented today, so don't read more into it. Ferryx is early software, and anyone exposing a terminal over a network should think about their threat model first. A terminal is a shell on your machine, and whoever can steer it can do anything that shell can. Keep remote access off unless you need it, and prefer a trusted network path when you can.
+The verifiable parts are the ones listed above: the gateway requires authentication, pairing goes through account sign-in, and the relay URL is configurable. That's the extent of what's documented today, so don't read more into it. Ferryx is early software, and anyone exposing a terminal over a network should think about their threat model first. A terminal is a shell on your machine, and whoever can steer it can do anything that shell can. Keep remote access off unless you need it, and prefer a trusted network path when you can.
 
 ## Trying it
 

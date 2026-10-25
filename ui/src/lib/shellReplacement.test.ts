@@ -9,6 +9,28 @@ import { PROJECTS_STORAGE_KEY } from "./storageKeys";
 
 afterEach(clearShellReplacementInflightForTests);
 describe("shell replacement", () => {
+  it("replaces a local session stuck reconnecting to a backend that never comes back", async () => {
+    const session: TerminalSession = { id: "pane", workspaceId: "local-ws", cwd: "/repo", worktree: null, backendSessionId: "dead-pty", lifecycle: "running", remoteConnectionState: "reconnecting", agentType: "omo" };
+    const spawn = vi.fn().mockResolvedValue({ sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" });
+    const dispatch = vi.fn();
+    const result = await replaceExitedShellSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch }, { clearAgent: true });
+    expect(result.sessionId).toBe("new-pty");
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND", sessionId: "pane", backendSessionId: "new-pty", clearAgent: true }));
+  });
+
+  it("discards the new shell when recovery reattaches the reconnecting session first", async () => {
+    let session: TerminalSession = { id: "pane", workspaceId: "local-ws", cwd: "/repo", worktree: null, backendSessionId: "live-pty", lifecycle: "running", remoteConnectionState: "reconnecting" };
+    const spawn = vi.fn().mockImplementation(async () => {
+      session = { ...session, remoteConnectionState: undefined };
+      return { sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" };
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    const dispatch = vi.fn();
+    await expect(replaceExitedShellSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch, close })).rejects.toMatchObject({ code: "AGENT_RESUME_INVALID" });
+    expect(close).toHaveBeenCalledWith("new-pty");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it.each([null, "claude"])("never replaces an SSH shell or agent (%s)", async agentType => {
     const session: TerminalSession = { id: "pane", workspaceId: "ssh:host:project", cwd: "/srv", worktree: null, backendSessionId: null, lifecycle: "exited", agentType };
     const spawn = vi.fn();

@@ -61,8 +61,8 @@ if it ever restores wrong, see [recovering a corrupted workspace layout](/blog/r
 
 Ferryx can reach terminals on other machines in two ways:
 
-- **A phone or another browser.** Pair it from Settings > Remote Access with a QR code or a
-  PIN. The mobile client renders the same sessions in a layout built for a narrow screen.
+- **A phone or another browser.** Sign in to your Ferryx account on it with an email magic
+  link. The mobile client renders the same sessions in a layout built for a narrow screen.
   [Pair Ferryx with your phone](/blog/pair-ferryx-with-phone/) covers the steps.
 - **Another computer running Ferryx or the headless `ferryx-cli` daemon.** Install
   `ferryx-cli`, start `ferryx-cli --daemon`, and link the machine to your account with

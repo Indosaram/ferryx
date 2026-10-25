@@ -16,7 +16,7 @@ That's the practical difference. The rest of this page covers what Conductor act
 | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | Not available yet |
 | Licensing | Source-available under the Ferryx License, free for individuals and small companies | Closed source; free tier plus paid plans from $50/mo |
 | Agents | Any command you can start in a shell; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Claude Code, Codex, Cursor, and OpenCode |
-| Mobile | Authenticated mobile web client, PIN pairing | Conductor for iOS app; the mobile app is listed under Pro |
+| Mobile | Authenticated mobile web client, account sign-in | Conductor for iOS app; the mobile app is listed under Pro |
 | Cloud service | None | Conductor Cloud, on paid plans |
 
 Verified 2026-10-24 against Ferryx v2026.10.11.1 and Conductor's [docs](https://www.conductor.build/docs), [pricing](https://www.conductor.build/pricing), and [changelog](https://www.conductor.build/changelog) (latest dated entry 0.91.0, 2026-10-15). Both products move quickly, so check the linked pages before you decide anything on them.

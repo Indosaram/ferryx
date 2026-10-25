@@ -1809,6 +1809,19 @@ fn split_stage_deadline(remaining_ms: u64, cap: u64) -> Result<tokio::time::Inst
     Ok(tokio::time::Instant::now() + Duration::from_millis(budget))
 }
 
+/// The source pane's cwd is a hint, not a precondition: a source whose shell already exited
+/// (the daemon answers SESSION_NOT_FOUND) must not fail the split, it starts at the worktree
+/// root instead, as plain spawn does. Transport failures still fail the stage.
+fn inherited_split_cwd(
+    described: Result<crate::daemon::protocol::DaemonSessionDetails, IpcError>,
+) -> Result<Option<PathBuf>, IpcError> {
+    match described {
+        Ok(details) => Ok(details.cwd.map(PathBuf::from)),
+        Err(error) if error.code == IpcErrorCode::SessionNotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn split_wire_epoch(operation: crate::daemon::protocol::SplitOperationResult)
     -> crate::daemon::protocol::SplitOperationResult<String>
 {
@@ -4097,8 +4110,9 @@ pub async fn cmd_terminal_spawn_operation(
                 (None, Some(parent)) => {
                     let probe_deadline = deadline.min(tokio::time::Instant::now()
                         + Duration::from_millis(STAGE_CWD_PROBE_MAX_MS));
-                    daemon_client.describe_session_until(parent, &identity, probe_deadline)
-                        .await?.cwd.map(PathBuf::from)
+                    inherited_split_cwd(
+                        daemon_client.describe_session_until(parent, &identity, probe_deadline).await,
+                    )?
                 }
                 _ => request.cwd.clone(),
             };
@@ -5637,6 +5651,14 @@ mod tests {
         assert!(split_stage_deadline(0, 9000).is_err());
         assert_eq!(crate::daemon::protocol::clip_stage_budget(1000, 9000), 1000);
         assert_eq!(crate::daemon::protocol::clip_stage_budget(9000, 3000), 3000);
+    }
+
+    #[test]
+    fn split_cwd_inheritance_tolerates_an_exited_source_but_not_transport_failure() {
+        let missing = IpcError::new(IpcErrorCode::SessionNotFound, "Session 'source' not found");
+        assert_eq!(inherited_split_cwd(Err(missing)).unwrap(), None);
+        let transport = IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "timed out");
+        assert_eq!(inherited_split_cwd(Err(transport)).unwrap_err().code, IpcErrorCode::SpawnAttemptTimeout);
     }
 
     #[tokio::test]

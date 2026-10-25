@@ -255,6 +255,65 @@ function waitForSnapshotUpdate(
 }
 
 describe("local recovery retry identity_conflict revalidation", () => {
+  it("settles a reconnecting agent pane as exited once the daemon confirms its backend absent", async () => {
+    resetLocalRecoveryForTests();
+    const clock = virtualRecoveryClock();
+    const retained: TerminalSession = { ...session("absent-s1", "local", "backend-absent-1"), agentType: "omo",
+      providerSession: { key: "session_id", id: "conversation-1" } };
+    setWorkspaceSnapshot("local", stateWith([retained]));
+    setLocalRecoveryClockForTests(clock);
+    const absent = { code: "SESSION_NOT_FOUND", message: "Session 'backend-absent-1' not found",
+      details: { source: "daemon_describe", kind: "session_not_found", reason: "scoped_missing" } };
+    describeTerminalMock.mockReset();
+    describeTerminalMock.mockRejectedValue(absent);
+    const exited = clock.waitForSignal((resolve) => {
+      const unsubscribe = subscribeWorkspaceSnapshots(() => {
+        if (getWorkspaceSnapshot("local")?.sessions["absent-s1"]?.lifecycle === "exited") {
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+    const retry = clock.waitForTimer(250);
+    setLocalRecoveryPersistence(async () => {});
+    await retry;
+    clock.advanceBy(250);
+    await exited;
+    const settled = getWorkspaceSnapshot("local")?.sessions["absent-s1"];
+    expect(settled).toMatchObject({ lifecycle: "exited", backendSessionId: null, agentType: "omo",
+      providerSession: { key: "session_id", id: "conversation-1" }, recoveryState: { phase: "exited", reason: "absent" } });
+    expect(settled?.remoteConnectionState).toBeUndefined();
+    expect(describeTerminalMock).toHaveBeenCalledTimes(2);
+    resetLocalRecoveryForTests();
+    clearWorkspaceSnapshot("local");
+    describeTerminalMock.mockReset();
+  });
+
+  it("keeps retrying when the predecessor that owns the session is unreachable", async () => {
+    resetLocalRecoveryForTests();
+    const clock = virtualRecoveryClock();
+    setWorkspaceSnapshot("local", stateWith([session("unreachable-s1", "local", "backend-unreachable-1")]));
+    setLocalRecoveryClockForTests(clock);
+    describeTerminalMock.mockReset();
+    describeTerminalMock.mockRejectedValue({ code: "SESSION_NOT_FOUND", message: "peer unreachable",
+      details: { source: "daemon_describe", kind: "owner_unavailable", reason: "legacy_peer_unreachable" } });
+    let timer = clock.waitForTimer(250);
+    setLocalRecoveryPersistence(async () => {});
+    for (const delay of [250, 500, 1_000, 2_000]) {
+      await timer;
+      timer = clock.waitForTimer(delay * 2);
+      clock.advanceBy(delay);
+    }
+    await timer;
+    const retained = getWorkspaceSnapshot("local")?.sessions["unreachable-s1"];
+    expect(retained).toMatchObject({ backendSessionId: "backend-unreachable-1", lifecycle: "working",
+      remoteConnectionState: "reconnecting" });
+    expect(describeTerminalMock).toHaveBeenCalledTimes(5);
+    resetLocalRecoveryForTests();
+    clearWorkspaceSnapshot("local");
+    describeTerminalMock.mockReset();
+  });
+
   it("retries a background-loaded session beyond thirty virtual seconds and recovers the retained identity", async () => {
     resetLocalRecoveryForTests();
     const clock = virtualRecoveryClock();

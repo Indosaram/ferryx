@@ -1,23 +1,23 @@
 ---
 title: "Remote Pairing Troubleshooting Checklist"
-description: "PIN rejected, device will not connect, relay unreachable: a step-by-step fix list for pairing failures. Claims map to Ferryx docs and cited sources only."
+description: "Sign-in link not arriving, device will not connect, relay unreachable: a step-by-step fix list for pairing failures. Claims map to Ferryx docs and cited sources only."
 ---
 
-**Remote Pairing Troubleshooting Checklist.** PIN rejected, device will not connect, relay unreachable: a step-by-step fix list for pairing failures. Claims map to Ferryx docs and cited sources only.
+**Remote Pairing Troubleshooting Checklist.** Sign-in link not arriving, device will not connect, relay unreachable: a step-by-step fix list for pairing failures. Claims map to Ferryx docs and cited sources only.
 
 ![pairing-troubleshooting cover](/images/blog/pairing-troubleshooting/cover.png)
 
-## PIN failures
+## Sign-in failures
 
-Long agent runs do not wait for you to be at the desk. Remote access that does not require inbound SSH or a vendor-hosted jump box keeps you checking progress, sending input, and watching CI from a phone without exposing a raw shell to the internet. In the specific case of “Remote Pairing Troubleshooting Checklist”, the Ferryx angle is straightforward: pin rejected, device will not connect, relay unreachable: a step-by-step fix list for pairing failures. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Long agent runs do not wait for you to be at the desk. Remote access that does not require inbound SSH or a vendor-hosted jump box keeps you checking progress, sending input, and watching CI from a phone without exposing a raw shell to the internet. In the specific case of “Remote Pairing Troubleshooting Checklist”, the Ferryx angle is straightforward: sign-in link not arriving, device will not connect, relay unreachable: a step-by-step fix list for pairing failures. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
 
 ## Connectivity checks
 
-Ferryx pairs a mobile or browser client to your daemon through an authenticated gateway: sign in to your Ferryx account with an email magic link, or enter a short-lived 6-digit pairing PIN. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. Applied to “remote pairing troubleshooting”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Ferryx pairs a mobile or browser client to your daemon through an authenticated gateway: sign in to your Ferryx account with an email magic link. The remote client renders terminals in a custom DOM grid rather than xterm.js, and an outbound relay covers machines behind NAT. Applied to “remote pairing troubleshooting”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
 
 ## Practical steps
 
-1. Enable the gateway on the host and sign in to your Ferryx account there (or generate a 6-digit pairing PIN).
+1. Enable the gateway on the host and sign in to your Ferryx account there.
 2. Open the Ferryx remote client on the phone or browser and complete pairing; the session binds to the host identity.
 3. Browse sessions, tap into a pane, and type as if you were local; the DOM grid keeps layout stable on small screens.
 4. For off-LAN access, point the client at your own outbound relay instead of depending on a third-party tunnel.
@@ -52,7 +52,7 @@ Typically no inbound ports: the client reaches the host through the gateway or y
 
 ### What does pairing grant?
 
-An account sign-in, or a 6-digit PIN that expires after 60 seconds, lets the client complete an authenticated pairing handshake with your host; revoke the device from host settings if the phone is lost.
+An account sign-in lets the client complete an authenticated pairing handshake with your host; revoke the device from host settings if the phone is lost.
 
 ## Limits and non-goals
 
