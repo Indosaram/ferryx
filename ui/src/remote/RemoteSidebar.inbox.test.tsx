@@ -134,19 +134,34 @@ describe("publishedAttentionOption", () => {
   const base = (options: RemoteWorkspaceModel["options"]): RemoteWorkspaceModel =>
     ({ context: { workspaceId: null, worktreeSlug: null, worktreeLabel: null }, options }) as unknown as RemoteWorkspaceModel;
 
-  it("opens that machine's session when the inventory knows it", () => {
-    const session = { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", sessionId: "s-n1", machineId: "m1" };
+  const backed: PublishedAttentionTarget = { machineId: "m1", row: { ...row("n1", "needs-you"), backendSessionId: "pty-7", worktreeSlug: "main" } };
+
+  it("opens that machine's session by the row's backend session id, attach-only", () => {
+    const session = { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", sessionId: "pty-7", machineId: "m1" };
     const other = { ...session, machineId: "m2" };
 
-    expect(publishedAttentionOption(base([other, session]), target)).toBe(session);
+    expect(publishedAttentionOption(base([other, session]), backed)).toEqual({ ...session, attachOnly: true });
   });
 
-  it("falls back to that machine's workspace, root worktree first, then to the bare workspace", () => {
+  it("never matches the row's local pane id against the inventory", () => {
+    const localIdOption = { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", sessionId: "s-n1", machineId: "m1" };
+
+    expect(publishedAttentionOption(base([localIdOption]), target).sessionId).toBeUndefined();
+  });
+
+  it("falls back to the row's worktree when its session is gone", () => {
     const slugged = { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", machineId: "m1" };
     const root = { ...slugged, worktreeSlug: null, worktreeLabel: null };
 
-    expect(publishedAttentionOption(base([slugged, root]), target)).toBe(root);
-    expect(publishedAttentionOption(base([{ ...root, machineId: "m2" }]), target)).toEqual({ workspaceId: "ws-ferryx", worktreeSlug: null, worktreeLabel: null, machineId: "m1" });
-    expect(publishedAttentionOption(base([]), target)).toEqual({ workspaceId: "ws-ferryx", worktreeSlug: null, worktreeLabel: null });
+    expect(publishedAttentionOption(base([root, slugged]), backed)).toEqual({ ...slugged, attachOnly: true });
+  });
+
+  it("falls back to that machine's workspace, root worktree first, then to the bare workspace, all attach-only", () => {
+    const slugged = { workspaceId: "ws-ferryx", worktreeSlug: "main", worktreeLabel: "main", machineId: "m1" };
+    const root = { ...slugged, worktreeSlug: null, worktreeLabel: null };
+
+    expect(publishedAttentionOption(base([slugged, root]), target)).toEqual({ ...root, attachOnly: true });
+    expect(publishedAttentionOption(base([{ ...root, machineId: "m2" }]), target)).toEqual({ workspaceId: "ws-ferryx", worktreeSlug: null, worktreeLabel: null, machineId: "m1", attachOnly: true });
+    expect(publishedAttentionOption(base([]), target)).toEqual({ workspaceId: "ws-ferryx", worktreeSlug: null, worktreeLabel: null, attachOnly: true });
   });
 });
