@@ -72,6 +72,9 @@ export function newSummary({ runId, platform, host, revisions = {}, startedAt = 
     host,
     startedAt,
     finishedAt: null,
+    // Release commit the run tested; the release survival gate (scripts/lib/release-survival.mjs)
+    // accepts a summary only when this equals the release commit.
+    commit: revisions.head ?? null,
     revisions: { head: null, handoverV1Rev: null, baselineRev: null, ...revisions },
     hooks: {},
     artifacts: {},

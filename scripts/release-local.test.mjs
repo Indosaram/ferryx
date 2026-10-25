@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
+import { writeSurvivalFixture } from "./fixtures/survival-fixture.mjs";
 
 const SCRIPT_PATH = join(process.cwd(), "scripts", "release-local.mjs");
 
@@ -411,6 +412,7 @@ test("publish: full pipeline with fake gh executable and byte verification", asy
     writeFileSync(join(publishDir, "SHA256SUMS.txt"), sums);
 
     writeIntegrityState(runDir, plan, publishDir);
+    writeSurvivalFixture(runDir, plan.commitSha);
 
     // Create fake gh script that tracks calls and simulates GitHub release flow
     const fakeGhPath = join(tmp, "fake-gh.mjs");

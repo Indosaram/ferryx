@@ -414,7 +414,13 @@ export async function nonceRoundTrip(ctx, conn, sessionId, result, label, { fres
 
 /** Pre/post DescribeLiveSessions comparison with assertions. */
 export function assertInventoryKept(result, before, after, label) {
-  const problems = compareInventories(liveSessions(before), after.sessions);
+  const live = liveSessions(before);
+  const problems = compareInventories(live, after.sessions);
+  // Session counts for the release survival report: the lowest kept/before of the scenario.
+  const kept = live.length - problems.length;
+  if (!result.sessions || kept / Math.max(live.length, 1) < result.sessions.kept / Math.max(result.sessions.before, 1)) {
+    result.sessions = { before: live.length, kept };
+  }
   assertion(result, `${label}: every live session kept its identity`, problems.length === 0, problems);
   return problems.length === 0;
 }
