@@ -242,15 +242,15 @@ async fn sidebar_snapshot_survives_reload_from_disk() {
         let path = root.path().join("data/desktop-sidebar.v1.json");
         let store = SidebarSnapshotStore::load(path.clone());
         assert!(store.model().is_none());
-        assert_eq!(store.store(model("first")).unwrap(), 1);
-        assert_eq!(store.store(model("second")).unwrap(), 2);
+        assert_eq!(store.store(model("first"), true).unwrap(), 1);
+        assert_eq!(store.store(model("second"), true).unwrap(), 2);
         drop(store);
         let reloaded = SidebarSnapshotStore::load(path);
         let served = reloaded.model().unwrap();
         assert_eq!(served["projects"][0]["label"], "second");
         assert_eq!(served["revision"], 2);
         assert_eq!(
-            reloaded.store(model("third")).unwrap(),
+            reloaded.store(model("third"), true).unwrap(),
             3,
             "revisions continue after reload"
         );
@@ -270,11 +270,146 @@ async fn sidebar_snapshot_ignores_a_corrupt_file() {
         std::fs::write(&path, b"{not json").unwrap();
         let store = SidebarSnapshotStore::load(path);
         assert!(store.model().is_none());
-        assert_eq!(store.store(model("fresh")).unwrap(), 1);
+        assert_eq!(store.store(model("fresh"), true).unwrap(), 1);
         drop(store);
         root.close().unwrap();
         Ok(())
     })
     .await
     .unwrap();
+}
+
+fn live_model(label: &str) -> Value {
+    let mut published = model(label);
+    published["signals"] = json!({"unreadWorktreePaths": {"/p": true}, "agentStateByPath": {},
+        "activityByWorktreePath": {}, "attentionRows": []});
+    published
+}
+
+#[tokio::test]
+async fn sidebar_snapshot_never_reloads_live_signals_from_disk() {
+    crate::ipc::run_blocking(|| {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data/desktop-sidebar.v1.json");
+        let store = SidebarSnapshotStore::load(path.clone());
+        store.store(live_model("published"), true).unwrap();
+        assert!(store.model().unwrap().get("signals").is_some());
+        drop(store);
+        let reloaded = SidebarSnapshotStore::load(path);
+        let served = reloaded.model().unwrap();
+        assert!(
+            served.get("signals").is_none(),
+            "a previous desktop session's live state is not served: {served}"
+        );
+        assert_eq!(served["projects"][0]["label"], "published", "the structure persists");
+        drop(reloaded);
+        root.close().unwrap();
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Opens the desktop's event stream the way lib.rs's bridge does and returns the open stream.
+async fn open_desktop_stream(
+    server: &Arc<DaemonServer>,
+) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+    let mut frame = serde_json::to_value(&DaemonRequest::SubscribeRemoteEvents).unwrap();
+    if let (Some(token), Value::Object(map)) = (server.transport_token(), &mut frame) {
+        map.insert("token".into(), token.into());
+    }
+    let (mut client, server_side) = tokio::io::duplex(64 * 1024);
+    let handler = Arc::clone(server);
+    let serving = tokio::spawn(async move { handler.handle_client(server_side).await });
+    client
+        .write_all(format!("{frame}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(&mut client);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        serde_json::from_str::<DaemonResponse>(line.trim()).unwrap(),
+        DaemonResponse::SubscribeRemoteEventsOk
+    ));
+    (client, serving)
+}
+
+#[tokio::test]
+async fn sidebar_live_signals_are_dropped_when_the_desktop_disconnects() {
+    let fixture = fixture().await;
+    let service = Arc::clone(
+        &fixture
+            .server
+            .remote_state()
+            .machine_services
+            .as_ref()
+            .unwrap()
+            .workspaces,
+    );
+    let streams = service.desktop_stream_count();
+    let wait_streams = |streams: &tokio::sync::watch::Receiver<usize>, n: usize| {
+        let mut streams = streams.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), streams.wait_for(|open| *open == n))
+                .await
+                .expect("desktop stream count")
+                .unwrap();
+        }
+    };
+
+    // Published while no desktop is connected: the live part is never stored.
+    exchange(
+        &fixture.server,
+        &DaemonRequest::SyncDesktopSidebar {
+            model: live_model("early"),
+        },
+    )
+    .await;
+    let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
+    assert!(body["model"].get("signals").is_none(), "{body}");
+
+    let (first, _first_serving) = open_desktop_stream(&fixture.server).await;
+    let (second, _second_serving) = open_desktop_stream(&fixture.server).await;
+    wait_streams(&streams, 2).await;
+    let response = exchange(
+        &fixture.server,
+        &DaemonRequest::SyncDesktopSidebar {
+            model: live_model("ferryx"),
+        },
+    )
+    .await;
+    assert!(
+        matches!(response, DaemonResponse::SyncDesktopSidebarOk { revision: 2 }),
+        "{response:?}"
+    );
+    let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
+    assert!(body["model"].get("signals").is_some(), "{body}");
+    let mut events = service.machine_events.subscribe();
+
+    // One of two desktop streams ends: a desktop is still connected, the live part stays.
+    drop(first);
+    wait_streams(&streams, 1).await;
+    let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
+    assert!(body["model"].get("signals").is_some(), "{body}");
+    assert!(events.try_recv().is_err(), "nothing changed yet");
+
+    // The last desktop stream ends (the app quit): the live part goes, announced once.
+    drop(second);
+    wait_streams(&streams, 0).await;
+    let event = events.try_recv().expect("sidebarChanged after the desktop disconnects");
+    assert_eq!(
+        (event["type"].clone(), event["payload"].clone()),
+        (json!("sidebarChanged"), json!({"revision": 3}))
+    );
+    assert!(events.try_recv().is_err(), "announced once");
+    let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
+    assert!(body["model"].get("signals").is_none(), "{body}");
+    assert_eq!(body["model"]["revision"], 3);
+    assert_eq!(body["model"]["projects"][0]["label"], "ferryx", "the structure stays");
+    drop(service);
+    close(fixture).await;
 }

@@ -3708,6 +3708,8 @@ impl DaemonClient {
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
+            // Held open for the stream's life: the daemon reads EOF on it as "the desktop is gone".
+            let _write_half = write_half;
             let mut line = String::new();
             while let Ok(n) = reader.read_line(&mut line).await {
                 if n == 0 {
