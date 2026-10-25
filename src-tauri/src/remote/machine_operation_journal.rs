@@ -37,15 +37,18 @@ pub struct MachineSession {
     pub session: super::machine_protocol::Session,
     pub exit: Option<super::machine_protocol::ExitMetadata>,
 }
+#[cfg(test)]
+type JournalProbe = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct MachineOperationJournal {
     path: PathBuf,
     state: parking_lot::Mutex<Result<Store, String>>,
     #[cfg(test)]
-    probe: parking_lot::RwLock<Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>>,
+    probe: parking_lot::RwLock<Option<JournalProbe>>,
 }
 pub enum Begin {
     New,
-    Existing(Record),
+    Existing(Box<Record>),
 }
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -78,7 +81,7 @@ impl MachineOperationJournal {
                 &receipt.device_id,
                 &receipt.request_id,
                 receipt.status,
-                outcome.clone(),
+                outcome.as_ref().clone(),
             )?;
         }
         Ok(())
@@ -99,7 +102,7 @@ impl MachineOperationJournal {
         record.status = status;
         record.operation = Operation::Completed {
             request_id: request.into(),
-            outcome,
+            outcome: Box::new(outcome),
         };
         Ok(record)
     }
@@ -214,7 +217,7 @@ impl MachineOperationJournal {
             if r.digest != digest || r.kind != kind {
                 return Err("REQUEST_CONFLICT".into());
             }
-            return Ok(Begin::Existing(r.clone()));
+            return Ok(Begin::Existing(Box::new(r.clone())));
         }
         let time = now();
         let mut tombstones = s
@@ -334,9 +337,9 @@ impl MachineOperationJournal {
         record.outcome_summary = Some("session".into());
         record.operation = Operation::Completed {
             request_id: request.into(),
-            outcome: OperationOutcome::Session {
+            outcome: Box::new(OperationOutcome::Session {
                 session: session.session.clone(),
-            },
+            }),
         };
         candidate
             .sessions
@@ -470,7 +473,7 @@ impl MachineOperationJournal {
         });
         r.operation = Operation::Completed {
             request_id: request_id.into(),
-            outcome,
+            outcome: Box::new(outcome),
         };
         let result = r.clone();
         self.persist(&mut state, s)?;

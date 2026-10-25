@@ -250,10 +250,12 @@ async fn next_run_state(stream: &mut PairedDagStream, run_id: &str) -> anyhow::R
     bounded.unwrap_or(Ok(false))
 }
 
+type DagInventory = (String, Vec<crate::dag::journal::DagRunSnapshot>);
+
 /// Waits for the first inventory frame, so the assertion never depends on arrival timing.
 async fn next_inventory(
     stream: &mut PairedDagStream,
-) -> anyhow::Result<Option<(String, Vec<crate::dag::journal::DagRunSnapshot>)>> {
+) -> anyhow::Result<Option<DagInventory>> {
     let wait = async {
         loop {
             let frame = match stream.socket.next().await {
@@ -279,7 +281,7 @@ async fn next_inventory(
         }
     };
     let bounded: Result<
-        Result<Option<(String, Vec<crate::dag::journal::DagRunSnapshot>)>, anyhow::Error>,
+        anyhow::Result<Option<DagInventory>>,
         tokio::time::error::Elapsed,
     > = tokio::time::timeout(EVENT_WAIT, wait).await;
     bounded.unwrap_or(Ok(None))

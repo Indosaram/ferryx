@@ -761,12 +761,23 @@ pub(crate) fn decide_ssh_watch_step(
         failure,
         consecutive_terminal_failures,
         consecutive_transport_failures,
-        host_id,
-        project_path,
-        generation,
-        DEFAULT_TERMINAL_FAILURE_BUDGET,
-        DEFAULT_TRANSPORT_FAILURE_BUDGET,
+        SshWatchTarget { host_id, project_path, generation },
+        SshWatchBudget {
+            terminal: DEFAULT_TERMINAL_FAILURE_BUDGET,
+            transport: DEFAULT_TRANSPORT_FAILURE_BUDGET,
+        },
     )
+}
+
+pub(crate) struct SshWatchBudget {
+    terminal: u32,
+    transport: u32,
+}
+
+pub(crate) struct SshWatchTarget<'a> {
+    host_id: &'a str,
+    project_path: &'a str,
+    generation: Option<u64>,
 }
 
 pub(crate) fn decide_ssh_watch_step_with_budget(
@@ -774,12 +785,11 @@ pub(crate) fn decide_ssh_watch_step_with_budget(
     failure: &SshWatchFailureKind,
     consecutive_terminal_failures: u32,
     consecutive_transport_failures: u32,
-    host_id: &str,
-    project_path: &str,
-    generation: Option<u64>,
-    terminal_budget: u32,
-    transport_budget: u32,
+    target: SshWatchTarget<'_>,
+    budget: SshWatchBudget,
 ) -> SshWatchDecision {
+    let SshWatchTarget { host_id, project_path, generation } = target;
+    let SshWatchBudget { terminal: terminal_budget, transport: transport_budget } = budget;
     if cancelled {
         return SshWatchDecision::Cancel;
     }

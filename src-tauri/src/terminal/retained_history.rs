@@ -33,8 +33,7 @@ impl RetentionBudget {
     fn max_unit_bytes(&self) -> usize {
         self.image_bytes
             .max(self.text_bytes)
-            .min(MAX_RETAINED_GROUP_BYTES)
-            .max(64)
+            .clamp(64, MAX_RETAINED_GROUP_BYTES)
     }
 
     fn text_block_bytes(&self) -> usize {

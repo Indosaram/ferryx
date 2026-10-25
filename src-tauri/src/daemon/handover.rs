@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 
+#[cfg(any(not(unix), test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpgradeAction {
     /// Session-preserving handover or an idle re-exec may proceed.
@@ -18,6 +19,7 @@ pub(crate) enum UpgradeAction {
     Refuse { live_sessions: usize },
 }
 
+#[cfg(test)]
 impl UpgradeAction {
     pub(crate) fn is_proceed(self) -> bool {
         matches!(self, Self::Proceed)
@@ -26,10 +28,12 @@ impl UpgradeAction {
 
 /// Opt-in gate for the non-unix idle restart. Default OFF: without it the platform keeps the
 /// refusal-only behavior, so a defect in the Windows-only restart wiring cannot cost a daemon.
+#[cfg(any(not(unix), test))]
 pub(crate) fn idle_upgrade_enabled(value: Option<&str>) -> bool {
     matches!(value, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+#[cfg(not(unix))]
 pub(crate) fn idle_upgrade_requested() -> bool {
     let value = std::env::var("FERRYX_DAEMON_IDLE_UPGRADE").ok();
     idle_upgrade_enabled(value.as_deref())
@@ -54,6 +58,7 @@ pub(crate) fn successor_wait_from_env() -> Option<std::time::Duration> {
 /// without session transfer must never upgrade while sessions are live, because the only
 /// alternative is terminating them. Deliberately pure so the invariant is testable without a
 /// daemon, a socket, or a PTY.
+#[cfg(any(not(unix), test))]
 pub(crate) fn upgrade_action(live_sessions: usize, session_transfer_supported: bool) -> UpgradeAction {
     if session_transfer_supported || live_sessions == 0 {
         UpgradeAction::Proceed
@@ -1017,6 +1022,8 @@ mod spawn_owner_tests {
     }
 }
 
+type CommitCallbacks = Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>>;
+
 pub struct HandoverManager {
     status: Arc<RwLock<HandoverStatus>>,
     /// Duplicates of this daemon's public listening sockets (canonical data, control,
@@ -1068,7 +1075,7 @@ pub struct HandoverManager {
     shutdown_requested: AtomicBool,
     client_abort_tx: broadcast::Sender<()>,
     commit_notify_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    commit_callbacks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send + 'static>>>>,
+    commit_callbacks: CommitCallbacks,
 }
 
 impl HandoverManager {

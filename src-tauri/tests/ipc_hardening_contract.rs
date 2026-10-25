@@ -39,16 +39,11 @@ async fn setup_test_daemon() -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHa
     ));
     let server_clone = Arc::clone(&server);
     let server_task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let s = Arc::clone(&server_clone);
-                    tokio::spawn(async move {
-                        s.handle_client(stream).await;
-                    });
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            let s = Arc::clone(&server_clone);
+            tokio::spawn(async move {
+                s.handle_client(stream).await;
+            });
         }
     });
 

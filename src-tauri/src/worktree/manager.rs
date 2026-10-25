@@ -14,8 +14,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(test)]
+type PruneProbe = Box<dyn Fn(&Path, bool)>;
+
+#[cfg(test)]
 thread_local! {
-    pub(crate) static PRUNE_PROBE: std::cell::RefCell<Option<Box<dyn Fn(&Path, bool)>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static PRUNE_PROBE: std::cell::RefCell<Option<PruneProbe>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Formats a worktree session ID scoped to a remote host, e.g. `"host-abc::sess-123"`.
@@ -28,10 +31,7 @@ pub fn format_host_scoped_session_id(host_id: &str, session_id: &str) -> String 
 /// Returns `Some((host_id, session_id))` when `scoped` contains the `::` separator,
 /// otherwise `None` (e.g. for raw, unscoped session IDs).
 pub fn parse_host_scoped_session_id(scoped: &str) -> Option<(&str, &str)> {
-    let mut parts = scoped.splitn(2, "::");
-    let host_id = parts.next()?;
-    let session_id = parts.next()?;
-    Some((host_id, session_id))
+    scoped.split_once("::")
 }
 
 /// A local->remote port forward for a dev server running inside a worktree on a remote host.
@@ -78,39 +78,6 @@ impl WriterLeaseRegistry {
 
     fn owner_canonical(&self, path: &Path) -> Option<String> {
         self.writers.lock().get(path).cloned()
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct WriterLeaseGuard {
-    registry: WriterLeaseRegistry,
-    canonical_path: PathBuf,
-    owner_id: String,
-}
-
-impl WriterLeaseGuard {
-    fn new(registry: WriterLeaseRegistry, canonical_path: PathBuf, owner_id: String) -> Self {
-        Self {
-            registry,
-            canonical_path,
-            owner_id,
-        }
-    }
-
-    pub(crate) fn canonical_path(&self) -> &Path {
-        &self.canonical_path
-    }
-
-    pub(crate) fn owner_id(&self) -> &str {
-        &self.owner_id
-    }
-}
-
-impl Drop for WriterLeaseGuard {
-    fn drop(&mut self) {
-        let _ = self
-            .registry
-            .release_canonical(&self.canonical_path, &self.owner_id);
     }
 }
 
@@ -410,22 +377,6 @@ impl WorktreeManager {
         Ok(self.writer_leases.owner_canonical(&canonical))
     }
 
-    pub(crate) fn acquire_writer_lease(
-        &self,
-        worktree_path: &Path,
-        owner_id: &str,
-    ) -> Result<WriterLeaseGuard, WorktreeError> {
-        let _delete_guard = self.delete_lock.lock();
-        let canonical = self.canonical_worktree_path(worktree_path)?;
-        self.writer_leases
-            .acquire_canonical(canonical.clone(), owner_id)?;
-        Ok(WriterLeaseGuard::new(
-            self.writer_leases.clone(),
-            canonical,
-            owner_id.to_string(),
-        ))
-    }
-
     /// Branch for `ws_id/slug` under the default Ferryx prefix. Creation uses the repository's
     /// prefix through [`Self::branch_name_for`]; this static form also validates an identity.
     pub fn format_branch_name(ws_id: &str, slug: &str) -> Result<String, WorktreeError> {
@@ -474,10 +425,6 @@ impl WorktreeManager {
     /// Parses a managed branch under the current, legacy or any configured prefix.
     pub fn parse_branch_name(branch: &str) -> Option<OrcaWorktreeInfo> {
         naming::parse_known_branch(branch).map(|(ws_id, slug)| OrcaWorktreeInfo { ws_id, slug })
-    }
-
-    fn validate_ref_component(component: &str, label: &str) -> Result<(), WorktreeError> {
-        Self::validate_ref_component_platform(component, label, cfg!(windows))
     }
 
     pub fn is_windows_reserved_segment(segment: &str) -> bool {

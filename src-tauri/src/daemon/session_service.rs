@@ -56,12 +56,35 @@ const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 #[path = "session_service_machine_tests.rs"]
 mod machine_tests;
 
+pub(crate) struct SpawnOptions {
+    pub worktree: Option<WorktreeIdentity>,
+    pub cwd: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub shell: Option<String>,
+}
+
+pub(super) struct RemoteSpawnTarget {
+    pub project: crate::ssh::projects::RemoteProject,
+    pub host: crate::ssh::SshHost,
+}
+
 pub(crate) struct MachineSpawn {
     pub request: crate::remote::machine_protocol::CreateSessionRequest,
     pub device: String,
     pub digest: String,
     pub target: crate::remote::machine_protocol::RemoteTerminalTarget,
     pub deadline: Instant,
+    pub check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+}
+
+pub(crate) struct MachineClose<'a> {
+    pub device: &'a str,
+    pub request: &'a str,
+    pub digest: &'a str,
+    pub id: &'a str,
+    pub expected_epoch: crate::scoped_contracts::Epoch,
+    pub owner_epoch: crate::scoped_contracts::Epoch,
     pub check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
 }
 tokio::task_local! { pub(crate) static MACHINE_SPAWN: Arc<MachineSpawn>; }
@@ -480,7 +503,7 @@ impl DaemonSessionService {
                         && recorded.workspace_id == session.workspace_id && recorded.worktree == session.worktree =>
                 {
                     let rebound = crate::daemon::protocol::SplitOperationResult::Created {
-                        session_id: session_id.clone(), daemon_epoch: current_epoch, session,
+                        session_id: session_id.clone(), daemon_epoch: current_epoch, session: Box::new(session),
                         ownership: *ownership,
                     };
                     let root = self.split_root();
@@ -530,10 +553,10 @@ impl DaemonSessionService {
     }
 
     pub(crate) async fn create_split(
-        &self, request_id: &str, workspace: &str, worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>, cols: u16, rows: u16, shell: Option<String>,
+        &self, request_id: &str, workspace: &str, options: SpawnOptions,
         envelope: crate::daemon::protocol::LocalSplitEnvelope, current_epoch: u64,
     ) -> Result<crate::daemon::protocol::SplitOperationResult, crate::ipc::IpcError> {
+        let SpawnOptions { worktree, cwd, cols, rows, shell } = options;
         use crate::daemon::protocol::{SplitOperationResult as R, SplitUnknownReason};
         if envelope.origin_epoch != current_epoch {
             return Ok(R::Unknown { reason: SplitUnknownReason::EpochChanged });
@@ -595,14 +618,14 @@ impl DaemonSessionService {
                 .map_err(crate::ipc::IpcError::internal)
         }).await?;
         let result = LOCAL_SPLIT_SPAWN.scope(deadline, self.handle_spawn(
-            request_id, workspace, worktree, cwd, cols, rows, shell,
+            request_id, workspace, crate::daemon::session_service::SpawnOptions { worktree, cwd, cols, rows, shell },
             None, #[cfg(test)] None)).await;
         entry.outcome = Some(match result {
             Ok(session_id) => {
                 entry.session_id = Some(session_id.clone());
                 match self.handle_describe_session(&session_id) {
                     DaemonResponse::DescribeSessionOk { session, .. } => R::Created {
-                        session_id, daemon_epoch: current_epoch, session,
+                        session_id, daemon_epoch: current_epoch, session: Box::new(session),
                         ownership: crate::daemon::protocol::SplitOwnership::Created,
                     },
                     _ => R::Unknown { reason: SplitUnknownReason::PublicationUncertain },
@@ -685,7 +708,7 @@ impl DaemonSessionService {
     }
 
     #[cfg(test)]
-    pub fn publish_agent_state_for_test(&self, state: crate::daemon::agent_state::AgentState) {
+    pub(crate) fn publish_agent_state_for_test(&self, state: crate::daemon::agent_state::AgentState) {
         self.agent_states.publish_canonical(state);
     }
 
@@ -1127,11 +1150,7 @@ impl DaemonSessionService {
                 self.handle_spawn(
                     &cache_key,
                     &request.workspace_id,
-                    worktree,
-                    None,
-                    request.cols,
-                    request.rows,
-                    None,
+                    crate::daemon::session_service::SpawnOptions { worktree, cwd: None, cols: request.cols, rows: request.rows, shell: None },
                     startup,
                     #[cfg(test)]
                     None,
@@ -1245,40 +1264,12 @@ impl DaemonSessionService {
         })
     }
 
-    pub(crate) fn machine_sessions(
-        &self,
-        epoch: crate::scoped_contracts::Epoch,
-    ) -> Result<crate::remote::machine_protocol::Sessions, String> {
-        use crate::remote::machine_protocol::*;
-        let mut sessions = Vec::new();
-        for record in self.workspace_service.journal.sessions()? {
-            let mut session = record.session;
-            match self.machine_detail(&session.target.session_id, epoch)? {
-                SessionDetail::Running { session: live }
-                | SessionDetail::Exited { session: live, .. } => session = live,
-                SessionDetail::Expired { .. } => session.running = false,
-            }
-            sessions.push(session);
-        }
-        Ok(Sessions {
-            revision: self.workspace_service.journal.session_revision()?,
-            completeness: Completeness::Complete,
-            sessions,
-            unavailable_workspace_ids: Vec::new(),
-        })
-    }
-
     pub(crate) async fn close_machine(
         &self,
-        device: &str,
-        request: &str,
-        digest: &str,
-        id: &str,
-        expected_epoch: crate::scoped_contracts::Epoch,
-        owner_epoch: crate::scoped_contracts::Epoch,
-        check: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+        close: MachineClose<'_>,
     ) -> Result<(), String> {
         use crate::remote::{machine_operation_journal::Begin, machine_protocol::*};
+        let MachineClose { device, request, digest, id, expected_epoch, owner_epoch, check } = close;
         let _retirement = self.retain_machine_request()?;
         let _spawn = self.spawn_lock.lock().await;
         let controllers = self.machine_controllers.lock().await;
@@ -1520,8 +1511,10 @@ impl DaemonSessionService {
             // Hold the cross-process lock (acquired above, moved in here) across
             // the write so no other daemon interleaves a snapshot replacement.
             let _held = _file_lock;
-            let mut session = crate::session::PersistedWorkspaceSession::default();
-            session.version = 3;
+            let mut session = crate::session::PersistedWorkspaceSession {
+                version: 3,
+                ..Default::default()
+            };
             session.extra.insert(
                 "remoteSessions".into(),
                 serde_json::to_value(records)
@@ -1597,8 +1590,10 @@ impl DaemonSessionService {
             if records.len() == before {
                 return Ok(());
             }
-            let mut session = crate::session::PersistedWorkspaceSession::default();
-            session.version = 3;
+            let mut session = crate::session::PersistedWorkspaceSession {
+                version: 3,
+                ..Default::default()
+            };
             session.extra.insert(
                 "remoteSessions".into(),
                 serde_json::to_value(records)
@@ -1971,16 +1966,14 @@ impl DaemonSessionService {
         // Held for the whole remote spawn so the handover gate covers a remote
         // registered-session lifecycle exactly as it covers a local one.
         _spawn_owner: Option<&super::handover::SpawnOwnerGuard>,
-        project: crate::ssh::projects::RemoteProject,
-        host: crate::ssh::SshHost,
+        target: RemoteSpawnTarget,
         request: &str,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
+        options: SpawnOptions,
         fingerprint: SpawnRequestFingerprint,
         #[cfg(test)] helper_home: Option<String>,
     ) -> Result<String, SpawnError> {
+        let RemoteSpawnTarget { project, host } = target;
+        let SpawnOptions { worktree, cwd, cols, rows, .. } = options;
         let environment = crate::ssh::runtime::detect_for(&host, project.platform)
             .await
             .map_err(SpawnError::Structured)?;
@@ -2040,7 +2033,7 @@ impl DaemonSessionService {
                 // Uncertain requests require recovery of their original target, not a new shell.
                 return Err(crate::ipc::IpcError::internal("Remote spawn request is pending recovery; refusing to create a replacement target"));
             }
-            let mut session = crate::session::PersistedWorkspaceSession::default(); session.version = 3;
+            let mut session = crate::session::PersistedWorkspaceSession { version: 3, ..Default::default() };
             session.extra.insert("request".into(), request_value);
             save_session_to_path(&request_path, &session)
         }).await.map_err(|e| e.to_string())?;
@@ -2161,11 +2154,7 @@ impl DaemonSessionService {
         &self,
         client_request_id: &str,
         workspace_id: &str,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
-        shell: Option<String>,
+        options: SpawnOptions,
         startup: Option<TerminalStartup>,
         requested_session_id: Option<String>,
         #[cfg(test)] helper_home: Option<String>,
@@ -2179,7 +2168,7 @@ impl DaemonSessionService {
             }
         }
         REQUESTED_SESSION_ID.scope(requested_session_id, self.handle_spawn(
-            client_request_id, workspace_id, worktree, cwd, cols, rows, shell, startup,
+            client_request_id, workspace_id, options, startup,
             #[cfg(test)] helper_home,
         )).await
     }
@@ -2188,14 +2177,11 @@ impl DaemonSessionService {
         &self,
         client_request_id: &str,
         workspace_id: &str,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
-        shell: Option<String>,
+        options: SpawnOptions,
         startup: Option<TerminalStartup>,
         #[cfg(test)] helper_home: Option<String>,
     ) -> Result<String, SpawnError> {
+        let SpawnOptions { worktree, cwd, cols, rows, shell } = options;
         let machine = MACHINE_SPAWN.try_with(Arc::clone).ok();
         if let Some(machine) = &machine {
             (machine.check)()?;
@@ -2288,11 +2274,14 @@ impl DaemonSessionService {
                     return Err("REQUEST_CONFLICT".to_string().into());
                 }
                 return match record.operation {
-                    crate::remote::machine_protocol::Operation::Completed {
-                        outcome:
-                            crate::remote::machine_protocol::OperationOutcome::Session { session },
-                        ..
-                    } => Ok(session.target.session_id),
+                    crate::remote::machine_protocol::Operation::Completed { outcome, .. } => {
+                        match *outcome {
+                            crate::remote::machine_protocol::OperationOutcome::Session { session } => {
+                                Ok(session.target.session_id)
+                            }
+                            _ => Err("OPERATION_OUTCOME_UNKNOWN".to_string().into()),
+                        }
+                    }
                     _ => Err("OPERATION_OUTCOME_UNKNOWN".to_string().into()),
                 };
             }
@@ -2397,13 +2386,9 @@ impl DaemonSessionService {
             return self
                 .spawn_remote(
                     spawn_owner.as_ref(),
-                    project,
-                    host,
+                    RemoteSpawnTarget { project, host },
                     client_request_id,
-                    worktree,
-                    cwd,
-                    cols,
-                    rows,
+                    SpawnOptions { worktree, cwd, cols, rows, shell: None },
                     spawn_fingerprint,
                     #[cfg(test)]
                     helper_home,
@@ -3478,7 +3463,8 @@ mod tests {
         };
         let error = service
             .create_split(
-                request_id, "ws-conflict-fingerprint", None, None, 80, 24, None,
+                request_id, "ws-conflict-fingerprint",
+                SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
                 envelope, epoch,
             )
             .await
@@ -3567,11 +3553,7 @@ mod tests {
             .handle_spawn(
                 "req-sub-cwd",
                 "default",
-                None,
-                Some(sub.to_str().unwrap().to_string()),
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(sub.to_str().unwrap().to_string()), cols: 80, rows: 24, shell: None },
                 None,
                 None,
             )

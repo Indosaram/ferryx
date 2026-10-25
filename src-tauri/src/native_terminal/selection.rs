@@ -286,6 +286,8 @@ pub fn screen_row_text(
     Ok(format_selection(handle, Some(&selection), true)?.unwrap_or_default())
 }
 
+type LogicalLineCells = (String, Vec<(u16, u32)>);
+
 /// Screen-coordinate text of the logical (soft-wrap aware) line containing `grid_ref`,
 /// paired with the screen cell each character came from.
 ///
@@ -293,7 +295,7 @@ pub fn screen_row_text(
 fn logical_line_cells(
     handle: NonNull<GhosttyTerminalImpl>,
     grid_ref: GhosttyGridRef,
-) -> Result<Option<(String, Vec<(u16, u32)>)>, NativeTerminalError> {
+) -> Result<Option<LogicalLineCells>, NativeTerminalError> {
     let options = GhosttyTerminalSelectLineOptions {
         size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(),
         grid_ref,

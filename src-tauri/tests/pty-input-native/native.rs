@@ -73,7 +73,7 @@ async fn native_saturation_drop_and_deadline() {
     command.args(["/C", "more"]);
     let child=pair.slave.spawn_command(command).unwrap();drop(pair.slave);
     let (tx,mut rx)=tokio::sync::mpsc::channel(1024);
-    let pty=std::sync::Arc::new(session::PtySession::new(session::PtySessionConfig{id:"private-proof".into(),incarnation:Some(uuid::Uuid::new_v4().to_string()),input,master:pair.master,reader_interrupt,child,writer,reader,cols:80,rows:24,tx,worktree_path:None,close_grace:std::sync::Arc::new(parking_lot::Mutex::new(None))}));
+    let pty=std::sync::Arc::new(session::PtySession::new(session::PtySessionConfig{id:"private-proof".into(),incarnation:Some(uuid::Uuid::new_v4().to_string()),input,master:pair.master,reader_interrupt,child,writer,reader,cols:80,rows:24,tx,worktree_path:None}));
     pty.mark_running();
     let drain=tokio::spawn(async move{while let Some(bytes)=rx.recv().await{
         println!("PTY_OUTPUT {:?}",String::from_utf8_lossy(&bytes));

@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::attach_crypto::{AttachError, AttachResponder, SecureStream};
@@ -117,6 +115,7 @@ mod tests {
     use super::*;
     use crate::remote::attach_crypto::AttachInitiator;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use std::time::Duration;
 
     fn attach_identity() -> AttachIdentity {
         let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);

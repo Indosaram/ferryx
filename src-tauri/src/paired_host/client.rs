@@ -180,7 +180,7 @@ pub(crate) fn discovered_repos(host: &str, rows: m::Repositories) -> Result<Disc
 #[serde(rename_all = "camelCase")]
 pub struct ClientError {
     pub code: String,
-    pub machine_error: Option<m::MachineError>,
+    pub machine_error: Option<Box<m::MachineError>>,
     pub request_id: Option<String>,
     pub ambiguous: bool,
 }
@@ -670,7 +670,7 @@ fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
             } else {
                 Some(error.request_id.clone())
             },
-            machine_error: Some(error),
+            machine_error: Some(Box::new(error)),
             ambiguous: false,
         };
     }
@@ -693,7 +693,7 @@ fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
             } else {
                 Some(error.request_id.clone())
             },
-            machine_error: Some(error),
+            machine_error: Some(Box::new(error)),
             ambiguous: false,
         };
     }
@@ -736,7 +736,7 @@ fn map_ticket_error(status: reqwest::StatusCode, bytes: &[u8]) -> ClientError {
     ClientError {
         code: code.to_string(),
         request_id: None,
-        machine_error: Some(machine_error),
+        machine_error: Some(Box::new(machine_error)),
         ambiguous: false,
     }
 }
@@ -768,7 +768,7 @@ fn map_operation_http_error(
         return ClientError {
             code: error.code.clone(),
             request_id: Some(error.request_id.clone()),
-            machine_error: Some(error),
+            machine_error: Some(Box::new(error)),
             ambiguous: false,
         };
     }
@@ -810,7 +810,7 @@ fn map_operation_http_error(
     ClientError {
         code: code.to_string(),
         request_id: None,
-        machine_error: Some(machine_error),
+        machine_error: Some(Box::new(machine_error)),
         ambiguous: false,
     }
 }
@@ -1815,7 +1815,7 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
             let mut op = decode(bytes)?;
             validate_operation(&op, request_id)?;
             if let m::Operation::Completed { outcome, .. } = &mut op {
-                match outcome {
+                match outcome.as_mut() {
                     m::OperationOutcome::Session { session: row } => session(host, row)?,
                     m::OperationOutcome::Worktree { worktree: row } => workspace_identity(
                         &row.workspace_id,

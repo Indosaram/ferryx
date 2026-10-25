@@ -1,16 +1,20 @@
 //! Authoritative notification permission queries.
 
+#[cfg(any(target_os = "macos", test))]
 use std::sync::mpsc::Receiver;
+#[cfg(any(target_os = "macos", test))]
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use super::model::NotificationAuthorization;
 use super::model::{
-    NotificationAuthorization, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
-    NotificationPlatform,
+    NotificationPermissionRequestDto, NotificationPermissionStatusDto, NotificationPlatform,
 };
 
 /// How long a user-facing authorization dialog is allowed to stay open.
 ///
 /// Five minutes, not five seconds: the user is reading the macOS prompt.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn authorization_wait() -> Duration {
     Duration::from_secs(5 * 60)
 }
@@ -21,6 +25,7 @@ pub trait MainThreadScheduler {
 }
 
 /// Start `begin` on `scheduler`, then wait for the user without blocking that thread.
+#[cfg(any(all(target_os = "macos", feature = "desktop"), test))]
 pub(crate) fn request_authorization_with(
     scheduler: &impl MainThreadScheduler,
     begin: impl FnOnce() -> Result<Receiver<Result<bool, String>>, String> + Send + 'static,
@@ -45,6 +50,7 @@ pub(crate) fn request_authorization_with(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn wait_for_authorization(
     rx: Receiver<Result<bool, String>>,
     timeout: Duration,

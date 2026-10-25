@@ -367,7 +367,7 @@ fn encode_request(
     let body = body.unwrap_or_default();
     let mut out = format!("{method} {path_and_query} HTTP/1.1\r\nHost: localhost\r\n");
     for (name, value) in headers {
-        if !clean(*name) || value.bytes().any(|b| b == b'\r' || b == b'\n') {
+        if !clean(name) || value.bytes().any(|b| b == b'\r' || b == b'\n') {
             return Err(invalid());
         }
         out.push_str(&format!("{name}: {value}\r\n"));

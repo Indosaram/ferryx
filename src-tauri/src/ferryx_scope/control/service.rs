@@ -11,13 +11,15 @@ pub trait ControlBackend: Send + Sync {
     fn execute(&self, target: TargetRef, operation: String, params: Value) -> BoxFuture<'_, Result<Value>>;
     fn read(&self, target: TargetRef, limit: usize) -> BoxFuture<'_, Result<Value>>;
 }
+type ReceiptMap = HashMap<(String, String), (Value, Result<Value>)>;
+
 pub struct Service {
     pub inventory: Mutex<Inventory>,
     pub auth: AuthManager,
     pub allow_control: AtomicBool,
     backends: parking_lot::RwLock<HashMap<String, Arc<dyn ControlBackend>>>,
     scopes: parking_lot::RwLock<HashMap<String, Vec<String>>>,
-    receipts: Mutex<HashMap<(String, String), (Value, Result<Value>)>>,
+    receipts: Mutex<ReceiptMap>,
     changed: watch::Sender<u64>,
 }
 impl Service {
@@ -31,7 +33,13 @@ impl Service {
     }
     pub fn grant_hosts(&self, device: String, hosts: Vec<String>) { self.scopes.write().insert(device, hosts); self.notify_policy(); }
     pub fn notify_policy(&self) { self.changed.send_modify(|v| *v += 1); }
-    pub fn revoke(&self, device: &str) { self.auth.revoke_device(device); self.scopes.write().remove(device); self.notify_policy(); }
+    pub fn revoke(&self, device: &str) {
+        if let Err(error) = self.auth.revoke_device(device) {
+            eprintln!("Failed to revoke control device {device}: {error}");
+        }
+        self.scopes.write().remove(device);
+        self.notify_policy();
+    }
     pub fn authorize(&self, token: &str, host: Option<&str>, mutation: bool) -> Result<DeviceInfo> {
         let d = self.auth.validate_token(token).map_err(|_| error(ScopeErrorCode::Unauthorized, "device token expired or revoked"))?;
         if mutation && (!self.allow_control.load(Ordering::SeqCst) || d.permission != DevicePermission::Control) { return Err(error(ScopeErrorCode::Forbidden, "control permission required")); }

@@ -7,6 +7,7 @@ use super::types::{RendererConfig, SelectionSnapshot};
 use crate::native_terminal::error::NativeTerminalError;
 use crate::native_terminal::snapshot::RenderSnapshot;
 
+#[derive(Default)]
 pub struct RowCacheManager {
     entries: Vec<RowCacheEntry>,
     last_atlas_generation: u64,

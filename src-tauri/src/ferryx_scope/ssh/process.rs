@@ -1,8 +1,9 @@
 //! Blocking portable stdio adapter. Call via spawn_blocking from async application code.
 use super::helper::{read_frame, write_frame, Request, Runtime};
 use serde_json::{json, Value};
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::OsString;
 use std::{
-    ffi::OsString,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, MutexGuard},

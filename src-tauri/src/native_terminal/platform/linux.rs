@@ -37,7 +37,6 @@ use crate::native_terminal::composition::{
 use crate::native_terminal::error::NativeTerminalError;
 use crate::native_terminal::platform::wayland_child::WaylandChild;
 
-const INPUT_OUTPUT: u32 = 1;
 const COPY_FROM_PARENT: c_ulong = 0;
 const SHAPE_INPUT: c_int = 2;
 const SHAPE_SET: c_int = 0;

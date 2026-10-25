@@ -16,7 +16,6 @@ use crate::remote::state::RemoteGatewayConfig;
 use crate::session::PersistedWorkspaceSession;
 use crate::terminal::output_hub::ReplayGap;
 use crate::terminal::TerminalSignal;
-use crate::worktree::WorktreeIdentity;
 use bytes::Bytes;
 use serde_json::json;
 use std::collections::HashMap;
@@ -333,7 +332,7 @@ pub async fn endpoint_owner_pid() -> Option<u32> {
 #[cfg(all(test, unix))]
 mod endpoint_owner_probe_tests {
     use super::*;
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    use tokio::io::BufReader;
 
     fn handshake_reply(pid: u32) -> String {
         let mut reply = serde_json::to_string(&DaemonResponse::HandshakeOk {
@@ -1707,7 +1706,7 @@ impl DaemonClient {
                         "Split request identity was reused with different parameters",
                     ));
                 }
-                return Ok(DaemonSpawnResult { session_id, epoch: daemon_epoch, session });
+                return Ok(DaemonSpawnResult { session_id, epoch: daemon_epoch, session: *session });
             }
             SplitOperationResult::Absent { can_create: true } => {}
             operation => {
@@ -2014,15 +2013,15 @@ impl DaemonClient {
                     Self::PAIRED_QUERY_OUTER_TIMEOUT
                 }
             }
-            DaemonRequest::AgentControl { request, .. } => match request {
-                crate::agent_control::AgentControlOp::Wait { timeout_ms, .. } => {
+            DaemonRequest::AgentControl {
+                request: crate::agent_control::AgentControlOp::Wait { timeout_ms, .. },
+                ..
+            } => {
                     std::time::Duration::from_millis(
                         (*timeout_ms)
                             .min(crate::agent_control::policy::AGENT_CONTROL_TIMEOUT_MAX_MS)
                             .saturating_add(15_000),
                     )
-                }
-                _ => Self::PAIRED_DEFAULT_OUTER_TIMEOUT,
             },
             DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
             DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. } => {
@@ -3455,44 +3454,27 @@ impl DaemonClient {
         }
     }
 
-    pub async fn spawn_terminal(
+    pub(crate) async fn spawn_terminal(
         &self,
         client_request_id: String,
         workspace_id: String,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
-        shell: Option<String>,
+        options: crate::daemon::session_service::SpawnOptions,
     ) -> Result<String, IpcError> {
         Ok(self
-            .spawn_terminal_with_startup(
-                client_request_id,
-                workspace_id,
-                worktree,
-                cwd,
-                cols,
-                rows,
-                shell,
-                None,
-                None,
-            )
+            .spawn_terminal_with_startup(client_request_id, workspace_id, options, None, None)
             .await?
             .session_id)
     }
 
-    pub async fn spawn_terminal_with_startup(
+    pub(crate) async fn spawn_terminal_with_startup(
         &self,
         client_request_id: String,
         workspace_id: String,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
-        shell: Option<String>,
+        options: crate::daemon::session_service::SpawnOptions,
         startup: Option<TerminalStartup>,
         session_id: Option<String>,
     ) -> Result<DaemonSpawnResult, IpcError> {
+        let crate::daemon::session_service::SpawnOptions { worktree, cwd, cols, rows, shell } = options;
         let resp = self
             .send_on_connection(&self.spawn_connection, DaemonRequest::Spawn {
                 client_request_id,
@@ -4330,7 +4312,7 @@ impl DaemonClient {
                             session_id: descriptor.target.session_id.clone(),
                             request: crate::remote::machine_protocol::CloseSessionRequest {
                                 request_id: cleanup_req_id.clone(),
-                                daemon_epoch: descriptor.target.daemon_epoch.clone(),
+                                daemon_epoch: descriptor.target.daemon_epoch,
                             },
                         },
                     };
@@ -4357,10 +4339,9 @@ impl DaemonClient {
                                     },
                                 };
                                 match self.paired_host_operation(journal_req).await {
-                                Ok(op_resp) => match op_resp.result {
-                                    crate::paired_host::client::OperationResult::Operation(
+                                Ok(op_resp) => if let crate::paired_host::client::OperationResult::Operation(
                                         crate::remote::machine_protocol::Operation::Completed { outcome, .. },
-                                    ) => match outcome {
+                                    ) = op_resp.result { match *outcome {
                                         crate::remote::machine_protocol::OperationOutcome::Error { error } => {
                                             return Err(IpcError::new(
                                                 IpcErrorCode::Custom("REMOTE_CLOSE_FAILED".to_string()),
@@ -4371,8 +4352,7 @@ impl DaemonClient {
                                             determined = true;
                                             break;
                                         }
-                                    },
-                                    _ => {}
+                                    }
                                 },
                                 Err(journal_err) if journal_err.code == "SESSION_NOT_FOUND" => {
                                     // The paired host does not know the host/session at all:
@@ -5191,7 +5171,7 @@ mod local_control_isolation_tests {
                         pid: None,
                     };
                     let resp = DaemonResponse::RemoteSessionDetailsOk {
-                        details: Some(details),
+                        details: Some(Box::new(details)),
                         legacy_direct_ssh: false,
                     };
                     writer
@@ -6180,6 +6160,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(dir.path().join("daemon.lock"))
             .unwrap();
         let _held = crate::daemon::server::DaemonLockFile::try_lock(lock).expect("take the daemon lock");
@@ -6432,16 +6413,11 @@ mod tests {
 
         let server_clone = Arc::clone(&server);
         let server_task = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&server_clone);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&server_clone);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
 
@@ -6449,15 +6425,7 @@ mod tests {
 
         // 1. Spawn a terminal session
         let session_id = client
-            .spawn_terminal(
-                "test-req-1".to_string(),
-                "default".to_string(),
-                None,
-                None,
-                80,
-                24,
-                None,
-            )
+            .spawn_terminal("test-req-1".to_string(), "default".to_string(), crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None })
             .await
             .expect("spawn terminal");
 
@@ -6536,44 +6504,23 @@ mod tests {
 
         let server_clone = Arc::clone(&server);
         let server_task = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&server_clone);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&server_clone);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
 
         let client = DaemonClient::new_with_socket(socket_path);
 
         let session_id = client
-            .spawn_terminal(
-                "cycle-req-1".to_string(),
-                "default".to_string(),
-                None,
-                None,
-                90,
-                35,
-                None,
-            )
+            .spawn_terminal("cycle-req-1".to_string(), "default".to_string(), crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 90, rows: 35, shell: None })
             .await
             .expect("spawn terminal");
 
         let session_id_2 = client
-            .spawn_terminal(
-                "cycle-req-1".to_string(),
-                "default".to_string(),
-                None,
-                None,
-                90,
-                35,
-                None,
-            )
+            .spawn_terminal("cycle-req-1".to_string(), "default".to_string(), crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 90, rows: 35, shell: None })
             .await
             .expect("idempotent spawn");
         assert_eq!(session_id, session_id_2);
@@ -6615,16 +6562,11 @@ mod tests {
         let server_clone = Arc::clone(&server);
 
         let server_task = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&server_clone);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&server_clone);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
 

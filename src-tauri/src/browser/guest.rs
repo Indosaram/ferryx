@@ -82,7 +82,6 @@ pub fn parse_browser_guest_action(url: &Url, expected_nonce: &str) -> Option<Bro
         _ => None,
     }
 }
-
 fn query_value(url: &Url, key: &str) -> Option<String> {
     url.query_pairs()
         .find(|(name, _)| name == key)
@@ -632,6 +631,152 @@ __FERRYX_WINDOW_CLOSE_BODY__
   }, true);
 })();
 "#;
+
+pub fn build_console_drain_script(clear: bool, errors_only: bool) -> String {
+    format!(
+        r#"(() => {{
+  const ring = window.__FERRYX_BROWSER_CONSOLE__ || [];
+  let entries = ring;
+  if ({errors_only}) {{
+    entries = ring.filter(e => e.level === "error");
+  }}
+  if ({clear}) {{
+    if ({errors_only}) {{
+      window.__FERRYX_BROWSER_CONSOLE__ = ring.filter(e => e.level !== "error");
+    }} else {{
+      window.__FERRYX_BROWSER_CONSOLE__ = [];
+    }}
+  }}
+  return JSON.stringify(entries);
+}})()"#,
+        errors_only = errors_only,
+        clear = clear,
+    )
+}
+
+pub fn build_dialog_handle_script(action: &str, prompt_text: Option<&str>) -> String {
+    let action_json = serde_json::to_string(action).unwrap_or_else(|_| "\"dismiss\"".into());
+    let prompt_json = serde_json::to_string(&prompt_text).unwrap_or_else(|_| "null".into());
+    format!(
+        r#"(() => {{
+  const state = window.__FERRYX_DIALOG_STATE__;
+  if (!state) return JSON.stringify({{ error: "no_active_dialog" }});
+  const pending = state.pending;
+  if (!pending) {{
+    return JSON.stringify({{ error: "no_active_dialog" }});
+  }}
+  pending.action = {action_json};
+  if ({action_json} === 'accept') {{
+    if (pending.type === 'confirm') pending.result = 'true';
+    else if (pending.type === 'prompt') pending.result = {prompt_json};
+    else pending.result = 'ok';
+  }} else {{
+    if (pending.type === 'confirm') pending.result = 'false';
+    else if (pending.type === 'prompt') pending.result = null;
+    else pending.result = 'dismissed';
+  }}
+  state.pending = null;
+  return JSON.stringify({{ ok: true, dialog: pending }});
+}})()"#
+    )
+}
+
+pub fn build_dialog_arm_script(action: &str, prompt_text: Option<&str>) -> String {
+    let action_json = serde_json::to_string(action).unwrap_or_else(|_| "\"dismiss\"".into());
+    let prompt_json = serde_json::to_string(&prompt_text).unwrap_or_else(|_| "null".into());
+    format!(
+        r#"(() => {{
+  const state = (window.__FERRYX_DIALOG_STATE__ = window.__FERRYX_DIALOG_STATE__ || {{ policy: 'auto-dismiss', pending: null, nextAction: null }});
+  state.nextAction = {{ action: {action_json}, promptText: {prompt_json} }};
+  return JSON.stringify({{ ok: true }});
+}})()"#
+    )
+}
+
+pub fn build_dialog_policy_script(policy: &str) -> String {
+    let policy_json = serde_json::to_string(policy).unwrap_or_else(|_| "\"auto-dismiss\"".into());
+    format!(
+        r#"(() => {{
+  const state = (window.__FERRYX_DIALOG_STATE__ = window.__FERRYX_DIALOG_STATE__ || {{ policy: 'auto-dismiss', pending: null, nextAction: null }});
+  state.policy = {policy_json};
+  return JSON.stringify({{ ok: true, policy: state.policy }});
+}})()"#
+    )
+}
+
+pub fn build_dialog_drain_script() -> String {
+    r#"(() => {
+  const dialogs = window.__FERRYX_BROWSER_DIALOGS__ || [];
+  return JSON.stringify(dialogs);
+})()"#
+        .into()
+}
+
+pub fn parse_dialog_entry(raw_json: &str) -> Result<crate::browser::model::BrowserDialogEntry, String> {
+    if let Ok(entry) = serde_json::from_str::<crate::browser::model::BrowserDialogEntry>(raw_json) {
+        return Ok(entry);
+    }
+    if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
+        if let Ok(entry) = serde_json::from_str::<crate::browser::model::BrowserDialogEntry>(&unquoted) {
+            return Ok(entry);
+        }
+    }
+    Err("failed to parse browser dialog entry".to_string())
+}
+
+pub fn parse_dialog_drain_result(
+    raw_json: &str,
+) -> Result<Vec<crate::browser::model::BrowserDialogEntry>, String> {
+    if let Ok(entries) =
+        serde_json::from_str::<Vec<crate::browser::model::BrowserDialogEntry>>(raw_json)
+    {
+        return Ok(entries);
+    }
+    if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
+        if let Ok(entries) =
+            serde_json::from_str::<Vec<crate::browser::model::BrowserDialogEntry>>(&unquoted)
+        {
+            return Ok(entries);
+        }
+    }
+    Err("failed to parse browser dialog entries".to_string())
+}
+
+pub fn parse_console_drain_result(
+    raw_json: &str,
+) -> Result<Vec<crate::browser::model::BrowserConsoleEntry>, String> {
+    if let Ok(entries) =
+        serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(raw_json)
+    {
+        return Ok(entries);
+    }
+    if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
+        if let Ok(entries) =
+            serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(&unquoted)
+        {
+            return Ok(entries);
+        }
+    }
+    Err("failed to parse console drain entries".to_string())
+}
+
+pub fn browser_guest_geometry_observation_script() -> &'static str {
+    r#"
+    (() => {
+      try {
+        return JSON.stringify({
+          innerWidth: window.innerWidth || 0,
+          innerHeight: window.innerHeight || 0,
+          scrollX: window.scrollX || 0,
+          scrollY: window.scrollY || 0,
+          devicePixelRatio: window.devicePixelRatio || 1.0,
+        });
+      } catch (e) {
+        return null;
+      }
+    })()
+    "#
+}
 
 #[cfg(test)]
 mod tests {
@@ -1188,150 +1333,4 @@ mod tests {
             }
         }
     }
-}
-
-pub fn build_console_drain_script(clear: bool, errors_only: bool) -> String {
-    format!(
-        r#"(() => {{
-  const ring = window.__FERRYX_BROWSER_CONSOLE__ || [];
-  let entries = ring;
-  if ({errors_only}) {{
-    entries = ring.filter(e => e.level === "error");
-  }}
-  if ({clear}) {{
-    if ({errors_only}) {{
-      window.__FERRYX_BROWSER_CONSOLE__ = ring.filter(e => e.level !== "error");
-    }} else {{
-      window.__FERRYX_BROWSER_CONSOLE__ = [];
-    }}
-  }}
-  return JSON.stringify(entries);
-}})()"#,
-        errors_only = errors_only,
-        clear = clear,
-    )
-}
-
-pub fn build_dialog_handle_script(action: &str, prompt_text: Option<&str>) -> String {
-    let action_json = serde_json::to_string(action).unwrap_or_else(|_| "\"dismiss\"".into());
-    let prompt_json = serde_json::to_string(&prompt_text).unwrap_or_else(|_| "null".into());
-    format!(
-        r#"(() => {{
-  const state = window.__FERRYX_DIALOG_STATE__;
-  if (!state) return JSON.stringify({{ error: "no_active_dialog" }});
-  const pending = state.pending;
-  if (!pending) {{
-    return JSON.stringify({{ error: "no_active_dialog" }});
-  }}
-  pending.action = {action_json};
-  if ({action_json} === 'accept') {{
-    if (pending.type === 'confirm') pending.result = 'true';
-    else if (pending.type === 'prompt') pending.result = {prompt_json};
-    else pending.result = 'ok';
-  }} else {{
-    if (pending.type === 'confirm') pending.result = 'false';
-    else if (pending.type === 'prompt') pending.result = null;
-    else pending.result = 'dismissed';
-  }}
-  state.pending = null;
-  return JSON.stringify({{ ok: true, dialog: pending }});
-}})()"#
-    )
-}
-
-pub fn build_dialog_arm_script(action: &str, prompt_text: Option<&str>) -> String {
-    let action_json = serde_json::to_string(action).unwrap_or_else(|_| "\"dismiss\"".into());
-    let prompt_json = serde_json::to_string(&prompt_text).unwrap_or_else(|_| "null".into());
-    format!(
-        r#"(() => {{
-  const state = (window.__FERRYX_DIALOG_STATE__ = window.__FERRYX_DIALOG_STATE__ || {{ policy: 'auto-dismiss', pending: null, nextAction: null }});
-  state.nextAction = {{ action: {action_json}, promptText: {prompt_json} }};
-  return JSON.stringify({{ ok: true }});
-}})()"#
-    )
-}
-
-pub fn build_dialog_policy_script(policy: &str) -> String {
-    let policy_json = serde_json::to_string(policy).unwrap_or_else(|_| "\"auto-dismiss\"".into());
-    format!(
-        r#"(() => {{
-  const state = (window.__FERRYX_DIALOG_STATE__ = window.__FERRYX_DIALOG_STATE__ || {{ policy: 'auto-dismiss', pending: null, nextAction: null }});
-  state.policy = {policy_json};
-  return JSON.stringify({{ ok: true, policy: state.policy }});
-}})()"#
-    )
-}
-
-pub fn build_dialog_drain_script() -> String {
-    r#"(() => {
-  const dialogs = window.__FERRYX_BROWSER_DIALOGS__ || [];
-  return JSON.stringify(dialogs);
-})()"#
-        .into()
-}
-
-pub fn parse_dialog_entry(raw_json: &str) -> Result<crate::browser::model::BrowserDialogEntry, String> {
-    if let Ok(entry) = serde_json::from_str::<crate::browser::model::BrowserDialogEntry>(raw_json) {
-        return Ok(entry);
-    }
-    if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
-        if let Ok(entry) = serde_json::from_str::<crate::browser::model::BrowserDialogEntry>(&unquoted) {
-            return Ok(entry);
-        }
-    }
-    Err("failed to parse browser dialog entry".to_string())
-}
-
-pub fn parse_dialog_drain_result(
-    raw_json: &str,
-) -> Result<Vec<crate::browser::model::BrowserDialogEntry>, String> {
-    if let Ok(entries) =
-        serde_json::from_str::<Vec<crate::browser::model::BrowserDialogEntry>>(raw_json)
-    {
-        return Ok(entries);
-    }
-    if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
-        if let Ok(entries) =
-            serde_json::from_str::<Vec<crate::browser::model::BrowserDialogEntry>>(&unquoted)
-        {
-            return Ok(entries);
-        }
-    }
-    Err("failed to parse browser dialog entries".to_string())
-}
-
-pub fn parse_console_drain_result(
-    raw_json: &str,
-) -> Result<Vec<crate::browser::model::BrowserConsoleEntry>, String> {
-    if let Ok(entries) =
-        serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(raw_json)
-    {
-        return Ok(entries);
-    }
-    if let Ok(unquoted) = serde_json::from_str::<String>(raw_json) {
-        if let Ok(entries) =
-            serde_json::from_str::<Vec<crate::browser::model::BrowserConsoleEntry>>(&unquoted)
-        {
-            return Ok(entries);
-        }
-    }
-    Err("failed to parse console drain entries".to_string())
-}
-
-pub fn browser_guest_geometry_observation_script() -> &'static str {
-    r#"
-    (() => {
-      try {
-        return JSON.stringify({
-          innerWidth: window.innerWidth || 0,
-          innerHeight: window.innerHeight || 0,
-          scrollX: window.scrollX || 0,
-          scrollY: window.scrollY || 0,
-          devicePixelRatio: window.devicePixelRatio || 1.0,
-        });
-      } catch (e) {
-        return null;
-      }
-    })()
-    "#
 }

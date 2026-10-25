@@ -66,11 +66,7 @@ async fn desktop_gui_session_inventory_and_attach_validation() {
         .handle_spawn(
             "desktop-gui-req-1",
             &request.workspace_id,
-            None,
-            None,
-            80,
-            24,
-            None,
+            crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
             None,
             #[cfg(test)]
             None,
@@ -373,11 +369,7 @@ async fn desktop_gui_session_lifecycle_machine_events() {
         .handle_spawn(
             "desktop-gui-event-req",
             &request.workspace_id,
-            None,
-            None,
-            80,
-            24,
-            None,
+            crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
             None,
             #[cfg(test)]
             None,

@@ -25,12 +25,14 @@ fn live_path_for(path: &Path) -> PathBuf {
     }
 }
 
+type AttributeRowSpec = (&'static str, fn(&mut CellSnapshot));
+
 fn build_attribute_snapshot() -> RenderSnapshot {
     let cols = 60u16;
     let rows = 10u16;
     let mut grid = vec![vec![CellSnapshot::default(); cols as usize]; rows as usize];
 
-    let row_specs: [(&str, fn(&mut CellSnapshot)); 10] = [
+    let row_specs: [AttributeRowSpec; 10] = [
         ("row 0 (normal):        ", |_| {}),
         ("row 1 (bold):          ", |c| c.bold = true),
         ("row 2 (faint):         ", |c| c.faint = true),
@@ -50,16 +52,20 @@ fn build_attribute_snapshot() -> RenderSnapshot {
 
         // Render plain label starting at column 0
         for ch in label.chars() {
-            let mut cell = CellSnapshot::default();
-            cell.text = ch.to_string();
+            let cell = CellSnapshot {
+                text: ch.to_string(),
+                ..Default::default()
+            };
             grid[row_idx][col_idx] = cell;
             col_idx += 1;
         }
 
         // Render styled sample text
         for ch in sample_text.chars() {
-            let mut cell = CellSnapshot::default();
-            cell.text = ch.to_string();
+            let mut cell = CellSnapshot {
+                text: ch.to_string(),
+                ..Default::default()
+            };
             apply_attr(&mut cell);
             grid[row_idx][col_idx] = cell;
             col_idx += 1;

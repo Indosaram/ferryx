@@ -631,7 +631,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
         RemoteBrowserOperation::Navigate { browser_id, url } => {
             // A framed remote operation: the Remote URL policy applies (file:// denied).
             // A scheme denial is a policy refusal; a malformed URL stays a bad request.
-            let state = navigate_browser_session_with_context(
+            navigate_browser_session_with_context(
                 app,
                 manager,
                 &browser_id,
@@ -640,7 +640,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             )
             .await
             .map_err(remote_url_error_to_ipc)?;
-            serde_json::to_value(&state)
+            serde_json::to_value(())
                 .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
         }
         RemoteBrowserOperation::Back { browser_id } => {
@@ -1024,7 +1024,7 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     let conn = connection_id.as_deref().unwrap_or("");
                     let inst = browser_instance_id.as_deref().unwrap_or("");
 
-                    service.execute_command_guard(&browser_id, lease_ep, dev, conn, inst, dt_ep, gen)
+                    service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &browser_id, lease_epoch: lease_ep, device_id: dev, connection_id: conn, instance_id: inst, desktop_epoch: dt_ep, generation: gen })
                         .map_err(|e| match e {
                             crate::browser::remote_service::RemoteServiceError::BrowserNotFound(id) => {
                                 IpcError::new(IpcErrorCode::Custom("BROWSER_NOT_FOUND".into()), id)
@@ -1700,8 +1700,8 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     let runtime_dir = socket_path
         .parent()
         .ok_or_else(|| BrowserError::Internal("browser CLI socket path has no parent".into()))?;
-    fs::create_dir_all(&runtime_dir).map_err(|error| BrowserError::Internal(error.to_string()))?;
-    fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700))
+    fs::create_dir_all(runtime_dir).map_err(|error| BrowserError::Internal(error.to_string()))?;
+    fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o700))
         .map_err(|error| BrowserError::Internal(error.to_string()))?;
     let Some(endpoint_lock) = claim_browser_cli_endpoint(socket_path)? else {
         tracing::info!(
@@ -2402,11 +2402,13 @@ async fn execute_request<R: tauri::Runtime>(
                 app,
                 manager,
                 &browser_id,
-                &action,
-                name.as_deref(),
-                value.as_deref(),
-                domain.as_deref(),
-                path.as_deref(),
+                crate::ipc::browser::BrowserCookieParams {
+                    action: &action,
+                    name: name.as_deref(),
+                    value: value.as_deref(),
+                    domain: domain.as_deref(),
+                    path: path.as_deref(),
+                },
             )
             .await
             {
@@ -2431,13 +2433,15 @@ async fn execute_request<R: tauri::Runtime>(
                 app,
                 manager,
                 &browser_id,
-                &kind,
-                &action,
-                key.as_deref(),
-                value.as_deref(),
-                clear_all.unwrap_or(false),
-                url.as_deref(),
-                domain.as_deref(),
+                crate::ipc::browser::BrowserStorageParams {
+                    kind: &kind,
+                    action: &action,
+                    key: key.as_deref(),
+                    value: value.as_deref(),
+                    clear_all: clear_all.unwrap_or(false),
+                    url: url.as_deref(),
+                    domain: domain.as_deref(),
+                },
             )
             .await
             {

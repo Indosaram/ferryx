@@ -714,12 +714,10 @@ impl RelayClient {
                             request.registration.generation == ack.generation
                                 && request.registration.pin == ack.pin
                                 && request.registration.machine_id == ack.machine_id
-                        }) {
-                            if pending.take().unwrap().ack.send(Ok(ack)).is_err() {
-                                tracing::debug!(
-                                    "Registration ACK arrived after caller disconnected"
-                                );
-                            }
+                        }) && pending.take().unwrap().ack.send(Ok(ack)).is_err() {
+                            tracing::debug!(
+                                "Registration ACK arrived after caller disconnected"
+                            );
                         }
                         continue;
                     }

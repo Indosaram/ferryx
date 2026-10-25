@@ -69,6 +69,12 @@ impl NotificationActivations {
     pub fn len(&self) -> usize {
         self.pending.lock().len()
     }
+
+    /// Whether there are no pending activations. Test-only.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.pending.lock().is_empty()
+    }
 }
 
 /// Whether a platform click callback is the user activating the notification

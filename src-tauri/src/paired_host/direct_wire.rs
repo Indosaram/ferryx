@@ -5,6 +5,7 @@
 //!   signed by the source machine's `identity.json` key (role Initiator);
 //! - answer  `session_id = "<offer session_id>|<base64url sha256(offer transcript)>"`,
 //!   signed by the target machine's key, so it binds the initiator cert + nonce.
+//!
 //! Machine ids never contain `|` (see `direct_trust::validate_machine_id`).
 use super::direct::{
     compute_offer_transcript, DirectConnectionAnswer, DirectConnectionOffer, DirectRole,

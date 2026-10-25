@@ -54,7 +54,7 @@ pub enum Operation {
     Completed {
         #[serde(deserialize_with = "request_id")]
         request_id: String,
-        outcome: OperationOutcome,
+        outcome: Box<OperationOutcome>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

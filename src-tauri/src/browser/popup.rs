@@ -339,9 +339,9 @@ pub fn page_warning_script(message: &str) -> String {
 /// The registry is process-wide; every test in the crate that mutates or asserts it
 /// (here and in `ipc::browser::popup_handle_tests`) holds this lock.
 #[cfg(test)]
-pub(crate) fn registry_test_lock() -> parking_lot::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock()
+pub(crate) fn registry_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
 }
 
 #[cfg(test)]
@@ -352,7 +352,7 @@ mod tests {
     fn registry_links_looks_up_and_unlinks() {
         // RED when `unlink` stops removing the entry (returns the link but leaves it
         // registered), or when `popup_for_handle` matches on the handle alone.
-        let _guard = registry_test_lock();
+        let _guard = registry_test_lock().blocking_lock();
         clear_all();
         link("popup-1", "opener-1", "p1");
         link("popup-2", "opener-2", "p1");
@@ -391,7 +391,7 @@ mod tests {
         // Deterministic regression: when opener calls popup.close() before creation completes,
         // pending close is recorded. When link() runs later, it detects pending close,
         // refuses registration (returns false), and leaves the registry clean.
-        let _guard = registry_test_lock();
+        let _guard = registry_test_lock().blocking_lock();
         clear_all();
         record_pending_close("opener-race", "p_fast_close");
         assert!(is_pending_close("opener-race", "p_fast_close"));
@@ -417,7 +417,7 @@ mod tests {
     fn pending_closes_stay_bounded() {
         // A-CORE-2: an opener that keeps closing handles that never become popups must not
         // grow the process-wide pending set without limit.
-        let _guard = registry_test_lock();
+        let _guard = registry_test_lock().blocking_lock();
         for index in 0..5_000 {
             record_pending_close("opener-flood", &format!("flood-p{index}"));
         }
@@ -432,7 +432,7 @@ mod tests {
     fn pending_close_cap_is_per_opener() {
         // m2: the cap is per opener, so one page flooding closes cannot evict another
         // tab's legitimate pending close.
-        let _guard = registry_test_lock();
+        let _guard = registry_test_lock().blocking_lock();
         clear_all();
         record_pending_close("opener-quiet", "q-p1");
         for index in 0..(MAX_PENDING_CLOSES * 4) {
@@ -460,7 +460,7 @@ mod tests {
     fn stale_pending_close_from_an_old_document_does_not_block_a_new_document_handle() {
         // A-CORE-2: handles carry a per-document id, so a pending close recorded for the
         // previous document can never match the next document's handle.
-        let _guard = registry_test_lock();
+        let _guard = registry_test_lock().blocking_lock();
         let opener = "opener-doc-reload";
         record_pending_close(opener, "dk3j9a1-p1");
         assert!(link("popup-doc-reload", opener, "dq77x0c-p1"));
@@ -477,7 +477,7 @@ mod tests {
     fn linking_the_same_opener_handle_twice_keeps_one_entry() {
         // A-CORE-2: a second link for (opener, handle) must replace the first, never leave
         // two entries that `popup_for_handle` resolves by first hit.
-        let _guard = registry_test_lock();
+        let _guard = registry_test_lock().blocking_lock();
         let opener = "opener-dup-link";
         assert!(link("popup-dup-old", opener, "dz-p1"));
         assert!(link("popup-dup-new", opener, "dz-p1"));

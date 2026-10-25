@@ -276,7 +276,8 @@ async fn dropped_http_reply_replays_original_process_and_controller_fences_close
         socket.write_all(format!("POST /api/v1/sessions HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(10), observed).await.unwrap().unwrap();
         let record = service.workspace_service.journal.reconcile(&device.id, &request.request_id).unwrap().unwrap();
-        let Operation::Completed { outcome: OperationOutcome::Session { session }, .. } = record.operation else { panic!("not committed"); };
+        let Operation::Completed { outcome, .. } = record.operation else { panic!("not committed"); };
+        let OperationOutcome::Session { session } = *outcome else { panic!("not a session"); };
         let pty = service.terminal_service.get_session(&session.target.session_id).unwrap();
         let original_pid = pty.pid();
         // The server is held before response serialization; no response bytes are consumed.
@@ -291,7 +292,7 @@ async fn dropped_http_reply_replays_original_process_and_controller_fences_close
         assert_eq!(service.terminal_service.get_session(&session.target.session_id).unwrap().pid(), original_pid);
         service.machine_controllers.lock().await.insert(session.target.session_id.clone(), "another-controller".into());
         let close_id = uuid::Uuid::new_v4().to_string();
-        assert_eq!(service.close_machine(&device.id, &close_id, "close", &session.target.session_id, session.target.daemon_epoch, session.target.daemon_epoch, Arc::new(|| Ok(()))).await.unwrap_err(), "CONTROL_CONFLICT");
+        assert_eq!(service.close_machine(crate::daemon::session_service::MachineClose { device: &device.id, request: &close_id, digest: "close", id: &session.target.session_id, expected_epoch: session.target.daemon_epoch, owner_epoch: session.target.daemon_epoch, check: Arc::new(|| Ok(())) }).await.unwrap_err(), "CONTROL_CONFLICT");
         assert!(service.workspace_service.journal.reconcile(&device.id, &close_id).unwrap().is_none());
         service.machine_controllers.lock().await.clear();
         eprintln!("A09 dropped actual HTTP reply: target={} original_pid={original_pid:?} same-PID-replay=true controller-conflict-before-intent=true", session.target.session_id);
@@ -662,7 +663,6 @@ fn projector_child(
 
 /// Bound for one child scenario. A blocked child must fail this parent naming the stage it
 /// reported, not hang the suite; a bound is a bound, never a sleep or a poll.
-
 const PROJECTOR_CHILD_BOUND: Duration = Duration::from_secs(90);
 
 /// Bounds for the two waits a blocked child forces. Neither may be unbounded, and neither failure
@@ -1016,7 +1016,7 @@ async fn projector_child_spawn(
 ) -> String {
     projector_child_stage("spawn");
     service
-        .handle_spawn(request_id, "projector-ws", None, cwd, cols, rows, None, None, None)
+        .handle_spawn(request_id, "projector-ws", crate::daemon::session_service::SpawnOptions { worktree: None, cwd, cols, rows, shell: None }, None, None)
         .await
         .unwrap()
 }

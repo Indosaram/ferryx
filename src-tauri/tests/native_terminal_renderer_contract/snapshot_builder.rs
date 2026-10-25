@@ -24,15 +24,20 @@ pub fn empty_cell() -> CellSnapshot {
     }
 }
 
+#[derive(Default)]
+pub struct CellStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub inverse: bool,
+}
+
 pub fn make_cell(
     text: &str,
     wide: CellWide,
     fg: Option<ColorRgb>,
     bg: Option<ColorRgb>,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    inverse: bool,
+    style: CellStyle,
 ) -> CellSnapshot {
     CellSnapshot {
         text: text.to_string(),
@@ -41,10 +46,10 @@ pub fn make_cell(
         bg,
         fg_ident: None,
         underline_ident: None,
-        bold,
-        italic,
-        underline,
-        inverse,
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        inverse: style.inverse,
         faint: false,
         blink: false,
         invisible: false,
@@ -74,115 +79,82 @@ pub fn build_test_snapshot() -> RenderSnapshot {
         CellWide::Narrow,
         rgb_fg,
         rgb_bg,
-        true,
-        false,
-        false,
-        false,
+        CellStyle { bold: true, ..Default::default() },
     );
     grid[0][1] = make_cell(
         "e",
         CellWide::Narrow,
         rgb_fg,
         rgb_bg,
-        true,
-        false,
-        false,
-        false,
+        CellStyle { bold: true, ..Default::default() },
     );
     grid[0][2] = make_cell(
         "l",
         CellWide::Narrow,
         rgb_fg,
         rgb_bg,
-        true,
-        false,
-        false,
-        false,
+        CellStyle { bold: true, ..Default::default() },
     );
     grid[0][3] = make_cell(
         "l",
         CellWide::Narrow,
         rgb_fg,
         rgb_bg,
-        true,
-        false,
-        false,
-        false,
+        CellStyle { bold: true, ..Default::default() },
     );
     grid[0][4] = make_cell(
         "o",
         CellWide::Narrow,
         rgb_fg,
         rgb_bg,
-        true,
-        false,
-        false,
-        false,
+        CellStyle { bold: true, ..Default::default() },
     );
 
     // Row 1: CJK, Emoji, and Unicode combining marks
-    grid[1][0] = make_cell("東", CellWide::Wide, None, None, false, false, false, false);
+    grid[1][0] = make_cell("東", CellWide::Wide, None, None, CellStyle::default());
     grid[1][1] = make_cell(
         "",
         CellWide::SpacerTail,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
-    grid[1][2] = make_cell("京", CellWide::Wide, None, None, false, false, false, false);
+    grid[1][2] = make_cell("京", CellWide::Wide, None, None, CellStyle::default());
     grid[1][3] = make_cell(
         "",
         CellWide::SpacerTail,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
     grid[1][4] = make_cell(
         " ",
         CellWide::Narrow,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
-    grid[1][5] = make_cell("🦀", CellWide::Wide, None, None, false, false, false, false);
+    grid[1][5] = make_cell("🦀", CellWide::Wide, None, None, CellStyle::default());
     grid[1][6] = make_cell(
         "",
         CellWide::SpacerTail,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
     grid[1][7] = make_cell(
         " ",
         CellWide::Narrow,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
     grid[1][8] = make_cell(
         "e\u{0301}",
         CellWide::Narrow,
         None,
         None,
-        false,
-        true,
-        false,
-        false,
+        CellStyle { italic: true, ..Default::default() },
     );
 
     // Row 2: Long continuous text filling all 80 columns
@@ -195,10 +167,7 @@ pub fn build_test_snapshot() -> RenderSnapshot {
             CellWide::Narrow,
             None,
             None,
-            false,
-            false,
-            false,
-            false,
+            CellStyle::default(),
         );
     }
 

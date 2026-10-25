@@ -301,22 +301,18 @@ fn authorize(state: &RemoteGatewayState, headers: &HeaderMap) -> Result<String, 
 }
 fn replay(r: Record) -> Response {
     match r.operation {
-        Operation::Completed {
-            outcome: OperationOutcome::Project { project },
-            ..
-        } => response(r.status, project),
-        Operation::Completed {
-            outcome: OperationOutcome::Worktree { worktree },
-            ..
-        } => response(r.status, worktree),
-        Operation::Completed {
-            outcome: OperationOutcome::NoContent,
-            ..
-        } => (StatusCode::NO_CONTENT, [("cache-control", "no-store")]).into_response(),
-        Operation::Completed {
-            outcome: OperationOutcome::Error { error },
-            ..
-        } => response(r.status, ErrorEnvelope { error }),
+        Operation::Completed { request_id, outcome } => match *outcome {
+            OperationOutcome::Project { project } => response(r.status, project),
+            OperationOutcome::Worktree { worktree } => response(r.status, worktree),
+            OperationOutcome::NoContent => {
+                (StatusCode::NO_CONTENT, [("cache-control", "no-store")]).into_response()
+            }
+            OperationOutcome::Error { error } => response(r.status, ErrorEnvelope { error }),
+            outcome => response(r.status, Operation::Completed {
+                request_id,
+                outcome: Box::new(outcome),
+            }),
+        },
         Operation::OutcomeUnknown { request_id } => {
             failure("OPERATION_OUTCOME_UNKNOWN", &request_id)
         }
@@ -977,7 +973,7 @@ async fn list_inventory(State(state): State<Arc<RemoteGatewayState>>, headers: H
                 .as_ref()
                 .expect("authorized services");
             let result = (|| {
-                authorize(&state, &headers)?;
+                authorize(state, headers)?;
                 #[cfg(test)]
                 probe(state, "listProbe");
                 project_inventory(&services.workspaces, context, desktop_local)
@@ -1045,7 +1041,7 @@ async fn mutate(
             let service = &services.workspaces;
             let result = (|| {
                 context.check()?;
-                let device = authorize(&state, &headers)?;
+                let device = authorize(state, headers)?;
                 let kind = if workspace.is_some() {
                     "unregisterProject"
                 } else {
@@ -1106,7 +1102,7 @@ async fn mutate(
                     .journal
                     .begin(&device, &request, kind, &digest, &resource)?
                 {
-                    return Ok(r);
+                    return Ok(*r);
                 }
                 let outcome = (|| {
                     let mut c = service
@@ -1132,7 +1128,7 @@ async fn mutate(
                             }
                             Ok(())
                         })?;
-                        authorize(&state, &headers)?;
+                        authorize(state, headers)?;
                         c.workspaces.remove(&workspace);
                         (204, OperationOutcome::NoContent)
                     } else {
@@ -1176,7 +1172,7 @@ async fn mutate(
                             return Ok((200, OperationOutcome::Project { project: p }));
                         } else {
                         c.ownership.entry(resource.clone()).or_default().machine = true;
-                        authorize(&state, &headers)?;
+                        authorize(state, headers)?;
                         c.workspaces.insert(
                             resource.clone(),
                             super::workspace_catalog::CatalogRow {
@@ -1271,7 +1267,7 @@ pub async fn operation(
         false,
         id.clone(),
         move |state, headers, _context| {
-            let device = match authorize(&state, &headers) {
+            let device = match authorize(state, headers) {
                 Ok(d) => d,
                 Err(e) => return failure(&e, &uuid::Uuid::new_v4().to_string()),
             };

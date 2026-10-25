@@ -551,11 +551,7 @@ async fn exercise_child(root: &Path) {
             .handle_spawn(
                 request_id,
                 &response.workspace_id,
-                None,
-                spawn_cwd,
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: spawn_cwd, cols: 80, rows: 24, shell: None },
                 Some(startup.clone()),
             )
             .await
@@ -616,11 +612,7 @@ async fn exercise_child(root: &Path) {
         .handle_spawn(
             "remote-worktree-tab",
             &response.workspace_id,
-            Some(wt_identity.clone()),
-            Some(wt_dir.to_str().unwrap().into()),
-            80,
-            24,
-            None,
+            crate::daemon::session_service::SpawnOptions { worktree: Some(wt_identity.clone()), cwd: Some(wt_dir.to_str().unwrap().into()), cols: 80, rows: 24, shell: None },
             Some(startup.clone()),
         )
         .await
@@ -671,11 +663,7 @@ async fn exercise_child(root: &Path) {
         .handle_spawn(
             "remote-shell-override",
             &response.workspace_id,
-            None,
-            None,
-            80,
-            24,
-            Some("/bin/zsh".into()),
+            crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: Some("/bin/zsh".into()) },
             Some(startup.clone()),
         )
         .await
@@ -772,11 +760,7 @@ async fn exercise_child(root: &Path) {
         .handle_spawn(
             "disabled",
             &response.workspace_id,
-            None,
-            None,
-            80,
-            24,
-            None,
+            crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
             Some(startup.clone())
         )
         .await
@@ -786,11 +770,7 @@ async fn exercise_child(root: &Path) {
         .handle_spawn(
             "deleted",
             &response.workspace_id,
-            None,
-            None,
-            80,
-            24,
-            None,
+            crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
             Some(startup)
         )
         .await
@@ -799,11 +779,7 @@ async fn exercise_child(root: &Path) {
         .handle_spawn(
             "no-fallback",
             &response.workspace_id,
-            None,
-            None,
-            80,
-            24,
-            None,
+            crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
             None
         )
         .await
@@ -1226,11 +1202,7 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_child() {
         .handle_spawn(
             "auto-provision-first-spawn",
             &response.workspace_id,
-            None,
-            Some(response.repo_root.clone()),
-            80,
-            24,
-            None,
+            crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(response.repo_root.clone()), cols: 80, rows: 24, shell: None },
             Some(startup),
         )
         .await

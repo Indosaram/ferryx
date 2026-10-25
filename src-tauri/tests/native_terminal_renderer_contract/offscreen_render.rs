@@ -1,5 +1,6 @@
 //! Contract test for Phase 2 native terminal renderer offscreen frame generation.
 
+use super::snapshot_builder::CellStyle;
 use ferryx_lib::native_terminal::composition::PhysicalBounds;
 use ferryx_lib::native_terminal::renderer::font_manager::FontManager;
 use ferryx_lib::native_terminal::renderer::RendererTheme;
@@ -57,10 +58,7 @@ fn test_dense_scale_2_working_set_pixel_readback_integrity() {
                 CellWide::Wide,
                 None,
                 None,
-                false,
-                false,
-                false,
-                false,
+                CellStyle::default(),
             );
             grid[i / 40][(i % 40) * 2 + 1].wide = CellWide::SpacerTail;
         }
@@ -194,10 +192,7 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
             CellWide::Narrow,
             Some(foreground),
             Some(background),
-            false,
-            false,
-            false,
-            false,
+            CellStyle::default(),
         )]],
     };
     let config = RendererConfig {
@@ -402,40 +397,28 @@ fn test_render_snapshot_offscreen_frame_with_color_emoji() {
         ferryx_lib::native_terminal::CellWide::Narrow,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
     grid[0][1] = super::snapshot_builder::make_cell(
         "😺",
         ferryx_lib::native_terminal::CellWide::Wide,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
     grid[0][2] = super::snapshot_builder::make_cell(
         "",
         ferryx_lib::native_terminal::CellWide::SpacerTail,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
     grid[0][3] = super::snapshot_builder::make_cell(
         ")",
         ferryx_lib::native_terminal::CellWide::Narrow,
         None,
         None,
-        false,
-        false,
-        false,
-        false,
+        CellStyle::default(),
     );
 
     let snapshot = RenderSnapshot {
@@ -585,7 +568,11 @@ fn test_render_to_offscreen_viewport_with_attention_frame() {
 
     let frame_with_attention = renderer
         .render_to_offscreen_viewport_with_overlay_and_attention(
-            &snapshot, None, surface_w, surface_h, viewport, None, true,
+            &snapshot, None,
+            ferryx_lib::native_terminal::renderer::implementation::OffscreenViewportOptions {
+                width: surface_w, height: surface_h, viewport,
+                scrollbar_overlay: None, attention_frame: true,
+            },
         )
         .expect("render with attention frame");
 

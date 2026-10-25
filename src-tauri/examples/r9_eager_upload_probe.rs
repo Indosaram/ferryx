@@ -92,7 +92,18 @@ fn wire_valid(wire: &[u8], expected: u16, code: &str) -> bool {
     length == Some(wire.len()-boundary-4) && valid(status, no_store, &wire[boundary+4..], expected, code)
 }
 
-async fn raw(log: &Log, addr: SocketAddr, method: &str, path: &str, size: usize, token: Option<&str>, expected: u16, code: &str, mode: &str) -> Result<()> {
+struct RawRequest<'a> {
+    method: &'a str,
+    path: &'a str,
+    size: usize,
+    token: Option<&'a str>,
+    expected: u16,
+    code: &'a str,
+    mode: &'a str,
+}
+
+async fn raw(log: &Log, addr: SocketAddr, request: RawRequest<'_>) -> Result<()> {
+    let RawRequest { method, path, size, token, expected, code, mode } = request;
     let staged = mode == "raw-staged";
     let early_fin = mode == "raw-eager-fin";
     let tcp = TcpStream::connect(addr).await?;
@@ -156,7 +167,7 @@ async fn requests(log: &Log, addr: SocketAddr, grants: &[String]) -> Result<()> 
                 log.lock().unwrap().case = name;
                 event(log, json!({"event":"case_start", "method":method, "size":size, "auth":label, "mode":mode, "expected":expected}));
                 if mode.starts_with("raw") {
-                    raw(log, addr, method, path, size, token, expected, code, mode).await?;
+                    raw(log, addr, RawRequest { method, path, size, token, expected, code, mode }).await?;
                 } else {
                     let client = client(mode == "reqwest-fresh")?;
                     if mode == "reqwest-pooled" {

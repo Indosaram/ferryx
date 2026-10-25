@@ -204,8 +204,8 @@ async fn machine_events_begin_with_authoritative_snapshot() {
         eprintln!("A12 unsubscribe while snapshot admission blocked cancels before permit release; watches dropped");
     }).catch_unwind().await;
     for id in owner.terminal_service().list_sessions() { owner.terminal_service().close_session(&id).await.unwrap(); }
-    state.auth_manager.revoke_device("owner");
-    state.auth_manager.revoke_device("mirror");
+    state.auth_manager.revoke_device("owner").expect("revoke owner");
+    state.auth_manager.revoke_device("mirror").expect("revoke mirror");
     stop.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());

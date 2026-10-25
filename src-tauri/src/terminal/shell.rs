@@ -452,6 +452,7 @@ fn is_on_path(exe: &str) -> bool {
 
 /// Reliable ordinary shells never consult the legacy login-shell PATH cache.
 /// Lookup uses the command's inherited environment, including Windows PATHEXT.
+#[cfg(test)]
 pub(crate) fn resolve_ordinary_shell_command(
     preference: Option<&str>,
 ) -> Result<CommandBuilder, crate::terminal::PtyError> {
@@ -461,6 +462,7 @@ pub(crate) fn resolve_ordinary_shell_command(
     })
 }
 
+#[cfg(test)]
 fn ordinary_shell_command_with_env<E>(
     preference: Option<&str>,
     platform: TargetPlatform,
@@ -497,6 +499,7 @@ where
     Ok(command)
 }
 
+#[cfg(test)]
 fn inherited_executable(
     program: &str,
     paths: &[std::path::PathBuf],
@@ -529,6 +532,7 @@ fn inherited_executable(
     None
 }
 
+#[cfg(test)]
 fn inherited_candidate_is_executable(path: &std::path::Path, platform: TargetPlatform) -> bool {
     #[cfg(unix)]
     {

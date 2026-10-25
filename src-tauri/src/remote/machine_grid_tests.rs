@@ -475,9 +475,7 @@ async fn machine_terminal_preserves_raw_mode_and_rejects_scroll() {
     .await;
 
     let attached = read_attached_frame(&mut socket).await;
-    let Attached::Attached { generation, .. } = attached else {
-        panic!("unexpected attached variant");
-    };
+    let Attached::Attached { generation, .. } = attached;
 
     let raw_bytes = read_binary_frame_matching(&mut socket, |b| {
         String::from_utf8_lossy(b).contains("RAW_MODE_REPLAY")
@@ -514,9 +512,7 @@ async fn machine_grid_controller_fencing_and_revocation() {
     let mut socket_a = open_ws(fixture.server.addr, &path, Some(&fixture.token)).await;
 
     let attached = read_attached_frame(&mut socket_a).await;
-    let Attached::Attached { generation, .. } = attached else {
-        panic!("unexpected attached variant");
-    };
+    let Attached::Attached { generation, .. } = attached;
     let gen_str = generation.0.to_string();
 
     let _ = read_grid_frame_matching(&mut socket_a, |f| matches!(f, RemoteGridFrame::Grid { .. })).await;
@@ -613,9 +609,7 @@ async fn machine_grid_rejects_oversized_resize_and_allows_raw_resize() {
     );
     let mut socket_grid = open_ws(fixture.server.addr, &path_grid, Some(&fixture.token)).await;
     let attached = read_attached_frame(&mut socket_grid).await;
-    let Attached::Attached { generation, .. } = attached else {
-        panic!("unexpected attached variant");
-    };
+    let Attached::Attached { generation, .. } = attached;
 
     let oversized_resize = serde_json::json!({
         "type": "resize",
@@ -639,9 +633,7 @@ async fn machine_grid_rejects_oversized_resize_and_allows_raw_resize() {
     );
     let mut socket_raw = open_ws(fixture.server.addr, &path_raw, Some(&fixture.token)).await;
     let attached_raw = read_attached_frame(&mut socket_raw).await;
-    let Attached::Attached { generation: raw_gen, .. } = attached_raw else {
-        panic!("unexpected attached variant");
-    };
+    let Attached::Attached { generation: raw_gen, .. } = attached_raw;
 
     let raw_resize = serde_json::json!({
         "type": "resize",

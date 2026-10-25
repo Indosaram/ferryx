@@ -7,19 +7,14 @@ use std::time::{Duration, Instant};
 /// This is intentionally independent from agent activity (working/waiting/done):
 /// a completed agent can still have a Running backing process until the idle policy
 /// moves it to Hibernated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionProcessState {
+    #[default]
     Standby,
     Running,
     Hibernated,
     Suspended,
-}
-
-impl Default for SessionProcessState {
-    fn default() -> Self {
-        Self::Standby
-    }
 }
 
 #[derive(Debug, Clone)]

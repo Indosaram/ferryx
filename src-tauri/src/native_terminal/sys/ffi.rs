@@ -6,7 +6,7 @@ use super::types::{
     GhosttyAllocator, GhosttyCell, GhosttyFormatter, GhosttyFormatterTerminalOptions,
     GhosttyGridRef, GhosttyKeyEncoder, GhosttyKeyEvent,
     GhosttyMouseEncoder, GhosttyMouseEvent, GhosttyMousePosition, GhosttyPoint,
-    GhosttyPointCoordinate, GhosttyReader, GhosttyRenderState, GhosttyRenderStateRowCells,
+    GhosttyPointCoordinate, GhosttyRenderState, GhosttyRenderStateRowCells,
     GhosttyRenderStateRowIterator, GhosttySelection, GhosttySelectionGesture,
     GhosttySelectionGestureEvent, GhosttySnapshotDecoder, GhosttyTerminal,
     GhosttyTerminalScrollViewport, GhosttyTerminalSelectLineOptions,
@@ -284,18 +284,7 @@ extern "C" {
         buf_len: usize,
         out_written: *mut usize,
     ) -> c_int;
-    pub fn ghostty_snapshot_encode_alloc(
-        terminal: GhosttyTerminal,
-        allocator: *const GhosttyAllocator,
-        out_ptr: *mut *mut u8,
-        out_len: *mut usize,
-    ) -> c_int;
 
-    pub fn ghostty_snapshot_decoder_new(
-        allocator: *const GhosttyAllocator,
-        decoder: *mut GhosttySnapshotDecoder,
-        reader: GhosttyReader,
-    ) -> c_int;
     pub fn ghostty_snapshot_decoder_new_buf(
         allocator: *const GhosttyAllocator,
         decoder: *mut GhosttySnapshotDecoder,
@@ -322,29 +311,6 @@ extern "C" {
         data: c_int,
         out: *mut c_void,
     ) -> c_int;
-    pub fn ghostty_snapshot_decoder_get_multi(
-        decoder: GhosttySnapshotDecoder,
-        count: usize,
-        keys: *const c_int,
-        values: *mut *mut c_void,
-        out_written: *mut usize,
-    ) -> c_int;
 
-    // Terminal continuation APIs matching `ghostty/vt/terminal.h`.
-    pub fn ghostty_terminal_continuation_write(
-        terminal: GhosttyTerminal,
-        writer: GhosttyWriter,
-    ) -> c_int;
-    pub fn ghostty_terminal_continuation_buf(
-        terminal: GhosttyTerminal,
-        buf: *mut u8,
-        buf_len: usize,
-        out_written: *mut usize,
-    ) -> c_int;
-    pub fn ghostty_terminal_continuation_alloc(
-        terminal: GhosttyTerminal,
-        allocator: *const GhosttyAllocator,
-        out_ptr: *mut *mut u8,
-        out_len: *mut usize,
-    ) -> c_int;
+
 }

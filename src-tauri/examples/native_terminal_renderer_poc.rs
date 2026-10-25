@@ -78,8 +78,8 @@ fn canonical_scenario() -> (RenderSnapshot, SelectionSnapshot) {
         grid[2][col] = cell;
     }
 
-    for col in 0..6 {
-        grid[0][col].bg = Some(selection_bg);
+    for cell in &mut grid[0][..6] {
+        cell.bg = Some(selection_bg);
     }
 
     (

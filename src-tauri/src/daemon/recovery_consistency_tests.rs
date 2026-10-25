@@ -110,7 +110,7 @@ mod tests {
 
         assert!(paired_details.is_paired_proxy_actor());
         assert!(!paired_details.is_affirmative_exit());
-        assert_eq!(paired_details.running, false);
+        assert!(!paired_details.running);
         assert_eq!(
             paired_details.recovery_authority.as_ref().unwrap().status,
             "owner_unavailable"
@@ -241,7 +241,7 @@ mod tests {
         .unwrap();
         let helper_home = home_dir.path().to_str().unwrap().to_string();
         let session_id = server
-            .handle_spawn("local-proj-session", "test-local-ws", None, None, 80, 24, Some("/bin/sh".to_string()), None, Some(helper_home))
+            .handle_spawn("local-proj-session", "test-local-ws", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: Some("/bin/sh".to_string()) }, None, Some(helper_home))
             .await
             .unwrap();
         let resp = server.describe_session_identity(&session_id).await;
@@ -249,7 +249,7 @@ mod tests {
             panic!("Expected DescribeSessionOk, got {resp:?}");
         };
         assert!(daemon_epoch.is_some());
-        assert_eq!(session.running, true);
+        assert!(session.running);
         assert_eq!(session.is_paired_proxy, Some(false));
         let auth = session.recovery_authority.expect("recovery_authority must be projected");
         assert_eq!(auth.status, "running");
@@ -291,7 +291,7 @@ mod tests {
             panic!("Expected DescribeSessionOk, got {resp:?}");
         };
         assert_eq!(daemon_epoch, Some(server.epoch.to_string()));
-        assert_eq!(session.running, false);
+        assert!(!session.running);
         assert_eq!(session.is_paired_proxy, Some(true));
         let auth = session.recovery_authority.expect("recovery_authority must be present for absent proxy");
         assert_eq!(auth.status, "owner_unavailable");
@@ -319,11 +319,7 @@ mod tests {
             .handle_spawn(
                 "local-exit-session",
                 "test-exit-ws",
-                None,
-                None,
-                80,
-                24,
-                Some("/bin/sh".to_string()),
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: Some("/bin/sh".to_string()) },
                 None,
                 Some(helper_home),
             )

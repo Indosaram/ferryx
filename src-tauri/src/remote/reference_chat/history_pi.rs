@@ -470,7 +470,7 @@ fn assistant_turn(turns: &mut Vec<ReferenceTurn>, settled: bool, timestamp: Opti
 
 /// Fold this record's tool results into the tool parts they answer.
 fn apply_results(
-    turns: &mut Vec<ReferenceTurn>,
+    turns: &mut [ReferenceTurn],
     pending: &mut HashMap<String, (usize, usize)>,
     message: &PiMessage,
 ) {
@@ -1025,7 +1025,7 @@ fn entries_by_id(index: &PiIndex) -> HashMap<&str, usize> {
 }
 
 /// The last entry written, or `None` when the tree is empty or longer than the file it came from.
-fn leaf_of<'a>(index: &'a PiIndex, size: usize) -> Option<usize> {
+fn leaf_of(index: &PiIndex, size: usize) -> Option<usize> {
     let last = index.entries.len().checked_sub(1)?;
     if index.entries[last].end > size {
         return None;

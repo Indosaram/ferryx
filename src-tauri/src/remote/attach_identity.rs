@@ -75,6 +75,7 @@ impl AttachLock {
         let path = lock_path(base_dir);
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)

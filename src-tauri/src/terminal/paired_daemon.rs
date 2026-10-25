@@ -142,7 +142,7 @@ impl Proxy {
             exit_code: None,
         })
     }
-    pub fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    pub(crate) fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
         self.agent_sink = Some(sink);
     }
     pub fn id(&self) -> &str {
@@ -250,7 +250,7 @@ impl Proxy {
             return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
         };
         if let Ok(m::Control::Error { error: rejection }) = serde_json::from_str(&text) {
-            return Err(ClientError { code: rejection.code.clone(), machine_error: Some(rejection), request_id: None, ambiguous: false });
+            return Err(ClientError { code: rejection.code.clone(), machine_error: Some(Box::new(rejection)), request_id: None, ambiguous: false });
         }
         let m::Attached::Attached {
             target,
@@ -370,9 +370,6 @@ impl Proxy {
         if cols > 0 && rows > 0 && cols <= 1000 && rows <= 1000 {
             self.desired_geometry = Some((cols, rows));
         }
-    }
-    pub(crate) fn agent_sink(&self) -> Option<Arc<dyn crate::terminal::remote::AgentStateSink>> {
-        self.agent_sink.clone()
     }
     pub async fn detach(&mut self) -> Result<()> {
         self.controller = None;
@@ -562,7 +559,7 @@ impl Proxy {
                         .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))? else {
                             return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
                         };
-                    return Err(ClientError { code: rejection.code.clone(), machine_error: Some(rejection), request_id: None, ambiguous: false });
+                    return Err(ClientError { code: rejection.code.clone(), machine_error: Some(Box::new(rejection)), request_id: None, ambiguous: false });
                 } else if value["type"].as_str() == Some("status") {
                     let m::Control::Status { target, status } = serde_json::from_value(value.clone())
                         .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))? else {

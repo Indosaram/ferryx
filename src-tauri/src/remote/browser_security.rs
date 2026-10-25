@@ -189,7 +189,10 @@ pub fn truncate_eval_result(result_str: &str) -> (String, bool) {
     if result_str.len() <= MAX_EVAL_RESULT_BYTES {
         (result_str.to_string(), false)
     } else {
-        let boundary = result_str.floor_char_boundary(MAX_EVAL_RESULT_BYTES);
+        let mut boundary = MAX_EVAL_RESULT_BYTES;
+        while !result_str.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
         (result_str[..boundary].to_string(), true)
     }
 }
@@ -197,6 +200,12 @@ pub fn truncate_eval_result(result_str: &str) -> (String, bool) {
 pub struct RequestDeduplicator {
     cache: Mutex<HashMap<u64, (Instant, Vec<u8>)>>,
     highest_seen_seq: Mutex<u64>,
+}
+
+impl Default for RequestDeduplicator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RequestDeduplicator {

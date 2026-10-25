@@ -259,7 +259,7 @@ pub struct ServiceError {
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
+    pub details: Option<Box<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
 }
@@ -273,7 +273,7 @@ impl ServiceError {
         }
     }
     pub fn with_details(mut self, details: Option<serde_json::Value>) -> Self {
-        self.details = details;
+        self.details = details.map(Box::new);
         self
     }
     pub fn with_retryable(mut self, retryable: bool) -> Self {
@@ -330,6 +330,9 @@ struct Owner {
     #[cfg(test)]
     loopback_http: bool,
 }
+#[cfg(test)]
+type VerificationGate = Arc<Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>>;
+
 #[derive(Clone)]
 pub struct PairedHostService {
     inventory: Arc<Mutex<Owner>>,
@@ -339,7 +342,7 @@ pub struct PairedHostService {
     pub(crate) reachability_sink: Option<ReachabilitySink>,
     authority_changes: tokio::sync::watch::Sender<(u64, String)>,
     #[cfg(test)]
-    verification_gate: Arc<Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>>,
+    verification_gate: VerificationGate,
     #[cfg(test)]
     loopback_http: bool,
 }
@@ -1169,7 +1172,7 @@ fn map_http_error(status: reqwest::StatusCode, bytes: &[u8]) -> ServiceError {
     ServiceError {
         code: code.into(),
         message,
-        details,
+        details: details.map(Box::new),
         retryable: Some(retryable),
     }
 }
@@ -1219,9 +1222,9 @@ fn sanitize_error_text(text: &str) -> String {
     let mut word = String::new();
 
     let flush_word = |word: &str, result: &mut String| {
-        if word.len() >= 32 && word.chars().all(|c| c.is_ascii_hexdigit()) {
-            result.push_str("[REDACTED]");
-        } else if word.len() == 6 && word.chars().all(|c| c.is_ascii_digit()) {
+        if (word.len() >= 32 && word.chars().all(|c| c.is_ascii_hexdigit()))
+            || (word.len() == 6 && word.chars().all(|c| c.is_ascii_digit()))
+        {
             result.push_str("[REDACTED]");
         } else {
             result.push_str(word);

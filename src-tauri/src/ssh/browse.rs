@@ -191,7 +191,7 @@ fn parse_listing(
         .split(|byte| *byte == 0)
         .collect();
     if fields.len() < 5
-        || (fields.len() - 5) % 2 != 0
+        || !(fields.len() - 5).is_multiple_of(2)
         || fields.last() != Some(&b"".as_slice())
         || fields[fields.len() - 3] != b"END"
     {
@@ -410,15 +410,15 @@ mod tests {
     #[test]
     fn rejects_malformed_frames_and_reports_truncation() {
         let env = environment();
-        assert!(parse_listing(b"wrong\0/home/test\0/home\0END\00\0", "FRAME", &env).is_err());
+        assert!(parse_listing(b"wrong\0/home/test\0/home\0END\x000\0", "FRAME", &env).is_err());
         assert!(parse_listing(
-            b"FRAME\0/home/test\0/home\0../escape\00\0END\00\0",
+            b"FRAME\0/home/test\0/home\0../escape\x000\0END\x000\0",
             "FRAME",
             &env
         )
         .is_err());
         let result =
-            parse_listing(b"banner\nFRAME\0/home/test\0/home\0END\01\0", "FRAME", &env).unwrap();
+            parse_listing(b"banner\nFRAME\0/home/test\0/home\0END\x001\0", "FRAME", &env).unwrap();
         assert!(result.truncated);
         assert!(result.entries.is_empty());
     }
@@ -529,16 +529,16 @@ mod tests {
 
     #[test]
     fn skips_non_utf8_entry_names_but_rejects_invalid_metadata() {
-        let bytes = b"UTF8\0/home/test\0/home\0project\00\0bad\xff\00\0END\00\0";
+        let bytes = b"UTF8\0/home/test\0/home\0project\x000\0bad\xff\x000\0END\x000\0";
         let listing = parse_listing(bytes, "UTF8", &environment()).unwrap();
         assert_eq!(listing.entries.len(), 1);
         assert_eq!(listing.entries[0].path, "/home/test/project");
         assert!(listing.truncated);
         assert!(
-            parse_listing(b"UTF8\0/home/\xff\0/home\0END\00\0", "UTF8", &environment()).is_err()
+            parse_listing(b"UTF8\0/home/\xff\0/home\0END\x000\0", "UTF8", &environment()).is_err()
         );
         assert!(parse_listing(
-            b"UTF8\0/home/test\0/home\0bad\xff\0x\0END\00\0",
+            b"UTF8\0/home/test\0/home\0bad\xff\0x\0END\x000\0",
             "UTF8",
             &environment()
         )

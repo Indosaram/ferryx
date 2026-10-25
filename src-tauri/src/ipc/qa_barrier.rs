@@ -2279,17 +2279,7 @@ async fn create_plain_fixture_session(
 ) -> Result<String, String> {
     let spawned = tokio::time::timeout_at(
         deadline,
-        client.spawn_terminal_with_startup(
-            uuid::Uuid::new_v4().to_string(),
-            FIXTURE_WORKSPACE_ID.to_string(),
-            None,
-            Some(cwd.to_string()),
-            FIXTURE_COLS,
-            FIXTURE_ROWS,
-            None,
-            None,
-            None,
-        ),
+        client.spawn_terminal_with_startup(uuid::Uuid::new_v4().to_string(), FIXTURE_WORKSPACE_ID.to_string(), crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(cwd.to_string()), cols: FIXTURE_COLS, rows: FIXTURE_ROWS, shell: None }, None, None),
     )
     .await
     .map_err(|_| "daemon spawn timed out".to_string())?
@@ -3561,19 +3551,19 @@ mod tests {
     // turn the verdict positive.
     #[test]
     fn daemon_facts_are_only_reported_when_observed() {
-        let older_daemon = crate::daemon::protocol::DaemonSessionDetails::new(
-            "backend-1".into(),
-            None,
-            None,
-            None,
-            80,
-            24,
-            true,
-            None,
-            None,
-            None,
-            false,
-        );
+        let older_daemon = crate::daemon::protocol::DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+            session_id: "backend-1".into(),
+            workspace_id: None,
+            worktree: None,
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            running: true,
+            start_sequence: None,
+            end_sequence: None,
+            last_output_age_ms: None,
+            suspended: false,
+        });
         let unobserved = daemon_liveness_from_details(&older_daemon, None);
         assert!(unobserved.observed);
         assert_eq!(unobserved.reader_paused, None);
@@ -3674,19 +3664,19 @@ mod tests {
     #[test]
     fn fixture_kind_claims_follow_the_daemons_own_reply() {
         let base = || {
-            crate::daemon::protocol::DaemonSessionDetails::new(
-                "backend-1".into(),
-                None,
-                None,
-                None,
-                80,
-                24,
-                true,
-                None,
-                None,
-                None,
-                false,
-            )
+            crate::daemon::protocol::DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+                session_id: "backend-1".into(),
+                workspace_id: None,
+                worktree: None,
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                running: true,
+                start_sequence: None,
+                end_sequence: None,
+                last_output_age_ms: None,
+                suspended: false,
+            })
         };
         let idle_facts = || crate::daemon::protocol::DaemonSessionDetails {
             reader_paused: Some(false),

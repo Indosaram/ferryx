@@ -39,6 +39,7 @@ pub(crate) fn validate_local_file(path: &str) -> Result<PathBuf, IpcError> {
     Ok(p)
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn desktop_entry_for_mime(contents: &str, mime: &str) -> Option<String> {
     let trimmed_mime = mime.trim();
     if trimmed_mime.is_empty() {
@@ -70,15 +71,14 @@ pub(crate) fn desktop_entry_for_mime(contents: &str, mime: &str) -> Option<Strin
                 if val.eq_ignore_ascii_case("true") {
                     no_display = true;
                 }
-            } else if key == "MimeType" {
-                if val
+            } else if key == "MimeType"
+                && val
                     .split(';')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .any(|m| m == trimmed_mime)
-                {
-                    mime_matches = true;
-                }
+            {
+                mime_matches = true;
             }
         }
     }
@@ -90,6 +90,7 @@ pub(crate) fn desktop_entry_for_mime(contents: &str, mime: &str) -> Option<Strin
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn is_valid_desktop_id(id: &str) -> bool {
     let Some(stem) = id.strip_suffix(".desktop") else {
         return false;
@@ -100,6 +101,7 @@ pub(crate) fn is_valid_desktop_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn desktop_application_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 

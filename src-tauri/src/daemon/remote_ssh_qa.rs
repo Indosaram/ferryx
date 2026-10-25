@@ -171,11 +171,7 @@ async fn exercise(config: &QaConfig) {
             .handle_spawn(
                 request,
                 &response.workspace_id,
-                None,
-                None,
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
                 Some(TerminalStartup::RemoteSsh {
                     host_store_path: host_store.clone(),
                 }),

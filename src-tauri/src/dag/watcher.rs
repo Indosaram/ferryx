@@ -80,7 +80,7 @@ async fn scan_and_emit(
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() || !path.extension().is_some_and(|ext| ext == "json") {
+            if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
             let meta = std::fs::metadata(&path).ok();

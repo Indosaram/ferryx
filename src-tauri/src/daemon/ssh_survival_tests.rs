@@ -1026,8 +1026,7 @@ async fn ssh_handover_persistence_keeps_predecessor_owned_records() {
     let durable_dir = dir.path().join("durable");
     std::fs::create_dir_all(&durable_dir).unwrap();
     let durable = durable_dir.join("remote_sessions.json");
-    let mut persisted = crate::session::PersistedWorkspaceSession::default();
-    persisted.version = 3;
+    let mut persisted = crate::session::PersistedWorkspaceSession { version: 3, ..Default::default() };
     persisted.extra.insert(
         "remoteSessions".into(),
         serde_json::json!([
@@ -1399,8 +1398,7 @@ async fn ssh_handover_predecessor_retire_keeps_successor_records() {
         Some(dir.path().join("auth")),
     );
     let durable = dir.path().join("remote_sessions.json");
-    let mut persisted = crate::session::PersistedWorkspaceSession::default();
-    persisted.version = 3;
+    let mut persisted = crate::session::PersistedWorkspaceSession { version: 3, ..Default::default() };
     persisted.extra.insert(
         "remoteSessions".into(),
         serde_json::json!([

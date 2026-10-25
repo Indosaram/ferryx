@@ -30,8 +30,10 @@ impl WatchdogClock for MockClock {
     }
 }
 
+type DispatchCallbacks = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+
 struct MockDispatcher {
-    callbacks: Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>,
+    callbacks: DispatchCallbacks,
     total_dispatched: Arc<AtomicU64>,
 }
 
@@ -136,9 +138,11 @@ fn test_at_most_one_pending_heartbeat_enforced_when_hung() {
     let clock = MockClock::new();
     let dispatcher = MockDispatcher::new();
     let sink = MockSink::new();
-    let mut config = WatchdogConfig::default();
-    config.hang_threshold = Duration::from_secs(5);
-    config.cooldown_interval = Duration::from_secs(60);
+    let config = WatchdogConfig {
+        hang_threshold: Duration::from_secs(5),
+        cooldown_interval: Duration::from_secs(60),
+        ..WatchdogConfig::default()
+    };
     let mut engine = WatchdogEngine::new(config);
 
     engine.tick(&clock, &dispatcher, &sink);
@@ -173,10 +177,12 @@ fn test_repeated_sleep_gaps_preserves_pending_seq_and_keeps_queue_length_one() {
     let clock = MockClock::new();
     let dispatcher = MockDispatcher::new();
     let sink = MockSink::new();
-    let mut config = WatchdogConfig::default();
-    config.heartbeat_interval = Duration::from_secs(1);
-    config.sleep_gap_tolerance = Duration::from_secs(3);
-    config.hang_threshold = Duration::from_secs(5);
+    let config = WatchdogConfig {
+        heartbeat_interval: Duration::from_secs(1),
+        sleep_gap_tolerance: Duration::from_secs(3),
+        hang_threshold: Duration::from_secs(5),
+        ..WatchdogConfig::default()
+    };
     let mut engine = WatchdogEngine::new(config);
 
     engine.tick(&clock, &dispatcher, &sink);
@@ -222,9 +228,11 @@ fn test_cooldown_prevents_repeated_capture_during_continuous_hang() {
     let clock = MockClock::new();
     let dispatcher = MockDispatcher::new();
     let sink = MockSink::new();
-    let mut config = WatchdogConfig::default();
-    config.hang_threshold = Duration::from_secs(5);
-    config.cooldown_interval = Duration::from_secs(60);
+    let config = WatchdogConfig {
+        hang_threshold: Duration::from_secs(5),
+        cooldown_interval: Duration::from_secs(60),
+        ..WatchdogConfig::default()
+    };
     let mut engine = WatchdogEngine::new(config);
 
     engine.tick(&clock, &dispatcher, &sink);
@@ -253,8 +261,10 @@ fn test_recovery_after_hang() {
     let clock = MockClock::new();
     let dispatcher = MockDispatcher::new();
     let sink = MockSink::new();
-    let mut config = WatchdogConfig::default();
-    config.hang_threshold = Duration::from_secs(5);
+    let config = WatchdogConfig {
+        hang_threshold: Duration::from_secs(5),
+        ..WatchdogConfig::default()
+    };
     let mut engine = WatchdogEngine::new(config);
 
     engine.tick(&clock, &dispatcher, &sink);

@@ -4378,7 +4378,7 @@ mod tests {
         let path_str = path.to_str().expect("path utf8");
         let dummy_cwd = std::path::Path::new("/dummy");
 
-        let parsed = parse_open_cli(&["ferryx", "open", path_str], dummy_cwd).expect("parse open");
+        let parsed = parse_open_cli(["ferryx", "open", path_str], dummy_cwd).expect("parse open");
         assert_eq!(parsed.path, path_str);
         assert_eq!(parsed.line, None);
         assert_eq!(parsed.col, None);
@@ -4392,7 +4392,7 @@ mod tests {
         let target = format!("{path_str}:12");
         let dummy_cwd = std::path::Path::new("/dummy");
 
-        let parsed = parse_open_cli(&["ferryx", "open", &target], dummy_cwd).expect("parse open");
+        let parsed = parse_open_cli(["ferryx", "open", &target], dummy_cwd).expect("parse open");
         assert_eq!(parsed.path, path_str);
         assert_eq!(parsed.line, Some(12));
         assert_eq!(parsed.col, None);
@@ -4406,7 +4406,7 @@ mod tests {
         let target = format!("{path_str}:12:3");
         let dummy_cwd = std::path::Path::new("/dummy");
 
-        let parsed = parse_open_cli(&["ferryx", "open", &target], dummy_cwd).expect("parse open");
+        let parsed = parse_open_cli(["ferryx", "open", &target], dummy_cwd).expect("parse open");
         assert_eq!(parsed.path, path_str);
         assert_eq!(parsed.line, Some(12));
         assert_eq!(parsed.col, Some(3));
@@ -4421,14 +4421,14 @@ mod tests {
         let expected_canonical = file_path.canonicalize().expect("canonicalize");
         let expected_str = expected_canonical.to_str().expect("path utf8");
 
-        let parsed = parse_open_cli(&["ferryx", "open", file_name], temp_dir.path())
+        let parsed = parse_open_cli(["ferryx", "open", file_name], temp_dir.path())
             .expect("parse open relative");
         assert_eq!(parsed.path, expected_str);
         assert_eq!(parsed.line, None);
         assert_eq!(parsed.col, None);
 
         let target = format!("{file_name}:42:7");
-        let parsed_line_col = parse_open_cli(&["ferryx", "open", &target], temp_dir.path())
+        let parsed_line_col = parse_open_cli(["ferryx", "open", &target], temp_dir.path())
             .expect("parse open relative with line and col");
         assert_eq!(parsed_line_col.path, expected_str);
         assert_eq!(parsed_line_col.line, Some(42));
@@ -4439,7 +4439,7 @@ mod tests {
     fn open_cli_missing_file_errors_with_file_not_found() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let err = parse_open_cli(
-            &["ferryx", "open", "does_not_exist_file.txt"],
+            ["ferryx", "open", "does_not_exist_file.txt"],
             temp_dir.path(),
         )
         .unwrap_err();
@@ -4454,7 +4454,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let subdir = temp_dir.path().join("subdir");
         std::fs::create_dir(&subdir).expect("create subdir");
-        let err = parse_open_cli(&["ferryx", "open", "subdir"], temp_dir.path()).unwrap_err();
+        let err = parse_open_cli(["ferryx", "open", "subdir"], temp_dir.path()).unwrap_err();
         assert!(
             err.contains("file not found"),
             "expected 'file not found' in '{err}'"
@@ -4464,20 +4464,20 @@ mod tests {
     #[test]
     fn open_cli_missing_arg_errors_with_usage() {
         let dummy_cwd = std::path::Path::new("/dummy");
-        let err_missing = parse_open_cli(&["ferryx", "open"], dummy_cwd).unwrap_err();
+        let err_missing = parse_open_cli(["ferryx", "open"], dummy_cwd).unwrap_err();
         assert!(
             err_missing.contains("usage"),
             "expected 'usage' in '{err_missing}'"
         );
 
-        let err_no_open = parse_open_cli(&["ferryx"], dummy_cwd).unwrap_err();
+        let err_no_open = parse_open_cli(["ferryx"], dummy_cwd).unwrap_err();
         assert!(
             err_no_open.contains("usage"),
             "expected 'usage' in '{err_no_open}'"
         );
 
         let err_extra =
-            parse_open_cli(&["ferryx", "open", "file.txt", "extra"], dummy_cwd).unwrap_err();
+            parse_open_cli(["ferryx", "open", "file.txt", "extra"], dummy_cwd).unwrap_err();
         assert!(
             err_extra.contains("usage"),
             "expected 'usage' in '{err_extra}'"
@@ -4817,7 +4817,7 @@ mod tests {
                 browser_id: "b-1".into(),
             }
         );
-        assert!(parse_browser_cli(&["ferryx", "browser", "back"]).is_err());
+        assert!(parse_browser_cli(["ferryx", "browser", "back"]).is_err());
 
         let happy_forward = vec!["ferryx", "browser", "forward", "--browser-id", "b-1"];
         assert_eq!(
@@ -4826,7 +4826,7 @@ mod tests {
                 browser_id: "b-1".into(),
             }
         );
-        assert!(parse_browser_cli(&["ferryx", "browser", "forward"]).is_err());
+        assert!(parse_browser_cli(["ferryx", "browser", "forward"]).is_err());
 
         let happy_reload = vec!["ferryx", "browser", "reload", "--browser-id", "b-1"];
         assert_eq!(
@@ -4835,7 +4835,7 @@ mod tests {
                 browser_id: "b-1".into(),
             }
         );
-        assert!(parse_browser_cli(&["ferryx", "browser", "reload"]).is_err());
+        assert!(parse_browser_cli(["ferryx", "browser", "reload"]).is_err());
     }
 
     #[test]
@@ -4891,13 +4891,13 @@ mod tests {
 
     #[test]
     fn browser_cli_unknown_subcommand_and_usage() {
-        let err = parse_browser_cli(&["ferryx", "browser", "unknown"]).unwrap_err();
+        let err = parse_browser_cli(["ferryx", "browser", "unknown"]).unwrap_err();
         assert_eq!(
             err,
             "expected `ferryx browser <list|open|navigate|goto|back|forward|reload|close|identify|url|title|snapshot|click|dblclick|hover|check|uncheck|scroll-into-view|select|type|scroll|fill|keypress|eval|wait|screenshot|highlight|console|errors|focus|cookies|storage|get|is|find|dialog|download|tab|state>`"
         );
 
-        let err_no_browser = parse_browser_cli(&["ferryx", "other"]).unwrap_err();
+        let err_no_browser = parse_browser_cli(["ferryx", "other"]).unwrap_err();
         assert_eq!(
             err_no_browser,
             "expected `ferryx browser <list|open|navigate|goto|back|forward|reload|close|identify|url|title|snapshot|click|dblclick|hover|check|uncheck|scroll-into-view|select|type|scroll|fill|keypress|eval|wait|screenshot|highlight|console|errors|focus|cookies|storage|get|is|find|dialog|download|tab|state>`"
@@ -7554,7 +7554,7 @@ mod tests {
         // `type` and `scroll` may omit `--ref`: they then act on the active element
         // and the window, which is exactly what the executor does for a missing
         // reference.
-        let type_without_ref = parse_browser_cli(&[
+        let type_without_ref = parse_browser_cli([
             "ferryx",
             "browser",
             "type",
@@ -7580,7 +7580,7 @@ mod tests {
             }
         );
 
-        let scroll_without_ref = parse_browser_cli(&[
+        let scroll_without_ref = parse_browser_cli([
             "ferryx",
             "browser",
             "scroll",
@@ -7619,18 +7619,18 @@ mod tests {
             "uncheck",
             "scroll-into-view",
         ] {
-            assert!(parse_browser_cli(&["ferryx", "browser", verb]).is_err());
-            assert!(parse_browser_cli(&[
+            assert!(parse_browser_cli(["ferryx", "browser", verb]).is_err());
+            assert!(parse_browser_cli([
                 "ferryx", "browser", verb, "--browser-id", "b-1", "--generation", "2"
             ])
             .is_err());
-            assert!(parse_browser_cli(&[
+            assert!(parse_browser_cli([
                 "ferryx", "browser", verb, "--browser-id", "b-1", "--ref", "e1"
             ])
             .is_err());
         }
 
-        assert!(parse_browser_cli(&[
+        assert!(parse_browser_cli([
             "ferryx",
             "browser",
             "select",
@@ -7643,7 +7643,7 @@ mod tests {
         ])
         .is_err());
 
-        assert!(parse_browser_cli(&[
+        assert!(parse_browser_cli([
             "ferryx",
             "browser",
             "type",
@@ -7655,7 +7655,7 @@ mod tests {
         .is_err());
 
         assert_eq!(
-            parse_browser_cli(&[
+            parse_browser_cli([
                 "ferryx",
                 "browser",
                 "scroll",
@@ -7674,7 +7674,7 @@ mod tests {
     #[test]
     fn browser_dialog_cli_parsing_and_mapping() {
         // Row 11 (audit D-5): the dialog IPC commands had no caller at all.
-        let accept = parse_browser_cli(&[
+        let accept = parse_browser_cli([
             "ferryx",
             "browser",
             "dialog",
@@ -7695,7 +7695,7 @@ mod tests {
             }
         );
 
-        let accept_plain = parse_browser_cli(&[
+        let accept_plain = parse_browser_cli([
             "ferryx",
             "browser",
             "dialog",
@@ -7714,7 +7714,7 @@ mod tests {
             }
         );
 
-        let dismiss = parse_browser_cli(&[
+        let dismiss = parse_browser_cli([
             "ferryx",
             "browser",
             "dialog",
@@ -7733,7 +7733,7 @@ mod tests {
             }
         );
 
-        let list = parse_browser_cli(&["ferryx", "browser", "dialog", "--browser-id", "b-1", "list"])
+        let list = parse_browser_cli(["ferryx", "browser", "dialog", "--browser-id", "b-1", "list"])
             .expect("parse dialog list");
         assert_eq!(
             browser_cli_request(list),
@@ -7745,7 +7745,7 @@ mod tests {
             }
         );
 
-        let policy_positional = parse_browser_cli(&[
+        let policy_positional = parse_browser_cli([
             "ferryx",
             "browser",
             "dialog",
@@ -7765,7 +7765,7 @@ mod tests {
             }
         );
 
-        let policy_flag = parse_browser_cli(&[
+        let policy_flag = parse_browser_cli([
             "ferryx",
             "browser",
             "dialog",
@@ -7790,7 +7790,7 @@ mod tests {
         // `auto-dismiss`; any other value silently behaved like `auto-dismiss`
         // before, so it is rejected at parse time instead.
         assert_eq!(
-            parse_browser_cli(&[
+            parse_browser_cli([
                 "ferryx",
                 "browser",
                 "dialog",
@@ -7804,18 +7804,18 @@ mod tests {
         );
 
         assert_eq!(
-            parse_browser_cli(&["ferryx", "browser", "dialog", "--browser-id", "b-1"])
+            parse_browser_cli(["ferryx", "browser", "dialog", "--browser-id", "b-1"])
                 .unwrap_err(),
             "expected dialog <accept|dismiss|list|policy>"
         );
 
-        assert!(parse_browser_cli(&["ferryx", "browser", "dialog", "accept"]).is_err());
+        assert!(parse_browser_cli(["ferryx", "browser", "dialog", "accept"]).is_err());
     }
 
     #[test]
     fn browser_download_cli_parsing_and_mapping() {
         // Row 12 (audit D-6): the cookie-carrying download path had no caller.
-        let start = parse_browser_cli(&[
+        let start = parse_browser_cli([
             "ferryx",
             "browser",
             "download",
@@ -7838,7 +7838,7 @@ mod tests {
             }
         );
 
-        let list = parse_browser_cli(&["ferryx", "browser", "download", "list"])
+        let list = parse_browser_cli(["ferryx", "browser", "download", "list"])
             .expect("parse download list");
         assert_eq!(
             browser_cli_request(list),
@@ -7851,7 +7851,7 @@ mod tests {
             }
         );
 
-        let cancel = parse_browser_cli(&[
+        let cancel = parse_browser_cli([
             "ferryx",
             "browser",
             "download",
@@ -7873,7 +7873,7 @@ mod tests {
 
         // Adversarial: a start without its target path, and a cancel without an id,
         // must fail loudly rather than downloading nowhere or cancelling nothing.
-        assert!(parse_browser_cli(&[
+        assert!(parse_browser_cli([
             "ferryx",
             "browser",
             "download",
@@ -7883,14 +7883,14 @@ mod tests {
             "https://example.com/a.pdf"
         ])
         .is_err());
-        assert!(parse_browser_cli(&["ferryx", "browser", "download", "cancel"]).is_err());
-        assert!(parse_browser_cli(&["ferryx", "browser", "download"]).is_err());
+        assert!(parse_browser_cli(["ferryx", "browser", "download", "cancel"]).is_err());
+        assert!(parse_browser_cli(["ferryx", "browser", "download"]).is_err());
     }
 
     #[test]
     fn browser_highlight_cli_parsing_and_mapping() {
         // Row 14 (audit D-7): `cmd_browser_highlight` had no caller.
-        let default_duration = parse_browser_cli(&[
+        let default_duration = parse_browser_cli([
             "ferryx",
             "browser",
             "highlight",
@@ -7909,7 +7909,7 @@ mod tests {
             }
         );
 
-        let explicit_duration = parse_browser_cli(&[
+        let explicit_duration = parse_browser_cli([
             "ferryx",
             "browser",
             "highlight",
@@ -7930,10 +7930,10 @@ mod tests {
             }
         );
 
-        assert!(parse_browser_cli(&["ferryx", "browser", "highlight", "--browser-id", "b-1"])
+        assert!(parse_browser_cli(["ferryx", "browser", "highlight", "--browser-id", "b-1"])
             .is_err());
         assert_eq!(
-            parse_browser_cli(&[
+            parse_browser_cli([
                 "ferryx",
                 "browser",
                 "highlight",

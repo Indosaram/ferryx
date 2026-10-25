@@ -10,7 +10,7 @@ use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscripti
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
     AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
-    DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire, TerminalStartup,
+    DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire,
     DAEMON_PROTOCOL_VERSION,
 };
 use crate::remote::auth::DevicePermission;
@@ -20,7 +20,11 @@ use crate::remote::state::{
 };
 use crate::session::{clear_session_from_path, load_session_from_path, save_session_to_path};
 use crate::terminal::{PtyManager, TerminalOutputHub, TerminalService};
-use crate::worktree::{WorkspaceRegistry, WorktreeIdentity};
+use crate::worktree::WorkspaceRegistry;
+#[cfg(test)]
+use crate::daemon::protocol::TerminalStartup;
+#[cfg(test)]
+use crate::worktree::WorktreeIdentity;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use std::borrow::Cow;
@@ -260,19 +264,19 @@ mod pane_liveness_adopted_ownership_tests {
         worktree: Option<WorktreeIdentity>,
         incarnation: Option<&str>,
     ) -> DaemonSessionDetails {
-        let mut details = DaemonSessionDetails::new(
-            "session-owned".into(),
-            workspace_id.map(str::to_owned),
+        let mut details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+            session_id: "session-owned".into(),
+            workspace_id: workspace_id.map(str::to_owned),
             worktree,
-            Some("/repo".into()),
-            80,
-            24,
-            true,
-            None,
-            None,
-            None,
-            false,
-        );
+            cwd: Some("/repo".into()),
+            cols: 80,
+            rows: 24,
+            running: true,
+            start_sequence: None,
+            end_sequence: None,
+            last_output_age_ms: None,
+            suspended: false,
+        });
         details.incarnation = incarnation.map(str::to_owned);
         details
     }
@@ -807,10 +811,10 @@ pub fn clear_cloexec(fd: std::os::unix::io::RawFd) -> Result<(), std::io::Error>
         if flags == -1 {
             return Err(std::io::Error::last_os_error());
         }
-        if (flags & libc::FD_CLOEXEC) != 0 {
-            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
+        if (flags & libc::FD_CLOEXEC) != 0
+            && libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+        {
+            return Err(std::io::Error::last_os_error());
         }
     }
     Ok(())
@@ -1168,7 +1172,7 @@ impl DaemonLockFile {
 
     /// Detaches the underlying file without invoking `LOCK_UN`, preserving the lock
     /// across ownership transfer to the successor process.
-    pub(crate) fn detach_without_unlock(mut self) -> File {
+    pub(crate) fn detach_without_unlock(self) -> File {
         // SAFETY: `self._file` is a valid File. We read it out and forget `self`
         // so that the `Drop` implementation (which calls `LOCK_UN`) does not execute.
         let file = unsafe { std::ptr::read(&self._file) };
@@ -3895,26 +3899,19 @@ impl DaemonServer {
         self.paired_hosts = service;
     }
 
+    #[cfg(test)]
     async fn handle_spawn(
         &self,
         client_request_id: &str,
         workspace_id: &str,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
-        shell: Option<String>,
+        options: crate::daemon::session_service::SpawnOptions,
         startup: Option<TerminalStartup>,
     ) -> Result<String, SpawnError> {
         self.session_service
             .handle_spawn(
                 client_request_id,
                 workspace_id,
-                worktree,
-                cwd,
-                cols,
-                rows,
-                shell,
+                options,
                 startup,
                 #[cfg(test)]
                 self.helper_home.clone(),
@@ -4122,9 +4119,7 @@ impl DaemonServer {
         agent: Option<&str>,
         reported: Option<&AgentProviderSession>,
     ) -> Option<AgentProviderSession> {
-        let Some(provider) = reported else {
-            return None;
-        };
+        let provider = reported?;
         let Some(agent) = agent else {
             return Some(provider.clone());
         };
@@ -5175,14 +5170,10 @@ impl DaemonServer {
                         effective_owned,
                         "Received session exports over the handover socket"
                     );
-                    if let Err(reason) =
-                        handover_delivery_verdict_owned(effective_owned, offered, accepted)
-                    {
-                        // Do NOT proceed. Committing here retires the predecessor, and every
-                        // session it offered but did not deliver dies with the PTY master fd it
-                        // still owned. Aborting leaves the predecessor serving all of them instead.
-                        return Err(reason);
-                    }
+                    // Do NOT proceed on error. Committing here retires the predecessor, and every
+                    // session it offered but did not deliver dies with the PTY master fd it
+                    // still owned. Aborting leaves the predecessor serving all of them instead.
+                    handover_delivery_verdict_owned(effective_owned, offered, accepted)?;
 
                     for (export, owner) in exports {
                         tracing::info!(session_id = %export.session_id, "Adopting transferred session from predecessor");
@@ -6004,7 +5995,7 @@ impl DaemonServer {
                         Some(response) => response,
                         None => {
                             let legacy_direct_ssh = local_details.is_none() && self.session_metadata.read().get(&session_id).is_some_and(|m| crate::ssh::projects::is_remote(&m.workspace_id));
-                            DaemonResponse::RemoteSessionDetailsOk { details: local_details, legacy_direct_ssh }
+                            DaemonResponse::RemoteSessionDetailsOk { details: local_details.map(Box::new), legacy_direct_ssh }
                         }
                     }
                 }
@@ -6246,13 +6237,14 @@ impl DaemonServer {
                 Ok(DaemonRequest::RegisterWorkspace {
                     workspace_id,
                     repo_root,
-                }) => match {
+                }) => {
                     let service = Arc::clone(&self.session_service.workspace_service);
-                    crate::ipc::run_blocking(move || service.register(&workspace_id, &repo_root)
-                        .map_err(crate::ipc::IpcError::internal)).await
-                } {
-                    Ok(()) => DaemonResponse::RegisterWorkspaceOk,
-                    Err(e) => daemon_error(e.to_string()),
+                    let registered = crate::ipc::run_blocking(move || service.register(&workspace_id, &repo_root)
+                        .map_err(crate::ipc::IpcError::internal)).await;
+                    match registered {
+                        Ok(()) => DaemonResponse::RegisterWorkspaceOk,
+                        Err(e) => daemon_error(e.to_string()),
+                    }
                 },
                 Ok(DaemonRequest::UnregisterWorkspace { workspace_id }) => {
                     match self.handle_unregister_workspace(&workspace_id).await {
@@ -6277,10 +6269,12 @@ impl DaemonServer {
                             daemon_error("Local split does not accept agent startup")
                         } else {
                             match self.session_service.create_split(&client_request_id,
-                                &workspace_id, worktree, cwd, cols, rows, shell, envelope, self.epoch).await {
+                                &workspace_id,
+                                super::session_service::SpawnOptions { worktree, cwd, cols, rows, shell },
+                                envelope, self.epoch).await {
                                 Ok(crate::daemon::protocol::SplitOperationResult::Created {
                                     session_id, daemon_epoch, session, ..
-                                }) => DaemonResponse::SpawnOk { session_id, epoch: daemon_epoch, session },
+                                }) => DaemonResponse::SpawnOk { session_id, epoch: daemon_epoch, session: *session },
                                 Ok(operation) => DaemonResponse::SpawnOperationOk { operation },
                                 Err(error) => DaemonResponse::Error { message: error.message,
                                     code: Some(error.code.to_string()), details: error.details },
@@ -6291,11 +6285,7 @@ impl DaemonServer {
                         .handle_spawn_requested(
                             &client_request_id,
                             &workspace_id,
-                            worktree,
-                            cwd,
-                            cols,
-                            rows,
-                            shell,
+                            super::session_service::SpawnOptions { worktree, cwd, cols, rows, shell },
                             startup,
                             requested_session_id,
                             #[cfg(test)]
@@ -7738,16 +7728,11 @@ impl DaemonServer {
     #[cfg(unix)]
     pub fn spawn_legacy_listener(self: Arc<Self>, listener: UnixListener) {
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&self);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&self);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
     }
@@ -8294,16 +8279,11 @@ impl DaemonServer {
                 );
             }
 
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&self);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&self);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
     }
@@ -9108,6 +9088,7 @@ mod live_relay_apply_tests {
     }
 }
 
+#[cfg(test)]
 fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
     let norm_repo = repo_root.replace('\\', "/");
     let norm_root = root.replace('\\', "/");
@@ -9622,7 +9603,7 @@ mod tests {
 
         // 1. Spawning before registration must fail explicitly (no GUI CWD fallback)
         let unreg_res = server
-            .handle_spawn("req-unreg-1", "ws-app", None, None, 80, 24, None, None)
+            .handle_spawn("req-unreg-1", "ws-app", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await;
         assert!(
             unreg_res.is_err(),
@@ -9643,7 +9624,7 @@ mod tests {
 
         // 3. Spawning in registered workspace succeeds
         let spawn_res = server
-            .handle_spawn("req-reg-1", "ws-app", None, None, 80, 24, None, None)
+            .handle_spawn("req-reg-1", "ws-app", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await;
         assert!(spawn_res.is_ok());
 
@@ -9671,8 +9652,8 @@ mod tests {
 
         let req_id = "spawn-req-idempotency-1".to_string();
         let (first, second) = tokio::join!(
-            server.handle_spawn(&req_id, "default", None, None, 80, 24, None, None),
-            server.handle_spawn(&req_id, "default", None, None, 80, 24, None, None),
+            server.handle_spawn(&req_id, "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None),
+            server.handle_spawn(&req_id, "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None),
         );
         let session1 = first.expect("first spawn succeeds");
         let session2 = second.expect("concurrent duplicate succeeds");
@@ -9689,14 +9670,14 @@ mod tests {
             .await
             .expect("close first session");
         let replacement = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24, None, None)
+            .handle_spawn(&req_id, "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await
             .expect("dead cached session is never returned");
         assert_ne!(session1, replacement);
 
         server.expire_spawn_request_for_test(&req_id);
         let after_ttl = server
-            .handle_spawn(&req_id, "default", None, None, 80, 24, None, None)
+            .handle_spawn(&req_id, "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await
             .expect("a repeated id never creates a second live shell");
         assert_eq!(replacement, after_ttl);
@@ -9743,11 +9724,7 @@ mod tests {
                     .handle_spawn(
                         request_id,
                         "default",
-                        None,
-                        None,
-                        80,
-                        24,
-                        None,
+                        crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
                         Some(test_agent_resume_startup("production-provider")),
                     )
                     .await
@@ -9765,11 +9742,7 @@ mod tests {
             .handle_spawn(
                 "production-competing",
                 "default",
-                None,
-                None,
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
                 Some(test_agent_resume_startup("production-provider")),
             )
             .await
@@ -9781,11 +9754,7 @@ mod tests {
             .handle_spawn(
                 "production-same",
                 "default",
-                None,
-                None,
-                100,
-                40,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 100, rows: 40, shell: None },
                 Some(test_agent_resume_startup("different-provider")),
             )
             .await
@@ -9819,11 +9788,7 @@ mod tests {
             .handle_spawn(
                 "same-request",
                 "default",
-                None,
-                None,
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
                 Some(startup("/tmp/pi-first.json")),
             )
             .await
@@ -9832,11 +9797,7 @@ mod tests {
             .handle_spawn(
                 "same-request",
                 "default",
-                None,
-                None,
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
                 Some(startup("/tmp/pi-second.json")),
             )
             .await
@@ -9974,11 +9935,7 @@ mod tests {
             .handle_spawn(
                 "omo-outside-workspace",
                 "default",
-                None,
-                Some(repo.path().to_string_lossy().into_owned()),
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(repo.path().to_string_lossy().into_owned()), cols: 80, rows: 24, shell: None },
                 Some(TerminalStartup::AgentResume {
                     agent_type: "omo".to_string(),
                     provider_session: crate::daemon::protocol::AgentProviderSession {
@@ -10006,11 +9963,7 @@ mod tests {
             .handle_spawn(
                 "req-bad-cwd",
                 "default",
-                None,
-                Some("/nonexistent/path/for/rorca/test/123".to_string()),
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some("/nonexistent/path/for/rorca/test/123".to_string()), cols: 80, rows: 24, shell: None },
                 None,
             )
             .await;
@@ -10022,11 +9975,7 @@ mod tests {
             .handle_spawn(
                 "req-outside-cwd",
                 "default",
-                None,
-                Some(outside.path().to_string_lossy().into_owned()),
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(outside.path().to_string_lossy().into_owned()), cols: 80, rows: 24, shell: None },
                 None,
             )
             .await;
@@ -10041,11 +9990,7 @@ mod tests {
             .handle_spawn(
                 "req-symlink-cwd",
                 "default",
-                None,
-                Some(symlink_outside.to_string_lossy().into_owned()),
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(symlink_outside.to_string_lossy().into_owned()), cols: 80, rows: 24, shell: None },
                 None,
             )
             .await;
@@ -10060,11 +10005,7 @@ mod tests {
             .handle_spawn(
                 "req-good-cwd",
                 "default",
-                None,
-                Some(ok_cwd.clone()),
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(ok_cwd.clone()), cols: 80, rows: 24, shell: None },
                 None,
             )
             .await;
@@ -10918,8 +10859,7 @@ mod tests {
         let owner = Arc::new(owner);
         let repo = init_test_git_repo();
         owner.handle_register_workspace("default", repo.path().to_str().unwrap()).unwrap();
-        let session_id = owner.handle_spawn("owner-identity", "default", None, None,
-            80, 24, None, None).await.unwrap();
+        let session_id = owner.handle_spawn("owner-identity", "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None).await.unwrap();
         let local = owner.describe_session_identity(&session_id).await;
         let DaemonResponse::DescribeSessionOk { session: local_details, daemon_epoch } = local else {
             panic!("unexpected local description: {local:?}");
@@ -11020,7 +10960,7 @@ mod tests {
             .unwrap();
 
         let session_id = server
-            .handle_spawn("req-seq-1", "default", None, None, 80, 24, None, None)
+            .handle_spawn("req-seq-1", "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await
             .unwrap();
 
@@ -11182,11 +11122,7 @@ mod tests {
             .handle_spawn(
                 "req-agent-snapshot",
                 "default",
-                None,
-                None,
-                80,
-                24,
-                None,
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None },
                 None,
             )
             .await
@@ -12041,7 +11977,7 @@ mod tests {
             .unwrap();
 
         let session_id = server
-            .handle_spawn("req-idle-1", "default", None, None, 80, 24, None, None)
+            .handle_spawn("req-idle-1", "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await
             .unwrap();
 
@@ -12390,7 +12326,7 @@ mod instance_lock_deadline_tests {
 
         // 1. Spawn a session initially at 80x24.
         let session_id = server
-            .handle_spawn("req-restore-1", "default", None, None, 80, 24, None, None)
+            .handle_spawn("req-restore-1", "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await
             .unwrap();
 
@@ -12476,7 +12412,7 @@ mod instance_lock_deadline_tests {
             .handle_register_workspace("default", repo.path().to_str().unwrap())
             .unwrap();
         let session_id = server
-            .handle_spawn("req-restore-2", "default", None, None, 80, 24, None, None)
+            .handle_spawn("req-restore-2", "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 80, rows: 24, shell: None }, None)
             .await
             .unwrap();
 

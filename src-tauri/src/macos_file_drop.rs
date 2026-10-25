@@ -76,8 +76,8 @@ define_class!(
                 return Bool::NO;
             }
 
-            let location = unsafe { info.draggingLocation() };
-            let point = unsafe { self.convertPoint_fromView(location, None) };
+            let location = info.draggingLocation();
+            let point = self.convertPoint_fromView(location, None);
             (self.ivars().on_drop)(paths, point.x, point.y);
             Bool::YES
         }
@@ -99,10 +99,10 @@ fn legacy_filenames_type() -> Retained<NSString> {
 }
 
 fn collect_paths(info: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<String> {
-    let pasteboard: Retained<NSPasteboard> = unsafe { info.draggingPasteboard() };
+    let pasteboard: Retained<NSPasteboard> = info.draggingPasteboard();
 
     let legacy = legacy_filenames_type();
-    if let Some(list) = unsafe { pasteboard.propertyListForType(&legacy) } {
+    if let Some(list) = pasteboard.propertyListForType(&legacy) {
         if let Ok(array) = list.downcast::<NSArray>() {
             let mut paths = Vec::new();
             for entry in array.iter() {
@@ -119,9 +119,9 @@ fn collect_paths(info: &ProtocolObject<dyn NSDraggingInfo>) -> Vec<String> {
     // Finder stops advertising the legacy type in some macOS releases, so fall back to the
     // modern file URL representation before giving up.
     let file_url_type = unsafe { NSPasteboardTypeFileURL };
-    if let Some(text) = unsafe { pasteboard.stringForType(file_url_type) } {
-        if let Some(url) = unsafe { NSURL::URLWithString(&text) } {
-            if let Some(path) = unsafe { url.path() } {
+    if let Some(text) = pasteboard.stringForType(file_url_type) {
+        if let Some(url) = NSURL::URLWithString(&text) {
+            if let Some(path) = url.path() {
                 return vec![path.to_string()];
             }
         }
@@ -166,7 +166,7 @@ where
     let file_url_type = unsafe { NSPasteboardTypeFileURL };
     let legacy = legacy_filenames_type();
     let types = NSArray::from_slice(&[file_url_type, &*legacy]);
-    unsafe { view.registerForDraggedTypes(&types) };
+    view.registerForDraggedTypes(&types);
 
     content_view.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Above, None);
 

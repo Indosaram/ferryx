@@ -408,8 +408,7 @@ fn parse_ssh_value(input: &str) -> String {
     if let Some(rest) = trimmed.strip_prefix('"') {
         let mut result = String::new();
         let mut in_escape = false;
-        let mut chars = rest.char_indices().peekable();
-        while let Some((_, c)) = chars.next() {
+        for (_, c) in rest.char_indices() {
             if in_escape {
                 if c == '"' {
                     result.push('"');
@@ -441,7 +440,7 @@ pub fn import_aliases(config_hosts: &[ConfigHost], tombstones: &[String]) -> Vec
     let mut seen_aliases = std::collections::HashSet::new();
     config_hosts
         .iter()
-        .filter_map(|entry| config_host_to_ssh_host(entry))
+        .filter_map(config_host_to_ssh_host)
         .filter(|host| seen_aliases.insert(host.label.clone()))
         .filter(|host| !tombstones.iter().any(|tombstone| tombstone == &host.key()))
         .take(IMPORT_CAP)

@@ -53,6 +53,12 @@ pub struct DriverBroker {
     reclaim_tx: tokio::sync::broadcast::Sender<String>,
 }
 
+impl Default for DriverBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DriverBroker {
     pub fn new() -> Self {
         let (reclaim_tx, _) = tokio::sync::broadcast::channel(64);
@@ -365,6 +371,12 @@ pub struct AdmissionController {
 }
 
 pub type ViewerEligibilityHook = Arc<dyn Fn(&str, &str, bool, bool) + Send + Sync>;
+
+impl Default for AdmissionController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl AdmissionController {
     pub fn new() -> Self {

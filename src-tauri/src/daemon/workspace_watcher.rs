@@ -42,6 +42,123 @@ pub(crate) struct WorkspaceWatch {
     refresh_slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+impl WorkspaceWatch {
+    pub(crate) fn new() -> Result<Self, String> {
+        let (sender, changed) = tokio::sync::mpsc::channel(1);
+        let noise_roots = Arc::new(parking_lot::RwLock::new(Vec::<PathBuf>::new()));
+        let roots = noise_roots.clone();
+        let watcher =
+            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
+                match event {
+                    Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
+                    Ok(event)
+                        if !event.paths.is_empty()
+                            && {
+                                let roots = roots.read();
+                                event.paths.iter().all(|path| is_noise_path(&roots, path))
+                            } =>
+                    {
+                        return
+                    }
+                    Err(error) => tracing::warn!(%error, "Workspace watch failed"),
+                    _ => {}
+                }
+                // Full means an invalidation is already pending; closed means unsubscribe.
+                let _ = sender.try_send(());
+            })
+            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
+        Ok(Self {
+            watcher,
+            paths: BTreeMap::new(),
+            noise_roots,
+            changed,
+            debounce: None,
+            refresh_slot: None,
+        })
+    }
+    pub(crate) async fn refresh_bounded(
+        mut self,
+        service: Arc<DaemonWorkspaceService>,
+        slot: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<Self, String> {
+        self.refresh_slot = Some(slot);
+        let mut watcher = self.refresh(service).await?;
+        watcher.refresh_slot = None;
+        Ok(watcher)
+    }
+    pub(crate) async fn refresh(
+        mut self,
+        service: Arc<DaemonWorkspaceService>,
+    ) -> Result<Self, String> {
+        crate::ipc::run_blocking(move || {
+            #[cfg(test)]
+            if let Some(probe) = service.transaction_probe.read().clone() {
+                probe("watchRefreshRequested");
+            }
+            let catalog = service.catalog().map_err(crate::ipc::IpcError::internal)?;
+            let mut paths = BTreeMap::new();
+            for row in catalog.workspaces.values() {
+                // A registration can outlive its directories (temp or removed worktrees).
+                // The native backend refuses to watch a missing path, and one refusal fails
+                // the whole inventory snapshot, so only existing parents are watched.
+                if let Some(parent) = row.repo_root.parent().filter(|parent| parent.is_dir()) {
+                    paths.entry(parent.to_owned()).or_insert(false);
+                }
+                if row.repo_root.is_dir() {
+                    paths.insert(row.repo_root.clone(), true);
+                }
+            }
+            if paths.len() > 2048 {
+                return Err(crate::ipc::IpcError::internal("CAPACITY_EXCEEDED"));
+            }
+            for (path, recursive) in &self.paths {
+                if paths.get(path) != Some(recursive) {
+                    self.watcher.unwatch(path).map_err(|_| {
+                        crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE")
+                    })?;
+                }
+            }
+            for (path, recursive) in &paths {
+                if self.paths.get(path) != Some(recursive) {
+                    self.watcher
+                        .watch(
+                            path,
+                            if *recursive {
+                                RecursiveMode::Recursive
+                            } else {
+                                RecursiveMode::NonRecursive
+                            },
+                        )
+                        .map_err(|_| {
+                            crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE")
+                        })?;
+                }
+            }
+            *self.noise_roots.write() = paths
+                .iter()
+                .filter(|(_, recursive)| **recursive)
+                .map(|(path, _)| path.clone())
+                .collect();
+            self.paths = paths;
+            Ok(self)
+        })
+        .await
+        .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".into())
+    }
+    pub(crate) async fn changed(&mut self) {
+        if self.debounce.is_none() {
+            if self.changed.recv().await.is_none() {
+                std::future::pending::<()>().await;
+            }
+            self.debounce = Some(tokio::time::Instant::now() + Duration::from_millis(100));
+        }
+        // Retain the deadline across select cancellation by another event.
+        tokio::time::sleep_until(self.debounce.expect("pending invalidation")).await;
+        while self.changed.try_recv().is_ok() {}
+        self.debounce = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,121 +292,5 @@ mod tests {
         // Then missing paths are skipped and the live project is still watched recursively.
         assert_eq!(watched_live, Some(true), "live project must stay watched");
         assert!(!watched_vanished, "a vanished parent must never be watched");
-    }
-}
-impl WorkspaceWatch {
-    pub(crate) fn new() -> Result<Self, String> {
-        let (sender, changed) = tokio::sync::mpsc::channel(1);
-        let noise_roots = Arc::new(parking_lot::RwLock::new(Vec::<PathBuf>::new()));
-        let roots = noise_roots.clone();
-        let watcher =
-            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
-                match event {
-                    Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
-                    Ok(event)
-                        if !event.paths.is_empty()
-                            && {
-                                let roots = roots.read();
-                                event.paths.iter().all(|path| is_noise_path(&roots, path))
-                            } =>
-                    {
-                        return
-                    }
-                    Err(error) => tracing::warn!(%error, "Workspace watch failed"),
-                    _ => {}
-                }
-                // Full means an invalidation is already pending; closed means unsubscribe.
-                let _ = sender.try_send(());
-            })
-            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
-        Ok(Self {
-            watcher,
-            paths: BTreeMap::new(),
-            noise_roots,
-            changed,
-            debounce: None,
-            refresh_slot: None,
-        })
-    }
-    pub(crate) async fn refresh_bounded(
-        mut self,
-        service: Arc<DaemonWorkspaceService>,
-        slot: tokio::sync::OwnedSemaphorePermit,
-    ) -> Result<Self, String> {
-        self.refresh_slot = Some(slot);
-        let mut watcher = self.refresh(service).await?;
-        watcher.refresh_slot = None;
-        Ok(watcher)
-    }
-    pub(crate) async fn refresh(
-        mut self,
-        service: Arc<DaemonWorkspaceService>,
-    ) -> Result<Self, String> {
-        crate::ipc::run_blocking(move || {
-            #[cfg(test)]
-            if let Some(probe) = service.transaction_probe.read().clone() {
-                probe("watchRefreshRequested");
-            }
-            let catalog = service.catalog().map_err(crate::ipc::IpcError::internal)?;
-            let mut paths = BTreeMap::new();
-            for row in catalog.workspaces.values() {
-                // A registration can outlive its directories (temp or removed worktrees).
-                // The native backend refuses to watch a missing path, and one refusal fails
-                // the whole inventory snapshot, so only existing parents are watched.
-                if let Some(parent) = row.repo_root.parent().filter(|parent| parent.is_dir()) {
-                    paths.entry(parent.to_owned()).or_insert(false);
-                }
-                if row.repo_root.is_dir() {
-                    paths.insert(row.repo_root.clone(), true);
-                }
-            }
-            if paths.len() > 2048 {
-                return Err(crate::ipc::IpcError::internal("CAPACITY_EXCEEDED"));
-            }
-            for (path, recursive) in &self.paths {
-                if paths.get(path) != Some(recursive) {
-                    self.watcher.unwatch(path).map_err(|_| {
-                        crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE")
-                    })?;
-                }
-            }
-            for (path, recursive) in &paths {
-                if self.paths.get(path) != Some(recursive) {
-                    self.watcher
-                        .watch(
-                            path,
-                            if *recursive {
-                                RecursiveMode::Recursive
-                            } else {
-                                RecursiveMode::NonRecursive
-                            },
-                        )
-                        .map_err(|_| {
-                            crate::ipc::IpcError::internal("MACHINE_SERVICE_UNAVAILABLE")
-                        })?;
-                }
-            }
-            *self.noise_roots.write() = paths
-                .iter()
-                .filter(|(_, recursive)| **recursive)
-                .map(|(path, _)| path.clone())
-                .collect();
-            self.paths = paths;
-            Ok(self)
-        })
-        .await
-        .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".into())
-    }
-    pub(crate) async fn changed(&mut self) {
-        if self.debounce.is_none() {
-            if self.changed.recv().await.is_none() {
-                std::future::pending::<()>().await;
-            }
-            self.debounce = Some(tokio::time::Instant::now() + Duration::from_millis(100));
-        }
-        // Retain the deadline across select cancellation by another event.
-        tokio::time::sleep_until(self.debounce.expect("pending invalidation")).await;
-        while self.changed.try_recv().is_ok() {}
-        self.debounce = None;
     }
 }

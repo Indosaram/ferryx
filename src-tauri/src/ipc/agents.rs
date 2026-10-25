@@ -263,7 +263,7 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
         return false;
     };
     let basename = command
-        .rsplit(|ch| ch == '/' || ch == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(command)
         .to_ascii_lowercase();
@@ -1066,10 +1066,10 @@ pub(crate) fn parse_opencode_session_list_json(json_str: &str, cwd: &str) -> Opt
     let items: Vec<OpencodeSessionItem> = serde_json::from_str(json_str).ok()?;
     for item in items {
         if let (Some(id), Some(dir)) = (item.id, item.directory) {
-            if is_path_prefix(&dir, cwd) || is_path_prefix(cwd, &dir) {
-                if is_valid_opencode_session_id(&id) {
-                    return Some(id);
-                }
+            if (is_path_prefix(&dir, cwd) || is_path_prefix(cwd, &dir))
+                && is_valid_opencode_session_id(&id)
+            {
+                return Some(id);
             }
         }
     }
@@ -2370,21 +2370,21 @@ mod p09_tests {
                 (".BAT;.CMD", "fixture.bat"),
             ] {
                 assert_eq!(
-                    resolve_binary_with_env("fixture", &[dir.clone()], true, Some(extensions)),
+                    resolve_binary_with_env("fixture", std::slice::from_ref(&dir), true, Some(extensions)),
                     Some(dir.join(expected))
                 );
             }
             assert_eq!(
-                resolve_binary_with_env("FIXTURE.cmd", &[dir.clone()], true, Some(".CMD")),
+                resolve_binary_with_env("FIXTURE.cmd", std::slice::from_ref(&dir), true, Some(".CMD")),
                 Some(dir.join("fixture.CmD"))
             );
             std::fs::write(dir.join("data.txt"), b"data").unwrap();
             assert_eq!(
-                resolve_binary_with_env("data.txt", &[dir.clone()], true, Some(".TXT;.CMD")),
+                resolve_binary_with_env("data.txt", std::slice::from_ref(&dir), true, Some(".TXT;.CMD")),
                 None
             );
             assert_eq!(
-                resolve_binary_with_env("../fixture", &[dir.clone()], true, Some(".EXE")),
+                resolve_binary_with_env("../fixture", std::slice::from_ref(&dir), true, Some(".EXE")),
                 None
             );
         });
@@ -2405,12 +2405,12 @@ mod p09_tests {
             std::fs::write(&file, b"fixture").unwrap();
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert_eq!(
-                resolve_binary_with_env("fixture", &[dir.clone()], false, None),
+                resolve_binary_with_env("fixture", std::slice::from_ref(&dir), false, None),
                 None
             );
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(
-                resolve_binary_with_env("fixture", &[dir.clone()], false, None),
+                resolve_binary_with_env("fixture", std::slice::from_ref(&dir), false, None),
                 Some(file)
             );
         });

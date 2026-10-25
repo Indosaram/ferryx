@@ -705,12 +705,12 @@ async fn gatefix_journal_error_uses_the_same_safe_projection() {
     assert!(!serde_json::to_string(&result)
         .unwrap()
         .contains("fixture-secret"));
-    let OperationResult::Operation(m::Operation::Completed {
-        outcome: m::OperationOutcome::Error { error },
-        ..
-    }) = result.result
+    let OperationResult::Operation(m::Operation::Completed { outcome, .. }) = result.result
     else {
         panic!("journal error");
+    };
+    let m::OperationOutcome::Error { error } = *outcome else {
+        panic!("journal error outcome");
     };
     assert_eq!(
         serde_json::to_value(error.details).unwrap(),
@@ -753,7 +753,10 @@ async fn gatefix_create_only_peer_receives_zero_socket_requests() {
         0,
         "create-only peer received a socket request"
     );
-    let error = result.err().expect("stream capability must be required");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("stream capability must be required"),
+    };
     assert_eq!(error.code, "PAIRED_HOST_CAPABILITY_UNAVAILABLE");
     assert_eq!(serde_json::to_value(error).unwrap()["ambiguous"], false);
 }
@@ -1432,13 +1435,13 @@ async fn test_r4_n1_migrate_event_carries_correlated_host_view() {
 fn test_r5_n3_machine_rejection_stays_definitive_and_transport_uncertainty_relabeled() {
     let mut machine = ClientError {
         code: "UNAUTHORIZED".into(),
-        machine_error: Some(m::MachineError {
+        machine_error: Some(Box::new(m::MachineError {
             code: "UNAUTHORIZED".into(),
             message: "denied".into(),
             retryable: false,
             request_id: "srv-1".into(),
             details: Default::default(),
-        }),
+        })),
         request_id: None,
         ambiguous: false,
     };

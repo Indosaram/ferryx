@@ -248,6 +248,7 @@ mod agent_state_rendezvous_tests {
 }
 
 /// Authority resolved by the daemon under its worktree fence, not rediscovered here.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedSpawnContext {
     pub root: std::path::PathBuf,
@@ -255,6 +256,7 @@ pub(crate) struct ResolvedSpawnContext {
     pub managed_workspace_id: Option<String>,
 }
 
+#[cfg(test)]
 impl ResolvedSpawnContext {
     fn apply(&self, command: &mut CommandBuilder, session_id: &str) {
         command.cwd(crate::daemon::session_service::normalize_process_cwd(&self.cwd));
@@ -310,6 +312,7 @@ mod preparation_context_tests {
 #[derive(Clone, Copy)]
 enum SpawnPathPolicy {
     LegacyDiscovery,
+    #[cfg(test)]
     Inherited,
 }
 
@@ -461,6 +464,7 @@ impl PtyManager {
         self.spawn_with_id_and_worktree(session_id.into(), cmd, cols, rows, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_resolved_with_id(
         &self,
         session_id: String,
@@ -572,6 +576,7 @@ impl PtyManager {
                     cmd.env("PATH", augmented);
                 }
             }
+            #[cfg(test)]
             SpawnPathPolicy::Inherited => {}
         }
 
@@ -698,9 +703,6 @@ impl PtyManager {
             rows,
             tx,
             worktree_path,
-            // Empty: the grace a concurrent close has to cover is recorded by the close that claims
-            // the session, not by the session itself.
-            close_grace: Arc::new(Mutex::new(None)),
         }));
 
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
@@ -725,9 +727,6 @@ impl PtyManager {
     fn start_lifecycle_watcher(&self, session_id: String) {
         let manager = self.clone();
         tokio::spawn(async move {
-            let Some(session) = manager.get_session(&session_id) else {
-                return;
-            };
             loop {
                 let Some(session) = manager.get_session(&session_id) else {
                     break;
@@ -1186,6 +1185,7 @@ impl PtyManager {
         self.sessions.read().contains_key(session_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn try_acquire_cwd_probe(
         &self,
         session_id: &str,
@@ -1679,7 +1679,7 @@ mod tests {
              predecessor, and stopping its reader silently strands it"
         );
 
-        let _ = manager.close_session(&session_id);
+        manager.close_session(&session_id).await.expect("close session after failed export");
     }
 
     /// The other half of the same lifecycle: a session whose export FAILED is still this daemon's
@@ -2855,8 +2855,8 @@ mod tests {
     ///
     /// This is the regression that FAILS on the pre-fix code. There the bound was the module constant
     /// - `TERM_GRACE_TIMEOUT + KILL_REAP_TIMEOUT + MASTER_RELEASE_TIMEOUT + READER_SHUTDOWN_TIMEOUT *
-    /// READER_WAIT_STAGES` = 10 s - with no function of the grace at all, so the second assertion
-    /// below, which requires 19.14 s for the 5 s machine grace, cannot be satisfied by it.
+    ///   READER_WAIT_STAGES` = 10 s - with no function of the grace at all, so the second assertion
+    ///   below, which requires 19.14 s for the 5 s machine grace, cannot be satisfied by it.
     ///
     /// The poll quantization of the bounded waits is part of that sum: dropping those terms from
     /// `close_fence_for` (19 s here) fails the second assertion too, and so does dropping the

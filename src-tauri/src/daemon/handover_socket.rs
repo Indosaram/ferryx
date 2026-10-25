@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
@@ -258,7 +256,7 @@ pub fn send_authority_sources(
     };
 
     let payload = serde_json::to_value(&meta)
-        .map_err(|e| HandoverWireError::InvalidPayload(e))?;
+        .map_err(HandoverWireError::InvalidPayload)?;
 
     let frame = HandoverFrame::new(KIND_AUTHORITY, transfer_id.to_string(), frame_sequence, payload)
         .with_fds(fds);
@@ -268,13 +266,13 @@ pub fn send_authority_sources(
 }
 
 pub fn recv_authority(stream: &StdUnixStream) -> Result<TransferredAuthority, HandoverSocketError> {
-    let mut frame = recv_frame(stream.as_raw_fd())?;
+    let frame = recv_frame(stream.as_raw_fd())?;
     if frame.kind != KIND_AUTHORITY {
         return Err(HandoverSocketError::UnexpectedMessageKind(frame.kind));
     }
 
     let meta: AuthorityMetadata = serde_json::from_value(frame.payload)
-        .map_err(|e| HandoverWireError::InvalidPayload(e))?;
+        .map_err(HandoverWireError::InvalidPayload)?;
 
     let mut fd_iter = frame.fds.into_iter();
 
@@ -403,7 +401,11 @@ fn validate_lock(role: &'static str, fd: &OwnedFd, path: &Path) -> Result<(), Ha
         return Err(io::Error::last_os_error().into());
     }
     let on_disk = std::fs::metadata(path)?;
-    if stat.st_dev as u64 != on_disk.dev() || stat.st_ino as u64 != on_disk.ino() {
+    #[cfg(target_os = "macos")]
+    let same_device = stat.st_dev as u64 == on_disk.dev();
+    #[cfg(not(target_os = "macos"))]
+    let same_device = stat.st_dev == on_disk.dev();
+    if !same_device || stat.st_ino != on_disk.ino() {
         return Err(HandoverSocketError::AdoptionFailed(format!(
             "{role} does not refer to {}",
             path.display()
@@ -574,7 +576,7 @@ pub fn send_session(
         owner,
     };
     let payload = serde_json::to_value(&meta)
-        .map_err(|e| HandoverWireError::InvalidPayload(e))?;
+        .map_err(HandoverWireError::InvalidPayload)?;
     let frame = HandoverFrame::new(KIND_SESSION, transfer_id.to_string(), frame_sequence, payload)
         .with_fds(vec![export.master_fd]);
     send_frame(stream.as_raw_fd(), &frame)?;
@@ -613,7 +615,7 @@ pub fn recv_session_with_owner(
     Option<(crate::terminal::session::PtySessionExport, Option<serde_json::Value>)>,
     HandoverSocketError,
 > {
-    let mut frame = recv_frame(stream.as_raw_fd())?;
+    let frame = recv_frame(stream.as_raw_fd())?;
     if frame.kind == KIND_TRANSFER_DONE {
         return Ok(None);
     }
@@ -621,7 +623,7 @@ pub fn recv_session_with_owner(
         return Err(HandoverSocketError::UnexpectedMessageKind(frame.kind));
     }
     let mut meta: SessionTransferMetadata = serde_json::from_value(frame.payload)
-        .map_err(|e| HandoverWireError::InvalidPayload(e))?;
+        .map_err(HandoverWireError::InvalidPayload)?;
     if meta.session_snapshot.hub_snapshot.is_none() {
         meta.session_snapshot.hub_snapshot = meta.hub_snapshot.take();
     }
@@ -637,7 +639,6 @@ pub fn recv_session_with_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::os::unix::net::UnixStream;
 
     #[test]
@@ -653,6 +654,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&legacy_lock_path)
             .expect("create legacy lock");
         let ret = unsafe { libc::flock(legacy_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -663,6 +665,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&persistent_lock_path)
             .expect("create persistent lock");
         let ret = unsafe { libc::flock(persistent_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };

@@ -547,7 +547,7 @@ fn assistant_turn(turns: &mut Vec<ReferenceTurn>, started_at: Option<&str>) -> u
     turns.len() - 1
 }
 
-fn push_part(turns: &mut Vec<ReferenceTurn>, turn_index: usize, part: ReferencePart) {
+fn push_part(turns: &mut [ReferenceTurn], turn_index: usize, part: ReferencePart) {
     if let Some(turn) = turns.get_mut(turn_index) {
         turn.parts.push(part);
     }

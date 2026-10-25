@@ -117,18 +117,13 @@ const MAX_URL_LENGTH_BYTES: usize = 8192;
 
 /// Security boundary context distinguishing local desktop execution from
 /// remote paired/web gateway execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BrowserSecurityContext {
     /// Local desktop execution (Tauri GUI window).
+    #[default]
     Local,
     /// Remote client execution (Axum gateway / WebSockets).
     Remote,
-}
-
-impl Default for BrowserSecurityContext {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 pub fn validate_url(url_str: &str) -> Result<String, BrowserError> {
@@ -172,10 +167,7 @@ pub fn validate_url_with_context(
                 return Err(BrowserError::SchemeDenied(parsed.to_string()));
             }
             // 2. Localhost or empty host only; remote SMB/UNC file URLs are rejected.
-            let host_is_local = match parsed.host_str() {
-                None | Some("") | Some("localhost") => true,
-                _ => false,
-            };
+            let host_is_local = matches!(parsed.host_str(), None | Some("") | Some("localhost"));
             if !host_is_local {
                 return Err(BrowserError::SchemeDenied(parsed.to_string()));
             }

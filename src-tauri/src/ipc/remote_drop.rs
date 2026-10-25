@@ -3,7 +3,7 @@ use crate::ipc::error::{IpcError, IpcErrorCode};
 use crate::ipc::run_blocking;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -200,7 +200,7 @@ pub async fn cmd_remote_upload_dropped_files<R: Runtime>(
         _ = cancel_token.cancelled() => {
             Ok(None)
         }
-        result = upload_all_files(app, daemon, workspace_id, upload_id, validated, aggregate_total, progress, cancel_token.clone()) => {
+        result = upload_all_files(app, daemon, UploadFilesParams { workspace_id, upload_id, files: validated, aggregate_total, progress, cancel_token: cancel_token.clone() }) => {
             match result {
                 Ok(res) => Ok(Some(res)),
                 Err(e) => {
@@ -215,16 +215,21 @@ pub async fn cmd_remote_upload_dropped_files<R: Runtime>(
     }
 }
 
-async fn upload_all_files<R: Runtime>(
-    app: AppHandle<R>,
-    daemon: State<'_, Arc<DaemonClient>>,
+struct UploadFilesParams {
     workspace_id: String,
     upload_id: String,
     files: Vec<ValidatedFile>,
     aggregate_total: u64,
     progress: Channel<DropUploadProgress>,
     cancel_token: CancellationToken,
+}
+
+async fn upload_all_files<R: Runtime>(
+    app: AppHandle<R>,
+    daemon: State<'_, Arc<DaemonClient>>,
+    params: UploadFilesParams,
 ) -> Result<RemoteDropUploadResult, IpcError> {
+    let UploadFilesParams { workspace_id, upload_id, files, aggregate_total, progress, cancel_token } = params;
     let total_files = files.len();
     let mut uploaded_files = Vec::with_capacity(total_files);
     let mut aggregate_sent = 0u64;
@@ -307,7 +312,7 @@ async fn upload_all_files<R: Runtime>(
             .app_data_dir()
             .map_err(|e| IpcError::internal(e.to_string()))?;
 
-        let host =
+        let _host =
             crate::paired_host::upload::resolve_paired_host(&daemon, &data_dir, &workspace_id)
                 .await?;
 

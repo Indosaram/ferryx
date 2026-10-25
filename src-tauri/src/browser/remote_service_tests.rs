@@ -255,76 +255,28 @@ fn test_guard_verification_rejections() {
 
     // 1. All valid guards pass
     assert!(service
-        .execute_command_guard(
-            &b1,
-            lease.lease_epoch,
-            "dev1",
-            "conn1",
-            &valid_instance,
-            valid_desktop_epoch,
-            valid_gen
-        )
+        .execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: &valid_instance, desktop_epoch: valid_desktop_epoch, generation: valid_gen })
         .is_ok());
 
     // 2. Stale lease epoch rejected
-    let stale_lease_err = service.execute_command_guard(
-        &b1,
-        lease.lease_epoch + 99,
-        "dev1",
-        "conn1",
-        &valid_instance,
-        valid_desktop_epoch,
-        valid_gen,
-    );
+    let stale_lease_err = service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch + 99, device_id: "dev1", connection_id: "conn1", instance_id: &valid_instance, desktop_epoch: valid_desktop_epoch, generation: valid_gen });
     assert_eq!(stale_lease_err, Err(RemoteServiceError::StaleLease));
 
     // 3. Stale browser instance ID rejected
-    let stale_instance_err = service.execute_command_guard(
-        &b1,
-        lease.lease_epoch,
-        "dev1",
-        "conn1",
-        "stale-instance-xyz",
-        valid_desktop_epoch,
-        valid_gen,
-    );
+    let stale_instance_err = service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: "stale-instance-xyz", desktop_epoch: valid_desktop_epoch, generation: valid_gen });
     assert_eq!(stale_instance_err, Err(RemoteServiceError::StaleInstance));
 
     // 4. Stale desktop epoch rejected
-    let stale_epoch_err = service.execute_command_guard(
-        &b1,
-        lease.lease_epoch,
-        "dev1",
-        "conn1",
-        &valid_instance,
-        valid_desktop_epoch + 1,
-        valid_gen,
-    );
+    let stale_epoch_err = service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: &valid_instance, desktop_epoch: valid_desktop_epoch + 1, generation: valid_gen });
     assert_eq!(stale_epoch_err, Err(RemoteServiceError::StaleLease));
 
     // 5. Stale document generation rejected
-    let stale_gen_err = service.execute_command_guard(
-        &b1,
-        lease.lease_epoch,
-        "dev1",
-        "conn1",
-        &valid_instance,
-        valid_desktop_epoch,
-        valid_gen + 1,
-    );
+    let stale_gen_err = service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: &valid_instance, desktop_epoch: valid_desktop_epoch, generation: valid_gen + 1 });
     assert_eq!(stale_gen_err, Err(RemoteServiceError::StaleGeneration));
 
     // 6. Desktop owner reclaim revokes lease
     let _ = service.driver_broker().desktop_reclaim();
-    let reclaimed_guard_err = service.execute_command_guard(
-        &b1,
-        lease.lease_epoch,
-        "dev1",
-        "conn1",
-        &valid_instance,
-        valid_desktop_epoch,
-        valid_gen,
-    );
+    let reclaimed_guard_err = service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: &valid_instance, desktop_epoch: valid_desktop_epoch, generation: valid_gen });
     assert_eq!(
         reclaimed_guard_err,
         Err(RemoteServiceError::DesktopReclaimed)

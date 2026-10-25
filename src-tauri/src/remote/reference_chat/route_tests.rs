@@ -226,7 +226,8 @@ impl ReferenceRouteServer {
         };
         let backend_sessions = self.state.session_backend.list_sessions().await;
         let hub = self.state.terminal_service.output_hub();
-        let owned_sessions: Vec<(String, Option<(Option<u64>, Option<u64>)>)> = self
+        type SessionSequenceRange = (String, Option<(Option<u64>, Option<u64>)>);
+        let owned_sessions: Vec<SessionSequenceRange> = self
             .state
             .terminal_service
             .list_sessions()
@@ -709,7 +710,7 @@ async fn a_reference_chat_submit_through_the_relay_reaches_the_real_pane() {
         private_key: STANDARD.encode(key.to_bytes()),
     };
     let client = RelayClient::with_identity_and_auth(
-        &format!("ws://{addr}"),
+        format!("ws://{addr}"),
         identity,
         fixture.server.addr.to_string(),
         (*fixture.state.auth_manager).clone(),

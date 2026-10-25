@@ -34,6 +34,7 @@
 //! Every path that spawns the `launchctl` binary is gated to `#[cfg(target_os = "macos")]`, so a
 //! caller cannot shell out to a macOS-only tool on Windows or Linux.
 
+#[cfg(any(target_os = "macos", test))]
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]

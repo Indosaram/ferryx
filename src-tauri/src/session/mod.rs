@@ -516,8 +516,7 @@ mod tests {
     }
 
     fn minimal_v3_session(marker: &str) -> PersistedWorkspaceSession {
-        let mut session = PersistedWorkspaceSession::default();
-        session.version = 3;
+        let mut session = PersistedWorkspaceSession { version: 3, ..Default::default() };
         session.extra.insert(
             "testMarker".to_string(),
             serde_json::Value::String(marker.to_string()),
@@ -585,8 +584,7 @@ mod tests {
                     // would mix documents (the trailing-characters corruption shape).
                     let marker = format!("writer-{writer}-iter-{iteration}-payload ");
                     let filler = marker.repeat(if iteration % 2 == 0 { 96 } else { 24 });
-                    let mut session = PersistedWorkspaceSession::default();
-                    session.version = 3;
+                    let mut session = PersistedWorkspaceSession { version: 3, ..Default::default() };
                     session
                         .extra
                         .insert("marker".into(), serde_json::Value::String(filler));

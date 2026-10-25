@@ -556,7 +556,7 @@ pub fn gjc_skill_invocation(prompt: &str) -> Option<GjcSkillInvocation> {
         let location = captures.get(3).map(|group| group.as_str()).unwrap_or_default();
         // the envelope must agree with itself about which skill it injected
         let skill = if name == declared { loaded_skill(name, location) } else { None };
-        let Some(skill) = skill else { return None };
+        let skill = skill?;
         skills.push(skill);
         remainder = &remainder[captures.get(0)?.as_str().len()..];
         if !remainder.starts_with("\n\nThe user explicitly invoked the ") {
@@ -564,9 +564,7 @@ pub fn gjc_skill_invocation(prompt: &str) -> Option<GjcSkillInvocation> {
         }
         remainder = &remainder[2..];
         matched = instruction.captures(remainder);
-        if matched.is_none() {
-            return None;
-        }
+        matched.as_ref()?;
     }
 
     if !skills.is_empty() {

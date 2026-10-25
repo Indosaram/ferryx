@@ -380,8 +380,7 @@ pub fn parse_cp_time(text: &str) -> Option<CpuCounters> {
 pub fn parse_top_cpu_usage(text: &str) -> Option<f32> {
     let line = text
         .lines()
-        .filter(|line| line.trim_start().starts_with("CPU usage:"))
-        .next_back()?;
+        .rfind(|line| line.trim_start().starts_with("CPU usage:"))?;
     let percent = |label: &str| -> Option<f32> {
         let (rest, _) = line.split_once(label)?;
         rest.split_whitespace()
@@ -743,10 +742,10 @@ mod platform {
         if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
             return (None, None);
         }
-        let block = stat.f_frsize as u64;
+        let block = stat.f_frsize;
         (
-            Some((stat.f_blocks as u64).saturating_mul(block)),
-            Some((stat.f_bavail as u64).saturating_mul(block)),
+            Some(stat.f_blocks.saturating_mul(block)),
+            Some(stat.f_bavail.saturating_mul(block)),
         )
     }
 }

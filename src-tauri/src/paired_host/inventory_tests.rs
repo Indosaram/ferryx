@@ -513,7 +513,7 @@ fn legacy_host_view_decodes_without_device_id_and_omits_none_in_wire_format() {
     assert_eq!(view.grant_scope, GrantScope::Machine);
     assert_eq!(view.generation, Epoch(1));
     assert_eq!(view.auth_status, AuthStatus::Paired);
-    assert_eq!(view.online, true);
+    assert!(view.online);
     assert_eq!(view.ssh_host_id, None);
     assert_eq!(view.device_id, None);
     assert_eq!(view.unavailable_reason, None);

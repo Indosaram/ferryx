@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
+use tauri::Manager;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Desktop window label allowed to hold preview capabilities.
@@ -424,7 +425,7 @@ pub fn decode_text(bytes: &[u8]) -> Option<(String, FilePreviewEncoding)> {
 }
 
 fn decode_utf16(bytes: &[u8], convert: fn([u8; 2]) -> u16) -> Option<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     let units: Vec<u16> = bytes
@@ -536,7 +537,6 @@ struct HandleRecord {
     file: std::fs::File,
     byte_length: u64,
     media_type: Option<&'static str>,
-    kind: FilePreviewKind,
     /// Canonical directory a Markdown document may resolve children under.
     parent_dir: Option<PathBuf>,
     /// (device, inode) of the boundary directory captured at open. Unix only;
@@ -972,7 +972,7 @@ impl FilePreviewService {
             ));
         }
         slot.pending_children += 1;
-        Ok(ChildReservation(window_label.to_string()))
+        Ok(ChildReservation)
     }
 
     fn refund_child_slot(&self, window_label: &str, reservation: ChildReservation) {
@@ -1115,7 +1115,6 @@ fn record_of(opened: OpenedFile, started_at: std::time::Instant) -> Arc<HandleRe
         file: opened.file,
         byte_length: opened.byte_length,
         media_type: opened.media_type,
-        kind: opened.kind,
         parent_dir: opened.parent_dir,
         parent_identity: opened.parent_identity,
         revoked: Arc::new(AtomicBool::new(false)),
@@ -1143,15 +1142,6 @@ fn path_identity(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
-/// True when the path still names the object captured as identity.
-fn identity_holds(path: &Path, identity: Option<(u64, u64)>) -> bool {
-    match identity {
-        // Non-Unix platforms keep canonical-path containment only.
-        None => true,
-        Some(expected) => path_identity(path) == Some(expected),
-    }
-}
-
 /// The retained identity of a Markdown document's parent directory.
 #[derive(Clone)]
 struct ChildBoundary {
@@ -1160,7 +1150,7 @@ struct ChildBoundary {
 }
 
 /// A counted reservation of one child-handle budget slot.
-struct ChildReservation(String);
+struct ChildReservation;
 
 /// Re-checks the boundary directory identity after awaited I/O. This closes
 /// the rename+symlink swap window that path-only containment leaves open.
@@ -1584,7 +1574,7 @@ fn resolve_contained_child(boundary: &ChildBoundary, relative: &str) -> Result<P
     if crate::ipc::file_link::is_absolute_token(relative) || relative.starts_with('~') {
         return Err(outside_boundary(relative));
     }
-    let candidate = boundary.dir.join(&relative);
+    let candidate = boundary.dir.join(relative);
     let canonical = std::fs::canonicalize(&candidate).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => preview_error(
             FilePreviewErrorReason::MissingFile,
@@ -1875,8 +1865,6 @@ fn chunk_stream(
 #[tauri::command]
 pub async fn cmd_file_preview_open<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
-    service: tauri::State<'_, Arc<FilePreviewService>>,
-    daemon_client: tauri::State<'_, Arc<crate::daemon::DaemonClient>>,
     owner_id: Option<String>,
     path: String,
     backend_session_id: Option<String>,
@@ -1884,6 +1872,8 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
     line: Option<u32>,
     col: Option<u32>,
 ) -> Result<FilePreviewPayload, IpcError> {
+    let service = webview.state::<Arc<FilePreviewService>>();
+    let daemon_client = webview.state::<Arc<crate::daemon::DaemonClient>>();
     let window_label = webview.label().to_string();
     ensure_trusted_window(&window_label)?;
     let cwd = admitted_session_cwd(

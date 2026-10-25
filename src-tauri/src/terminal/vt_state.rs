@@ -116,10 +116,11 @@ impl TerminalStateRecorder {
     pub fn observe(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             match self.scan {
-                Scan::Ground => match byte {
-                    ESC => self.scan = Scan::Escape,
-                    _ => {}
-                },
+                Scan::Ground => {
+                    if byte == ESC {
+                        self.scan = Scan::Escape;
+                    }
+                }
                 Scan::Escape => match byte {
                     b'[' => {
                         self.params.clear();

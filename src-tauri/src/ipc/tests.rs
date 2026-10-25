@@ -43,16 +43,11 @@ async fn setup_test_daemon_with_remote_paths(
     let server = Arc::new(DaemonServer::new_with_paths(config_path, auth_path));
     let server_clone = Arc::clone(&server);
     let server_task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let s = Arc::clone(&server_clone);
-                    tokio::spawn(async move {
-                        s.handle_client(stream).await;
-                    });
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            let s = Arc::clone(&server_clone);
+            tokio::spawn(async move {
+                s.handle_client(stream).await;
+            });
         }
     });
 
@@ -67,16 +62,11 @@ async fn setup_test_daemon() -> (TempDir, Arc<DaemonClient>, tokio::task::JoinHa
     let server = Arc::new(DaemonServer::new());
     let server_clone = Arc::clone(&server);
     let server_task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let s = Arc::clone(&server_clone);
-                    tokio::spawn(async move {
-                        s.handle_client(stream).await;
-                    });
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            let s = Arc::clone(&server_clone);
+            tokio::spawn(async move {
+                s.handle_client(stream).await;
+            });
         }
     });
 
@@ -1201,7 +1191,7 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
 
-    let store_path = crate::ipc::ssh::get_ssh_store_path(&app.handle()).expect("store path");
+    let store_path = crate::ipc::ssh::get_ssh_store_path(app.handle()).expect("store path");
     std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
 
     let host = crate::ssh::SshHost {
@@ -1545,9 +1535,9 @@ async fn test_p10_ambiguous_create_session_reconciles_via_journal() {
                                         result: OperationResult::Operation(
                                             m::Operation::Completed {
                                                 request_id,
-                                                outcome: m::OperationOutcome::Session {
+                                                outcome: Box::new(m::OperationOutcome::Session {
                                                     session: fixture.clone(),
-                                                },
+                                                }),
                                             },
                                         ),
                                     },
@@ -1623,7 +1613,7 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let _serial = serialize_registry_test();
+    let _serial = serialize_registry_test().await;
 
     clear_pending_creates_for_test();
 
@@ -1723,9 +1713,9 @@ async fn test_p10_background_reconciler_adopts_delayed_completed_session() {
                                                 result: OperationResult::Operation(
                                                     m::Operation::Completed {
                                                         request_id,
-                                                        outcome: m::OperationOutcome::Session {
+                                                        outcome: Box::new(m::OperationOutcome::Session {
                                                             session: fixture.clone(),
-                                                        },
+                                                        }),
                                                     },
                                                 ),
                                             },
@@ -1799,7 +1789,7 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let _serial = serialize_registry_test();
+    let _serial = serialize_registry_test().await;
 
     clear_pending_creates_for_test();
 
@@ -1899,9 +1889,9 @@ async fn test_p10_background_reconciler_closes_cancelled_delayed_completed_sessi
                                             result: OperationResult::Operation(
                                                 m::Operation::Completed {
                                                     request_id,
-                                                    outcome: m::OperationOutcome::Session {
+                                                    outcome: Box::new(m::OperationOutcome::Session {
                                                         session: fixture.clone(),
-                                                    },
+                                                    }),
                                                 },
                                             ),
                                         },
@@ -1978,7 +1968,7 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let _serial = serialize_registry_test();
+    let _serial = serialize_registry_test().await;
 
     clear_pending_cleanups_for_test();
 
@@ -2065,7 +2055,7 @@ async fn test_p11_reattach_failure_cleanup_reconciles_and_reaps_unknown() {
                                             result: OperationResult::Operation(
                                                 m::Operation::Completed {
                                                     request_id,
-                                                    outcome: m::OperationOutcome::NoContent,
+                                                    outcome: Box::new(m::OperationOutcome::NoContent),
                                                 },
                                             ),
                                         },
@@ -2328,7 +2318,7 @@ async fn test_p11_reaper_retains_exhausted_records_in_dead_letter_list() {
     use crate::scoped_contracts::Epoch;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let _serial = serialize_registry_test();
+    let _serial = serialize_registry_test().await;
 
     clear_pending_cleanups_for_test();
 
@@ -2482,7 +2472,7 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
     use crate::scoped_contracts::Epoch;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let _serial = serialize_registry_test();
+    let _serial = serialize_registry_test().await;
 
     clear_pending_creates_for_test();
 
@@ -2562,9 +2552,9 @@ async fn test_p10_pending_create_reaper_resolves_still_pending_records() {
                                         result: OperationResult::Operation(
                                             m::Operation::Completed {
                                                 request_id,
-                                                outcome: m::OperationOutcome::Session {
+                                                outcome: Box::new(m::OperationOutcome::Session {
                                                     session: fixture.clone(),
-                                                },
+                                                }),
                                             },
                                         ),
                                     },
@@ -2645,7 +2635,7 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
     use crate::scoped_contracts::Epoch;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let _serial = serialize_registry_test();
+    let _serial = serialize_registry_test().await;
 
     clear_pending_cleanups_for_test();
 
@@ -2715,7 +2705,7 @@ async fn test_p11_start_cleanup_reaper_schedules_background_resolution() {
                                             crate::paired_host::client::OperationResult::Operation(
                                                 m::Operation::Completed {
                                                     request_id,
-                                                    outcome: m::OperationOutcome::NoContent,
+                                                    outcome: Box::new(m::OperationOutcome::NoContent),
                                                 },
                                             ),
                                     },
@@ -3471,19 +3461,19 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
                         DaemonRequest::DescribeSession { session_id } => {
                             if session_id == P13_PROXY_SESSION_ID {
                                 let mut session =
-                                    crate::daemon::protocol::DaemonSessionDetails::new(
-                                        P13_PROXY_SESSION_ID.into(),
-                                        None,
-                                        None,
-                                        None,
-                                        80,
-                                        24,
-                                        true,
-                                        Some(42),
-                                        Some(43),
-                                        None,
-                                        false,
-                                    );
+                                    crate::daemon::protocol::DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+                                        session_id: P13_PROXY_SESSION_ID.into(),
+                                        workspace_id: None,
+                                        worktree: None,
+                                        cwd: None,
+                                        cols: 80,
+                                        rows: 24,
+                                        running: true,
+                                        start_sequence: Some(42),
+                                        end_sequence: Some(43),
+                                        last_output_age_ms: None,
+                                        suspended: false,
+                                    });
                                 session.incarnation = Some(P13_PROXY_INCARNATION.into());
                                 DaemonResponse::DescribeSessionOk { session, daemon_epoch: None }
                             } else {
@@ -3979,10 +3969,8 @@ fn paired_create_reconcile_policy_covers_lost_responses() {
 
 /// The pending-create and pending-cleanup registries are process-global, so the tests that drive
 /// them must not interleave with one another.
-static IPC_REGISTRY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static IPC_REGISTRY_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn serialize_registry_test() -> std::sync::MutexGuard<'static, ()> {
-    IPC_REGISTRY_TESTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+async fn serialize_registry_test() -> tokio::sync::MutexGuard<'static, ()> {
+    IPC_REGISTRY_TESTS.lock().await
 }

@@ -203,16 +203,11 @@ async fn spawn_test_daemon() -> TestDaemon {
     ));
     let server_clone = Arc::clone(&server);
     let task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let s = Arc::clone(&server_clone);
-                    tokio::spawn(async move {
-                        s.handle_client(stream).await;
-                    });
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            let s = Arc::clone(&server_clone);
+            tokio::spawn(async move {
+                s.handle_client(stream).await;
+            });
         }
     });
     TestDaemon {

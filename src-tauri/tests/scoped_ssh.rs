@@ -1,4 +1,5 @@
 pub use ferryx_lib::scoped_contracts; // Compile the real shared DTOs.
+pub use ferryx_lib::{dag_journal, worktree_naming};
 #[path = "../src/ferryx_scope/ssh/mod.rs"]
 pub mod ssh;
 

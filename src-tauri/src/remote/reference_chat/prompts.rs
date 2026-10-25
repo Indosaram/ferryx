@@ -2860,7 +2860,7 @@ mod tests {
         let held = reference_prompt_card(&prompt.id).expect("still held");
         assert_eq!(held, card);
         assert!(reference_answer_keys(&prompt, &option(1)).is_ok());
-        assert!(REFERENCE_PROMPT_CARD_LIMIT >= 16, "the registry holds more than a screenful");
+        const { assert!(REFERENCE_PROMPT_CARD_LIMIT >= 16, "the registry holds more than a screenful") };
     }
 
     #[tokio::test]

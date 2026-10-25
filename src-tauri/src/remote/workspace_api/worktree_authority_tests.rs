@@ -213,7 +213,7 @@ async fn followthrough_write_failures_non_head_and_prunable_preview() {
                 let receipt = durable.transaction.as_ref().unwrap();
                 assert_eq!(receipt.request_id, request);
                 assert_eq!(receipt.status, 201);
-                assert!(matches!(&receipt.operation, crate::remote::machine_protocol::Operation::Completed { outcome: crate::remote::machine_protocol::OperationOutcome::Worktree { worktree }, .. } if worktree.head == base));
+                assert!(matches!(&receipt.operation, crate::remote::machine_protocol::Operation::Completed { outcome, .. } if matches!(outcome.as_ref(), crate::remote::machine_protocol::OperationOutcome::Worktree { worktree } if worktree.head == base)));
             } else {
                 assert_eq!(durable.revision, baseline.revision);
                 assert_eq!(durable.worktree_observations, baseline.worktree_observations);

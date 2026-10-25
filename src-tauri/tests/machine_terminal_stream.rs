@@ -190,7 +190,7 @@ async fn machine_streams_use_original_owner_and_ignore_mirror_focus() {
         resumed.send(Message::Binary(vec![b'x';65537].into())).await.unwrap(); closed(&mut resumed).await;
         let (mut revoked, _) = attach(&client, &base, "owner-token", target, None).await;
         control(&mut revoked, json!({"type":"ping"}), "pong").await;
-        state.auth_manager.revoke_device("owner");
+        state.auth_manager.revoke_device("owner").expect("revoke owner");
         let _ = revoked.send(Message::Binary(b"A10_REVOKED=executed\r".to_vec().into())).await;
         closed(&mut revoked).await; closed(&mut two).await;
         assert_eq!(pty.pid(), original_pid);
@@ -203,7 +203,9 @@ async fn machine_streams_use_original_owner_and_ignore_mirror_focus() {
         eprintln!("A10 controller replacement/stale-input/stale-resize/conflict/HTTP-close-conflict/replay/gap/empty/ticket-reuse/64KiB+1/16KiB+1/revoked-input passed original_pid={original_pid:?} epoch={epoch}");
     }).catch_unwind().await;
     // Revocation cancels every upgrade before joining the listener, including on assertion failure.
-    for id in ["owner", "other", "mirror", "view"] { state.auth_manager.revoke_device(id); }
+    for id in ["owner", "other", "mirror", "view"] {
+        state.auth_manager.revoke_device(id).expect("revoke fixture device");
+    }
     for id in backend.list_sessions() {
         let pty = backend.get_session(&id);
         let pid = pty.as_ref().and_then(|p| p.pid());

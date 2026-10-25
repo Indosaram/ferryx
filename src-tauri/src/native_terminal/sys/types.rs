@@ -27,13 +27,6 @@ pub type GhosttyTerminalWritePtyFn = unsafe extern "C" fn(
     len: usize,
 );
 
-/// C callback for reading bytes from a source into a buffer matching `include/ghostty/vt/io.h`.
-pub type GhosttyReaderFn = unsafe extern "C" fn(
-    userdata: *mut c_void,
-    buffer: *mut u8,
-    capacity: usize,
-    out_read: *mut usize,
-) -> bool;
 
 /// C callback for writing bytes from a source slice to a destination matching `include/ghostty/vt/io.h`.
 pub type GhosttyWriterFn = unsafe extern "C" fn(
@@ -42,13 +35,6 @@ pub type GhosttyWriterFn = unsafe extern "C" fn(
     len: usize,
 ) -> bool;
 
-/// Byte source callback and its opaque context matching `include/ghostty/vt/io.h`.
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct GhosttyReader {
-    pub read: GhosttyReaderFn,
-    pub userdata: *mut c_void,
-}
 
 /// Byte destination callback and its opaque context matching `include/ghostty/vt/io.h`.
 #[repr(C)]

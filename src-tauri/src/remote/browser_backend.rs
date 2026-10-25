@@ -1321,6 +1321,12 @@ pub struct InProcessTestBackend {
     pub identities: Mutex<HashMap<String, BrowserSubscribeIdentity>>,
 }
 
+impl Default for InProcessTestBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InProcessTestBackend {
     pub fn new() -> Self {
         Self {
@@ -1611,15 +1617,7 @@ impl RemoteBrowserBackend for InProcessBrowserServiceBackend {
                     let lease_epoch = lease_str.parse::<u64>().unwrap_or(0);
                     let desktop_epoch = dt_ep.parse::<u64>().unwrap_or(0);
                     let generation = doc_gen.parse::<u64>().unwrap_or(0);
-                    self.remote_service.execute_command_guard(
-                        &ctx.browser_id,
-                        lease_epoch,
-                        dev_id,
-                        conn_id,
-                        inst,
-                        desktop_epoch,
-                        generation,
-                    ).map_err(|e| match e {
+                    self.remote_service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &ctx.browser_id, lease_epoch, device_id: dev_id, connection_id: conn_id, instance_id: inst, desktop_epoch, generation }).map_err(|e| match e {
                         crate::browser::remote_service::RemoteServiceError::BrowserNotFound(id) => RemoteBrowserError::NotFound(id),
                         crate::browser::remote_service::RemoteServiceError::StaleLease
                         | crate::browser::remote_service::RemoteServiceError::DesktopReclaimed => RemoteBrowserError::Forbidden(e.to_string()),

@@ -514,6 +514,12 @@ pub struct HandoverTransaction {
     pub result: Option<HandoverTransactionResult>,
 }
 
+pub struct HandoverInventories {
+    pub sessions: Vec<SessionInventoryEntry>,
+    pub fd_roles: Vec<FdRole>,
+    pub fingerprint: String,
+}
+
 impl HandoverTransaction {
     /// Creates a new handover transaction in the `Active` state.
     pub fn new(
@@ -523,9 +529,7 @@ impl HandoverTransaction {
         predecessor_epoch: u64,
         successor_pid: u32,
         successor_epoch: u64,
-        session_inventory: Vec<SessionInventoryEntry>,
-        expected_fd_roles: Vec<FdRole>,
-        fingerprint: impl Into<String>,
+        inventories: HandoverInventories,
     ) -> Self {
         let transfer_id = transfer_id.into();
         let ledger = FrameReceiptLedger::new(transfer_id.clone());
@@ -536,12 +540,12 @@ impl HandoverTransaction {
             predecessor_epoch,
             successor_pid,
             successor_epoch,
-            session_inventory,
-            expected_fd_roles,
+            session_inventory: inventories.sessions,
+            expected_fd_roles: inventories.fd_roles,
             frame_receipt_ledger: ledger,
             commit_nonce: None,
             state: HandoverState::Active,
-            fingerprint: fingerprint.into(),
+            fingerprint: inventories.fingerprint,
             manifest_digest: None,
             rollback_reason: None,
             result: None,
@@ -565,9 +569,11 @@ impl HandoverTransaction {
             predecessor_epoch,
             successor_pid,
             successor_epoch,
-            Vec::new(),
-            Vec::new(),
-            fingerprint,
+            HandoverInventories {
+                sessions: Vec::new(),
+                fd_roles: Vec::new(),
+                fingerprint: fingerprint.into(),
+            },
         )
     }
 
@@ -974,7 +980,7 @@ impl HandoverIdempotencyLedger {
         let tx = self
             .transactions
             .get_mut(&client_req_id)
-            .ok_or_else(|| HandoverError::UnknownTransferId(transfer_id))?;
+            .ok_or(HandoverError::UnknownTransferId(transfer_id))?;
 
         tx.record_frame(frame)
     }
@@ -1137,9 +1143,11 @@ mod tests {
             1726700000000,
             2002,
             1726700005000,
-            vec![pty_session, ssh_session, paired_session],
-            expected_roles,
-            fingerprint,
+            HandoverInventories {
+                sessions: vec![pty_session, ssh_session, paired_session],
+                fd_roles: expected_roles,
+                fingerprint: fingerprint.into(),
+            },
         )
     }
 

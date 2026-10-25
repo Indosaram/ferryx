@@ -88,7 +88,6 @@ impl FerryxNativeTerminalView {
             return 1.0;
         };
         let scale = window.backingScaleFactor();
-        let scale: f64 = scale.into();
         if scale.is_finite() && scale > 0.0 {
             scale
         } else {

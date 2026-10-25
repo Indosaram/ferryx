@@ -125,10 +125,6 @@ impl<'a> Row<'a> {
         self.get(key).and_then(Value::as_bool)
     }
 
-    fn number(&self, key: &str) -> Option<f64> {
-        self.get(key).and_then(Value::as_f64)
-    }
-
     fn row(&self, key: &str) -> Row<'a> {
         Row(self.get(key).and_then(Value::as_object))
     }
@@ -648,9 +644,7 @@ pub fn omo_skill_invocation_prompt(text: &str) -> Option<OmoSkillInvocation> {
         }
         remainder = &remainder[2..];
         matched = skill_instruction_regex().captures(remainder);
-        if matched.is_none() {
-            return None;
-        }
+        matched.as_ref()?;
     }
     if !skills.is_empty() {
         if remainder.is_empty() {
@@ -689,7 +683,7 @@ fn assistant_turn(turns: &mut Vec<ReferenceTurn>, timestamp: &Option<String>, se
 }
 
 fn apply_omo_tool_results(
-    turns: &mut Vec<ReferenceTurn>,
+    turns: &mut [ReferenceTurn],
     pending: &mut HashMap<String, (usize, usize)>,
     results: &[OmoToolResult],
     tool_images: bool,
@@ -755,9 +749,9 @@ pub fn parse_omo_transcript(
     task_titles: &mut HashMap<String, String>,
 ) -> Vec<ReferenceTurn> {
     let mut turns: Vec<ReferenceTurn> = Vec::new();
-    /// Tool parts still waiting for their result: (turn index, part index).
+    // Tool parts still waiting for their result: (turn index, part index).
     let mut pending: HashMap<String, (usize, usize)> = HashMap::new();
-    /// The last assistant message stopped for good: the next one starts a turn of its own.
+    // The last assistant message stopped for good: the next one starts a turn of its own.
     let mut settled = false;
 
     for line in text.split('\n') {

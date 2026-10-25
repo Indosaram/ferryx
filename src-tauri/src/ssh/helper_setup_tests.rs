@@ -839,7 +839,7 @@ fn posix_upload_script_never_kills_live_daemon_and_defers_upgrade() {
     assert_eq!(details["executable"].as_str(), fake_helper.to_str());
     assert_eq!(details["root"].as_str(), base.join("helper").to_str());
 
-    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(base);
 }
 
 #[test]

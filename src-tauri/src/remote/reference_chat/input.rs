@@ -237,7 +237,7 @@ pub fn shape_reference_submit(text: &str, bracketed_paste: bool) -> Result<Strin
 /// Split out because the shape of the body is the part with a wire meaning: the markers are a
 /// mode, the body is the message.
 pub fn reference_composer_body(text: &str) -> String {
-    let trimmed = text.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+    let trimmed = text.trim_end_matches(['\r', '\n']);
     let normalized = trimmed.replace("\r\n", "\n").replace('\r', "\n");
     normalized.replace('\n', "\r")
 }

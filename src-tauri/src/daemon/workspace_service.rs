@@ -23,9 +23,6 @@ pub struct DaemonWorkspaceService {
     pub(crate) catalog: parking_lot::Mutex<Result<Catalog, String>>,
     pub(crate) catalog_path: PathBuf,
     pub(crate) sidebar: super::sidebar_snapshot::SidebarSnapshotStore,
-    workspace_queues: parking_lot::Mutex<
-        std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
-    >,
     worktree_gates: parking_lot::Mutex<
         std::collections::HashMap<String, std::sync::Weak<parking_lot::Mutex<()>>>,
     >,
@@ -35,22 +32,13 @@ pub struct DaemonWorkspaceService {
     pub(crate) project_reads: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) project_mutations: std::sync::Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
-    pub(crate) transaction_probe:
-        parking_lot::RwLock<Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>>,
+    pub(crate) transaction_probe: TransactionProbe,
 }
 
-impl DaemonWorkspaceService {
-    pub(crate) fn spawn_queue(&self, workspace: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-        let mut queues = self.workspace_queues.lock();
-        queues.retain(|_, queue| queue.strong_count() > 0);
-        if let Some(queue) = queues.get(workspace).and_then(std::sync::Weak::upgrade) {
-            return queue;
-        }
-        let queue = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-        queues.insert(workspace.to_owned(), std::sync::Arc::downgrade(&queue));
-        queue
-    }
+#[cfg(test)]
+type TransactionProbe = parking_lot::RwLock<Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>>;
 
+impl DaemonWorkspaceService {
     pub(crate) fn new(registry: WorkspaceRegistry, catalog_path: PathBuf) -> Self {
         let mut catalog = workspace_catalog::load(&catalog_path);
         let journal = crate::remote::machine_operation_journal::MachineOperationJournal::open(
@@ -114,7 +102,6 @@ impl DaemonWorkspaceService {
             mutation_gate: parking_lot::Mutex::new(()),
             catalog: parking_lot::Mutex::new(catalog),
             catalog_path,
-            workspace_queues: parking_lot::Mutex::new(Default::default()),
             worktree_gates: parking_lot::Mutex::new(Default::default()),
         }
     }
@@ -618,24 +605,25 @@ mod catalog_tests {
         })
         .await
         .unwrap();
-        let fence = service.worktree_gate("busy");
-        let held = fence.lock();
-        assert!(service.worktree_gate("busy").try_lock().is_none());
         let other = root.path().join("other");
         let worker_service = service.clone();
-        let mut worker = tokio::spawn(crate::ipc::run_blocking(move || {
-            worker_service
-                .register("other", other.to_str().unwrap())
-                .unwrap();
+        crate::ipc::run_blocking(move || {
+            let fence = worker_service.worktree_gate("busy");
+            let held = fence.lock();
+            assert!(worker_service.worktree_gate("busy").try_lock().is_none());
+            let (completed, progress) = std::sync::mpsc::sync_channel(1);
+            let registering_service = worker_service.clone();
+            let worker = std::thread::spawn(move || {
+                let result = registering_service.register("other", other.to_str().unwrap());
+                completed.send(result).unwrap();
+            });
+            let progress = progress.recv_timeout(std::time::Duration::from_secs(5));
+            drop(held);
+            worker.join().unwrap();
+            progress.unwrap().unwrap();
+            assert!(worker_service.registry.contains("other"));
             Ok(())
-        }));
-        let progress = tokio::time::timeout(std::time::Duration::from_secs(5), &mut worker).await;
-        drop(held);
-        if progress.is_err() {
-            worker.await.unwrap().unwrap();
-        }
-        progress.unwrap().unwrap().unwrap();
-        assert!(service.registry.contains("other"));
+        }).await.unwrap();
         drop(service);
         crate::ipc::run_blocking(move || {
             root.close().unwrap();

@@ -385,7 +385,7 @@ pub async fn cmd_remote_pairing_create(
                 let info = coordinator
                     .generate_pairing_with_permission(std::time::Duration::from_secs(60), perm)
                     .await
-                    .map_err(|e| IpcError::internal(e))?;
+                    .map_err(IpcError::internal)?;
                 let effective_relay = state
                     .config
                     .read()
@@ -472,7 +472,8 @@ pub struct SetActiveDesktopSelectionRequest {
 
 fn remote_terminal_tab_label(label: String) -> String {
     let trimmed = label.trim();
-    if trimmed.starts_with('/')
+    if trimmed.is_empty()
+        || trimmed.starts_with('/')
         || trimmed.starts_with('\\')
         || trimmed.starts_with("~/")
         || trimmed.starts_with("~\\")
@@ -480,8 +481,6 @@ fn remote_terminal_tab_label(label: String) -> String {
         || trimmed.as_bytes().get(1) == Some(&b':')
             && matches!(trimmed.as_bytes().first(), Some(b'A'..=b'Z' | b'a'..=b'z'))
     {
-        "Terminal".to_string()
-    } else if trimmed.is_empty() {
         "Terminal".to_string()
     } else {
         trimmed.to_string()

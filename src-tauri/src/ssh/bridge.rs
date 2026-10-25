@@ -25,7 +25,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::RawFd;
 #[cfg(not(unix))]
 pub type RawFd = i32;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
@@ -347,8 +347,8 @@ pub enum BridgeError {
 
     #[error("Target mismatch: expected {expected:?}, remote helper returned {actual:?}")]
     TargetMismatch {
-        expected: TargetRef,
-        actual: TargetRef,
+        expected: Box<TargetRef>,
+        actual: Box<TargetRef>,
     },
 
     #[error("Target not found on remote helper")]
@@ -748,7 +748,7 @@ impl BridgeChildGuard {
             return;
         };
         if !supervised {
-            let _ = child.start_kill();
+            child.start_kill();
         }
         let _ = tokio::time::timeout(timeout_dur, child.wait()).await;
     }
@@ -805,7 +805,7 @@ impl Drop for BridgeChildGuard {
         }
         if !self.is_supervised() {
             if let Some(mut child) = self.child.take() {
-                let _ = child.start_kill();
+                child.start_kill();
             }
         }
         // A supervised child is ended by the owner dropped below the guard: the lease closes,
@@ -1367,8 +1367,8 @@ impl BridgeConnection {
             .map_err(|e| BridgeError::Protocol(format!("Invalid describe response: {e}")))?;
         if &describe.target != target {
             return Err(BridgeError::TargetMismatch {
-                expected: target.clone(),
-                actual: describe.target,
+                expected: Box::new(target.clone()),
+                actual: Box::new(describe.target),
             });
         }
         Ok(describe)
@@ -1409,8 +1409,8 @@ impl BridgeConnection {
 
         if &read_res.target != target {
             return Err(BridgeError::TargetMismatch {
-                expected: target.clone(),
-                actual: read_res.target,
+                expected: Box::new(target.clone()),
+                actual: Box::new(read_res.target),
             });
         }
 

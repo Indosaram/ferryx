@@ -80,7 +80,7 @@ mod tests {
         assert_eq!(event.action, MouseAction::Press);
         assert_eq!(event.button, Some(MouseButton::Left));
         assert_eq!(event.position.x, 12.5);
-        assert_eq!(event.modifiers.super_key, true);
+        assert!(event.modifiers.super_key);
         let size = event.size.expect("mouse renderer size");
         assert_eq!(size.screen_width, 1000);
         assert_eq!(size.cell_height, 20);

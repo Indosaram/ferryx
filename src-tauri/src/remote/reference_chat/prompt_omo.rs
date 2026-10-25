@@ -396,7 +396,7 @@ pub fn omo_ask_waits(args: &Value) -> bool {
 }
 
 /// One session record, applied to the open calls. Upstream `omoAsksAfter`.
-pub fn omo_asks_after(mut open: Vec<OmoAskCall>, entry: &Value) -> Vec<OmoAskCall> {
+pub fn omo_asks_after(open: Vec<OmoAskCall>, entry: &Value) -> Vec<OmoAskCall> {
     let entry_type = entry.get("type").and_then(Value::as_str);
     if entry_type == Some("custom") {
         let id = if entry.get("customType").and_then(Value::as_str) == Some("ask-user:settlement") {
@@ -973,7 +973,7 @@ fn omo_question_view(lines: &[String], start: usize, end: usize, cut: bool) -> O
         };
         // Options count from 1: a row numbered 0 is never one, even where a cut form starts.
         if let Some(number) = row.filter(|number| *number >= 1) {
-            if Some(number) == next && (selected || (indent >= 2 && indent < 5)) {
+            if Some(number) == next && (selected || (2..5).contains(&indent)) {
                 view.rows.push(OmoRow {
                     number,
                     label: vec![raw.clone()],
@@ -1075,7 +1075,7 @@ fn parse_omo_question(lines: &[String], ask: Option<&OmoAsk>, trusted: bool) -> 
         hint_index,
         form.is_none(),
     );
-    let Some((own_selected, own_index)) = view.own else { return None };
+    let (own_selected, own_index) = view.own?;
     if view.rows.is_empty() && known.is_none() {
         return None;
     }
@@ -2074,7 +2074,7 @@ mod tests {
     fn a_cut_form_matching_two_open_calls_is_refused() {
         assert!(card_for("omo", FORM_AMBIGUOUS, ASKS_AMBIGUOUS).is_none(), "nothing says which call the screen answers");
         let open = open_omo_asks(ASKS_AMBIGUOUS);
-        let single = vec![open[0].clone()];
+        let single = [open[0].clone()];
         let lines = screen_lines(FORM_AMBIGUOUS);
         let matched: Vec<OmoCard> = single
             .iter()

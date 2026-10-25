@@ -215,7 +215,9 @@ fn local_gateway_addr(state: &RemoteGatewayState) -> Option<SocketAddr> {
 /// Token validation may persist auth state, so it runs on a blocking worker.
 async fn authorize(state: &Arc<RemoteGatewayState>, headers: &HeaderMap) -> Result<DeviceInfo, Response> {
     let (state, headers) = (Arc::clone(state), headers.clone());
-    let device = crate::ipc::run_blocking(move || Ok(authenticate_machine_request(&state, &headers)))
+    let device = crate::ipc::run_blocking(move || {
+        Ok(authenticate_machine_request(&state, &headers).map_err(|response| *response))
+    })
         .await
         .map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))??;
     if device.access_scope != DeviceAccessScope::Machine || device.permission != DevicePermission::Control {

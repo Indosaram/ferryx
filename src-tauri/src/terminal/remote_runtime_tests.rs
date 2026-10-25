@@ -138,12 +138,14 @@ fn descriptor() -> RemoteSessionDescriptor {
     "clientRequestId":"request-original","remoteCursor":"0","cols":80,"rows":24
 })).unwrap()
 }
-fn fixture() -> (
+type RemoteFixture = (
     RemoteRuntime,
     Arc<TerminalOutputHub>,
     Arc<Dialer>,
     mpsc::UnboundedSender<Result<ReadResult, BridgeError>>,
-) {
+);
+
+fn fixture() -> RemoteFixture {
     let (tx, rx) = mpsc::unbounded_channel();
     let fake = Arc::new(Fake {
         reads: Mutex::new(rx),
@@ -935,7 +937,6 @@ async fn ssh_remote_input_stale_generation_resize_is_not_replayed_onto_new_conne
         .fake
         .last_resize
         .lock()
-        .clone()
         .expect("dial must apply descriptor geometry");
     assert_eq!(
         last,
@@ -1031,14 +1032,16 @@ impl AgentStateSink for TestSink {
     }
 }
 
-fn agent_fixture(supports_agent_state: bool) -> (
+type AgentFixture = (
     RemoteRuntime,
     Arc<TerminalOutputHub>,
     Arc<Dialer>,
     mpsc::UnboundedSender<Result<ReadResult, BridgeError>>,
     Arc<TestSink>,
     Arc<tokio::sync::Notify>,
-) {
+);
+
+fn agent_fixture(supports_agent_state: bool) -> AgentFixture {
     let (tx, rx) = mpsc::unbounded_channel();
     let fake = Arc::new(Fake {
         reads: Mutex::new(rx),
@@ -1727,7 +1730,7 @@ async fn ssh_imported_transport_recovers_after_control_disconnect() {
 
 #[tokio::test]
 async fn ssh_target_not_found_is_retryable_disconnected_owner_unknown_not_expired() {
-    let (runtime, _hub, dialer, tx) = fixture();
+    let (runtime, _hub, _dialer, tx) = fixture();
     runtime.restore(descriptor()).unwrap();
     let mut updates = runtime.subscribe("local-stable").unwrap();
     state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;

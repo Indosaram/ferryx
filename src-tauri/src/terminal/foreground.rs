@@ -309,6 +309,7 @@ pub(crate) fn capture_process_snapshot() -> std::io::Result<ProcessSnapshot> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn inspect(session: &PtySession) -> std::io::Result<Option<Foreground>> {
     inspect_with_snapshot(session, &capture_process_snapshot()?)
 }

@@ -258,7 +258,7 @@ async fn ssh_bridge_frame_framing_roundtrip_and_size_bounds() {
     // 3. Verify oversized length header is rejected on read
     let oversized_len: u32 = (MAX_FRAME as u32) + 10;
     let mut bad_header = oversized_len.to_be_bytes().to_vec();
-    bad_header.extend_from_slice(&vec![0u8; 100]);
+    bad_header.extend_from_slice(&[0u8; 100]);
     let mut bad_slice = &bad_header[..];
     let read_err = read_frame_async(&mut bad_slice, Duration::from_secs(2)).await;
     assert!(matches!(read_err, Err(BridgeError::FrameTooLarge(_))));
@@ -521,7 +521,7 @@ async fn ssh_bridge_remote_pid_does_not_expose_signal_target() {
     assert_eq!(pid.as_u32(), 99999);
     assert_eq!(format!("{pid}"), "99999");
 
-    let json_val = serde_json::to_value(&pid).expect("serialize");
+    let json_val = serde_json::to_value(pid).expect("serialize");
     assert_eq!(json_val, json!(99999));
 
     let deserialized: RemotePid = serde_json::from_value(json_val).expect("deserialize");
@@ -1684,7 +1684,7 @@ fn spawn_cat_child() -> tokio::process::Child {
 /// child (the sole writer of that pipe) is gone.
 #[cfg(unix)]
 fn spawn_pipe_guarded_cat() -> (tokio::process::Child, std::os::unix::io::RawFd) {
-    let mut child = spawn_cat_child();
+    let child = spawn_cat_child();
     use std::os::unix::io::AsRawFd;
     let stdout = child.stdout.as_ref().expect("child stdout");
     let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
@@ -1698,7 +1698,7 @@ fn spawn_pipe_guarded_cat() -> (tokio::process::Child, std::os::unix::io::RawFd)
 /// transferred stdin pipe closes, which would make "still alive" assertions vacuous.
 #[cfg(unix)]
 fn spawn_pipe_guarded_sleeper(seconds: u32) -> (tokio::process::Child, std::os::unix::io::RawFd) {
-    let mut child = tokio::process::Command::new("/bin/sh")
+    let child = tokio::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(format!("exec sleep {seconds}"))
         .stdin(Stdio::piped())
@@ -1715,7 +1715,7 @@ fn spawn_pipe_guarded_sleeper(seconds: u32) -> (tokio::process::Child, std::os::
 /// Spawns a `sleep` child with a non-piped stdin, i.e. one `from_child` must reject.
 #[cfg(unix)]
 fn spawn_stdinless_sleeper() -> (tokio::process::Child, std::os::unix::io::RawFd) {
-    let mut child = tokio::process::Command::new("/bin/sh")
+    let child = tokio::process::Command::new("/bin/sh")
         .arg("-c")
         .arg("exec sleep 300")
         .stdin(Stdio::null())
@@ -2372,8 +2372,6 @@ async fn spawn_owner_scenario(
 async fn assert_scenario_stdout_closed(
     lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
 ) {
-    use tokio::io::AsyncBufReadExt;
-
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut diagnostics: Vec<String> = Vec::new();
     loop {

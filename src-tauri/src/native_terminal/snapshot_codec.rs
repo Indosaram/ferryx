@@ -163,6 +163,8 @@ pub fn validate_snapshot_bounds(
     Ok(())
 }
 
+/// # Safety
+/// A non-null `terminal` must be a live Ghostty terminal exclusively accessible for this call.
 pub unsafe fn enable_raw_continuation_tracking(
     terminal: GhosttyTerminal,
     max_bytes: usize,
@@ -181,6 +183,8 @@ pub unsafe fn enable_raw_continuation_tracking(
     NativeTerminalError::from_c_result(res, "ghostty_terminal_set(OPT_CONTINUATION_MAX_BYTES)")
 }
 
+/// # Safety
+/// A non-null `terminal` must remain live and must not be mutated concurrently during this call.
 pub unsafe fn query_raw_continuation_max_bytes(
     terminal: GhosttyTerminal,
 ) -> Result<usize, NativeTerminalError> {
@@ -226,6 +230,8 @@ unsafe extern "C" fn bounded_writer_callback(
     true
 }
 
+/// # Safety
+/// A non-null `terminal` must remain live and must not be accessed concurrently during encoding.
 pub unsafe fn encode_raw_terminal_snapshot(
     terminal: GhosttyTerminal,
     max_wire_bytes: usize,
@@ -255,6 +261,8 @@ pub unsafe fn encode_raw_terminal_snapshot(
     Ok(out)
 }
 
+/// # Safety
+/// A non-null `terminal` must remain live and must not be accessed concurrently during encoding.
 pub unsafe fn encode_raw_terminal_snapshot_buf(
     terminal: GhosttyTerminal,
     buf: &mut [u8],
@@ -275,9 +283,12 @@ pub unsafe fn encode_raw_terminal_snapshot_buf(
     Ok(written)
 }
 
+/// # Safety
+/// A non-null `terminal` must remain live and exclusively accessible during encoding;
+/// `writer` must not re-enter or mutate that terminal.
 pub unsafe fn encode_raw_terminal_snapshot_to_writer<W: std::io::Write>(
     terminal: GhosttyTerminal,
-    mut writer: W,
+    writer: W,
     max_wire_bytes: usize,
 ) -> Result<usize, NativeTerminalError> {
     if terminal.is_null() {
@@ -385,6 +396,9 @@ impl DecodedTerminal {
         unsafe { Self::from_raw(raw) }
     }
 
+    /// # Safety
+    /// A non-null `raw` must be a live, uniquely owned Ghostty terminal allocated by
+    /// `ghostty_terminal_new`; ownership transfers here, including responsibility for freeing it.
     pub unsafe fn from_raw(raw: GhosttyTerminal) -> Result<Self, NativeTerminalError> {
         let handle = NonNull::new(raw).ok_or_else(|| {
             NativeTerminalError::InvalidValue(

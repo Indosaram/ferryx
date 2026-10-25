@@ -30,6 +30,11 @@ fn attach_ws_url(base_origin: &str, session_id: &str, is_relay: bool) -> String 
     }
 }
 
+pub struct AttachCandidates<'a> {
+    pub paths: &'a [CandidatePath],
+    pub http_client: Option<&'a reqwest::Client>,
+}
+
 pub async fn attach_paired_session_with_candidates(
     relay_origin: &str,
     session_id: &str,
@@ -37,9 +42,9 @@ pub async fn attach_paired_session_with_candidates(
     machine_attach_public_key: &str,
     enrollment_epoch: &str,
     identity_dir: &Path,
-    candidates: &[CandidatePath],
-    _http_client: Option<&reqwest::Client>,
+    options: AttachCandidates<'_>,
 ) -> anyhow::Result<RelayAttachedStream> {
+    let AttachCandidates { paths: candidates, http_client: _http_client } = options;
     let identity = load_or_generate_client_attach_identity(identity_dir)
         .map_err(|error| anyhow::anyhow!(error))?;
 
@@ -146,8 +151,7 @@ pub async fn attach_relay_session(
         machine_attach_public_key,
         enrollment_epoch,
         identity_dir,
-        &[],
-        None,
+        AttachCandidates { paths: &[], http_client: None },
     )
     .await
 }

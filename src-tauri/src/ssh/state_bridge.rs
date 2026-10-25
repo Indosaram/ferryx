@@ -94,8 +94,8 @@ try {{
             .spawn()
             .map_err(|e| runtime::error(IpcErrorCode::IoError, "integration", &e.to_string()))?;
         let script = format!(
-            "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; try {{ {} }} catch {{ [Console]::Error.Write($_.Exception.Message); exit 1 }}\n",
-            format!("Invoke-Expression {}", runtime::powershell_data(&script))
+            "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; try {{ Invoke-Expression {} }} catch {{ [Console]::Error.Write($_.Exception.Message); exit 1 }}\n",
+            runtime::powershell_data(&script)
         );
         let mut stdin = child
             .stdin

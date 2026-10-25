@@ -964,8 +964,6 @@ fn install_pty_resize_dispatcher(
 #[tauri::command]
 pub async fn cmd_native_terminal_attach<R: Runtime>(
     app: AppHandle<R>,
-    daemon_client: State<'_, Arc<DaemonClient>>,
-    state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
@@ -973,6 +971,8 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
     remaining_ms: Option<u64>,
 ) -> Result<NativeTerminalAttachReceipt, IpcError> {
+    let daemon_client = app.state::<Arc<DaemonClient>>();
+    let state = app.state::<NativeTerminalSurfaceHostState>();
     let receipt_state = state.inner().clone();
     let expected_tuple = attach_tuple.clone();
     // Without a GPU adapter the surface would attach and then never present: a blank pane.
@@ -980,8 +980,9 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     probe_native_renderer(&receipt_state).await?;
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_millis(remaining_ms.unwrap_or(4_000).min(4_000));
-    native_terminal_attach(app, daemon_client, state, session_id.clone(), bounds,
-        scale_factor, after_sequence, attach_tuple, deadline).await?;
+    native_terminal_attach(app.clone(), daemon_client, state, NativeTerminalAttachParams {
+        session_id: session_id.clone(), bounds, scale_factor, after_sequence, attach_tuple, deadline,
+    }).await?;
     let active = receipt_state.session_attach_tuple(&session_id);
     if active != expected_tuple {
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
@@ -1023,17 +1024,22 @@ fn check_native_surface_presentation() -> Result<(), IpcError> {
         .map_err(IpcError::from)
 }
 
-async fn native_terminal_attach<R: Runtime>(
-    app: AppHandle<R>,
-    daemon_client: State<'_, Arc<DaemonClient>>,
-    state: State<'_, NativeTerminalSurfaceHostState>,
+struct NativeTerminalAttachParams {
     session_id: String,
     bounds: Option<NativeTerminalLogicalRect>,
     scale_factor: Option<f64>,
     after_sequence: Option<String>,
     attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
     deadline: tokio::time::Instant,
+}
+
+async fn native_terminal_attach<R: Runtime>(
+    app: AppHandle<R>,
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    params: NativeTerminalAttachParams,
 ) -> Result<(), IpcError> {
+    let NativeTerminalAttachParams { session_id, bounds, scale_factor, after_sequence, attach_tuple, deadline } = params;
     install_pty_resize_dispatcher(state.inner(), Arc::clone(daemon_client.inner()));
     let logical_bounds = match (bounds, scale_factor) {
         (Some(rect), Some(scale)) if scale.is_finite() && scale > 0.0 => Some(LogicalBounds {
@@ -1045,12 +1051,11 @@ async fn native_terminal_attach<R: Runtime>(
         }),
         _ => None,
     };
-    match state
+    if state
         .reattach_existing_session_with_bounds_and_tuple(&session_id, logical_bounds, attach_tuple.as_ref())
         .map_err(|error| IpcError::internal(error.to_string()))?
     {
-        true => return Ok(()),
-        false => {}
+        return Ok(());
     }
 
     // Fence the old pump and capture the replay cursor in one transaction BEFORE awaiting the
@@ -1317,7 +1322,7 @@ fn presented_after(
     presentations: &mut tokio::sync::watch::Receiver<Option<PresentedFrame>>,
     awaited_generation: u64,
 ) -> Option<NativeTerminalSurfaceReceipt> {
-    presentations.borrow_and_update().clone()
+    (*presentations.borrow_and_update())
         .filter(|presented| {
             presented.generation > awaited_generation
                 && slot.is_attached_with_epoch(presented.attachment_epoch)
@@ -2375,12 +2380,9 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
         Err(err) => return Err(IpcError::internal(err.to_string())),
     };
     state.emit_scrollbar_if_changed(Some(&app), &session_id);
-    if let Err(err) = daemon_client
+    daemon_client
         .write_terminal_at_generation(&session_id, generation, bytes)
-        .await
-    {
-        return Err(err);
-    }
+        .await?;
 
     dispatch_native_terminal_receipt(&app, state.inner(), &session_id)
         .await
@@ -2472,12 +2474,9 @@ pub async fn cmd_native_terminal_mouse<R: Runtime>(
             Err(err) => return Err(IpcError::internal(err.to_string())),
         };
         if !bytes.is_empty() {
-            if let Err(err) = daemon_client
+            daemon_client
                 .write_terminal_at_generation(&session_id, generation, bytes)
-                .await
-            {
-                return Err(err);
-            }
+                .await?;
         }
     }
 
@@ -2803,8 +2802,6 @@ mod tests {
         // When the pane attaches its native surface.
         let error = cmd_native_terminal_attach(
             app.handle().clone(),
-            app.state::<Arc<DaemonClient>>(),
-            app.state::<NativeTerminalSurfaceHostState>(),
             "no-gpu-session".into(), None, None, None, None, None,
         )
         .await
@@ -2883,8 +2880,6 @@ mod tests {
         // When another pane attaches its native surface.
         let error = cmd_native_terminal_attach(
             app.handle().clone(),
-            app.state::<Arc<DaemonClient>>(),
-            app.state::<NativeTerminalSurfaceHostState>(),
             "no-surface-session".into(), None, None, None, None, None,
         )
         .await
@@ -3006,14 +3001,13 @@ mod tests {
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(120),
                 cmd_native_terminal_attach(
-                    app.handle().clone(), app.state::<Arc<DaemonClient>>(),
-                    app.state::<NativeTerminalSurfaceHostState>(),
+                    app.handle().clone(),
                     "qa-existing-session".into(), None, None, None, Some(tuple), None,
                 ),
             ).await;
             // Then the command settles before the test's safety deadline.
             assert!(result.is_ok(), "native reconnect attach exceeded its bounded-error contract");
-            let error = result.unwrap().err().expect("attachment must fail");
+            let error = result.unwrap().expect_err("attachment must fail");
             assert_eq!(error.code, IpcErrorCode::Timeout);
             let state = app.state::<NativeTerminalSurfaceHostState>();
             assert!(!state.has_session("qa-existing-session"), "timeout must roll back the new native reservation");
@@ -3109,8 +3103,6 @@ mod tests {
         let action = async {
             let res = cmd_native_terminal_attach(
                 app.handle().clone(),
-                app.state::<Arc<DaemonClient>>(),
-                state.clone(),
                 session_id.into(),
                 None,
                 None,
@@ -3210,7 +3202,7 @@ mod tests {
         });
 
         let write_fut = send_native_terminal_input_with_stage_logging(
-            &app.handle(),
+            app.handle(),
             &state,
             "session-test-barrier",
             &input,

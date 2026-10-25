@@ -106,8 +106,8 @@ fn tokenize_keypress(raw: &str) -> Result<Vec<&str>, BrowserError> {
         return Ok(vec!["+"]);
     }
 
-    let (prefix, has_trailing_plus) = if raw.ends_with("++") {
-        (&raw[..raw.len() - 2], true)
+    let (prefix, has_trailing_plus) = if let Some(prefix) = raw.strip_suffix("++") {
+        (prefix, true)
     } else {
         (raw, false)
     };
@@ -1692,7 +1692,7 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                                 .get_bounds(&browser_id)
                                 .ok()
                                 .flatten()
-                                .unwrap_or_else(|| LogicalRect {
+                                .unwrap_or(LogicalRect {
                                     x: pos.x,
                                     y: pos.y,
                                     width: size.width,
@@ -2038,8 +2038,7 @@ pub async fn cmd_browser_finish_element_pick<R: tauri::Runtime>(
         crate::browser::bridge::PICKER_READ_SCRIPT.to_string(),
     )
     .await?;
-    let json = Some(raw.as_str())
-        .map(crate::browser::picker::unwrap_eval_json)
+    let json = Some(crate::browser::picker::unwrap_eval_json(raw.as_str()))
         .filter(|value| !value.trim().is_empty() && value != "null" && value != "undefined")
         .ok_or_else(|| IpcError::new(IpcErrorCode::ParseError, "element pick is empty"))?;
     if let Err(error) = crate::browser::bridge::eval_in_world(
@@ -2173,7 +2172,7 @@ mod trusted_dispatch_tests {
 
     #[test]
     fn self_close_on_a_non_popup_tab_emits_nothing() {
-        let _guard = crate::browser::popup::registry_test_lock();
+        let _guard = crate::browser::popup::registry_test_lock().blocking_lock();
         let app = tauri::test::mock_app();
         let manager = Arc::new(BrowserManager::new());
         session(&manager, "close-1", TrustedBridgeKind::Isolated);
@@ -2358,7 +2357,7 @@ pub(crate) fn history_navigation<R: tauri::Runtime>(
                 }
             })
             .map_err(|error| BrowserError::HistoryFailed(error.to_string()))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -4732,7 +4731,7 @@ pub async fn console_browser_session<R: tauri::Runtime>(
     let script = crate::browser::guest::build_console_drain_script(clear, errors_only);
     let raw = eval_webview(webview, script).await?;
     let entries = crate::browser::guest::parse_console_drain_result(&raw)
-        .map_err(|e| BrowserError::AutomationFailed(e))?;
+        .map_err(BrowserError::AutomationFailed)?;
     Ok(entries)
 }
 
@@ -4787,16 +4786,21 @@ pub async fn cmd_browser_highlight<R: tauri::Runtime>(
     highlight_browser_session(&app, manager.inner(), &browser_id, &selector).await
 }
 
+pub struct BrowserCookieParams<'a> {
+    pub action: &'a str,
+    pub name: Option<&'a str>,
+    pub value: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    pub path: Option<&'a str>,
+}
+
 pub async fn cookies_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,
     browser_id: &str,
-    action: &str,
-    name: Option<&str>,
-    value: Option<&str>,
-    domain: Option<&str>,
-    path: Option<&str>,
+    params: BrowserCookieParams<'_>,
 ) -> Result<Vec<crate::browser::model::BrowserCookieEntry>, IpcError> {
+    let BrowserCookieParams { action, name, value, domain, path } = params;
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -4813,18 +4817,23 @@ pub async fn cookies_browser_session<R: tauri::Runtime>(
     Ok(entries)
 }
 
+pub struct BrowserStorageParams<'a> {
+    pub kind: &'a str,
+    pub action: &'a str,
+    pub key: Option<&'a str>,
+    pub value: Option<&'a str>,
+    pub clear_all: bool,
+    pub url: Option<&'a str>,
+    pub domain: Option<&'a str>,
+}
+
 pub async fn storage_browser_session_extended<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,
     browser_id: &str,
-    kind: &str,
-    action: &str,
-    key: Option<&str>,
-    value: Option<&str>,
-    clear_all: bool,
-    url: Option<&str>,
-    domain: Option<&str>,
+    params: BrowserStorageParams<'_>,
 ) -> Result<Option<String>, IpcError> {
+    let BrowserStorageParams { kind, action, key, value, clear_all, url, domain } = params;
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -4845,7 +4854,8 @@ pub async fn storage_browser_session<R: tauri::Runtime>(
     value: Option<&str>,
 ) -> Result<Option<String>, IpcError> {
     storage_browser_session_extended(
-        app, manager, browser_id, kind, action, key, value, false, None, None,
+        app, manager, browser_id,
+        BrowserStorageParams { kind, action, key, value, clear_all: false, url: None, domain: None },
     )
     .await
 }
@@ -5318,7 +5328,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .or_else(|| p.get("viewport_revision").and_then(|v| v.as_str()))
                     {
                         if let Ok(expected_vp) = vp_str.parse::<u64>() {
-                            if expected_vp != current_vp_rev as u64 {
+                            if expected_vp != current_vp_rev {
                                 return Err(RemoteBrowserError::StaleFrame("viewport revision changed since frame capture".into()));
                             }
                         }
@@ -5327,7 +5337,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .or_else(|| p.get("viewport_revision"))
                         .and_then(|v| v.as_u64())
                     {
-                        if expected_vp != current_vp_rev as u64 {
+                        if expected_vp != current_vp_rev {
                             return Err(RemoteBrowserError::StaleFrame("viewport revision changed since frame capture".into()));
                         }
                     }
@@ -5965,7 +5975,7 @@ mod r6_fill_tests {
 
     #[tokio::test]
     async fn linked_popup_navigation_refuses_file_urls() {
-        let _guard = crate::browser::popup::registry_test_lock();
+        let _guard = crate::browser::popup::registry_test_lock().lock().await;
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("mock app");
@@ -6236,7 +6246,7 @@ mod popup_handle_tests {
     async fn test_popup_handle_close_targets_linked_popup_not_opener() {
         use tauri::Listener;
 
-        let _guard = crate::browser::popup::registry_test_lock();
+        let _guard = crate::browser::popup::registry_test_lock().lock().await;
         crate::browser::popup::clear_all();
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -6300,7 +6310,7 @@ mod popup_handle_tests {
 
     #[tokio::test]
     async fn test_popup_handle_close_race_records_pending_close_and_discards_late_creation() {
-        let _guard = crate::browser::popup::registry_test_lock();
+        let _guard = crate::browser::popup::registry_test_lock().lock().await;
         crate::browser::popup::clear_all();
         let app = tauri::test::mock_builder()
             .build(tauri::test::mock_context(tauri::test::noop_assets()))

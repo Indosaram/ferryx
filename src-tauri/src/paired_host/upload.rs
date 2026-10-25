@@ -363,13 +363,13 @@ mod tests {
     fn is_retryable_client_error_identifies_transient_and_rejects_definitive() {
         let retryable_machine = ClientError {
             code: "CAPACITY_EXCEEDED".into(),
-            machine_error: Some(m::MachineError {
+            machine_error: Some(Box::new(m::MachineError {
                 code: "CAPACITY_EXCEEDED".into(),
                 message: "busy".into(),
                 retryable: true,
                 request_id: "req-1".into(),
                 details: serde_json::Map::new(),
-            }),
+            })),
             request_id: None,
             ambiguous: false,
         };
@@ -377,13 +377,13 @@ mod tests {
 
         let fatal = ClientError {
             code: "UNAUTHORIZED".into(),
-            machine_error: Some(m::MachineError {
+            machine_error: Some(Box::new(m::MachineError {
                 code: "UNAUTHORIZED".into(),
                 message: "denied".into(),
                 retryable: false,
                 request_id: "req-2".into(),
                 details: serde_json::Map::new(),
-            }),
+            })),
             request_id: None,
             ambiguous: false,
         };

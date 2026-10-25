@@ -190,7 +190,7 @@ fn parse_png_dimensions(bytes: &[u8]) -> Result<(u32, u32), ProtocolCodecError> 
             "PNG buffer too short for IHDR".into(),
         ));
     }
-    if &bytes[0..8] != &PNG_SIG {
+    if bytes[0..8] != PNG_SIG {
         return Err(ProtocolCodecError::InvalidImageHeader(
             "Invalid PNG signature".into(),
         ));
@@ -811,11 +811,7 @@ pub mod tests {
         meta.image_height = 2;
 
         let meta_json = serde_json::to_vec(&meta).unwrap();
-        let mut raw = Vec::new();
-        raw.push(PROTOCOL_KIND);
-        raw.push(PROTOCOL_VERSION);
-        raw.push(OPCODE_FRAME);
-        raw.push(FORMAT_PNG);
+        let mut raw = vec![PROTOCOL_KIND, PROTOCOL_VERSION, OPCODE_FRAME, FORMAT_PNG];
         raw.extend_from_slice(&1u32.to_le_bytes());
         raw.extend_from_slice(&(meta_json.len() as u32).to_le_bytes());
         raw.extend_from_slice(&0u32.to_le_bytes());

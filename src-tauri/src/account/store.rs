@@ -395,6 +395,7 @@ pub fn lock_account_dir(dir: &Path) -> Result<File, String> {
     let path = dir.join("account-store.lock");
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)

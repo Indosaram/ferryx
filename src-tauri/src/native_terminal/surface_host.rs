@@ -333,6 +333,7 @@ impl RenderScheduleCoordinator {
         self.state.swap(RENDER_IDLE, Ordering::SeqCst) != RENDER_IDLE
     }
 
+    #[cfg(any(test, feature = "local-split-qa"))]
     fn begin_owned_render(&self) -> Option<u64> {
         let ownership = self.ownership.lock();
         self.begin_render().then_some(*ownership)
@@ -596,11 +597,7 @@ impl NativeTerminalSession {
     fn owns_replay_request(&self, token: &ReplayRequestToken) -> bool {
         self.pump_generation == token.generation
             && self.active_attach_tuple.as_ref() == token.attach_tuple.as_ref()
-            && token.attempt_generation.map_or(true, |generation| self.attempt_generation == generation)
-    }
-
-    fn presentation_tuple(&self) -> Option<&crate::daemon::protocol::PaneAttachTuple> {
-        self.active_attach_tuple.as_ref()
+            && token.attempt_generation.is_none_or(|generation| self.attempt_generation == generation)
     }
 
     pub fn publish_frame(&self) {
@@ -1924,10 +1921,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                             gpu,
                             Some(effective_bounds),
                             layout,
-                            &render_input.snapshot,
-                            render_input.selection.as_ref(),
-                            render_input.scrollbar_overlay.as_ref(),
-                            render_input.attention_frame,
+                            render_input,
                             &session_id,
                             frame_generation,
                         ))
@@ -2051,7 +2045,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                         }
 
                         if receipt.presented && tuple_is_current {
-                            let mut publish_accepted = false;
+                            #[cfg(feature = "local-split-qa")]
                             let mut finish_presentation_invoked = false;
                             let mut hosts_guard = completion_hosts.lock();
                             // The only place a caller can learn that this frame actually reached
@@ -2064,12 +2058,13 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 frame_attach_tuple.as_ref(),
                                 receipt,
                             );
-                            publish_accepted = accepted;
-
                             if accepted {
                                 if let Some(host) = hosts_guard.get_mut(&completion_session_id) {
                                     host.finish_presentation(&completion_host_window);
-                                    finish_presentation_invoked = true;
+                                    #[cfg(feature = "local-split-qa")]
+                                    {
+                                        finish_presentation_invoked = true;
+                                    }
                                 }
                                 // The product's own receipt is the one value that
                                 // carries the authoritative seven-field tuple; the
@@ -2100,7 +2095,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                             #[cfg(feature = "local-split-qa")]
                             if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
                                 eprintln!(
-                                    "[native_qa_predicates] session={completion_session_id} gen={frame_generation} epoch={frame_epoch} stage=completion current_owner=true tuple_is_current=true presented={} suspended={} publish_accepted={publish_accepted} finish_presentation={finish_presentation_invoked}",
+                                    "[native_qa_predicates] session={completion_session_id} gen={frame_generation} epoch={frame_epoch} stage=completion current_owner=true tuple_is_current=true presented={} suspended={} publish_accepted={accepted} finish_presentation={finish_presentation_invoked}",
                                     receipt.presented,
                                     receipt.render_suspended
                                 );
@@ -2157,14 +2152,14 @@ fn dispatch_owned_render_inner<R: Runtime>(
                 let retry = gpu_completion_requires_retry(&receipt);
                 match receipt {
                     Ok(receipt) => {
-                        if receipt.presented {
-                            if slot.publish_presentation(frame_generation, frame_epoch, frame_attach_tuple.as_ref(), receipt) {
-                                if let Some(receipt) = pane_liveness_presentation_receipt(frame_attach_tuple, true) {
-                                    if let Err(error) = surface_window.emit(
-                                        crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT, receipt,
-                                    ) {
-                                        tracing::debug!(%error, "Failed to emit injected presentation receipt");
-                                    }
+                        if receipt.presented
+                            && slot.publish_presentation(frame_generation, frame_epoch, frame_attach_tuple.as_ref(), receipt)
+                        {
+                            if let Some(receipt) = pane_liveness_presentation_receipt(frame_attach_tuple, true) {
+                                if let Err(error) = surface_window.emit(
+                                    crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT, receipt,
+                                ) {
+                                    tracing::debug!(%error, "Failed to emit injected presentation receipt");
                                 }
                             }
                         }
@@ -3600,7 +3595,7 @@ impl NativeTerminalSurfaceHostState {
         };
 
         let prior_scrollbar = session.terminal.scrollbar().ok();
-        let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
+        let is_at_bottom = prior_scrollbar.is_none_or(|sb| {
             let max_offset = sb.total.saturating_sub(sb.len);
             max_offset == 0 || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
         });
@@ -3847,7 +3842,7 @@ impl NativeTerminalSurfaceHostState {
             };
             if let Some((bounds, metrics, layout)) = layout {
                 let prior_scrollbar = session.terminal.scrollbar().ok();
-                let is_at_bottom = prior_scrollbar.map_or(true, |sb| {
+                let is_at_bottom = prior_scrollbar.is_none_or(|sb| {
                     let max_offset = sb.total.saturating_sub(sb.len);
                     max_offset == 0
                         || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
@@ -4104,7 +4099,7 @@ impl NativeTerminalSurfaceHostState {
                         Some(attachment.gap.is_none()),
                     )
                 };
-                let was_at_bottom = session.terminal.scrollbar().ok().map_or(true, |sb| {
+                let was_at_bottom = session.terminal.scrollbar().ok().is_none_or(|sb| {
                     let max_offset = sb.total.saturating_sub(sb.len);
                     max_offset == 0
                         || sb.offset >= max_offset.saturating_sub(BOTTOM_LOCK_TOLERANCE_ROWS)
@@ -4577,7 +4572,7 @@ impl NativeTerminalSurfaceHostState {
                                     replay_is_delta,
                                 );
                                 let was_at_bottom =
-                                    sess.terminal.scrollbar().ok().map_or(true, |sb| {
+                                    sess.terminal.scrollbar().ok().is_none_or(|sb| {
                                         let max_offset = sb.total.saturating_sub(sb.len);
                                         max_offset == 0
                                             || sb.offset >= max_offset
@@ -4681,7 +4676,7 @@ impl NativeTerminalSurfaceHostState {
                                 .filter(|sess| sess.pump_generation == pump_generation)
                             {
                                 let was_at_bottom =
-                                    sess.terminal.scrollbar().ok().map_or(true, |sb| {
+                                    sess.terminal.scrollbar().ok().is_none_or(|sb| {
                                         let max_offset = sb.total.saturating_sub(sb.len);
                                         max_offset == 0
                                             || sb.offset >= max_offset
@@ -4892,7 +4887,7 @@ impl NativeTerminalSurfaceHostState {
             let client = daemon_client.clone();
             let sessions = Arc::clone(&self.sessions);
             let id = session_id.to_string();
-            let app_handle_for_writer = app.as_ref().map(|a| a.clone());
+            let app_handle_for_writer = app.clone();
             Some(tokio::spawn(async move {
                 while let Some(record) = rx.recv().await {
                     let crate::native_terminal::bell::PtyWriteRecord {
@@ -5897,11 +5892,7 @@ impl NativeTerminalSurfaceHostState {
         let receipt = host.render_snapshot(
             window,
             layout,
-            &render_input.snapshot,
-            render_input.selection.as_ref(),
-            render_input.scrollbar_overlay.as_ref(),
-            render_input.attention_frame,
-            render_input.synchronized_output,
+            &render_input,
         )?;
         drop(hosts);
         if receipt.render_deferred && !render_input.synchronized_output {
@@ -6004,11 +5995,7 @@ impl NativeTerminalSurfaceHostState {
             let receipt = host.render_snapshot(
                 window,
                 layout,
-                &render_input.snapshot,
-                render_input.selection.as_ref(),
-                render_input.scrollbar_overlay.as_ref(),
-                render_input.attention_frame,
-                render_input.synchronized_output,
+                &render_input,
             )?;
             drop(hosts);
             if receipt.render_deferred && !render_input.synchronized_output {
@@ -6251,15 +6238,12 @@ impl NativeTerminalSurfaceHost {
         &mut self,
         _window: &Window<R>,
         layout: SurfaceCompositionLayout,
-        snapshot: &RenderSnapshot,
-        _selection: Option<&SelectionSnapshot>,
-        _scrollbar_overlay: Option<&ScrollbarOverlayState>,
-        _attention_frame: bool,
-        synchronized_output: bool,
+        input: &SessionRenderInput,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        let snapshot = &input.snapshot;
         #[cfg(test)]
         RENDER_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-        if synchronized_output {
+        if input.synchronized_output {
             let cell_metrics = match &self.frame_target {
                 HostFrameTarget::Native(target) => target.cell_metrics,
                 #[cfg(test)]
@@ -6373,11 +6357,13 @@ struct GpuLeg {
 /// Safe asynchronous retirement discharges this obligation without blocking the UI thread:
 /// if `leg` is currently lent to a worker thread, `target` is retained in the retirement slot
 /// and dropped strictly after the worker returns and drops `leg`.
+type MainThreadDispatcher = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
+
 struct NativeSurfaceFrameTarget {
     leg: LentSlot<GpuLeg>,
     cell_metrics: CellMetrics,
     target: Option<PlatformCompositorTarget>,
-    main_dispatcher: Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>,
+    main_dispatcher: MainThreadDispatcher,
 }
 
 impl Drop for NativeSurfaceFrameTarget {
@@ -6402,9 +6388,9 @@ impl NativeSurfaceFrameTarget {
         descriptor.validate_desktop_composition()?;
 
         let window_clone = window.clone();
-        let main_dispatcher: Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync> =
+        let main_dispatcher: MainThreadDispatcher =
             Arc::new(move |task| {
-                if dispatch_render_on_main_thread(&window_clone, move || task()).is_err() {
+                if dispatch_render_on_main_thread(&window_clone, task).is_err() {
                     tracing::warn!("Failed to dispatch native target drop to main thread during shutdown");
                 }
             });
@@ -6505,13 +6491,11 @@ impl GpuLeg {
         _gpu: &GpuThread,
         logical_bounds: Option<LogicalBounds>,
         layout: SurfaceCompositionLayout,
-        snapshot: &RenderSnapshot,
-        selection: Option<&super::renderer::SelectionSnapshot>,
-        scrollbar_overlay: Option<&ScrollbarOverlayState>,
-        attention_frame: bool,
-        session_id: &str,
-        frame_generation: u64,
+        input: &SessionRenderInput,
+        _session_id: &str,
+        _frame_generation: u64,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
+        let snapshot = &input.snapshot;
         if self.renderer.is_none() {
             self.renderer = Some(NativeTerminalRenderer::with_shared_surface_gpu(
                 self.initial_config,
@@ -6551,19 +6535,15 @@ impl GpuLeg {
             height: surface_size.height,
         };
 
-        let mut texture_outcome = "Unknown";
         let mut render_suspended = false;
-        let frame = match self.surface.get_current_texture() {
+        let (frame, _texture_outcome) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => {
-                texture_outcome = "Success";
-                Some(frame)
+                (Some(frame), "Success")
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                texture_outcome = "Suboptimal";
-                Some(frame)
+                (Some(frame), "Suboptimal")
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                texture_outcome = "LostOrOutdated";
                 self.format = renderer.configure_surface(
                     &self.surface,
                     surface_size.width,
@@ -6571,35 +6551,29 @@ impl GpuLeg {
                 )?;
                 match self.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(frame) => {
-                        texture_outcome = "ReconfigureSuccess";
-                        Some(frame)
+                        (Some(frame), "ReconfigureSuccess")
                     }
                     wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                        texture_outcome = "ReconfigureSuboptimal";
-                        Some(frame)
+                        (Some(frame), "ReconfigureSuboptimal")
                     }
                     ref other => match classify_surface_error(other)? {
                         SurfaceFrameAction::Retry => {
-                            texture_outcome = "ReconfigureRetry";
-                            None
+                            (None, "ReconfigureRetry")
                         }
                         SurfaceFrameAction::Suspend => {
-                            texture_outcome = "ReconfigureSuspend";
                             render_suspended = true;
-                            None
+                            (None, "ReconfigureSuspend")
                         }
                     },
                 }
             }
             ref other => match classify_surface_error(other)? {
                 SurfaceFrameAction::Retry => {
-                    texture_outcome = "Retry";
-                    None
+                    (None, "Retry")
                 }
                 SurfaceFrameAction::Suspend => {
-                    texture_outcome = "Suspend";
                     render_suspended = true;
-                    None
+                    (None, "Suspend")
                 }
             },
         };
@@ -6609,9 +6583,9 @@ impl GpuLeg {
         };
         let Some(frame) = frame else {
             #[cfg(feature = "local-split-qa")]
-            if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+            if crate::ipc::qa_barrier::active_channel().is_some() && _frame_generation <= 5 {
                 eprintln!(
-                    "[native_qa_predicates] session={session_id} gen={frame_generation} stage=gpu_texture outcome={texture_outcome} presented=false suspended={render_suspended}"
+                    "[native_qa_predicates] session={_session_id} gen={_frame_generation} stage=gpu_texture outcome={_texture_outcome} presented=false suspended={render_suspended}"
                 );
             }
             let mut receipt = NativeTerminalSurfaceReceipt::from_snapshot(
@@ -6630,20 +6604,22 @@ impl GpuLeg {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let (rebuilt_rows, reused_rows) = renderer.render_to_surface_viewport(
             snapshot,
-            selection,
-            &view,
-            surface_size.width,
-            surface_size.height,
-            self.format,
-            local_viewport,
-            scrollbar_overlay,
-            attention_frame,
+            input.selection.as_ref(),
+            super::renderer::implementation::SurfaceViewportOptions {
+                view: &view,
+                width: surface_size.width,
+                height: surface_size.height,
+                format: self.format,
+                viewport: local_viewport,
+                scrollbar_overlay: input.scrollbar_overlay.as_ref(),
+                attention_frame: input.attention_frame,
+            },
         )?;
         renderer.present(frame);
         #[cfg(feature = "local-split-qa")]
-        if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
+        if crate::ipc::qa_barrier::active_channel().is_some() && _frame_generation <= 5 {
             eprintln!(
-                "[native_qa_predicates] session={session_id} gen={frame_generation} stage=gpu_texture outcome={texture_outcome} presented=true suspended=false"
+                "[native_qa_predicates] session={_session_id} gen={_frame_generation} stage=gpu_texture outcome={_texture_outcome} presented=true suspended=false"
             );
         }
         Ok(NativeTerminalSurfaceReceipt {
@@ -8258,7 +8234,7 @@ mod tests {
         // A surface that keeps refusing a drawable (Metal `Timeout`, or an occluded window)
         // must re-arm on the frame clock. Enqueueing the retry inline turns a transient
         // compositor stall into an unbounded main-thread spin.
-        let mut harness = DirectRenderHarness::new(
+        let harness = DirectRenderHarness::new(
             (0..8)
                 .map(|_| SimulatedAcquisition::Dropped)
                 .collect::<Vec<_>>(),
@@ -8309,7 +8285,7 @@ mod tests {
         // Suspension must not be a one-way door. The test above proves occlusion arms no retry,
         // which is only half the contract: if suspending also latched the coordinator, the pane
         // would go dark permanently instead of waking, which is worse than the spin it replaced.
-        let mut harness = DirectRenderHarness::new(vec![
+        let harness = DirectRenderHarness::new(vec![
             SimulatedAcquisition::Occluded,
             SimulatedAcquisition::Frame,
         ]);
@@ -9385,17 +9361,15 @@ mod tests {
         let mut hosts_guard = state.hosts.lock();
         let resurrected = if !slot.is_attached_with_epoch(frame_epoch) {
             false
-        } else {
-            if let std::collections::hash_map::Entry::Vacant(entry) = hosts_guard.entry(session_id.to_string()) {
-                if let Ok(new_host) = NativeTerminalSurfaceHost::new(&window, bounds.scale_factor) {
-                    entry.insert(new_host);
-                    true
-                } else {
-                    false
-                }
+        } else if let std::collections::hash_map::Entry::Vacant(entry) = hosts_guard.entry(session_id.to_string()) {
+            if let Ok(new_host) = NativeTerminalSurfaceHost::new(&window, bounds.scale_factor) {
+                entry.insert(new_host);
+                true
             } else {
                 false
             }
+        } else {
+            false
         };
         drop(hosts_guard);
 
@@ -10719,10 +10693,11 @@ mod tests {
         );
 
         // Once the burst goes idle the finished redraw is painted exactly once.
-        tokio::time::timeout(std::time::Duration::from_secs(5), harness.dispatched.recv())
+        let dispatched = tokio::time::timeout(std::time::Duration::from_secs(5), harness.dispatched.recv())
             .await
             .expect("the drained redraw must be painted")
             .expect("dispatch channel open");
+        drop(dispatched);
     }
 
     #[tokio::test]
@@ -11099,7 +11074,7 @@ mod tests {
         let harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
         RENDER_SNAPSHOT_CALL_COUNT.store(0, Ordering::SeqCst);
 
-        let receipt = harness
+        harness
             .state
             .get_receipt(&harness.window, &harness.request.session_id)
             .expect("receipt query");
@@ -11109,7 +11084,7 @@ mod tests {
             "receipt path must build zero render snapshots"
         );
 
-        let render_receipt = harness
+        harness
             .state
             .render(&harness.window, harness.request.clone())
             .expect("render frame");

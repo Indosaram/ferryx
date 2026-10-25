@@ -292,12 +292,13 @@ pub struct BrowserWsSession {
     pub scope_validator: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
+type FillSerializerMap =
+    std::collections::HashMap<(String, u64, String), Arc<tokio::sync::Mutex<()>>>;
+
 /// Serializer map ensuring fill commands per (browser_id, lease_epoch, target) are queued
 /// sequentially and never interleave on one target (R6-11).
 static FILL_SERIALIZERS: std::sync::LazyLock<
-    parking_lot::Mutex<
-        std::collections::HashMap<(String, u64, String), Arc<tokio::sync::Mutex<()>>>,
-    >,
+    parking_lot::Mutex<FillSerializerMap>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 fn get_fill_serializer(browser_id: &str, epoch: u64, target: &str) -> Arc<tokio::sync::Mutex<()>> {

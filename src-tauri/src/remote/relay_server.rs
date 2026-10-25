@@ -473,6 +473,7 @@ impl PairingClaimGuard {
         }
     }
 
+    #[cfg(test)]
     pub fn disarm(&mut self) {
         self.armed = false;
     }
@@ -854,20 +855,6 @@ impl RelayState {
         } else {
             Err(response.status())
         }
-    }
-
-    /// True when this relay serves an account service and that account store already holds
-    /// this exact machine id bound to this exact public key.
-    ///
-    /// This is the account-based equivalent of an operator-issued enrollment token: the
-    /// machine proved ownership of the key when it enrolled, so re-demanding a hand-issued
-    /// token would leave `ferryx account enroll` unable to open a control tunnel at all.
-    fn is_account_enrolled_machine(&self, machine_id: &str, public_key: &str) -> bool {
-        let Some(account) = self.account_state() else {
-            return false;
-        };
-        crate::account::service::enrolled_machine_by_id(&account, machine_id)
-            .is_some_and(|record| record.public_key == public_key)
     }
 
     fn bind_machine_key(&self, auth: &ControlAuth) -> Result<(), String> {
@@ -1333,9 +1320,9 @@ impl RelayState {
         registration: RegisterPairingPin,
     ) -> Result<(), &'static str> {
         let channels = self.inner.control_channels.lock();
-        if !channels
+        if channels
             .get(machine)
-            .is_some_and(|c| c.generation == generation)
+            .is_none_or(|c| c.generation != generation)
             || registration.machine_id != machine
             || registration.pin.len() != 6
             || !registration.pin.bytes().all(|b| b.is_ascii_digit())
@@ -1636,12 +1623,12 @@ async fn socket_ticket_handler(
     if request.machine_id != machine || !valid_socket_target(&request.target) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if !state
+    if state
         .inner
         .control_channels
         .lock()
         .get(&machine)
-        .is_some_and(|c| !c.tx.is_closed())
+        .is_none_or(|c| c.tx.is_closed())
     {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -3129,6 +3116,7 @@ fn response_is_reusable(raw: &[u8], head: bool) -> bool {
 }
 
 /// Decode HTTP framing independently of WebSocket message boundaries.
+#[cfg(test)]
 fn parse_http_response(raw: &[u8], head: bool, eof: bool) -> Result<Option<Response>, StatusCode> {
     parse_http_response_within(raw, head, eof, MAX_HTTP_SIZE)
 }
@@ -3691,7 +3679,7 @@ async fn download_cli_artifact_from_candidate_dirs(
     }
 
     for dir in candidate_dirs {
-        let file_path = dir.join(&artifact);
+        let file_path = dir.join(artifact);
         if let Ok(meta) = tokio::fs::symlink_metadata(&file_path).await {
             if meta.file_type().is_file() {
                 if let Ok(bytes) = tokio::fs::read(&file_path).await {
@@ -4324,7 +4312,7 @@ async fn pump_relay_direction(
 mod tests {
     // `FERRYX_DOWNLOADS_DIR` is process-global and the harness runs tests in parallel
     // threads, so every test that sets it must hold this guard for the whole body.
-    static DOWNLOAD_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static DOWNLOAD_DIR_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     thread_local! {
         static PROBE_ENROLLMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -5878,8 +5866,7 @@ mod tests {
             state
                 .open_session_channel(machine, Some(4))
                 .await
-                .err()
-                .map(|status| status),
+                .err(),
             Some(StatusCode::GONE),
             "dispatch must refuse a generation the current control channel never held"
         );
@@ -9142,7 +9129,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_script_and_download_cli_routes() {
-        let _guard = DOWNLOAD_DIR_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = DOWNLOAD_DIR_ENV_LOCK.lock().await;
         let state = RelayState::new(vec!["test-machine-token".to_string()]);
         let (url, _handle) = spawn_test_relay_with_state(state).await;
         let http_url = url.replace("ws://", "http://");

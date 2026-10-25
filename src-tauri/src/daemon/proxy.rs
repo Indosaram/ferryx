@@ -1022,7 +1022,7 @@ impl RemoteSessionBackend for SessionRouter {
                 Ok(RemoteSessionDetails {
                     session_id: details.session_id,
                     workspace_id: details.workspace_id,
-                    worktree_label: details.worktree.as_ref().and_then(|w| Some(w.slug.clone())),
+                    worktree_label: details.worktree.as_ref().map(|w| w.slug.clone()),
                     worktree_path: details.cwd.map(PathBuf::from),
                     running: details.running,
                     cols: details.cols,

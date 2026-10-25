@@ -128,7 +128,7 @@ async fn owner_cli(
         &token,
         crate::remote::auth::DevicePermission::Control,
         expected,
-    );
+    ).expect("register scoped pairing capability");
     let authority = if machine {
         "Access: machine (account grant)"
     } else {

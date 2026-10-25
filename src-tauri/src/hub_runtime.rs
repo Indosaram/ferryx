@@ -170,7 +170,7 @@ impl TaskLauncher for DaemonBridge {
         })?;
         let shell = if command.is_empty() { None } else { Some(command.join(" ")) };
         self.client
-            .spawn_terminal(format!("hub-{}", std::process::id()), workspace, None, Some(cwd.to_owned()), 100, 32, shell)
+            .spawn_terminal(format!("hub-{}", std::process::id()), workspace, crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(cwd.to_owned()), cols: 100, rows: 32, shell })
             .await
             .map_err(|error| HubError::message(error.to_string()))
     }
@@ -413,7 +413,7 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
                 return 1;
             }
         };
-        return runtime.block_on(async move {
+        runtime.block_on(async move {
             match ferryx_hub::control::send_control(&path, op).await {
                 Ok(reply) => {
                     println!("{}", reply.trim());
@@ -425,7 +425,7 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
                     1
                 }
             }
-        });
+        })
     }
     #[cfg(not(unix))]
     {

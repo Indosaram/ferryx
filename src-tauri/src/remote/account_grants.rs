@@ -105,7 +105,6 @@ async fn accept_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use ed25519_dalek::{Signer, SigningKey};
 
     fn submission() -> GrantSubmission {

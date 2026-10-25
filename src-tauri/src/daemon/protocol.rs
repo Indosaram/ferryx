@@ -114,7 +114,7 @@ pub enum SplitOperationResult<Epoch = u64> {
     Created {
         session_id: String,
         daemon_epoch: Epoch,
-        session: DaemonSessionDetails,
+        session: Box<DaemonSessionDetails>,
         ownership: SplitOwnership,
     },
     Cancelled,
@@ -133,7 +133,7 @@ pub enum SplitOperationResult<Epoch = u64> {
 pub enum SplitOperationRequest {
     Prepare {
         request_id: String,
-        request: crate::ipc::terminal::SpawnTerminalRequest,
+        request: Box<crate::ipc::terminal::SpawnTerminalRequest>,
         remaining_ms: u64,
     },
     Status {
@@ -396,6 +396,20 @@ pub struct DaemonSessionDetails {
     pub generation: Option<String>,
 }
 
+pub struct DaemonSessionDetailsParams {
+    pub session_id: String,
+    pub workspace_id: Option<String>,
+    pub worktree: Option<WorktreeIdentity>,
+    pub cwd: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub running: bool,
+    pub start_sequence: Option<u64>,
+    pub end_sequence: Option<u64>,
+    pub last_output_age_ms: Option<u64>,
+    pub suspended: bool,
+}
+
 impl DaemonSessionDetails {
     pub fn is_recoverable_legacy(&self) -> bool {
         self.incarnation.is_none()
@@ -421,19 +435,10 @@ impl DaemonSessionDetails {
                 .unwrap_or(false)
     }
 
-    pub fn new(
-        session_id: String,
-        workspace_id: Option<String>,
-        worktree: Option<WorktreeIdentity>,
-        cwd: Option<String>,
-        cols: u16,
-        rows: u16,
-        running: bool,
-        start_sequence: Option<u64>,
-        end_sequence: Option<u64>,
-        last_output_age_ms: Option<u64>,
-        suspended: bool,
-    ) -> Self {
+    pub fn new(params: DaemonSessionDetailsParams) -> Self {
+        let DaemonSessionDetailsParams {
+            session_id, workspace_id, worktree, cwd, cols, rows, running, start_sequence, end_sequence, last_output_age_ms, suspended
+        } = params;
         Self {
             session_id,
             workspace_id,
@@ -1125,7 +1130,7 @@ pub enum DaemonResponse {
     },
     #[serde(rename_all = "camelCase")]
     RemoteSessionDetailsOk {
-        details: Option<crate::terminal::remote::RemoteSessionDetails>,
+        details: Option<Box<crate::terminal::remote::RemoteSessionDetails>>,
         legacy_direct_ssh: bool,
     },
     #[cfg(feature = "local-split-qa")]

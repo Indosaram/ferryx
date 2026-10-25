@@ -1237,16 +1237,11 @@ async fn setup_test_daemon_with_remote_paths(
     ));
     let server_clone = Arc::clone(&server);
     let server_task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let s = Arc::clone(&server_clone);
-                    tokio::spawn(async move {
-                        s.handle_client(stream).await;
-                    });
-                }
-                Err(_) => break,
-            }
+        while let Ok((stream, _)) = listener.accept().await {
+            let s = Arc::clone(&server_clone);
+            tokio::spawn(async move {
+                s.handle_client(stream).await;
+            });
         }
     });
     let client = Arc::new(crate::daemon::client::DaemonClient::new_with_socket(
@@ -2574,15 +2569,7 @@ async fn test_daemon_owned_remote_chain_end_to_end() {
     // 3. Spawn real daemon PTY terminal
     let client_req_id = uuid::Uuid::new_v4().to_string();
     let session_id = daemon_client
-        .spawn_terminal(
-            client_req_id,
-            ws_id.to_string(),
-            None,
-            Some(repo_dir.to_str().unwrap().to_string()),
-            80,
-            24,
-            None,
-        )
+        .spawn_terminal(client_req_id, ws_id.to_string(), crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(repo_dir.to_str().unwrap().to_string()), cols: 80, rows: 24, shell: None })
         .await
         .expect("spawn daemon terminal");
 
@@ -2858,24 +2845,16 @@ async fn test_daemon_remote_worktree_selection_then_grid_terminal_control() {
     command.arg("-c");
     command.arg("IFS= read -r line; printf '%s\\n' \"$line\"; sleep 30");
     let session_id = daemon_client
-        .spawn_terminal(
-            uuid::Uuid::new_v4().to_string(),
-            workspace_id.to_string(),
-            Some(WorktreeIdentity {
+        .spawn_terminal(uuid::Uuid::new_v4().to_string(), workspace_id.to_string(), crate::daemon::session_service::SpawnOptions { worktree: Some(WorktreeIdentity {
                 ws_id: workspace_id.to_string(),
                 slug: worktree_slug.to_string(),
-            }),
-            Some(
+            }), cwd: Some(
                 worktree
                     .path
                     .to_str()
                     .expect("worktree path utf-8")
                     .to_string(),
-            ),
-            80,
-            24,
-            None,
-        )
+            ), cols: 80, rows: 24, shell: None })
         .await
         .expect("spawn selected-worktree terminal");
 

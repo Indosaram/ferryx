@@ -140,10 +140,10 @@ pub fn build_row_instances(
                 ]
             });
 
-        if cell.map_or(false, |c| c.inverse) {
+        if cell.is_some_and(|c| c.inverse) {
             std::mem::swap(&mut bg_color, &mut fg_color);
         }
-        if cell.map_or(false, |c| c.faint) {
+        if cell.is_some_and(|c| c.faint) {
             fg_color = [
                 (fg_color[0] + bg_color[0]) * 0.5,
                 (fg_color[1] + bg_color[1]) * 0.5,
@@ -151,7 +151,7 @@ pub fn build_row_instances(
                 fg_color[3],
             ];
         }
-        if selection.map_or(false, |s| s.contains_cell(col, row)) {
+        if selection.is_some_and(|s| s.contains_cell(col, row)) {
             bg_color = config.theme.selection_background;
             fg_color = config.theme.selection_foreground;
         }

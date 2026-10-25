@@ -637,7 +637,7 @@ pub fn parse_pi_model(screen: &str) -> Option<PiParsedPrompt> {
     let question = match rows.iter().find(|row| row.current) {
         Some(current) => format!(
             "Select model (currently {})",
-            model_default_re().replace(&current.label, "").to_string()
+            model_default_re().replace(&current.label, "")
         ),
         None => "Select model".to_string(),
     };

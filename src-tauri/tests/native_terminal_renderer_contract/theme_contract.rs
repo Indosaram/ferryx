@@ -123,13 +123,15 @@ fn test_hex_color_parsing_totality_and_fallbacks() {
 
 #[test]
 fn test_renderer_theme_conversion_from_terminal_preferences() {
-    let mut theme_colors = TerminalThemeColors::default();
-    theme_colors.background = "#123456".into();
-    theme_colors.foreground = "#abcdef".into();
-    theme_colors.cursor = "#ffffff".into();
-    theme_colors.cursor_accent = "#000000".into();
-    theme_colors.selection_background = "#52525299".into();
-    theme_colors.selection_foreground = Some("#fedcba".into());
+    let theme_colors = TerminalThemeColors {
+        background: "#123456".into(),
+        foreground: "#abcdef".into(),
+        cursor: "#ffffff".into(),
+        cursor_accent: "#000000".into(),
+        selection_background: "#52525299".into(),
+        selection_foreground: Some("#fedcba".into()),
+        ..Default::default()
+    };
 
     let theme = RendererTheme::from(&theme_colors);
     assert_eq!(
@@ -190,13 +192,15 @@ fn test_renderer_theme_conversion_from_terminal_preferences() {
 
 #[test]
 fn test_renderer_theme_invalid_hex_falls_back_to_documented_defaults() {
-    let mut theme_colors = TerminalThemeColors::default();
-    theme_colors.background = "invalid-hex-color".into();
-    theme_colors.foreground = "###".into();
-    theme_colors.cursor = "zzz".into();
-    theme_colors.cursor_accent = "".into();
-    theme_colors.selection_background = "#12345".into();
-    theme_colors.selection_foreground = Some("not-hex".into());
+    let theme_colors = TerminalThemeColors {
+        background: "invalid-hex-color".into(),
+        foreground: "###".into(),
+        cursor: "zzz".into(),
+        cursor_accent: "".into(),
+        selection_background: "#12345".into(),
+        selection_foreground: Some("not-hex".into()),
+        ..Default::default()
+    };
 
     let theme = RendererTheme::from(&theme_colors);
     assert_eq!(theme.background, DEFAULT_RENDERER_BACKGROUND);
@@ -212,9 +216,11 @@ fn test_rendered_row_instances_honor_preference_theme_colors() {
     let gpu = GpuContext::new().expect("gpu context");
     let mut atlas = GlyphAtlas::new(&gpu.device);
 
-    let mut theme_colors = TerminalThemeColors::default();
-    theme_colors.background = "#123456".into();
-    theme_colors.foreground = "#abcdef".into();
+    let theme_colors = TerminalThemeColors {
+        background: "#123456".into(),
+        foreground: "#abcdef".into(),
+        ..Default::default()
+    };
 
     let prefs = TerminalPreferences {
         font_family: "monospace".into(),
@@ -290,9 +296,11 @@ fn test_rendered_row_instances_fallback_on_invalid_hex() {
     let gpu = GpuContext::new().expect("gpu context");
     let mut atlas = GlyphAtlas::new(&gpu.device);
 
-    let mut theme_colors = TerminalThemeColors::default();
-    theme_colors.background = "invalid-color".into();
-    theme_colors.foreground = "also-invalid".into();
+    let theme_colors = TerminalThemeColors {
+        background: "invalid-color".into(),
+        foreground: "also-invalid".into(),
+        ..Default::default()
+    };
 
     let theme = RendererTheme::from(&theme_colors);
     let config = RendererConfig {
@@ -318,8 +326,10 @@ fn test_renderer_cursor_visual_style_preference_and_unfocused_hollow() {
     let gpu = GpuContext::new().expect("gpu context");
     let mut atlas = GlyphAtlas::new(&gpu.device);
 
-    let mut theme_colors = TerminalThemeColors::default();
-    theme_colors.cursor = "#ff0000".into();
+    let theme_colors = TerminalThemeColors {
+        cursor: "#ff0000".into(),
+        ..Default::default()
+    };
 
     let prefs = TerminalPreferences {
         font_family: "monospace".into(),

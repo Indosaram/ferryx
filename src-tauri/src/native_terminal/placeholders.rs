@@ -174,10 +174,8 @@ pub fn resolve_placements(
         for (column_index, cell) in cells.iter().enumerate() {
             let column_index = column_index as u32;
             let decoded = decode_cell(cell);
-            let continues = match (decoded, run) {
-                (Some(decoded), Some(run)) if run.can_append(&decoded, column_index) => true,
-                _ => false,
-            };
+            let continues = matches!((decoded, run),
+                (Some(decoded), Some(run)) if run.can_append(&decoded, column_index));
             match decoded {
                 Some(decoded) => {
                     if continues {
@@ -266,16 +264,16 @@ fn push_run(
     });
 }
 
-fn select_placement<'a>(
-    virtuals: &'a [VirtualPlacement],
+fn select_placement(
+    virtuals: &[VirtualPlacement],
     image_id: u32,
     placement_id: Option<u32>,
-) -> Option<&'a VirtualPlacement> {
+) -> Option<&VirtualPlacement> {
     let matches_image = |candidate: &&VirtualPlacement| candidate.image.id == image_id;
     if let Some(placement_id) = placement_id {
         if let Some(explicit) = virtuals
             .iter()
-            .find(|candidate| matches_image(&candidate) && candidate.placement_id == placement_id)
+            .find(|candidate| matches_image(candidate) && candidate.placement_id == placement_id)
         {
             return Some(explicit);
         }

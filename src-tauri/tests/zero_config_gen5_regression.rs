@@ -87,7 +87,7 @@ struct Fixture {
     base: String,
     handle: Option<RemoteServerHandle>,
     _relay: Running,
-    env: IsolatedEnv,
+    _env: IsolatedEnv,
 }
 
 impl Fixture {
@@ -118,7 +118,7 @@ impl Fixture {
         };
         let (handle, _) = start_remote_server(Arc::clone(daemon.remote_state())).await.unwrap();
         daemon.remote_state().persist_config().unwrap();
-        Self { daemon, base, handle: Some(handle), _relay: relay, env }
+        Self { daemon, base, handle: Some(handle), _relay: relay, _env: env }
     }
 }
 

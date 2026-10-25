@@ -62,7 +62,7 @@ async fn a06_budget_per_device_burst_and_refill() {
             .expect_err("exhausted bucket must reject admission");
         assert_eq!(response.status(), 429);
         assert_eq!(response.headers()["cache-control"], "no-store");
-        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        let bytes = axum::body::to_bytes((*response).into_body(), 4096)
             .await
             .unwrap();
         let error: machine_protocol::ErrorEnvelope = serde_json::from_slice(&bytes).unwrap();

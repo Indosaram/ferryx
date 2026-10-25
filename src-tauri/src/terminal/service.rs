@@ -35,30 +35,6 @@ pub struct TerminalService {
     lifecycle: Arc<Mutex<SessionLifecycleRegistry>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PumpToken(u64);
-
-#[derive(Default)]
-pub(crate) struct PumpTokenFence {
-    next: std::sync::atomic::AtomicU64,
-    active: Mutex<Option<PumpToken>>,
-}
-
-impl PumpTokenFence {
-    pub(crate) fn install(&self) -> PumpToken {
-        let token = PumpToken(self.next.fetch_add(1, std::sync::atomic::Ordering::AcqRel).wrapping_add(1));
-        *self.active.lock() = Some(token);
-        token
-    }
-
-    pub(crate) fn is_active(&self, token: PumpToken) -> bool { *self.active.lock() == Some(token) }
-
-    pub(crate) fn remove(&self, token: PumpToken) -> bool {
-        let mut active = self.active.lock();
-        if *active == Some(token) { *active = None; true } else { false }
-    }
-}
-
 impl Default for TerminalService {
     fn default() -> Self {
         Self::new(
@@ -101,7 +77,7 @@ impl TerminalService {
         &self.paired
     }
 
-    pub fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
+    pub(crate) fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
         self.paired.set_agent_sink(sink);
     }
 
@@ -204,6 +180,7 @@ impl TerminalService {
         &self.pty_manager
     }
 
+    #[cfg(test)]
     pub(crate) fn try_acquire_cwd_probe(
         &self,
         session_id: &str,
@@ -258,6 +235,7 @@ impl TerminalService {
         Ok(self.register_output(session_id, pty_rx, cols, rows))
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_resolved_with_id(
         &self,
         session_id: String,

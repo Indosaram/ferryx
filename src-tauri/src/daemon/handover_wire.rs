@@ -1,6 +1,4 @@
 
-#![cfg(unix)]
-
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
@@ -169,15 +167,15 @@ pub(crate) unsafe fn send_raw_with_fds(
     msg.msg_iov = iov.as_mut_ptr();
     msg.msg_iovlen = 2;
     if !fds.is_empty() {
-        let space = unsafe { libc::CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as _) } as usize;
-        let usize_len = (space + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>();
+        let space = unsafe { libc::CMSG_SPACE(std::mem::size_of_val(fds) as _) } as usize;
+        let usize_len = space.div_ceil(std::mem::size_of::<usize>());
         _control_storage = vec![0usize; usize_len];
         msg.msg_control = _control_storage.as_mut_ptr() as *mut libc::c_void;
         msg.msg_controllen = space as _;
         let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = unsafe { libc::CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as _) } as _;
+        (*cmsg).cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of_val(fds) as _) } as _;
         let data = unsafe { libc::CMSG_DATA(cmsg) } as *mut RawFd;
         for (index, value) in fds.iter().enumerate() {
             data.add(index).write(*value);
@@ -185,8 +183,7 @@ pub(crate) unsafe fn send_raw_with_fds(
     }
 
     let total = header.len() + payload.len();
-    let mut sent = 0usize;
-    loop {
+    let sent = loop {
         let n = unsafe { libc::sendmsg(fd, &msg, 0) };
         if n < 0 {
             let err = io::Error::last_os_error();
@@ -195,11 +192,9 @@ pub(crate) unsafe fn send_raw_with_fds(
             }
             return Err(err);
         }
-        sent = n as usize;
-        break;
-    }
+        break n as usize;
+    };
     let mut offset = sent;
-    let mut iov_index = 0usize;
     let mut iov_offset = offset;
     while offset < total {
         let (slice, skip) = if iov_offset < header.len() {
@@ -210,7 +205,6 @@ pub(crate) unsafe fn send_raw_with_fds(
         };
         let _ = skip;
         let n = {
-            let mut written_total = 0usize;
             let n = unsafe { libc::write(fd, slice.as_ptr() as *const libc::c_void, slice.len()) };
             if n < 0 {
                 let err = io::Error::last_os_error();
@@ -219,10 +213,8 @@ pub(crate) unsafe fn send_raw_with_fds(
                 }
                 return Err(err);
             }
-            written_total = n as usize;
-            written_total
+            n as usize
         };
-        let _ = iov_index;
         offset += n;
         iov_offset += n;
         if n == 0 {
@@ -363,7 +355,7 @@ fn recv_frame_with_control_capacity(
     let mut header = [0u8; HANDOVER_HEADER_BYTES];
     let control_bytes =
         unsafe { libc::CMSG_SPACE((control_capacity_fds * std::mem::size_of::<RawFd>()) as _) } as usize;
-    let usize_len = (control_bytes.max(1) + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>();
+    let usize_len = control_bytes.max(1).div_ceil(std::mem::size_of::<usize>());
     let mut control = vec![0usize; usize_len];
     let mut received: Vec<OwnedFd> = Vec::new();
     let outcome = unsafe {
@@ -462,7 +454,6 @@ pub fn peer_credentials(fd: RawFd) -> Result<PeerCredentials, HandoverWireError>
 mod tests {
     use super::*;
     use std::fs::File;
-    use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixStream;
 
     fn socketpair() -> (UnixStream, UnixStream) {
@@ -549,12 +540,11 @@ mod tests {
         let (sender, receiver) = socketpair();
         let frame = sample_frame(dev_null_fds(1));
         let payload = serde_json::to_vec(&frame.payload).expect("payload");
-        let mut header =
+        let header =
             encode_header(frame.kind, &frame.transfer_id, frame.frame_sequence, 2, 0, payload.len() as u32)
                 .expect("header");
         let fd_values: Vec<RawFd> = frame.fds.iter().map(AsRawFd::as_raw_fd).collect();
         unsafe { send_raw_with_fds(sender.as_raw_fd(), &header, &payload, &fd_values) }.expect("send");
-        header = [0u8; HANDOVER_HEADER_BYTES];
         let error = recv_frame(receiver.as_raw_fd()).expect_err("mismatch");
         assert!(matches!(
             error,
@@ -565,17 +555,13 @@ mod tests {
     #[test]
     fn oversize_payload_is_rejected() {
         let (sender, receiver) = socketpair();
-        let mut header =
+        let header =
             encode_header(1, &uuid::Uuid::new_v4().to_string(), 1, 0, 0, HANDOVER_MAX_PAYLOAD_BYTES + 1)
                 .expect("header");
-        let mut cursor = 0usize;
         let raw = unsafe {
             libc::write(sender.as_raw_fd(), header.as_ptr() as *const libc::c_void, header.len())
         };
         assert_eq!(raw as usize, header.len());
-        cursor = header.len();
-        let _ = cursor;
-        let _ = &mut header;
         let error = recv_frame(receiver.as_raw_fd()).expect_err("oversize");
         assert!(matches!(error, HandoverWireError::PayloadTooLarge(_)));
     }
@@ -594,7 +580,7 @@ mod tests {
 
     #[test]
     fn bad_transfer_id_is_rejected_on_decode() {
-        let (sender, receiver) = socketpair();
+        let (_sender, receiver) = socketpair();
         let payload = serde_json::to_vec(&serde_json::json!({"x": 1})).expect("payload");
         let header = encode_header(1, "short", 0, 0, 0, payload.len() as u32)
             .expect_err("encode must reject short ids");
@@ -711,7 +697,7 @@ mod tests {
 
     #[test]
     fn peer_credentials_match_self() {
-        let (sender, receiver) = socketpair();
+        let (sender, _receiver) = socketpair();
         let creds = peer_credentials(sender.as_raw_fd()).expect("credentials");
         assert_eq!(creds.uid, unsafe { libc::getuid() });
         assert_eq!(creds.gid, unsafe { libc::getgid() });
@@ -731,15 +717,15 @@ mod tests {
         msg.msg_iov = iov.as_mut_ptr();
         msg.msg_iovlen = 1;
         if !fds.is_empty() {
-            let space = unsafe { libc::CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as _) } as usize;
-            let usize_len = (space + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>();
+            let space = unsafe { libc::CMSG_SPACE(std::mem::size_of_val(fds) as _) } as usize;
+            let usize_len = space.div_ceil(std::mem::size_of::<usize>());
             _control_storage = vec![0usize; usize_len];
             msg.msg_control = _control_storage.as_mut_ptr() as *mut libc::c_void;
             msg.msg_controllen = space as _;
             let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            (*cmsg).cmsg_len = unsafe { libc::CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as _) } as _;
+            (*cmsg).cmsg_len = unsafe { libc::CMSG_LEN(std::mem::size_of_val(fds) as _) } as _;
             let data = unsafe { libc::CMSG_DATA(cmsg) } as *mut RawFd;
             for (index, value) in fds.iter().enumerate() {
                 unsafe { data.add(index).write(*value) };

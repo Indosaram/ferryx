@@ -349,8 +349,7 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
         || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
 
     // Reject contradictory markers or exit codes
-    if (has_missing_marker && has_not_executable_marker)
-        || (exit_code == Some(126) && has_missing_marker)
+    if (has_missing_marker && (has_not_executable_marker || exit_code == Some(126)))
         || (exit_code == Some(127) && has_not_executable_marker)
     {
         return err;
@@ -498,8 +497,7 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
         || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
 
     // Contradictory signals are untrustworthy: claim nothing.
-    if (has_missing_marker && has_not_executable_marker)
-        || (exit_code == Some(126) && has_missing_marker)
+    if (has_missing_marker && (has_not_executable_marker || exit_code == Some(126)))
         || (exit_code == Some(127) && has_not_executable_marker)
     {
         return HelperProbeState::Unknown;
@@ -648,7 +646,7 @@ pub fn parse_installed_version_output(stdout: &[u8]) -> Option<String> {
         }
         let token = trimmed.split_whitespace().last()?;
         if token.contains('.')
-            && token.chars().next().map_or(false, |c| c.is_ascii_digit())
+            && token.chars().next().is_some_and(|c| c.is_ascii_digit())
             && token
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')

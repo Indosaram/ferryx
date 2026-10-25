@@ -163,8 +163,8 @@ async fn test_oversized_non_punch_packet_transition() {
                 && len == PUNCH_PACKET_LEN
                 && recv_buf[0..8] == PUNCH_MAGIC
                 && recv_buf[8] == PUNCH_MSG_ACK
-                && &recv_buf[9..41] == &nonce_b
-                && &recv_buf[41..73] == &nonce_a
+                && recv_buf[9..41] == nonce_b
+                && recv_buf[41..73] == nonce_a
             {
                 break;
             }

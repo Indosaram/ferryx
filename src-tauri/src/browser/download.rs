@@ -83,6 +83,12 @@ pub struct DownloadRegistry {
     broadcaster: broadcast::Sender<DownloadRecord>,
 }
 
+impl Default for DownloadRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DownloadRegistry {
     pub fn new() -> Self {
         let (broadcaster, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);

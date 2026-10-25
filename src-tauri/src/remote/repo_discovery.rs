@@ -441,6 +441,7 @@ pub(crate) async fn repositories(
             Err(fs_response(FsError::Timeout))
         } else {
             super::server::authenticate_machine_request(&auth_state, &auth_headers)
+                .map_err(|response| *response)
         };
         drop(permit);
         Ok(result)
@@ -471,7 +472,7 @@ pub(crate) async fn repositories(
     if tokio::time::Instant::now() >= deadline {
         return Err(fs_response(FsError::Timeout));
     }
-    let permit = limits.acquire(&device.id)?;
+    let permit = limits.acquire(&device.id).map_err(|response| *response)?;
     let flag = cancel.0.clone();
     let started = Instant::now();
     let work = crate::ipc::run_blocking(move || {

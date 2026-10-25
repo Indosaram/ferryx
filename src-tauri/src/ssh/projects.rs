@@ -521,7 +521,6 @@ mod memo_tests {
             target_len,
             "simulated rewrite must match identical file length"
         );
-        let initial_len = target_len as u64;
 
         // Write the same-length content to disk
         std::fs::write(&host_store, &updated_bytes).expect("write updated store");

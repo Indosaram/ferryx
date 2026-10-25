@@ -10,7 +10,7 @@ use crate::browser::chromium_cookies::{
 #[cfg(target_os = "macos")]
 use crate::browser::chromium_cookies::CHROMIUM_PBKDF2_ITERATIONS_MACOS;
 use crate::browser::cookies::{
-    resolve_installed_browser_profile_dir, ImportedCookie, InstalledBrowserKind,
+    resolve_installed_browser_profile_dir, InstalledBrowserKind,
 };
 use crate::browser::BrowserError;
 

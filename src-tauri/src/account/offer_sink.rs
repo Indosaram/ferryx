@@ -6,7 +6,7 @@ use crate::remote::account_protocol::{
 };
 use crate::remote::attach_identity::AttachIdentity;
 use crate::remote::auth::{AuthManager, DeviceAccessScope, DevicePermission};
-use crate::remote::sealed_offer::{open_offer, seal_offer};
+use crate::remote::sealed_offer::open_offer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

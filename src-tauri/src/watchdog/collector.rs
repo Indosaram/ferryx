@@ -80,7 +80,7 @@ pub fn collect_hang_evidence(
 
     let initial_write_res = match serde_json::to_string_pretty(&evidence) {
         Ok(json_content) => std::fs::write(&meta_file, json_content),
-        Err(err) => Err(std::io::Error::new(std::io::ErrorKind::Other, err)),
+        Err(err) => Err(std::io::Error::other(err)),
     };
 
     if let Err(err) = initial_write_res {

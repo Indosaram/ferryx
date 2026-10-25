@@ -752,15 +752,13 @@ pub mod headless {
                     self.alt_grid.remove(0);
                     self.alt_grid.push(vec![HeadlessCell::default(); cols]);
                 }
-            } else {
-                if !self.primary_grid.is_empty() {
-                    let old_line = self.primary_grid.remove(0);
-                    self.scrollback.push(old_line);
-                    if self.scrollback.len() > 10_000 {
-                        self.scrollback.remove(0);
-                    }
-                    self.primary_grid.push(vec![HeadlessCell::default(); cols]);
+            } else if !self.primary_grid.is_empty() {
+                let old_line = self.primary_grid.remove(0);
+                self.scrollback.push(old_line);
+                if self.scrollback.len() > 10_000 {
+                    self.scrollback.remove(0);
                 }
+                self.primary_grid.push(vec![HeadlessCell::default(); cols]);
             }
         }
 
@@ -774,8 +772,6 @@ pub mod headless {
                     grid.remove(bottom);
                     grid.insert(top, vec![HeadlessCell::default(); cols]);
                 }
-            } else if self.cursor_y > self.scroll_top {
-                self.cursor_y = self.cursor_y.saturating_sub(1);
             } else {
                 self.cursor_y = self.cursor_y.saturating_sub(1);
             }
@@ -827,10 +823,12 @@ pub mod headless {
                     grid[cy][cx + 1] = HeadlessCell::default();
                 }
                 // If writing a wide character and next cell was a wide character head, clear its tail
-                if width == 2 && cx + 1 < grid[cy].len() {
-                    if grid[cy][cx + 1].width == 2 && cx + 2 < grid[cy].len() {
-                        grid[cy][cx + 2] = HeadlessCell::default();
-                    }
+                if width == 2
+                    && cx + 1 < grid[cy].len()
+                    && grid[cy][cx + 1].width == 2
+                    && cx + 2 < grid[cy].len()
+                {
+                    grid[cy][cx + 2] = HeadlessCell::default();
                 }
 
                 grid[cy][cx] = HeadlessCell {
@@ -955,14 +953,14 @@ pub mod headless {
                                         grid[cy][x] = HeadlessCell::default();
                                     }
                                 }
-                                for y in (cy + 1)..grid.len() {
-                                    grid[y].fill(HeadlessCell::default());
+                                for line in grid.iter_mut().skip(cy + 1) {
+                                    line.fill(HeadlessCell::default());
                                 }
                             }
                         }
                         1 => {
-                            for y in 0..cy.min(grid.len()) {
-                                grid[y].fill(HeadlessCell::default());
+                            for line in grid.iter_mut().take(cy) {
+                                line.fill(HeadlessCell::default());
                             }
                             if cy < grid.len() {
                                 for x in 0..=cx.min(cols.saturating_sub(1)) {

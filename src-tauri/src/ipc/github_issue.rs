@@ -234,7 +234,8 @@ fn canonical_issue_url(repository: &RepositorySlug, number: u64) -> String {
 
 #[derive(Debug, Deserialize)]
 struct GhIssueResponse {
-    number: u64,
+    #[serde(rename = "number")]
+    _number: u64,
     title: String,
     url: String,
     #[serde(default)]

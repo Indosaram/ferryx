@@ -384,23 +384,12 @@ pub enum SnapshotTransferMessage {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SnapshotTransferAssembler {
     current_generation: u64,
     active_metadata: Option<SnapshotMetadata>,
     chunks: HashMap<u32, Vec<u8>>,
     received_bytes: usize,
-}
-
-impl Default for SnapshotTransferAssembler {
-    fn default() -> Self {
-        Self {
-            current_generation: 0,
-            active_metadata: None,
-            chunks: HashMap::new(),
-            received_bytes: 0,
-        }
-    }
 }
 
 impl SnapshotTransferAssembler {

@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(feature = "desktop")]
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+use tauri::Manager;
 
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
@@ -47,7 +49,7 @@ pub fn clamp_capture_dimensions(width: u32, height: u32) -> (u32, u32) {
     let mut clamped_w = (w.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
     let mut clamped_h = (h.round() as u32).clamp(1, MAX_CAPTURE_EDGE);
 
-    while (clamped_w as u64) * (clamped_h as u64) > MAX_CAPTURE_PIXELS as u64 {
+    while (clamped_w as u64) * (clamped_h as u64) > MAX_CAPTURE_PIXELS {
         if clamped_w >= clamped_h && clamped_w > 1 {
             clamped_w -= 1;
         } else if clamped_h > 1 {
@@ -61,16 +63,11 @@ pub fn clamp_capture_dimensions(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// The target image encoding for browser snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SnapshotFormat {
+    #[default]
     Png,
     Jpeg { quality: u8 },
-}
-
-impl Default for SnapshotFormat {
-    fn default() -> Self {
-        Self::Png
-    }
 }
 
 /// Options controlling the snapshot capture.
@@ -176,6 +173,9 @@ pub trait BrowserSnapshotSource: Send + Sync {
     }
 }
 
+type SnapshotSender = tokio::sync::oneshot::Sender<Result<BrowserSnapshot, IpcError>>;
+type PermitReleaser = Box<dyn FnOnce() + Send + 'static>;
+
 /// Thread-safe coordinator for native snapshot callbacks.
 ///
 /// Ensures:
@@ -185,12 +185,12 @@ pub trait BrowserSnapshotSource: Send + Sync {
 /// - Late callback quarantine: safely quarantine/discard late-arriving callbacks after timeout without leaking permits or corrupting state.
 #[derive(Clone)]
 pub struct SnapshotCallbackCoordinator {
-    sender: Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<BrowserSnapshot, IpcError>>>>>,
+    sender: Arc<Mutex<Option<SnapshotSender>>>,
     call_count: Arc<AtomicUsize>,
     timed_out: Arc<std::sync::atomic::AtomicBool>,
     quarantined: Arc<std::sync::atomic::AtomicBool>,
     late_arrivals: Arc<AtomicUsize>,
-    permit_releaser: Arc<Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>>,
+    permit_releaser: Arc<Mutex<Option<PermitReleaser>>>,
 }
 
 impl SnapshotCallbackCoordinator {
@@ -341,21 +341,30 @@ pub async fn await_coordinator_completion(
 #[cfg(feature = "desktop")]
 /// Production snapshot source backed by Tauri's AppHandle and webviews.
 pub struct TauriBrowserSnapshotSource<R: tauri::Runtime> {
+    #[cfg(target_os = "macos")]
     app: AppHandle<R>,
+    #[cfg(not(target_os = "macos"))]
+    _app: AppHandle<R>,
+    #[cfg(target_os = "macos")]
     timeout: Duration,
 }
 
 #[cfg(feature = "desktop")]
 impl<R: tauri::Runtime> TauriBrowserSnapshotSource<R> {
     pub fn new(app: AppHandle<R>) -> Self {
-        Self {
-            app,
-            timeout: Duration::from_secs(10),
-        }
+        Self::with_timeout(app, Duration::from_secs(10))
     }
 
     pub fn with_timeout(app: AppHandle<R>, timeout: Duration) -> Self {
-        Self { app, timeout }
+        #[cfg(target_os = "macos")]
+        {
+            Self { app, timeout }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = timeout;
+            Self { _app: app }
+        }
     }
 }
 
@@ -514,6 +523,10 @@ pub async fn capture_webview_snapshot_with_coordinator<R: tauri::Runtime>(
 
 /// Parses the AppKit / WebKit snapshot completion objects strictly on the main thread.
 /// Objective-C objects never leave this function; only Rust `Vec<u8>` is returned.
+///
+/// # Safety
+/// Call on the AppKit main thread. Non-null `image` and `error` pointers must name
+/// live NSImage and NSError objects, respectively, for the duration of this call.
 #[cfg(target_os = "macos")]
 pub unsafe fn parse_native_snapshot_result(
     image: *mut AnyObject,

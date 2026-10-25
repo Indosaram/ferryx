@@ -1,7 +1,5 @@
 use super::machine_input_probe::Observation;
-#[path = "machine_input_fixture.rs"]
-mod fixture;
-use fixture::{Fixture, Held, DEADLINE};
+use super::machine_input_fixture::{Fixture, Held, DEADLINE};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 

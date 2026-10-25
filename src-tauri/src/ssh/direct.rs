@@ -541,6 +541,7 @@ async fn collect_finite_output(
     }
 }
 
+#[cfg(test)]
 async fn collect_output(
     child: tokio::process::Child,
     deadline: Duration,
@@ -731,6 +732,7 @@ async fn collect_windows_output(
     }
 }
 
+#[cfg(windows)]
 fn timeout_error_with_stderr(stderr: &[u8]) -> IpcError {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let text = std::str::from_utf8(stderr).ok();
@@ -743,6 +745,7 @@ fn timeout_error_with_stderr(stderr: &[u8]) -> IpcError {
         }))
 }
 
+#[cfg(windows)]
 fn ssh_status_error(status: std::process::ExitStatus, stderr: &[u8]) -> IpcError {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let text = std::str::from_utf8(stderr).ok();

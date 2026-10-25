@@ -181,7 +181,7 @@ mod tests {
         attach_opaque_session, load_or_generate_client_attach_identity,
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
 
     #[tokio::test]
     async fn a_lan_attach_reaches_the_local_gateway_decrypted() {
@@ -215,7 +215,7 @@ mod tests {
 
         let deps = Arc::new(AttachRouterDeps {
             gateway_addr: gateway_addr.clone(),
-            authorize: Arc::new(move |key| key == &client_public),
+            authorize: Arc::new(move |key| key == client_public),
         });
         let app = attach_router(deps);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -237,7 +237,6 @@ mod tests {
         .await
         .expect("direct attach handshake");
 
-        use tokio::io::AsyncWriteExt as _;
         secure.send_frame(b"sentinel").await.expect("send sentinel");
 
         let seen = tokio::time::timeout(std::time::Duration::from_secs(5), gateway_seen)

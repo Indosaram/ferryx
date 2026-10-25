@@ -709,9 +709,13 @@ static DROP_UPLOAD_STORE: parking_lot::Mutex<
     Option<std::collections::HashMap<(std::path::PathBuf, String), DropUploadPending>>,
 > = parking_lot::Mutex::new(None);
 
+pub struct PasteUploadDestination<'a> {
+    pub dir: &'a std::path::Path,
+    pub upload_id: &'a str,
+}
+
 pub fn save_paste_chunk_v2_in_dir(
-    dir: &std::path::Path,
-    upload_id: &str,
+    destination: PasteUploadDestination<'_>,
     file_name: &str,
     chunk_index: u32,
     total_chunks: u32,
@@ -719,6 +723,7 @@ pub fn save_paste_chunk_v2_in_dir(
     total_bytes: u64,
     data: &[u8],
 ) -> Result<Option<std::path::PathBuf>, IpcError> {
+    let PasteUploadDestination { dir, upload_id } = destination;
     validate_drop_file_name(file_name)?;
     validate_upload_id(upload_id)?;
 
@@ -776,6 +781,7 @@ pub fn save_paste_chunk_v2_in_dir(
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&staging_path)
             .map_err(|e| IpcError::internal(format!("Failed to open staging file: {e}")))?;
@@ -874,8 +880,7 @@ pub fn save_paste_chunk_v2(
 ) -> Result<Option<std::path::PathBuf>, IpcError> {
     let dir = default_paste_dir();
     save_paste_chunk_v2_in_dir(
-        &dir,
-        upload_id,
+        PasteUploadDestination { dir: &dir, upload_id },
         file_name,
         chunk_index,
         total_chunks,
@@ -1282,8 +1287,7 @@ mod tests {
 
         // Deliver part 2 first
         let res = save_paste_chunk_v2_in_dir(
-            &dir,
-            upload_id,
+            PasteUploadDestination { dir: &dir, upload_id },
             file_name,
             1,
             3,
@@ -1296,8 +1300,7 @@ mod tests {
 
         // Deliver part 3 next
         let res = save_paste_chunk_v2_in_dir(
-            &dir,
-            upload_id,
+            PasteUploadDestination { dir: &dir, upload_id },
             file_name,
             2,
             3,
@@ -1310,8 +1313,7 @@ mod tests {
 
         // Deliver duplicate part 2 — idempotent write
         let res = save_paste_chunk_v2_in_dir(
-            &dir,
-            upload_id,
+            PasteUploadDestination { dir: &dir, upload_id },
             file_name,
             1,
             3,
@@ -1324,8 +1326,7 @@ mod tests {
 
         // Deliver part 1 — completes
         let res = save_paste_chunk_v2_in_dir(
-            &dir,
-            upload_id,
+            PasteUploadDestination { dir: &dir, upload_id },
             file_name,
             0,
             3,
@@ -1341,8 +1342,7 @@ mod tests {
 
         // Re-requesting after finalization returns the existing path idempotently
         let res_after = save_paste_chunk_v2_in_dir(
-            &dir,
-            upload_id,
+            PasteUploadDestination { dir: &dir, upload_id },
             file_name,
             0,
             3,
@@ -1362,13 +1362,13 @@ mod tests {
 
         // Exceeds 30MB
         let too_large = (MAX_REMOTE_DROP_FILE_BYTES + 1) as u64;
-        let err = save_paste_chunk_v2_in_dir(&dir, upload_id, "large.bin", 0, 1, 0, too_large, b"x");
+        let err = save_paste_chunk_v2_in_dir(PasteUploadDestination { dir: &dir, upload_id }, "large.bin", 0, 1, 0, too_large, b"x");
         assert!(err.is_err());
 
         // Inconsistent metadata across chunks for same upload_id
-        let res1 = save_paste_chunk_v2_in_dir(&dir, upload_id, "name1.txt", 0, 2, 0, 10, b"hello");
+        let res1 = save_paste_chunk_v2_in_dir(PasteUploadDestination { dir: &dir, upload_id }, "name1.txt", 0, 2, 0, 10, b"hello");
         assert!(res1.is_ok());
-        let res2 = save_paste_chunk_v2_in_dir(&dir, upload_id, "name2.txt", 1, 2, 5, 10, b"world");
+        let res2 = save_paste_chunk_v2_in_dir(PasteUploadDestination { dir: &dir, upload_id }, "name2.txt", 1, 2, 5, 10, b"world");
         assert!(res2.is_err(), "mismatched file_name must be rejected");
     }
 

@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::daemon::protocol::{
-        clip_stage_budget, DaemonRequest, DaemonResponse, DaemonSessionDetails,
+        clip_stage_budget, DaemonResponse, DaemonSessionDetails,
         LocalSplitEnvelope, PaneAttachTuple, PanePresentationReceipt, PreparedLocalSplit,
-        SplitAttachAttempt, SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
-        SplitOperationRequest, SplitOperationResponse, SplitOperationResult, SplitOwnership,
+        SplitDelivery, SplitErrorDetails, SplitIdentity, SplitNoChild,
+        SplitOperationResult, SplitOwnership,
         SplitUnknownReason, ATTEMPT_TOTAL_BUDGET_MS, CANCEL_ACK_MAX_MS,
         DAEMON_CANCEL_CLEANUP_MAX_MS, LOCAL_SPLIT_LIFECYCLE_CAPABILITY, LOCAL_SPLIT_VALIDITY_MS,
         STAGE_ATTACH_OR_LISTENER_MAX_MS, STAGE_CREATE_OR_STATUS_MAX_MS, STAGE_CWD_PROBE_MAX_MS,
@@ -108,7 +108,7 @@ mod tests {
             SplitOperationResult::Created {
                 session_id: "pty-1".to_string(),
                 daemon_epoch: "42".to_string(),
-                session: details,
+                session: Box::new(details),
                 ownership: SplitOwnership::Created,
             },
             SplitOperationResult::Cancelled,

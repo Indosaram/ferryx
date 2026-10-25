@@ -688,176 +688,6 @@ pub async fn legacy(
         Err(_) => failure("TIMEOUT", &uuid::Uuid::new_v4().to_string()),
     }
 }
-#[cfg(test)]
-mod publication_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn plain_folder_listing_returns_project_root() {
-        let (root, server, workspace, path) = tokio::task::spawn_blocking(|| {
-            let root = tempfile::tempdir().unwrap();
-            let path = root.path().join("plain-folder");
-            std::fs::create_dir(&path).unwrap();
-            let server = crate::daemon::server::DaemonServer::new_with_paths(
-                Some(root.path().join("config")),
-                Some(root.path().join("auth")),
-            );
-            let workspace = server.remote_state().machine_services.as_ref().unwrap()
-                .workspaces.register_machine(path.to_str().unwrap()).unwrap();
-            let path = std::fs::canonicalize(path).unwrap();
-            (root, server, workspace, path)
-        }).await.unwrap();
-        let state = server.remote_state().clone();
-        let pin = state.auth_manager.create_scoped_pairing_code(
-            DevicePermission::Control, DeviceAccessScope::Machine,
-        ).unwrap();
-        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "folder-listing").unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-        let response = read(state.clone(), headers.clone(), Some(format!("workspaceId={workspace}")), false).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let listed = value["worktrees"].as_array().unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0]["workspaceId"], workspace);
-        assert_eq!(listed[0]["path"], path.to_str().unwrap());
-        assert_eq!(listed[0]["managed"], false);
-        assert!(listed[0]["identity"].is_null());
-        assert!(listed[0]["branch"].is_null());
-        assert_eq!(listed[0]["head"], "");
-        let repeated = read(state.clone(), headers, Some(format!("workspaceId={workspace}")), false).await;
-        assert_eq!(repeated.status(), StatusCode::OK);
-        let repeated = axum::body::to_bytes(repeated.into_body(), 65536).await.unwrap();
-        assert_eq!(body, repeated);
-        drop(state);
-        drop(server);
-        tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn cancelled_publication_preserves_unknown_after_git() {
-        for revoke in [false, true] {
-            let (root, server, workspace) = tokio::task::spawn_blocking(|| {
-                let root = tempfile::tempdir().unwrap();
-                let repo = root.path().join("repo");
-                std::fs::create_dir(&repo).unwrap();
-                crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
-                crate::worktree::run_git(
-                    &repo,
-                    &[
-                        "-c",
-                        "user.name=A08",
-                        "-c",
-                        "user.email=a08@example.invalid",
-                        "commit",
-                        "--allow-empty",
-                        "-m",
-                        "base",
-                    ],
-                )
-                .unwrap();
-                let server = crate::daemon::server::DaemonServer::new_with_paths(
-                    Some(root.path().join("config")),
-                    Some(root.path().join("auth")),
-                );
-                let workspace = server
-                    .remote_state()
-                    .machine_services
-                    .as_ref()
-                    .unwrap()
-                    .workspaces
-                    .register_machine(repo.to_str().unwrap())
-                    .unwrap();
-                (root, server, workspace)
-            })
-            .await
-            .unwrap();
-            let state = server.remote_state().clone();
-            let service = &state.machine_services.as_ref().unwrap().workspaces;
-            let pin = state
-                .auth_manager
-                .create_scoped_pairing_code(
-                    super::super::super::auth::DevicePermission::Control,
-                    super::super::super::auth::DeviceAccessScope::Machine,
-                )
-                .unwrap();
-            let (token, device) = state
-                .auth_manager
-                .exchange_pairing_code(&pin, "publication")
-                .unwrap();
-            let mut headers = HeaderMap::new();
-            headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
-            let revision = service.catalog().unwrap().revision;
-            let gate = service.mutation_gate.lock();
-            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-            let entered_tx = std::sync::Mutex::new(Some(entered_tx));
-            *service.transaction_probe.write() = Some(Arc::new(move |phase| {
-                if phase == "worktreePublication" {
-                    entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
-                }
-            }));
-            let request = uuid::Uuid::new_v4().to_string();
-            let payload = Bytes::from(serde_json::json!({"requestId":request,"workspaceId":workspace,"worktree":{"wsId":workspace,"slug":"fenced"}}).to_string());
-            let task = tokio::spawn(mutate_worktree(
-                state.clone(),
-                headers.clone(),
-                payload.clone(),
-                false,
-            ));
-            let entered = tokio::time::timeout(Duration::from_secs(10), entered_rx).await;
-            if revoke {
-                assert!(state.auth_manager.revoke_device(&device.id).unwrap());
-            } else {
-                task.abort();
-            }
-            let response = task.await;
-            drop(gate);
-            let slots = tokio::time::timeout(
-                Duration::from_secs(10),
-                service.project_mutations.clone().acquire_many_owned(8),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            *service.transaction_probe.write() = None;
-            let current = service.catalog().unwrap().revision;
-            let record = service
-                .journal
-                .reconcile(&device.id, &request)
-                .unwrap()
-                .unwrap();
-            let manager = service.worktree_manager(&workspace, false).unwrap();
-            let target = manager.worktree_path_for(&workspace, "fenced").unwrap();
-            let present = tokio::task::spawn_blocking(move || target.exists())
-                .await
-                .unwrap();
-            drop(slots);
-            // An identical request must replay unknown, not repeat completed Git.
-            if !revoke {
-                let replay = mutate_worktree(state.clone(), headers, payload, false).await;
-                assert_eq!(replay.status().as_u16(), 409);
-            }
-            drop(state);
-            drop(server);
-            tokio::task::spawn_blocking(move || root.close().unwrap())
-                .await
-                .unwrap();
-            assert!(entered.unwrap().is_ok());
-            if revoke {
-                assert_eq!(response.unwrap().status().as_u16(), 401);
-            } else {
-                assert!(response.unwrap_err().is_cancelled());
-            }
-            assert_eq!(current, revision);
-            assert!(present);
-            assert!(matches!(record.operation, Operation::OutcomeUnknown { .. }));
-            eprintln!("A08 publication revoke={revoke} git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true");
-        }
-    }
-}
 pub async fn mutate_worktree(
     state: Arc<RemoteGatewayState>,
     headers: HeaderMap,
@@ -937,7 +767,7 @@ pub async fn mutate_worktree(
                         .journal
                         .begin(&device, &request_id, kind, &digest, &resource)?
                 {
-                    return Ok(record);
+                    return Ok(*record);
                 }
                 let mut side_effect_started = false;
                 let outcome = (|| {
@@ -1138,4 +968,186 @@ pub async fn mutate_worktree(
         },
     )
     .await
+}
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn plain_folder_listing_returns_project_root() {
+        let (root, server, workspace, path) = tokio::task::spawn_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("plain-folder");
+            std::fs::create_dir(&path).unwrap();
+            let server = crate::daemon::server::DaemonServer::new_with_paths(
+                Some(root.path().join("config")),
+                Some(root.path().join("auth")),
+            );
+            let workspace = server.remote_state().machine_services.as_ref().unwrap()
+                .workspaces.register_machine(path.to_str().unwrap()).unwrap();
+            let path = std::fs::canonicalize(path).unwrap();
+            (root, server, workspace, path)
+        }).await.unwrap();
+        let state = server.remote_state().clone();
+        let pin = state.auth_manager.create_scoped_pairing_code(
+            DevicePermission::Control, DeviceAccessScope::Machine,
+        ).unwrap();
+        let (token, _) = state.auth_manager.exchange_pairing_code(&pin, "folder-listing").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+        let response = read(state.clone(), headers.clone(), Some(format!("workspaceId={workspace}")), false).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let listed = value["worktrees"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["workspaceId"], workspace);
+        assert_eq!(listed[0]["path"], path.to_str().unwrap());
+        assert_eq!(listed[0]["managed"], false);
+        assert!(listed[0]["identity"].is_null());
+        assert!(listed[0]["branch"].is_null());
+        assert_eq!(listed[0]["head"], "");
+        let repeated = read(state.clone(), headers, Some(format!("workspaceId={workspace}")), false).await;
+        assert_eq!(repeated.status(), StatusCode::OK);
+        let repeated = axum::body::to_bytes(repeated.into_body(), 65536).await.unwrap();
+        assert_eq!(body, repeated);
+        drop(state);
+        drop(server);
+        tokio::task::spawn_blocking(move || root.close().unwrap()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_publication_preserves_unknown_after_git() {
+        for revoke in [false, true] {
+            let (root, server, workspace) = tokio::task::spawn_blocking(|| {
+                let root = tempfile::tempdir().unwrap();
+                let repo = root.path().join("repo");
+                std::fs::create_dir(&repo).unwrap();
+                crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+                crate::worktree::run_git(
+                    &repo,
+                    &[
+                        "-c",
+                        "user.name=A08",
+                        "-c",
+                        "user.email=a08@example.invalid",
+                        "commit",
+                        "--allow-empty",
+                        "-m",
+                        "base",
+                    ],
+                )
+                .unwrap();
+                let server = crate::daemon::server::DaemonServer::new_with_paths(
+                    Some(root.path().join("config")),
+                    Some(root.path().join("auth")),
+                );
+                let workspace = server
+                    .remote_state()
+                    .machine_services
+                    .as_ref()
+                    .unwrap()
+                    .workspaces
+                    .register_machine(repo.to_str().unwrap())
+                    .unwrap();
+                (root, server, workspace)
+            })
+            .await
+            .unwrap();
+            let state = server.remote_state().clone();
+            let service = &state.machine_services.as_ref().unwrap().workspaces;
+            let pin = state
+                .auth_manager
+                .create_scoped_pairing_code(
+                    super::super::super::auth::DevicePermission::Control,
+                    super::super::super::auth::DeviceAccessScope::Machine,
+                )
+                .unwrap();
+            let (token, device) = state
+                .auth_manager
+                .exchange_pairing_code(&pin, "publication")
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+            let revision = service.catalog().unwrap().revision;
+            let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let gate_service = service.clone();
+            let gate_task = tokio::task::spawn_blocking(move || {
+                let _gate = gate_service.mutation_gate.lock();
+                locked_tx.send(()).unwrap();
+                let _ = release_rx.blocking_recv();
+            });
+            tokio::time::timeout(Duration::from_secs(10), locked_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let entered_tx = std::sync::Mutex::new(Some(entered_tx));
+            *service.transaction_probe.write() = Some(Arc::new(move |phase| {
+                if phase == "worktreePublication" {
+                    entered_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                }
+            }));
+            let request = uuid::Uuid::new_v4().to_string();
+            let payload = Bytes::from(serde_json::json!({"requestId":request,"workspaceId":workspace,"worktree":{"wsId":workspace,"slug":"fenced"}}).to_string());
+            let task = tokio::spawn(mutate_worktree(
+                state.clone(),
+                headers.clone(),
+                payload.clone(),
+                false,
+            ));
+            let entered = tokio::time::timeout(Duration::from_secs(10), entered_rx).await;
+            if revoke {
+                assert!(state.auth_manager.revoke_device(&device.id).unwrap());
+            } else {
+                task.abort();
+            }
+            let response = task.await;
+            release_tx.send(()).unwrap();
+            gate_task.await.unwrap();
+            let slots = tokio::time::timeout(
+                Duration::from_secs(10),
+                service.project_mutations.clone().acquire_many_owned(8),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            *service.transaction_probe.write() = None;
+            let current = service.catalog().unwrap().revision;
+            let record = service
+                .journal
+                .reconcile(&device.id, &request)
+                .unwrap()
+                .unwrap();
+            let manager = service.worktree_manager(&workspace, false).unwrap();
+            let target = manager.worktree_path_for(&workspace, "fenced").unwrap();
+            let present = tokio::task::spawn_blocking(move || target.exists())
+                .await
+                .unwrap();
+            drop(slots);
+            // An identical request must replay unknown, not repeat completed Git.
+            if !revoke {
+                let replay = mutate_worktree(state.clone(), headers, payload, false).await;
+                assert_eq!(replay.status().as_u16(), 409);
+            }
+            drop(state);
+            drop(server);
+            tokio::task::spawn_blocking(move || root.close().unwrap())
+                .await
+                .unwrap();
+            assert!(entered.unwrap().is_ok());
+            if revoke {
+                assert_eq!(response.unwrap().status().as_u16(), 401);
+            } else {
+                assert!(response.unwrap_err().is_cancelled());
+            }
+            assert_eq!(current, revision);
+            assert!(present);
+            assert!(matches!(record.operation, Operation::OutcomeUnknown { .. }));
+            eprintln!("A08 publication revoke={revoke} git_target_exists=true catalog_unchanged=true outcome_unknown=true workers_drained=true private_root_removed=true");
+        }
+    }
 }

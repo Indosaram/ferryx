@@ -49,6 +49,21 @@ pub struct HistoryRange {
     pub end: usize,
 }
 
+pub type SegmentedHistory = (
+    Vec<u8>,
+    Vec<HistorySegment>,
+    Option<u64>,
+    Option<u64>,
+    Option<ReplayGap>,
+);
+pub(crate) type RangedHistory = (
+    Vec<u8>,
+    Vec<HistoryRange>,
+    Option<u64>,
+    Option<u64>,
+    Option<ReplayGap>,
+);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputChunk {
     pub sequence: u64,
@@ -453,26 +468,11 @@ impl BoundedBuffer {
         (history, start, end, gap)
     }
 
-    pub(crate) fn snapshot_after_ring(
-        &self,
-        after_sequence: Option<u64>,
-    ) -> (Vec<u8>, Option<u64>, Option<u64>, Option<ReplayGap>) {
-        let (history, _, start, end, gap) =
-            self.snapshot_after_ranges_impl(after_sequence, &[], false);
-        (history, start, end, gap)
-    }
-
     pub fn snapshot_after_segmented(
         &self,
         after_sequence: Option<u64>,
         ledger: &[ResizePoint],
-    ) -> (
-        Vec<u8>,
-        Vec<HistorySegment>,
-        Option<u64>,
-        Option<u64>,
-        Option<ReplayGap>,
-    ) {
+    ) -> SegmentedHistory {
         let (history, ranges, start, end, gap) = if after_sequence.is_none() {
             self.snapshot_after_ranges_retained(after_sequence, ledger)
         } else {
@@ -490,7 +490,7 @@ impl BoundedBuffer {
         &self,
         after_sequence: Option<u64>,
         ledger: &[ResizePoint],
-    ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+    ) -> RangedHistory {
         self.snapshot_after_ranges_impl(after_sequence, ledger, true)
     }
 
@@ -498,7 +498,7 @@ impl BoundedBuffer {
         &self,
         after_sequence: Option<u64>,
         ledger: &[ResizePoint],
-    ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+    ) -> RangedHistory {
         self.snapshot_after_ranges_impl(after_sequence, ledger, true)
     }
 
@@ -507,7 +507,7 @@ impl BoundedBuffer {
         after_sequence: Option<u64>,
         ledger: &[ResizePoint],
         from_retained: bool,
-    ) -> (Vec<u8>, Vec<HistoryRange>, Option<u64>, Option<u64>, Option<ReplayGap>) {
+    ) -> RangedHistory {
         let first = if from_retained {
             self.retained_start_sequence()
         } else {
@@ -516,12 +516,7 @@ impl BoundedBuffer {
         let last = self.end_sequence();
         let gap = after_sequence.and_then(|requested| {
             if let Some(first) = first {
-                if requested < first.saturating_sub(1) {
-                    Some(ReplayGap {
-                        requested_after_sequence: requested,
-                        available_from_sequence: first,
-                    })
-                } else if requested > last.unwrap_or(0) {
+                if requested < first.saturating_sub(1) || requested > last.unwrap_or(0) {
                     Some(ReplayGap {
                         requested_after_sequence: requested,
                         available_from_sequence: first,
@@ -740,7 +735,7 @@ pub mod vt_state;
 pub mod vt_stream;
 
 pub struct SessionHub {
-    pub(crate) machine_senders: Vec<machine_output::MachineSender>,
+    machine_senders: Vec<machine_output::MachineSender>,
     pub(crate) buffer: BoundedBuffer,
     pub(crate) sender: broadcast::Sender<OutputChunk>,
     pub(crate) raw_sender: broadcast::Sender<Vec<u8>>,
@@ -1033,7 +1028,7 @@ impl TerminalOutputHub {
         Some((history, rx))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn observe_for_test(
         &self,
         session_id: &str,

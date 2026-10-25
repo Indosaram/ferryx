@@ -88,13 +88,13 @@ mod tailscale_sync_tests {
         let p = peer("node-a", true);
         let alias = host("cfg-box", &p.hostname, crate::ssh::SshHostSource::Config);
         let mut store = SshHostStore { hosts: vec![alias.clone()], tombstones: Vec::new() };
-        merge_tailscale_peers(&mut store, &[p.clone()], &[alias.clone()]);
+        merge_tailscale_peers(&mut store, std::slice::from_ref(&p), std::slice::from_ref(&alias));
         assert_eq!(store.hosts, vec![alias.clone()]);
         let mut deleted = SshHostStore { hosts: Vec::new(), tombstones: vec![format!("tailscale-host:{}", p.hostname)] };
-        merge_tailscale_peers(&mut deleted, &[p.clone()], &[alias.clone()]);
+        merge_tailscale_peers(&mut deleted, std::slice::from_ref(&p), std::slice::from_ref(&alias));
         assert!(deleted.hosts.is_empty());
         let mut imported = SshHostStore::default();
-        merge_tailscale_peers(&mut imported, &[p.clone()], &[alias]);
+        merge_tailscale_peers(&mut imported, std::slice::from_ref(&p), &[alias]);
         assert_eq!(imported.hosts[0].id, "tailscale:node-a");
         assert_eq!(imported.hosts[0].username.as_deref(), Some("alice"));
         imported.hosts[0].label = "Custom label".into();
@@ -442,10 +442,8 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
             if !store.tombstones.contains(&discovery_key) {
                 store.tombstones.push(discovery_key);
             }
-            if removed.id.starts_with("tailscale:") {
-                if !store.tombstones.contains(&removed.id) {
-                    store.tombstones.push(removed.id.clone());
-                }
+            if removed.id.starts_with("tailscale:") && !store.tombstones.contains(&removed.id) {
+                store.tombstones.push(removed.id.clone());
             }
             if removed.source == crate::ssh::SshHostSource::Config {
                 let key = removed.key();
@@ -1007,12 +1005,12 @@ pub async fn cmd_ssh_sync_tailscale<R: Runtime>(app: AppHandle<R>) -> Result<Ssh
     match crate::remote::discovery::tailscale::TailscaleDiscoveryProvider::new().discover_ssh_peers_async().await {
         Err(crate::remote::discovery::tailscale::TailscaleDiscoveryError::Timeout) => {
             let hosts = run_blocking(move || Ok(load_store(&path)?.hosts)).await?;
-            return Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(IpcErrorCode::Timeout, "Tailscale status discovery timed out").with_details(serde_json::json!({"stage":"discovery"}))) });
+            Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(IpcErrorCode::Timeout, "Tailscale status discovery timed out").with_details(serde_json::json!({"stage":"discovery"}))) })
         }
         Err(error) => {
             let hosts = run_blocking(move || Ok(load_store(&path)?.hosts)).await?;
             let (code, stage) = match &error { crate::remote::discovery::tailscale::TailscaleDiscoveryError::Command(_) => (IpcErrorCode::CliExecutableNotFound, "command"), crate::remote::discovery::tailscale::TailscaleDiscoveryError::Parse(_) => (IpcErrorCode::InvalidRequest, "parse"), crate::remote::discovery::tailscale::TailscaleDiscoveryError::Timeout => unreachable!() };
-            return Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(code, error.to_string()).with_details(serde_json::json!({"stage":stage}))) });
+            Ok(SshTailscaleSyncResult { hosts, targets: Vec::new(), discovery_error: Some(IpcError::new(code, error.to_string()).with_details(serde_json::json!({"stage":stage}))) })
         }
         Ok(peers) => sync_tailscale_peers(path, peers).await,
     }
@@ -1156,7 +1154,7 @@ fn tailnet_host_matches(host: &SshHost, peer: &crate::remote::discovery::tailsca
     if direct.iter().flatten().any(|name| host.hostname.eq_ignore_ascii_case(name)) { return true; }
     let Some(dns) = peer.dns_name.as_deref() else { return false; };
     let short_dns = dns.split('.').next().unwrap_or(dns);
-    !host.hostname.parse::<std::net::Ipv4Addr>().is_ok()
+    host.hostname.parse::<std::net::Ipv4Addr>().is_err()
         && !host.hostname.contains('.')
         && host.hostname.eq_ignore_ascii_case(short_dns)
 }

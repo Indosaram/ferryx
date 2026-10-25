@@ -12,16 +12,8 @@ use std::{
 
 use crate::scoped_contracts::{Epoch, TargetRef};
 
-#[path = "../../dag/paths.rs"]
-mod dag_paths;
-
-/// Shared worktree naming; the standalone helper uses only part of it.
-#[path = "../../worktree/naming.rs"]
-#[allow(dead_code)]
-mod worktree_naming;
-
-#[path = "../../dag/journal.rs"]
-pub mod dag_journal;
+use crate::worktree_naming;
+pub use crate::dag_journal;
 
 #[path = "dag_stream.rs"]
 pub mod dag_stream;
@@ -131,6 +123,9 @@ impl<'a> Drop for SpawnReservationGuard<'a> {
     }
 }
 
+#[cfg(test)]
+type SpawnHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct Runtime {
     root: PathBuf,
     host: String,
@@ -144,7 +139,7 @@ pub struct Runtime {
     dag_streams: dag_stream::DagStreams,
     pub(crate) agent_state: Option<Arc<agent_state::AgentStateServer>>,
     #[cfg(test)]
-    spawn_hook: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+    spawn_hook: Mutex<Option<SpawnHook>>,
 }
 
 impl Runtime {
@@ -153,7 +148,7 @@ impl Runtime {
     }
 
     #[cfg(test)]
-    pub fn set_spawn_hook(&self, hook: Option<Arc<dyn Fn(&str) + Send + Sync>>) {
+    pub fn set_spawn_hook(&self, hook: Option<SpawnHook>) {
         *self.spawn_hook.lock().unwrap() = hook;
     }
 
@@ -346,7 +341,7 @@ impl Runtime {
                     projects.get(project_id).cloned()
                 };
                 let root = root.ok_or_else(|| "NOT_FOUND".to_string())?;
-                let runs_dir = dag_paths::resolve_dag_runs_dir(&root);
+                let runs_dir = dag_journal::resolve_dag_runs_dir(&root);
                 let mut frame = self.dag_streams.subscribe(runs_dir, connection)?;
                 frame["projectId"] = json!(project_id);
                 Ok(frame)
@@ -367,7 +362,7 @@ impl Runtime {
                     projects.get(project_id).cloned()
                 };
                 let root = root.ok_or_else(|| "NOT_FOUND".to_string())?;
-                let runs_dir = dag_paths::resolve_dag_runs_dir(&root);
+                let runs_dir = dag_journal::resolve_dag_runs_dir(&root);
                 let mut runs = Vec::new();
                 if let Ok(entries) = std::fs::read_dir(&runs_dir) {
                     for entry in entries.flatten() {
@@ -395,7 +390,7 @@ impl Runtime {
                     projects.get(project_id).cloned()
                 };
                 let root = root.ok_or_else(|| "NOT_FOUND".to_string())?;
-                let runs_dir = dag_paths::resolve_dag_runs_dir(&root);
+                let runs_dir = dag_journal::resolve_dag_runs_dir(&root);
                 let mut runs = Vec::new();
                 let mut max_mtime = after_mtime_ms;
                 if let Ok(entries) = std::fs::read_dir(&runs_dir) {

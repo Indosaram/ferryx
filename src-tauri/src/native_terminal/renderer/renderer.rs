@@ -6,7 +6,10 @@ use super::atlas::GlyphAtlas;
 use super::gpu_context::GpuContext;
 use super::images::{image_background_occluders, ImageTextures};
 use super::instances::prepare_visible_glyphs;
-use super::pass::encode_terminal_passes_with_surface_options;
+use super::pass::{
+    encode_terminal_passes_with_surface_options, TerminalPassOptions, TerminalPassResources,
+    TerminalPassTarget,
+};
 use super::pipeline::{GlyphInstance, RectInstance, RenderPipelines, ScreenUniform};
 use super::render_target::{RenderTarget, TARGET_FORMAT};
 use super::row_cache::RowCacheManager;
@@ -18,6 +21,24 @@ use crate::native_terminal::scroll::{
     ATTENTION_FRAME_THICKNESS_LOGICAL_PX,
 };
 use crate::native_terminal::snapshot::RenderSnapshot;
+
+pub struct SurfaceViewportOptions<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub width: u32,
+    pub height: u32,
+    pub format: wgpu::TextureFormat,
+    pub viewport: PhysicalBounds,
+    pub scrollbar_overlay: Option<&'a ScrollbarOverlayState>,
+    pub attention_frame: bool,
+}
+
+pub struct OffscreenViewportOptions<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub viewport: PhysicalBounds,
+    pub scrollbar_overlay: Option<&'a ScrollbarOverlayState>,
+    pub attention_frame: bool,
+}
 
 pub struct NativeTerminalRenderer {
     config: RendererConfig,
@@ -35,6 +56,607 @@ pub struct NativeTerminalRenderer {
     fail_rebuild_after: Option<usize>,
     // Keep the instance owner alive until all renderer GPU resources have dropped.
     gpu: GpuContext,
+}
+
+impl NativeTerminalRenderer {
+    pub fn new(config: RendererConfig) -> Result<Self, NativeTerminalError> {
+        config.validate()?;
+
+        let gpu = GpuContext::new()?;
+        Self::with_gpu(config, gpu)
+    }
+
+    pub(crate) fn with_shared_surface_gpu(
+        config: RendererConfig,
+    ) -> Result<Self, NativeTerminalError> {
+        config.validate()?;
+        Self::with_gpu(config, GpuContext::shared_surface_context()?)
+    }
+
+    fn with_gpu(config: RendererConfig, gpu: GpuContext) -> Result<Self, NativeTerminalError> {
+        let pipelines = RenderPipelines::new(&gpu.device);
+        let atlas = GlyphAtlas::new(&gpu.device);
+
+        let uniform_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Screen Uniform Buffer"),
+                contents: bytemuck::bytes_of(&ScreenUniform {
+                    screen_size: [1.0, 1.0],
+                    _pad: [0.0, 0.0],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let uniform_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Uniform Bind Group"),
+            layout: &pipelines.uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let atlas_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Atlas Bind Group"),
+            layout: &pipelines.atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas.mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas.color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&atlas.sampler),
+                },
+            ],
+        });
+
+        Ok(Self {
+            config,
+            gpu,
+            pipelines,
+            atlas,
+            target: None,
+            uniform_buffer,
+            uniform_bind_group,
+            atlas_bind_group,
+            row_cache: RowCacheManager::new(),
+            image_textures: ImageTextures::default(),
+            #[cfg(test)]
+            preparation_attempts: 0,
+            #[cfg(test)]
+            fail_rebuild_after: None,
+        })
+    }
+
+    /// No caller may encode or submit until this returns a complete set of rows.
+    fn prepare_frame_instances(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+    ) -> Result<(Vec<RectInstance>, Vec<GlyphInstance>, u16, u16), NativeTerminalError> {
+        #[cfg(test)]
+        {
+            self.preparation_attempts = 1;
+        }
+        match self.row_cache.update_and_flatten(
+            snapshot,
+            selection,
+            &self.config,
+            &mut self.atlas,
+            &self.gpu.queue,
+            None,
+        ) {
+            Ok(instances) => return Ok(instances),
+            Err(NativeTerminalError::LimitExceeded) => {}
+            Err(error) => return Err(error),
+        }
+
+        // Only pressure pays for a row-major first-occurrence raster sequence.
+        // Fit and the one permitted rebuild use the SAME dimensions and empties.
+        let prepared = prepare_visible_glyphs(snapshot, &self.config);
+        let dimension =
+            prepared.fitting_dimension(self.atlas.dimension, self.atlas.max_dimension)?;
+        let grew = dimension != self.atlas.dimension;
+        self.atlas.reset_for_rebuild(&self.gpu.device, dimension);
+        if grew {
+            self.atlas_bind_group = self
+                .gpu
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Atlas Bind Group"),
+                    layout: &self.pipelines.atlas_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.atlas.mask_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.atlas.color_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.atlas.sampler),
+                        },
+                    ],
+                });
+        }
+        #[cfg(test)]
+        {
+            self.preparation_attempts = 2;
+            self.atlas.fail_after_insertions = self.fail_rebuild_after;
+        }
+        // The row cache invalidates ALL partial rows on every error. In particular,
+        // a second Full remains LimitExceeded: no encode, partial success or third try.
+        self.row_cache.update_and_flatten(
+            snapshot,
+            selection,
+            &self.config,
+            &mut self.atlas,
+            &self.gpu.queue,
+            Some(&prepared),
+        )
+    }
+
+    /// Returns a reference to the active renderer configuration.
+    pub fn config(&self) -> &RendererConfig {
+        &self.config
+    }
+
+    /// Safely updates renderer configuration and invalidates atlas/cache on dimension/scale change.
+    pub fn update_config(&mut self, config: RendererConfig) -> Result<(), NativeTerminalError> {
+        config.validate()?;
+        if self.config != config {
+            self.config = config;
+            self.atlas.clear();
+            self.target = None;
+        }
+        Ok(())
+    }
+
+    /// Provides access to the underlying WGPU adapter metadata.
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.gpu.adapter_info
+    }
+
+    /// Creates a native render surface using the renderer's WGPU instance.
+    pub fn create_surface<'a>(
+        &self,
+        target: impl Into<wgpu::SurfaceTarget<'a>>,
+    ) -> Result<wgpu::Surface<'a>, NativeTerminalError> {
+        self.gpu.create_surface(target)
+    }
+
+    /// Configures a native surface with matching device capabilities and returns its format.
+    pub fn configure_surface(
+        &self,
+        surface: &wgpu::Surface,
+        width: u32,
+        height: u32,
+    ) -> Result<wgpu::TextureFormat, NativeTerminalError> {
+        self.gpu.configure_surface(surface, width, height)
+    }
+
+    /// Presents a surface texture using the GPU queue.
+    pub fn present(&self, frame: wgpu::SurfaceTexture) {
+        self.gpu.queue.present(frame);
+    }
+
+    pub fn render_snapshot(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+    ) -> Result<OffscreenFrame, NativeTerminalError> {
+        let (width_px, height_px) = self.validate_and_dims(snapshot)?;
+        let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
+        let images = self.image_textures.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &self.pipelines,
+            snapshot,
+            &self.config,
+            [0.0; 2],
+        )?;
+        let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
+
+        if self
+            .target
+            .as_ref()
+            .is_none_or(|t| t.width != width_px || t.height != height_px)
+        {
+            self.target = Some(RenderTarget::new(&self.gpu.device, width_px, height_px));
+        }
+        let target = self
+            .target
+            .as_ref()
+            .ok_or_else(|| NativeTerminalError::GpuBufferError("Target missing".into()))?;
+
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Offscreen Encoder"),
+            });
+
+        let clear_color = wgpu::Color {
+            r: self.config.theme.background[0] as f64,
+            g: self.config.theme.background[1] as f64,
+            b: self.config.theme.background[2] as f64,
+            a: self.config.theme.background[3] as f64,
+        };
+
+        encode_terminal_passes_with_surface_options(
+            TerminalPassResources {
+                device: &self.gpu.device,
+                queue: &self.gpu.queue,
+                pipelines: &self.pipelines,
+                uniform_buf: &self.uniform_buffer,
+                uniform_bg: &self.uniform_bind_group,
+                atlas_bg: &self.atlas_bind_group,
+            },
+            &mut encoder,
+            TerminalPassTarget {
+                view: &target.view,
+                format: TARGET_FORMAT,
+                width: width_px,
+                height: height_px,
+            },
+            &bg,
+            &glyph,
+            TerminalPassOptions {
+                clear_color,
+                scissor: None,
+                overlay: &[],
+                images: &images,
+                image_occluders: &occluders,
+            },
+        );
+        target.copy_to_staging(&mut encoder);
+        self.gpu.queue.submit(Some(encoder.finish()));
+
+        self.gpu.check_error()?;
+        let mut frame = target.readback_frame(&self.gpu.device, snapshot.rows)?;
+        self.gpu.check_error()?;
+
+        frame.rebuilt_row_count = rebuilt;
+        frame.reused_row_count = reused;
+        Ok(frame)
+    }
+
+    /// Renders snapshot passes directly into an external GPU TextureView (e.g. swapchain surface).
+    pub fn render_to_surface_view(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        view: &wgpu::TextureView,
+        width_px: u32,
+        height_px: u32,
+        format: wgpu::TextureFormat,
+    ) -> Result<(u16, u16), NativeTerminalError> {
+        let (_, _) = self.validate_and_dims(snapshot)?;
+        let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
+        let images = self.image_textures.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &self.pipelines,
+            snapshot,
+            &self.config,
+            [0.0; 2],
+        )?;
+        let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
+
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Surface Encoder"),
+            });
+
+        let clear_color = wgpu::Color {
+            r: self.config.theme.background[0] as f64,
+            g: self.config.theme.background[1] as f64,
+            b: self.config.theme.background[2] as f64,
+            a: self.config.theme.background[3] as f64,
+        };
+
+        encode_terminal_passes_with_surface_options(
+            TerminalPassResources {
+                device: &self.gpu.device,
+                queue: &self.gpu.queue,
+                pipelines: &self.pipelines,
+                uniform_buf: &self.uniform_buffer,
+                uniform_bg: &self.uniform_bind_group,
+                atlas_bg: &self.atlas_bind_group,
+            },
+            &mut encoder,
+            TerminalPassTarget {
+                view,
+                format,
+                width: width_px,
+                height: height_px,
+            },
+            &bg,
+            &glyph,
+            TerminalPassOptions {
+                clear_color,
+                scissor: None,
+                overlay: &[],
+                images: &images,
+                image_occluders: &occluders,
+            },
+        );
+        self.gpu.queue.submit(Some(encoder.finish()));
+        self.gpu.check_error()?;
+
+        Ok((rebuilt, reused))
+    }
+
+    pub fn render_to_surface_viewport(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        options: SurfaceViewportOptions<'_>,
+    ) -> Result<(u16, u16), NativeTerminalError> {
+        self.render_to_surface_viewport_internal(
+            snapshot,
+            selection,
+            options,
+            false,
+        )
+    }
+
+    fn render_to_surface_viewport_internal(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        options: SurfaceViewportOptions<'_>,
+        include_bottom_band: bool,
+    ) -> Result<(u16, u16), NativeTerminalError> {
+        let SurfaceViewportOptions {
+            view,
+            width: surface_width_px,
+            height: surface_height_px,
+            format,
+            viewport,
+            scrollbar_overlay,
+            attention_frame,
+        } = options;
+        let (terminal_width_px, terminal_height_px) = self.validate_and_dims(snapshot)?;
+        let right = viewport
+            .x
+            .checked_add(viewport.width)
+            .ok_or(NativeTerminalError::LimitExceeded)?;
+        let bottom = viewport
+            .y
+            .checked_add(viewport.height)
+            .ok_or(NativeTerminalError::LimitExceeded)?;
+        if viewport.width < terminal_width_px
+            || viewport.height < terminal_height_px
+            || right > surface_width_px
+            || bottom > surface_height_px
+        {
+            return Err(NativeTerminalError::InvalidValue(
+                "Native terminal viewport is outside the configured surface".into(),
+            ));
+        }
+
+        let (bg, mut glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
+        let images = self.image_textures.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &self.pipelines,
+            snapshot,
+            &self.config,
+            [viewport.x as f32, viewport.y as f32],
+        )?;
+        let mut occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
+        for rect in &mut occluders {
+            rect.rect[0] += viewport.x as f32;
+            rect.rect[1] += viewport.y as f32;
+        }
+
+        let default_bg_color = self.config.theme.background;
+        let mut final_bg = Vec::with_capacity(bg.len() + 1);
+        // Base viewport rectangle ensuring 100% native child view coverage including any residual gutter
+        final_bg.push(RectInstance {
+            rect: [
+                viewport.x as f32,
+                viewport.y as f32,
+                viewport.width as f32,
+                viewport.height as f32,
+            ],
+            color: default_bg_color,
+        });
+
+        for mut instance in bg {
+            instance.rect[0] += viewport.x as f32;
+            instance.rect[1] += viewport.y as f32;
+            final_bg.push(instance);
+        }
+        for instance in &mut glyph {
+            instance.rect[0] += viewport.x as f32;
+            instance.rect[1] += viewport.y as f32;
+        }
+
+        let mut overlay_instances = Vec::new();
+        if let Some(overlay) = scrollbar_overlay {
+            if overlay.visible {
+                if let Some(metrics) = overlay.metrics {
+                    if let Some(rect) = compute_scrollbar_overlay_rect(
+                        viewport,
+                        metrics.total,
+                        metrics.offset,
+                        metrics.len,
+                        self.config.theme.foreground,
+                    ) {
+                        overlay_instances.push(rect);
+                    }
+                }
+            }
+        }
+        if attention_frame {
+            let thickness = ATTENTION_FRAME_THICKNESS_LOGICAL_PX * self.config.device_scale_factor;
+            overlay_instances.extend(compute_attention_frame_rects(
+                viewport,
+                thickness,
+                include_bottom_band,
+            ));
+        }
+
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Native Terminal Surface Encoder"),
+            });
+        encode_terminal_passes_with_surface_options(
+            TerminalPassResources {
+                device: &self.gpu.device,
+                queue: &self.gpu.queue,
+                pipelines: &self.pipelines,
+                uniform_buf: &self.uniform_buffer,
+                uniform_bg: &self.uniform_bind_group,
+                atlas_bg: &self.atlas_bind_group,
+            },
+            &mut encoder,
+            TerminalPassTarget {
+                view,
+                format,
+                width: surface_width_px,
+                height: surface_height_px,
+            },
+            &final_bg,
+            &glyph,
+            TerminalPassOptions {
+                clear_color: wgpu::Color {
+                    r: default_bg_color[0] as f64,
+                    g: default_bg_color[1] as f64,
+                    b: default_bg_color[2] as f64,
+                    a: default_bg_color[3] as f64,
+                },
+                scissor: Some(viewport),
+                overlay: &overlay_instances,
+                images: &images,
+                image_occluders: &occluders,
+            },
+        );
+        self.gpu.queue.submit(Some(encoder.finish()));
+        self.gpu.check_error()?;
+        Ok((rebuilt, reused))
+    }
+
+    /// Renders snapshot passes to an offscreen viewport target with readback (for verification and testing).
+    pub fn render_to_offscreen_viewport(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        surface_width_px: u32,
+        surface_height_px: u32,
+        viewport: PhysicalBounds,
+    ) -> Result<OffscreenFrame, NativeTerminalError> {
+        self.render_to_offscreen_viewport_with_overlay(
+            snapshot,
+            selection,
+            surface_width_px,
+            surface_height_px,
+            viewport,
+            None,
+        )
+    }
+
+    /// Renders snapshot passes with an optional scrollbar overlay to an offscreen viewport target.
+    pub fn render_to_offscreen_viewport_with_overlay(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        surface_width_px: u32,
+        surface_height_px: u32,
+        viewport: PhysicalBounds,
+        scrollbar_overlay: Option<&ScrollbarOverlayState>,
+    ) -> Result<OffscreenFrame, NativeTerminalError> {
+        self.render_to_offscreen_viewport_with_overlay_and_attention(
+            snapshot,
+            selection,
+            OffscreenViewportOptions {
+                width: surface_width_px,
+                height: surface_height_px,
+                viewport,
+                scrollbar_overlay,
+                attention_frame: false,
+            },
+        )
+    }
+
+    /// Renders snapshot passes with an optional scrollbar overlay and attention frame to an offscreen viewport target.
+    pub fn render_to_offscreen_viewport_with_overlay_and_attention(
+        &mut self,
+        snapshot: &RenderSnapshot,
+        selection: Option<&SelectionSnapshot>,
+        options: OffscreenViewportOptions<'_>,
+    ) -> Result<OffscreenFrame, NativeTerminalError> {
+        let OffscreenViewportOptions {
+            width: surface_width_px, height: surface_height_px,
+            viewport, scrollbar_overlay, attention_frame,
+        } = options;
+        let target = RenderTarget::new(&self.gpu.device, surface_width_px, surface_height_px);
+        let (rebuilt, reused) = self.render_to_surface_viewport_internal(
+            snapshot,
+            selection,
+            SurfaceViewportOptions {
+                view: &target.view,
+                width: surface_width_px,
+                height: surface_height_px,
+                format: TARGET_FORMAT,
+                viewport,
+                scrollbar_overlay,
+                attention_frame,
+            },
+            true,
+        )?;
+
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Offscreen Viewport Readback Encoder"),
+            });
+        target.copy_to_staging(&mut encoder);
+        self.gpu.queue.submit(Some(encoder.finish()));
+        self.gpu.check_error()?;
+
+        let mut frame = target.readback_frame(&self.gpu.device, snapshot.rows)?;
+        self.gpu.check_error()?;
+
+        frame.rebuilt_row_count = rebuilt;
+        frame.reused_row_count = reused;
+        Ok(frame)
+    }
+
+    pub fn glyph_atlas_stats(&self) -> GlyphAtlasStats {
+        self.atlas.stats(&self.config)
+    }
+
+    fn validate_and_dims(&self, snap: &RenderSnapshot) -> Result<(u32, u32), NativeTerminalError> {
+        if snap.cols == 0 || snap.rows == 0 {
+            return Err(NativeTerminalError::InvalidDimensions(snap.cols, snap.rows));
+        }
+        let w = (snap.cols as u32)
+            .checked_mul(self.config.cell_width_px)
+            .ok_or(NativeTerminalError::InvalidDimensions(snap.cols, snap.rows))?;
+        let h = (snap.rows as u32)
+            .checked_mul(self.config.cell_height_px)
+            .ok_or(NativeTerminalError::InvalidDimensions(snap.cols, snap.rows))?;
+        if w == 0 || h == 0 || w > 16384 || h > 16384 {
+            return Err(NativeTerminalError::InvalidDimensions(snap.cols, snap.rows));
+        }
+        Ok((w, h))
+    }
 }
 
 #[cfg(test)]
@@ -367,18 +989,20 @@ mod tests {
                     .render_to_surface_viewport(
                         &snapshot,
                         None,
-                        &target.view,
-                        width,
-                        height,
-                        TARGET_FORMAT,
-                        PhysicalBounds {
-                            x,
-                            y,
-                            width: 1280,
-                            height: 800,
+                        SurfaceViewportOptions {
+                            view: &target.view,
+                            width,
+                            height,
+                            format: TARGET_FORMAT,
+                            viewport: PhysicalBounds {
+                                x,
+                                y,
+                                width: 1280,
+                                height: 800,
+                            },
+                            scrollbar_overlay: None,
+                            attention_frame: false,
                         },
-                        None,
-                        false,
                     )
                     .unwrap();
             } else {
@@ -463,18 +1087,20 @@ mod tests {
                     .render_to_surface_viewport(
                         &snapshot,
                         None,
-                        &target.view,
-                        target.width,
-                        target.height,
-                        TARGET_FORMAT,
-                        PhysicalBounds {
-                            x,
-                            y,
-                            width: 64,
-                            height: 48,
+                        SurfaceViewportOptions {
+                            view: &target.view,
+                            width: target.width,
+                            height: target.height,
+                            format: TARGET_FORMAT,
+                            viewport: PhysicalBounds {
+                                x,
+                                y,
+                                width: 64,
+                                height: 48,
+                            },
+                            scrollbar_overlay: None,
+                            attention_frame: false,
                         },
-                        None,
-                        false,
                     )
                     .unwrap();
             } else {
@@ -641,593 +1267,5 @@ mod tests {
         save_frame("history-reference", &reference);
         // Then: the complete glyph-cell readback equals the independent fresh frame.
         assert_eq!(final_frame.pixels, reference.pixels);
-    }
-}
-
-impl NativeTerminalRenderer {
-    pub fn new(config: RendererConfig) -> Result<Self, NativeTerminalError> {
-        config.validate()?;
-
-        let gpu = GpuContext::new()?;
-        Self::with_gpu(config, gpu)
-    }
-
-    pub(crate) fn with_shared_surface_gpu(
-        config: RendererConfig,
-    ) -> Result<Self, NativeTerminalError> {
-        config.validate()?;
-        Self::with_gpu(config, GpuContext::shared_surface_context()?)
-    }
-
-    fn with_gpu(config: RendererConfig, gpu: GpuContext) -> Result<Self, NativeTerminalError> {
-        let pipelines = RenderPipelines::new(&gpu.device);
-        let atlas = GlyphAtlas::new(&gpu.device);
-
-        let uniform_buffer = gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Screen Uniform Buffer"),
-                contents: bytemuck::bytes_of(&ScreenUniform {
-                    screen_size: [1.0, 1.0],
-                    _pad: [0.0, 0.0],
-                }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-
-        let uniform_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Uniform Bind Group"),
-            layout: &pipelines.uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let atlas_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Atlas Bind Group"),
-            layout: &pipelines.atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas.mask_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas.color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&atlas.sampler),
-                },
-            ],
-        });
-
-        Ok(Self {
-            config,
-            gpu,
-            pipelines,
-            atlas,
-            target: None,
-            uniform_buffer,
-            uniform_bind_group,
-            atlas_bind_group,
-            row_cache: RowCacheManager::new(),
-            image_textures: ImageTextures::default(),
-            #[cfg(test)]
-            preparation_attempts: 0,
-            #[cfg(test)]
-            fail_rebuild_after: None,
-        })
-    }
-
-    /// No caller may encode or submit until this returns a complete set of rows.
-    fn prepare_frame_instances(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-    ) -> Result<(Vec<RectInstance>, Vec<GlyphInstance>, u16, u16), NativeTerminalError> {
-        #[cfg(test)]
-        {
-            self.preparation_attempts = 1;
-        }
-        match self.row_cache.update_and_flatten(
-            snapshot,
-            selection,
-            &self.config,
-            &mut self.atlas,
-            &self.gpu.queue,
-            None,
-        ) {
-            Ok(instances) => return Ok(instances),
-            Err(NativeTerminalError::LimitExceeded) => {}
-            Err(error) => return Err(error),
-        }
-
-        // Only pressure pays for a row-major first-occurrence raster sequence.
-        // Fit and the one permitted rebuild use the SAME dimensions and empties.
-        let prepared = prepare_visible_glyphs(snapshot, &self.config);
-        let dimension =
-            prepared.fitting_dimension(self.atlas.dimension, self.atlas.max_dimension)?;
-        let grew = dimension != self.atlas.dimension;
-        self.atlas.reset_for_rebuild(&self.gpu.device, dimension);
-        if grew {
-            self.atlas_bind_group = self
-                .gpu
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Atlas Bind Group"),
-                    layout: &self.pipelines.atlas_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&self.atlas.mask_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.atlas.color_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.atlas.sampler),
-                        },
-                    ],
-                });
-        }
-        #[cfg(test)]
-        {
-            self.preparation_attempts = 2;
-            self.atlas.fail_after_insertions = self.fail_rebuild_after;
-        }
-        // The row cache invalidates ALL partial rows on every error. In particular,
-        // a second Full remains LimitExceeded: no encode, partial success or third try.
-        self.row_cache.update_and_flatten(
-            snapshot,
-            selection,
-            &self.config,
-            &mut self.atlas,
-            &self.gpu.queue,
-            Some(&prepared),
-        )
-    }
-
-    /// Returns a reference to the active renderer configuration.
-    pub fn config(&self) -> &RendererConfig {
-        &self.config
-    }
-
-    /// Safely updates renderer configuration and invalidates atlas/cache on dimension/scale change.
-    pub fn update_config(&mut self, config: RendererConfig) -> Result<(), NativeTerminalError> {
-        config.validate()?;
-        if self.config != config {
-            self.config = config;
-            self.atlas.clear();
-            self.target = None;
-        }
-        Ok(())
-    }
-
-    /// Provides access to the underlying WGPU adapter metadata.
-    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
-        &self.gpu.adapter_info
-    }
-
-    /// Creates a native render surface using the renderer's WGPU instance.
-    pub fn create_surface<'a>(
-        &self,
-        target: impl Into<wgpu::SurfaceTarget<'a>>,
-    ) -> Result<wgpu::Surface<'a>, NativeTerminalError> {
-        self.gpu.create_surface(target)
-    }
-
-    /// Configures a native surface with matching device capabilities and returns its format.
-    pub fn configure_surface(
-        &self,
-        surface: &wgpu::Surface,
-        width: u32,
-        height: u32,
-    ) -> Result<wgpu::TextureFormat, NativeTerminalError> {
-        self.gpu.configure_surface(surface, width, height)
-    }
-
-    /// Presents a surface texture using the GPU queue.
-    pub fn present(&self, frame: wgpu::SurfaceTexture) {
-        self.gpu.queue.present(frame);
-    }
-
-    pub fn render_snapshot(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-    ) -> Result<OffscreenFrame, NativeTerminalError> {
-        let (width_px, height_px) = self.validate_and_dims(snapshot)?;
-        let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
-        let images = self.image_textures.prepare(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &self.pipelines,
-            snapshot,
-            &self.config,
-            [0.0; 2],
-        )?;
-        let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
-
-        if self
-            .target
-            .as_ref()
-            .map_or(true, |t| t.width != width_px || t.height != height_px)
-        {
-            self.target = Some(RenderTarget::new(&self.gpu.device, width_px, height_px));
-        }
-        let target = self
-            .target
-            .as_ref()
-            .ok_or_else(|| NativeTerminalError::GpuBufferError("Target missing".into()))?;
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Offscreen Encoder"),
-            });
-
-        let clear_color = wgpu::Color {
-            r: self.config.theme.background[0] as f64,
-            g: self.config.theme.background[1] as f64,
-            b: self.config.theme.background[2] as f64,
-            a: self.config.theme.background[3] as f64,
-        };
-
-        encode_terminal_passes_with_surface_options(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &self.pipelines,
-            &self.uniform_buffer,
-            &self.uniform_bind_group,
-            &self.atlas_bind_group,
-            &mut encoder,
-            &target.view,
-            TARGET_FORMAT,
-            width_px,
-            height_px,
-            &bg,
-            &glyph,
-            clear_color,
-            None,
-            &[],
-            &images,
-            &occluders,
-        );
-        target.copy_to_staging(&mut encoder);
-        self.gpu.queue.submit(Some(encoder.finish()));
-
-        self.gpu.check_error()?;
-        let mut frame = target.readback_frame(&self.gpu.device, snapshot.rows)?;
-        self.gpu.check_error()?;
-
-        frame.rebuilt_row_count = rebuilt;
-        frame.reused_row_count = reused;
-        Ok(frame)
-    }
-
-    /// Renders snapshot passes directly into an external GPU TextureView (e.g. swapchain surface).
-    pub fn render_to_surface_view(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-        view: &wgpu::TextureView,
-        width_px: u32,
-        height_px: u32,
-        format: wgpu::TextureFormat,
-    ) -> Result<(u16, u16), NativeTerminalError> {
-        let (_, _) = self.validate_and_dims(snapshot)?;
-        let (bg, glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
-        let images = self.image_textures.prepare(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &self.pipelines,
-            snapshot,
-            &self.config,
-            [0.0; 2],
-        )?;
-        let occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Surface Encoder"),
-            });
-
-        let clear_color = wgpu::Color {
-            r: self.config.theme.background[0] as f64,
-            g: self.config.theme.background[1] as f64,
-            b: self.config.theme.background[2] as f64,
-            a: self.config.theme.background[3] as f64,
-        };
-
-        encode_terminal_passes_with_surface_options(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &self.pipelines,
-            &self.uniform_buffer,
-            &self.uniform_bind_group,
-            &self.atlas_bind_group,
-            &mut encoder,
-            view,
-            format,
-            width_px,
-            height_px,
-            &bg,
-            &glyph,
-            clear_color,
-            None,
-            &[],
-            &images,
-            &occluders,
-        );
-        self.gpu.queue.submit(Some(encoder.finish()));
-        self.gpu.check_error()?;
-
-        Ok((rebuilt, reused))
-    }
-
-    pub fn render_to_surface_viewport(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-        view: &wgpu::TextureView,
-        surface_width_px: u32,
-        surface_height_px: u32,
-        format: wgpu::TextureFormat,
-        viewport: PhysicalBounds,
-        scrollbar_overlay: Option<&ScrollbarOverlayState>,
-        attention_frame: bool,
-    ) -> Result<(u16, u16), NativeTerminalError> {
-        self.render_to_surface_viewport_internal(
-            snapshot,
-            selection,
-            view,
-            surface_width_px,
-            surface_height_px,
-            format,
-            viewport,
-            scrollbar_overlay,
-            attention_frame,
-            false,
-        )
-    }
-
-    fn render_to_surface_viewport_internal(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-        view: &wgpu::TextureView,
-        surface_width_px: u32,
-        surface_height_px: u32,
-        format: wgpu::TextureFormat,
-        viewport: PhysicalBounds,
-        scrollbar_overlay: Option<&ScrollbarOverlayState>,
-        attention_frame: bool,
-        include_bottom_band: bool,
-    ) -> Result<(u16, u16), NativeTerminalError> {
-        let (terminal_width_px, terminal_height_px) = self.validate_and_dims(snapshot)?;
-        let right = viewport
-            .x
-            .checked_add(viewport.width)
-            .ok_or(NativeTerminalError::LimitExceeded)?;
-        let bottom = viewport
-            .y
-            .checked_add(viewport.height)
-            .ok_or(NativeTerminalError::LimitExceeded)?;
-        if viewport.width < terminal_width_px
-            || viewport.height < terminal_height_px
-            || right > surface_width_px
-            || bottom > surface_height_px
-        {
-            return Err(NativeTerminalError::InvalidValue(
-                "Native terminal viewport is outside the configured surface".into(),
-            ));
-        }
-
-        let (bg, mut glyph, rebuilt, reused) = self.prepare_frame_instances(snapshot, selection)?;
-        let images = self.image_textures.prepare(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &self.pipelines,
-            snapshot,
-            &self.config,
-            [viewport.x as f32, viewport.y as f32],
-        )?;
-        let mut occluders = image_background_occluders(snapshot, &self.config, selection, &bg);
-        for rect in &mut occluders {
-            rect.rect[0] += viewport.x as f32;
-            rect.rect[1] += viewport.y as f32;
-        }
-
-        let default_bg_color = self.config.theme.background;
-        let mut final_bg = Vec::with_capacity(bg.len() + 1);
-        // Base viewport rectangle ensuring 100% native child view coverage including any residual gutter
-        final_bg.push(RectInstance {
-            rect: [
-                viewport.x as f32,
-                viewport.y as f32,
-                viewport.width as f32,
-                viewport.height as f32,
-            ],
-            color: default_bg_color,
-        });
-
-        for mut instance in bg {
-            instance.rect[0] += viewport.x as f32;
-            instance.rect[1] += viewport.y as f32;
-            final_bg.push(instance);
-        }
-        for instance in &mut glyph {
-            instance.rect[0] += viewport.x as f32;
-            instance.rect[1] += viewport.y as f32;
-        }
-
-        let mut overlay_instances = Vec::new();
-        if let Some(overlay) = scrollbar_overlay {
-            if overlay.visible {
-                if let Some(metrics) = overlay.metrics {
-                    if let Some(rect) = compute_scrollbar_overlay_rect(
-                        viewport,
-                        metrics.total,
-                        metrics.offset,
-                        metrics.len,
-                        self.config.theme.foreground,
-                    ) {
-                        overlay_instances.push(rect);
-                    }
-                }
-            }
-        }
-        if attention_frame {
-            let thickness = ATTENTION_FRAME_THICKNESS_LOGICAL_PX * self.config.device_scale_factor;
-            overlay_instances.extend(compute_attention_frame_rects(
-                viewport,
-                thickness,
-                include_bottom_band,
-            ));
-        }
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Native Terminal Surface Encoder"),
-            });
-        encode_terminal_passes_with_surface_options(
-            &self.gpu.device,
-            &self.gpu.queue,
-            &self.pipelines,
-            &self.uniform_buffer,
-            &self.uniform_bind_group,
-            &self.atlas_bind_group,
-            &mut encoder,
-            view,
-            format,
-            surface_width_px,
-            surface_height_px,
-            &final_bg,
-            &glyph,
-            wgpu::Color {
-                r: default_bg_color[0] as f64,
-                g: default_bg_color[1] as f64,
-                b: default_bg_color[2] as f64,
-                a: default_bg_color[3] as f64,
-            },
-            Some(viewport),
-            &overlay_instances,
-            &images,
-            &occluders,
-        );
-        self.gpu.queue.submit(Some(encoder.finish()));
-        self.gpu.check_error()?;
-        Ok((rebuilt, reused))
-    }
-
-    /// Renders snapshot passes to an offscreen viewport target with readback (for verification and testing).
-    pub fn render_to_offscreen_viewport(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-        surface_width_px: u32,
-        surface_height_px: u32,
-        viewport: PhysicalBounds,
-    ) -> Result<OffscreenFrame, NativeTerminalError> {
-        self.render_to_offscreen_viewport_with_overlay(
-            snapshot,
-            selection,
-            surface_width_px,
-            surface_height_px,
-            viewport,
-            None,
-        )
-    }
-
-    /// Renders snapshot passes with an optional scrollbar overlay to an offscreen viewport target.
-    pub fn render_to_offscreen_viewport_with_overlay(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-        surface_width_px: u32,
-        surface_height_px: u32,
-        viewport: PhysicalBounds,
-        scrollbar_overlay: Option<&ScrollbarOverlayState>,
-    ) -> Result<OffscreenFrame, NativeTerminalError> {
-        self.render_to_offscreen_viewport_with_overlay_and_attention(
-            snapshot,
-            selection,
-            surface_width_px,
-            surface_height_px,
-            viewport,
-            scrollbar_overlay,
-            false,
-        )
-    }
-
-    /// Renders snapshot passes with an optional scrollbar overlay and attention frame to an offscreen viewport target.
-    pub fn render_to_offscreen_viewport_with_overlay_and_attention(
-        &mut self,
-        snapshot: &RenderSnapshot,
-        selection: Option<&SelectionSnapshot>,
-        surface_width_px: u32,
-        surface_height_px: u32,
-        viewport: PhysicalBounds,
-        scrollbar_overlay: Option<&ScrollbarOverlayState>,
-        attention_frame: bool,
-    ) -> Result<OffscreenFrame, NativeTerminalError> {
-        let target = RenderTarget::new(&self.gpu.device, surface_width_px, surface_height_px);
-        let (rebuilt, reused) = self.render_to_surface_viewport_internal(
-            snapshot,
-            selection,
-            &target.view,
-            surface_width_px,
-            surface_height_px,
-            TARGET_FORMAT,
-            viewport,
-            scrollbar_overlay,
-            attention_frame,
-            true,
-        )?;
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Offscreen Viewport Readback Encoder"),
-            });
-        target.copy_to_staging(&mut encoder);
-        self.gpu.queue.submit(Some(encoder.finish()));
-        self.gpu.check_error()?;
-
-        let mut frame = target.readback_frame(&self.gpu.device, snapshot.rows)?;
-        self.gpu.check_error()?;
-
-        frame.rebuilt_row_count = rebuilt;
-        frame.reused_row_count = reused;
-        Ok(frame)
-    }
-
-    pub fn glyph_atlas_stats(&self) -> GlyphAtlasStats {
-        self.atlas.stats(&self.config)
-    }
-
-    fn validate_and_dims(&self, snap: &RenderSnapshot) -> Result<(u32, u32), NativeTerminalError> {
-        if snap.cols == 0 || snap.rows == 0 {
-            return Err(NativeTerminalError::InvalidDimensions(snap.cols, snap.rows));
-        }
-        let w = (snap.cols as u32)
-            .checked_mul(self.config.cell_width_px)
-            .ok_or_else(|| NativeTerminalError::InvalidDimensions(snap.cols, snap.rows))?;
-        let h = (snap.rows as u32)
-            .checked_mul(self.config.cell_height_px)
-            .ok_or_else(|| NativeTerminalError::InvalidDimensions(snap.cols, snap.rows))?;
-        if w == 0 || h == 0 || w > 16384 || h > 16384 {
-            return Err(NativeTerminalError::InvalidDimensions(snap.cols, snap.rows));
-        }
-        Ok((w, h))
     }
 }

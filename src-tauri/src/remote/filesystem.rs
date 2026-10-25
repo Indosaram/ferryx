@@ -358,7 +358,7 @@ impl BrowseLimits {
     pub(super) fn acquire(
         &self,
         device: &str,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, Box<Response>> {
         self.acquire_with_clock(device, Instant::now)
     }
 
@@ -369,7 +369,7 @@ impl BrowseLimits {
         &self,
         device: &str,
         now: Instant,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, Box<Response>> {
         self.acquire_with_clock(device, || now)
     }
 
@@ -377,7 +377,7 @@ impl BrowseLimits {
         &self,
         device: &str,
         clock: impl FnOnce() -> Instant,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, Box<Response>> {
         let mut budgets = self.0.lock();
         let now = clock();
         budgets.retain(|_, b| {
@@ -385,10 +385,10 @@ impl BrowseLimits {
                 || b.slots.available_permits() != 4
         });
         if !budgets.contains_key(device) && budgets.len() >= 4096 {
-            return Err(super::server::machine_error(
+            return Err(Box::new(super::server::machine_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "CAPACITY_EXCEEDED",
-            ));
+            )));
         }
         let budget = budgets
             .entry(device.into())
@@ -401,13 +401,13 @@ impl BrowseLimits {
             (budget.tokens + now.duration_since(budget.updated).as_secs_f64() * 10.0).min(20.0);
         budget.updated = now;
         if budget.tokens < 1.0 {
-            return Err(super::server::machine_error(
+            return Err(Box::new(super::server::machine_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "RATE_LIMITED",
-            ));
+            )));
         }
         let permit = budget.slots.clone().try_acquire_owned().map_err(|_| {
-            super::server::machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED")
+            Box::new(super::server::machine_error(StatusCode::TOO_MANY_REQUESTS, "CAPACITY_EXCEEDED"))
         })?;
         budget.tokens -= 1.0;
         Ok(permit)
@@ -468,6 +468,7 @@ pub(crate) async fn directories(
             Err(FsError::Timeout.response())
         } else {
             super::server::authenticate_machine_request(&auth_state, &auth_headers)
+                .map_err(|response| *response)
         };
         drop(permit);
         Ok(result)
@@ -498,7 +499,7 @@ pub(crate) async fn directories(
     if tokio::time::Instant::now() >= deadline {
         return Err(FsError::Timeout.response());
     }
-    let permit = limits.acquire(&device.id)?;
+    let permit = limits.acquire(&device.id).map_err(|response| *response)?;
     let flag = cancel.0.clone();
 
     let started = Instant::now();

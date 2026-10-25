@@ -611,12 +611,14 @@ mod tests {
 
     /// Runs the supervisor on its own task so the test can drive the signal stream and the
     /// paused clock; returns the sender, the cancel token, the join handle and the event log.
-    fn spawn_supervisor() -> (
+    type SupervisorFixture = (
         mpsc::UnboundedSender<DownloadSignal>,
         CancellationToken,
         tokio::task::JoinHandle<DownloadOutcome>,
         std::sync::Arc<Mutex<Vec<UpdaterDownloadEvent>>>,
-    ) {
+    );
+
+    fn spawn_supervisor() -> SupervisorFixture {
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let events = std::sync::Arc::new(Mutex::new(Vec::new()));

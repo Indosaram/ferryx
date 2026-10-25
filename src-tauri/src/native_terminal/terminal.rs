@@ -95,9 +95,9 @@ pub(crate) fn full_palette(theme: &TerminalThemeColors) -> [ColorRgb; 256] {
         }
     }
 
-    for i in 232..=255 {
+    for (i, color) in palette.iter_mut().enumerate().skip(232) {
         let gray = ((i - 232) as u8) * 10 + 8;
-        palette[i] = ColorRgb::new(gray, gray, gray);
+        *color = ColorRgb::new(gray, gray, gray);
     }
 
     for &(override_idx, ref hex) in &theme.palette_overrides {
@@ -241,9 +241,9 @@ impl NativeTerminal {
         &mut self,
         now: tokio::time::Instant,
     ) -> Result<bool, NativeTerminalError> {
-        if !self
+        if self
             .synchronized_output_deadline
-            .is_some_and(|deadline| now >= deadline)
+            .is_none_or(|deadline| now < deadline)
         {
             return Ok(false);
         }
@@ -803,10 +803,12 @@ mod tests {
     #[test]
     fn test_apply_theme_preferences_on_terminal() {
         let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
-        let mut theme = TerminalThemeColors::default();
-        theme.foreground = "#112233".to_string();
-        theme.background = "#445566".to_string();
-        theme.cursor = "#778899".to_string();
+        let mut theme = TerminalThemeColors {
+            foreground: "#112233".to_string(),
+            background: "#445566".to_string(),
+            cursor: "#778899".to_string(),
+            ..Default::default()
+        };
         theme.palette_overrides.push((200, "#abcdef".to_string()));
 
         terminal

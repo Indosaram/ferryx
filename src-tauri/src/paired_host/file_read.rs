@@ -441,13 +441,13 @@ mod tests {
         details.insert("contentTypeClass".into(), serde_json::json!("none"));
         ClientError {
             code: "PERMISSION_DENIED".into(),
-            machine_error: Some(m::MachineError {
+            machine_error: Some(Box::new(m::MachineError {
                 code: "PERMISSION_DENIED".into(),
                 message: "denied".into(),
                 retryable: false,
                 request_id: String::new(),
                 details,
-            }),
+            })),
             request_id: None,
             ambiguous: false,
         }

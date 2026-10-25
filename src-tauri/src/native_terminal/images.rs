@@ -149,10 +149,10 @@ impl ImageCache {
             retained.insert(id);
             if changed || !self.images.contains_key(&id) {
                 let image_generation: u64 = unsafe { image_get(raw_image, IMAGE_GENERATION)? };
-                if !self
+                if self
                     .images
                     .get(&id)
-                    .is_some_and(|i| i.generation == image_generation)
+                    .is_none_or(|i| i.generation != image_generation)
                 {
                     let width: u32 = unsafe { image_get(raw_image, IMAGE_WIDTH)? };
                     let height: u32 = unsafe { image_get(raw_image, IMAGE_HEIGHT)? };

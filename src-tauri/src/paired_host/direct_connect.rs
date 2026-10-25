@@ -271,7 +271,7 @@ pub(crate) async fn post_offer(
         .map_err(transport)?;
     let status = response.status();
     // Older hosts/relays reject the unknown route: treat as "no direct", not an error.
-    if matches!(status.as_u16(), 403 | 404 | 405) {
+    if matches!(status.as_u16(), 403..=405) {
         return Err(DirectConnectError::Unsupported);
     }
     if !status.is_success() {

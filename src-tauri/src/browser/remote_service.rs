@@ -82,6 +82,9 @@ pub struct ViewerInfo {
     pub stalled: bool,
 }
 
+type FrameBroadcasters =
+    Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>;
+
 #[derive(Clone)]
 pub struct BrowserRemoteService {
     manager: BrowserManager,
@@ -95,8 +98,7 @@ pub struct BrowserRemoteService {
     stream_counter: Arc<AtomicU64>,
     desktop_epoch: Arc<AtomicU64>,
     service_epoch: u64,
-    frame_broadcaster:
-        Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>,
+    frame_broadcaster: FrameBroadcasters,
     snapshot_source: Arc<parking_lot::RwLock<Arc<dyn BrowserSnapshotSource>>>,
     native_capture_semaphore: Arc<tokio::sync::Semaphore>,
     quarantined_permits: Arc<
@@ -111,6 +113,16 @@ pub static ACTIVE_REMOTE_SERVICE: parking_lot::RwLock<Option<Arc<BrowserRemoteSe
 
 pub fn get_active_service() -> Option<Arc<BrowserRemoteService>> {
     ACTIVE_REMOTE_SERVICE.read().clone()
+}
+
+pub struct CommandGuardParams<'a> {
+    pub browser_id: &'a str,
+    pub lease_epoch: u64,
+    pub device_id: &'a str,
+    pub connection_id: &'a str,
+    pub instance_id: &'a str,
+    pub desktop_epoch: u64,
+    pub generation: u64,
 }
 
 impl BrowserRemoteService {
@@ -170,7 +182,7 @@ impl BrowserRemoteService {
 
     pub fn frame_broadcaster(
         &self,
-    ) -> &Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>> {
+    ) -> &FrameBroadcasters {
         &self.frame_broadcaster
     }
 
@@ -258,14 +270,14 @@ impl BrowserRemoteService {
         let subs = self.subscribers_per_browser.lock();
         subs.get(browser_id)
             .and_then(|m| m.get(subscription_id))
-            .map_or(false, |v| v.paused)
+            .is_some_and(|v| v.paused)
     }
 
     pub fn is_viewer_stalled(&self, browser_id: &str, subscription_id: &str) -> bool {
         let subs = self.subscribers_per_browser.lock();
         subs.get(browser_id)
             .and_then(|m| m.get(subscription_id))
-            .map_or(false, |v| v.stalled)
+            .is_some_and(|v| v.stalled)
     }
 
     /// Subscribes a viewer to a browser's shared screencast producer.
@@ -812,14 +824,9 @@ impl BrowserRemoteService {
     /// lease validity, browser instance ID, desktop epoch, and document generation.
     pub fn execute_command_guard(
         &self,
-        browser_id: &str,
-        lease_epoch: u64,
-        device_id: &str,
-        connection_id: &str,
-        instance_id: &str,
-        desktop_epoch: u64,
-        generation: u64,
+        params: CommandGuardParams<'_>,
     ) -> Result<(), RemoteServiceError> {
+        let CommandGuardParams { browser_id, lease_epoch, device_id, connection_id, instance_id, desktop_epoch, generation } = params;
         // 1. Lease guard
         self.driver_broker
             .validate_lease(browser_id, lease_epoch, device_id, connection_id)
@@ -973,70 +980,30 @@ mod tests {
 
         // 1. Valid command guard passes
         assert!(service
-            .execute_command_guard(
-                &b1,
-                lease.lease_epoch,
-                "dev1",
-                "conn1",
-                &instance_id,
-                desktop_epoch,
-                generation
-            )
+            .execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: &instance_id, desktop_epoch, generation })
             .is_ok());
 
         // 2. Stale lease epoch rejected
         assert!(matches!(
-            service.execute_command_guard(
-                &b1,
-                lease.lease_epoch + 1,
-                "dev1",
-                "conn1",
-                &instance_id,
-                desktop_epoch,
-                generation
-            ),
+            service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch + 1, device_id: "dev1", connection_id: "conn1", instance_id: &instance_id, desktop_epoch, generation }),
             Err(RemoteServiceError::StaleLease)
         ));
 
         // 3. Stale instance ID rejected
         assert!(matches!(
-            service.execute_command_guard(
-                &b1,
-                lease.lease_epoch,
-                "dev1",
-                "conn1",
-                "wrong-instance-id",
-                desktop_epoch,
-                generation
-            ),
+            service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: "wrong-instance-id", desktop_epoch, generation }),
             Err(RemoteServiceError::StaleInstance)
         ));
 
         // 4. Stale desktop epoch rejected
         assert!(matches!(
-            service.execute_command_guard(
-                &b1,
-                lease.lease_epoch,
-                "dev1",
-                "conn1",
-                &instance_id,
-                desktop_epoch + 1,
-                generation
-            ),
+            service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: &instance_id, desktop_epoch: desktop_epoch + 1, generation }),
             Err(RemoteServiceError::StaleLease)
         ));
 
         // 5. Stale document generation rejected
         assert!(matches!(
-            service.execute_command_guard(
-                &b1,
-                lease.lease_epoch,
-                "dev1",
-                "conn1",
-                &instance_id,
-                desktop_epoch,
-                generation + 1
-            ),
+            service.execute_command_guard(crate::browser::remote_service::CommandGuardParams { browser_id: &b1, lease_epoch: lease.lease_epoch, device_id: "dev1", connection_id: "conn1", instance_id: &instance_id, desktop_epoch, generation: generation + 1 }),
             Err(RemoteServiceError::StaleGeneration)
         ));
     }

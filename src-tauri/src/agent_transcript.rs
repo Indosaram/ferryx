@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ fn tool_call_input(arguments: &serde_json::Value) -> Option<String> {
     let raw = match direct {
         Some(value) => value,
         None => {
-            if arguments.as_object().map_or(true, |object| object.is_empty()) {
+            if arguments.as_object().is_none_or(|object| object.is_empty()) {
                 return None;
             }
             serde_json::to_string(arguments).ok()?
@@ -136,7 +136,7 @@ pub fn slug_for_cwd(cwd: &str) -> String {
             continue;
         }
         if !first {
-            slug.push_str("-");
+            slug.push('-');
         }
         first = false;
         slug.push_str(part);
@@ -151,7 +151,7 @@ pub fn latest_transcript_for_cwd(
     session_id_hint: Option<&str>,
 ) -> Option<PathBuf> {
     let candidate_dir =
-        home.join(".omo").join("agent").join("sessions").join(&slug_for_cwd(cwd));
+        home.join(".omo").join("agent").join("sessions").join(slug_for_cwd(cwd));
     let Ok(entries) = std::fs::read_dir(&candidate_dir) else {
         return None;
     };

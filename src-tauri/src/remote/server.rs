@@ -5,7 +5,9 @@ pub(crate) mod agent_control_service;
 #[path = "supervisor_api.rs"]
 pub(crate) mod supervisor_api;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
-use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend, RemoteSessionDetails};
+use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
+#[cfg(test)]
+use crate::remote::backend::RemoteSessionDetails;
 use crate::remote::browser_admission::AdmissionController;
 use crate::remote::browser_backend::{DesktopScope, RemoteBrowserBackend, RemoteBrowserError};
 use crate::remote::browser_protocol::ServerMessage;
@@ -70,7 +72,7 @@ fn machine_grid_text(frame: &RemoteGridFrame) -> Result<String, ()> {
     if text
         .len()
         .checked_add(WS_HEADER_BYTES)
-        .map_or(true, |total| total > MACHINE_GRID_FRAME_MAX_BYTES)
+        .is_none_or(|total| total > MACHINE_GRID_FRAME_MAX_BYTES)
     {
         return Err(());
     }
@@ -473,14 +475,9 @@ fn canonicalize_or_raw(path: &Path) -> PathBuf {
     }
     let mut missing_tail = Vec::new();
     let mut ancestor = path;
-    loop {
-        match ancestor.parent() {
-            Some(parent) => {
-                missing_tail.push(ancestor.file_name());
-                ancestor = parent;
-            }
-            None => break,
-        }
+    while let Some(parent) = ancestor.parent() {
+        missing_tail.push(ancestor.file_name());
+        ancestor = parent;
         if let Ok(canonical_ancestor) = std::fs::canonicalize(ancestor) {
             let mut resolved = canonical_ancestor;
             for component in missing_tail.into_iter().rev().flatten() {
@@ -1087,7 +1084,7 @@ async fn get_workspace_state(
         }
         if live_session_id.is_none() {
             for sid in &terminal_sessions {
-                if let Some(session) = state.terminal_service.get_session(&sid) {
+                if let Some(session) = state.terminal_service.get_session(sid) {
                     if matches!(
                         session.state(),
                         crate::terminal::PtySessionState::Running
@@ -1996,8 +1993,7 @@ async fn ws_terminal_handler(
                 socket,
                 session_id.clone(),
                 attachment,
-                device,
-                Arc::clone(&state),
+                GatewaySocketContext { device, state: Arc::clone(&state) },
                 render_grid,
                 requested_geometry,
                 Arc::clone(&resized),
@@ -2102,8 +2098,7 @@ async fn machine_terminal_upgrade(
                 session,
                 attachment,
                 generation,
-                device,
-                Arc::clone(&state),
+                GatewaySocketContext { device, state: Arc::clone(&state) },
                 Arc::clone(&resized),
                 render_grid,
             );
@@ -2170,7 +2165,7 @@ where
         Err(()) => {
             let bounded_provider = state.provider_session.as_ref().map(|ps| {
                 crate::daemon::protocol::AgentProviderSession {
-                    key: ps.key.clone(),
+                    key: ps.key,
                     id: ps.id.clone(),
                     transcript_path: None, // Exclude oversized transcript paths; root badge requires key+id
                 }
@@ -2197,16 +2192,21 @@ where
     machine_send(sender, text_message, termination).await
 }
 
+struct GatewaySocketContext {
+    device: DeviceInfo,
+    state: Arc<RemoteGatewayState>,
+}
+
 async fn handle_machine_terminal_socket(
     socket: WebSocket,
     session: crate::remote::machine_protocol::Session,
     attachment: crate::terminal::output_hub::machine_output::MachineAttachment,
     generation: u64,
-    device: DeviceInfo,
-    state: Arc<RemoteGatewayState>,
+    context: GatewaySocketContext,
     resized: Arc<std::sync::atomic::AtomicBool>,
     render_grid: bool,
 ) {
+    let GatewaySocketContext { device, state } = context;
     use crate::remote::protocol::MachineTerminalControl;
     use crate::remote::terminal_wire::{encode_frame, Metadata, ReplayGap};
     use crate::scoped_contracts::Epoch;
@@ -2261,10 +2261,9 @@ async fn handle_machine_terminal_socket(
     if let Some(initial_state) = agent_subscription.snapshot.as_ref() {
         if initial_state.session_id == target.session_id
             && services.sessions.validate_machine_target(target).await.is_ok()
+            && send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err()
         {
-            if send_machine_agent_state(&mut sender, initial_state, target, &mut termination).await.is_err() {
-                return;
-            }
+            return;
         }
     }
     let grid_notify = Arc::new(tokio::sync::Notify::new());
@@ -2295,10 +2294,10 @@ async fn handle_machine_terminal_socket(
             if !history_ranges.is_empty() {
                 for range in &history_ranges {
                     if let (Some(cols), Some(rows)) = (range.cols, range.rows) {
-                        if m.dimensions().ok() != Some((cols, rows)) {
-                            if m.resize(cols, rows).is_err() {
-                                return;
-                            }
+                        if m.dimensions().ok() != Some((cols, rows))
+                            && m.resize(cols, rows).is_err()
+                        {
+                            return;
                         }
                     }
                     let slice = &snapshot.history[range.start..range.end];
@@ -2309,10 +2308,10 @@ async fn handle_machine_terminal_socket(
             } else if !snapshot.history.is_empty() && m.feed(&snapshot.history).is_err() {
                 return;
             }
-            if m.dimensions().ok() != Some((session.cols, session.rows)) {
-                if m.resize(session.cols, session.rows).is_err() {
-                    return;
-                }
+            if m.dimensions().ok() != Some((session.cols, session.rows))
+                && m.resize(session.cols, session.rows).is_err()
+            {
+                return;
             }
             let initial_frame = match m.full_frame() {
                 Ok(frame) => frame,
@@ -2356,7 +2355,7 @@ async fn handle_machine_terminal_socket(
             )
         };
         if !snapshot.history.is_empty() || snapshot.gap.is_some() {
-            let Ok(frame) = replay(&snapshot, snapshot.gap.is_some()) else {
+            let Ok(frame) = replay(snapshot, snapshot.gap.is_some()) else {
                 return;
             };
             let Ok(frame) = machine_frame(frame, snapshot.history.len()) else {
@@ -2427,10 +2426,9 @@ async fn handle_machine_terminal_socket(
                             if let Some(current) = agent_subscription.resynchronize(&target.session_id) {
                                 if current.session_id == target.session_id
                                     && services.sessions.validate_machine_target(target).await.is_ok()
+                                    && send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err()
                                 {
-                                    if send_machine_agent_state(&mut sender, &current, target, &mut termination).await.is_err() {
-                                        return;
-                                    }
+                                    return;
                                 }
                             }
                         }
@@ -2769,12 +2767,12 @@ async fn handle_terminal_socket(
     mut socket: WebSocket,
     session_id: String,
     attachment: SessionAttachment,
-    device: DeviceInfo,
-    state: Arc<RemoteGatewayState>,
+    context: GatewaySocketContext,
     render_grid: bool,
     requested_geometry: Option<(u16, u16)>,
     resized: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    let GatewaySocketContext { device, state } = context;
     let recovery_state = Arc::new(parking_lot::RwLock::new(None));
     let mut recovery = match state.session_backend.recovery(&session_id).await {
         Ok(recovery) => recovery,
@@ -2807,8 +2805,7 @@ async fn handle_terminal_socket(
             socket,
             session_id,
             attachment,
-            device,
-            state,
+            GatewaySocketContext { device, state },
             recovery,
             recovery_state,
             resized,
@@ -3085,12 +3082,12 @@ async fn handle_terminal_grid_socket(
     mut socket: WebSocket,
     session_id: String,
     attachment: SessionAttachment,
-    device: DeviceInfo,
-    state: Arc<RemoteGatewayState>,
+    context: GatewaySocketContext,
     mut recovery: Option<RecoveryStream>,
     recovery_state: Arc<parking_lot::RwLock<Option<RemoteRecoveryStatus>>>,
     resized: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    let GatewaySocketContext { device, state } = context;
     let is_ssh = recovery_state.read().is_some();
     if let Ok(Some(outcome)) = state.session_backend.paired_recovery_outcome(&session_id).await {
         if outcome.backend_session_id == session_id && socket.send(terminal_outcome_message(&session_id, outcome)).await.is_err() { return; }
@@ -3105,8 +3102,8 @@ async fn handle_terminal_grid_socket(
         return;
     };
     let (cols, rows) = (
-        details.cols.max(1).min(REMOTE_GRID_MAX_COLS),
-        details.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
+        details.cols.clamp(1, REMOTE_GRID_MAX_COLS),
+        details.rows.clamp(1, REMOTE_GRID_MAX_ROWS),
     );
     let mirror = match RemoteTerminalMirror::new(cols, rows) {
         Ok(mirror) => Arc::new(parking_lot::Mutex::new(mirror)),
@@ -3122,10 +3119,10 @@ async fn handle_terminal_grid_socket(
         } else if !snapshot.history.is_empty() && mirror.feed(&snapshot.history).is_err() {
             return;
         }
-        if mirror.dimensions().ok() != Some((cols, rows)) {
-            if mirror.resize(cols, rows).is_err() {
-                return;
-            }
+        if mirror.dimensions().ok() != Some((cols, rows))
+            && mirror.resize(cols, rows).is_err()
+        {
+            return;
         }
         match mirror.full_frame() {
             Ok(frame) => frame,
@@ -3139,10 +3136,9 @@ async fn handle_terminal_grid_socket(
         if outcome.backend_session_id == session_id
             && !outcome.incarnation.is_empty()
             && !outcome.daemon_epoch.is_empty()
+            && sender.send(terminal_outcome_message(&session_id, outcome)).await.is_err()
         {
-            if sender.send(terminal_outcome_message(&session_id, outcome)).await.is_err() {
-                return;
-            }
+            return;
         }
     }
     let mut last_emitted_sequence = snapshot.history_end_sequence;
@@ -3251,8 +3247,8 @@ async fn handle_terminal_grid_socket(
                         }
                         let (cols, rows) = match session_backend.describe_session(&send_session_id).await {
                             Ok(details) => (
-                                details.cols.max(1).min(REMOTE_GRID_MAX_COLS),
-                                details.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
+                                details.cols.clamp(1, REMOTE_GRID_MAX_COLS),
+                                details.rows.clamp(1, REMOTE_GRID_MAX_ROWS),
                             ),
                             Err(_) => break,
                         };
@@ -3325,8 +3321,8 @@ async fn handle_terminal_grid_socket(
                     let (cols, rows) =
                         match session_backend.describe_session(&send_session_id).await {
                             Ok(d) => (
-                                d.cols.max(1).min(REMOTE_GRID_MAX_COLS),
-                                d.rows.max(1).min(REMOTE_GRID_MAX_ROWS),
+                                d.cols.clamp(1, REMOTE_GRID_MAX_COLS),
+                                d.rows.clamp(1, REMOTE_GRID_MAX_ROWS),
                             ),
                             Err(_) => break,
                         };
@@ -3350,10 +3346,10 @@ async fn handle_terminal_grid_socket(
                             {
                                 break;
                             }
-                            if replacement.dimensions().ok() != Some((cols, rows)) {
-                                if replacement.resize(cols, rows).is_err() {
-                                    break;
-                                }
+                            if replacement.dimensions().ok() != Some((cols, rows))
+                                && replacement.resize(cols, rows).is_err()
+                            {
+                                break;
                             }
                             let frame = match replacement.full_frame() {
                                 Ok(frame) => frame,
@@ -3371,10 +3367,10 @@ async fn handle_terminal_grid_socket(
                             {
                                 break;
                             }
-                            if mirror.dimensions().ok() != Some((cols, rows)) {
-                                if mirror.resize(cols, rows).is_err() {
-                                    break;
-                                }
+                            if mirror.dimensions().ok() != Some((cols, rows))
+                                && mirror.resize(cols, rows).is_err()
+                            {
+                                break;
                             }
                             match mirror.full_frame() {
                                 Ok(frame) => frame,
@@ -3487,14 +3483,14 @@ async fn handle_terminal_grid_socket(
                             ClientControlMessage::Ping => {}
                             ClientControlMessage::Scroll { rows } => {
                                 let clamped_rows = rows.clamp(-50, 50);
-                                if clamped_rows != 0 {
-                                    if !enqueue_grid_operation(
+                                if clamped_rows != 0
+                                    && !enqueue_grid_operation(
                                         &recv_mirror,
                                         &recv_tx,
                                         move |mirror| mirror.scroll(clamped_rows),
-                                    ) {
-                                        break;
-                                    }
+                                    )
+                                {
+                                    break;
                                 }
                             }
                         }
@@ -3830,13 +3826,13 @@ pub(super) fn machine_error_with_details(
 pub(super) fn authenticate_machine_request(
     state: &RemoteGatewayState,
     headers: &HeaderMap,
-) -> Result<DeviceInfo, Response> {
+) -> Result<DeviceInfo, Box<Response>> {
     let token = extract_token(headers)
-        .ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
+        .ok_or_else(|| Box::new(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")))?;
     state
         .auth_manager
         .validate_token(&token)
-        .map_err(|_| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))
+        .map_err(|_| Box::new(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")))
 }
 
 /// The identity fields the capability document publishes for reference-chat clients.
@@ -3881,9 +3877,9 @@ async fn get_capabilities(
 ) -> Result<Response, Response> {
     // Authentication precedes even the identity-file lookup. No workspace or
     // session service is probed or advertised until its implementation ships.
-    authenticate_machine_request(&state, &headers)?;
+    authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
     let identity = load_gateway_identity(Arc::clone(&state)).await?;
-    let device = authenticate_machine_request(&state, &headers)?;
+    let device = authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
     let browser_caps = state.browser_backend().capabilities().await;
     // The reference-chat host id this host publishes for itself. A mutation target names it;
     // `machineId` is a different value and never stands in for it.
@@ -4038,7 +4034,8 @@ async fn worktree_mutation_boundary(
         Duration::from_secs(10),
         crate::ipc::run_blocking(move || {
             let _permit = permit;
-            Ok(authenticate_machine_request(&auth_state, &auth_headers))
+            Ok(authenticate_machine_request(&auth_state, &auth_headers)
+                .map_err(|response| *response))
         }),
     )
     .await
@@ -5058,11 +5055,10 @@ async fn ws_browser_handler(
             run_browser_ws_session(
                 socket,
                 browser_id,
-                device,
+                GatewaySocketContext { device, state: auth_state },
                 service_epoch,
                 backend,
                 admission,
-                auth_state,
                 revocation,
             )
             .await;
@@ -5072,13 +5068,13 @@ async fn ws_browser_handler(
 async fn run_browser_ws_session(
     socket: WebSocket,
     browser_id: String,
-    device: DeviceInfo,
+    context: GatewaySocketContext,
     service_epoch: u64,
     backend: Arc<dyn RemoteBrowserBackend>,
     admission: Arc<AdmissionController>,
-    state: Arc<RemoteGatewayState>,
     mut revocation: tokio::sync::watch::Receiver<bool>,
 ) {
+    let GatewaySocketContext { device, state } = context;
     let connection_id = format!("conn_{}", uuid::Uuid::new_v4());
     // The scope this socket was admitted under. A later desktop scope change
     // invalidates the socket rather than silently re-targeting it (R4-4).
@@ -5231,7 +5227,7 @@ async fn run_browser_ws_session(
             _ = ack_check_interval.tick() => {
                 let now = Instant::now();
                 if let Some(sub_id) = &session.subscription_id {
-                    let stalled = session.queue.as_ref().map_or(false, |q| q.is_ack_stalled(now));
+                    let stalled = session.queue.as_ref().is_some_and(|q| q.is_ack_stalled(now));
                     admission.set_viewer_stalled(&session.browser_id, sub_id, stalled);
                 }
             }
@@ -5523,7 +5519,6 @@ const REFERENCE_PROMPT_SESSION_MAX_BYTES: usize = 4 * 1024 * 1024;
 struct ReferenceStagedFile {
     target_key: String,
     dir: PathBuf,
-    path: PathBuf,
     preview: Option<Arc<reference_files::ReferencePreviewLease>>,
     display_name: String,
     receipt: AttachmentReceipt,
@@ -5762,12 +5757,12 @@ fn reference_chat_refusal(error: &ScopeError) -> Response {
 /// bodyless rejection.
 fn reference_chat_read_query(
     query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
-) -> Result<ReferenceChatReadQuery, Response> {
+) -> Result<ReferenceChatReadQuery, Box<Response>> {
     query.map(|Query(query)| query).map_err(|rejection| {
-        reference_chat_refusal(&reference_chat_scope(
+        Box::new(reference_chat_refusal(&reference_chat_scope(
             ScopeErrorCode::InvalidRequest,
             format!("the read query is not readable: {rejection}"),
-        ))
+        )))
     })
 }
 
@@ -5978,7 +5973,7 @@ async fn reference_chat_read_context_with(
     registry_required: bool,
     require_live: bool,
 ) -> Result<ReferenceChatRead, Response> {
-    let device = authenticate_machine_request(state, headers)?;
+    let device = authenticate_machine_request(state, headers).map_err(|response| *response)?;
     if let Some(named) = query
         .backend_session_id
         .as_deref()
@@ -6036,7 +6031,7 @@ async fn reference_chat_mutation_context<P>(
     session_id: &str,
     body: &ReferenceChatMutation<P>,
 ) -> Result<(DeviceInfo, reference_types::ReferenceTargetRef), Response> {
-    let device = authenticate_machine_request(state, headers)?;
+    let device = authenticate_machine_request(state, headers).map_err(|response| *response)?;
     if body.request_id.trim().is_empty() {
         return Err(reference_chat_error(
             ScopeErrorCode::InvalidRequest,
@@ -6523,7 +6518,7 @@ async fn reference_chat_mutation_body<P: serde::de::DeserializeOwned>(
 ) -> Result<(HeaderMap, P), Response> {
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
-    authenticate_machine_request(state, &headers)?;
+    authenticate_machine_request(state, &headers).map_err(|response| *response)?;
     let bytes = axum::body::to_bytes(body, REFERENCE_CHAT_MUTATION_MAX_BYTES)
         .await
         .map_err(|_| {
@@ -6571,7 +6566,7 @@ where
 {
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
     {
@@ -6658,7 +6653,7 @@ async fn reference_chat_screen(
 ) -> Response {
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
@@ -6684,7 +6679,7 @@ async fn reference_chat_prompt(
 ) -> Response {
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
     {
@@ -7090,7 +7085,6 @@ pub(crate) async fn reference_chat_stage_file_with_runtime(
             ReferenceStagedFile {
                 target_key: target_key.clone(),
                 dir: PathBuf::new(),
-                path: PathBuf::new(),
                 preview: None,
                 display_name: String::new(),
                 receipt: AttachmentReceipt {
@@ -7146,7 +7140,6 @@ pub(crate) async fn reference_chat_stage_file_with_runtime(
         };
         let dir = reference_files::reference_staging_base_dir(&worktree)
             .join(&receipt.receipt.attachment_id);
-        let path = dir.join(&receipt.display_name);
         let mut staged = runtime.staged.lock();
         staged.remove(&reservation);
         staged.insert(
@@ -7154,7 +7147,6 @@ pub(crate) async fn reference_chat_stage_file_with_runtime(
             ReferenceStagedFile {
                 target_key,
                 dir,
-                path,
                 preview: Some(reference_files::ReferencePreviewLease::new(preview, preview_permit)),
                 display_name: receipt.display_name.clone(),
                 receipt: receipt.receipt.clone(),
@@ -7200,7 +7192,7 @@ async fn reference_chat_list_files(
 ) -> Response {
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
@@ -7243,7 +7235,7 @@ async fn reference_chat_preview_file(
 ) -> Response {
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
@@ -7316,7 +7308,7 @@ async fn reference_chat_delete_file(
 ) -> Response {
     let query = match reference_chat_read_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     // No liveness check: a staged file of an exited session must stay releasable, and the
     // registry key below already ties the file to its own target.
@@ -9258,7 +9250,7 @@ mod tests {
         let request =
             tokio::spawn(async move { get_capabilities(State(request_state), headers).await });
         let entered = tokio::time::timeout(Duration::from_secs(5), entered_rx).await;
-        state.auth_manager.revoke_device(&device.id);
+        state.auth_manager.revoke_device(&device.id).unwrap();
         let released = release_tx.send(());
         let response = tokio::time::timeout(Duration::from_secs(5), request).await;
         assert!(
@@ -9640,17 +9632,6 @@ mod tests {
             Arc::clone(&terminal_service),
             registry.clone(),
         ));
-
-        fn no_auth_query() -> AuthQuery {
-            AuthQuery {
-                ticket: None,
-                render: None,
-                cols: None,
-                rows: None,
-                daemon_epoch: None,
-                after_sequence: None,
-            }
-        }
 
         let subscribe_result = push_subscribe(
             State(Arc::clone(&state)),
@@ -11285,11 +11266,11 @@ mod tests {
             .expect("first json body");
         let first_items = first_body["items"].as_array().expect("items array");
         assert_eq!(first_items.len(), 2, "limit=2 must return the newest two messages");
-        assert_eq!(first_items[0]["ordinal"].as_u64(), Some(3 as u64), "ordinal 3 expected");
-        assert_eq!(first_items[1]["ordinal"].as_u64(), Some(4 as u64), "ordinal 4 expected");
+        assert_eq!(first_items[0]["ordinal"].as_u64(), Some(3_u64), "ordinal 3 expected");
+        assert_eq!(first_items[1]["ordinal"].as_u64(), Some(4_u64), "ordinal 4 expected");
         assert!(first_body["partial"].as_bool() == Some(true), "older history remains");
         assert!(
-            first_body["nextCursor"].as_u64() == Some(3 as u64),
+            first_body["nextCursor"].as_u64() == Some(3_u64),
             "nextCursor is the oldest returned ordinal"
         );
 
@@ -11305,11 +11286,11 @@ mod tests {
             .expect("second json body");
         let second_items = second_body["items"].as_array().expect("items array");
         assert_eq!(second_items.len(), 2, "cursor=3 must return the two older messages");
-        assert_eq!(second_items[0]["ordinal"].as_u64(), Some(1 as u64), "ordinal 1 expected");
-        assert_eq!(second_items[1]["ordinal"].as_u64(), Some(2 as u64), "ordinal 2 expected");
+        assert_eq!(second_items[0]["ordinal"].as_u64(), Some(1_u64), "ordinal 1 expected");
+        assert_eq!(second_items[1]["ordinal"].as_u64(), Some(2_u64), "ordinal 2 expected");
         assert!(second_body["partial"].as_bool() == Some(true), "older history remains");
         assert!(
-            second_body["nextCursor"].as_u64() == Some(1 as u64),
+            second_body["nextCursor"].as_u64() == Some(1_u64),
             "nextCursor is the oldest returned ordinal"
         );
 
@@ -11325,7 +11306,7 @@ mod tests {
             .expect("final json body");
         let final_items = final_body["items"].as_array().expect("items array");
         assert_eq!(final_items.len(), 1, "cursor=1 must return only the oldest message");
-        assert_eq!(final_items[0]["ordinal"].as_u64(), Some(0 as u64), "ordinal 0 expected");
+        assert_eq!(final_items[0]["ordinal"].as_u64(), Some(0_u64), "ordinal 0 expected");
         assert!(final_body["partial"].as_bool() == Some(false), "oldest message included");
         assert!(final_body["nextCursor"].is_null(), "no older history means no cursor");
 

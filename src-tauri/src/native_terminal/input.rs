@@ -163,18 +163,10 @@ impl NativeTerminalInput {
 }
 
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct NativeTerminalInputState {
     terminal: Option<NativeTerminal>,
     focused: bool,
-}
-
-impl Default for NativeTerminalInputState {
-    fn default() -> Self {
-        Self {
-            terminal: None,
-            focused: false,
-        }
-    }
 }
 
 #[allow(dead_code)]

@@ -374,8 +374,9 @@ fn token_expired(issued_at: u64, now: u64) -> bool {
 
 fn token_in_rotation_window(issued_at: u64, now: u64) -> bool {
     let age = now.saturating_sub(issued_at);
-    age >= TOKEN_ABSOLUTE_LIFETIME_SECS - TOKEN_ROTATION_WINDOW_SECS
-        && age < TOKEN_ABSOLUTE_LIFETIME_SECS
+    (TOKEN_ABSOLUTE_LIFETIME_SECS - TOKEN_ROTATION_WINDOW_SECS
+        ..TOKEN_ABSOLUTE_LIFETIME_SECS)
+        .contains(&age)
 }
 
 fn mint_bearer_token() -> String {
@@ -1574,6 +1575,39 @@ fn prune_revoked_and_idle_devices(state: &mut PersistedAuthState, now: u64) {
     token_meta.retain(|token, _| tokens.contains_key(token));
 }
 
+/// Holds an advisory exclusive lock for the lifetime of a store write.
+///
+/// The daemon, the GUI and the CLI are separate PROCESSES writing the same file, so
+/// an in-process mutex cannot order them: two writers could each read, modify and
+/// rename, and the later rename would silently discard the earlier writer's change.
+/// `std::fs::File::lock` on a sidecar file serializes them across processes on every
+/// platform. Gating this to Unix left Windows with no cross-process lock at all, so
+/// the daemon, the GUI and the CLI could each rename over the others' tokens.
+///
+/// The lock is advisory and only effective between participants that take it, which
+/// is every writer that goes through [`write_private_json`]. It is released when the
+/// file descriptor closes, including on process death, so a crash cannot wedge it.
+struct StoreLock {
+    _file: std::fs::File,
+}
+
+impl StoreLock {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options.open(path.with_extension("lock"))?;
+        // Blocking: a concurrent writer is expected and should be waited for, not
+        // raced with or skipped.
+        file.lock()?;
+        Ok(Self { _file: file })
+    }
+}
+
 /// Writes `value` as JSON, restricting access to the current user.
 ///
 /// On Unix the owner-only modes are applied explicitly, and the file is written to a temporary
@@ -1593,38 +1627,6 @@ fn prune_revoked_and_idle_devices(state: &mut PersistedAuthState, now: u64) {
 ///   with respect to readers, but without fsync the rename can reach disk while the
 ///   contents have not, so a crash can leave an empty or truncated store where a
 ///   valid one is expected.
-
-/// Holds an advisory exclusive lock for the lifetime of a store write.
-///
-/// The daemon, the GUI and the CLI are separate PROCESSES writing the same file, so
-/// an in-process mutex cannot order them: two writers could each read, modify and
-/// rename, and the later rename would silently discard the earlier writer's change.
-/// `std::fs::File::lock` on a sidecar file serializes them across processes on every
-/// platform. Gating this to Unix left Windows with no cross-process lock at all, so
-/// the daemon, the GUI and the CLI could each rename over the others' tokens.
-///
-/// The lock is advisory and only effective between participants that take it, which
-/// is every writer that goes through [`write_private_json`]. It is released when the
-/// file descriptor closes, including on process death, so a crash cannot wedge it.
-struct StoreLock(std::fs::File);
-
-impl StoreLock {
-    fn acquire(path: &Path) -> std::io::Result<Self> {
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(false).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let file = options.open(path.with_extension("lock"))?;
-        // Blocking: a concurrent writer is expected and should be waited for, not
-        // raced with or skipped.
-        file.lock()?;
-        Ok(Self(file))
-    }
-}
-
 pub(crate) fn write_private_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2121,7 +2123,7 @@ mod tests {
         let auth = AuthManager::new();
         let code = auth.create_pairing_code(DevicePermission::Control);
         let long_name = "A".repeat(150);
-        let (token, device) = auth
+        let (_token, device) = auth
             .exchange_pairing_code_with_installation(&code, &long_name, Some("inst-len"))
             .expect("exchange");
         assert_eq!(device.name.len(), 100, "name must be capped at 100 chars");
@@ -3086,7 +3088,7 @@ mod persistence_tests {
         let burst: Vec<_> = (0..2 * PAIRING_GLOBAL_FAILURE_CEILING)
             .map(|_| guess(Duration::ZERO))
             .collect();
-        let mut total = burst.iter().filter(|r| accepted(*r)).count();
+        let mut total = burst.iter().filter(|r| accepted(r)).count();
         assert_eq!(total, PAIRING_GLOBAL_FAILURE_CEILING as usize);
         // One more guess every second for the rest of the 600 s lifetime: a
         // budget that reset every 60 s would accept more here.

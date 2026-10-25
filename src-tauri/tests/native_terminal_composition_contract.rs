@@ -347,11 +347,11 @@ fn test_viewport_containment_and_interaction_boundary_seam() {
 
     // Platform interaction boundary contract:
     // Active macOS compositor is pointer-transparent and cannot intercept events outside its viewport
-    let descriptor =
-        ferryx_lib::native_terminal::composition::PlatformCompositorDescriptor::active_for_platform(
-        );
     #[cfg(target_os = "macos")]
     {
+        let descriptor =
+            ferryx_lib::native_terminal::composition::PlatformCompositorDescriptor::active_for_platform(
+            );
         assert!(!descriptor.can_intercept_event_outside_viewport());
         assert!(descriptor.pointer_transparent);
         assert!(descriptor.validate_desktop_composition().is_ok());

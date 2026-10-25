@@ -80,10 +80,7 @@ pub fn is_color_glyph_candidate(text: &str) -> bool {
         return false;
     };
     let cp = first_ch as u32;
-    match cp {
-        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF => true,
-        _ => false,
-    }
+    matches!(cp, 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF)
 }
 
 /// Returns true if character is in secondary candidate ranges (Arrows or Misc Technical).
@@ -204,8 +201,13 @@ impl FontManager {
         scale_factor: f32,
     ) -> RasterizedGlyph {
         let total_pixels = (width * height) as usize;
-        let mut buffer = vec![0u8; total_pixels];
+        let buffer = vec![0u8; total_pixels];
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let mut buffer = buffer;
+        #[cfg(target_os = "macos")]
         let mut subpixel_buffer = vec![0u8; total_pixels * 4];
+        #[cfg(not(target_os = "macos"))]
+        let subpixel_buffer = vec![0u8; total_pixels * 4];
 
         if text.is_empty() || text.chars().all(|c| c.is_whitespace()) || width == 0 || height == 0 {
             return RasterizedGlyph::Alpha(buffer);
@@ -340,8 +342,7 @@ impl FontManager {
                 &family,
                 text,
                 &mut buffer,
-                width,
-                height,
+                (width, height),
                 effective_font_size,
                 bold,
                 italic,
@@ -758,7 +759,7 @@ mod tests {
     fn test_glyph_placement_snaps_to_integral_physical_pixels() {
         let mgr = FontManager::global();
         let metrics = mgr.cell_metrics();
-        let odd_width = if metrics.width_px % 2 == 0 {
+        let odd_width = if metrics.width_px.is_multiple_of(2) {
             metrics.width_px + 1
         } else {
             metrics.width_px

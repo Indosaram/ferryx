@@ -112,6 +112,7 @@ thread_local! { pub(crate) static CHILD_STARTED: std::cell::RefCell<Option<tokio
 thread_local! { static EXCEPTIONAL_CLEANUP: std::cell::RefCell<Option<tokio::sync::oneshot::Sender<bool>>> = const { std::cell::RefCell::new(None) }; }
 /// Local IPC mutations have no remote grant. Retain the sender for the whole
 /// transaction so a closed watch channel cannot masquerade as revocation.
+#[cfg(test)]
 pub(crate) fn with_local_worktree_budget<T>(work: impl FnOnce() -> T) -> T {
     if GIT_BUDGET.with(|slot| slot.borrow().is_some()) {
         return work();
@@ -140,6 +141,7 @@ pub(crate) fn with_git_budget<T>(budget: GitBudget, work: impl FnOnce() -> T) ->
 
 /// Nested use is the same operation: pass clones of its cancellation sources.
 /// This preserves inherited grant revocation and can only shorten its deadline.
+#[cfg(test)]
 pub(crate) fn with_preparation_git_budget<T>(
     deadline: std::time::Instant,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1329,10 +1331,10 @@ fn is_hosted_git_remote(remote: &str) -> bool {
     let Some((host, path)) = remote.split_once(':') else {
         return false;
     };
-    !host.is_empty()
-        && !host.contains(['/', '\\'])
-        && !(host.len() == 1 && path.starts_with(['/', '\\']))
-        && !path.is_empty()
+    !(host.is_empty()
+        || host.contains(['/', '\\'])
+        || path.is_empty()
+        || host.len() == 1 && path.starts_with(['/', '\\']))
 }
 
 pub fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {

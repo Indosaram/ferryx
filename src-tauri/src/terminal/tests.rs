@@ -555,12 +555,9 @@ async fn terminal_service_natural_exit_closes_daemon_owned_output_stream() {
     let mut receiver = attachment.receiver;
 
     timeout(Duration::from_secs(5), async {
-        loop {
-            match receiver.recv().await {
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
+        while let Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
+            receiver.recv().await
+        {}
     })
     .await
     .expect("natural exit closes output stream");

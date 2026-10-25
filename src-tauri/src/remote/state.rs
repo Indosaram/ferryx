@@ -778,6 +778,9 @@ pub struct PublishedPairing {
 /// Monotonic source for PublishedPairing::epoch.
 pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+#[cfg(test)]
+type SnapshotPostBuildHook = Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
@@ -867,7 +870,7 @@ pub struct RemoteGatewayState {
     #[cfg(test)]
     snapshot_build_completed: Notify,
     #[cfg(test)]
-    snapshot_post_build_hook: Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    snapshot_post_build_hook: SnapshotPostBuildHook,
 }
 
 impl RemoteGatewayState {

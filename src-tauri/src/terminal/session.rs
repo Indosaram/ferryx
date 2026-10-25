@@ -432,10 +432,7 @@ pub(crate) struct PtySessionConfig {
     /// the PTY session preserves session listing and CWD validation without abusing the
     /// exclusive writer lease used by agent/destructive-operation safety.
     pub worktree_path: Option<PathBuf>,
-    /// The TERM grace the close that claims this session will run, shared with the session so a
-    /// concurrent close can size its fence for the close actually in flight rather than for its own
-    /// grace. Both constructors start it empty: a session that is not closing has no close to cover.
-    pub close_grace: Arc<Mutex<Option<Duration>>>,
+
 }
 
 /// Where a PTY reader thread currently is. Diagnostic only: written by the reader loop and read
@@ -463,6 +460,7 @@ impl PtyReaderPhase {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_raw(raw: u64) -> Self {
         match raw {
             1 => PtyReaderPhase::BeforeRead,
@@ -474,6 +472,7 @@ impl PtyReaderPhase {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             PtyReaderPhase::Starting => "starting",
@@ -521,6 +520,7 @@ pub struct PtySession {
     /// has returned" and is consumed by the lifecycle watcher.
     reader_stop_requested: Arc<AtomicBool>,
     /// The reader's own phase, diagnostics only (see `PtyReaderPhase`).
+    #[cfg(test)]
     reader_phase: Arc<AtomicU64>,
     reaped: Arc<AtomicBool>,
     /// Epoch millis of the last PTY output chunk read from the child (0 = none).
@@ -766,6 +766,7 @@ impl PtySession {
             reader_finished,
             reader_finished_notify,
             reader_stop_requested,
+            #[cfg(test)]
             reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
@@ -1454,6 +1455,7 @@ impl PtySession {
         }
     }
 
+    #[cfg(any(test, windows))]
     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
         let mut child_slot = self.child.lock();
         let Some(mut process) = child_slot.take() else {
@@ -1547,6 +1549,7 @@ impl PtySession {
     }
 
     /// The reader's current phase, for diagnostics only.
+    #[cfg(test)]
     pub(crate) fn reader_phase(&self) -> &'static str {
         PtyReaderPhase::from_raw(self.reader_phase.load(Ordering::Acquire)).as_str()
     }
@@ -1640,7 +1643,7 @@ impl PtySession {
         &self,
         hub: Option<&TerminalOutputHub>,
     ) -> Result<PtySessionExport, PtyError> {
-        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::fd::FromRawFd;
 
         let master_raw_fd = {
             let master_lock = self.master.lock();
@@ -1703,7 +1706,7 @@ impl PtySession {
         })?;
 
         // Reconstruct UnixMasterPty from the transferred master OwnedFd
-        let mut master_pty = portable_pty::master_from_owned_fd(master, None)
+        let master_pty = portable_pty::master_from_owned_fd(master, None)
             .map_err(|e| PtyError::PtyCreationError(format!("Failed to adopt master PTY fd: {e}")))?;
 
         // Mirror the existing nonblocking-input pattern in PtyManager::spawn_with_id_and_worktree
@@ -1884,6 +1887,7 @@ impl PtySession {
             reader_finished,
             reader_finished_notify,
             reader_stop_requested,
+            #[cfg(test)]
             reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
@@ -1968,6 +1972,8 @@ mod tests {
         assert_ne!(target.load(Ordering::Relaxed), 0);
     }
 
+    #[cfg(unix)]
+    #[test]
     fn test_adopted_process_liveness_observation() {
         // Real process (current test process) must be observed as alive
         let my_pid = std::process::id();

@@ -156,7 +156,7 @@ pub fn omp_skill_invocation(prompt: &str) -> Option<OmpSkillInvocation> {
         } else {
             None
         };
-        let Some(skill) = skill else { return None };
+        let skill = skill?;
         skills.push(skill);
         remainder = &remainder[captures.get(0)?.as_str().len()..];
         if !remainder.starts_with("\n\nThe user explicitly invoked the ") {
@@ -164,9 +164,7 @@ pub fn omp_skill_invocation(prompt: &str) -> Option<OmpSkillInvocation> {
         }
         remainder = &remainder[2..];
         matched = pattern.captures(remainder);
-        if matched.is_none() {
-            return None;
-        }
+        matched.as_ref()?;
     }
 
     if !skills.is_empty() {

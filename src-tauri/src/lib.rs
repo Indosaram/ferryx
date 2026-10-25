@@ -21,6 +21,7 @@ pub mod clipboard_image;
 pub mod daemon;
 pub mod hub_runtime;
 pub mod dag;
+pub use dag::journal as dag_journal;
 pub mod host_boot;
 pub mod ipc;
 #[cfg(all(feature = "desktop", target_os = "macos"))]
@@ -43,6 +44,7 @@ pub mod ssh;
 pub mod terminal;
 pub mod util;
 pub mod worktree;
+pub use worktree::naming as worktree_naming;
 #[cfg(feature = "desktop")]
 pub mod watchdog;
 
@@ -115,11 +117,11 @@ pub fn raise_file_descriptor_limit() -> Option<u64> {
         let hard = if limits.rlim_max == libc::RLIM_INFINITY {
             u64::MAX
         } else {
-            limits.rlim_max as u64
+            limits.rlim_max
         };
-        let target = file_descriptor_limit_target(limits.rlim_cur as u64, hard);
-        if target <= limits.rlim_cur as u64 {
-            return Some(limits.rlim_cur as u64);
+        let target = file_descriptor_limit_target(limits.rlim_cur, hard);
+        if target <= limits.rlim_cur {
+            return Some(limits.rlim_cur);
         }
         let raised = libc::rlimit {
             rlim_cur: target as libc::rlim_t,
@@ -128,7 +130,7 @@ pub fn raise_file_descriptor_limit() -> Option<u64> {
         if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) != 0 {
             // Keep serving with the inherited limit rather than aborting startup; the
             // caller can still log the shortfall.
-            return Some(limits.rlim_cur as u64);
+            return Some(limits.rlim_cur);
         }
         Some(target)
     }
@@ -375,7 +377,7 @@ pub fn is_unshifted_cmd_w_modifiers(flags: objc2_app_kit::NSEventModifierFlags) 
 
 #[cfg(target_os = "macos")]
 pub fn is_unshifted_cmd_w_characters(characters: Option<&str>) -> bool {
-    characters.map_or(false, |chars| chars.eq_ignore_ascii_case("w"))
+    characters.is_some_and(|chars| chars.eq_ignore_ascii_case("w"))
 }
 
 #[cfg(target_os = "macos")]
@@ -1322,6 +1324,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
+    #[cfg(all(target_os = "macos", feature = "native-terminal"))]
     let scroll_daemon_client = Arc::clone(&daemon_client);
     // P10/P11: the cleanup + pending-create reapers must run from a real
     // process lifecycle, not only from tests.
@@ -1858,9 +1861,9 @@ mod tests {
     use crate::daemon::client::DaemonClient;
     use crate::remote::auth::DevicePermission;
     use std::ffi::OsString;
-    use std::sync::Mutex;
+    use tokio::sync::Mutex;
 
-    static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static FERRYX_DATA_DIR_LOCK: Mutex<()> = Mutex::const_new(());
 
     /// The predicate chain the macOS key monitor ran before todo 18, in its original order.
     #[cfg(target_os = "macos")]
@@ -2569,7 +2572,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn app_remote_state_persists_pairing_but_starts_off() {
-        let _lock = FERRYX_DATA_DIR_LOCK.lock().expect("data dir lock");
+        let _lock = FERRYX_DATA_DIR_LOCK.lock().await;
         let _restore = RestoreFerryxDataDir(std::env::var_os("FERRYX_DATA_DIR"));
         let dir = tempfile::TempDir::new().expect("tempdir");
         std::env::set_var("FERRYX_DATA_DIR", dir.path());
@@ -2612,16 +2615,11 @@ mod tests {
         }
         let server_clone = Arc::clone(&server);
         let server_task = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&server_clone);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let s = Arc::clone(&server_clone);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
 
@@ -2654,16 +2652,11 @@ mod tests {
         ));
         let server_clone2 = Arc::clone(&server2);
         let server_task2 = tokio::spawn(async move {
-            loop {
-                match listener2.accept().await {
-                    Ok((stream, _)) => {
-                        let s = Arc::clone(&server_clone2);
-                        tokio::spawn(async move {
-                            s.handle_client(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener2.accept().await {
+                let s = Arc::clone(&server_clone2);
+                tokio::spawn(async move {
+                    s.handle_client(stream).await;
+                });
             }
         });
 
@@ -2736,7 +2729,7 @@ pub fn run() {
         .with_max_level(tracing::Level::INFO)
         .try_init();
 
-    let mut context = tauri::generate_context!();
+    let context = tauri::generate_context!();
     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
     let qa_profile = match (
         std::env::var("FERRYX_QA_BARRIER_DIR"),
@@ -2750,10 +2743,14 @@ pub fn run() {
         _ => panic!("QA GUI launch requires both barrier directory and run id"),
     };
     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
-    if let Some(profile) = qa_profile.as_deref() {
-        configure_qa_primary_window(&mut context, profile)
-            .expect("QA GUI config must contain the main window");
-    }
+    let context = {
+        let mut context = context;
+        if let Some(profile) = qa_profile.as_deref() {
+            configure_qa_primary_window(&mut context, profile)
+                .expect("QA GUI config must contain the main window");
+        }
+        context
+    };
     create_app(tauri::Builder::default())
         .build(context)
         .expect("error while building tauri application")

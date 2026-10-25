@@ -913,7 +913,7 @@ impl RemoteRuntime {
                         let overwrite = s
                             .pending_size
                             .as_ref()
-                            .map_or(true, |&(_, _, gen)| generation >= gen);
+                            .is_none_or(|&(_, _, gen)| generation >= gen);
                         if overwrite {
                             s.pending_size = Some((cols, rows, generation));
                         }
@@ -1099,7 +1099,8 @@ impl RemoteRuntime {
     /// - Never reconnects.
     /// - Never spawns a new remote PTY.
     /// - Attaches directly to the existing `TerminalOutputHub` session without failing.
-    pub fn live_import(
+    #[cfg(test)]
+    pub(crate) fn live_import(
         &self,
         state: RemoteExportState,
         transport: Option<Arc<dyn Transport>>,
@@ -1120,7 +1121,8 @@ impl RemoteRuntime {
     }
 
     /// Alias for `live_import`.
-    pub fn import_transferred(
+    #[cfg(test)]
+    pub(crate) fn import_transferred(
         &self,
         state: RemoteExportState,
         transport: Option<Arc<dyn Transport>>,
@@ -1128,6 +1130,7 @@ impl RemoteRuntime {
         self.live_import(state, transport)
     }
 
+    #[cfg(test)]
     fn insert_live(
         &self,
         state: RemoteExportState,
@@ -1202,6 +1205,7 @@ impl RemoteRuntime {
         Ok(())
     }
 
+    #[cfg(test)]
     fn launch_live(&self, entry: &Arc<Entry>, client: Arc<dyn Transport>) {
         let mut state = entry.state.lock();
         let generation = state.details.generation;
@@ -1344,8 +1348,8 @@ async fn run(
             let info = client.describe(&d.target).await?;
             if info.target != d.target {
                 return Err(BridgeError::TargetMismatch {
-                    expected: d.target.clone(),
-                    actual: info.target,
+                    expected: Box::new(d.target.clone()),
+                    actual: Box::new(info.target),
                 });
             }
             if info.exited {
@@ -1377,10 +1381,9 @@ async fn run(
                     "Remote helper does not advertise agentStateV1; agent state reporting unavailable for this session"
                 );
             }
-            let mut desired_size: Option<(u16, u16)> = None;
             {
                 let _gate = e.control.lock().await;
-                {
+                let desired_size = {
                     let mut s = e.state.lock();
                     if s.details.generation != generation {
                         return Ok(());
@@ -1389,14 +1392,15 @@ async fn run(
                     s.details.pid = Some(info.pid);
                     s.details.state = RemoteConnectionState::Connected;
                     s.details.failure = None;
-                    desired_size = Some(
+                    let desired_size = Some(
                         s.pending_size
                             .take()
                             .map(|(c, r, _)| (c, r))
                             .unwrap_or((s.details.descriptor.cols, s.details.descriptor.rows)),
                     );
                     Entry::notify(&s);
-                }
+                    desired_size
+                };
                 // Converge the remote PTY onto the last size the daemon knows about
                 // before streaming resumes: a reconnect must not leave the remote shell
                 // at stale spawn defaults while the pane renders a different grid.
@@ -1420,7 +1424,7 @@ async fn run(
                             let restore = s
                                 .pending_size
                                 .as_ref()
-                                .map_or(true, |&(_, _, gen)| generation >= gen);
+                                .is_none_or(|&(_, _, gen)| generation >= gen);
                             if restore {
                                 s.pending_size = Some((cols, rows, generation));
                             }
@@ -1548,6 +1552,7 @@ async fn run(
     }
 }
 
+#[cfg(test)]
 async fn run_live(
     e: Arc<Entry>,
     hub: Arc<TerminalOutputHub>,
@@ -1693,6 +1698,207 @@ async fn run_live(
     };
     connector.delay(0).await;
     run(e, hub, connector, next_generation, None, sink).await;
+}
+
+async fn queue_worker(
+    mut rx: mpsc::UnboundedReceiver<RemoteCommand>,
+    entry_weak: Weak<Entry>,
+    hub: Arc<TerminalOutputHub>,
+) {
+    struct PermitGuard {
+        permits: Arc<parking_lot::Mutex<QueuePermits>>,
+        entries: usize,
+        bytes: usize,
+    }
+    impl Drop for PermitGuard {
+        fn drop(&mut self) {
+            if self.entries > 0 || self.bytes > 0 {
+                let mut p = self.permits.lock();
+                p.allocated_entries = p.allocated_entries.saturating_sub(self.entries);
+                p.allocated_bytes = p.allocated_bytes.saturating_sub(self.bytes);
+            }
+        }
+    }
+
+    let mut pending = std::collections::VecDeque::new();
+    loop {
+        let cmd = if let Some(cmd) = pending.pop_front() {
+            cmd
+        } else {
+            match rx.recv().await {
+                Some(cmd) => cmd,
+                None => break,
+            }
+        };
+
+        let Some(e) = entry_weak.upgrade() else {
+            break;
+        };
+
+        let _guard = PermitGuard {
+            permits: e.queue_permits.clone(),
+            entries: 1,
+            bytes: cmd.bytes,
+        };
+
+        if cmd.reply.is_closed() {
+            continue;
+        }
+
+        let gate = tokio::time::timeout_at(cmd.dispatch_deadline, e.control.lock()).await;
+        let Ok(_gate) = gate else {
+            let _ = cmd.reply.send(Err(RemoteFailure::new(
+                RemoteFailureKind::Busy,
+                "Remote input queue deadline exceeded; input was not sent",
+            )));
+            continue;
+        };
+        if tokio::time::Instant::now() >= cmd.dispatch_deadline {
+            let _ = cmd.reply.send(Err(RemoteFailure::new(
+                RemoteFailureKind::Busy,
+                "Remote input queue deadline exceeded; input was not sent",
+            )));
+            continue;
+        }
+        if cmd.reply.is_closed() {
+            continue;
+        }
+
+        let (client, target) = {
+            let mut s = e.state.lock();
+            if let Err(error) = check_connected(&s, cmd.generation) {
+                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
+                    // Only a same-generation outage may retain the desired geometry:
+                    // a stale-generation op must never seed pending_size, otherwise
+                    // its old geometry is replayed onto the next connection and can
+                    // regress geometry the newer generation already applied.
+                    if error.kind == RemoteFailureKind::Disconnected {
+                        let overwrite = s
+                            .pending_size
+                            .as_ref()
+                            .is_none_or(|&(_, _, gen)| cmd.generation >= gen);
+                        if overwrite {
+                            s.pending_size = Some((cols, rows, cmd.generation));
+                        }
+                    }
+                }
+                let _ = cmd.reply.send(Err(error));
+                continue;
+            }
+            (
+                s.transport.clone().unwrap(),
+                s.details.descriptor.target.clone(),
+            )
+        };
+
+        let mut batched_writes = Vec::new();
+        let mut total_bytes = 0;
+        if let RemoteCommandKind::Write(ref bytes) = cmd.kind {
+            total_bytes = bytes.len();
+            while batched_writes.len() < 8 {
+                let candidate = if let Some(c) = pending.pop_front() {
+                    Some(c)
+                } else {
+                    rx.try_recv().ok()
+                };
+                let Some(candidate) = candidate else {
+                    break;
+                };
+
+                if candidate.reply.is_closed() {
+                    drop(PermitGuard {
+                        permits: e.queue_permits.clone(),
+                        entries: 1,
+                        bytes: candidate.bytes,
+                    });
+                    continue;
+                }
+
+                let matches = match candidate.kind {
+                    RemoteCommandKind::Write(ref b) => {
+                        candidate.generation == cmd.generation
+                            && tokio::time::Instant::now() < candidate.dispatch_deadline
+                            && total_bytes.saturating_add(b.len()) <= MAX_PENDING_BYTES
+                    }
+                    _ => false,
+                };
+
+                if matches {
+                    if let RemoteCommandKind::Write(ref b) = candidate.kind {
+                        total_bytes += b.len();
+                    }
+                    batched_writes.push(candidate);
+                } else {
+                    pending.push_front(candidate);
+                    break;
+                }
+            }
+        }
+
+        let batch_bytes: usize = batched_writes.iter().map(|c| c.bytes).sum();
+        let _batch_guard = PermitGuard {
+            permits: e.queue_permits.clone(),
+            entries: batched_writes.len(),
+            bytes: batch_bytes,
+        };
+
+        let result = match cmd.kind {
+            RemoteCommandKind::Write(ref bytes) => {
+                if batched_writes.is_empty() {
+                    client.write(&target, bytes).await
+                } else {
+                    let mut combined = Vec::with_capacity(total_bytes);
+                    combined.extend_from_slice(bytes);
+                    for drained in &batched_writes {
+                        if let RemoteCommandKind::Write(ref b) = drained.kind {
+                            combined.extend_from_slice(b);
+                        }
+                    }
+                    client.write(&target, &combined).await
+                }
+            }
+            RemoteCommandKind::Resize(cols, rows) => client.resize(&target, cols, rows).await,
+        };
+
+        let mut s = e.state.lock();
+        let outcome = match result {
+            Ok(()) => {
+                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
+                    s.details.descriptor.cols = cols;
+                    s.details.descriptor.rows = rows;
+                    let clear = s
+                        .pending_size
+                        .as_ref()
+                        .is_none_or(|&(_, _, gen)| cmd.generation >= gen);
+                    if clear {
+                        s.pending_size = None;
+                    }
+                    hub.record_resize(&s.details.descriptor.backend_session_id, cols, rows);
+                    Entry::notify(&s);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let failure = RemoteFailure::from_bridge(&error);
+                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
+                    let overwrite = s
+                        .pending_size
+                        .as_ref()
+                        .is_none_or(|&(_, _, gen)| cmd.generation >= gen);
+                    if overwrite {
+                        s.pending_size = Some((cols, rows, cmd.generation));
+                    }
+                }
+                fail(&mut s, failure.clone());
+                Err(failure)
+            }
+        };
+
+        let _ = cmd.reply.send(outcome.clone());
+        for drained in batched_writes {
+            let _ = drained.reply.send(outcome.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1887,7 +2093,7 @@ mod tests {
         });
 
         // Live import into successor
-        successor.live_import(exported, Some(imported_transport.clone())).expect("live_import");
+        successor.import_transferred(exported, Some(imported_transport.clone())).expect("live_import");
 
         // Verify live import invariants:
         // 1. Never reconnected
@@ -2273,206 +2479,6 @@ mod tests {
             guard2.assert_still_alive();
             guard1.terminate_and_wait();
             guard2.terminate_and_wait();
-        }
-    }
-}
-async fn queue_worker(
-    mut rx: mpsc::UnboundedReceiver<RemoteCommand>,
-    entry_weak: Weak<Entry>,
-    hub: Arc<TerminalOutputHub>,
-) {
-    struct PermitGuard {
-        permits: Arc<parking_lot::Mutex<QueuePermits>>,
-        entries: usize,
-        bytes: usize,
-    }
-    impl Drop for PermitGuard {
-        fn drop(&mut self) {
-            if self.entries > 0 || self.bytes > 0 {
-                let mut p = self.permits.lock();
-                p.allocated_entries = p.allocated_entries.saturating_sub(self.entries);
-                p.allocated_bytes = p.allocated_bytes.saturating_sub(self.bytes);
-            }
-        }
-    }
-
-    let mut pending = std::collections::VecDeque::new();
-    loop {
-        let cmd = if let Some(cmd) = pending.pop_front() {
-            cmd
-        } else {
-            match rx.recv().await {
-                Some(cmd) => cmd,
-                None => break,
-            }
-        };
-
-        let Some(e) = entry_weak.upgrade() else {
-            break;
-        };
-
-        let _guard = PermitGuard {
-            permits: e.queue_permits.clone(),
-            entries: 1,
-            bytes: cmd.bytes,
-        };
-
-        if cmd.reply.is_closed() {
-            continue;
-        }
-
-        let gate = tokio::time::timeout_at(cmd.dispatch_deadline, e.control.lock()).await;
-        let Ok(_gate) = gate else {
-            let _ = cmd.reply.send(Err(RemoteFailure::new(
-                RemoteFailureKind::Busy,
-                "Remote input queue deadline exceeded; input was not sent",
-            )));
-            continue;
-        };
-        if tokio::time::Instant::now() >= cmd.dispatch_deadline {
-            let _ = cmd.reply.send(Err(RemoteFailure::new(
-                RemoteFailureKind::Busy,
-                "Remote input queue deadline exceeded; input was not sent",
-            )));
-            continue;
-        }
-        if cmd.reply.is_closed() {
-            continue;
-        }
-
-        let (client, target) = {
-            let mut s = e.state.lock();
-            if let Err(error) = check_connected(&s, cmd.generation) {
-                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
-                    // Only a same-generation outage may retain the desired geometry:
-                    // a stale-generation op must never seed pending_size, otherwise
-                    // its old geometry is replayed onto the next connection and can
-                    // regress geometry the newer generation already applied.
-                    if error.kind == RemoteFailureKind::Disconnected {
-                        let overwrite = s
-                            .pending_size
-                            .as_ref()
-                            .map_or(true, |&(_, _, gen)| cmd.generation >= gen);
-                        if overwrite {
-                            s.pending_size = Some((cols, rows, cmd.generation));
-                        }
-                    }
-                }
-                let _ = cmd.reply.send(Err(error));
-                continue;
-            }
-            (
-                s.transport.clone().unwrap(),
-                s.details.descriptor.target.clone(),
-            )
-        };
-
-        let mut batched_writes = Vec::new();
-        let mut total_bytes = 0;
-        if let RemoteCommandKind::Write(ref bytes) = cmd.kind {
-            total_bytes = bytes.len();
-            while batched_writes.len() < 8 {
-                let candidate = if let Some(c) = pending.pop_front() {
-                    Some(c)
-                } else {
-                    rx.try_recv().ok()
-                };
-                let Some(candidate) = candidate else {
-                    break;
-                };
-
-                if candidate.reply.is_closed() {
-                    drop(PermitGuard {
-                        permits: e.queue_permits.clone(),
-                        entries: 1,
-                        bytes: candidate.bytes,
-                    });
-                    continue;
-                }
-
-                let matches = match candidate.kind {
-                    RemoteCommandKind::Write(ref b) => {
-                        candidate.generation == cmd.generation
-                            && tokio::time::Instant::now() < candidate.dispatch_deadline
-                            && total_bytes.saturating_add(b.len()) <= MAX_PENDING_BYTES
-                    }
-                    _ => false,
-                };
-
-                if matches {
-                    if let RemoteCommandKind::Write(ref b) = candidate.kind {
-                        total_bytes += b.len();
-                    }
-                    batched_writes.push(candidate);
-                } else {
-                    pending.push_front(candidate);
-                    break;
-                }
-            }
-        }
-
-        let batch_bytes: usize = batched_writes.iter().map(|c| c.bytes).sum();
-        let _batch_guard = PermitGuard {
-            permits: e.queue_permits.clone(),
-            entries: batched_writes.len(),
-            bytes: batch_bytes,
-        };
-
-        let result = match cmd.kind {
-            RemoteCommandKind::Write(ref bytes) => {
-                if batched_writes.is_empty() {
-                    client.write(&target, bytes).await
-                } else {
-                    let mut combined = Vec::with_capacity(total_bytes);
-                    combined.extend_from_slice(bytes);
-                    for drained in &batched_writes {
-                        if let RemoteCommandKind::Write(ref b) = drained.kind {
-                            combined.extend_from_slice(b);
-                        }
-                    }
-                    client.write(&target, &combined).await
-                }
-            }
-            RemoteCommandKind::Resize(cols, rows) => client.resize(&target, cols, rows).await,
-        };
-
-        let mut s = e.state.lock();
-        let outcome = match result {
-            Ok(()) => {
-                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
-                    s.details.descriptor.cols = cols;
-                    s.details.descriptor.rows = rows;
-                    let clear = s
-                        .pending_size
-                        .as_ref()
-                        .map_or(true, |&(_, _, gen)| cmd.generation >= gen);
-                    if clear {
-                        s.pending_size = None;
-                    }
-                    hub.record_resize(&s.details.descriptor.backend_session_id, cols, rows);
-                    Entry::notify(&s);
-                }
-                Ok(())
-            }
-            Err(error) => {
-                let failure = RemoteFailure::from_bridge(&error);
-                if let RemoteCommandKind::Resize(cols, rows) = cmd.kind {
-                    let overwrite = s
-                        .pending_size
-                        .as_ref()
-                        .map_or(true, |&(_, _, gen)| cmd.generation >= gen);
-                    if overwrite {
-                        s.pending_size = Some((cols, rows, cmd.generation));
-                    }
-                }
-                fail(&mut s, failure.clone());
-                Err(failure)
-            }
-        };
-
-        let _ = cmd.reply.send(outcome.clone());
-        for drained in batched_writes {
-            let _ = drained.reply.send(outcome.clone());
         }
     }
 }

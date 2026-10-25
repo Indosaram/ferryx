@@ -978,7 +978,7 @@ mod tests {
         let probe =
             move |_root: &Path| ProbeOutcome::Done(Some("static-claim-unchanged".to_string()));
 
-        assert!(sweep_with_probe(&cache, &registry, now, &probe).is_empty());
+        assert!(sweep_with_probe(&cache, &registry, now, probe).is_empty());
         manager.safe_delete(&wt_path).unwrap();
 
         for seconds in (30..RECONCILE_INTERVAL.as_secs()).step_by(30) {
@@ -986,7 +986,7 @@ mod tests {
                 &cache,
                 &registry,
                 now + Duration::from_secs(seconds),
-                &probe,
+                probe,
             );
             assert!(
                 changes.is_empty(),
@@ -994,7 +994,7 @@ mod tests {
             );
         }
 
-        let changes = sweep_with_probe(&cache, &registry, now + RECONCILE_INTERVAL, &probe);
+        let changes = sweep_with_probe(&cache, &registry, now + RECONCILE_INTERVAL, probe);
         assert_eq!(
             changes.len(),
             1,
@@ -1007,7 +1007,7 @@ mod tests {
             &cache,
             &registry,
             now + RECONCILE_INTERVAL + Duration::from_secs(30),
-            &probe,
+            probe,
         );
         assert!(changes.is_empty());
     }

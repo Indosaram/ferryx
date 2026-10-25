@@ -13,9 +13,10 @@ fn resolve_dag_runs_dir_with_env(
         nested.join("runs")
     } else if nested.is_dir() {
         nested
-    } else if project_path.join("runs").is_dir() {
-        project_path.join("runs")
-    } else if project_path.ends_with(".omo/senpi-task/dag") || project_path.ends_with("dag") {
+    } else if project_path.join("runs").is_dir()
+        || project_path.ends_with(".omo/senpi-task/dag")
+        || project_path.ends_with("dag")
+    {
         project_path.join("runs")
     } else if has_records(&project_path.join(".omo/senpi-task")) {
         nested.join("runs")

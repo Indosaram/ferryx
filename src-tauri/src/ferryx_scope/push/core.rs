@@ -1,5 +1,4 @@
 use crate::scoped_contracts::{InventoryTransition, TargetRef, TransitionKind, TransitionSource};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -53,7 +52,6 @@ impl PushStore {
     }
     pub fn mark_delivered(&mut self, device: &str, event: &InventoryTransition) { self.delivered.insert((device.into(), event.target.clone(), event.revision)); }
 }
-pub fn target_link(target: &TargetRef) -> String { format!("/#task={}", URL_SAFE_NO_PAD.encode(serde_json::to_vec(target).expect("target serialization"))) }
 pub fn validate_endpoint(endpoint: &str) -> Result<reqwest::Url, &'static str> {
     let url = reqwest::Url::parse(endpoint).map_err(|_| "endpoint")?;
     if url.scheme() != "https" || url.host_str() != Some("fcm.googleapis.com")

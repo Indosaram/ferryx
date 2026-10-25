@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn unreadable_argv_is_never_guessed() {
         let unreadable = GroupProcess { pid: 21, parent: 10, argv: None, executable: None };
-        assert!(matches!(select_candidate(&[unreadable.clone()]), Err(DetectError::Unsupported(_))));
+        assert!(matches!(select_candidate(std::slice::from_ref(&unreadable)), Err(DetectError::Unsupported(_))));
         // Next to a readable ssh the unreadable member could be a second client.
         let group = [proc(20, 10, &["ssh", "a"]), unreadable];
         assert!(matches!(select_candidate(&group), Err(DetectError::Unsupported(_))));

@@ -578,7 +578,7 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
     };
     let rows = parse_numbered_rows(&lines, top, hint_index);
 
-    let mut question: Option<String>;
+    let question: Option<String>;
     let options: Vec<ReferencePromptOption>;
     let menu_row_count: usize;
     let selected_index: usize;
@@ -589,9 +589,7 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
 
     if rows.is_empty() {
         // free form: the answer line sits right above the hint
-        if header.is_none() {
-            return None;
-        }
+        header?;
         let answer_line = find_last_index(&lines[..hint_index], |line, _| {
             let cleaned = clean_line(line);
             !cleaned.is_empty() && !is_divider(&cleaned)
@@ -669,7 +667,7 @@ pub fn parse_codex_async_question(screen: &str) -> Option<ReferenceCodexPrompt> 
         None => "Question".to_string(),
     };
     let custom_menu_index = (!typed_row_holds_text).then(|| menu_row_count.saturating_sub(1));
-    let custom_option_index = (!typed_row_holds_text).then(|| options.len() as u32);
+    let custom_option_index = (!typed_row_holds_text).then_some(options.len() as u32);
     let parsed = finish_codex_prompt(FinishCodexPrompt {
         kind: ReferencePromptKind::Question,
         title,
@@ -904,13 +902,6 @@ fn queued_prompt(
         })
         .collect();
     let custom_menu_index = first.options.len();
-    let menu_labels: Vec<String> = if first.options.is_empty() {
-        Vec::new()
-    } else {
-        let mut labels = first.options.clone();
-        labels.push("Other".to_string());
-        labels
-    };
     Some(finish_codex_prompt(FinishCodexPrompt {
         kind: ReferencePromptKind::Question,
         title: if count > 1 {
@@ -1061,8 +1052,8 @@ fn nearest_question(lines: &[String], before_index: usize) -> Option<String> {
 fn parse_numbered_rows(lines: &[String], start: usize, end: usize) -> Vec<NumberedRow> {
     let mut rows: Vec<NumberedRow> = Vec::new();
     let end = end.min(lines.len());
-    for index in start..end {
-        let raw = re_ansi().replace_all(&lines[index], "").to_string();
+    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
+        let raw = re_ansi().replace_all(line, "").to_string();
         let Some(captures) = re_numbered_option().captures(raw.trim()) else {
             continue;
         };
@@ -1085,8 +1076,8 @@ fn parse_numbered_rows(lines: &[String], start: usize, end: usize) -> Vec<Number
     for index in 0..rows.len() {
         let row_line = rows[index].line_index;
         let next_line = rows.get(index + 1).map(|row| row.line_index).unwrap_or(end);
-        for line_index in row_line + 1..next_line {
-            let description = clean_line(&lines[line_index]);
+        for line in lines.iter().take(next_line).skip(row_line + 1) {
+            let description = clean_line(line);
             if description.is_empty() || is_divider(&description) {
                 continue;
             }
@@ -1288,8 +1279,7 @@ fn list_rows(lines: &[String], hint_index: usize, shape: &Regex, more: Option<&R
     let mut first = usize::MAX;
     let mut last = 0usize;
     let start = hint_index.saturating_sub(80);
-    for index in start..hint_index {
-        let line = &lines[index];
+    for (index, line) in lines.iter().enumerate().take(hint_index).skip(start) {
         let text = line.trim();
         let above = if ended { None } else { rows.len().checked_sub(1) };
         // what a row says, wrapped under itself: told by its column, before anything it happens
@@ -2168,7 +2158,7 @@ mod tests {
         assert_eq!(parsed.prompt.kind, ReferencePromptKind::Question);
         assert_eq!(parsed.prompt.title, "");
         assert_eq!(parsed.prompt.body, None);
-        assert_eq!(parsed.prompt.multi_select, false);
+        assert!(!parsed.prompt.multi_select);
         assert_eq!(parsed.prompt.custom_option_index, None);
         assert_eq!(
             parsed.prompt.question,

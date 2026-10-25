@@ -979,7 +979,7 @@ impl CodexParser {
                 let plain = payload
                     .get("kind")
                     .and_then(Value::as_str)
-                    .map_or(true, |kind| kind == "plain");
+                    .is_none_or(|kind| kind == "plain");
                 if !plain {
                     return;
                 }
@@ -1350,7 +1350,7 @@ fn codex_image_values(entry: &Map<String, Value>) -> Vec<String> {
         let plain = payload
             .get("kind")
             .and_then(Value::as_str)
-            .map_or(true, |kind| kind == "plain");
+            .is_none_or(|kind| kind == "plain");
         if !message || !plain {
             return Vec::new();
         }

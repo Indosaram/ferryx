@@ -71,7 +71,9 @@ impl ImageTextures {
                 continue;
             }
             retained.insert(image.generation);
-            if !self.textures.contains_key(&image.generation) {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.textures.entry(image.generation)
+            {
                 let expected = (image.width as usize)
                     .checked_mul(image.height as usize)
                     .and_then(|n| n.checked_mul(4));
@@ -133,7 +135,7 @@ impl ImageTextures {
                         },
                     ],
                 });
-                self.textures.insert(image.generation, binding);
+                entry.insert(binding);
                 #[cfg(test)]
                 {
                     self.upload_count += 1;

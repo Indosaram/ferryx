@@ -53,10 +53,7 @@ impl FsFault {
 fn fs_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(test)]
     if FsFault::get() == FsFault::FailTempWrite {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "injected temp write failure",
-        ));
+        return Err(std::io::Error::other("injected temp write failure"));
     }
     std::fs::write(path, bytes)
 }
@@ -64,10 +61,7 @@ fn fs_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn fs_rename(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     if FsFault::get() == FsFault::FailRename {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "injected rename failure",
-        ));
+        return Err(std::io::Error::other("injected rename failure"));
     }
     std::fs::rename(from, to)
 }
@@ -93,15 +87,8 @@ const PERSIST_MIN_INTERVAL: Duration = Duration::from_millis(100);
 const RETRY_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
-static TEST_PERSIST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-#[cfg(test)]
 static TEST_PERSIST_MAP: parking_lot::Mutex<Option<HashMap<PathBuf, usize>>> =
     parking_lot::Mutex::new(None);
-
-#[cfg(test)]
-pub(crate) fn test_persist_count() -> usize {
-    TEST_PERSIST_COUNT.load(std::sync::atomic::Ordering::SeqCst)
-}
 
 #[cfg(test)]
 pub(crate) fn test_persist_count_path(path: &Path) -> usize {
@@ -118,7 +105,6 @@ fn save_descriptors_locked(
 ) -> Result<(), String> {
     #[cfg(test)]
     {
-        TEST_PERSIST_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut map = TEST_PERSIST_MAP.lock();
         let m = map.get_or_insert_with(HashMap::new);
         *m.entry(path.to_path_buf()).or_insert(0) += 1;
@@ -164,14 +150,18 @@ fn save_descriptors(
 }
 
 type Reply = oneshot::Sender<Result<(), String>>;
+type RecoveryStatus = (String, Option<Epoch>, Option<i32>, Option<String>);
+#[cfg(any(test, feature = "local-split-qa"))]
+type StatusEvent = (String, RecoveryStatus);
+
 enum Command {
     Write(u64, Vec<u8>, Reply),
     Resize(u64, u16, u16, Reply),
     Interrupt(u64, Option<String>, Reply),
-    Detach(Reply),
     Rearm(Reply),
     RetryOwned { daemon_epoch: String, incarnation: String, reply: Reply },
-    Status(oneshot::Sender<(String, Option<Epoch>, Option<i32>, Option<String>)>),
+    #[cfg(test)]
+    Status(oneshot::Sender<RecoveryStatus>),
     #[cfg(feature = "local-split-qa")]
     QaDropLoopback(Reply),
     #[cfg(feature = "local-split-qa")]
@@ -180,10 +170,6 @@ enum Command {
     QaRouteReceipt(oneshot::Sender<Result<super::paired_daemon::PairedRouteReceipt, String>>),
     #[cfg(feature = "local-split-qa")]
     QaDialAudit(oneshot::Sender<PairedDialAudit>),
-    #[cfg(test)]
-    QaBlockRecovery(Reply),
-    #[cfg(test)]
-    QaReleaseRecovery(Reply),
     #[cfg(test)]
     Block(oneshot::Sender<()>, oneshot::Receiver<()>),
     #[cfg(test)]
@@ -214,7 +200,7 @@ struct Owner {
     /// Live identity the actor republishes on every loop turn.
     live: Arc<Mutex<super::paired_daemon::PairedLive>>,
     cancel: tokio::sync::watch::Sender<bool>,
-    status: Arc<Mutex<(String, Option<Epoch>, Option<i32>, Option<String>)>>,
+    status: Arc<Mutex<RecoveryStatus>>,
     outcome: tokio::sync::watch::Receiver<PairedRecoveryOutcome>,
     #[cfg(test)]
     completed: tokio::sync::watch::Receiver<bool>,
@@ -299,7 +285,7 @@ pub struct Runtime {
     agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn crate::terminal::remote::AgentStateSink>>>>,
     installation: Mutex<()>,
     #[cfg(any(test, feature = "local-split-qa"))]
-    status_events: tokio::sync::broadcast::Sender<(String, (String, Option<Epoch>, Option<i32>, Option<String>))>,
+    status_events: tokio::sync::broadcast::Sender<StatusEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -369,6 +355,7 @@ impl RetryOwnedResult {
     fn stale_tuple() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: true, blocked: false, affirmative_exit: false } }
     fn blocked() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: true, affirmative_exit: false } }
     fn affirmative_exit() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: false, affirmative_exit: true } }
+    #[cfg(test)]
     fn protocol_flags_valid(self) -> bool {
         [self.admitted, self.owner_unavailable, self.stale_tuple, self.blocked, self.affirmative_exit]
             .into_iter().filter(|flag| *flag).count() == 1
@@ -408,7 +395,7 @@ impl Runtime {
         }
     }
 
-    pub fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
+    pub(crate) fn set_agent_sink(&self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
         *self.agent_sink.write() = Some(sink);
     }
     #[cfg(feature = "local-split-qa")]
@@ -465,24 +452,6 @@ impl Runtime {
         }).await.map_err(|error| error.to_string())?
     }
 
-    #[cfg(test)]
-    pub(crate) async fn qa_block_recovery(&self, id: &str) -> Result<(), &'static str> {
-        self.qa_actor_command(id, |reply| Command::QaBlockRecovery(reply)).await
-    }
-    #[cfg(test)]
-    pub(crate) async fn qa_release_recovery(&self, id: &str) -> Result<(), &'static str> {
-        self.qa_actor_command(id, |reply| Command::QaReleaseRecovery(reply)).await
-    }
-    #[cfg(test)]
-    async fn qa_actor_command(&self, id: &str, command: impl FnOnce(Reply) -> Command) -> Result<(), &'static str> {
-        let owners = self.owners.lock();
-        let Some(owner) = owners.get(id).filter(|owner| !owner.task.is_finished()) else { return Err("OWNER_UNAVAILABLE") };
-        let (reply, result) = oneshot::channel();
-        owner.sender.try_send(command(reply)).map_err(|_| "PAIRED_PROXY_BUSY")?;
-        drop(owners);
-        result.await.map_err(|_| "OWNER_UNAVAILABLE")?.map_err(|_| "OWNER_UNAVAILABLE")
-    }
-
     pub fn set_store_path(&self, path: PathBuf) {
         // N1: single lock order — the store-path snapshot is taken BEFORE the
         // descriptors lock is ever acquired; no site may acquire store_path
@@ -494,7 +463,6 @@ impl Runtime {
                 eprintln!(
                     "[paired_runtime] descriptor store load failed; leaving file untouched: {e}"
                 );
-                return;
             }
             Ok(loaded) => {
                 let _persist_guard = match PERSIST_MUTEX.lock() {
@@ -525,7 +493,7 @@ impl Runtime {
             .get(id)
             .is_some_and(|o| !o.task.is_finished())
     }
-    pub fn recovery_status(&self, id: &str) -> Option<(String, Option<Epoch>, Option<i32>, Option<String>)> {
+    pub fn recovery_status(&self, id: &str) -> Option<RecoveryStatus> {
         self.owners.lock().get(id).filter(|owner| !owner.task.is_finished())
             .map(|owner| owner.status.lock().clone())
     }
@@ -886,6 +854,7 @@ impl Runtime {
                             }
                             let _ = reply.send(result);
                         }
+                        #[cfg(test)]
                         Some(Command::Status(reply)) => {
                             let (outcome, exit_code) = proxy.outcome();
                             let _ = reply.send((outcome.into(), proxy.controller(), exit_code, proxy.blocked_reason().map(str::to_owned)));
@@ -918,24 +887,6 @@ impl Runtime {
                                 recovery_event_start_sequence: recovery_receipts.first().map_or(recovery_attempts + 1, |event| event.sequence),
                                 recovery_events: recovery_receipts.clone(),
                             });
-                        }
-                        #[cfg(test)]
-                        Some(Command::QaBlockRecovery(reply)) => {
-                            proxy.mark_disconnected();
-                            let _ = reply.send(Ok(()));
-                        }
-                        #[cfg(test)]
-                        Some(Command::QaReleaseRecovery(reply)) => {
-                            proxy.mark_disconnected();
-                            recovery_at = Some(tokio::time::Instant::now());
-                            let _ = reply.send(Ok(()));
-                        }
-                        Some(Command::Detach(reply)) => {
-                            let result = proxy.detach().await.map_err(|e| e.code);
-                            descriptors.lock().insert(task_id.clone(), proxy.descriptor().clone());
-                            dirty.store(true, Ordering::Release);
-                            let _ = reply.send(result);
-                            return;
                         }
                         #[cfg(test)]
                         Some(Command::Block(started, rx)) => {
@@ -1054,14 +1005,10 @@ impl Runtime {
                                                 }
                                                 let _ = reply.send(Ok(()));
                                             }
+                                            #[cfg(test)]
                                             Some(Command::Status(reply)) => {
                                                 let _ = reply.send(("owner_unavailable".into(), None, None, None));
                                             }
-                                            #[cfg(test)]
-                                            Some(Command::QaBlockRecovery(reply)) => { let _ = reply.send(Ok(())); }
-                                            #[cfg(test)]
-                                            Some(Command::QaReleaseRecovery(reply)) => { recovery_at = Some(tokio::time::Instant::now()); let _ = reply.send(Ok(())); }
-                                            Some(Command::Detach(reply)) => { let _ = reply.send(Ok(())); return; }
                                             #[cfg(test)]
                                             Some(Command::Block(started, gate)) => { let _ = started.send(()); let _ = gate.await; }
                                             #[cfg(test)]
@@ -1232,7 +1179,7 @@ impl Runtime {
         }
         self.flush_descriptors().await.unwrap();
     }
-    pub(crate) fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
+    fn sender(&self, id: &str) -> Result<mpsc::Sender<Command>, String> {
         self.owners
             .lock()
             .get(id)
@@ -1352,13 +1299,14 @@ impl Runtime {
 
     #[cfg(test)]
     async fn hold_actor_mailbox(&self, id: &str) -> Result<oneshot::Sender<()>, String> {
-        let owners = self.owners.lock();
-        let owner = owners.get(id).ok_or_else(|| "OWNER_UNAVAILABLE".to_string())?;
         let (entered_tx, entered_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        owner.sender.try_send(Command::HoldRecovery(entered_tx, release_rx))
-            .map_err(|_| "PAIRED_PROXY_BUSY".to_string())?;
-        drop(owners);
+        {
+            let owners = self.owners.lock();
+            let owner = owners.get(id).ok_or_else(|| "OWNER_UNAVAILABLE".to_string())?;
+            owner.sender.try_send(Command::HoldRecovery(entered_tx, release_rx))
+                .map_err(|_| "PAIRED_PROXY_BUSY".to_string())?;
+        }
         entered_rx.await.map_err(|_| "OWNER_UNAVAILABLE".to_string())?;
         Ok(release_tx)
     }
@@ -1833,7 +1781,7 @@ mod tests {
         commands: mpsc::Sender<FixtureCommand>,
         received: mpsc::Receiver<Message>,
     }
-    async fn published_status(events: &mut tokio::sync::broadcast::Receiver<(String, (String, Option<Epoch>, Option<i32>, Option<String>))>, id: &str, expected: &str) -> (String, Option<Epoch>, Option<i32>, Option<String>) {
+    async fn published_status(events: &mut tokio::sync::broadcast::Receiver<StatusEvent>, id: &str, expected: &str) -> RecoveryStatus {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let (owner, status) = events.recv().await.unwrap();
@@ -1841,7 +1789,7 @@ mod tests {
             }
         }).await.unwrap()
     }
-    async fn actor_barrier(runtime: &Runtime, id: &str) -> (String, Option<Epoch>, Option<i32>, Option<String>) {
+    async fn actor_barrier(runtime: &Runtime, id: &str) -> RecoveryStatus {
         let (reply, received) = oneshot::channel();
         runtime.sender(id).unwrap().send(Command::Status(reply)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), received).await.unwrap().unwrap()
@@ -2423,8 +2371,7 @@ mod tests {
         let failure = proxy
             .receive()
             .await
-            .err()
-            .expect("malformed agent_state frame must fail the boundary");
+            .expect_err("malformed agent_state frame must fail the boundary");
         assert_eq!(
             failure.code, "PAIRED_HOST_INVALID_RESPONSE",
             "{failure:?}"

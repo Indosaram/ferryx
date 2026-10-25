@@ -20,6 +20,8 @@ const COL_1: char = '\u{030D}';
 const COL_2: char = '\u{030E}';
 const HIGH_OUT_OF_RANGE: char = '\u{a8ea}';
 
+type PlacementGeometry = (i32, i32, [u32; 4], Option<[u32; 4]>);
+
 fn kitty(command: &str, bytes: &[u8]) -> Vec<u8> {
     format!(
         "\x1b_G{command};{}\x1b\\",
@@ -133,7 +135,7 @@ fn placeholder_cells_resolve_to_aspect_preserved_tiles() {
         .expect("placeholder cells");
 
     let snapshot = terminal.render_snapshot().expect("snapshot");
-    let placements: Vec<(i32, i32, [u32; 4], Option<[u32; 4]>)> = snapshot
+    let placements: Vec<PlacementGeometry> = snapshot
         .images
         .iter()
         .map(|placement| {
@@ -260,7 +262,7 @@ fn indented_block_uses_image_columns_for_its_source() {
         .expect("placeholder cells");
 
     let snapshot = terminal.render_snapshot().expect("snapshot");
-    let placements: Vec<(i32, i32, [u32; 4], Option<[u32; 4]>)> = snapshot
+    let placements: Vec<PlacementGeometry> = snapshot
         .images
         .iter()
         .map(|placement| {

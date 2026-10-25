@@ -11,7 +11,6 @@ use crate::remote::{
     auth::{DeviceAccessScope, DevicePermission},
     machine_protocol as m,
 };
-use crate::scoped_contracts::Epoch;
 use crate::terminal::{
     output_hub::TerminalOutputHub,
     paired_daemon::{Descriptor, Proxy},

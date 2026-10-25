@@ -95,7 +95,7 @@ pub fn decrypt_chromium_value(
     }
 
     let ciphertext = &encrypted[3..];
-    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
         return Err(BrowserError::CookieImport(
             "ciphertext length must be a non-zero multiple of 16 bytes".into(),
         ));

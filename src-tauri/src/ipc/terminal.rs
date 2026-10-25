@@ -320,11 +320,9 @@ pub fn start_managed_pump_token<R: Runtime>(
                                 emit_terminal_replay_gap(
                                     &app,
                                     &session_id_clone,
-                                    requested_after_sequence,
-                                    available_from_sequence,
-                                    start_sequence,
-                                    end_sequence,
-                                    &history,
+                                    TerminalReplayGapParams {
+                                        requested_after_sequence, available_from_sequence, start_sequence, end_sequence, history: &history,
+                                    },
                                     Some(&epoch_str),
                                 );
                             }
@@ -343,11 +341,9 @@ pub fn start_managed_pump_token<R: Runtime>(
                                 emit_terminal_replay_gap(
                                     &app,
                                     &session_id_clone,
-                                    requested_after_sequence,
-                                    available_from_sequence,
-                                    None,
-                                    None,
-                                    &[],
+                                    TerminalReplayGapParams {
+                                        requested_after_sequence, available_from_sequence, start_sequence: None, end_sequence: None, history: &[],
+                                    },
                                     Some(&epoch_str),
                                 );
                             }
@@ -412,11 +408,9 @@ pub fn start_managed_pump_token<R: Runtime>(
                     emit_terminal_replay_gap(
                         &app,
                         &session_id_clone,
-                        requested_after_sequence,
-                        available_from_sequence,
-                        start_sequence,
-                        end_sequence,
-                        &history,
+                        TerminalReplayGapParams {
+                            requested_after_sequence, available_from_sequence, start_sequence, end_sequence, history: &history,
+                        },
                         Some(&epoch_str),
                     );
                 }
@@ -435,11 +429,9 @@ pub fn start_managed_pump_token<R: Runtime>(
                     emit_terminal_replay_gap(
                         &app,
                         &session_id_clone,
-                        requested_after_sequence,
-                        available_from_sequence,
-                        None,
-                        None,
-                        &[],
+                        TerminalReplayGapParams {
+                            requested_after_sequence, available_from_sequence, start_sequence: None, end_sequence: None, history: &[],
+                        },
                         Some(&epoch_str),
                     );
                 }
@@ -782,16 +774,22 @@ fn flush_terminal_output<R: Runtime>(
 }
 
 #[cfg(feature = "desktop")]
-fn emit_terminal_replay_gap<R: Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
+struct TerminalReplayGapParams<'a> {
     requested_after_sequence: u64,
     available_from_sequence: u64,
     start_sequence: Option<u64>,
     end_sequence: Option<u64>,
-    history: &[u8],
+    history: &'a [u8],
+}
+
+#[cfg(feature = "desktop")]
+fn emit_terminal_replay_gap<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: &str,
+    gap: TerminalReplayGapParams<'_>,
     daemon_epoch: Option<&str>,
 ) -> bool {
+    let TerminalReplayGapParams { requested_after_sequence, available_from_sequence, start_sequence, end_sequence, history } = gap;
     let channel = TERMINAL_OUTPUT_CHANNEL.lock().clone();
     if let Some(channel) = channel {
         let epoch_u64 = daemon_epoch.and_then(|s| s.parse::<u64>().ok());
@@ -1162,7 +1160,7 @@ fn spawn_background_create_reconciler(
             let terminal = match journal_resp.result {
                 crate::paired_host::client::OperationResult::Operation(
                     crate::remote::machine_protocol::Operation::Completed { outcome, .. },
-                ) => Some(outcome),
+                ) => Some(*outcome),
                 _ => None,
             };
             let Some(outcome) = terminal else { continue };
@@ -1196,7 +1194,7 @@ async fn resolve_pending_create_terminal(
             if cancelled {
                 let close_req = crate::remote::machine_protocol::CloseSessionRequest {
                     request_id: uuid::Uuid::new_v4().to_string(),
-                    daemon_epoch: session.target.daemon_epoch.clone(),
+                    daemon_epoch: session.target.daemon_epoch,
                 };
                 let close_res = client
                     .paired_host_operation(crate::paired_host::client::OperationRequest {
@@ -1297,7 +1295,7 @@ pub async fn start_pending_create_reaper(daemon_client: Arc<DaemonClient>) {
                             crate::remote::machine_protocol::Operation::Completed {
                                 outcome, ..
                             },
-                        ) => Some(outcome),
+                        ) => Some(*outcome),
                         _ => None,
                     },
                     Err(_) => None,
@@ -1347,13 +1345,13 @@ pub async fn reconcile_ambiguous_create(
                 match op_resp.result {
                     crate::paired_host::client::OperationResult::Operation(
                         crate::remote::machine_protocol::Operation::Completed { outcome, .. },
-                    ) => match outcome {
+                    ) => match *outcome {
                         crate::remote::machine_protocol::OperationOutcome::Session { session } => {
                             if cancelled {
                                 let close_req =
                                     crate::remote::machine_protocol::CloseSessionRequest {
                                         request_id: uuid::Uuid::new_v4().to_string(),
-                                        daemon_epoch: session.target.daemon_epoch.clone(),
+                                        daemon_epoch: session.target.daemon_epoch,
                                     };
                                 let _ = daemon_client
                                         .paired_host_operation(crate::paired_host::client::OperationRequest {
@@ -1372,7 +1370,7 @@ pub async fn reconcile_ambiguous_create(
                         crate::remote::machine_protocol::OperationOutcome::Error { error } => {
                             let client_err = crate::paired_host::client::ClientError {
                                 code: error.code.clone(),
-                                machine_error: Some(error.clone()),
+                                machine_error: Some(Box::new(error.clone())),
                                 request_id: if error.request_id.is_empty() {
                                     Some(request_id.to_string())
                                 } else {
@@ -1559,8 +1557,8 @@ fn persist_pending_cleanups() {
     let pending_guard = PENDING_CLEANUPS.lock();
     let exhausted_guard = EXHAUSTED_CLEANUPS.lock();
     let saved = SavedCleanups {
-        pending: &*pending_guard,
-        exhausted: &*exhausted_guard,
+        pending: &pending_guard,
+        exhausted: &exhausted_guard,
     };
     if let Ok(bytes) = serde_json::to_vec_pretty(&saved) {
         let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
@@ -1619,7 +1617,7 @@ pub async fn execute_cleanup_close(
 ) -> CleanupOutcome {
     let close_req = crate::remote::machine_protocol::CloseSessionRequest {
         request_id: cleanup_request_id.clone(),
-        daemon_epoch: daemon_epoch.clone(),
+        daemon_epoch,
     };
     let op_req = crate::paired_host::client::OperationRequest {
         host_id: host_id.to_string(),
@@ -1646,13 +1644,15 @@ pub async fn execute_cleanup_close(
             };
             match daemon_client.paired_host_operation(journal_req).await {
                 Ok(resp) => {
-                    if let crate::paired_host::client::OperationResult::Operation(
-                        crate::remote::machine_protocol::Operation::Completed {
-                            outcome: crate::remote::machine_protocol::OperationOutcome::NoContent,
-                            ..
-                        },
-                    ) = resp.result
-                    {
+                    let completed_no_content = matches!(
+                        resp.result,
+                        crate::paired_host::client::OperationResult::Operation(
+                            crate::remote::machine_protocol::Operation::Completed {
+                                ref outcome, ..
+                            },
+                        ) if matches!(**outcome, crate::remote::machine_protocol::OperationOutcome::NoContent)
+                    );
+                    if completed_no_content {
                         CleanupOutcome::Success
                     } else {
                         let mut guard = PENDING_CLEANUPS.lock();
@@ -1744,7 +1744,7 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
                 {
                     retain_pending_cleanups(&item.cleanup_request_id);
                     if matches!(
-                        outcome,
+                        *outcome,
                         crate::remote::machine_protocol::OperationOutcome::Error { .. }
                     ) {
                         item.resolved = true;
@@ -1760,7 +1760,7 @@ pub async fn reap_cleanup_unknowns(daemon_client: &DaemonClient) -> usize {
                     let retry_req_id = uuid::Uuid::new_v4().to_string();
                     let close_req = crate::remote::machine_protocol::CloseSessionRequest {
                         request_id: retry_req_id.clone(),
-                        daemon_epoch: item.daemon_epoch.clone(),
+                        daemon_epoch: item.daemon_epoch,
                     };
                     let retry_op = crate::paired_host::client::OperationRequest {
                         host_id: item.host_id.clone(),
@@ -2569,7 +2569,7 @@ mod qa_split_producers {
                 session_id,
                 session,
                 ..
-            }) if session_id == command.backend_session_id => ("created", Some(session)),
+            }) if session_id == command.backend_session_id => ("created", Some(*session)),
             Ok(operation) => {
                 let state = operation_state(&operation).to_string();
                 let reason = format!(
@@ -3421,19 +3421,19 @@ mod qa_split_producers {
         }
 
         fn session_details() -> DaemonSessionDetails {
-            let mut details = DaemonSessionDetails::new(
-                "session-1".into(),
-                Some("ws-1".into()),
-                None,
-                Some("/repo".into()),
-                80,
-                24,
-                true,
-                None,
-                None,
-                None,
-                false,
-            );
+            let mut details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+                session_id: "session-1".into(),
+                workspace_id: Some("ws-1".into()),
+                worktree: None,
+                cwd: Some("/repo".into()),
+                cols: 80,
+                rows: 24,
+                running: true,
+                start_sequence: None,
+                end_sequence: None,
+                last_output_age_ms: None,
+                suspended: false,
+            });
             details.incarnation = Some("inc-1".into());
             details
         }
@@ -4068,6 +4068,7 @@ pub async fn cmd_terminal_spawn_operation(
     use crate::daemon::protocol::*;
     match request {
         SplitOperationRequest::Prepare { request_id, request, remaining_ms } => {
+            let request = *request;
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
             eprintln!(
                 "FERRYX_QA_SPLIT_OP_RECEIVED: variant=prepare request_id={request_id} workspace_id={}",
@@ -4242,19 +4243,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         // Explicit worktree/cwd spawn at the validated remote worktree path,
         // everything else at the registered root; local process CWD is still never inherited.
         daemon_client
-            .spawn_terminal_with_startup(
-                request
+            .spawn_terminal_with_startup(request
                     .client_request_id
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                request.workspace_id,
-                request.worktree.clone(),
-                request.cwd.clone().map(|p| p.to_string_lossy().to_string()),
-                cols,
-                rows,
-                None,
-                Some(TerminalStartup::RemoteSsh { host_store_path }),
-                None,
-            )
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()), request.workspace_id, crate::daemon::session_service::SpawnOptions { worktree: request.worktree.clone(), cwd: request.cwd.clone().map(|p| p.to_string_lossy().to_string()), cols, rows, shell: None }, Some(TerminalStartup::RemoteSsh { host_store_path }), None)
             .await?
     } else if is_paired_workspace {
         if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
@@ -4682,7 +4673,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             &host_id,
                             host.generation,
                             &remote_session.target.session_id,
-                            remote_session.target.daemon_epoch.clone(),
+                            remote_session.target.daemon_epoch,
                             cleanup_req_id,
                         )
                         .await;
@@ -4703,7 +4694,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     &host_id,
                     host.generation,
                     &remote_session.target.session_id,
-                    remote_session.target.daemon_epoch.clone(),
+                    remote_session.target.daemon_epoch,
                     cleanup_req_id,
                 )
                 .await;
@@ -4891,17 +4882,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             })
         });
         let spawn_result = match daemon_client
-            .spawn_terminal_with_startup(
-                client_request_id,
-                request.workspace_id,
-                request.worktree,
-                Some(cwd.to_string_lossy().to_string()),
-                cols,
-                rows,
-                effective_shell,
-                request.startup,
-                request.session_id,
-            )
+            .spawn_terminal_with_startup(client_request_id, request.workspace_id, crate::daemon::session_service::SpawnOptions { worktree: request.worktree, cwd: Some(cwd.to_string_lossy().to_string()), cols, rows, shell: effective_shell }, request.startup, request.session_id)
             .await
         {
             Ok(result) => result,
@@ -5068,7 +5049,7 @@ pub async fn cmd_terminal_attach<R: Runtime>(
             { return Err(IpcError::spawn_request_conflict("Attach attempt differs from durable pane binding")); }
             match daemon_client.local_split_status_until(&attempt.identity, deadline).await? {
                 crate::daemon::protocol::SplitOperationResult::Created { session_id: owned, session, .. }
-                    if owned == session_id => session,
+                    if owned == session_id => *session,
                 _ => return Err(IpcError::new(IpcErrorCode::OperationOutcomeUnknown,
                     "Attach requires a journal-confirmed creation for this request")),
             }
@@ -5381,7 +5362,7 @@ mod windows_process_cwd;
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        return std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
 
     #[cfg(target_os = "macos")]
@@ -5682,8 +5663,19 @@ mod tests {
             let mut lines = BufReader::new(read).lines();
             for step in 0..4 {
                 let request: DaemonRequest = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-                let mut details = DaemonSessionDetails::new("owned".into(), None, None, None,
-                    80, 24, true, None, None, None, false);
+                let mut details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+                    session_id: "owned".into(),
+                    workspace_id: None,
+                    worktree: None,
+                    cwd: None,
+                    cols: 80,
+                    rows: 24,
+                    running: true,
+                    start_sequence: None,
+                    end_sequence: None,
+                    last_output_age_ms: None,
+                    suspended: false,
+                });
                 details.incarnation = Some("owner-incarnation".into());
                 let response = match (step, request) {
                     (0, DaemonRequest::Handshake { .. }) => DaemonResponse::HandshakeOk {
@@ -5721,7 +5713,6 @@ mod tests {
 
     #[tokio::test]
     async fn pane_liveness_pump_generation_old_teardown_preserves_new_stream_atomically() {
-        use tauri::Manager;
         let session = format!("pump-teardown-{}", uuid::Uuid::new_v4());
         let old = reserve_managed_pump(&session);
         let current = reserve_managed_pump(&session);
@@ -5745,7 +5736,6 @@ mod tests {
 
     #[tokio::test]
     async fn pane_liveness_pump_generation_old_completion_cannot_install_new_stream() {
-        use tauri::Manager;
         let session = format!("pump-install-{}", uuid::Uuid::new_v4());
         let old = reserve_managed_pump(&session);
         let current = reserve_managed_pump(&session);
@@ -5813,19 +5803,19 @@ mod tests {
                     (1, crate::daemon::protocol::DaemonRequest::DescribeSession { session_id })
                         if session_id == session_for_peer =>
                     {
-                        let mut details = crate::daemon::protocol::DaemonSessionDetails::new(
-                            session_for_peer.clone(),
-                            None,
-                            None,
-                            None,
-                            80,
-                            24,
-                            true,
-                            None,
-                            None,
-                            None,
-                            false,
-                        );
+                        let mut details = crate::daemon::protocol::DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+                            session_id: session_for_peer.clone(),
+                            workspace_id: None,
+                            worktree: None,
+                            cwd: None,
+                            cols: 80,
+                            rows: 24,
+                            running: true,
+                            start_sequence: None,
+                            end_sequence: None,
+                            last_output_age_ms: None,
+                            suspended: false,
+                        });
                         details.incarnation = Some("daemon-incarnation-mismatch".into());
                         crate::daemon::protocol::DaemonResponse::DescribeSessionOk {
                             session: details,
@@ -6075,7 +6065,7 @@ mod tests {
             ).await;
             // Then the command itself must settle, not this test's safety bound.
             assert!(result.is_ok(), "reconnect attach exceeded its bounded-error contract");
-            let error = result.unwrap().err().expect("attachment must fail");
+            let error = result.unwrap().expect_err("attachment must fail");
             assert_eq!(error.code, IpcErrorCode::Timeout);
             assert_eq!(error.details.unwrap()["phase"], "attach");
         };
@@ -6089,8 +6079,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn p11_reap_keeps_unresolved_cleanup_in_authoritative_and_persisted_state() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _env_guard = ENV_LOCK.lock().unwrap();
+        static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _env_guard = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("FERRYX_PAIRED_PENDING_CLEANUPS_DIR", dir.path());
         clear_pending_cleanups_for_test();
@@ -6156,13 +6146,13 @@ mod tests {
         // and FAILS if the mapping is reverted to IpcError::internal("...") (assert code != internal).
         let client_err = crate::paired_host::client::ClientError {
             code: "SESSION_NOT_FOUND".to_string(),
-            machine_error: Some(crate::remote::machine_protocol::MachineError {
+            machine_error: Some(Box::new(crate::remote::machine_protocol::MachineError {
                 code: "SESSION_NOT_FOUND".to_string(),
                 message: "Remote session terminated".to_string(),
                 retryable: false,
                 request_id: "req-test-123".to_string(),
                 details: serde_json::Map::new(),
-            }),
+            })),
             request_id: Some("req-test-123".to_string()),
             ambiguous: false,
         };

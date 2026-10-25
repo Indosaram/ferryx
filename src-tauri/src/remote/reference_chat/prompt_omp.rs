@@ -445,12 +445,7 @@ fn strip_ansi(text: &str) -> String {
 
 /// `findLastIndex` (`:151-162`).
 fn find_last_index<T>(lines: &[T], predicate: impl Fn(&T, usize) -> bool) -> Option<usize> {
-    for index in (0..lines.len()).rev() {
-        if predicate(&lines[index], index) {
-            return Some(index);
-        }
-    }
-    None
+    (0..lines.len()).rev().find(|&index| predicate(&lines[index], index))
 }
 
 /// `wrapped` (`:163-166`): a line and the `span - 1` after it, as one, so a narrow pane's
@@ -490,8 +485,8 @@ fn nearest_question(lines: &[String], before_index: usize) -> Option<String> {
 /// `parseBorderMenu` (`:177-190`): the rows between two dividers, markers stripped.
 fn parse_border_menu(lines: &[String], start_divider: usize, end_divider: usize) -> Vec<MenuRow> {
     let mut rows = Vec::new();
-    for index in (start_divider + 1)..end_divider {
-        let mut text = clean_line(&lines[index]);
+    for (index, line) in lines.iter().enumerate().take(end_divider).skip(start_divider + 1) {
+        let mut text = clean_line(line);
         if text.is_empty() || is_divider(&text) {
             continue;
         }
@@ -663,8 +658,8 @@ fn parse_omp_approval(screen: &str) -> Option<OmpPromptCard> {
 
     let header_index = find_last_index(&lines, |line, _| patterns.approval_header.is_match(&clean_line(line)))?;
     let mut rows: Vec<MenuRow> = Vec::new();
-    for index in (header_index + 1)..lines.len() {
-        let text = clean_line(&lines[index]);
+    for (index, line) in lines.iter().enumerate().skip(header_index + 1) {
+        let text = clean_line(line);
         let Some(captures) = patterns.approval_row.captures(&text) else {
             continue;
         };
@@ -742,7 +737,7 @@ fn parse_omp_approval(screen: &str) -> Option<OmpPromptCard> {
 /// The omp branches of `promptTailIsActive` (`:1613`, `:1621`).
 fn omp_prompt_tail_is_active(responder: OmpPromptResponder, screen: &str) -> bool {
     let patterns = patterns();
-    let clean_lines: Vec<String> = strip_ansi(screen).split('\n').map(|line| clean_line(line)).collect();
+    let clean_lines: Vec<String> = strip_ansi(screen).split('\n').map(clean_line).collect();
     let mut visible: Vec<String> = clean_lines
         .into_iter()
         .filter(|line| !line.is_empty() && !is_divider(line))

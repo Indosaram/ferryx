@@ -16,7 +16,8 @@ pub mod pass;
 pub mod pipeline;
 pub mod rasterizer;
 pub mod render_target;
-pub mod renderer;
+#[path = "renderer.rs"]
+pub mod implementation;
 pub mod row_cache;
 pub mod scenario;
 pub mod shaders;
@@ -26,7 +27,7 @@ pub use font_manager::FontManager;
 pub use instances::build_row_instances;
 pub use pipeline::{GlyphInstance, RectInstance};
 pub use rasterizer::{rasterize_glyph, rasterize_glyph_with_scale, RasterizedGlyph};
-pub use renderer::NativeTerminalRenderer;
+pub use implementation::NativeTerminalRenderer;
 pub use scenario::canonical_scenario;
 pub use types::{
     parse_cursor_style, parse_hex_color, GlyphAtlasStats, OffscreenFrame, RendererConfig,

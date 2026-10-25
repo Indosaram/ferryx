@@ -42,10 +42,12 @@ fn test_envelope_validation_and_size_rejection() {
 
 #[test]
 fn test_pre_ffi_dimension_and_count_bounding() {
-    let mut options = SnapshotCodecOptions::default();
-    options.max_cols = 200;
-    options.max_rows = 100;
-    options.max_screens = 2;
+    let options = SnapshotCodecOptions {
+        max_cols: 200,
+        max_rows: 100,
+        max_screens: 2,
+        ..Default::default()
+    };
 
     let mut malformed_hdr = Vec::new();
     malformed_hdr.extend_from_slice(SNAPSHOT_MAGIC);
@@ -73,8 +75,10 @@ fn absent_scrollback_policies_do_not_exceed_decode_limits() {
     let mut term = DecodedTerminal::new(80, 24).expect("new terminal");
     term.vt_write(b"snapshot policy\r\n");
     let snapshot = term.encode(DEFAULT_MAX_SNAPSHOT_WIRE_BYTES).expect("snapshot");
-    let mut options = SnapshotCodecOptions::default();
-    options.max_scrollback_rows = 0;
+    let options = SnapshotCodecOptions {
+        max_scrollback_rows: 0,
+        ..Default::default()
+    };
     assert!(validate_snapshot_bounds(&snapshot, &options).is_ok());
 
     let mut explicit = snapshot.clone();
@@ -242,16 +246,20 @@ fn test_wire_limits_and_controlled_encode() {
         .encode(DEFAULT_MAX_SNAPSHOT_WIRE_BYTES)
         .expect("valid snapshot");
 
-    let mut decode_opts = SnapshotCodecOptions::default();
-    decode_opts.max_wire_bytes = snapshot.len() - 1;
+    let decode_opts = SnapshotCodecOptions {
+        max_wire_bytes: snapshot.len() - 1,
+        ..Default::default()
+    };
     let decode_limit_err = decode_terminal_snapshot(&snapshot, decode_opts);
     match decode_limit_err {
         Err(NativeTerminalError::LimitExceeded) => {}
         other => panic!("expected LimitExceeded on decode, got {:?}", other.err()),
     }
 
-    let mut high_continuation_opts = SnapshotCodecOptions::default();
-    high_continuation_opts.max_continuation_bytes = MAX_CONTINUATION_CEILING + 1;
+    let high_continuation_opts = SnapshotCodecOptions {
+        max_continuation_bytes: MAX_CONTINUATION_CEILING + 1,
+        ..Default::default()
+    };
     let ceil_err = decode_terminal_snapshot(&snapshot, high_continuation_opts);
     match ceil_err {
         Err(NativeTerminalError::LimitExceeded) => {}
@@ -307,6 +315,6 @@ fn test_incremental_decoder_early_drop_safety() {
 
 #[test]
 fn test_kitty_graphics_exclusion_contract() {
-    assert!(!KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED);
+    const { assert!(!KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED) };
     assert_eq!(KITTY_VIRTUAL_PLACEHOLDER_CODEPOINT, 0x10EEEE);
 }

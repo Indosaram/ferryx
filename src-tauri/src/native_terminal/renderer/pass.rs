@@ -6,68 +6,69 @@ use super::images::ImageDraw;
 use super::pipeline::{GlyphInstance, RectInstance, RenderPipelines, ScreenUniform};
 use crate::native_terminal::composition::PhysicalBounds;
 
+pub struct TerminalPassResources<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    pub pipelines: &'a RenderPipelines,
+    pub uniform_buf: &'a wgpu::Buffer,
+    pub uniform_bg: &'a wgpu::BindGroup,
+    pub atlas_bg: &'a wgpu::BindGroup,
+}
+
+pub struct TerminalPassTarget<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub format: wgpu::TextureFormat,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub struct TerminalPassOptions<'a> {
+    pub clear_color: wgpu::Color,
+    pub scissor: Option<PhysicalBounds>,
+    pub overlay: &'a [RectInstance],
+    pub images: &'a [ImageDraw],
+    pub image_occluders: &'a [RectInstance],
+}
+
 pub fn encode_terminal_passes(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipelines: &RenderPipelines,
-    uniform_buf: &wgpu::Buffer,
-    uniform_bg: &wgpu::BindGroup,
-    atlas_bg: &wgpu::BindGroup,
+    resources: TerminalPassResources<'_>,
     encoder: &mut wgpu::CommandEncoder,
-    view: &wgpu::TextureView,
-    format: wgpu::TextureFormat,
-    w: u32,
-    h: u32,
+    target: TerminalPassTarget<'_>,
     bg: &[RectInstance],
     glyph: &[GlyphInstance],
 ) {
     encode_terminal_passes_with_surface_options(
-        device,
-        queue,
-        pipelines,
-        uniform_buf,
-        uniform_bg,
-        atlas_bg,
+        resources,
         encoder,
-        view,
-        format,
-        w,
-        h,
+        target,
         bg,
         glyph,
-        wgpu::Color {
-            r: 0.07,
-            g: 0.07,
-            b: 0.09,
-            a: 1.0,
+        TerminalPassOptions {
+            clear_color: wgpu::Color {
+                r: 0.07,
+                g: 0.07,
+                b: 0.09,
+                a: 1.0,
+            },
+            scissor: None,
+            overlay: &[],
+            images: &[],
+            image_occluders: &[],
         },
-        None,
-        &[],
-        &[],
-        &[],
     );
 }
 
 pub fn encode_terminal_passes_with_surface_options(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipelines: &RenderPipelines,
-    uniform_buf: &wgpu::Buffer,
-    uniform_bg: &wgpu::BindGroup,
-    atlas_bg: &wgpu::BindGroup,
+    resources: TerminalPassResources<'_>,
     encoder: &mut wgpu::CommandEncoder,
-    view: &wgpu::TextureView,
-    format: wgpu::TextureFormat,
-    w: u32,
-    h: u32,
+    target: TerminalPassTarget<'_>,
     bg: &[RectInstance],
     glyph: &[GlyphInstance],
-    clear_color: wgpu::Color,
-    scissor: Option<PhysicalBounds>,
-    overlay: &[RectInstance],
-    images: &[ImageDraw],
-    image_occluders: &[RectInstance],
+    options: TerminalPassOptions<'_>,
 ) {
+    let TerminalPassResources { device, queue, pipelines, uniform_buf, uniform_bg, atlas_bg } = resources;
+    let TerminalPassTarget { view, format, width: w, height: h } = target;
+    let TerminalPassOptions { clear_color, scissor, overlay, images, image_occluders } = options;
     queue.write_buffer(
         uniform_buf,
         0,

@@ -59,18 +59,17 @@ fn json(status: u16, value: impl serde::Serialize) -> Response {
 }
 fn replay(record: super::machine_operation_journal::Record) -> Response {
     match record.operation {
-        Operation::Completed {
-            outcome: OperationOutcome::Session { session },
-            ..
-        } => json(record.status, session),
-        Operation::Completed {
-            outcome: OperationOutcome::NoContent,
-            ..
-        } => (StatusCode::NO_CONTENT, [("cache-control", "no-store")]).into_response(),
-        Operation::Completed {
-            outcome: OperationOutcome::Error { error },
-            ..
-        } => json(record.status, ErrorEnvelope { error }),
+        Operation::Completed { request_id, outcome } => match *outcome {
+            OperationOutcome::Session { session } => json(record.status, session),
+            OperationOutcome::NoContent => {
+                (StatusCode::NO_CONTENT, [("cache-control", "no-store")]).into_response()
+            }
+            OperationOutcome::Error { error } => json(record.status, ErrorEnvelope { error }),
+            outcome => json(record.status, Operation::Completed {
+                request_id,
+                outcome: Box::new(outcome),
+            }),
+        },
         Operation::OutcomeUnknown { request_id } => {
             failure("OPERATION_OUTCOME_UNKNOWN", &request_id)
         }
@@ -213,7 +212,7 @@ async fn mutation(
             Ok(super::server::authenticate_machine_request(
                 &auth_state,
                 &auth_headers,
-            ))
+            ).map_err(|response| *response))
         })
         .await
         .map_err(|_| failure("MACHINE_SERVICE_UNAVAILABLE", &id))??;
@@ -285,15 +284,15 @@ async fn mutation(
         if let (Some(session_id), Some(close)) = (close_id, close) {
             if let Err(error) = services
                 .sessions
-                .close_machine(
-                    &device.id,
-                    &id,
-                    &digest,
-                    &session_id,
-                    close.daemon_epoch,
-                    epoch,
-                    check.clone(),
-                )
+                .close_machine(crate::daemon::session_service::MachineClose {
+                    device: &device.id,
+                    request: &id,
+                    digest: &digest,
+                    id: &session_id,
+                    expected_epoch: close.daemon_epoch,
+                    owner_epoch: epoch,
+                    check: check.clone(),
+                })
                 .await
             {
                 let workspaces = services.workspaces.clone();

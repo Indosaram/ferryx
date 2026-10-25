@@ -640,8 +640,8 @@ pub fn classify_pane_liveness(snapshot: &PaneLivenessSnapshot) -> PaneLivenessVe
         return PaneLivenessVerdict::Unknown;
     }
 
-    let is_slow_execution = snapshot.executing_running_age_ms.map_or(false, |age| age > 250)
-        || snapshot.write_pending_ms.map_or(false, |ms| ms > 250);
+    let is_slow_execution = snapshot.executing_running_age_ms.is_some_and(|age| age > 250)
+        || snapshot.write_pending_ms.is_some_and(|ms| ms > 250);
 
     if is_slow_execution {
         return PaneLivenessVerdict::BlockedInIpcWrite;
@@ -670,7 +670,7 @@ pub fn classify_pane_liveness(snapshot: &PaneLivenessSnapshot) -> PaneLivenessVe
         }
     }
 
-    if snapshot.queued_head_age_ms.map_or(false, |age| age > 250) {
+    if snapshot.queued_head_age_ms.is_some_and(|age| age > 250) {
         return PaneLivenessVerdict::BlockedInQueue;
     }
 
@@ -702,7 +702,7 @@ pub fn classify_pane_liveness(snapshot: &PaneLivenessSnapshot) -> PaneLivenessVe
     let has_identity = snapshot
         .session_id
         .as_ref()
-        .map_or(false, |id| !id.trim().is_empty());
+        .is_some_and(|id| !id.trim().is_empty());
     let no_queued = snapshot.queued_head_age_ms.is_none() && snapshot.queued_count.unwrap_or(0) == 0;
     let no_executing = snapshot.executing_running_age_ms.is_none();
     let no_write_pending = snapshot.write_pending_ms.is_none();
@@ -1107,8 +1107,8 @@ mod pane_liveness_diagnostics_tests {
         match decoded_legacy {
             DaemonResponse::DescribeSessionOk { session, .. } => {
                 assert_eq!(session.session_id, "legacy-session-1");
-                assert_eq!(session.running, true);
-                assert_eq!(session.suspended, false);
+                assert!(session.running);
+                assert!(!session.suspended);
                 assert_eq!(session.reader_paused, None);
                 assert_eq!(session.kernel_stopped, None);
                 assert_eq!(session.registry_suspended, None);
@@ -1143,19 +1143,19 @@ mod pane_liveness_diagnostics_tests {
             _ => panic!("expected DescribeSessionOk"),
         }
 
-        let details = DaemonSessionDetails::new(
-            "sess-compat".into(),
-            Some("ws-1".into()),
-            None,
-            Some("/path".into()),
-            80,
-            24,
-            true,
-            Some(1),
-            Some(10),
-            None,
-            false,
-        );
+        let details = DaemonSessionDetails::new(crate::daemon::protocol::DaemonSessionDetailsParams {
+            session_id: "sess-compat".into(),
+            workspace_id: Some("ws-1".into()),
+            worktree: None,
+            cwd: Some("/path".into()),
+            cols: 80,
+            rows: 24,
+            running: true,
+            start_sequence: Some(1),
+            end_sequence: Some(10),
+            last_output_age_ms: None,
+            suspended: false,
+        });
         let resp = DaemonResponse::DescribeSessionOk { session: details, daemon_epoch: None };
         let serialized_wire = serde_json::to_string(&resp).expect("serialize DaemonResponse envelope");
         assert!(!serialized_wire.contains("readerPaused"));

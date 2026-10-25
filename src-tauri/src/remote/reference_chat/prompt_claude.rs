@@ -194,7 +194,6 @@ struct ListRows {
     rows: Vec<ListRow>,
     /// The rows a `… +N models` line under them counts.
     below: usize,
-    first: i64,
     last: i64,
     /// A line under a row that is not its wrapped text: the rows are not the list as drawn.
     unread: bool,
@@ -505,7 +504,7 @@ pub fn parse_claude_suggestion(ansi: &str) -> Option<String> {
             }
             let blank = character.is_whitespace() || character == '\u{a0}';
             // the cursor Claude draws itself sits inverse on the first grey character
-            if !dim && !blank && !(inverse && text.trim().is_empty() && !cursor) {
+            if !(dim || blank || inverse && text.trim().is_empty() && !cursor) {
                 return None;
             }
             if !dim && !blank {
@@ -839,9 +838,7 @@ fn parse_claude_approval(screen: &str) -> Option<ClaudePrompt> {
                 Some(_) => rules.first().copied(),
                 None => rules.last().copied(),
             };
-            let Some(rule_index) = rule_index else {
-                return None;
-            };
+            let rule_index = rule_index?;
             if question_index - rule_index > REFERENCE_CLAUDE_APPROVAL_PANEL_WINDOW {
                 return None;
             }
@@ -852,9 +849,7 @@ fn parse_claude_approval(screen: &str) -> Option<ClaudePrompt> {
                     !line.is_empty() && !is_divider(line) && !tip_line().is_match(line)
                 })
                 .collect();
-            let Some(title) = panel.first().cloned() else {
-                return None;
-            };
+            let title = panel.first().cloned()?;
             (title, panel[1..].join("\n"))
         }
     };
@@ -875,8 +870,8 @@ fn parse_claude_approval(screen: &str) -> Option<ClaudePrompt> {
                         .map(|row| row.line_index)
                         .unwrap_or(end);
                     let mut parts = vec![row.label.clone()];
-                    for line_index in row.line_index + 1..next {
-                        let line = clean_line(&lines[line_index]);
+                    for raw in lines.iter().take(next).skip(row.line_index + 1) {
+                        let line = clean_line(raw);
                         if !line.is_empty() && !is_divider(&line) {
                             parts.push(line);
                         }
@@ -1355,8 +1350,8 @@ fn parse_numbered_rows(lines: &[String], start: usize, end: usize) -> Vec<Claude
     if end <= start || start >= lines.len() {
         return rows;
     }
-    for index in start..end.min(lines.len()) {
-        let text = strip_ansi(&lines[index]);
+    for (index, raw) in lines.iter().enumerate().take(end).skip(start) {
+        let text = strip_ansi(raw);
         let text = text.trim();
         let Some(captures) = numbered_option().captures(text) else {
             continue;
@@ -1382,8 +1377,8 @@ fn parse_numbered_rows(lines: &[String], start: usize, end: usize) -> Vec<Claude
             .get(index + 1)
             .map(|row| row.line_index)
             .unwrap_or(end);
-        for line_index in rows[index].line_index + 1..next.min(lines.len()) {
-            let description = clean_line(&lines[line_index]);
+        for raw in lines.iter().take(next).skip(rows[index].line_index + 1) {
+            let description = clean_line(raw);
             if description.is_empty() || is_divider(&description) {
                 continue;
             }
@@ -1597,11 +1592,9 @@ fn list_rows(lines: &[String], hint_index: usize, shape: &Regex, more: Option<&R
     let mut below = 0usize;
     let mut ended = false;
     let mut unread = false;
-    let mut first: i64 = -1;
     let mut last: i64 = -1;
     let from = hint_index.saturating_sub(REFERENCE_CLAUDE_LIST_WINDOW);
-    for index in from..hint_index {
-        let line = &lines[index];
+    for (index, line) in lines.iter().enumerate().take(hint_index).skip(from) {
         let text = line.trim();
         let above = if ended { None } else { rows.last() };
         // what a row says, wrapped under itself: told by its column, before anything it happens
@@ -1630,7 +1623,6 @@ fn list_rows(lines: &[String], hint_index: usize, shape: &Regex, more: Option<&R
             };
             if restart {
                 rows = Vec::new();
-                first = index as i64;
             }
             rows.push(row);
             below = 0;
@@ -1664,7 +1656,6 @@ fn list_rows(lines: &[String], hint_index: usize, shape: &Regex, more: Option<&R
     ListRows {
         rows,
         below,
-        first,
         last,
         unread,
     }
@@ -1920,123 +1911,123 @@ macro_rules! claude_pattern {
     };
 }
 
-/// Upstream `ANSI_RE`.
+// Upstream `ANSI_RE`.
 claude_pattern!(ansi_escape, r"\x1b\[[0-?]*[ -/]*[@-~]");
-/// Upstream's OSC form, dropped alongside `ANSI_RE` in `parseClaudeSuggestion`.
+// Upstream's OSC form, dropped alongside `ANSI_RE` in `parseClaudeSuggestion`.
 claude_pattern!(osc, r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)");
-/// Upstream `sgrRuns`'s escape: a CSI with its params, an OSC, or a two-character escape.
+// Upstream `sgrRuns`'s escape: a CSI with its params, an OSC, or a two-character escape.
 claude_pattern!(escape, r"\x1b(?:\[([0-?]*)[ -/]*([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])");
-/// Upstream `SELECTED_RE`.
+// Upstream `SELECTED_RE`.
 claude_pattern!(selected_marker, r"^[❯›>]\s*");
-/// Upstream `DIVIDER_RE`.
+// Upstream `DIVIDER_RE`.
 claude_pattern!(divider, r"^[\s╭╮╰╯├┤┬┴┼─━═╌▔]+$");
-/// Upstream `NUMBERED_OPTION_RE`.
+// Upstream `NUMBERED_OPTION_RE`.
 claude_pattern!(numbered_option, r"^\s*([›>❯])?\s*([0-9]+)\.\s+(.+)$");
-/// Upstream `parseNumberedRows`'s checkbox test.
+// Upstream `parseNumberedRows`'s checkbox test.
 claude_pattern!(checkbox_lead, r"^\[[xX✓]\]");
-/// Upstream `parseNumberedRows`'s checkbox strip.
+// Upstream `parseNumberedRows`'s checkbox strip.
 claude_pattern!(checkbox_trim, r"^\[[ xX✓]\]\s*");
-/// Upstream `SOLID_RULE_RE`.
+// Upstream `SOLID_RULE_RE`.
 claude_pattern!(solid_rule, r"^[─━]{8,}$");
-/// Upstream `CLAUDE_ASK_HINT_RE`.
+// Upstream `CLAUDE_ASK_HINT_RE`.
 claude_pattern!(
     claude_ask_hint,
     r"(?i)enter to select.*(?:↑/↓|tab/arrow keys) to navigate.*esc to cancel"
 );
-/// Upstream `CLAUDE_TABS_RE`.
+// Upstream `CLAUDE_TABS_RE`.
 claude_pattern!(claude_tabs_bar, r"^←\s+[☐☒☑✔]");
-/// One tab of the bar: its marker and its label.
+// One tab of the bar: its marker and its label.
 claude_pattern!(tab_token, r"([☐☒☑✔])\s+([^\s].*?)\s*$");
-/// Upstream `CLAUDE_CONFIRM_HINT_RE`.
+// Upstream `CLAUDE_CONFIRM_HINT_RE`.
 claude_pattern!(claude_confirm_hint, r"(?i)enter to confirm.*esc to (?:cancel|exit|go back)");
-/// Upstream `CLAUDE_MODEL_HINT_RE`.
+// Upstream `CLAUDE_MODEL_HINT_RE`.
 claude_pattern!(
     claude_model_hint,
     r"(?i)enter to set as default.*\bs to use this session only.*esc to cancel"
 );
-/// Upstream `CLAUDE_MODEL_ROW_RE`.
+// Upstream `CLAUDE_MODEL_ROW_RE`.
 claude_pattern!(claude_model_row, r"^\s*([❯›>↑↓])?\s*([0-9]+)\.\s+(\S.*)$");
-/// Upstream `CLAUDE_MODEL_MORE_RE`.
+// Upstream `CLAUDE_MODEL_MORE_RE`.
 claude_pattern!(claude_model_more, r"^…\s*\+([0-9]+) models?$");
-/// Upstream `CLAUDE_TASKS_HEAD_RE`.
+// Upstream `CLAUDE_TASKS_HEAD_RE`.
 claude_pattern!(
     claude_tasks_head,
     r"^([0-9]+) tasks \([0-9]+ done, (?:[0-9]+ in progress, )?[0-9]+ open\)$"
 );
-/// Upstream `CLAUDE_TASK_ROW_RE`.
+// Upstream `CLAUDE_TASK_ROW_RE`.
 claude_pattern!(claude_task_row, r"^[◻◼✔]\s");
-/// Upstream `CLAUDE_TASKS_MORE_RE`.
+// Upstream `CLAUDE_TASKS_MORE_RE`.
 claude_pattern!(claude_tasks_more, r"^…\s\+[0-9]+ pending$");
-/// Upstream's guard on a task's activity line: a prompt or bullet of its own.
+// Upstream's guard on a task's activity line: a prompt or bullet of its own.
 claude_pattern!(claude_task_activity_guard, r"^[❯>›●⏺]");
-/// Upstream `LABELED_RULE_RE`.
+// Upstream `LABELED_RULE_RE`.
 claude_pattern!(labeled_rule, r"^─{3,}\s.*─$");
-/// Upstream `CLAUDE_HINT_TAIL_RE`.
+// Upstream `CLAUDE_HINT_TAIL_RE`.
 claude_pattern!(claude_hint_tail, r"(?i)\besc to (?:cancel|exit|go back)\b");
-/// Upstream `CLAUDE_PREVIEW_HINT_RE`.
+// Upstream `CLAUDE_PREVIEW_HINT_RE`.
 claude_pattern!(claude_preview_hint, r"(?i)\bn to add notes\b");
-/// Upstream's preview box corner: two or more spaces, then the box's top-left corner.
+// Upstream's preview box corner: two or more spaces, then the box's top-left corner.
 claude_pattern!(preview_corner, r"\s{2,}[┌╭]");
-/// Upstream's preview notes line.
+// Upstream's preview notes line.
 claude_pattern!(preview_notes, r"(?i)^\s*Notes:\s+press n to add notes\b.*$");
-/// Upstream `claudeChip`'s chip.
+// Upstream `claudeChip`'s chip.
 claude_pattern!(chip, r"^[☐☒☑✔]\s+(\S.*)$");
-/// Upstream `claudeQuestionText`'s chip test.
+// Upstream `claudeQuestionText`'s chip test.
 claude_pattern!(chip_any, r"^[☐☒☑✔]\s+\S");
-/// Upstream's typed-answer row (`Type something.`).
+// Upstream's typed-answer row (`Type something.`).
 claude_pattern!(typed_answer, r"(?i)^Type something\.?$");
-/// Upstream's multiple-choice row test.
+// Upstream's multiple-choice row test.
 claude_pattern!(multi_select_row, r"^\s*(?:[›>❯]\s*)?[0-9]+\.\s+\[[ xX✓]\]");
-/// Upstream's plan question.
+// Upstream's plan question.
 claude_pattern!(
     plan_question,
     r"(?i)Claude has written up a plan and is ready to execute\. Would you like to proceed\?"
 );
-/// Upstream's plan panel title.
+// Upstream's plan panel title.
 claude_pattern!(ready_to_code, r"(?i)Ready to code\?");
-/// Upstream's plan row that takes feedback.
+// Upstream's plan row that takes feedback.
 claude_pattern!(tell_change, r"(?i)^Tell Claude what to change$");
-/// Upstream's command-approval marker.
+// Upstream's command-approval marker.
 claude_pattern!(requires_approval, r"(?i)This command requires approval");
-/// Upstream's dangerous-rm marker.
+// Upstream's dangerous-rm marker.
 claude_pattern!(dangerous_rm, r"(?i)^Dangerous rm operation\b");
-/// Upstream's approval question.
+// Upstream's approval question.
 claude_pattern!(do_you_want, r"(?i)^Do you want to .+\?$");
-/// Upstream's approval hint tail.
+// Upstream's approval hint tail.
 claude_pattern!(esc_to_cancel, r"(?i)esc to cancel");
-/// Upstream's dropped `Tip:` line.
+// Upstream's dropped `Tip:` line.
 claude_pattern!(tip_line, r"(?i)^Tip:");
-/// Upstream's tool call: `● name(`, a dotted or dashed name, an optional `(MCP)`.
+// Upstream's tool call: `● name(`, a dotted or dashed name, an optional `(MCP)`.
 claude_pattern!(tool_call, r"^●\s+[0-9A-Za-z_.:-]+(?:\s[0-9A-Za-z_.:-]+)*(?:\s\(MCP\))?\(");
-/// Upstream's review header line.
+// Upstream's review header line.
 claude_pattern!(review_header, r"(?i)^Review your answers$");
-/// Upstream's submit question.
+// Upstream's submit question.
 claude_pattern!(ready_to_submit, r"(?i)^Ready to submit your answers\?$");
-/// Upstream's submit tail: the last row is `Cancel`.
+// Upstream's submit tail: the last row is `Cancel`.
 claude_pattern!(claude_submit_cancel_row, r"(?i)^(?:[›>❯]\s*)?[0-9]+\.\s+Cancel$");
-/// Upstream's approval tail.
+// Upstream's approval tail.
 claude_pattern!(claude_approval_tail, r"(?i)esc to cancel.*(?:tab|ctrl\+e)|ctrl\+e to explain");
-/// Upstream's plan tail.
+// Upstream's plan tail.
 claude_pattern!(
     claude_plan_tail,
     r"(?i)ctrl\+g to edit|shift\+tab to approve with this feedback"
 );
-/// Upstream `nearestQuestion`'s skipped lines.
+// Upstream `nearestQuestion`'s skipped lines.
 claude_pattern!(nearest_skip_planning, r"(?i)^Planning:");
 claude_pattern!(nearest_skip_tabs, r"^[←→].*Submit");
 claude_pattern!(nearest_skip_chip, r"^[☐☒☑✔]\s+\S");
 claude_pattern!(nearest_skip_progress, r"(?i)^Question [0-9]+/[0-9]+");
-/// Upstream's `(N selected)` prefix on a question line.
+// Upstream's `(N selected)` prefix on a question line.
 claude_pattern!(selected_count, r"(?i)^\([0-9]+\s+selected\)\s*");
-/// Upstream's `asked` sentence inside a confirm panel's prose.
+// Upstream's `asked` sentence inside a confirm panel's prose.
 claude_pattern!(asked_question, r"(?:^|[.:!]\s+)([^.:!?]*\?)");
-/// Upstream's `✔`/`✓` mark on the model in use.
+// Upstream's `✔`/`✓` mark on the model in use.
 claude_pattern!(trailing_mark, r"\s*[✔✓]$");
-/// Upstream's `(recommended)` tag.
+// Upstream's `(recommended)` tag.
 claude_pattern!(trailing_recommended, r"(?i)\s*\(recommended\)$");
-/// Upstream's two-or-more-space run.
+// Upstream's two-or-more-space run.
 claude_pattern!(two_spaces, r"\s{2,}");
-/// Upstream `CLAUDE_TIP_RE`: Claude's new-session tip, not a suggestion.
+// Upstream `CLAUDE_TIP_RE`: Claude's new-session tip, not a suggestion.
 claude_pattern!(claude_tip, r#"^Try ""#);
 
 // ---------------------------------------------------------------------------------------

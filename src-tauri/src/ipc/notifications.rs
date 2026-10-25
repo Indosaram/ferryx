@@ -19,19 +19,31 @@ use crate::notification::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Runtime, State};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
 /// Native backend built on `tauri-plugin-notification`.
 pub struct TauriNotificationBackend<R: Runtime> {
+    #[cfg(not(target_os = "macos"))]
     app: AppHandle<R>,
+    #[cfg(target_os = "macos")]
+    _app: AppHandle<R>,
 }
 
 impl<R: Runtime> TauriNotificationBackend<R> {
     pub fn new(app: AppHandle<R>) -> Self {
-        Self { app }
+        #[cfg(target_os = "macos")]
+        {
+            Self { _app: app }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self { app }
+        }
     }
 }
 
@@ -42,7 +54,7 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
         // legacy bridge would be denied. Submit over the same API we query.
         #[cfg(target_os = "macos")]
         {
-            return crate::notification::permission::macos::submit_notification(content);
+            crate::notification::permission::macos::submit_notification(content)
         }
         // Windows/Linux: route clicks through notify-rust when the notification
         // carries a destination. notify-rust's `wait_for_response` gives us the
@@ -75,7 +87,7 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
             } else {
                 builder
             };
-            return builder.show().map_err(|error| error.to_string());
+            builder.show().map_err(|error| error.to_string())
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
@@ -136,7 +148,7 @@ struct AppMainThread<R: Runtime>(AppHandle<R>);
 #[cfg(target_os = "macos")]
 impl<R: Runtime> crate::notification::MainThreadScheduler for AppMainThread<R> {
     fn schedule(&self, work: Box<dyn FnOnce() + Send>) {
-        let _ = self.0.run_on_main_thread(move || work());
+        let _ = self.0.run_on_main_thread(work);
     }
 }
 
