@@ -242,15 +242,16 @@ async fn sidebar_snapshot_survives_reload_from_disk() {
         let path = root.path().join("data/desktop-sidebar.v1.json");
         let store = SidebarSnapshotStore::load(path.clone());
         assert!(store.model().is_none());
-        assert_eq!(store.store(model("first"), true).unwrap(), 1);
-        assert_eq!(store.store(model("second"), true).unwrap(), 2);
+        let events = crate::remote::machine_events::MachineEvents::default();
+        assert_eq!(store.store(model("first"), &events).unwrap(), 1);
+        assert_eq!(store.store(model("second"), &events).unwrap(), 2);
         drop(store);
         let reloaded = SidebarSnapshotStore::load(path);
         let served = reloaded.model().unwrap();
         assert_eq!(served["projects"][0]["label"], "second");
         assert_eq!(served["revision"], 2);
         assert_eq!(
-            reloaded.store(model("third"), true).unwrap(),
+            reloaded.store(model("third"), &events).unwrap(),
             3,
             "revisions continue after reload"
         );
@@ -270,7 +271,8 @@ async fn sidebar_snapshot_ignores_a_corrupt_file() {
         std::fs::write(&path, b"{not json").unwrap();
         let store = SidebarSnapshotStore::load(path);
         assert!(store.model().is_none());
-        assert_eq!(store.store(model("fresh"), true).unwrap(), 1);
+        let events = crate::remote::machine_events::MachineEvents::default();
+        assert_eq!(store.store(model("fresh"), &events).unwrap(), 1);
         drop(store);
         root.close().unwrap();
         Ok(())
@@ -292,7 +294,9 @@ async fn sidebar_snapshot_never_reloads_live_signals_from_disk() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("data/desktop-sidebar.v1.json");
         let store = SidebarSnapshotStore::load(path.clone());
-        store.store(live_model("published"), true).unwrap();
+        let events = crate::remote::machine_events::MachineEvents::default();
+        store.desktop_stream_opened();
+        store.store(live_model("published"), &events).unwrap();
         assert!(store.model().unwrap().get("signals").is_some());
         drop(store);
         let reloaded = SidebarSnapshotStore::load(path);
@@ -411,5 +415,123 @@ async fn sidebar_live_signals_are_dropped_when_the_desktop_disconnects() {
     assert_eq!(body["model"]["revision"], 3);
     assert_eq!(body["model"]["projects"][0]["label"], "ferryx", "the structure stays");
     drop(service);
+    close(fixture).await;
+}
+
+fn pause_lifecycle(
+    store: &SidebarSnapshotStore,
+    stage: &'static str,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached, paused) = std::sync::mpsc::channel();
+    let (resume, resumed) = std::sync::mpsc::channel();
+    let resumed = Mutex::new(resumed);
+    *store.lifecycle_probe.write() = Some(Arc::new(move |at| {
+        if at == stage {
+            reached.send(()).unwrap();
+            resumed.lock().recv_timeout(Duration::from_secs(10)).unwrap();
+        }
+        Ok(())
+    }));
+    (paused, resume)
+}
+
+#[tokio::test]
+async fn sidebar_publish_cannot_restore_signals_after_final_close() {
+    let fixture = fixture().await;
+    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    crate::ipc::run_blocking(move || {
+        service.sidebar.desktop_stream_opened();
+        service.sync_desktop_sidebar(live_model("initial")).unwrap();
+        let mut events = service.machine_events.subscribe();
+        let (paused, resume) = pause_lifecycle(&service.sidebar, "presenceCaptured");
+        let publisher = Arc::clone(&service);
+        let publish = std::thread::spawn(move || publisher.sync_desktop_sidebar(live_model("racing")));
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        service.desktop_stream_closed();
+        let closed = service.sidebar.model().unwrap();
+        let close_event = events.try_recv().unwrap();
+        resume.send(()).unwrap();
+        let revision = publish.join().unwrap().unwrap();
+        *service.sidebar.lifecycle_probe.write() = None;
+
+        assert!(closed.get("signals").is_none());
+        assert_eq!(close_event["payload"]["revision"], closed["revision"]);
+        let last_event = events.try_recv().unwrap();
+        let last_model = service.sidebar.model().unwrap();
+        assert_eq!(last_event["type"], "sidebarChanged");
+        assert_eq!(last_event["payload"]["revision"], revision);
+        assert_eq!(last_model["revision"], revision);
+        assert!(last_model.get("signals").is_none(), "{last_model}");
+        assert_eq!(last_model["projects"][0]["label"], "racing");
+        assert!(events.try_recv().is_err());
+        Ok(())
+    }).await.unwrap();
+    close(fixture).await;
+}
+
+#[tokio::test]
+async fn sidebar_final_close_invalidates_even_when_persistence_fails() {
+    let fixture = fixture().await;
+    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    crate::ipc::run_blocking(move || {
+        service.sidebar.desktop_stream_opened();
+        service.sync_desktop_sidebar(live_model("published")).unwrap();
+        let mut events = service.machine_events.subscribe();
+        *service.sidebar.lifecycle_probe.write() = Some(Arc::new(|stage| {
+            if stage == "dropLivePersist" {
+                return Err(std::io::Error::other("injected sidebar persistence failure"));
+            }
+            Ok(())
+        }));
+
+        service.desktop_stream_closed();
+
+        let current = service.sidebar.model().unwrap();
+        assert!(current.get("signals").is_none(), "{current}");
+        assert_eq!(current["revision"], 2);
+        let event = events.try_recv().expect("invalidation even on persistence failure");
+        assert_eq!(event["type"], "sidebarChanged");
+        assert_eq!(event["payload"]["revision"], current["revision"]);
+        assert!(events.try_recv().is_err());
+        let persisted: Value = serde_json::from_slice(&std::fs::read(&service.sidebar.path).unwrap()).unwrap();
+        assert_eq!(persisted["revision"], 1, "the injected write failed");
+        assert!(persisted.get("signals").is_some());
+        *service.sidebar.lifecycle_probe.write() = None;
+        Ok(())
+    }).await.unwrap();
+    close(fixture).await;
+}
+
+#[tokio::test]
+async fn sidebar_open_does_not_wait_for_stalled_close_persistence() {
+    let fixture = fixture().await;
+    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    crate::ipc::run_blocking(move || {
+        service.sidebar.desktop_stream_opened();
+        service.sync_desktop_sidebar(live_model("published")).unwrap();
+        let (paused, resume) = pause_lifecycle(&service.sidebar, "dropLivePersist");
+        let closer = Arc::clone(&service);
+        let close = std::thread::spawn(move || closer.desktop_stream_closed());
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (opened, opening) = std::sync::mpsc::channel();
+        let opener = Arc::clone(&service);
+
+        let open = std::thread::spawn(move || {
+            let guard = opener.desktop_stream_opened();
+            opened.send(()).unwrap();
+            guard
+        });
+        let result = opening.recv_timeout(Duration::from_secs(2));
+        resume.send(()).unwrap();
+        close.join().unwrap();
+        let guard = open.join().unwrap();
+        *service.sidebar.lifecycle_probe.write() = None;
+        std::thread::spawn(move || drop(guard)).join().unwrap();
+
+        result.expect("stream open must finish while close persistence is still stalled");
+        assert!(service.sidebar.model().unwrap().get("signals").is_none());
+        Ok(())
+    }).await.unwrap();
     close(fixture).await;
 }
