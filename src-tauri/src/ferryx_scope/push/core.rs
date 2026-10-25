@@ -47,7 +47,7 @@ impl PushStore {
             _ => return Vec::new(),
         }
         self.subscriptions.values().filter(|stored| {
-            !stored.subscription.expiration_time.is_some_and(|expires| expires <= now_ms)
+            stored.subscription.expiration_time.is_none_or(|expires| expires > now_ms)
                 && !self.delivered.contains(&(stored.device_id.clone(), event.target.clone(), event.revision))
         }).cloned().collect()
     }

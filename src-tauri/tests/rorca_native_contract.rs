@@ -565,10 +565,7 @@ fn foreign_identity_ws_id_cannot_escape_the_registered_repo_root() {
             ws_id: hostile.to_string(),
             slug: "task".into(),
         };
-        match registry.target_path("workspace-a", &identity) {
-            Ok(path) => panic!("hostile ws_id {hostile:?} produced a path: {path:?}"),
-            Err(_) => {}
-        }
+        if let Ok(path) = registry.target_path("workspace-a", &identity) { panic!("hostile ws_id {hostile:?} produced a path: {path:?}") }
     }
 
     let benign = WorktreeIdentity {

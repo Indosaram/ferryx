@@ -465,10 +465,7 @@ impl PrivateDaemons {
                         .await
                         .expect("watcher ended")
                         .expect("watch error");
-                    match TestDaemonClient::connect(&self.socket(), self.pid(index)).await {
-                        Ok(_) => break,
-                        Err(_) => {}
-                    }
+                    if let Ok(_) = TestDaemonClient::connect(&self.socket(), self.pid(index)).await { break }
                 }
             })
             .await

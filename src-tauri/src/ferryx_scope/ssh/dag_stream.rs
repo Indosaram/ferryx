@@ -471,13 +471,12 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
             });
             let mut candidate_dropped = dropped.clone();
             candidate_dropped.push(drop_entry.clone());
-            if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true) {
-                if !runs.is_empty() || !dropped.is_empty() {
+            if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true)
+                && (!runs.is_empty() || !dropped.is_empty()) {
                     let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
                     state.pending.insert(name);
                     break;
                 }
-            }
             dropped.push(drop_entry);
             let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
             state.known.insert(name, probed.hash);
@@ -499,13 +498,12 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
                     });
                     let mut candidate_dropped = dropped.clone();
                     candidate_dropped.push(drop_entry.clone());
-                    if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true) {
-                        if !runs.is_empty() || !dropped.is_empty() {
+                    if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true)
+                        && (!runs.is_empty() || !dropped.is_empty()) {
                             let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
                             state.pending.insert(name);
                             break;
                         }
-                    }
                     dropped.push(drop_entry);
                     let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
                     state.known.insert(name, probed.hash);
@@ -553,13 +551,12 @@ fn deliver(subscription: &Arc<Subscription>, id: &str) -> Result<Value, String> 
                 });
                 let mut candidate_dropped = dropped.clone();
                 candidate_dropped.push(drop_entry.clone());
-                if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true) {
-                    if !runs.is_empty() || !dropped.is_empty() {
+                if !frame_size_valid(id, next_seq, &runs, &candidate_dropped, resync, true)
+                    && (!runs.is_empty() || !dropped.is_empty()) {
                         let mut state = subscription.state.lock().map_err(|e| e.to_string())?;
                         state.pending.insert(name);
                         break;
                     }
-                }
                 dropped.push(drop_entry);
             }
         }

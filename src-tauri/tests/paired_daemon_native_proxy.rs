@@ -41,7 +41,7 @@ async fn a23_slow_consumer_is_bounded_and_drop_removes_host_qualified_entries() 
 #[test]
 fn a23_wire_limit_rejects_oversized_frames() {
     let metadata = Metadata::Output { sequence: 1, gap: None };
-    let frame = encode_frame(metadata.clone(), b"output", false).unwrap();
+    let frame = encode_frame(metadata, b"output", false).unwrap();
     assert!(frame.len() <= MAX_FRAME_BYTES);
     assert_eq!(decode_frame(&frame).unwrap().terminal_bytes, b"output");
     assert!(encode_frame(metadata, &vec![0; MAX_FRAME_BYTES + 1], false).is_err());

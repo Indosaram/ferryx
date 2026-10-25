@@ -227,7 +227,7 @@ pub async fn run() -> Result<()> {
 
     let session_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let terminal = Arc::clone(&daemon.remote_state().terminal_service);
-    let output_hub = Arc::clone(terminal.output_hub());
+    let _output_hub = Arc::clone(terminal.output_hub());
     let observer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let observer_address = observer_listener.local_addr()?;
     let nonce: String = rand::thread_rng().sample_iter(&Alphanumeric).take(48).map(char::from).collect();

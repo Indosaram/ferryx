@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ferryx_lib::account::mailer::{FileMailer, Mailer, MailerError};
-use ferryx_lib::account::service::{router, AccountState};
+use ferryx_lib::account::service::AccountState;
 use ferryx_lib::account::store::{now_secs, token_hash, AccountStore, LoginCodeRecord};
 use serde_json::{json, Value};
 

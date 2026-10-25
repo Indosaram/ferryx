@@ -364,7 +364,7 @@ async fn absolute_filename_fixture() {
         let mut bodies = Vec::new();
         for origin in [&direct, &format!("{base}/host/r4-machine")] {
             let response = client().get(format!("{origin}/api/v1/fs/directories"))
-                .bearer_auth(&token).query(&[("path", path.to_str().unwrap())]).send().await.unwrap();
+                .bearer_auth(token).query(&[("path", path.to_str().unwrap())]).send().await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "absolute replacement-character filename via {origin}");
             let body: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
             assert_eq!(body["path"], path.to_str().unwrap());
@@ -374,9 +374,9 @@ async fn absolute_filename_fixture() {
         assert_eq!(bodies[0], bodies[1]);
         for origin in [&direct, &format!("{base}/host/r4-machine")] {
             assert_eq!(client().get(format!("{origin}/api/v1/fs/directories?path=%2Ftmp%2F%FF"))
-                .bearer_auth(&token).send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+                .bearer_auth(token).send().await.unwrap().status(), StatusCode::BAD_REQUEST);
             assert_eq!(client().get(format!("{origin}/api/v1/terminal/preferences"))
-                .bearer_auth(&token).send().await.unwrap().status(), StatusCode::OK);
+                .bearer_auth(token).send().await.unwrap().status(), StatusCode::OK);
         }
         println!("R4 real gateway: absolute U+FFFD direct=200 relay=200 equal; malformed direct=400 relay=400; preferences direct=200 relay=200");
     }).catch_unwind().await;
