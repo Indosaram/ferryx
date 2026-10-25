@@ -631,7 +631,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             selectOption(sidebarRowOption(model, target));
           }}
           view={inline ? "worktrees" : view}
-          {...(inline ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow, onDismiss: () => undefined }, onOpenPublishedAttention: openPublishedAttention })}
+          {...(inline ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow }, onOpenPublishedAttention: openPublishedAttention })}
           {...(supervisor && !inline ? { supervisor } : {})}
           status={pickerStatus}
         />

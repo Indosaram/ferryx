@@ -41,7 +41,7 @@ function renderInbox(sections: readonly RemoteSidebarSection[], onOpenPublishedA
       onSelect={() => undefined}
       view="inbox"
       onViewChange={() => undefined}
-      inbox={{ rows: LOCAL, onOpen: localOpen, onDismiss: () => undefined }}
+      inbox={{ rows: LOCAL, onOpen: localOpen }}
       onOpenPublishedAttention={onOpenPublishedAttention}
     />,
   );

@@ -100,7 +100,7 @@ describe("older snapshots and panes without a backend session", () => {
 
     const model = { ...sidebarModelFixture([{ workspaceId: "ws", slug: null }]), signals: { unreadWorktreePaths: {}, agentStateByPath: {}, attentionRows: rows } };
     render(<RemoteSidebar sections={[{ machineId: "m", label: "m", state: "ok", model, signals: {}, error: null }]} density="touch" pending={null}
-      onSelect={() => undefined} view="inbox" onViewChange={() => undefined} inbox={{ rows: [], onOpen: () => undefined, onDismiss: () => undefined }} />);
+      onSelect={() => undefined} view="inbox" onViewChange={() => undefined} inbox={{ rows: [], onOpen: () => undefined }} />);
     expect(screen.getAllByTestId("attention-row")).toHaveLength(1);
     expect(screen.getByRole("tab", { name: /^Inbox/ })).toHaveAttribute("aria-label", "Inbox (1)");
   });

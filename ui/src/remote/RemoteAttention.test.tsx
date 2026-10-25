@@ -442,6 +442,39 @@ describe("RemoteAttention Affordance", () => {
     expect(screen.queryByRole("dialog", { name: "Workspace context" })).not.toBeInTheDocument();
   });
 
+  it("offers no Dismiss on its own Inbox rows when no desktop publishes any", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithAttention = {
+      ...baseState,
+      activeContext: {
+        ...baseState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex" },
+          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo" },
+        ],
+      },
+    };
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithAttention))
+      .mockResolvedValue(jsonResponse({ accepted: true }));
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await switchToTerminalMode();
+    await screen.findByTestId("remote-terminal");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    });
+    const drawer = screen.getByRole("dialog", { name: "Workspace context" });
+    await act(async () => { fireEvent.click(within(drawer).getByRole("tab", { name: "Inbox (2)" })); });
+
+    expect(within(drawer).getAllByTestId("attention-row")).toHaveLength(2);
+    expect(within(drawer).queryAllByRole("button", { name: /^Dismiss/ })).toHaveLength(0);
+  });
+
   it("renders attention affordance with accessible name when a background tab enters waiting state", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithWaiting = {
