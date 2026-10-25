@@ -29,6 +29,7 @@ pub struct LegacyPeer {
     socket_path: PathBuf,
     known_sessions: Arc<RwLock<Vec<String>>>,
     protocol_version: Arc<RwLock<u32>>,
+    manifest_path: Option<PathBuf>,
 }
 
 #[cfg(unix)]
@@ -46,6 +47,7 @@ impl LegacyPeer {
             socket_path,
             known_sessions: Arc::new(RwLock::new(initial_sessions)),
             protocol_version: Arc::new(RwLock::new(DAEMON_PROTOCOL_VERSION)),
+            manifest_path: None,
         }
     }
 
@@ -189,14 +191,57 @@ impl LegacyPeer {
             return Err("Legacy daemon closed connection without response".to_string());
         }
 
-        serde_json::from_str(line.trim())
-            .map_err(|e| format!("Failed to parse legacy response: {e}"))
+        let response: DaemonResponse = serde_json::from_str(line.trim())
+            .map_err(|e| format!("Failed to parse legacy response: {e}"))?;
+        let queried_id = match req {
+            DaemonRequest::RemoteSessionDetails { session_id }
+            | DaemonRequest::DescribeSession { session_id } => Some(session_id),
+            _ => None,
+        };
+        let missing = matches!(&response, DaemonResponse::Error { code, .. }
+            if code.as_deref() == Some("SESSION_NOT_FOUND"))
+            || matches!(&response, DaemonResponse::RemoteSessionDetailsOk {
+                details: None, legacy_direct_ssh: false,
+            });
+        if let Some(id) = queried_id.filter(|_| missing) {
+            self.remove_session(id);
+            self.persist_sessions().await?;
+        }
+        Ok(response)
+    }
+
+    async fn persist_sessions(&self) -> Result<(), String> {
+        let Some(path) = self.manifest_path.clone() else { return Ok(()); };
+        let socket = self.socket_path.clone();
+        let sessions = self.known_sessions.read().clone();
+        crate::ipc::run_blocking(move || {
+            HandoverManifest::update_at_path(&path, |manifest| {
+                if let Some(route) = manifest.routes.iter_mut().find(|route| route.legacy_socket_path == socket) {
+                    route.sessions.retain(|id| sessions.contains(id));
+                }
+                manifest.routes.retain(|route| !route.sessions.is_empty());
+            }).map_err(|error| crate::ipc::IpcError::internal(error.to_string()))?;
+            Ok(())
+        }).await.map_err(|error| error.to_string())
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<String>, String> {
         match self.send_request(&DaemonRequest::ListSessions).await? {
             DaemonResponse::ListSessionsOk { sessions, .. } => {
+                let changed = {
+                    let known = self.known_sessions.read();
+                    known.iter().collect::<std::collections::HashSet<_>>()
+                        != sessions.iter().collect::<std::collections::HashSet<_>>()
+                };
                 *self.known_sessions.write() = sessions.clone();
+                if changed {
+                    if let Err(error) = self.persist_sessions().await {
+                        // Inventory succeeded: a maintenance write cannot disprove
+                        // predecessor ownership or permit a competing controller.
+                        tracing::warn!(%error, legacy_socket = %self.socket_path.display(),
+                            "Failed to persist reachable legacy daemon inventory");
+                    }
+                }
                 Ok(sessions)
             }
             DaemonResponse::Error { message, .. } => Err(message),
@@ -762,10 +807,12 @@ impl SessionRouter {
             {
                 continue;
             }
-            let peer = Arc::new(LegacyPeer::new(
+            let mut peer = LegacyPeer::new(
                 route.legacy_socket_path.clone(),
                 route.sessions.clone(),
-            ));
+            );
+            peer.manifest_path = Some(pruned_path.clone());
+            let peer = Arc::new(peer);
             match peer.list_sessions().await {
                 Ok(_) => {
                     self.legacy_peers.write().push(peer);

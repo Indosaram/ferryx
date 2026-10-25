@@ -579,6 +579,31 @@ fn ssh_reconnect_backoff_is_bounded() {
 }
 
 #[tokio::test]
+async fn ssh_reconnect_unreachable_target_exhausts_budget_and_settles() {
+    let (runtime, hub, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut rx = runtime.subscribe("local-stable").unwrap();
+    state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
+    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+        state(&mut rx, |d| d.state == RemoteConnectionState::Reconnecting && d.attempts == attempt).await;
+        assert!(runtime.keeps_predecessor_alive("local-stable"));
+        *dialer.failure.lock() = Some(BridgeError::ConnectionClosed);
+        dialer.clock.add_permits(1);
+    }
+    let ended = state(&mut rx, |d| d.state == RemoteConnectionState::Expired).await;
+    assert!(runtime.keeps_predecessor_alive("local-stable"));
+    assert_eq!(ended.attempts, MAX_RECONNECT_ATTEMPTS);
+    assert!(ended.failure.unwrap().message.contains("reconnect attempts"));
+    assert!(runtime.retry("local-stable").is_err());
+    assert!(runtime.settle_ended("local-stable"));
+    assert!(!runtime.keeps_predecessor_alive("local-stable"));
+    assert!(!runtime.contains("local-stable"));
+    assert!(!hub.has_session("local-stable"));
+    assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn ssh_reconnect_safety_authentication_on_redial_stops_retries() {
     let (runtime, _, dialer, tx) = fixture();
     runtime.restore(descriptor()).unwrap();
@@ -1780,4 +1805,31 @@ async fn ssh_protocol_read_failure_does_not_auto_redial() {
     assert_eq!(dialer.calls.load(Ordering::SeqCst), initial_dials);
     assert!(runtime.retry("local-stable").is_ok());
     assert_eq!(runtime.details("local-stable").unwrap().state, RemoteConnectionState::Reconnecting);
+}
+
+#[tokio::test]
+async fn ssh_late_control_failure_preserves_terminal_expiry() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_entered.lock() = Some(entered.clone());
+    *dialer.fake.write_pause.lock() = Some(release.clone());
+    *dialer.fake.write_failure.lock() = Some(BridgeError::Protocol("late failure".into()));
+    let write = runtime.write("local-stable", connected.generation, b"held".to_vec()).unwrap();
+    let writing = tokio::spawn(write);
+    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await.unwrap();
+
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    let expired = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    release.notify_one();
+    assert!(tokio::time::timeout(Duration::from_secs(3), writing).await.unwrap().unwrap().is_err());
+
+    let current = runtime.details("local-stable").unwrap();
+    assert_eq!(current.state, RemoteConnectionState::Expired);
+    assert_eq!(current.failure, expired.failure);
+    assert_eq!(current.generation, expired.generation);
+    assert!(runtime.settle_ended("local-stable"));
 }

@@ -1,4 +1,408 @@
 use super::*;
+use std::sync::atomic::Ordering;
+
+async fn settlement_stage(
+    stages: &mut tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+    expected: &'static str,
+) {
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), stages.recv()).await.unwrap(), Some(expected));
+}
+
+async fn settlement_barriers_prevent_retirement(cleanup_failure: bool, terminal_failure: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let descriptor = serde_json::from_value(handover_persistence_record("settlement-ssh", "settlement-target")["descriptor"].clone()).unwrap();
+    daemon.terminal_service.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, None).unwrap();
+    daemon.persist_remote_sessions_at(daemon.remote_sessions_path.clone()).await.unwrap();
+    let entry = daemon.terminal_service.remote().entry_for_test("settlement-ssh").unwrap();
+    entry.state.lock().details.state = crate::terminal::remote::RemoteConnectionState::Expired;
+    entry.notify_for_test();
+    let legacy = dir.path().join("legacy.sock");
+    let _listener = UnixListener::bind(&legacy).unwrap();
+    daemon.handover_manager.force_prepared_for_test(legacy.clone());
+    let (done, mut retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { done.send_replace(true); });
+    let manager = daemon.handover_manager.clone();
+    let terminals = daemon.terminal_service.clone();
+    tokio::task::spawn_blocking(move || manager.commit_handover_v5(&terminals)).await.unwrap().unwrap();
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+    assert!(legacy.exists());
+    let (reached, mut stages) = tokio::sync::mpsc::unbounded_channel();
+    let barrier = Arc::new(crate::daemon::session_service::SettlementTestBarrier {
+        reached, proceed: tokio::sync::Semaphore::new(0),
+    });
+    let mut events = daemon.remote_event_tx.subscribe();
+    crate::daemon::session_service::SETTLEMENT_TEST_BARRIER.scope(barrier.clone(), async {
+        daemon.session_service.watch_remote_session("settlement-ssh").unwrap();
+    }).await;
+    settlement_stage(&mut stages, "before_terminal").await;
+    daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+    assert!(!*retired.borrow());
+    assert!(events.try_recv().is_err());
+    let sidecar = daemon.remote_sessions_path.with_extension("lock");
+    if terminal_failure {
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+    }
+    barrier.proceed.add_permits(1);
+    if terminal_failure {
+        settlement_stage(&mut stages, "terminal_failed").await;
+        daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+        assert!(!*retired.borrow());
+        assert!(events.try_recv().is_err());
+        assert!(daemon.terminal_service.remote().contains("settlement-ssh"));
+        std::fs::remove_dir(&sidecar).unwrap();
+        barrier.proceed.add_permits(1);
+    }
+    settlement_stage(&mut stages, "terminal_committed").await;
+    daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+    assert!(!*retired.borrow());
+    let snapshot = crate::session::load_session_from_path(&daemon.remote_sessions_path).unwrap().unwrap();
+    assert_eq!(snapshot.extra["remoteSessions"][0]["terminal"], true);
+    barrier.proceed.add_permits(1);
+    settlement_stage(&mut stages, "exit_published").await;
+    daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+    assert!(!*retired.borrow());
+    let mut exits = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.event == "terminal_lifecycle" { exits += 1; }
+    }
+    assert_eq!(exits, 1);
+    if cleanup_failure {
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+    }
+    barrier.proceed.add_permits(1);
+    if cleanup_failure {
+        settlement_stage(&mut stages, "cleanup_failed").await;
+        daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+        assert!(!*retired.borrow());
+        assert!(legacy.exists());
+        let restart = DaemonServer::new_with_paths(Some(dir.path().join("config2")), Some(dir.path().join("auth2")));
+        let mut restart_events = restart.remote_event_tx.subscribe();
+        restart.restore_remote_sessions_at(daemon.remote_sessions_path.clone()).await.unwrap();
+        assert!(!restart.terminal_service.remote().contains("settlement-ssh"));
+        assert!(restart_events.try_recv().is_err());
+        assert_eq!(crate::session::load_session_from_path(&daemon.remote_sessions_path).unwrap().unwrap().extra["remoteSessions"][0]["terminal"], true);
+        std::fs::remove_dir(&sidecar).unwrap();
+        barrier.proceed.add_permits(1);
+    }
+    tokio::time::timeout(Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
+    assert!(!daemon.terminal_service.remote().contains("settlement-ssh"));
+    assert!(persisted_durable_ids(&daemon.remote_sessions_path).is_empty());
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn ssh_settlement_orders_commit_durable_publication_and_retirement() {
+    settlement_barriers_prevent_retirement(false, false).await;
+}
+
+#[tokio::test]
+async fn ssh_settlement_cleanup_failure_retains_terminal_evidence_across_restart() {
+    settlement_barriers_prevent_retirement(true, false).await;
+}
+
+#[tokio::test]
+async fn ssh_settlement_terminal_write_failure_retains_owner_until_retry() {
+    settlement_barriers_prevent_retirement(false, true).await;
+}
+
+struct RetryHelper {
+    inner: LiveFakeHelper,
+    reads: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<crate::ssh::bridge::ReadResult, crate::ssh::bridge::BridgeError>>>,
+}
+
+impl crate::terminal::remote::Transport for RetryHelper {
+    fn describe<'a>(&'a self, target: &'a crate::scoped_contracts::TargetRef) -> FakeRpc<'a, crate::ssh::bridge::DescribeResult> {
+        self.inner.describe(target)
+    }
+    fn read<'a>(&'a self, _: &'a crate::scoped_contracts::TargetRef, _: crate::ssh::bridge::RemoteCursor, _: crate::ssh::bridge::RemoteCursor) -> FakeRpc<'a, crate::ssh::bridge::ReadResult> {
+        Box::pin(async move { self.reads.lock().await.recv().await.unwrap() })
+    }
+    fn write<'a>(&'a self, target: &'a crate::scoped_contracts::TargetRef, bytes: &'a [u8]) -> FakeRpc<'a, ()> {
+        self.inner.write(target, bytes)
+    }
+    fn resize<'a>(&'a self, target: &'a crate::scoped_contracts::TargetRef, cols: u16, rows: u16) -> FakeRpc<'a, ()> {
+        self.inner.resize(target, cols, rows)
+    }
+    fn stop<'a>(&'a self, target: &'a crate::scoped_contracts::TargetRef) -> FakeRpc<'a, ()> {
+        self.inner.stop(target)
+    }
+}
+
+struct RetryConnector(Arc<RetryHelper>);
+
+impl crate::terminal::remote::Connector for RetryConnector {
+    fn connect<'a>(&'a self, _: &'a crate::terminal::remote::RemoteSessionDescriptor) -> FakeRpc<'a, Arc<dyn crate::terminal::remote::Transport>> {
+        Box::pin(async move { Ok(self.0.clone() as Arc<dyn crate::terminal::remote::Transport>) })
+    }
+    fn delay(&self, _: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn ssh_retiring_connected_owner_survives_background_disconnect() {
+    use crate::daemon::handover::HandoverStatus;
+    use crate::terminal::remote::{RemoteConnectionState as S, Transport};
+
+    // Given an Active daemon with exactly one Connected SSH owner and no local sessions.
+    let dir = tempfile::tempdir().unwrap();
+    let (reads, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (_, inner_reads) = tokio::sync::mpsc::unbounded_channel();
+    let helper = Arc::new(RetryHelper {
+        inner: LiveFakeHelper { reads: tokio::sync::Mutex::new(inner_reads), written: tokio::sync::watch::channel(Vec::new()).0 },
+        reads: tokio::sync::Mutex::new(receiver),
+    });
+    let terminals = Arc::new(TerminalService::with_remote_connector_for_test(Arc::new(RetryConnector(helper.clone()))));
+    let daemon = DaemonServer::new_with_terminal_service(Some(dir.path().join("config")), Some(dir.path().join("auth")), Some(terminals.clone()));
+    let descriptor = serde_json::from_value(handover_persistence_record("retiring-ssh", "retiring-target")["descriptor"].clone()).unwrap();
+    terminals.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, Some(helper as Arc<dyn Transport>)).unwrap();
+    let mut states = terminals.remote().subscribe("retiring-ssh").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), states.wait_for(|d| d.state == S::Connected)).await.unwrap().unwrap();
+    assert_eq!(daemon.handover_manager.status(), HandoverStatus::Active);
+    assert_eq!(crate::daemon::handover::live_session_counts(&terminals), (0, 1, 0));
+    let (done, retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { done.send_replace(true); });
+    let (reached, mut stages) = tokio::sync::mpsc::unbounded_channel();
+    let barrier = Arc::new(crate::daemon::session_service::SettlementTestBarrier {
+        reached, proceed: tokio::sync::Semaphore::new(0),
+    });
+    crate::daemon::session_service::SETTLEMENT_TEST_BARRIER.scope(barrier.clone(), async {
+        daemon.session_service.watch_remote_session("retiring-ssh").unwrap();
+    }).await;
+    let request = daemon.handover_manager.retain_request(terminals.clone()).unwrap();
+    assert_eq!(daemon.handover_manager.control_retire_when_idle(&terminals), 1);
+    drop(request); // The response is complete before the background failure.
+    assert_eq!(daemon.handover_manager.status(), HandoverStatus::Retiring);
+    assert!(!daemon.handover_manager.retiring_signalled());
+    let owner = terminals.remote().take_recovery_owner_for_test("retiring-ssh").unwrap();
+
+    // When the reader fails in the background, wait until its watcher checked retirement.
+    reads.send(Err(crate::ssh::bridge::BridgeError::TargetNotFound)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), states.wait_for(|d| d.state == S::Disconnected)).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), owner).await.unwrap().unwrap();
+    settlement_stage(&mut stages, "disconnected_checked").await;
+
+    // Then the recoverable controller remains Retiring without an exit signal.
+    assert!(!daemon.handover_manager.retiring_signalled(), "recoverable SSH owner must prevent retirement");
+    assert_eq!(daemon.handover_manager.status(), HandoverStatus::Retiring);
+    assert!(!*retired.borrow());
+    assert!(terminals.remote().contains("retiring-ssh"));
+    barrier.proceed.add_permits(1);
+    terminals.remote().close("retiring-ssh").await.unwrap();
+}
+
+async fn disconnected_predecessor_is_retained(kind: crate::terminal::remote::RemoteFailureKind, fail_before_commit: bool) {
+    use crate::terminal::remote::{RemoteConnectionState as S, RemoteFailureKind as F, Transport};
+    let dir = tempfile::tempdir().unwrap();
+    let (reads, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (_, inner_reads) = tokio::sync::mpsc::unbounded_channel();
+    let helper = Arc::new(RetryHelper {
+        inner: LiveFakeHelper { reads: tokio::sync::Mutex::new(inner_reads), written: tokio::sync::watch::channel(Vec::new()).0 },
+        reads: tokio::sync::Mutex::new(receiver),
+    });
+    let terminals = Arc::new(TerminalService::with_remote_connector_for_test(Arc::new(RetryConnector(helper.clone()))));
+    let daemon = DaemonServer::new_with_terminal_service(Some(dir.path().join("config")), Some(dir.path().join("auth")), Some(terminals.clone()));
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(handover_persistence_record("retryable-ssh", "original-target")["descriptor"].clone()).unwrap();
+    let target = descriptor.target.clone();
+    terminals.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, Some(helper.clone() as Arc<dyn Transport>)).unwrap();
+    let mut states = terminals.remote().subscribe("retryable-ssh").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), states.wait_for(|d| d.state == S::Connected)).await.unwrap().unwrap();
+    let dead: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(handover_persistence_record("other-dead-ssh", "other-target")["descriptor"].clone()).unwrap();
+    terminals.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor: dead, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, None).unwrap();
+    {
+        let dead = terminals.remote().entry_for_test("other-dead-ssh").unwrap();
+        dead.state.lock().details.state = S::Expired;
+        dead.notify_for_test();
+    }
+    let (_, mut dead_output) = terminals.output_hub().subscribe("other-dead-ssh").unwrap();
+    let legacy = dir.path().join("legacy.sock");
+    let _listener = UnixListener::bind(&legacy).unwrap();
+    daemon.handover_manager.force_prepared_for_test(legacy.clone());
+    let (done, retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { done.send_replace(true); });
+    let commit = || {
+        let manager = daemon.handover_manager.clone();
+        let terminals = terminals.clone();
+        tokio::task::spawn_blocking(move || manager.commit_handover_v5(&terminals))
+    };
+    if !fail_before_commit { commit().await.unwrap().unwrap(); }
+    let owner = terminals.remote().take_recovery_owner_for_test("retryable-ssh").unwrap();
+    let failure = match kind {
+        F::Missing => crate::ssh::bridge::BridgeError::TargetNotFound,
+        F::Authentication => crate::ssh::bridge::BridgeError::ProcessExited { code: Some(255), stderr: "Permission denied (publickey)".into() },
+        F::Protocol => crate::ssh::bridge::BridgeError::Protocol("invalid response".into()),
+        other => panic!("unexpected test failure kind: {other:?}"),
+    };
+    reads.send(Err(failure)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), states.wait_for(|d| d.state == S::Disconnected)).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), owner).await.unwrap().unwrap();
+    assert_eq!(terminals.remote().details("retryable-ssh").unwrap().failure.unwrap().kind, kind);
+    if fail_before_commit { commit().await.unwrap().unwrap(); }
+    let mut events = daemon.remote_event_tx.subscribe();
+    daemon.session_service.watch_remote_session("retryable-ssh").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.event == "terminal_remote_status" && event.payload["state"] == "disconnected" { break; }
+        }
+    }).await.unwrap();
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+    assert!(!*retired.borrow());
+    assert!(legacy.exists());
+    assert!(persisted_durable_ids(&daemon.remote_sessions_path).contains(&"retryable-ssh".into()));
+    daemon.session_service.watch_remote_session("other-dead-ssh").unwrap();
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5), dead_output.recv()).await.unwrap(), Err(tokio::sync::broadcast::error::RecvError::Closed)));
+    daemon.handover_manager.check_retirement_if_empty(&terminals);
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+    terminals.remote().retry("retryable-ssh").unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(5), states.wait_for(|d| d.state == S::Connected && d.generation > 1)).await.unwrap().unwrap().clone();
+    assert_eq!(recovered.descriptor.target, target);
+    terminals.remote().write("retryable-ssh", recovered.generation, b"recovered".to_vec()).unwrap().await.unwrap();
+    assert_eq!(&*helper.inner.written.borrow(), b"recovered");
+    assert!(!*retired.borrow());
+    terminals.remote().close("retryable-ssh").await.unwrap();
+}
+
+#[tokio::test]
+async fn ssh_disconnected_missing_survives_watcher_checkpoint() {
+    disconnected_predecessor_is_retained(crate::terminal::remote::RemoteFailureKind::Missing, false).await;
+}
+#[tokio::test]
+async fn ssh_disconnected_authentication_survives_watcher_checkpoint() {
+    disconnected_predecessor_is_retained(crate::terminal::remote::RemoteFailureKind::Authentication, false).await;
+}
+#[tokio::test]
+async fn ssh_disconnected_protocol_survives_watcher_checkpoint() {
+    disconnected_predecessor_is_retained(crate::terminal::remote::RemoteFailureKind::Protocol, false).await;
+}
+#[tokio::test]
+async fn ssh_disconnected_missing_survives_handover_commit() {
+    disconnected_predecessor_is_retained(crate::terminal::remote::RemoteFailureKind::Missing, true).await;
+}
+#[tokio::test]
+async fn ssh_disconnected_authentication_survives_handover_commit() {
+    disconnected_predecessor_is_retained(crate::terminal::remote::RemoteFailureKind::Authentication, true).await;
+}
+#[tokio::test]
+async fn ssh_disconnected_protocol_survives_handover_commit() {
+    disconnected_predecessor_is_retained(crate::terminal::remote::RemoteFailureKind::Protocol, true).await;
+}
+
+#[tokio::test]
+async fn ssh_expired_session_settles_exited_and_preserves_agent_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(handover_persistence_record("ended-ssh", "ended-target")["descriptor"].clone()).unwrap();
+    let target = descriptor.target.clone();
+    let (reads_tx, reads_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (written, _) = tokio::sync::watch::channel(Vec::new());
+    let helper = Arc::new(LiveFakeHelper { reads: tokio::sync::Mutex::new(reads_rx), written });
+    daemon.terminal_service.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, Some(helper)).unwrap();
+    daemon.session_service.agent_states.publish_canonical(crate::daemon::agent_state::AgentState {
+        session_id: "ended-ssh".into(), state: "idle".into(), agent: Some("claude".into()),
+        provider_session: Some(serde_json::from_value(serde_json::json!({"key":"session_id","id":"conversation-original"})).unwrap()),
+        detail: None, origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+    });
+    let before = daemon.session_service.agent_states.current("ended-ssh").unwrap();
+    let startup = TerminalStartup::AgentResume {
+        agent_type: "claude".into(), provider_session: before.provider_session.clone().unwrap(),
+    };
+    daemon.session_service.reserve_provider_claim_for_test("ended-request", "ended-ssh", &startup).unwrap();
+    daemon.persist_remote_sessions_at(daemon.remote_sessions_path.clone()).await.unwrap();
+    let mut events = daemon.remote_event_tx.subscribe();
+    let (_, mut output) = daemon.terminal_service.output_hub().subscribe("ended-ssh").unwrap();
+    let legacy = dir.path().join("legacy.sock");
+    let _listener = UnixListener::bind(&legacy).unwrap();
+    let (retired_tx, mut retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { retired_tx.send_replace(true); });
+    daemon.handover_manager.force_prepared_for_test(legacy);
+    let manager = daemon.handover_manager.clone();
+    let terminals = daemon.terminal_service.clone();
+    tokio::task::spawn_blocking(move || manager.commit_handover_v5(&terminals)).await.unwrap().unwrap();
+    daemon.session_service.watch_remote_session("ended-ssh").unwrap();
+    let mut read = ssh_fixture_output(&target, 0, b"");
+    read.chunks.clear();
+    read.exited = true;
+    reads_tx.send(read).unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.event == "terminal_lifecycle" { break event; }
+        }
+    }).await.unwrap();
+    assert_eq!(exit.payload["state"], "exited");
+    assert!(exit.payload["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
+    assert_eq!(daemon.session_service.agent_states.current("ended-ssh").unwrap(), before);
+    assert_eq!(daemon.session_service.provider_claim_len_for_test(), 0);
+    daemon.session_service.reserve_provider_claim_for_test("resume-request", "reopened-ssh", &startup).unwrap();
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap(), Err(tokio::sync::broadcast::error::RecvError::Closed)));
+    tokio::time::timeout(Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
+    assert!(!daemon.terminal_service.list_sessions().contains(&"ended-ssh".into()));
+    assert!(persisted_durable_ids(&daemon.remote_sessions_path).is_empty());
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+    println!("QA_EXPIRED_SETTLED session=ended-ssh state=exited identity=preserved");
+}
+
+#[tokio::test]
+async fn ssh_all_dead_predecessor_retires_but_connected_session_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Arc::new(DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth"))));
+    let descriptor = serde_json::from_value(handover_persistence_record("dead-ssh", "dead-target")["descriptor"].clone()).unwrap();
+    daemon.terminal_service.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, None).unwrap();
+    let (retired_tx, mut retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { retired_tx.send_replace(true); });
+    let legacy = dir.path().join("legacy.sock");
+    let _listener = UnixListener::bind(&legacy).unwrap();
+    daemon.handover_manager.force_prepared_for_test(legacy);
+    let manager = daemon.handover_manager.clone();
+    let terminals = daemon.terminal_service.clone();
+    tokio::task::spawn_blocking(move || manager.commit_handover_v5(&terminals)).await.unwrap().unwrap();
+    daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+    let entry = daemon.terminal_service.remote().entry_for_test("dead-ssh").unwrap();
+    entry.state.lock().details.state = crate::terminal::remote::RemoteConnectionState::Expired;
+    daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+    entry.notify_for_test();
+    daemon.session_service.watch_remote_session("dead-ssh").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+    assert!(!daemon.terminal_service.remote().contains("dead-ssh"));
+    println!("QA_DEAD_PREDECESSOR_RETIRED connected=retained dead=retired");
+}
+
+#[tokio::test]
+async fn ssh_handover_prunes_sessions_not_owned_by_reachable_predecessor() {
+    let legacy = FakeLegacyDaemon::start(serde_json::json!({"type":"listSessionsOk","epoch":1,"sessions":["live-ssh"]}));
+    let path = legacy.socket_path.with_file_name("handover_routes.json");
+    crate::daemon::manifest::HandoverManifest { routes: vec![crate::daemon::manifest::HandoverRoute {
+        legacy_socket_path: legacy.socket_path.clone(), sessions: vec!["live-ssh".into(), "ghost-ssh".into()],
+    }] }.save_to_path(&path).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let router = &daemon.session_router;
+    router.adopt_routes_from_manifest_at(path.clone()).await.unwrap();
+    assert!(router.find_legacy_peer_for_session("live-ssh").is_some());
+    assert!(router.find_legacy_peer_for_session("ghost-ssh").is_none());
+    let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&path);
+    assert_eq!(manifest.routes[0].sessions, vec!["live-ssh"]);
+    assert!(crate::remote::backend::RemoteSessionBackend::describe_session(router.as_ref(), "ghost-ssh").await.is_err());
+}
 
 #[tokio::test]
 async fn ssh_daemon_restart_restores_identity_without_local_pty() {
@@ -214,6 +618,10 @@ impl Drop for FakeLegacyDaemon {
 
 impl FakeLegacyDaemon {
     fn start(reply: serde_json::Value) -> Self {
+        Self::start_with_inventory_hook(reply, Arc::new(|| {}))
+    }
+
+    fn start_with_inventory_hook(reply: serde_json::Value, inventory_hook: Arc<dyn Fn() + Send + Sync>) -> Self {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::Builder::new()
             .prefix("fx")
@@ -231,6 +639,7 @@ impl FakeLegacyDaemon {
                 };
                 let recorded = Arc::clone(&recorded);
                 let reply = reply.clone();
+                let inventory_hook = inventory_hook.clone();
                 tokio::spawn(async move {
                     let (read, mut write) = tokio::io::split(stream);
                     let mut lines = BufReader::new(read).lines();
@@ -244,6 +653,10 @@ impl FakeLegacyDaemon {
                                 "type": "handshakeOk", "version": version, "pid": 1, "epoch": 1
                             }),
                             other => {
+                                if matches!(other, DaemonRequest::ListSessions) {
+                                    let hook = inventory_hook.clone();
+                                    tokio::task::spawn_blocking(move || hook()).await.unwrap();
+                                }
                                 recorded.lock().push(other);
                                 reply.clone()
                             }
@@ -275,6 +688,67 @@ impl FakeLegacyDaemon {
     fn recorded(&self) -> Vec<DaemonRequest> {
         self.requests.lock().clone()
     }
+}
+
+#[tokio::test]
+async fn ssh_inventory_write_failure_keeps_peer_route_and_single_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("handover_routes.json");
+    let blocked_lock = path.with_extension("lock");
+    let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = injected.clone();
+    let legacy = FakeLegacyDaemon::start_with_inventory_hook(
+        serde_json::json!({"type":"listSessionsOk","epoch":1,"sessions":["live-ssh"]}),
+        Arc::new(move || {
+            std::fs::remove_file(&blocked_lock).unwrap();
+            std::fs::create_dir(&blocked_lock).unwrap();
+            observed.store(true, Ordering::SeqCst);
+        }),
+    );
+    crate::daemon::manifest::HandoverManifest { routes: vec![crate::daemon::manifest::HandoverRoute {
+        legacy_socket_path: legacy.socket_path.clone(), sessions: vec!["live-ssh".into(), "stale-ssh".into()],
+    }] }.save_to_path(&path).unwrap();
+    let durable = dir.path().join("remote_sessions.json");
+    let owner = DaemonServer::new_with_paths(Some(dir.path().join("owner/config")), Some(dir.path().join("owner/auth")));
+    let descriptor = serde_json::from_value(handover_persistence_record("live-ssh", "live-target")["descriptor"].clone()).unwrap();
+    owner.terminal_service.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, None).unwrap();
+    owner.persist_remote_sessions_at(durable.clone()).await.unwrap();
+    let successor = DaemonServer::new_with_paths(Some(dir.path().join("successor/config")), Some(dir.path().join("successor/auth")));
+
+    successor.session_router.adopt_routes_from_manifest_at(path.clone()).await.unwrap();
+    successor.restore_remote_sessions_at(durable).await.unwrap();
+
+    assert!(injected.load(Ordering::SeqCst));
+    assert!(path.with_extension("lock").is_dir());
+    let peer = successor.session_router.find_legacy_peer_for_session("live-ssh").expect("reachable inventory lost its peer");
+    assert_eq!(peer.socket_path(), legacy.socket_path);
+    assert!(successor.session_router.find_legacy_peer_for_session("stale-ssh").is_none());
+    let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&path);
+    assert!(manifest.routes.iter().any(|r| r.legacy_socket_path == legacy.socket_path && r.sessions.contains(&"live-ssh".into())));
+    assert!(owner.terminal_service.remote().contains("live-ssh"));
+    assert!(!successor.terminal_service.remote().contains("live-ssh"), "successor created a competing controller");
+}
+
+#[tokio::test]
+async fn ssh_inventory_order_only_change_does_not_persist() {
+    let legacy = FakeLegacyDaemon::start(serde_json::json!({"type":"listSessionsOk","epoch":1,"sessions":["second","first"]}));
+    let path = legacy.socket_path.with_file_name("handover_routes.json");
+    crate::daemon::manifest::HandoverManifest { routes: vec![crate::daemon::manifest::HandoverRoute {
+        legacy_socket_path: legacy.socket_path.clone(), sessions: vec!["first".into(), "second".into()],
+    }] }.save_to_path(&path).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    daemon.session_router.adopt_routes_from_manifest_at(path.clone()).await.unwrap();
+    let peer = daemon.session_router.find_legacy_peer_for_session("first").unwrap();
+    let lock = std::fs::OpenOptions::new().read(true).write(true).open(path.with_extension("lock")).unwrap();
+    lock.lock().unwrap();
+
+    let inventory = tokio::time::timeout(Duration::from_secs(5), peer.list_sessions()).await;
+
+    lock.unlock().unwrap();
+    assert_eq!(inventory.unwrap().unwrap(), vec!["second", "first"]);
 }
 
 fn peer_remote_details_reply(session_id: &str) -> serde_json::Value {
@@ -386,6 +860,10 @@ async fn ssh_handover_remote_details_fall_back_when_peer_lacks_session() {
             legacy_direct_ssh: false
         }
     ));
+    assert!(server.session_router.find_legacy_peer_for_session("ghost-session").is_none());
+    let again = request_response(&server, serde_json::json!({"type":"remoteSessionDetails","sessionId":"ghost-session"})).await;
+    assert!(matches!(again, DaemonResponse::RemoteSessionDetailsOk { details: None, .. }));
+    assert_eq!(legacy.recorded().len(), 1);
 
     // An unreachable peer is not evidence of absence.
     let unreachable = Arc::new(crate::daemon::proxy::LegacyPeer::new(

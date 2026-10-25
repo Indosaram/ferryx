@@ -1766,6 +1766,8 @@ impl HandoverManager {
                 retained = retained.len(),
                 "Committed handover; draining the retained SSH/paired sessions on the legacy socket"
             );
+            drop(status_guard);
+            self.check_retirement_if_empty(_terminal_service);
             return Ok(());
         }
 
@@ -1839,6 +1841,11 @@ impl HandoverManager {
     }
 
     fn check_retirement_locked(&self, terminal_service: &Arc<TerminalService>) {
+        let recovering_ssh = terminal_service.remote().list().iter().any(|id| {
+            terminal_service.remote().keeps_predecessor_alive(id)
+        }) || terminal_service.paired().list().iter().any(|id| {
+            terminal_service.paired().live_state(id).is_some_and(|live| live.reader_open)
+        });
         {
             let status = self.status.write();
             if *status == HandoverStatus::Retiring {
@@ -1847,7 +1854,7 @@ impl HandoverManager {
                 let live = if self.shutdown_requested.load(Ordering::SeqCst) {
                     0
                 } else {
-                    live_session_count(terminal_service) as usize
+                    (live_session_count(terminal_service) as usize).max(usize::from(recovering_ssh))
                 };
                 if crate::daemon::control::retirement_ready(
                     status.owner_status(),
@@ -1862,7 +1869,7 @@ impl HandoverManager {
                 return;
             }
         }
-        if self.is_draining() && terminal_service.list_sessions().is_empty() {
+        if self.is_draining() && live_session_count(terminal_service) == 0 && !recovering_ssh {
             self.retire();
         }
     }
