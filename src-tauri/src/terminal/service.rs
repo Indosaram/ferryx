@@ -69,6 +69,15 @@ impl Default for TerminalService {
 }
 
 impl TerminalService {
+    #[cfg(test)]
+    pub(crate) fn with_remote_connector_for_test(connector: Arc<dyn super::remote::Connector>) -> Self {
+        let mut service = Self::default();
+        service.remote = Arc::new(super::remote::RemoteRuntime::with_connector(
+            service.output_hub.clone(), connector,
+        ));
+        service
+    }
+
     pub fn new(pty_manager: Arc<PtyManager>, output_hub: Arc<TerminalOutputHub>) -> Self {
         pty_manager.set_output_hub(output_hub.clone());
         let service = Self {

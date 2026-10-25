@@ -3608,6 +3608,14 @@ impl DaemonServer {
     }
 
     pub fn new_with_paths(config_path: Option<PathBuf>, auth_path: Option<PathBuf>) -> Self {
+        Self::new_with_terminal_service(config_path, auth_path, None)
+    }
+
+    fn new_with_terminal_service(
+        config_path: Option<PathBuf>,
+        auth_path: Option<PathBuf>,
+        terminal_service: Option<Arc<TerminalService>>,
+    ) -> Self {
         // No-path unit constructors must never share or inspect owner state.
         // Explicit paths keep their persistent restart semantics.
         #[cfg(test)]
@@ -3637,10 +3645,10 @@ impl DaemonServer {
             PtyManager::new().with_agent_integration(Arc::clone(&agent_integration)),
         );
         let output_hub = Arc::new(TerminalOutputHub::default());
-        let terminal_service = Arc::new(TerminalService::new(
+        let terminal_service = terminal_service.unwrap_or_else(|| Arc::new(TerminalService::new(
             Arc::clone(&pty_manager),
             Arc::clone(&output_hub),
-        ));
+        )));
         #[cfg(windows)]
         {
             // Windows has no supported way to observe a stop, so the suspension backend

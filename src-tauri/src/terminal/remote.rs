@@ -720,9 +720,12 @@ impl RemoteRuntime {
         self.entry(id).is_ok_and(|entry| {
             let state = entry.state.lock();
             match state.details.state {
-                RemoteConnectionState::Connected => true,
-                RemoteConnectionState::Reconnecting => state.task.as_ref().is_some_and(|task| !task.is_finished()),
-                RemoteConnectionState::Disconnected | RemoteConnectionState::Expired => false,
+                // A parked controller still owns a recoverable target. Only terminal
+                // evidence (or removal by explicit close) permits predecessor retirement.
+                RemoteConnectionState::Connected
+                | RemoteConnectionState::Reconnecting
+                | RemoteConnectionState::Disconnected => true,
+                RemoteConnectionState::Expired => false,
             }
         })
     }
@@ -1229,6 +1232,9 @@ fn check_connected(s: &Session, generation: u64) -> Result<(), RemoteFailure> {
     Ok(())
 }
 fn fail(s: &mut Session, failure: RemoteFailure) {
+    if s.details.state == RemoteConnectionState::Expired {
+        return;
+    }
     s.transport = None;
     s.details.state = match failure.kind {
         RemoteFailureKind::Expired => RemoteConnectionState::Expired,

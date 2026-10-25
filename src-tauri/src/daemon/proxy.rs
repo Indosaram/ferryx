@@ -228,10 +228,19 @@ impl LegacyPeer {
     pub async fn list_sessions(&self) -> Result<Vec<String>, String> {
         match self.send_request(&DaemonRequest::ListSessions).await? {
             DaemonResponse::ListSessionsOk { sessions, .. } => {
-                let changed = *self.known_sessions.read() != sessions;
+                let changed = {
+                    let known = self.known_sessions.read();
+                    known.iter().collect::<std::collections::HashSet<_>>()
+                        != sessions.iter().collect::<std::collections::HashSet<_>>()
+                };
                 *self.known_sessions.write() = sessions.clone();
                 if changed {
-                    self.persist_sessions().await?;
+                    if let Err(error) = self.persist_sessions().await {
+                        // Inventory succeeded: a maintenance write cannot disprove
+                        // predecessor ownership or permit a competing controller.
+                        tracing::warn!(%error, legacy_socket = %self.socket_path.display(),
+                            "Failed to persist reachable legacy daemon inventory");
+                    }
                 }
                 Ok(sessions)
             }

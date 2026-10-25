@@ -1738,15 +1738,27 @@ impl DaemonSessionService {
                 };
                 if expired || vanished {
                     if expired {
+                        let Some(runtime) = runtime.upgrade() else { break; };
+                        if !runtime.settle_ended(&cleanup_session_id) {
+                            // The observed Expired snapshot is not settlement authority.
+                            // A late control response or close may have changed ownership.
+                            // Keep claims and durable state until the current owner ends.
+                            if runtime.contains(&cleanup_session_id) {
+                                if rx.changed().await.is_err() {
+                                    record_removable = !runtime.contains(&cleanup_session_id);
+                                    break;
+                                }
+                                continue;
+                            }
+                            record_removable = true;
+                            break;
+                        }
                         // Deliver terminal status before dropping the runtime sender. Do not clear
                         // agent_states or startup metadata: the ended pane can still resume its agent.
                         let _ = tx.send(DaemonRemoteEvent {
                             event: "terminal_remote_status".into(),
                             payload: serde_json::json!({"sessionId":cleanup_session_id,"state":details.state,"generation":details.generation,"failure":details.failure,"descriptor":details.descriptor}),
                         });
-                        if let Some(runtime) = runtime.upgrade() {
-                            runtime.settle_ended(&cleanup_session_id);
-                        }
                         claims.lock().retain(|_, owner| owner != &cleanup_session_id);
                         spawn_cache.lock().retain(|_, entry| entry.session_id != cleanup_session_id);
                         let _ = tx.send(DaemonRemoteEvent {

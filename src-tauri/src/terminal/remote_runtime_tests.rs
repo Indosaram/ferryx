@@ -1805,3 +1805,27 @@ async fn ssh_protocol_read_failure_does_not_auto_redial() {
     assert!(runtime.retry("local-stable").is_ok());
     assert_eq!(runtime.details("local-stable").unwrap().state, RemoteConnectionState::Reconnecting);
 }
+
+#[tokio::test]
+async fn ssh_late_control_failure_preserves_terminal_expiry() {
+    let (runtime, _, dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    let connected = state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *dialer.fake.write_entered.lock() = Some(entered.clone());
+    *dialer.fake.write_pause.lock() = Some(release.clone());
+    *dialer.fake.write_failure.lock() = Some(BridgeError::Protocol("late failure".into()));
+    let write = runtime.write("local-stable", connected.generation, b"held".to_vec()).unwrap();
+    let writing = tokio::spawn(write);
+    tokio::time::timeout(Duration::from_secs(3), entered.notified()).await.unwrap();
+
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    let expired = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    release.notify_one();
+    assert!(tokio::time::timeout(Duration::from_secs(3), writing).await.unwrap().unwrap().is_err());
+
+    assert_eq!(runtime.details("local-stable").unwrap(), expired);
+    assert!(runtime.settle_ended("local-stable"));
+}
