@@ -424,11 +424,14 @@ fn pause_lifecycle(
 ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
     let (reached, paused) = std::sync::mpsc::channel();
     let (resume, resumed) = std::sync::mpsc::channel();
-    let resumed = Mutex::new(resumed);
+    let resumed = Mutex::new(Some(resumed));
     *store.lifecycle_probe.write() = Some(Arc::new(move |at| {
         if at == stage {
-            reached.send(()).unwrap();
-            resumed.lock().recv_timeout(Duration::from_secs(10)).unwrap();
+            let receiver = resumed.lock().take();
+            if let Some(receiver) = receiver {
+                reached.send(()).unwrap();
+                receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
         }
         Ok(())
     }));
@@ -465,6 +468,76 @@ async fn sidebar_publish_cannot_restore_signals_after_final_close() {
         assert!(last_model.get("signals").is_none(), "{last_model}");
         assert_eq!(last_model["projects"][0]["label"], "racing");
         assert!(events.try_recv().is_err());
+        Ok(())
+    }).await.unwrap();
+    close(fixture).await;
+}
+
+#[tokio::test]
+async fn sidebar_old_publish_cannot_replace_new_lifetime_snapshot() {
+    let fixture = fixture().await;
+    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    crate::ipc::run_blocking(move || {
+        service.sidebar.desktop_stream_opened();
+        service.sync_desktop_sidebar(live_model("desktop-a")).unwrap();
+        let mut events = service.machine_events.subscribe();
+        let (paused, resume) = pause_lifecycle(&service.sidebar, "presenceCaptured");
+        let publisher = Arc::clone(&service);
+        let publish = std::thread::spawn(move || publisher.sync_desktop_sidebar(live_model("old-a")));
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        service.desktop_stream_closed();
+        assert_eq!(events.try_recv().unwrap()["payload"]["revision"], 2);
+        service.sidebar.desktop_stream_opened();
+        let mut replacement = live_model("desktop-b");
+        replacement["signals"]["unreadWorktreePaths"] = json!({"/desktop-b": true});
+        let revision = service.sync_desktop_sidebar(replacement).unwrap();
+        let accepted = service.sidebar.model().unwrap();
+        assert_eq!(events.try_recv().unwrap()["payload"]["revision"], revision);
+
+        resume.send(()).unwrap();
+        let result = publish.join().unwrap();
+        *service.sidebar.lifecycle_probe.write() = None;
+
+        assert!(matches!(result, Err(SidebarRejection::StaleLifetime)), "{result:?}");
+        assert_eq!(SidebarRejection::StaleLifetime.code(), "STALE_EPOCH");
+        assert_eq!(accepted["projects"][0]["label"], "desktop-b");
+        assert_eq!(accepted["signals"]["unreadWorktreePaths"], json!({"/desktop-b": true}));
+        assert_eq!(service.sidebar.model().unwrap(), accepted);
+        let persisted: Value = serde_json::from_slice(&std::fs::read(&service.sidebar.path).unwrap()).unwrap();
+        assert_eq!(persisted, *accepted);
+        assert!(events.try_recv().is_err(), "rejected publish must not announce");
+        Ok(())
+    }).await.unwrap();
+    close(fixture).await;
+}
+
+#[tokio::test]
+async fn sidebar_old_publish_is_rejected_after_new_lifetime_opens() {
+    let fixture = fixture().await;
+    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    crate::ipc::run_blocking(move || {
+        service.sidebar.desktop_stream_opened();
+        service.sync_desktop_sidebar(live_model("initial")).unwrap();
+        let mut events = service.machine_events.subscribe();
+        let (paused, resume) = pause_lifecycle(&service.sidebar, "presenceCaptured");
+        let publisher = Arc::clone(&service);
+        let publish = std::thread::spawn(move || publisher.sync_desktop_sidebar(live_model("old-a")));
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        service.desktop_stream_closed();
+        let closed = service.sidebar.model().unwrap();
+        assert_eq!(events.try_recv().unwrap()["payload"]["revision"], closed["revision"]);
+        service.sidebar.desktop_stream_opened();
+        resume.send(()).unwrap();
+        let result = publish.join().unwrap();
+        *service.sidebar.lifecycle_probe.write() = None;
+
+        assert!(matches!(result, Err(SidebarRejection::StaleLifetime)), "{result:?}");
+        assert_eq!(service.sidebar.model().unwrap(), closed);
+        let persisted: Value = serde_json::from_slice(&std::fs::read(&service.sidebar.path).unwrap()).unwrap();
+        assert_eq!(persisted, *closed);
+        assert!(events.try_recv().is_err(), "rejected publish must not announce");
         Ok(())
     }).await.unwrap();
     close(fixture).await;

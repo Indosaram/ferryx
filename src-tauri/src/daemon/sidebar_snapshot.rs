@@ -23,6 +23,8 @@ pub enum SidebarRejection {
     UnsupportedSchema,
     #[error("sidebar revision exhausted")]
     RevisionExhausted,
+    #[error("sidebar publish belongs to a stale desktop lifetime")]
+    StaleLifetime,
     #[error("sidebar snapshot could not be persisted: {0}")]
     Persist(#[from] std::io::Error),
 }
@@ -34,10 +36,14 @@ impl SidebarRejection {
             Self::TooLarge => "PAYLOAD_TOO_LARGE",
             Self::UnsupportedSchema => "INVALID_REQUEST",
             Self::RevisionExhausted => "CAPACITY_EXCEEDED",
+            Self::StaleLifetime => "STALE_EPOCH",
             Self::Persist(_) => "MACHINE_SERVICE_UNAVAILABLE",
         }
     }
 }
+
+#[cfg(test)]
+type LifecycleProbe = Arc<dyn Fn(&str) -> std::io::Result<()> + Send + Sync>;
 
 pub struct SidebarSnapshotStore {
     path: PathBuf,
@@ -48,7 +54,7 @@ pub struct SidebarSnapshotStore {
     presence: Mutex<DesktopPresence>,
     desktop_stream_count: tokio::sync::watch::Sender<usize>,
     #[cfg(test)]
-    pub(super) lifecycle_probe: RwLock<Option<Arc<dyn Fn(&str) -> std::io::Result<()> + Send + Sync>>>,
+    pub(super) lifecycle_probe: RwLock<Option<LifecycleProbe>>,
 }
 
 #[derive(Default)]
@@ -100,9 +106,9 @@ impl SidebarSnapshotStore {
         mut model: Value,
         events: &crate::remote::machine_events::MachineEvents,
     ) -> Result<u64, SidebarRejection> {
-        let admitted_epoch = {
+        let (admitted_live, admitted_epoch) = {
             let presence = self.presence.lock();
-            (presence.streams > 0).then_some(presence.epoch)
+            (presence.streams > 0, presence.epoch)
         };
         #[cfg(test)]
         self.probe("presenceCaptured")?;
@@ -111,7 +117,14 @@ impl SidebarSnapshotStore {
         }
         let _writer = self.writer.lock();
         let presence = self.presence.lock();
-        if presence.streams == 0 || admitted_epoch != Some(presence.epoch) {
+        if presence.epoch != admitted_epoch
+            && !(admitted_live
+                && presence.streams == 0
+                && presence.epoch == admitted_epoch.wrapping_add(1))
+        {
+            return Err(SidebarRejection::StaleLifetime);
+        }
+        if presence.streams == 0 || !admitted_live {
             strip_live(&mut model);
         }
         // Last-close needs writer, so it cannot invalidate this decision before commit/event.
