@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, renderHook } from "@testing-library/react";
 
-const tauri = vi.hoisted(() => ({ invoke: vi.fn() }));
+const tauri = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: tauri.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 
 import { buildSidebarModel, type SidebarModel } from "../components/sidebar/sidebarModel";
 import type { RemoteHostState } from "../state/remoteHostStore";
-import { createDesktopSidebarSync } from "./desktopSidebarSync";
+import { createDesktopSidebarSync, useDesktopSidebarPublisher, type DesktopSidebarInput } from "./desktopSidebarSync";
 import type { RegisteredProject } from "./tauri";
 
 const remoteState: RemoteHostState = {
@@ -26,12 +28,26 @@ const sentGroupIds = () => tauri.invoke.mock.calls.map(([command, args]) => {
   return (args as { model: SidebarModel }).model.projects.map((node) => node.groupId);
 });
 
+function deferredInvoke() {
+  const started = Promise.withResolvers<void>();
+  const response = Promise.withResolvers<number>();
+  tauri.invoke.mockImplementationOnce(() => {
+    started.resolve();
+    return response.promise;
+  });
+  return { started: started.promise, ...response };
+}
+
 beforeEach(() => {
   tauri.invoke.mockReset();
   tauri.invoke.mockResolvedValue(1);
+  tauri.listen.mockReset();
+  tauri.listen.mockResolvedValue(() => undefined);
 });
 
 afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -55,15 +71,15 @@ describe("createDesktopSidebarSync", () => {
   });
 
   it("keeps one call in flight and collapses queued models to the latest", async () => {
-    let release: (revision: number) => void = () => undefined;
-    tauri.invoke.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const response = deferredInvoke();
     const send = createDesktopSidebarSync();
 
     const first = send(model([project("first")]));
+    await response.started;
     void send(model([project("obsolete")]));
     const last = send(model([project("latest")]));
     expect(tauri.invoke).toHaveBeenCalledTimes(1);
-    release(1);
+    response.resolve(1);
     await Promise.all([first, last]);
 
     expect(sentGroupIds()).toEqual([["first"], ["latest"]]);
@@ -79,57 +95,57 @@ describe("createDesktopSidebarSync", () => {
   });
 
   it("resends an unchanged model when requested during an in-flight publish", async () => {
-    let release: (revision: number) => void = () => undefined;
-    tauri.invoke.mockImplementationOnce(() => new Promise<number>((resolve) => { release = resolve; }));
+    const response = deferredInvoke();
     const send = createDesktopSidebarSync();
     const snapshot = model([project("a")]);
     const first = send(snapshot);
+    await response.started;
 
     const resend = send(snapshot, true);
     expect(tauri.invoke).toHaveBeenCalledTimes(1);
-    release(1);
+    response.resolve(1);
     await Promise.all([first, resend]);
 
     expect(sentGroupIds()).toEqual([["a"], ["a"]]);
   });
 
   it("resends the latest model when it changes during an in-flight publish", async () => {
-    let release: (revision: number) => void = () => undefined;
-    tauri.invoke.mockImplementationOnce(() => new Promise<number>((resolve) => { release = resolve; }));
+    const response = deferredInvoke();
     const send = createDesktopSidebarSync();
     const first = send(model([project("a")]));
+    await response.started;
 
     void send(model([project("obsolete")]), true);
     const latest = send(model([project("b")]));
     expect(tauri.invoke).toHaveBeenCalledTimes(1);
-    release(1);
+    response.resolve(1);
     await Promise.all([first, latest]);
 
     expect(sentGroupIds()).toEqual([["a"], ["b"]]);
   });
 
   it("sends a pending resend when the in-flight publish rejects", async () => {
-    let reject: (reason: unknown) => void = () => undefined;
-    tauri.invoke.mockImplementationOnce(() => new Promise<number>((_resolve, fail) => { reject = fail; }));
+    const response = deferredInvoke();
     const send = createDesktopSidebarSync();
     const snapshot = model([project("a")]);
     const first = send(snapshot);
+    await response.started;
 
     const resend = send(snapshot, true);
     expect(tauri.invoke).toHaveBeenCalledTimes(1);
-    reject({ code: "STALE_EPOCH", message: "stale sidebar lifetime" });
+    response.reject({ code: "STALE_EPOCH", message: "stale sidebar lifetime" });
     await Promise.all([first, resend]);
 
     expect(sentGroupIds()).toEqual([["a"], ["a"]]);
   });
 
   it("deduplicates an unchanged non-forced model after a deferred publish succeeds", async () => {
-    let release: (revision: number) => void = () => undefined;
-    tauri.invoke.mockImplementationOnce(() => new Promise<number>((resolve) => { release = resolve; }));
+    const response = deferredInvoke();
     const send = createDesktopSidebarSync();
     const snapshot = model([project("a")]);
     const first = send(snapshot);
-    release(1);
+    await response.started;
+    response.resolve(1);
     await first;
 
     await send(snapshot);
@@ -138,6 +154,7 @@ describe("createDesktopSidebarSync", () => {
   });
 
   it.each(["INTERNAL_ERROR", "STALE_EPOCH"])("retries a model rejected with %s instead of treating it as sent", async (code) => {
+    vi.useFakeTimers();
     tauri.invoke.mockRejectedValueOnce({ code, message: "publish rejected" });
     const send = createDesktopSidebarSync();
 
@@ -145,5 +162,98 @@ describe("createDesktopSidebarSync", () => {
     await send(model([project("a")]));
 
     expect(sentGroupIds()).toEqual([["a"], ["a"]]);
+  });
+
+  it.each([false, true])("drains after idle dedupe with final forced=%s", async (forced) => {
+    const send = createDesktopSidebarSync();
+    const snapshot = model([project("a")]);
+    await send(snapshot);
+    await send(snapshot);
+    await send(forced ? snapshot : model([project("b")]), forced);
+    expect(sentGroupIds()).toEqual([["a"], [forced ? "a" : "b"]]);
+  });
+
+  it.each(["MACHINE_SERVICE_UNAVAILABLE", "STALE_EPOCH"])("retries failed forced publication autonomously for %s", async (code) => {
+    vi.useFakeTimers();
+    const send = createDesktopSidebarSync();
+    const snapshot = model([project("a")]);
+    await send(snapshot);
+    tauri.invoke.mockRejectedValueOnce({ code, message: "transient" });
+    await expect(send(snapshot, true)).rejects.toMatchObject({ code });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(tauri.invoke).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sentGroupIds()).toEqual([["a"], ["a"], ["a"]]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["INVALID_REQUEST", "PAYLOAD_TOO_LARGE", "CAPACITY_EXCEEDED"])("does not retry permanent %s", async (code) => {
+    vi.useFakeTimers();
+    tauri.invoke.mockRejectedValueOnce({ code, message: "STALE_EPOCH is only prose here" });
+    const send = createDesktopSidebarSync();
+    await expect(send(model([project("a")]), true)).rejects.toMatchObject({ code });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(tauri.invoke).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("supersedes a retry with the newest model", async () => {
+    vi.useFakeTimers();
+    tauri.invoke.mockRejectedValueOnce({ code: "INTERNAL_ERROR", message: "transient" });
+    const send = createDesktopSidebarSync();
+    await expect(send(model([project("a")]))).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
+    await send(model([project("b")]));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sentGroupIds()).toEqual([["a"], ["b"]]);
+  });
+
+  it("caps retry backoff and cancels outstanding obligations", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    tauri.invoke.mockRejectedValue({ code: "INTERNAL_ERROR", message: "transient" });
+    const send = createDesktopSidebarSync();
+    await expect(send(model([project("a")]))).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
+    for (const delay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
+      const count = tauri.invoke.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(tauri.invoke).toHaveBeenCalledTimes(count);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(tauri.invoke).toHaveBeenCalledTimes(count + 1);
+    }
+    send.cancel();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("useDesktopSidebarPublisher", () => {
+  const input: DesktopSidebarInput = {
+    enabled: true, projects: [project("hook")], activeProjectId: "hook", worktrees: [],
+    inactiveProjectWorktrees: {}, emptyWorkspaceIds: [], activityByWorktreePath: {},
+    unreadWorktreePaths: {}, agents: [], attentionRows: [],
+  };
+
+  it.each([null, "STALE_EPOCH"])("forces publication after a missed resync and initial result %s", async (code) => {
+    const attached = Promise.withResolvers<() => void>();
+    tauri.listen.mockReturnValue(attached.promise);
+    if (code) tauri.invoke.mockRejectedValueOnce({ code, message: "old epoch" });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await act(async () => { renderHook(() => useDesktopSidebarPublisher(input)); });
+    expect(tauri.invoke).toHaveBeenCalledTimes(1);
+    await act(async () => { attached.resolve(() => undefined); await attached.promise; });
+    expect(sentGroupIds()).toEqual([["hook"], ["hook"]]);
+  });
+
+  it("forces unchanged publication on re-enable before listener readiness", async () => {
+    const { rerender } = renderHook(({ enabled }) => useDesktopSidebarPublisher({ ...input, enabled }), {
+      initialProps: { enabled: true },
+    });
+    await act(async () => undefined);
+    const count = tauri.invoke.mock.calls.length;
+    rerender({ enabled: false });
+    const attached = Promise.withResolvers<() => void>();
+    tauri.listen.mockReturnValue(attached.promise);
+    await act(async () => { rerender({ enabled: true }); });
+    expect(tauri.invoke).toHaveBeenCalledTimes(count + 1);
+    await act(async () => { attached.resolve(() => undefined); await attached.promise; });
   });
 });

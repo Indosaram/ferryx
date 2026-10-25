@@ -295,7 +295,7 @@ async fn sidebar_snapshot_never_reloads_live_signals_from_disk() {
         let path = root.path().join("data/desktop-sidebar.v1.json");
         let store = SidebarSnapshotStore::load(path.clone());
         let events = crate::remote::machine_events::MachineEvents::default();
-        store.desktop_stream_opened();
+        store.desktop_stream_opened(&events);
         store.store(live_model("published"), &events).unwrap();
         assert!(store.model().unwrap().get("signals").is_some());
         drop(store);
@@ -317,7 +317,7 @@ async fn sidebar_snapshot_never_reloads_live_signals_from_disk() {
 /// Opens the desktop's event stream the way lib.rs's bridge does and returns the open stream.
 async fn open_desktop_stream(
     server: &Arc<DaemonServer>,
-) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+) -> (BufReader<tokio::io::DuplexStream>, tokio::task::JoinHandle<()>) {
     let mut frame = serde_json::to_value(&DaemonRequest::SubscribeRemoteEvents).unwrap();
     if let (Some(token), Value::Object(map)) = (server.transport_token(), &mut frame) {
         map.insert("token".into(), token.into());
@@ -329,7 +329,7 @@ async fn open_desktop_stream(
         .write_all(format!("{frame}\n").as_bytes())
         .await
         .unwrap();
-    let mut reader = BufReader::new(&mut client);
+    let mut reader = BufReader::new(client);
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
         .await
@@ -339,7 +339,7 @@ async fn open_desktop_stream(
         serde_json::from_str::<DaemonResponse>(line.trim()).unwrap(),
         DaemonResponse::SubscribeRemoteEventsOk
     ));
-    (client, serving)
+    (reader, serving)
 }
 
 #[tokio::test]
@@ -377,8 +377,12 @@ async fn sidebar_live_signals_are_dropped_when_the_desktop_disconnects() {
     assert!(body["model"].get("signals").is_none(), "{body}");
 
     let (first, _first_serving) = open_desktop_stream(&fixture.server).await;
-    let (second, _second_serving) = open_desktop_stream(&fixture.server).await;
+    let (mut second, _second_serving) = open_desktop_stream(&fixture.server).await;
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), second.read_line(&mut line)).await.unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<Value>(line.trim()).unwrap()["event"], "desktop_local_projects_resync");
     wait_streams(&streams, 2).await;
+    exchange(&fixture.server, &DaemonRequest::SyncDesktopSidebar { model: live_model("desktop-b") }).await;
     let response = exchange(
         &fixture.server,
         &DaemonRequest::SyncDesktopSidebar {
@@ -387,19 +391,29 @@ async fn sidebar_live_signals_are_dropped_when_the_desktop_disconnects() {
     )
     .await;
     assert!(
-        matches!(response, DaemonResponse::SyncDesktopSidebarOk { revision: 2 }),
+        matches!(response, DaemonResponse::SyncDesktopSidebarOk { revision: 5 }),
         "{response:?}"
     );
     let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
     assert!(body["model"].get("signals").is_some(), "{body}");
     let mut events = service.machine_events.subscribe();
 
-    // One of two desktop streams ends: a desktop is still connected, the live part stays.
     drop(first);
     wait_streams(&streams, 1).await;
     let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
-    assert!(body["model"].get("signals").is_some(), "{body}");
-    assert!(events.try_recv().is_err(), "nothing changed yet");
+    assert!(body["model"].get("signals").is_none(), "{body}");
+    assert_eq!(body["model"]["revision"], 6);
+    assert_eq!(events.try_recv().unwrap()["payload"]["revision"], 6);
+    line.clear();
+    tokio::time::timeout(Duration::from_secs(10), second.read_line(&mut line)).await.unwrap().unwrap();
+    let resync: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(resync["event"], "desktop_local_projects_resync");
+    let mut replacement = live_model("desktop-b");
+    replacement["signals"]["unreadWorktreePaths"] = json!({"/desktop-b": true});
+    exchange(&fixture.server, &DaemonRequest::SyncDesktopSidebar { model: replacement }).await;
+    let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
+    assert_eq!(body["model"]["signals"]["unreadWorktreePaths"], json!({"/desktop-b": true}));
+    assert_eq!(events.try_recv().unwrap()["payload"]["revision"], 7);
 
     // The last desktop stream ends (the app quit): the live part goes, announced once.
     drop(second);
@@ -407,13 +421,13 @@ async fn sidebar_live_signals_are_dropped_when_the_desktop_disconnects() {
     let event = events.try_recv().expect("sidebarChanged after the desktop disconnects");
     assert_eq!(
         (event["type"].clone(), event["payload"].clone()),
-        (json!("sidebarChanged"), json!({"revision": 3}))
+        (json!("sidebarChanged"), json!({"revision": 8}))
     );
     assert!(events.try_recv().is_err(), "announced once");
     let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
     assert!(body["model"].get("signals").is_none(), "{body}");
-    assert_eq!(body["model"]["revision"], 3);
-    assert_eq!(body["model"]["projects"][0]["label"], "ferryx", "the structure stays");
+    assert_eq!(body["model"]["revision"], 8);
+    assert_eq!(body["model"]["projects"][0]["label"], "desktop-b", "the structure stays");
     drop(service);
     close(fixture).await;
 }
@@ -443,7 +457,7 @@ async fn sidebar_publish_cannot_restore_signals_after_final_close() {
     let fixture = fixture().await;
     let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
     crate::ipc::run_blocking(move || {
-        service.sidebar.desktop_stream_opened();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
         service.sync_desktop_sidebar(live_model("initial")).unwrap();
         let mut events = service.machine_events.subscribe();
         let (paused, resume) = pause_lifecycle(&service.sidebar, "presenceCaptured");
@@ -455,18 +469,16 @@ async fn sidebar_publish_cannot_restore_signals_after_final_close() {
         let closed = service.sidebar.model().unwrap();
         let close_event = events.try_recv().unwrap();
         resume.send(()).unwrap();
-        let revision = publish.join().unwrap().unwrap();
+        let result = publish.join().unwrap();
         *service.sidebar.lifecycle_probe.write() = None;
 
         assert!(closed.get("signals").is_none());
         assert_eq!(close_event["payload"]["revision"], closed["revision"]);
-        let last_event = events.try_recv().unwrap();
         let last_model = service.sidebar.model().unwrap();
-        assert_eq!(last_event["type"], "sidebarChanged");
-        assert_eq!(last_event["payload"]["revision"], revision);
-        assert_eq!(last_model["revision"], revision);
+        assert!(matches!(result, Err(SidebarRejection::StaleLifetime)), "{result:?}");
+        assert_eq!(last_model["revision"], closed["revision"]);
         assert!(last_model.get("signals").is_none(), "{last_model}");
-        assert_eq!(last_model["projects"][0]["label"], "racing");
+        assert_eq!(last_model["projects"][0]["label"], "initial");
         assert!(events.try_recv().is_err());
         Ok(())
     }).await.unwrap();
@@ -478,7 +490,7 @@ async fn sidebar_old_publish_cannot_replace_new_lifetime_snapshot() {
     let fixture = fixture().await;
     let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
     crate::ipc::run_blocking(move || {
-        service.sidebar.desktop_stream_opened();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
         service.sync_desktop_sidebar(live_model("desktop-a")).unwrap();
         let mut events = service.machine_events.subscribe();
         let (paused, resume) = pause_lifecycle(&service.sidebar, "presenceCaptured");
@@ -488,7 +500,8 @@ async fn sidebar_old_publish_cannot_replace_new_lifetime_snapshot() {
 
         service.desktop_stream_closed();
         assert_eq!(events.try_recv().unwrap()["payload"]["revision"], 2);
-        service.sidebar.desktop_stream_opened();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
+        assert_eq!(events.try_recv().unwrap()["payload"]["revision"], 3);
         let mut replacement = live_model("desktop-b");
         replacement["signals"]["unreadWorktreePaths"] = json!({"/desktop-b": true});
         let revision = service.sync_desktop_sidebar(replacement).unwrap();
@@ -517,7 +530,7 @@ async fn sidebar_old_publish_is_rejected_after_new_lifetime_opens() {
     let fixture = fixture().await;
     let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
     crate::ipc::run_blocking(move || {
-        service.sidebar.desktop_stream_opened();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
         service.sync_desktop_sidebar(live_model("initial")).unwrap();
         let mut events = service.machine_events.subscribe();
         let (paused, resume) = pause_lifecycle(&service.sidebar, "presenceCaptured");
@@ -528,13 +541,15 @@ async fn sidebar_old_publish_is_rejected_after_new_lifetime_opens() {
         service.desktop_stream_closed();
         let closed = service.sidebar.model().unwrap();
         assert_eq!(events.try_recv().unwrap()["payload"]["revision"], closed["revision"]);
-        service.sidebar.desktop_stream_opened();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
+        let opened = service.sidebar.model().unwrap();
+        assert_eq!(events.try_recv().unwrap()["payload"]["revision"], opened["revision"]);
         resume.send(()).unwrap();
         let result = publish.join().unwrap();
         *service.sidebar.lifecycle_probe.write() = None;
 
         assert!(matches!(result, Err(SidebarRejection::StaleLifetime)), "{result:?}");
-        assert_eq!(service.sidebar.model().unwrap(), closed);
+        assert_eq!(service.sidebar.model().unwrap(), opened);
         let persisted: Value = serde_json::from_slice(&std::fs::read(&service.sidebar.path).unwrap()).unwrap();
         assert_eq!(persisted, *closed);
         assert!(events.try_recv().is_err(), "rejected publish must not announce");
@@ -548,7 +563,7 @@ async fn sidebar_final_close_invalidates_even_when_persistence_fails() {
     let fixture = fixture().await;
     let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
     crate::ipc::run_blocking(move || {
-        service.sidebar.desktop_stream_opened();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
         service.sync_desktop_sidebar(live_model("published")).unwrap();
         let mut events = service.machine_events.subscribe();
         *service.sidebar.lifecycle_probe.write() = Some(Arc::new(|stage| {
@@ -577,11 +592,77 @@ async fn sidebar_final_close_invalidates_even_when_persistence_fails() {
 }
 
 #[tokio::test]
+async fn sidebar_nonfinal_close_fences_old_admission_and_survivor_republishes() {
+    let fixture = fixture().await;
+    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    crate::ipc::run_blocking(move || {
+        service.sidebar.desktop_stream_opened(&service.machine_events);
+        service.sidebar.desktop_stream_opened(&service.machine_events);
+        service.sync_desktop_sidebar(live_model("desktop-b")).unwrap();
+        service.sync_desktop_sidebar(live_model("desktop-a")).unwrap();
+        let mut epochs = service.sidebar.desktop_epoch();
+        let mut events = service.machine_events.subscribe();
+        let (paused, resume) = pause_lifecycle(&service.sidebar, "presenceCaptured");
+        let publisher = Arc::clone(&service);
+        let publish = std::thread::spawn(move || publisher.sync_desktop_sidebar(live_model("old-a")));
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        service.desktop_stream_closed();
+        let invalidated = service.sidebar.model().unwrap();
+        resume.send(()).unwrap();
+        let result = publish.join().unwrap();
+        *service.sidebar.lifecycle_probe.write() = None;
+
+        assert!(invalidated.get("signals").is_none(), "{invalidated}");
+        assert_eq!(invalidated["revision"], 3);
+        assert_eq!(events.try_recv().unwrap()["payload"]["revision"], 3);
+        assert!(epochs.has_changed().unwrap());
+        assert_eq!(*epochs.borrow_and_update(), 3);
+        assert!(matches!(result, Err(SidebarRejection::StaleLifetime)), "{result:?}");
+        assert_eq!(SidebarRejection::StaleLifetime.code(), "STALE_EPOCH");
+        let mut replacement = live_model("desktop-b");
+        replacement["signals"]["unreadWorktreePaths"] = json!({"/b": true});
+        service.sync_desktop_sidebar(replacement).unwrap();
+        let current = service.sidebar.model().unwrap();
+        assert_eq!(current["signals"]["unreadWorktreePaths"], json!({"/b": true}));
+        assert_eq!(current["projects"][0]["label"], "desktop-b");
+        Ok(())
+    }).await.unwrap();
+    close(fixture).await;
+}
+
+#[tokio::test]
+async fn sidebar_open_during_publish_persistence_fences_memory_commit() {
+    let fixture = fixture().await;
+    let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
+    crate::ipc::run_blocking(move || {
+        service.sidebar.desktop_stream_opened(&service.machine_events);
+        service.sync_desktop_sidebar(live_model("initial")).unwrap();
+        let (paused, resume) = pause_lifecycle(&service.sidebar, "publishPersist");
+        let publisher = Arc::clone(&service);
+        let publish = std::thread::spawn(move || publisher.sync_desktop_sidebar(live_model("old-a")));
+        paused.recv_timeout(Duration::from_secs(10)).unwrap();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
+        let opened = service.sidebar.model().unwrap();
+        resume.send(()).unwrap();
+        let result = publish.join().unwrap();
+        *service.sidebar.lifecycle_probe.write() = None;
+        assert!(matches!(result, Err(SidebarRejection::StaleLifetime)), "{result:?}");
+        assert_eq!(service.sidebar.model().unwrap(), opened);
+        assert!(opened.get("signals").is_none());
+        service.sync_desktop_sidebar(live_model("current-b")).unwrap();
+        assert!(service.sidebar.model().unwrap().get("signals").is_some());
+        Ok(())
+    }).await.unwrap();
+    close(fixture).await;
+}
+
+#[tokio::test]
 async fn sidebar_open_does_not_wait_for_stalled_close_persistence() {
     let fixture = fixture().await;
     let service = Arc::clone(&fixture.server.remote_state().machine_services.as_ref().unwrap().workspaces);
     crate::ipc::run_blocking(move || {
-        service.sidebar.desktop_stream_opened();
+        service.sidebar.desktop_stream_opened(&service.machine_events);
         service.sync_desktop_sidebar(live_model("published")).unwrap();
         let (paused, resume) = pause_lifecycle(&service.sidebar, "dropLivePersist");
         let closer = Arc::clone(&service);

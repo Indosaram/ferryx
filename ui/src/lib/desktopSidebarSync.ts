@@ -7,7 +7,7 @@ import { sidebarSessionSignals } from "../components/sidebar/sidebarSessionSigna
 import { agentStatesByPath, useSidebarModel } from "../components/sidebar/useSidebarModel";
 import { groupProjects } from "./projectGrouping";
 import { loadCollapsedProjects, loadWorktreeOrder, subscribeSidebarPersistence } from "./sidebarPersistence";
-import { syncDesktopSidebar, type RegisteredProject } from "./tauri";
+import { syncDesktopSidebar, toIpcError, type RegisteredProject } from "./tauri";
 import type { ActiveAgent, Worktree } from "./types";
 import type { ActivitySummary } from "./activity";
 import type { PublishedAttentionRow } from "../components/sidebar/sidebarSessionSignals";
@@ -27,14 +27,26 @@ export function createDesktopSidebarSync() {
   let pending: SidebarModel | null = null;
   let forceNext = false;
   let running: Promise<void> | null = null;
-  return (model: SidebarModel, resend = false): Promise<void> => {
-    if (resend) forceNext = true;
-    pending = model;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let retryDelay = 1000;
+  let generation = 0;
+  const cancel = () => {
+    clearTimeout(retry);
+    retry = undefined;
+    pending = null;
+    forceNext = false;
+    lastSentKey = null;
+    retryDelay = 1000;
+    generation += 1;
+  };
+  const drain = (): Promise<void> => {
     if (running) return running;
-    running = (async () => {
+    // Install the handle before any path (including dedupe) can complete the worker.
+    running = Promise.resolve().then(async () => {
       try {
         while (pending !== null) {
           const snapshot = pending;
+          const admittedGeneration = generation;
           pending = null;
           const force = forceNext;
           forceNext = false;
@@ -42,25 +54,42 @@ export function createDesktopSidebarSync() {
           if (!force && key === lastSentKey) continue;
           try {
             await syncDesktopSidebar({ ...snapshot, generatedAt: new Date().toISOString() });
-            lastSentKey = key;
+            if (generation === admittedGeneration) lastSentKey = key;
+            retryDelay = 1000;
           } catch (error) {
-            if (pending === null) throw error;
+            const { code } = toIpcError(error);
+            const retryable = code !== "INVALID_REQUEST" && code !== "PAYLOAD_TOO_LARGE" && code !== "CAPACITY_EXCEEDED";
+            if (pending !== null) {
+              if (retryable) forceNext = true;
+              continue;
+            }
+            if (generation !== admittedGeneration) return;
+            if (retryable) {
+              pending = snapshot;
+              forceNext = true;
+              retry = setTimeout(() => {
+                retry = undefined;
+                void drain().catch((failure) => console.error("Desktop sidebar retry failed:", failure));
+              }, retryDelay);
+              retryDelay = Math.min(retryDelay * 2, 30_000);
+            }
+            throw error;
           }
         }
       } finally {
         running = null;
       }
-    })();
+    });
     return running;
   };
-}
-
-const sendDesktopSidebar = createDesktopSidebarSync();
-
-function publish(model: SidebarModel, resend = false) {
-  void sendDesktopSidebar(model, resend).catch((error) => {
-    console.error("Desktop sidebar publish failed:", error);
-  });
+  return Object.assign((model: SidebarModel, resend = false): Promise<void> => {
+    clearTimeout(retry);
+    retry = undefined;
+    retryDelay = 1000;
+    if (resend) forceNext = true;
+    pending = model;
+    return drain();
+  }, { cancel });
 }
 
 export type DesktopSidebarInput = {
@@ -80,6 +109,10 @@ export type DesktopSidebarInput = {
 
 /** Publishes the model the desktop sidebar renders, from the same builder hook the Sidebar calls. */
 export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
+  const send = useMemo(createDesktopSidebarSync, []);
+  const publish = (model: SidebarModel, resend = false) => {
+    void send(model, resend).catch((error) => console.error("Desktop sidebar publish failed:", error));
+  };
   const { enabled, projects, activeProjectId, worktrees, inactiveProjectWorktrees } = input;
   const [persistenceVersion, bumpPersistence] = useReducer((version: number) => version + 1, 0);
   useEffect(() => {
@@ -123,17 +156,22 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
 
   useEffect(() => {
     if (!enabled) return;
+    if (modelRef.current) publish(modelRef.current, true);
     let disposed = false;
     let unlisten: (() => void) | undefined;
     // The bridge emits this whenever the daemon event stream (re)connects; the daemon may have lost the snapshot.
     void listen("desktop_local_projects_resync", () => {
       if (modelRef.current) publish(modelRef.current, true);
     }).then((stop) => {
-      if (disposed) stop(); else unlisten = stop;
+      if (disposed) stop(); else {
+        unlisten = stop;
+        if (modelRef.current) publish(modelRef.current, true);
+      }
     });
     return () => {
       disposed = true;
       unlisten?.();
+      send.cancel();
     };
   }, [enabled]);
 }

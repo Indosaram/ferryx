@@ -378,7 +378,7 @@ impl DaemonWorkspaceService {
 
     /// A desktop opened its event stream.
     pub fn desktop_stream_opened(self: &std::sync::Arc<Self>) -> DesktopStreamGuard {
-        self.sidebar.desktop_stream_opened();
+        self.sidebar.desktop_stream_opened(&self.machine_events);
         DesktopStreamGuard(std::sync::Arc::clone(self))
     }
 
@@ -387,8 +387,7 @@ impl DaemonWorkspaceService {
         self.sidebar.desktop_stream_count()
     }
 
-    /// Blocking: a desktop event stream ended. When it was the last one, the published live
-    /// signals no longer describe a running desktop: drop them and announce the new revision.
+    /// Blocking: every close revokes the current epoch's signals, including non-final closes.
     pub fn desktop_stream_closed(&self) {
         if let Err(error) = self.sidebar.desktop_stream_closed(&self.machine_events) {
             tracing::warn!(%error, "Desktop sidebar invalidation could not be persisted");

@@ -53,6 +53,7 @@ pub struct SidebarSnapshotStore {
     /// Never held over persistence. Closing takes writer before presence; opening only presence.
     presence: Mutex<DesktopPresence>,
     desktop_stream_count: tokio::sync::watch::Sender<usize>,
+    desktop_epoch: tokio::sync::watch::Sender<u64>,
     #[cfg(test)]
     pub(super) lifecycle_probe: RwLock<Option<LifecycleProbe>>,
 }
@@ -94,6 +95,7 @@ impl SidebarSnapshotStore {
             current: RwLock::new(current),
             presence: Mutex::new(DesktopPresence::default()),
             desktop_stream_count: tokio::sync::watch::channel(0).0,
+            desktop_epoch: tokio::sync::watch::channel(0).0,
             #[cfg(test)]
             lifecycle_probe: RwLock::new(None),
         }
@@ -117,18 +119,12 @@ impl SidebarSnapshotStore {
         }
         let _writer = self.writer.lock();
         let presence = self.presence.lock();
-        if presence.epoch != admitted_epoch
-            && !(admitted_live
-                && presence.streams == 0
-                && presence.epoch == admitted_epoch.wrapping_add(1))
-        {
+        if presence.epoch != admitted_epoch {
             return Err(SidebarRejection::StaleLifetime);
         }
         if presence.streams == 0 || !admitted_live {
             strip_live(&mut model);
         }
-        // Last-close needs writer, so it cannot invalidate this decision before commit/event.
-        // First-open may advance the epoch, but a model admitted without presence is stripped.
         drop(presence);
         if serde_json::to_vec(&model)
             .map_err(std::io::Error::from)?
@@ -145,9 +141,17 @@ impl SidebarSnapshotStore {
             .checked_add(1)
             .ok_or(SidebarRejection::RevisionExhausted)?;
         model["revision"] = Value::from(revision);
+        #[cfg(test)]
+        self.probe("publishPersist")?;
         crate::remote::auth::write_private_json(&self.path, &model)?;
+        // Open must not wait on writer/disk. Fence its invalidation again at memory commit.
+        let presence = self.presence.lock();
+        if presence.epoch != admitted_epoch {
+            return Err(SidebarRejection::StaleLifetime);
+        }
         *self.current.write() = Some(Arc::new(model));
         announce(events, revision);
+        drop(presence);
         Ok(revision)
     }
 
@@ -156,20 +160,26 @@ impl SidebarSnapshotStore {
     }
 
     /// Opening never acquires writer, which may be held across disk I/O by a close or publish.
-    pub fn desktop_stream_opened(&self) {
+    pub fn desktop_stream_opened(&self, events: &crate::remote::machine_events::MachineEvents) {
         let mut presence = self.presence.lock();
-        if presence.streams == 0 {
-            presence.epoch = presence.epoch.wrapping_add(1);
-        }
+        presence.epoch = presence.epoch.wrapping_add(1);
         presence.streams += 1;
+        if let Err(error) = self.invalidate(events) {
+            tracing::warn!(%error, "Desktop sidebar open invalidation failed");
+        }
+        self.desktop_epoch.send_replace(presence.epoch);
         self.desktop_stream_count.send_replace(presence.streams);
+    }
+
+    pub fn desktop_epoch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.desktop_epoch.subscribe()
     }
 
     pub fn desktop_stream_count(&self) -> tokio::sync::watch::Receiver<usize> {
         self.desktop_stream_count.subscribe()
     }
 
-    /// Blocking: serializes final-close invalidation and its event with publishes. Memory and
+    /// Blocking: serializes close invalidation and its event with publishes. Memory and
     /// readers are invalidated before persistence, even if the write fails. Open never waits on I/O.
     pub fn desktop_stream_closed(
         &self,
@@ -178,34 +188,36 @@ impl SidebarSnapshotStore {
         let _writer = self.writer.lock();
         let mut presence = self.presence.lock();
         presence.streams = presence.streams.saturating_sub(1);
-        if presence.streams != 0 {
-            self.desktop_stream_count.send_replace(presence.streams);
-            return Ok(());
-        }
         presence.epoch = presence.epoch.wrapping_add(1);
-        let Some(current) = self.model() else {
-            self.desktop_stream_count.send_replace(0);
-            return Ok(());
-        };
+        let invalidated = self.invalidate(events);
+        self.desktop_epoch.send_replace(presence.epoch);
+        self.desktop_stream_count.send_replace(presence.streams);
+        drop(presence);
+        let Some(model) = invalidated? else { return Ok(()); };
+        #[cfg(test)]
+        self.probe("dropLivePersist")?;
+        crate::remote::auth::write_private_json(&self.path, &*model)?;
+        Ok(())
+    }
+
+    /// Called under presence: bounded memory/event work only, never filesystem operations.
+    fn invalidate(
+        &self,
+        events: &crate::remote::machine_events::MachineEvents,
+    ) -> Result<Option<Arc<Value>>, SidebarRejection> {
+        let Some(current) = self.model() else { return Ok(None); };
         let mut model = (*current).clone();
-        if !strip_live(&mut model) {
-            self.desktop_stream_count.send_replace(0);
-            return Ok(());
-        }
+        strip_live(&mut model);
         let revision = current["revision"]
             .as_u64()
             .unwrap_or(0)
             .checked_add(1)
             .ok_or(SidebarRejection::RevisionExhausted)?;
         model["revision"] = Value::from(revision);
-        *self.current.write() = Some(Arc::new(model.clone()));
+        let model = Arc::new(model);
+        *self.current.write() = Some(Arc::clone(&model));
         announce(events, revision);
-        self.desktop_stream_count.send_replace(0);
-        drop(presence);
-        #[cfg(test)]
-        self.probe("dropLivePersist")?;
-        crate::remote::auth::write_private_json(&self.path, &model)?;
-        Ok(())
+        Ok(Some(model))
     }
 
     #[cfg(test)]
