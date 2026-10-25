@@ -3058,4 +3058,136 @@ mod tests {
             "the close must end the reader the release had unblocked"
         );
     }
+
+    /// Read a session's output until `tag` is followed by a complete decimal number, bounded, and
+    /// return that number. The terminal echoes the typed command (`BG=$!`) before the shell runs it,
+    /// so only digits after the tag count, and only once a non-digit ends them.
+    async fn read_tagged_number(rx: &mut mpsc::Receiver<Vec<u8>>, tag: &str) -> u32 {
+        let mut seen = String::new();
+        let found = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            loop {
+                let Some(chunk) = rx.recv().await else {
+                    return None;
+                };
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                for (index, _) in seen.match_indices(tag) {
+                    let rest = &seen[index + tag.len()..];
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    if !digits.is_empty() && rest.len() > digits.len() {
+                        return Some(digits.parse::<u32>().expect("tagged number"));
+                    }
+                }
+            }
+        })
+        .await;
+        match found {
+            Ok(Some(value)) => value,
+            _ => panic!("never saw '{tag}<number>' in the output: {seen:?}"),
+        }
+    }
+
+    /// An interactive bash with no startup files and no history file, so a test neither depends on
+    /// nor writes the host user's shell state.
+    fn interactive_bash() -> CommandBuilder {
+        let mut cmd = CommandBuilder::new("/bin/bash");
+        cmd.args(["--noprofile", "--norc", "-i"]);
+        cmd.env("HISTFILE", "/dev/null");
+        cmd
+    }
+
+    /// GAP-1: a shell that exits while a background job still holds the terminal open.
+    ///
+    /// The job keeps the slave side open, so the spawned reader never sees EOF and used to wait in
+    /// `poll(-1)` with nothing able to wake it: the session's output never ended, and the reader
+    /// thread leaked. The exit must be reported and the reader must end within 3 s.
+    #[tokio::test]
+    async fn shell_exit_with_a_background_job_holding_the_tty_reports_exit_and_ends_the_reader() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn sh");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        manager
+            .write_input(&session_id, b"sleep 300 & echo BG=$!\n")
+            .expect("start background job");
+        let job = read_tagged_number(&mut rx, "BG=").await;
+
+        manager.write_input(&session_id, b"exit\n").expect("exit the shell");
+        let ended = tokio::time::timeout(Duration::from_secs(3), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await
+        .is_ok();
+        let reader_finished = session.is_reader_finished();
+        let state = session.state();
+
+        // The job is this test's to clean up. Killing it also closes the slave end a stuck reader
+        // waits on, so a failing run reports instead of hanging the runtime's shutdown.
+        unsafe { libc::kill(job as libc::pid_t, libc::SIGKILL) };
+
+        assert!(ended, "the session's output never ended after the shell exited (reader stuck)");
+        assert!(reader_finished, "the reader task must have finished");
+        assert!(
+            matches!(state, PtySessionState::Exited { .. }),
+            "the session must report its exit, got {state:?}"
+        );
+    }
+
+    /// GAP-1: Close ends the shell's whole terminal session, background jobs included.
+    ///
+    /// Job control puts `sleep 300 &` in its own process group, which the close's TERM/KILL (shell
+    /// group and foreground group only) never reached: the job survived its pane.
+    #[tokio::test]
+    async fn close_ends_a_background_job_of_the_shell() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager.spawn(interactive_bash(), 80, 24).expect("spawn bash");
+
+        manager
+            .write_input(&session_id, b"sleep 300 & echo BG=$!\n")
+            .expect("start background job");
+        let job = read_tagged_number(&mut rx, "BG=").await;
+        assert!(child_is_running(job), "the background job must be running before the close");
+
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded");
+        assert_close_completed(close, "close with a background job");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut survived = child_is_running(job);
+        while survived && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            survived = child_is_running(job);
+        }
+        if survived {
+            unsafe { libc::kill(job as libc::pid_t, libc::SIGKILL) };
+        }
+        assert!(!survived, "the background job {job} survived the close of its session");
+    }
+
+    /// GAP-1: an idle interactive shell closes on SIGHUP, like any terminal emulator's close.
+    ///
+    /// Interactive bash ignores SIGTERM, so a close that opens with TERM always waits out the whole
+    /// 1 s grace before KILL. SIGHUP first ends it at once.
+    #[tokio::test]
+    async fn close_of_an_idle_bash_session_does_not_wait_out_the_term_grace() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager.spawn(interactive_bash(), 80, 24).expect("spawn bash");
+        manager
+            .write_input(&session_id, b"echo READY=$((40+2))\n")
+            .expect("probe the shell");
+        assert_eq!(read_tagged_number(&mut rx, "READY=").await, 42);
+
+        let started = std::time::Instant::now();
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded");
+        let elapsed = started.elapsed();
+        close.expect("close of an idle shell succeeds");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "closing an idle bash took {elapsed:?}; it must not wait out the TERM grace"
+        );
+    }
 }
