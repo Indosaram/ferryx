@@ -2583,11 +2583,7 @@ impl DaemonClient {
             return;
         }
 
-        if self
-            .upgrade_requested
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
+        if !self.admit_upgrade_attempt() {
             return;
         }
 
@@ -2595,62 +2591,92 @@ impl DaemonClient {
         let target_client = self.clone();
         let control_dir = self.control_runtime_dir();
 
-        tokio::spawn(async move {
-            // Handing a busy daemon of a lossy version over to this binary would kill the
-            // terminals it serves, so that daemon keeps running until it is idle. The flag stays
-            // set, so this GUI checks once per run instead of on every reconnect.
-            match temp_client.list_sessions().await {
-                Ok(sessions)
-                    if handover_would_lose_sessions(daemon_version.as_deref(), sessions.len()) =>
-                {
-                    tracing::warn!(
-                        daemon_version = ?daemon_version,
-                        live_sessions = sessions.len(),
-                        "Deferring the daemon upgrade: this daemon version loses sessions during a handover, so it is replaced only once it has none"
-                    );
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "Deferring the daemon upgrade: could not count the daemon's live sessions"
-                    );
-                    return;
-                }
+        tokio::spawn(Self::run_upgrade_attempt(
+            temp_client,
+            target_client,
+            control_dir,
+            daemon_version,
+            daemon_mtime_ms,
+            own_mtime,
+            stage_own_runtime,
+        ));
+    }
+
+    /// Takes the once-per-run upgrade latch.
+    fn admit_upgrade_attempt(&self) -> bool {
+        self.upgrade_requested
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// One upgrade attempt against the running daemon, after the latch was taken.
+    async fn run_upgrade_attempt<F, Fut>(
+        temp_client: DaemonClient,
+        target_client: DaemonClient,
+        control_dir: PathBuf,
+        daemon_version: Option<String>,
+        daemon_mtime_ms: Option<u64>,
+        own_mtime: Option<u64>,
+        stage: F,
+    ) where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<crate::daemon::runtime_stage::StagedRuntime, String>>,
+    {
+        let own_version = env!("CARGO_PKG_VERSION");
+        // Handing a busy daemon of a lossy version over to this binary would kill the
+        // terminals it serves, so that daemon keeps running until it is idle. The flag stays
+        // set, so this GUI checks once per run instead of on every reconnect.
+        match temp_client.list_sessions().await {
+            Ok(sessions)
+                if handover_would_lose_sessions(daemon_version.as_deref(), sessions.len()) =>
+            {
+                tracing::warn!(
+                    daemon_version = ?daemon_version,
+                    live_sessions = sessions.len(),
+                    "Deferring the daemon upgrade: this daemon version loses sessions during a handover, so it is replaced only once it has none"
+                );
+                return;
             }
-            tracing::info!(
-                "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Requesting an upgrade through the control channel."
-            );
-            // Never UpgradeBinary (todo 8): a daemon without control-v1 is a pre-plan owner that
-            // stays alive until it exits on its own; a control daemon gets RequestUpgrade only
-            // when its Hello lists RequestUpgrade and handover-v1.
-            match request_upgrade_via_control(&control_dir, stage_own_runtime).await {
-                Ok(ControlUpgradeOutcome::Accepted) => {
-                    tracing::info!(
-                        "Daemon upgrade accepted: successor generation started as handover candidate. Invalidating cached connection."
-                    );
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    target_client.invalidate_cached_connections().await;
-                }
-                Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone) => {
-                    tracing::info!(
-                        "Running daemon predates the control channel; it is left running and is replaced only after it exits on its own."
-                    );
-                }
-                Ok(ControlUpgradeOutcome::Unsupported) => {
-                    tracing::info!(
-                        "Running daemon offers no handover upgrade on this platform. Suppressing further upgrade requests."
-                    );
-                }
-                Ok(ControlUpgradeOutcome::Refused(code)) => {
-                    tracing::info!(%code, "Daemon refused the upgrade request; it keeps serving every session.");
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to send daemon upgrade request: {e}");
-                }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Deferring the daemon upgrade: could not count the daemon's live sessions"
+                );
+                return;
             }
-        });
+        }
+        tracing::info!(
+            "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Requesting an upgrade through the control channel."
+        );
+        // Never UpgradeBinary (todo 8): a daemon without control-v1 is a pre-plan owner that
+        // stays alive until it exits on its own; a control daemon gets RequestUpgrade only
+        // when its Hello lists RequestUpgrade and handover-v1.
+        match request_upgrade_via_control(&control_dir, stage).await {
+            Ok(ControlUpgradeOutcome::Accepted) => {
+                tracing::info!(
+                    "Daemon upgrade accepted: successor generation started as handover candidate. Invalidating cached connection."
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                target_client.invalidate_cached_connections().await;
+            }
+            Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone) => {
+                tracing::info!(
+                    "Running daemon predates the control channel; it is left running and is replaced only after it exits on its own."
+                );
+            }
+            Ok(ControlUpgradeOutcome::Unsupported) => {
+                tracing::info!(
+                    "Running daemon offers no handover upgrade on this platform. Suppressing further upgrade requests."
+                );
+            }
+            Ok(ControlUpgradeOutcome::Refused(code)) => {
+                tracing::info!(%code, "Daemon refused the upgrade request; it keeps serving every session.");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to send daemon upgrade request: {e}");
+            }
+        }
     }
 
     async fn try_connect_existing_socket(&self) -> Result<DaemonStream, std::io::Error> {
@@ -4812,6 +4838,10 @@ impl DaemonClient {
     }
 }
 
+
+#[cfg(all(test, unix))]
+#[path = "client_handover_tests.rs"]
+mod client_handover_tests;
 
 #[cfg(test)]
 mod local_control_isolation_tests {
