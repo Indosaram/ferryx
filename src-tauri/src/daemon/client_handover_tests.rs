@@ -139,7 +139,7 @@ fn is_details(request: &DaemonRequest) -> bool {
 async fn handover_busy_write_is_retried_until_the_daemon_accepts_it() {
     let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handler_writes = Arc::clone(&writes);
-    let daemon = FakeDaemon::start(Arc::new(move |_, request| match request {
+    let daemon = FakeDaemon::start(Arc::new(move |_: usize, request: &DaemonRequest| match request {
         DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
         DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
         DaemonRequest::Write { .. } => {
@@ -164,7 +164,7 @@ async fn handover_busy_write_is_retried_until_the_daemon_accepts_it() {
 
 #[tokio::test]
 async fn persistent_handover_busy_keeps_its_code_and_reports_nothing_written() {
-    let daemon = FakeDaemon::start(Arc::new(|_, request| match request {
+    let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
         DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
         DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
         DaemonRequest::Write { .. } | DaemonRequest::Resize { .. } => Reply::Send(handover_busy()),
@@ -195,7 +195,7 @@ async fn persistent_handover_busy_keeps_its_code_and_reports_nothing_written() {
 
 #[tokio::test]
 async fn a_cached_slot_whose_peer_closed_is_reconnected_and_the_write_lands_once() {
-    let daemon = FakeDaemon::start(Arc::new(|_, request| match request {
+    let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
         DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
         DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
         DaemonRequest::Write { .. } => Reply::Send(DaemonResponse::WriteOk),
@@ -229,7 +229,7 @@ async fn a_cached_slot_whose_peer_closed_is_reconnected_and_the_write_lands_once
 
 #[tokio::test]
 async fn attach_to_a_peer_that_never_answers_the_handshake_fails_within_six_seconds() {
-    let daemon = FakeDaemon::start(Arc::new(|_, _| Reply::Silent));
+    let daemon = FakeDaemon::start(Arc::new(|_: usize, _: &DaemonRequest| Reply::Silent));
     let client = daemon.client();
     let outcome = tokio::time::timeout(Duration::from_secs(6), client.attach("s1", None)).await;
     let error = match outcome {
@@ -242,7 +242,7 @@ async fn attach_to_a_peer_that_never_answers_the_handshake_fails_within_six_seco
 
 #[tokio::test]
 async fn subscriptions_to_a_peer_that_never_answers_fail_within_six_seconds() {
-    let daemon = FakeDaemon::start(Arc::new(|_, _| Reply::Silent));
+    let daemon = FakeDaemon::start(Arc::new(|_: usize, _: &DaemonRequest| Reply::Silent));
     let client = daemon.client();
     let events = tokio::time::timeout(Duration::from_secs(6), client.subscribe_remote_events()).await;
     assert!(matches!(events, Ok(Err(_))), "remote events hung or succeeded");
@@ -252,7 +252,7 @@ async fn subscriptions_to_a_peer_that_never_answers_fail_within_six_seconds() {
 
 #[tokio::test]
 async fn a_list_sessions_failure_leaves_the_upgrade_retriable() {
-    let daemon = FakeDaemon::start(Arc::new(|_, request| match request {
+    let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
         DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
         DaemonRequest::ListSessions => Reply::Send(DaemonResponse::Error {
             code: None,
@@ -286,7 +286,7 @@ async fn a_list_sessions_failure_leaves_the_upgrade_retriable() {
 
 #[tokio::test]
 async fn a_second_local_write_on_the_same_session_sends_no_classification() {
-    let daemon = FakeDaemon::start(Arc::new(|_, request| match request {
+    let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
         DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
         DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
         DaemonRequest::Write { .. } => Reply::Send(DaemonResponse::WriteOk),
