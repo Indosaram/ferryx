@@ -23,10 +23,6 @@ pub struct DaemonWorkspaceService {
     pub(crate) catalog: parking_lot::Mutex<Result<Catalog, String>>,
     pub(crate) catalog_path: PathBuf,
     pub(crate) sidebar: super::sidebar_snapshot::SidebarSnapshotStore,
-    /// Open desktop event streams (SubscribeRemoteEvents); the sidebar's live part lives while > 0.
-    desktop_streams: parking_lot::Mutex<usize>,
-    /// The open stream count, published after each open or close has been fully processed.
-    desktop_stream_count: tokio::sync::watch::Sender<usize>,
     workspace_queues: parking_lot::Mutex<
         std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
     >,
@@ -108,8 +104,6 @@ impl DaemonWorkspaceService {
             sidebar: super::sidebar_snapshot::SidebarSnapshotStore::load(
                 catalog_path.with_file_name("desktop-sidebar.v1.json"),
             ),
-            desktop_streams: parking_lot::Mutex::new(0),
-            desktop_stream_count: tokio::sync::watch::channel(0).0,
             worktree_changes: tokio::sync::broadcast::channel(64).0,
 
             project_reads: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
@@ -379,51 +373,25 @@ impl DaemonWorkspaceService {
         &self,
         model: serde_json::Value,
     ) -> Result<u64, super::sidebar_snapshot::SidebarRejection> {
-        // Live signals are only served while a desktop is connected to say they are current.
-        let live = *self.desktop_streams.lock() > 0;
-        let revision = self.sidebar.store(model, live)?;
-        self.machine_events.publish(
-            "sidebarChanged",
-            None,
-            None,
-            serde_json::json!({"revision": revision}),
-        );
-        Ok(revision)
+        self.sidebar.store(model, &self.machine_events)
     }
 
     /// A desktop opened its event stream.
     pub fn desktop_stream_opened(self: &std::sync::Arc<Self>) -> DesktopStreamGuard {
-        let mut streams = self.desktop_streams.lock();
-        *streams += 1;
-        self.desktop_stream_count.send_replace(*streams);
+        self.sidebar.desktop_stream_opened(&self.machine_events);
         DesktopStreamGuard(std::sync::Arc::clone(self))
     }
 
     /// Open desktop event streams, updated once each open or close has taken effect.
     pub fn desktop_stream_count(&self) -> tokio::sync::watch::Receiver<usize> {
-        self.desktop_stream_count.subscribe()
+        self.sidebar.desktop_stream_count()
     }
 
-    /// Blocking: a desktop event stream ended. When it was the last one, the published live
-    /// signals no longer describe a running desktop: drop them and announce the new revision.
+    /// Blocking: every close revokes the current epoch's signals, including non-final closes.
     pub fn desktop_stream_closed(&self) {
-        let mut streams = self.desktop_streams.lock();
-        *streams = streams.saturating_sub(1);
-        if *streams == 0 {
-            match self.sidebar.drop_live() {
-                Ok(Some(revision)) => self.machine_events.publish(
-                    "sidebarChanged",
-                    None,
-                    None,
-                    serde_json::json!({"revision": revision}),
-                ),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "Desktop sidebar live signals could not be dropped")
-                }
-            }
+        if let Err(error) = self.sidebar.desktop_stream_closed(&self.machine_events) {
+            tracing::warn!(%error, "Desktop sidebar invalidation could not be persisted");
         }
-        self.desktop_stream_count.send_replace(*streams);
     }
 }
 

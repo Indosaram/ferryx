@@ -7320,8 +7320,9 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::SubscribeRemoteEvents) => {
                     let mut events = self.remote_event_tx.subscribe();
-                    // The desktop holds this stream for as long as it runs; when its last stream
-                    // ends, the sidebar's published live signals are dropped (the guard's Drop).
+                    // Watch retains epoch changes even when socket writes are delayed. Subscribe
+                    // before open so every remaining desktop reconciles every presence boundary.
+                    let mut sidebar_epoch = self.session_service.workspace_service.sidebar.desktop_epoch();
                     let mut desktop_stream = Some(self.session_service.workspace_service.desktop_stream_opened());
                     let mut resp_json =
                         serde_json::to_string(&DaemonResponse::SubscribeRemoteEventsOk).unwrap();
@@ -7337,6 +7338,13 @@ impl DaemonServer {
                         // its live sidebar signals; its events keep flowing.
                         let received = tokio::select! {
                             read = reader.read_line(&mut line), if desktop_stream.is_some() => Err(read),
+                            changed = sidebar_epoch.changed(), if desktop_stream.is_some() => {
+                                if changed.is_err() { return; }
+                                Ok(Ok(DaemonRemoteEvent {
+                                    event: "desktop_local_projects_resync".into(),
+                                    payload: serde_json::Value::Null,
+                                }))
+                            },
                             received = events.recv() => Ok(received),
                         };
                         let received = match received {

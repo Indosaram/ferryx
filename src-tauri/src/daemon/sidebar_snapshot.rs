@@ -23,6 +23,8 @@ pub enum SidebarRejection {
     UnsupportedSchema,
     #[error("sidebar revision exhausted")]
     RevisionExhausted,
+    #[error("sidebar publish belongs to a stale desktop lifetime")]
+    StaleLifetime,
     #[error("sidebar snapshot could not be persisted: {0}")]
     Persist(#[from] std::io::Error),
 }
@@ -34,16 +36,32 @@ impl SidebarRejection {
             Self::TooLarge => "PAYLOAD_TOO_LARGE",
             Self::UnsupportedSchema => "INVALID_REQUEST",
             Self::RevisionExhausted => "CAPACITY_EXCEEDED",
+            Self::StaleLifetime => "STALE_EPOCH",
             Self::Persist(_) => "MACHINE_SERVICE_UNAVAILABLE",
         }
     }
 }
+
+#[cfg(test)]
+type LifecycleProbe = Arc<dyn Fn(&str) -> std::io::Result<()> + Send + Sync>;
 
 pub struct SidebarSnapshotStore {
     path: PathBuf,
     /// Serializes revision assignment and the disk write; readers never wait on disk I/O.
     writer: Mutex<()>,
     current: RwLock<Option<Arc<Value>>>,
+    /// Never held over persistence. Closing takes writer before presence; opening only presence.
+    presence: Mutex<DesktopPresence>,
+    desktop_stream_count: tokio::sync::watch::Sender<usize>,
+    desktop_epoch: tokio::sync::watch::Sender<u64>,
+    #[cfg(test)]
+    pub(super) lifecycle_probe: RwLock<Option<LifecycleProbe>>,
+}
+
+#[derive(Default)]
+struct DesktopPresence {
+    streams: usize,
+    epoch: u64,
 }
 
 impl SidebarSnapshotStore {
@@ -75,18 +93,39 @@ impl SidebarSnapshotStore {
             path,
             writer: Mutex::new(()),
             current: RwLock::new(current),
+            presence: Mutex::new(DesktopPresence::default()),
+            desktop_stream_count: tokio::sync::watch::channel(0).0,
+            desktop_epoch: tokio::sync::watch::channel(0).0,
+            #[cfg(test)]
+            lifecycle_probe: RwLock::new(None),
         }
     }
 
     /// Blocking: validates, assigns the next revision and persists atomically (temp + rename).
-    /// Without `live` (no desktop connected) the model's live signals are not kept.
-    pub fn store(&self, mut model: Value, live: bool) -> Result<u64, SidebarRejection> {
+    /// A publish admitted in an older desktop lifetime cannot restore that lifetime's signals.
+    pub fn store(
+        &self,
+        mut model: Value,
+        events: &crate::remote::machine_events::MachineEvents,
+    ) -> Result<u64, SidebarRejection> {
+        let (admitted_live, admitted_epoch) = {
+            let presence = self.presence.lock();
+            (presence.streams > 0, presence.epoch)
+        };
+        #[cfg(test)]
+        self.probe("presenceCaptured")?;
         if !accepts(&model) {
             return Err(SidebarRejection::UnsupportedSchema);
         }
-        if !live {
+        let _writer = self.writer.lock();
+        let presence = self.presence.lock();
+        if presence.epoch != admitted_epoch {
+            return Err(SidebarRejection::StaleLifetime);
+        }
+        if presence.streams == 0 || !admitted_live {
             strip_live(&mut model);
         }
+        drop(presence);
         if serde_json::to_vec(&model)
             .map_err(std::io::Error::from)?
             .len()
@@ -94,7 +133,6 @@ impl SidebarSnapshotStore {
         {
             return Err(SidebarRejection::TooLarge);
         }
-        let _writer = self.writer.lock();
         let previous = self
             .model()
             .and_then(|current| current["revision"].as_u64())
@@ -103,8 +141,17 @@ impl SidebarSnapshotStore {
             .checked_add(1)
             .ok_or(SidebarRejection::RevisionExhausted)?;
         model["revision"] = Value::from(revision);
+        #[cfg(test)]
+        self.probe("publishPersist")?;
         crate::remote::auth::write_private_json(&self.path, &model)?;
+        // Open must not wait on writer/disk. Fence its invalidation again at memory commit.
+        let presence = self.presence.lock();
+        if presence.epoch != admitted_epoch {
+            return Err(SidebarRejection::StaleLifetime);
+        }
         *self.current.write() = Some(Arc::new(model));
+        announce(events, revision);
+        drop(presence);
         Ok(revision)
     }
 
@@ -112,27 +159,79 @@ impl SidebarSnapshotStore {
         self.current.read().clone()
     }
 
-    /// Blocking: removes the live signals once their publisher is gone, under a new revision.
-    /// Returns that revision, or None when there was nothing live to drop.
-    pub fn drop_live(&self) -> Result<Option<u64>, SidebarRejection> {
-        let _writer = self.writer.lock();
-        let Some(current) = self.model() else {
-            return Ok(None);
-        };
-        let mut model = (*current).clone();
-        if !strip_live(&mut model) {
-            return Ok(None);
+    /// Opening never acquires writer, which may be held across disk I/O by a close or publish.
+    pub fn desktop_stream_opened(&self, events: &crate::remote::machine_events::MachineEvents) {
+        let mut presence = self.presence.lock();
+        presence.epoch = presence.epoch.wrapping_add(1);
+        presence.streams += 1;
+        if let Err(error) = self.invalidate(events) {
+            tracing::warn!(%error, "Desktop sidebar open invalidation failed");
         }
+        self.desktop_epoch.send_replace(presence.epoch);
+        self.desktop_stream_count.send_replace(presence.streams);
+    }
+
+    pub fn desktop_epoch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.desktop_epoch.subscribe()
+    }
+
+    pub fn desktop_stream_count(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.desktop_stream_count.subscribe()
+    }
+
+    /// Blocking: serializes close invalidation and its event with publishes. Memory and
+    /// readers are invalidated before persistence, even if the write fails. Open never waits on I/O.
+    pub fn desktop_stream_closed(
+        &self,
+        events: &crate::remote::machine_events::MachineEvents,
+    ) -> Result<(), SidebarRejection> {
+        let _writer = self.writer.lock();
+        let mut presence = self.presence.lock();
+        presence.streams = presence.streams.saturating_sub(1);
+        presence.epoch = presence.epoch.wrapping_add(1);
+        let invalidated = self.invalidate(events);
+        self.desktop_epoch.send_replace(presence.epoch);
+        self.desktop_stream_count.send_replace(presence.streams);
+        drop(presence);
+        let Some(model) = invalidated? else { return Ok(()); };
+        #[cfg(test)]
+        self.probe("dropLivePersist")?;
+        crate::remote::auth::write_private_json(&self.path, &*model)?;
+        Ok(())
+    }
+
+    /// Called under presence: bounded memory/event work only, never filesystem operations.
+    fn invalidate(
+        &self,
+        events: &crate::remote::machine_events::MachineEvents,
+    ) -> Result<Option<Arc<Value>>, SidebarRejection> {
+        let Some(current) = self.model() else { return Ok(None); };
+        let mut model = (*current).clone();
+        strip_live(&mut model);
         let revision = current["revision"]
             .as_u64()
             .unwrap_or(0)
             .checked_add(1)
             .ok_or(SidebarRejection::RevisionExhausted)?;
         model["revision"] = Value::from(revision);
-        crate::remote::auth::write_private_json(&self.path, &model)?;
-        *self.current.write() = Some(Arc::new(model));
-        Ok(Some(revision))
+        let model = Arc::new(model);
+        *self.current.write() = Some(Arc::clone(&model));
+        announce(events, revision);
+        Ok(Some(model))
     }
+
+    #[cfg(test)]
+    fn probe(&self, stage: &str) -> std::io::Result<()> {
+        let probe = self.lifecycle_probe.read().clone();
+        match probe {
+            Some(probe) => probe(stage),
+            None => Ok(()),
+        }
+    }
+}
+
+fn announce(events: &crate::remote::machine_events::MachineEvents, revision: u64) {
+    events.publish("sidebarChanged", None, None, serde_json::json!({"revision": revision}));
 }
 
 /// Removes the live signals; true when the model carried any.
