@@ -1,6 +1,6 @@
 [package]
 name = "ferryx-remote-helper"
-version = "2026.1023.3"
+version = "2026.1025.1"
 description = "Standalone SSH remote PTY daemon for Ferryx"
 authors = ["Ferryx Contributors"]
 edition = "2021"

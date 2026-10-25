@@ -1,6 +1,6 @@
 [package]
 name = "ferryx"
-version = "2026.1024.1"
+version = "2026.1025.1"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
 authors = ["Ferryx Contributors"]
 license-file = "../LICENSE"
@@ -36,20 +36,20 @@ required-features = []
 
 [[example]]
 name = "native_terminal_renderer_poc"
-required-features = ["native-terminal"]
+required-features = ["desktop"]
 
 [[example]]
 name = "terminal_selection_evidence"
-required-features = ["native-terminal"]
+required-features = ["desktop"]
 
 [[example]]
 name = "terminal_attribute_evidence"
-required-features = ["native-terminal"]
+required-features = ["desktop"]
 
 [[test]]
 name = "native_terminal_macos_background"
 harness = false
-required-features = ["native-terminal"]
+required-features = ["desktop"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -59,7 +59,9 @@ default = ["desktop", "hub-slack", "hub-discord", "hub-voice"]
 # The Tauri GUI stack: tauri and its plugins, rodio playback, and on Linux GTK, WebKitGTK and
 # JavaScriptCore. `ferryx-cli`, `ferryx-relay` and `ferryx-account` build without it
 # (`--no-default-features`), so the Linux CLI links none of the desktop libraries.
-# `desktop` and `native-terminal` imply each other: the native surface host is a Tauri module.
+# `desktop` implies `native-terminal`. The native surface host is a Tauri module, so enable
+# `desktop` rather than `native-terminal` alone. The reverse edge must not exist: tauri-cli
+# resolves features recursively and overflows its stack on a cycle.
 desktop = [
     "native-terminal",
     "dep:tauri",
@@ -82,7 +84,6 @@ local-split-qa = []
 qa-protocol-bump = ["local-split-qa"]
 # Native GPU presentation is optional; real libghostty-vt parsing is always built.
 native-terminal = [
-    "desktop",
     "dep:wgpu",
     "dep:raw-window-handle",
     "dep:winit",

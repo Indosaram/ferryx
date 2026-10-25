@@ -273,8 +273,9 @@ pub fn is_explicit_silence(text: &str) -> bool {
         .is_match(stripped)
 }
 
-/// What a chat posts when the turn completes, following omo-gateway: nothing for a silence
-/// token; the text; "✅ Done." when the user has seen nothing yet; an error for a turn that
+/// What a chat posts when the turn completes: nothing for a silence token; the text; a line
+/// saying the work ran but no answer was written when tools ran and the user has seen nothing
+/// (a bare "✅ Done." told the owner nothing about what happened); an error for a turn that
 /// produced no text, no tool call and no interim message.
 pub fn final_reply(outcome: &TurnOutcome) -> Result<Option<String>> {
     if is_explicit_silence(&outcome.text) {
@@ -289,9 +290,33 @@ pub fn final_reply(outcome: &TurnOutcome) -> Result<Option<String>> {
         if outcome.messages_delivered > 0 {
             return Ok(None);
         }
-        return Ok(Some("✅ Done.".into()));
+        return Ok(Some(format!(
+            "⚠️ 작업은 실행됐지만(도구 {}회) 최종 답변을 만들지 못했어요. \"결과 알려줘\"라고 보내 주시면 정리해 드릴게요.",
+            outcome.tool_calls
+        )));
     }
     Ok(Some(outcome.text.clone()))
+}
+
+/// The follow-up sent on the same thread when a turn ran tools but wrote no answer.
+pub const FINAL_ANSWER_PROMPT: &str = "You ran tools but did not write a reply. Reply now with the final answer for the user's last message: what you did, the result, and anything left. Do not run more tools unless the answer needs them.";
+
+/// A turn that ran tools, wrote nothing and relayed nothing: the user has seen no answer.
+pub fn needs_final_answer(result: &Result<TurnOutcome>) -> bool {
+    matches!(result, Ok(outcome) if outcome.text.trim().is_empty()
+        && outcome.tool_calls > 0
+        && outcome.messages_delivered == 0
+        && !is_explicit_silence(&outcome.text))
+}
+
+/// The engine refused the requested model because the thread's live context does not fit
+/// that model's window ("Model ... cannot switch: target context window ... short").
+/// The turn never ran, so it is retried on the thread's current model.
+pub fn is_model_switch_rejection(result: &Result<TurnOutcome>) -> bool {
+    matches!(result, Err(error) if {
+        let lower = error.to_string().to_lowercase();
+        lower.contains("cannot switch") && lower.contains("context window")
+    })
 }
 
 /// omo-gateway's fallback model (`OMON_OMO_FALLBACK_MODEL`).
@@ -697,6 +722,51 @@ pub async fn steer(
         Err(error) => {
             tracing::warn!(%error, "turn/steer got no answer");
             Ok(false)
+        }
+    }
+}
+
+/// `run_turn` plus the two recoveries a chat turn needs before it reports to the owner:
+/// a model switch the engine refused for context size runs on the thread's current model
+/// (2026-10-24 23:15Z the owner got "응답을 만들지 못했어요" instead), and a turn that ran
+/// tools without writing a reply is asked once, on the same thread, for its final answer.
+pub async fn run_turn_recovering(
+    config: &OmoClientConfig,
+    request: &TurnRequest,
+    progress: Option<UnboundedSender<String>>,
+) -> Result<TurnOutcome> {
+    let mut first = run_turn(config, request, progress.clone()).await;
+    if is_model_switch_rejection(&first) && request.model.is_some() {
+        tracing::warn!(error = ?first.as_ref().err().map(ToString::to_string), "model switch refused; retrying on the thread's current model");
+        let same_model = TurnRequest {
+            model: None,
+            ..request.clone()
+        };
+        first = run_turn(config, &same_model, progress.clone()).await;
+    }
+    if !needs_final_answer(&first) {
+        return first;
+    }
+    let Ok(outcome) = &first else {
+        return first;
+    };
+    let ask = TurnRequest {
+        thread_id: Some(outcome.thread_id.clone()),
+        model: None,
+        text: FINAL_ANSWER_PROMPT.to_owned(),
+        ..request.clone()
+    };
+    match run_turn(config, &ask, progress).await {
+        Ok(answer) if !answer.text.trim().is_empty() || answer.messages_delivered > 0 => {
+            Ok(TurnOutcome {
+                tool_calls: outcome.tool_calls + answer.tool_calls,
+                ..answer
+            })
+        }
+        Ok(_) => first,
+        Err(error) => {
+            tracing::warn!(%error, "final-answer follow-up failed");
+            first
         }
     }
 }
@@ -1156,6 +1226,11 @@ pub mod mock {
         pub tick: std::time::Duration,
         /// Never acknowledge turn/start.
         pub no_ack: bool,
+        /// Refuse a turn/start that names a model with this error, as the engine does when the
+        /// thread's live context does not fit that model's window.
+        pub switch_error: Option<String>,
+        /// The first turn/start on a connection runs a tool and writes no reply.
+        pub silent_first_turn: bool,
     }
 
     #[allow(clippy::result_large_err)]
@@ -1232,6 +1307,20 @@ pub mod mock {
                                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                                     continue;
                                 }
+                                if let Some(error) = &script.switch_error {
+                                    if frame.pointer("/params/model").is_some() {
+                                        ws.send(out(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error}}))).await.unwrap();
+                                        continue;
+                                    }
+                                }
+                                if script.silent_first_turn
+                                    && log.frames.lock().unwrap().iter().filter(|f| f["method"] == "turn/start").count() == 1
+                                {
+                                    ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))).await.unwrap();
+                                    ws.send(out(json!({"jsonrpc":"2.0","method":"item/started","params":{"threadId":thread,"turnId":"turn-1","item":{"id":"tool-silent","type":"commandExecution"}}}))).await.unwrap();
+                                    ws.send(out(json!({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread,"turn":{"id":"turn-1","status":"completed"}}}))).await.unwrap();
+                                    continue;
+                                }
                                 if script.queued_ticks > 0 {
                                     ws.send(out(json!({"jsonrpc":"2.0","method":"turn/started","params":{"threadId":thread,"turn":{"id":"turn-0"}}}))).await.unwrap();
                                     for tick in 0..script.queued_ticks {
@@ -1290,6 +1379,8 @@ mod tests {
             queued_ticks: 0,
             tick: Duration::ZERO,
             no_ack: false,
+            switch_error: None,
+            silent_first_turn: false,
         }
     }
 
@@ -1463,6 +1554,69 @@ mod tests {
         assert!(answer.to_string().contains("intentionally retired"));
     }
 
+    /// 2026-10-24 23:15Z: turn/start refused the requested model for context size and the
+    /// owner got a failure line. The turn reruns on the thread's model and answers.
+    #[tokio::test]
+    async fn a_model_switch_refused_for_context_size_reruns_on_the_current_model() {
+        let (url, log) = serve(Script {
+            switch_error: Some("Model \"mahoquot/claude-opus-5-5\" cannot switch: target context window 400000 tokens is 1200 tokens short of the 401200-token requirement".into()),
+            ..script(&["answer on the current model"])
+        })
+        .await;
+        let outcome = run_turn_recovering(
+            &OmoClientConfig::new(url),
+            &TurnRequest {
+                text: "hello".into(),
+                model: Some("mahoquot/claude-opus-5-5".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.text, "answer on the current model");
+        let frames = log.frames.lock().unwrap().clone();
+        let starts: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "turn/start")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert!(starts[0].pointer("/params/model").is_some());
+        assert!(starts[1].pointer("/params/model").is_none());
+    }
+
+    /// A turn that ran tools and wrote no reply is asked for its answer on the same thread
+    /// instead of posting a bare "Done".
+    #[tokio::test]
+    async fn a_tool_only_turn_is_asked_for_its_final_answer() {
+        let (url, log) = serve(Script {
+            silent_first_turn: true,
+            ..script(&["here is what I found"])
+        })
+        .await;
+        let outcome = run_turn_recovering(
+            &OmoClientConfig::new(url),
+            &TurnRequest {
+                text: "check it".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.text, "here is what I found");
+        assert_eq!(outcome.tool_calls, 1);
+        let frames = log.frames.lock().unwrap().clone();
+        let starts: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "turn/start")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[1].pointer("/params/input/0/text").and_then(Value::as_str), Some(FINAL_ANSWER_PROMPT));
+        let resumes = frames.iter().filter(|frame| frame["method"] == "thread/resume").count();
+        assert_eq!(resumes, 1, "the follow-up resumes the same thread");
+    }
+
     #[tokio::test]
     async fn a_fresh_thread_gets_the_model_through_settings_update_like_omo() {
         let (url, log) = serve(script(&["hi"])).await;
@@ -1605,8 +1759,16 @@ mod tests {
         assert_eq!(final_reply(&outcome("NO_REPLY.", 0, 0)).unwrap(), None);
         assert_eq!(
             final_reply(&outcome("", 0, 2)).unwrap().as_deref(),
-            Some("✅ Done.")
+            Some("⚠️ 작업은 실행됐지만(도구 2회) 최종 답변을 만들지 못했어요. \"결과 알려줘\"라고 보내 주시면 정리해 드릴게요.")
         );
+        assert!(needs_final_answer(&Ok(outcome("", 0, 2))));
+        assert!(!needs_final_answer(&Ok(outcome("", 1, 2))));
+        assert!(!needs_final_answer(&Ok(outcome("hi", 0, 2))));
+        assert!(!needs_final_answer(&Ok(outcome("", 0, 0))));
+        assert!(is_model_switch_rejection(&Err(HubError::message(
+            "turn/start failed: Model \"x\" cannot switch: target context window 400000 tokens is 12 tokens short"
+        ))));
+        assert!(!is_model_switch_rejection(&Err(HubError::message("model not found"))));
         assert_eq!(final_reply(&outcome("", 1, 2)).unwrap(), None);
         assert!(final_reply(&outcome("", 0, 0)).is_err());
         assert_eq!(filter_reasoning("<think>x</think> answer"), "answer");

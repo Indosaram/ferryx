@@ -74,9 +74,6 @@ impl PrefilterRules {
                 if has("social") || contains_any(&text, &["category:social", "[social]"]) {
                     return Some("mail_social");
                 }
-                if has("updates") || contains_any(&text, &["category:updates", "[updates]"]) {
-                    return Some("mail_updates");
-                }
                 if contains_any(
                     &text,
                     &[
@@ -91,6 +88,14 @@ impl PrefilterRules {
                     ],
                 ) {
                     return Some("mail_otp");
+                }
+                // Security, billing and account notices come from no-reply senders in Gmail's
+                // Updates tab; the owner must see them (2026-10-23: such mail never reached him).
+                if is_account_critical(&text) {
+                    return None;
+                }
+                if has("updates") || contains_any(&text, &["category:updates", "[updates]"]) {
+                    return Some("mail_updates");
                 }
                 let sender = author.to_lowercase();
                 if contains_any(
@@ -182,6 +187,53 @@ impl PrefilterRules {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+/// Security, billing and account notices: sign-in alerts, password and 2FA changes, failed
+/// payments, suspended or expiring accounts. `text` is the lowercased sender, subject and snippet.
+fn is_account_critical(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "security alert",
+            "보안 알림",
+            "new sign-in",
+            "new login",
+            "suspicious",
+            "unusual activity",
+            "새로운 로그인",
+            "로그인 알림",
+            "password was changed",
+            "password changed",
+            "reset your password",
+            "비밀번호",
+            "two-factor",
+            "2-step",
+            "2단계",
+            "payment failed",
+            "payment declined",
+            "card declined",
+            "결제 실패",
+            "결제가 실패",
+            "invoice",
+            "청구서",
+            "billing",
+            "past due",
+            "overdue",
+            "미납",
+            "account suspended",
+            "account has been suspended",
+            "account will be",
+            "계정이 정지",
+            "계정 정지",
+            "subscription expir",
+            "subscription has been cancel",
+            "domain expir",
+            "will expire",
+            "만료",
+            "action required",
+        ],
+    )
 }
 
 /// omo's `record_drop`, per KST day. The table is omo's; it is created when missing.
@@ -291,6 +343,17 @@ mod tests {
         let mut promo = item("mail", "Shop <shop@x.example>", "sale");
         promo.mail_categories = vec!["promotions".into()];
         assert_eq!(rules.drop_reason(&promo), Some("mail_promotions"));
+        let mut update = item("mail", "Shop <shop@x.example>", "your order shipped");
+        update.mail_categories = vec!["updates".into()];
+        assert_eq!(rules.drop_reason(&update), Some("mail_updates"));
+        let mut alert = item("mail", "Google <no-reply@accounts.google.com>", "Security alert: new sign-in on Mac");
+        alert.mail_categories = vec!["updates".into()];
+        assert_eq!(rules.drop_reason(&alert), None, "security notices reach the owner");
+        assert_eq!(
+            rules.drop_reason(&item("mail", "Cloudflare <noreply@notify.cloudflare.com>", "Payment failed for your invoice")),
+            None,
+            "billing notices reach the owner"
+        );
         assert_eq!(
             rules.drop_reason(&item("mail", "Person <p@x.example>", "Re: quote")),
             None

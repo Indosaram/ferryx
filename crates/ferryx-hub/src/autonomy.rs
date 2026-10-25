@@ -24,6 +24,10 @@ pub const DEFAULT_DAILY_CAP: i64 = 24;
 pub const COALESCE_WINDOW: Duration = Duration::from_secs(120);
 pub const REQUEUE_AFTER: Duration = Duration::from_secs(30 * 60);
 pub const MAX_ATTEMPTS: i64 = 3;
+/// An inbox item older than this is not an action-loop candidate, and an outcome still
+/// `enqueued` after this long is closed as `failed`. Without it, the 2026-10-23 migration
+/// backlog (7,951 enqueued rows) kept coming back to the lead lane every 30 minutes.
+pub const MAX_ITEM_AGE: Duration = Duration::from_secs(72 * 60 * 60);
 pub const MAX_LISTED_ITEMS: usize = 20;
 pub const DEFAULT_CALENDAR_CMD: &str = "zele";
 
@@ -112,7 +116,7 @@ impl ActionLoop {
             .as_deref()
             .unwrap_or(&self.lead_session_key);
         let _ = crate::owner_alert::sweep(&self.pool, owner, now).await?;
-        let mut items = unseen_inbox(&self.pool).await?;
+        let mut items = unseen_inbox(&self.pool, now).await?;
         items.extend(requeue_stale(&self.pool, now).await?);
         let foreign = foreign_lead_items(&self.pool, &self.lead_session_key).await?;
         let stamp = now.to_rfc3339();
@@ -331,7 +335,7 @@ impl ActionLoop {
                     }
                 }
                 _ = sweep.tick() => {
-                    let pending = unseen_inbox(&self.pool).await.unwrap_or_default();
+                    let pending = unseen_inbox(&self.pool, Utc::now()).await.unwrap_or_default();
                     if !pending.is_empty() && deadline.is_none() {
                         deadline = Some(tokio::time::Instant::now() + self.coalesce_window);
                     }
@@ -453,19 +457,23 @@ pub async fn retire_unfiltered_kakao_backlog(pool: &SqlitePool) -> Result<u64> {
 }
 
 /// omo-gateway's `scan_unseen_candidates`: triaged `bot`/`owner` items (never FYI, ignored or
-/// untriaged noise) and GitHub items that triage did not take, each once.
-async fn unseen_inbox(pool: &SqlitePool) -> Result<Vec<LoopItem>> {
+/// untriaged noise) and GitHub items that triage did not take, each once, received within
+/// `MAX_ITEM_AGE` of `now`.
+async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopItem>> {
+    let oldest = age_cutoff(now);
     #[allow(clippy::type_complexity)]
     let rows: Vec<(String, String, String, String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT d.item_id, d.class, COALESCE(d.reason, ''), i.source, COALESCE(i.author, ''), COALESCE(i.title, ''), i.link
          FROM inbox_decisions d
          JOIN inbox_items i ON i.id = d.item_id
          WHERE d.class IN ('bot', 'owner')
+           AND i.received_at >= ?
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || d.item_id)
            AND NOT EXISTS (SELECT 1 FROM action_loop_outcomes o WHERE o.item_key = 'inbox:' || d.item_id)
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'github:' || d.item_id)
          ORDER BY d.decided_at ASC",
     )
+    .bind(&oldest)
     .fetch_all(pool)
     .await?;
     let mut out: Vec<LoopItem> = rows
@@ -493,11 +501,13 @@ async fn unseen_inbox(pool: &SqlitePool) -> Result<Vec<LoopItem>> {
     let github: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT i.id, COALESCE(i.author, ''), COALESCE(i.title, ''), i.link FROM inbox_items i
          WHERE i.source = 'github'
+           AND i.received_at >= ?
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'github:' || i.id)
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || i.id)
            AND NOT EXISTS (SELECT 1 FROM inbox_decisions d WHERE d.item_id = i.id AND d.class IN ('bot', 'owner'))
          ORDER BY i.received_at ASC",
     )
+    .bind(&oldest)
     .fetch_all(pool)
     .await?;
     out.extend(
@@ -530,7 +540,20 @@ fn one_line(text: &str, max: usize) -> String {
     }
 }
 
+fn age_cutoff(now: DateTime<Utc>) -> String {
+    (now - chrono::Duration::from_std(MAX_ITEM_AGE).unwrap_or_default()).to_rfc3339()
+}
+
 async fn requeue_stale(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopItem>> {
+    let oldest = age_cutoff(now);
+    sqlx::query(
+        "UPDATE action_loop_outcomes SET status = 'failed', detail = 'expired: not handled within 72h', updated_at = ?
+         WHERE status = 'enqueued' AND enqueued_at < ?",
+    )
+    .bind(now.to_rfc3339())
+    .bind(&oldest)
+    .execute(pool)
+    .await?;
     let cutoff = (now - chrono::Duration::from_std(REQUEUE_AFTER).unwrap_or_default()).to_rfc3339();
     let rows: Vec<(String, String, String, String, Option<String>, i64)> = sqlx::query_as(
         "SELECT item_key, kind, source, line, link, attempts FROM action_loop_outcomes
@@ -948,6 +971,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn items_older_than_72h_are_not_enqueued_and_old_enqueued_rows_expire() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        let old = (now - chrono::Duration::hours(80)).to_rfc3339();
+        let fresh = (now - chrono::Duration::hours(1)).to_rfc3339();
+        for (id, at) in [("old", &old), ("new", &fresh)] {
+            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?,'mail',?,'x',?,'h',?)")
+                .bind(id).bind(id).bind(at).bind(at)
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'owner', 'r', 'open', ?)")
+                .bind(id).bind(at)
+                .execute(&pool).await.unwrap();
+        }
+        let keys: Vec<String> = unseen_inbox(&pool, now)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|item| item.item_key)
+            .collect();
+        assert_eq!(keys, vec!["inbox:new".to_owned()]);
+        sqlx::query("INSERT INTO action_loop_outcomes(item_key, kind, source, line, status, attempts, enqueued_at, updated_at) VALUES('inbox:stale','inbox','mail','l','enqueued',1,?,?)")
+            .bind(&old).bind(&old)
+            .execute(&pool).await.unwrap();
+        assert!(requeue_stale(&pool, now).await.unwrap().is_empty());
+        let status: String = sqlx::query_scalar("SELECT status FROM action_loop_outcomes WHERE item_key = 'inbox:stale'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test]
     async fn the_unfiltered_kakao_backlog_is_retired_once() {
         let pool = crate::storage::memory().await.unwrap();
         let now = Utc::now().to_rfc3339();
@@ -961,7 +1014,7 @@ mod tests {
         }
         assert_eq!(retire_unfiltered_kakao_backlog(&pool).await.unwrap(), 1);
         assert_eq!(retire_unfiltered_kakao_backlog(&pool).await.unwrap(), 0);
-        let keys: Vec<String> = unseen_inbox(&pool)
+        let keys: Vec<String> = unseen_inbox(&pool, Utc::now())
             .await
             .unwrap()
             .into_iter()

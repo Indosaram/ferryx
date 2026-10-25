@@ -155,7 +155,7 @@ pub async fn decide(
 }
 
 pub const TRIAGE_OPTIONS: &[&str] = &["owner_must_act", "bot_can_handle", "fyi", "ignore"];
-pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is waiting for the owner's own reply, decision, signature or payment; surveys, reminders, newsletters, receipts, notices, verification/security codes and automated mail are never owner_must_act; bot_can_handle = a coding/ops task an agent can do alone without speaking as the owner; fyi = information only; ignore = ads/promotions";
+pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is waiting for the owner's own reply, decision, signature or payment, OR an account security/billing notice (new sign-in or suspicious login, password or 2FA change, failed or overdue payment, suspended or expiring account, domain or subscription expiry); surveys, reminders, newsletters, receipts, routine notices, verification/one-time codes and other automated mail are never owner_must_act; bot_can_handle = a coding/ops task an agent can do alone without speaking as the owner; fyi = information only; ignore = ads/promotions";
 
 /// Classifies inbox rows that have no decision yet.
 /// A message older than 24 hours is fyi, except a GitHub `[CI failed]` snippet.

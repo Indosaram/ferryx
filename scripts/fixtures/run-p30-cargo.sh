@@ -19,7 +19,7 @@ fi
   date -u '+%Y-%m-%dT%H:%M:%SZ'
   git rev-parse HEAD
   shasum -a 256 src-tauri/src/native_terminal/images.rs src-tauri/tests/native_terminal_images.rs
-  cargo test --offline --manifest-path src-tauri/Cargo.toml --features native-terminal --test native_terminal_images kitty_rgb_expansion_limit_does_not_block_text_frames -- --exact --nocapture --test-threads=1
+  cargo test --offline --manifest-path src-tauri/Cargo.toml --features desktop --test native_terminal_images kitty_rgb_expansion_limit_does_not_block_text_frames -- --exact --nocapture --test-threads=1
 } 2>&1 | tee "$log"
 # A disabled feature/zero-case invocation must not be counted as GREEN.
 grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log"

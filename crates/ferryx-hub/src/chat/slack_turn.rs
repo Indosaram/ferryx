@@ -646,7 +646,8 @@ pub async fn run_session_turn(
     // Boxed: the app-server turn plus the approval wrapper is a large future, and an unboxed
     // copy on each await level overflowed a 2 MiB worker stack in debug builds.
     let run = Box::pin(async {
-        let first = omo_client::run_turn(&omo, &request, Some(progress.clone())).await;
+        let first =
+            omo_client::run_turn_recovering(&omo, &request, Some(progress.clone())).await;
         // omo-gateway retries a side-effect-free failure once on the fallback model.
         let fallback = omo_client::fallback_model();
         if !omo_client::fallback_eligible(&first)

@@ -529,7 +529,6 @@ pub const GITHUB_NOTIFY_REASONS: &[&str] = &[
     "team_mention",
     "comment",
     "assign",
-    "author",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -826,6 +825,25 @@ mod tests {
         let error = parse_mail_at(&bad, Some("1"), now).unwrap_err().to_string();
         assert!(error.contains("unreadable date"));
         assert!(error.contains("cursor did not advance"));
+    }
+
+    /// Activity on the owner's own issues and PRs (`author`) is not a notice for him.
+    #[test]
+    fn github_author_notifications_are_not_notices() {
+        assert!(!GITHUB_NOTIFY_REASONS.contains(&"author"));
+        let prs = json!({"data": {"search": {"nodes": []}}});
+        let base = github_diff(None, &json!([]), &prs).unwrap();
+        let note = |id: &str, reason: &str| json!({
+            "id": id,
+            "updated_at": "2026-10-16T00:00:00Z",
+            "reason": reason,
+            "repository": {"full_name": "o/r"},
+            "subject": {"title": "t", "url": "https://api.github.com/repos/o/r/pulls/7"}
+        });
+        let notes = json!([note("a1", "author"), note("m1", "mention")]);
+        let next = github_diff(Some(&base.cursor), &notes, &prs).unwrap();
+        assert_eq!(next.items.len(), 1);
+        assert!(next.items[0].snippet.starts_with("[mention]"));
     }
 
     #[test]

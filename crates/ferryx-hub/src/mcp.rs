@@ -358,8 +358,9 @@ async fn call_tool(
             let request_id = required(args, "requestId")?;
             let answer = args
                 .get("answer")
+                .filter(|answer| answer.is_object())
                 .cloned()
-                .unwrap_or_else(|| json!({"optionIndex": 0}));
+                .ok_or_else(|| "missing answer".to_owned())?;
             context
                 .control
                 .execute(

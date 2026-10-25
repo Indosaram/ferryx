@@ -1890,6 +1890,8 @@ mod tests {
             queued_ticks: 0,
             tick: std::time::Duration::ZERO,
             no_ack: false,
+            switch_error: None,
+            silent_first_turn: false,
         })
         .await;
         let dir = std::env::temp_dir().join(format!("ferryx-e2e-turn-{}", std::process::id()));
