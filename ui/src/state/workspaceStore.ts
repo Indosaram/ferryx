@@ -456,6 +456,11 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
         if (localRecoveryOwners.has(key)) continue;
         const owner: LocalRecoveryOwner = { workspaceId, sessionId: session.id, captured: session,
           scheduler: null! as RecoveryScheduler, admitting: false, requesters: new Set() };
+        // Consecutive daemon answers that the backend does not exist. The canonical daemon answers
+        // `session_not_found` only after consulting its own registry and every legacy route
+        // (an unreachable predecessor answers `owner_unavailable` instead), so this is positive
+        // absence, not a transport outage. Two answers in a row absorb a handover-adoption race.
+        let absentStreak = 0;
         owner.scheduler = new RecoveryScheduler({ identity, clock: localRecoveryClock, attemptAction: async (attempt) => {
           const before = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
           if (!before || before.backendSessionId !== owner.captured.backendSessionId ||
@@ -475,7 +480,20 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
               current.recoveryKey === admissionKey && current.recoveryToken === admissionToken);
           };
           if (!fresh()) return { kind: "cancelled" };
-          const details = await describeTerminal(session.backendSessionId!);
+          let details: Awaited<ReturnType<typeof describeTerminal>>;
+          try {
+            details = await describeTerminal(session.backendSessionId!);
+          } catch (error) {
+            if (!fresh()) return { kind: "cancelled" };
+            if (!isConfirmedLocalAbsence(error)) { absentStreak = 0; throw error; }
+            absentStreak += 1;
+            if (absentStreak < LOCAL_ABSENCE_CONFIRMATIONS) return { kind: "retryable", reason: "owner_unknown", error };
+            applyLocalRecovery(workspaceId, { type: "SESSION_CONFIRMED_ABSENT", sessionId: session.id,
+              backendSessionId: session.backendSessionId!, key: admissionKey, token: admissionToken });
+            return getWorkspaceSnapshot(workspaceId)?.sessions[session.id]?.lifecycle === "exited"
+              ? { kind: "exited" } : { kind: "cancelled" };
+          }
+          absentStreak = 0;
           if (!fresh()) return { kind: "cancelled" };
           if (!details || details.sessionId !== session.backendSessionId || details.isPairedProxy) return { kind: "retryable", reason: "owner_unknown" };
           if (session.incarnation && details.incarnation && session.incarnation !== details.incarnation) return { kind: "blocked", reason: "identity_conflict" };
@@ -546,6 +564,19 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
 }
 
 const unsubscribeLocalRecoverySnapshots = subscribeWorkspaceSnapshots(() => reconcileLoadedLocalRecovery());
+
+const LOCAL_ABSENCE_CONFIRMATIONS = 2;
+
+/**
+ * The daemon's describe answered that it owns no such session after checking its registry and
+ * every legacy route. Transport failures, timeouts and an unreachable predecessor
+ * (`owner_unavailable`) stay retryable uncertainty (INV-1).
+ */
+function isConfirmedLocalAbsence(error: unknown): boolean {
+  const ipc = toIpcError(error);
+  return ipc.code === "SESSION_NOT_FOUND" && ipc.details?.source === "daemon_describe" &&
+    ipc.details?.kind === "session_not_found";
+}
 if (import.meta.hot) import.meta.hot.dispose(() => {
   unsubscribeLocalRecoverySnapshots();
   resetLocalRecoveryForTests();
@@ -750,6 +781,7 @@ export type WorkspaceAction =
       exitCode?: number | null;
       reason?: string | null;
     }
+  | { type: "SESSION_CONFIRMED_ABSENT"; sessionId: string; backendSessionId: string; key: string; token: number }
   | { type: "LOCAL_SPLIT_UPDATE"; session: LocalSplitSession }
   | { type: "LOCAL_SPLIT_REMOVE"; sessionId: string }
   | {
@@ -3764,6 +3796,22 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
       nextState = settleActivityForDeadSessions(nextState, [action.sessionId]);
       return nextState;
+    }
+    case "SESSION_CONFIRMED_ABSENT": {
+      const session = state.sessions[action.sessionId];
+      if (!session || session.backendSessionId !== action.backendSessionId ||
+          session.recoveryKey !== action.key || session.recoveryToken !== action.token) return state;
+      // Same settled shape as an affirmative exit: the pane offers a new shell, and an agent pane
+      // keeps its agent and provider session so it can resume the conversation.
+      return settleActivityForDeadSessions({ ...state, sessions: { ...state.sessions, [session.id]: {
+        ...session,
+        lifecycle: "exited",
+        backendSessionId: null,
+        reconnectLifecycle: "idle",
+        ...clearedTransportState(session),
+        backendUnavailableReason: "absent",
+        recoveryState: { phase: "exited", reason: "absent" },
+      } } }, [session.id]);
     }
     case "SESSION_BACKEND_UNAVAILABLE": {
       const session = state.sessions[action.sessionId];
