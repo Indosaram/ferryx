@@ -316,6 +316,10 @@ impl Entry {
     fn notify(s: &Session) {
         s.updates.send_replace(s.details.clone());
     }
+    #[cfg(test)]
+    pub(crate) fn notify_for_test(&self) {
+        Self::notify(&self.state.lock());
+    }
 }
 pub struct RemoteRuntime {
     sessions: Mutex<HashMap<String, Arc<Entry>>>,
