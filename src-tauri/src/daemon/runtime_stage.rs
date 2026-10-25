@@ -30,6 +30,10 @@ pub const HELPER_EXECUTABLE: &str = "ferryx";
 /// File inside every generation dir (outside any bundle) recording when it was staged, in unix
 /// milliseconds; garbage collection keeps the newest generations by this value.
 pub const STAGED_AT_FILE: &str = ".staged-at";
+/// Dir inside every generation (outside any bundle, so the macOS signature stays sealed) holding a
+/// copy of the app's remote helper assets (`manifest.json` plus one binary per target): the staged
+/// daemon installs SSH helpers from here, since it no longer runs from the app install.
+pub const HELPER_ASSETS_DIR: &str = "helpers";
 /// Generations that garbage collection always keeps, newest first.
 pub const KEEP_NEWEST: usize = 2;
 const TMP_MARKER: &str = ".tmp-";
@@ -145,7 +149,85 @@ pub fn platform_source(source_exe: &Path) -> Result<StageSource, RuntimeStageErr
 /// Stages the runtime for `source_exe` under `root` for this build's version. Blocking: async
 /// callers go through [`stage_runtime_blocking`].
 pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, RuntimeStageError> {
-    stage_from(root, &platform_source(source_exe)?, env!("CARGO_PKG_VERSION"))
+    let staged = stage_from(root, &platform_source(source_exe)?, env!("CARGO_PKG_VERSION"))?;
+    let generation = root.join(&staged.key);
+    // The running process is the app being staged (or a staged generation of it); an AppImage
+    // `source_exe` sits outside its mounted image, so look next to the live executable first.
+    let assets = std::env::current_exe()
+        .ok()
+        .and_then(|exe| helper_assets_dir_near(&exe))
+        .or_else(|| helper_assets_dir_near(source_exe));
+    match assets {
+        Some(assets) => {
+            if let Err(error) = ensure_helper_assets(&generation, &assets) {
+                tracing::warn!(%error, generation = %staged.key, "Could not stage the remote helper assets; SSH helper installs from this daemon will fail");
+            }
+        }
+        None => {
+            tracing::warn!(source = %source_exe.display(), "No remote helper assets next to the daemon source; SSH helper installs from this daemon will fail");
+        }
+    }
+    Ok(staged)
+}
+
+/// The remote helper assets dir (one holding `manifest.json`) next to `executable`: an app
+/// install (Windows `<install dir>/helpers`, macOS `Contents/Resources/helpers`, Linux deb or
+/// AppImage `usr/lib/Ferryx/helpers`) or a staged generation (`<key>/helpers`, which is
+/// `../../../helpers` from a macOS staged bundle executable).
+pub fn helper_assets_dir_near(executable: &Path) -> Option<PathBuf> {
+    let exe_dir = executable.parent()?;
+    [
+        exe_dir.join(HELPER_ASSETS_DIR),
+        exe_dir.join("../Resources").join(HELPER_ASSETS_DIR),
+        exe_dir.join("resources").join(HELPER_ASSETS_DIR),
+        exe_dir.join("../lib/Ferryx").join(HELPER_ASSETS_DIR),
+        exe_dir.join("../../..").join(HELPER_ASSETS_DIR),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("manifest.json").is_file())
+}
+
+/// Copies `assets` into `<generation>/helpers` unless it is already there. Also backfills
+/// generations staged before helper assets were staged. The copy lands complete (temp dir, then
+/// rename) and an existing assets dir is never overwritten.
+pub fn ensure_helper_assets(generation: &Path, assets: &Path) -> Result<(), RuntimeStageError> {
+    let destination = generation.join(HELPER_ASSETS_DIR);
+    if destination.join("manifest.json").is_file() {
+        return Ok(());
+    }
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let tmp = generation.join(format!(
+        "{HELPER_ASSETS_DIR}{TMP_MARKER}{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = copy_tree(assets, &tmp)
+        .and_then(|()| sync_dir(&tmp).map_err(io_error(format!("sync {}", tmp.display()))))
+        .and_then(|()| match fs::rename(&tmp, &destination) {
+            Ok(()) => sync_dir(generation).map_err(io_error(format!("sync {}", generation.display()))),
+            // Another stager won the rename.
+            Err(_) if destination.join("manifest.json").is_file() => Ok(()),
+            Err(error) => Err(io_error(format!("rename {} to {}", tmp.display(), destination.display()))(error)),
+        });
+    if tmp.exists() {
+        remove_tmp_dir(&tmp);
+    }
+    result
+}
+
+/// Recursive byte copy (`fs::copy` keeps unix permission bits, so helper binaries stay executable).
+fn copy_tree(source: &Path, destination: &Path) -> Result<(), RuntimeStageError> {
+    fs::create_dir_all(destination).map_err(io_error(format!("create {}", destination.display())))?;
+    for entry in fs::read_dir(source).map_err(io_error(format!("read {}", source.display())))? {
+        let entry = entry.map_err(io_error(format!("read {}", source.display())))?;
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target).map_err(io_error(format!("copy {}", entry.path().display())))?;
+        }
+    }
+    Ok(())
 }
 
 /// The key [`stage_runtime`] gives `source_exe`'s generation, without staging it. Blocking

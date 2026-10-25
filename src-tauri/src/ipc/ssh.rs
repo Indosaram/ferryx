@@ -825,6 +825,10 @@ pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, Ipc
     let mut helper_dir_candidates = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {
+        // A staged daemon generation carries its own copy (`runtime_stage::HELPER_ASSETS_DIR`).
+        if let Some(staged) = crate::daemon::runtime_stage::helper_assets_dir_near(&exe) {
+            helper_dir_candidates.push(staged);
+        }
         if let Some(exe_dir) = exe.parent() {
             helper_dir_candidates.push(exe_dir.join("helpers"));
             helper_dir_candidates.push(exe_dir.join("../Resources/helpers"));

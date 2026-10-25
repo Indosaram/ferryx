@@ -291,6 +291,88 @@ fn macos_helper_source_reports_a_missing_helper_bundle() {
     ));
 }
 
+fn write_helper_assets(dir: &Path) {
+    write_exe(&dir.join("manifest.json"), b"{\"helperVersion\":\"1\"}");
+    write_exe(&dir.join("x86_64-unknown-linux-gnu/ferryx-remote-helper"), b"linux helper");
+    write_exe(&dir.join("x86_64-pc-windows-msvc/ferryx-remote-helper.exe"), b"windows helper");
+}
+
+#[test]
+fn helper_assets_are_found_next_to_every_install_and_staged_layout() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let layouts = [
+        // Windows install and Windows/Linux staged generation: `<dir>/helpers`.
+        ("win/ferryx.exe", "win/helpers"),
+        // macOS app bundle.
+        ("Ferryx.app/Contents/MacOS/ferryx", "Ferryx.app/Contents/Resources/helpers"),
+        // Linux deb or mounted AppImage.
+        ("usr/bin/ferryx", "usr/lib/Ferryx/helpers"),
+        // macOS staged generation: assets sit beside the sealed bundle.
+        ("gen/Ferryx Daemon.app/Contents/MacOS/ferryx", "gen/helpers"),
+    ];
+    for (exe, assets) in layouts {
+        write_exe(&root.join(exe), b"exe");
+        write_helper_assets(&root.join(assets));
+        let found = helper_assets_dir_near(&root.join(exe)).unwrap_or_else(|| panic!("no assets for {exe}"));
+        assert_eq!(fs::canonicalize(found).unwrap(), fs::canonicalize(root.join(assets)).unwrap(), "{exe}");
+    }
+    write_exe(&root.join("bare/ferryx"), b"exe");
+    assert_eq!(helper_assets_dir_near(&root.join("bare/ferryx")), None);
+}
+
+#[test]
+fn helper_assets_are_copied_into_a_generation_and_never_overwritten() {
+    let temp = tempfile::tempdir().unwrap();
+    let assets = temp.path().join("app/helpers");
+    write_helper_assets(&assets);
+    // A generation staged before helper assets existed (the backfill case).
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+
+    ensure_helper_assets(&generation, &assets).unwrap();
+
+    let staged = generation.join(HELPER_ASSETS_DIR);
+    assert_eq!(fs::read(staged.join("x86_64-unknown-linux-gnu/ferryx-remote-helper")).unwrap(), b"linux helper");
+    assert_eq!(fs::read(staged.join("x86_64-pc-windows-msvc/ferryx-remote-helper.exe")).unwrap(), b"windows helper");
+    // No temp dir is left behind next to the copy.
+    let mut names = dir_names(&generation);
+    names.retain(|name| name.contains(TMP_MARKER));
+    assert!(names.is_empty(), "leftover temp dirs: {names:?}");
+    // The staged daemon resolves its own copy, and a later app's assets never replace it.
+    assert_eq!(helper_assets_dir_near(&generation.join(DAEMON_FILE_NAME)), Some(staged.clone()));
+    write_exe(&assets.join("x86_64-unknown-linux-gnu/ferryx-remote-helper"), b"other build");
+    ensure_helper_assets(&generation, &assets).unwrap();
+    assert_eq!(fs::read(staged.join("x86_64-unknown-linux-gnu/ferryx-remote-helper")).unwrap(), b"linux helper");
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_helper_binaries_stay_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let assets = temp.path().join("app/helpers");
+    write_helper_assets(&assets);
+    let binary = "x86_64-unknown-linux-gnu/ferryx-remote-helper";
+    fs::set_permissions(assets.join(binary), fs::Permissions::from_mode(0o755)).unwrap();
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+
+    ensure_helper_assets(&generation, &assets).unwrap();
+
+    let mode = fs::metadata(generation.join(HELPER_ASSETS_DIR).join(binary)).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+}
+
+#[test]
+fn a_missing_assets_source_leaves_no_partial_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+
+    let error = ensure_helper_assets(&generation, &temp.path().join("absent")).unwrap_err();
+
+    assert!(matches!(error, RuntimeStageError::Io { .. }));
+    assert_eq!(dir_names(&generation), vec![STAGED_AT_FILE.to_string(), DAEMON_FILE_NAME.to_string()]);
+}
+
 #[test]
 fn a_bundle_source_stages_the_whole_bundle_and_hashes_its_executable() {
     let temp = tempfile::tempdir().unwrap();
