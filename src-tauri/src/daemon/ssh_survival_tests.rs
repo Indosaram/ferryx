@@ -291,12 +291,12 @@ async fn ssh_expired_session_settles_exited_and_preserves_agent_identity() {
     }).await.unwrap();
     assert_eq!(exit.payload["state"], "exited");
     assert!(exit.payload["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
-    assert!(!daemon.terminal_service.list_sessions().contains(&"ended-ssh".into()));
     assert_eq!(daemon.session_service.agent_states.current("ended-ssh").unwrap(), before);
     assert_eq!(daemon.session_service.provider_claim_len_for_test(), 0);
     daemon.session_service.reserve_provider_claim_for_test("resume-request", "reopened-ssh", &startup).unwrap();
     assert!(matches!(tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap(), Err(tokio::sync::broadcast::error::RecvError::Closed)));
     tokio::time::timeout(Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
+    assert!(!daemon.terminal_service.list_sessions().contains(&"ended-ssh".into()));
     assert!(persisted_durable_ids(&daemon.remote_sessions_path).is_empty());
     assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
     println!("QA_EXPIRED_SETTLED session=ended-ssh state=exited identity=preserved");
