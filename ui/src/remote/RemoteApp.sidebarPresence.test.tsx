@@ -1,7 +1,7 @@
 // An account machine's sidebar section says "can't reach" only when the machine is offline or
 // its connect failed; an online machine whose tunnel is merely closed keeps listing worktrees.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
 import { requireSidebarRow } from "./remoteSidebarTestUtils";
