@@ -1903,6 +1903,8 @@ impl DaemonSessionService {
                     if let (Some(manager), Some(terminals)) = (handover.upgrade(), terminals.upgrade()) {
                         manager.check_retirement_if_empty(&terminals);
                     }
+                    #[cfg(test)]
+                    if let Some(barrier) = &barrier { barrier.checkpoint("disconnected_checked").await; }
                 }
                 if rx.changed().await.is_err() {
                     // The entry's sender dropped: either the session was closed out

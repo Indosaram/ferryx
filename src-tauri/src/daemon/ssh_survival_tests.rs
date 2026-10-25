@@ -144,6 +144,60 @@ impl crate::terminal::remote::Connector for RetryConnector {
     }
 }
 
+#[tokio::test]
+async fn ssh_retiring_connected_owner_survives_background_disconnect() {
+    use crate::daemon::handover::HandoverStatus;
+    use crate::terminal::remote::{RemoteConnectionState as S, Transport};
+
+    // Given an Active daemon with exactly one Connected SSH owner and no local sessions.
+    let dir = tempfile::tempdir().unwrap();
+    let (reads, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (_, inner_reads) = tokio::sync::mpsc::unbounded_channel();
+    let helper = Arc::new(RetryHelper {
+        inner: LiveFakeHelper { reads: tokio::sync::Mutex::new(inner_reads), written: tokio::sync::watch::channel(Vec::new()).0 },
+        reads: tokio::sync::Mutex::new(receiver),
+    });
+    let terminals = Arc::new(TerminalService::with_remote_connector_for_test(Arc::new(RetryConnector(helper.clone()))));
+    let daemon = DaemonServer::new_with_terminal_service(Some(dir.path().join("config")), Some(dir.path().join("auth")), Some(terminals.clone()));
+    let descriptor = serde_json::from_value(handover_persistence_record("retiring-ssh", "retiring-target")["descriptor"].clone()).unwrap();
+    terminals.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, Some(helper as Arc<dyn Transport>)).unwrap();
+    let mut states = terminals.remote().subscribe("retiring-ssh").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), states.wait_for(|d| d.state == S::Connected)).await.unwrap().unwrap();
+    assert_eq!(daemon.handover_manager.status(), HandoverStatus::Active);
+    assert_eq!(crate::daemon::handover::live_session_counts(&terminals), (0, 1, 0));
+    let (done, retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { done.send_replace(true); });
+    let (reached, mut stages) = tokio::sync::mpsc::unbounded_channel();
+    let barrier = Arc::new(crate::daemon::session_service::SettlementTestBarrier {
+        reached, proceed: tokio::sync::Semaphore::new(0),
+    });
+    crate::daemon::session_service::SETTLEMENT_TEST_BARRIER.scope(barrier.clone(), async {
+        daemon.session_service.watch_remote_session("retiring-ssh").unwrap();
+    }).await;
+    let request = daemon.handover_manager.retain_request(terminals.clone()).unwrap();
+    assert_eq!(daemon.handover_manager.control_retire_when_idle(&terminals), 1);
+    drop(request); // The response is complete before the background failure.
+    assert_eq!(daemon.handover_manager.status(), HandoverStatus::Retiring);
+    assert!(!daemon.handover_manager.retiring_signalled());
+    let owner = terminals.remote().take_recovery_owner_for_test("retiring-ssh").unwrap();
+
+    // When the reader fails in the background, wait until its watcher checked retirement.
+    reads.send(Err(crate::ssh::bridge::BridgeError::TargetNotFound)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), states.wait_for(|d| d.state == S::Disconnected)).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), owner).await.unwrap().unwrap();
+    settlement_stage(&mut stages, "disconnected_checked").await;
+
+    // Then the recoverable controller remains Retiring without an exit signal.
+    assert!(!daemon.handover_manager.retiring_signalled(), "recoverable SSH owner must prevent retirement");
+    assert_eq!(daemon.handover_manager.status(), HandoverStatus::Retiring);
+    assert!(!*retired.borrow());
+    assert!(terminals.remote().contains("retiring-ssh"));
+    barrier.proceed.add_permits(1);
+    terminals.remote().close("retiring-ssh").await.unwrap();
+}
+
 async fn disconnected_predecessor_is_retained(kind: crate::terminal::remote::RemoteFailureKind, fail_before_commit: bool) {
     use crate::terminal::remote::{RemoteConnectionState as S, RemoteFailureKind as F, Transport};
     let dir = tempfile::tempdir().unwrap();
