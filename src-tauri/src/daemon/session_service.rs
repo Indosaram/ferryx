@@ -1717,6 +1717,9 @@ impl DaemonSessionService {
         let cleanup_session_id = id.to_string();
         let terminals = Arc::downgrade(&self.terminal_service);
         let handover = self.handover_manager.clone();
+        let claims = self.provider_session_claims.clone();
+        let spawn_cache = self.spawn_idempotency_cache.clone();
+        let epoch = self.epoch.to_string();
         let mut record_removable = false;
         tokio::spawn(async move {
             loop {
@@ -1744,9 +1747,11 @@ impl DaemonSessionService {
                         if let Some(runtime) = runtime.upgrade() {
                             runtime.settle_ended(&cleanup_session_id);
                         }
+                        claims.lock().retain(|_, owner| owner != &cleanup_session_id);
+                        spawn_cache.lock().retain(|_, entry| entry.session_id != cleanup_session_id);
                         let _ = tx.send(DaemonRemoteEvent {
                             event: "terminal_lifecycle".into(),
-                            payload: serde_json::json!({"sessionId":cleanup_session_id,"state":"exited","exitCode":null,"reason":details.failure.as_ref().map(|failure| &failure.message),"incarnation":details.descriptor.client_request_id}),
+                            payload: serde_json::json!({"sessionId":cleanup_session_id,"state":"exited","exitCode":null,"reason":details.failure.as_ref().map(|failure| failure.message.as_str()).unwrap_or("Remote session ended"),"incarnation":details.descriptor.client_request_id,"daemonEpoch":epoch}),
                         });
                     }
                     record_removable = true;
@@ -1769,6 +1774,11 @@ impl DaemonSessionService {
                     tracing::error!(%error, "Remote session checkpoint persistence failed");
                 }
                 let _ = tx.send(DaemonRemoteEvent { event: "terminal_remote_status".into(), payload: serde_json::json!({"sessionId":details.descriptor.backend_session_id,"state":details.state,"generation":details.generation,"failure":details.failure,"replayGap":details.replay_gap}) });
+                if details.state == crate::terminal::remote::RemoteConnectionState::Disconnected {
+                    if let (Some(manager), Some(terminals)) = (handover.upgrade(), terminals.upgrade()) {
+                        manager.check_retirement_if_empty(&terminals);
+                    }
+                }
                 if rx.changed().await.is_err() {
                     // The entry's sender dropped: either the session was closed out
                     // of a live runtime (remove its record), or the whole runtime is

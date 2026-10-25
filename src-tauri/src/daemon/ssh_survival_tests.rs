@@ -4,27 +4,39 @@ use super::*;
 async fn ssh_expired_session_settles_exited_and_preserves_agent_identity() {
     let dir = tempfile::tempdir().unwrap();
     let daemon = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
-    let descriptor = serde_json::from_value(handover_persistence_record("ended-ssh", "ended-target")["descriptor"].clone()).unwrap();
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(handover_persistence_record("ended-ssh", "ended-target")["descriptor"].clone()).unwrap();
+    let target = descriptor.target.clone();
+    let (reads_tx, reads_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (written, _) = tokio::sync::watch::channel(Vec::new());
+    let helper = Arc::new(LiveFakeHelper { reads: tokio::sync::Mutex::new(reads_rx), written });
     daemon.terminal_service.remote().live_import(crate::terminal::remote::RemoteExportState {
         descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
-    }, None).unwrap();
+    }, Some(helper)).unwrap();
     daemon.session_service.agent_states.publish_canonical(crate::daemon::agent_state::AgentState {
         session_id: "ended-ssh".into(), state: "idle".into(), agent: Some("claude".into()),
         provider_session: Some(serde_json::from_value(serde_json::json!({"key":"session_id","id":"conversation-original"})).unwrap()),
         detail: None, origin: crate::daemon::protocol::AgentStateOrigin::Agent,
     });
     let before = daemon.session_service.agent_states.current("ended-ssh").unwrap();
+    let startup = TerminalStartup::AgentResume {
+        agent_type: "claude".into(), provider_session: before.provider_session.clone().unwrap(),
+    };
+    daemon.session_service.reserve_provider_claim_for_test("ended-request", "ended-ssh", &startup).unwrap();
     let mut events = daemon.remote_event_tx.subscribe();
     let (_, mut output) = daemon.terminal_service.output_hub().subscribe("ended-ssh").unwrap();
-    let entry = daemon.terminal_service.remote().entry_for_test("ended-ssh").unwrap();
-    {
-        let mut state = entry.state.lock();
-        state.details.state = crate::terminal::remote::RemoteConnectionState::Expired;
-        state.details.failure = Some(crate::terminal::remote::RemoteFailure {
-            kind: crate::terminal::remote::RemoteFailureKind::Expired, message: "owner epoch changed".into(),
-        });
-    }
+    let legacy = dir.path().join("legacy.sock");
+    let _listener = UnixListener::bind(&legacy).unwrap();
+    let (retired_tx, mut retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { retired_tx.send_replace(true); });
+    daemon.handover_manager.force_prepared_for_test(legacy);
+    let manager = daemon.handover_manager.clone();
+    let terminals = daemon.terminal_service.clone();
+    tokio::task::spawn_blocking(move || manager.commit_handover_v5(&terminals)).await.unwrap().unwrap();
     daemon.session_service.watch_remote_session("ended-ssh").unwrap();
+    let mut read = ssh_fixture_output(&target, 0, b"");
+    read.chunks.clear();
+    read.exited = true;
+    reads_tx.send(read).unwrap();
     let exit = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = events.recv().await.unwrap();
@@ -35,8 +47,12 @@ async fn ssh_expired_session_settles_exited_and_preserves_agent_identity() {
     assert!(exit.payload["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
     assert!(!daemon.terminal_service.list_sessions().contains(&"ended-ssh".into()));
     assert_eq!(daemon.session_service.agent_states.current("ended-ssh").unwrap(), before);
-    drop(entry);
-    assert!(matches!(output.recv().await, Err(tokio::sync::broadcast::error::RecvError::Closed)));
+    assert_eq!(daemon.session_service.provider_claim_len_for_test(), 0);
+    daemon.session_service.reserve_provider_claim_for_test("resume-request", "reopened-ssh", &startup).unwrap();
+    assert!(matches!(tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap(), Err(tokio::sync::broadcast::error::RecvError::Closed)));
+    tokio::time::timeout(Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
+    assert!(persisted_durable_ids(&daemon.remote_sessions_path).is_empty());
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
     println!("QA_EXPIRED_SETTLED session=ended-ssh state=exited identity=preserved");
 }
 
@@ -469,6 +485,10 @@ async fn ssh_handover_remote_details_fall_back_when_peer_lacks_session() {
             legacy_direct_ssh: false
         }
     ));
+    assert!(server.session_router.find_legacy_peer_for_session("ghost-session").is_none());
+    let again = request_response(&server, serde_json::json!({"type":"remoteSessionDetails","sessionId":"ghost-session"})).await;
+    assert!(matches!(again, DaemonResponse::RemoteSessionDetailsOk { details: None, .. }));
+    assert_eq!(legacy.recorded().len(), 1);
 
     // An unreachable peer is not evidence of absence.
     let unreachable = Arc::new(crate::daemon::proxy::LegacyPeer::new(
