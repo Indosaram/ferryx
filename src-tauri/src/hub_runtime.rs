@@ -11,7 +11,7 @@ use ferryx_hub::sessions::watch::Observation;
 use ferryx_hub::{Hub, HubConfig, HubError};
 use serde_json::{json, Value};
 
-use crate::agent_control::{AgentControlOp, AgentControlState, AgentStateSource};
+use crate::agent_control::{AgentControlOp, AgentControlState};
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
 use crate::daemon::server::DaemonServer;
