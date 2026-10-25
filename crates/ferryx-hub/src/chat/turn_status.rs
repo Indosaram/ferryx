@@ -90,15 +90,26 @@ fn last_tool(storage_key: &str) -> Option<String> {
     }
 }
 
-/// Drops leading `[2026-10-23 09:00 KST]`-style stamps the prompt renderer adds.
+/// Drops leading `[2026-10-23 09:00 KST]`-style stamps the prompt renderer adds. A lane-event
+/// turn (`[LANE_EVENT]\n<lane> <kind>: <body>`) shows the first event's body, not the
+/// internal lane and kind names.
 fn headline(owner_text: &str) -> String {
     let mut text = owner_text.trim_start();
     while text.starts_with('[') {
+        if let Some(events) = text.strip_prefix("[LANE_EVENT]") {
+            let first = events.trim_start().lines().next().unwrap_or_default();
+            let body = first.split_once(": ").map_or(first, |(_, body)| body);
+            return clip(&format!("받은 알림 처리: {body}"));
+        }
         match text.find(']') {
             Some(end) => text = text[end + 1..].trim_start(),
             None => break,
         }
     }
+    clip(text)
+}
+
+fn clip(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -232,6 +243,10 @@ mod tests {
         assert_eq!(
             headline("[2026-10-23 09:00 KST]  deploy   the\nhub"),
             "deploy the hub"
+        );
+        assert_eq!(
+            headline("[LANE_EVENT]\n- action_loop: [카톡 · 봇 처리] 여신님: 번역 가능?\n- note: x"),
+            "받은 알림 처리: [카톡 · 봇 처리] 여신님: 번역 가능?"
         );
         record_tool_activity("k", "commandExecution");
         assert_eq!(last_tool("k").as_deref(), Some("commandExecution"));
