@@ -66,7 +66,9 @@ async fn ssh_all_dead_predecessor_retires_but_connected_session_stays() {
     }, None).unwrap();
     let (retired_tx, mut retired) = tokio::sync::watch::channel(false);
     daemon.handover_manager.set_retirement_action(move || { retired_tx.send_replace(true); });
-    daemon.handover_manager.force_prepared_for_test(dir.path().join("legacy.sock"));
+    let legacy = dir.path().join("legacy.sock");
+    let _listener = UnixListener::bind(&legacy).unwrap();
+    daemon.handover_manager.force_prepared_for_test(legacy);
     let manager = daemon.handover_manager.clone();
     let terminals = daemon.terminal_service.clone();
     tokio::task::spawn_blocking(move || manager.commit_handover_v5(&terminals)).await.unwrap().unwrap();
@@ -83,7 +85,7 @@ async fn ssh_all_dead_predecessor_retires_but_connected_session_stays() {
 
 #[tokio::test]
 async fn ssh_handover_prunes_sessions_not_owned_by_reachable_predecessor() {
-    let legacy = FakeLegacyDaemon::start(serde_json::json!({"type":"listSessionsOk","sessions":["live-ssh"]}));
+    let legacy = FakeLegacyDaemon::start(serde_json::json!({"type":"listSessionsOk","epoch":1,"sessions":["live-ssh"]}));
     let path = legacy.socket_path.with_file_name("handover_routes.json");
     crate::daemon::manifest::HandoverManifest { routes: vec![crate::daemon::manifest::HandoverRoute {
         legacy_socket_path: legacy.socket_path.clone(), sessions: vec!["live-ssh".into(), "ghost-ssh".into()],

@@ -1864,6 +1864,8 @@ impl HandoverManager {
         }
         let recovering_ssh = terminal_service.remote().list().iter().any(|id| {
             terminal_service.remote().keeps_predecessor_alive(id)
+        }) || terminal_service.paired().list().iter().any(|id| {
+            terminal_service.paired().live_state(id).is_some_and(|live| live.reader_open)
         });
         if self.is_draining() && live_session_count(terminal_service) == 0 && !recovering_ssh {
             self.retire();

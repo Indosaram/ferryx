@@ -587,10 +587,12 @@ async fn ssh_reconnect_unreachable_target_exhausts_budget_and_settles() {
     tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
     for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
         state(&mut rx, |d| d.state == RemoteConnectionState::Reconnecting && d.attempts == attempt).await;
+        assert!(runtime.keeps_predecessor_alive("local-stable"));
         *dialer.failure.lock() = Some(BridgeError::ConnectionClosed);
         dialer.clock.add_permits(1);
     }
     let ended = state(&mut rx, |d| d.state == RemoteConnectionState::Expired).await;
+    assert!(!runtime.keeps_predecessor_alive("local-stable"));
     assert_eq!(ended.attempts, MAX_RECONNECT_ATTEMPTS);
     assert!(ended.failure.unwrap().message.contains("reconnect attempts"));
     assert!(runtime.retry("local-stable").is_err());
