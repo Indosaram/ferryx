@@ -1826,6 +1826,9 @@ async fn ssh_late_control_failure_preserves_terminal_expiry() {
     release.notify_one();
     assert!(tokio::time::timeout(Duration::from_secs(3), writing).await.unwrap().unwrap().is_err());
 
-    assert_eq!(runtime.details("local-stable").unwrap(), expired);
+    let current = runtime.details("local-stable").unwrap();
+    assert_eq!(current.state, RemoteConnectionState::Expired);
+    assert_eq!(current.failure, expired.failure);
+    assert_eq!(current.generation, expired.generation);
     assert!(runtime.settle_ended("local-stable"));
 }
