@@ -458,6 +458,135 @@ fn omo_session_id_in_table(table: &str, ferryx_session_id: &str) -> Option<Strin
     found
 }
 
+/// The live Ferryx session whose agent is already running omo conversation `provider_id`.
+///
+/// `sessions` are the daemon's live local sessions as (Ferryx session id, PTY pid). The daemon
+/// records a conversation claim only for agents it spawned as a resume, so an omo started by hand
+/// in a shell, or carried over from an older daemon by handover, owns its conversation without a
+/// claim. Reconnecting a pane to that conversation would then start a second agent on the same
+/// transcript. This finds the owner from the process table: an omo process carrying one of these
+/// `FERRYX_SESSION_ID`s whose `--session` argument or `PI_SESSION_FILE` names the conversation,
+/// else a descendant of a session's PTY holding that conversation's transcript open. Two owners
+/// answer `None` rather than a guess.
+pub(crate) fn omo_conversation_owner(provider_id: &str, sessions: &[(String, u32)]) -> Option<String> {
+    if sessions.is_empty() || !crate::agent_transcript::is_valid_session_id(provider_id) {
+        return None;
+    }
+    let ids: HashSet<&str> = sessions.iter().map(|(id, _)| id.as_str()).collect();
+    if let Some(owner) = process_environment_table()
+        .and_then(|table| omo_conversation_owner_in_table(&table, provider_id, &ids))
+    {
+        return Some(owner);
+    }
+    omo_conversation_owner_by_open_files(provider_id, sessions)
+}
+
+fn omo_conversation_owner_in_table(
+    table: &str,
+    provider_id: &str,
+    ids: &HashSet<&str>,
+) -> Option<String> {
+    let mut owner: Option<&str> = None;
+    for line in table.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let Some(session) = tokens
+            .iter()
+            .filter_map(|token| token.strip_prefix("FERRYX_SESSION_ID="))
+            .find(|id| ids.contains(id))
+        else {
+            continue;
+        };
+        let by_arg = tokens
+            .windows(2)
+            .any(|pair| pair[0] == "--session" && pair[1] == provider_id);
+        let by_file = tokens
+            .iter()
+            .filter_map(|token| token.strip_prefix("PI_SESSION_FILE="))
+            .any(|path| extract_session_id_from_path("omo", path).as_deref() == Some(provider_id));
+        if !(by_arg || by_file) {
+            continue;
+        }
+        match owner {
+            Some(existing) if existing != session => return None,
+            _ => owner = Some(session),
+        }
+    }
+    owner.map(str::to_string)
+}
+
+#[cfg(windows)]
+fn omo_conversation_owner_by_open_files(_provider_id: &str, _sessions: &[(String, u32)]) -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+fn omo_conversation_owner_by_open_files(provider_id: &str, sessions: &[(String, u32)]) -> Option<String> {
+    let entries = process_table_entries()?;
+    let owner_by_pid = session_by_descendant_pid(&entries, sessions);
+    if owner_by_pid.is_empty() {
+        return None;
+    }
+    let pids = owner_by_pid.keys().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let lsof = resolve_tool("lsof")?;
+    // lsof exits non-zero when any listed pid is gone, so its stdout is read regardless.
+    let output = crate::util::no_window_command(lsof)
+        .args(["-a", "-p", &pids, "-Fpn"])
+        .output()
+        .ok()?;
+    omo_conversation_owner_in_lsof(&String::from_utf8_lossy(&output.stdout), provider_id, &owner_by_pid)
+}
+
+#[cfg(any(not(windows), test))]
+fn session_by_descendant_pid<'a>(
+    entries: &[(u32, u32, String)],
+    sessions: &'a [(String, u32)],
+) -> HashMap<u32, &'a str> {
+    let mut children = HashMap::<u32, Vec<u32>>::new();
+    for (pid, ppid, _) in entries {
+        children.entry(*ppid).or_default().push(*pid);
+    }
+    let mut owner_by_pid = HashMap::new();
+    for (session, root) in sessions {
+        let mut queue = VecDeque::from([*root]);
+        while let Some(pid) = queue.pop_front() {
+            if owner_by_pid.insert(pid, session.as_str()).is_some() {
+                continue;
+            }
+            if let Some(descendants) = children.get(&pid) {
+                queue.extend(descendants.iter().copied());
+            }
+        }
+    }
+    owner_by_pid
+}
+
+#[cfg(any(not(windows), test))]
+fn omo_conversation_owner_in_lsof(
+    stdout: &str,
+    provider_id: &str,
+    owner_by_pid: &HashMap<u32, &str>,
+) -> Option<String> {
+    let mut current: Option<&str> = None;
+    let mut owner: Option<&str> = None;
+    for line in stdout.lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            current = pid.parse().ok().and_then(|pid| owner_by_pid.get(&pid).copied());
+            continue;
+        }
+        let (Some(session), Some(path)) = (current, line.strip_prefix('n')) else {
+            continue;
+        };
+        if extract_session_id_from_path("omo", path).as_deref() != Some(provider_id) {
+            continue;
+        }
+        match owner {
+            Some(existing) if existing != session => return None,
+            _ => owner = Some(session),
+        }
+    }
+    owner.map(str::to_string)
+}
+
 // One line per process: its arguments followed by its environment, as `ps -E` prints them.
 #[cfg(all(not(target_os = "linux"), not(windows)))]
 fn process_environment_table() -> Option<String> {
@@ -1350,6 +1479,61 @@ mod tests {
         );
         assert_eq!(omo_session_id_in_table(table, "pty-a"), None);
         assert_eq!(omo_session_id_in_table(table, "pty-b").as_deref(), Some("01a0-one"));
+    }
+
+    #[test]
+    fn omo_conversation_owner_in_table_finds_the_live_session_running_it() {
+        let conversation = "01a17077-db89-7bd2-b57b-da531f61b34d";
+        let table = format!(
+            "mhc --session {conversation} FERRYX_SESSION_ID=pty-a HOME=/h\n\
+             bun cli.js FERRYX_SESSION_ID=pty-b PI_SESSION_FILE=/h/.omo/agent/sessions/--p--/2026_01a170ef-9631-78d3-bc77-5e0233e39233.jsonl\n\
+             mhc --session {conversation} FERRYX_SESSION_ID=pty-gone\n"
+        );
+        let ids = HashSet::from(["pty-a", "pty-b"]);
+        assert_eq!(
+            omo_conversation_owner_in_table(&table, conversation, &ids).as_deref(),
+            Some("pty-a")
+        );
+        assert_eq!(
+            omo_conversation_owner_in_table(&table, "01a170ef-9631-78d3-bc77-5e0233e39233", &ids)
+                .as_deref(),
+            Some("pty-b")
+        );
+        assert_eq!(
+            omo_conversation_owner_in_table(&table, "01a0b028-8789-7683-9220-66d6ca855b24", &ids),
+            None
+        );
+        let both = HashSet::from(["pty-a", "pty-gone"]);
+        assert_eq!(omo_conversation_owner_in_table(&table, conversation, &both), None);
+    }
+
+    #[test]
+    fn omo_conversation_owner_in_lsof_maps_an_open_transcript_to_its_session() {
+        let entries = vec![
+            (100, 1, "/bin/zsh -l".to_string()),
+            (101, 100, "mhc".to_string()),
+            (200, 1, "/bin/zsh -l".to_string()),
+        ];
+        let sessions = vec![("pty-a".to_string(), 100), ("pty-b".to_string(), 200)];
+        let owners = session_by_descendant_pid(&entries, &sessions);
+        assert_eq!(owners.get(&101), Some(&"pty-a"));
+        let stdout = concat!(
+            "p101\n",
+            "n/h/.omo/sessions/--p--/2026-10-25T02-31-52-201Z_01a170e6-6e89-7900-a2a9-112ec1393d5e.jsonl.lock\n",
+            "n/h/.omo/memory/sidecars/2026_01a1713f-5231-7c62-8826-108555b19c46.jsonl.lock\n",
+            "p200\n",
+            "n/dev/ttys001\n",
+        );
+        assert_eq!(
+            omo_conversation_owner_in_lsof(stdout, "01a170e6-6e89-7900-a2a9-112ec1393d5e", &owners)
+                .as_deref(),
+            Some("pty-a")
+        );
+        assert_eq!(
+            omo_conversation_owner_in_lsof(stdout, "01a1713f-5231-7c62-8826-108555b19c46", &owners),
+            None,
+            "a file outside the omo transcript store is not the conversation"
+        );
     }
 
     #[test]

@@ -2505,12 +2505,31 @@ impl DaemonSessionService {
                     }
                 }
                 if let Some(claim) = spawn_claim.as_ref() {
-                    if let Some(existing_session_id) = claims.lock().get(claim) {
+                    let claimed = claims.lock().get(claim).cloned();
+                    // An omo the daemon did not spawn as a resume (started in a shell, or carried
+                    // over by handover) holds its conversation without a claim; find it so the
+                    // pane adopts that session instead of starting a second agent on it.
+                    let existing = claimed.or_else(|| {
+                        if claim.agent_type != "omo" {
+                            return None;
+                        }
+                        let live: Vec<(String, u32)> = terminal_service
+                            .list_sessions()
+                            .into_iter()
+                            .filter(|id| session_router.is_local_session(id))
+                            .filter_map(|id| {
+                                let pid = terminal_service.get_session(&id)?.pid()?;
+                                Some((id, pid))
+                            })
+                            .collect();
+                        crate::ipc::agents::omo_conversation_owner(&claim.provider_id, &live)
+                    });
+                    if let Some(existing_session_id) = existing {
                         return Err(SpawnError::AgentSessionConflict {
                             agent_type: claim.agent_type.clone(),
                             provider_key: claim.provider_key,
                             provider_id: claim.provider_id.clone(),
-                            existing_session_id: existing_session_id.clone(),
+                            existing_session_id,
                         });
                     }
                 }
