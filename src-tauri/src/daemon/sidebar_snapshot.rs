@@ -191,13 +191,21 @@ impl SidebarSnapshotStore {
         presence.epoch = presence.epoch.wrapping_add(1);
         let invalidated = self.invalidate(events);
         self.desktop_epoch.send_replace(presence.epoch);
-        self.desktop_stream_count.send_replace(presence.streams);
         drop(presence);
-        let Some(model) = invalidated? else { return Ok(()); };
-        #[cfg(test)]
-        self.probe("dropLivePersist")?;
-        crate::remote::auth::write_private_json(&self.path, &*model)?;
-        Ok(())
+        let result = (|| {
+            if let Some(model) = invalidated? {
+                #[cfg(test)]
+                self.probe("dropLivePersist")?;
+                crate::remote::auth::write_private_json(&self.path, &*model)?;
+            }
+            Ok(())
+        })();
+        // Count observers may tear down the service's storage after the final close.
+        // Notify only after persistence finishes, including the error path. Re-read
+        // presence because a new stream may have opened while disk I/O was in flight.
+        let presence = self.presence.lock();
+        self.desktop_stream_count.send_replace(presence.streams);
+        result
     }
 
     /// Called under presence: bounded memory/event work only, never filesystem operations.

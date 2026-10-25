@@ -379,7 +379,7 @@ impl DaemonWorkspaceService {
     /// A desktop opened its event stream.
     pub fn desktop_stream_opened(self: &std::sync::Arc<Self>) -> DesktopStreamGuard {
         self.sidebar.desktop_stream_opened(&self.machine_events);
-        DesktopStreamGuard(std::sync::Arc::clone(self))
+        DesktopStreamGuard(Some(std::sync::Arc::clone(self)))
     }
 
     /// Open desktop event streams, updated once each open or close has taken effect.
@@ -397,11 +397,26 @@ impl DaemonWorkspaceService {
 
 /// Held for the life of one desktop event stream; dropping it (stream ended, connection closed or
 /// the serving task cancelled) runs `desktop_stream_closed` off the async runtime.
-pub struct DesktopStreamGuard(std::sync::Arc<DaemonWorkspaceService>);
+pub struct DesktopStreamGuard(Option<std::sync::Arc<DaemonWorkspaceService>>);
+
+impl DesktopStreamGuard {
+    /// Finish normal EOF cleanup before the stream handler continues. Drop remains the
+    /// cancellation fallback, retaining the service until its blocking cleanup completes.
+    pub async fn close(mut self) {
+        if let Some(service) = self.0.take() {
+            if let Err(error) = crate::ipc::run_blocking(move || {
+                service.desktop_stream_closed();
+                Ok(())
+            }).await {
+                tracing::warn!(%error, "Desktop sidebar close task failed");
+            }
+        }
+    }
+}
 
 impl Drop for DesktopStreamGuard {
     fn drop(&mut self) {
-        let service = std::sync::Arc::clone(&self.0);
+        let Some(service) = self.0.take() else { return; };
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
                 runtime.spawn_blocking(move || service.desktop_stream_closed());

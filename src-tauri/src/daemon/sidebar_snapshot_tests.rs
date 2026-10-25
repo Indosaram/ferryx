@@ -69,7 +69,10 @@ async fn exchange(server: &Arc<DaemonServer>, request: &DaemonRequest) -> Daemon
     .unwrap()
     .unwrap();
     drop(write_half);
-    serving.abort();
+    tokio::time::timeout(Duration::from_secs(10), serving)
+        .await
+        .unwrap()
+        .unwrap();
     serde_json::from_str(line.trim()).unwrap()
 }
 
@@ -376,8 +379,8 @@ async fn sidebar_live_signals_are_dropped_when_the_desktop_disconnects() {
     let (_, body) = get_sidebar(&fixture.server, Some(&fixture.token)).await;
     assert!(body["model"].get("signals").is_none(), "{body}");
 
-    let (first, _first_serving) = open_desktop_stream(&fixture.server).await;
-    let (mut second, _second_serving) = open_desktop_stream(&fixture.server).await;
+    let (first, first_serving) = open_desktop_stream(&fixture.server).await;
+    let (mut second, second_serving) = open_desktop_stream(&fixture.server).await;
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(10), second.read_line(&mut line)).await.unwrap().unwrap();
     assert_eq!(serde_json::from_str::<Value>(line.trim()).unwrap()["event"], "desktop_local_projects_resync");
@@ -428,6 +431,13 @@ async fn sidebar_live_signals_are_dropped_when_the_desktop_disconnects() {
     assert!(body["model"].get("signals").is_none(), "{body}");
     assert_eq!(body["model"]["revision"], 8);
     assert_eq!(body["model"]["projects"][0]["label"], "desktop-b", "the structure stays");
+    for serving in [first_serving, second_serving] {
+        serving.abort();
+        let result = tokio::time::timeout(Duration::from_secs(10), serving).await.unwrap();
+        if let Err(error) = result {
+            assert!(error.is_cancelled(), "{error}");
+        }
+    }
     drop(service);
     close(fixture).await;
 }
@@ -665,9 +675,11 @@ async fn sidebar_open_does_not_wait_for_stalled_close_persistence() {
         service.sidebar.desktop_stream_opened(&service.machine_events);
         service.sync_desktop_sidebar(live_model("published")).unwrap();
         let (paused, resume) = pause_lifecycle(&service.sidebar, "dropLivePersist");
+        let mut streams = service.desktop_stream_count();
         let closer = Arc::clone(&service);
         let close = std::thread::spawn(move || closer.desktop_stream_closed());
         paused.recv_timeout(Duration::from_secs(10)).unwrap();
+        let count_during_persistence = *streams.borrow_and_update();
         let (opened, opening) = std::sync::mpsc::channel();
         let opener = Arc::clone(&service);
 
@@ -683,6 +695,8 @@ async fn sidebar_open_does_not_wait_for_stalled_close_persistence() {
         *service.sidebar.lifecycle_probe.write() = None;
         std::thread::spawn(move || drop(guard)).join().unwrap();
 
+        assert_eq!(count_during_persistence, 1, "close count waits for persistence");
+        assert_eq!(*streams.borrow(), 0, "completed closes publish the current count");
         result.expect("stream open must finish while close persistence is still stalled");
         assert!(service.sidebar.model().unwrap().get("signals").is_none());
         Ok(())

@@ -7351,7 +7351,9 @@ impl DaemonServer {
                             Ok(received) => received,
                             Err(read) => {
                                 if matches!(read, Ok(0) | Err(_)) {
-                                    desktop_stream = None;
+                                    if let Some(stream) = desktop_stream.take() {
+                                        stream.close().await;
+                                    }
                                 }
                                 line.clear();
                                 continue;
