@@ -57,7 +57,12 @@ async fn disconnected_predecessor_is_retained(kind: crate::terminal::remote::Rem
     terminals.remote().live_import(crate::terminal::remote::RemoteExportState {
         descriptor: dead, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
     }, None).unwrap();
-    terminals.remote().entry_for_test("other-dead-ssh").unwrap().state.lock().details.state = S::Expired;
+    {
+        let dead = terminals.remote().entry_for_test("other-dead-ssh").unwrap();
+        let mut state = dead.state.lock();
+        state.details.state = S::Expired;
+        state.updates.send_replace(state.details.clone());
+    }
     let (_, mut dead_output) = terminals.output_hub().subscribe("other-dead-ssh").unwrap();
     let legacy = dir.path().join("legacy.sock");
     let _listener = UnixListener::bind(&legacy).unwrap();
