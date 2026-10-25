@@ -22,6 +22,7 @@ async fn ssh_expired_session_settles_exited_and_preserves_agent_identity() {
         agent_type: "claude".into(), provider_session: before.provider_session.clone().unwrap(),
     };
     daemon.session_service.reserve_provider_claim_for_test("ended-request", "ended-ssh", &startup).unwrap();
+    daemon.persist_remote_sessions_at(daemon.remote_sessions_path.clone()).await.unwrap();
     let mut events = daemon.remote_event_tx.subscribe();
     let (_, mut output) = daemon.terminal_service.output_hub().subscribe("ended-ssh").unwrap();
     let legacy = dir.path().join("legacy.sock");
