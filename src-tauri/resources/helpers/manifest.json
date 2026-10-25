@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "helperVersion": "2026.1023.3",
+  "helperVersion": "2026.1025.1",
   "protocolVersion": 1,
-  "sourceFingerprint": "054571afdefc0f62d0c7c28e316da47e7ec0bef4c7b7ae13aafd65492277dcc9",
+  "sourceFingerprint": "4b8db6c369fe7f09c7e2d4a46a73c64235bc7000ef355d4c3a5529290328452f",
   "requiredCapabilities": [
     "sshHelperV1",
     "dagSubscribeV1",
@@ -12,8 +12,8 @@
     {
       "target": "x86_64-unknown-linux-gnu",
       "filename": "ferryx-remote-helper",
-      "sha256": "e8797c1cec244e20a5bedec5231953ab4c6aecc5043617aaa728e9e182c6ef7d",
-      "byteLength": 1497216,
+      "sha256": "5e0651439494d5fefcd1decaab976954188fc3607b1a98bc9659daea3dfa1457",
+      "byteLength": 1529176,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -25,8 +25,8 @@
     {
       "target": "aarch64-unknown-linux-gnu",
       "filename": "ferryx-remote-helper",
-      "sha256": "25bbae1b391c44e51d3afefb672fcca36df20f9dc06b13e5a084bff3058e0b05",
-      "byteLength": 1349344,
+      "sha256": "5c154ed33bde3d6ccbdb4b2c1b8c718adce66400180b76f0ee07c451047f9805",
+      "byteLength": 1375032,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -38,8 +38,8 @@
     {
       "target": "aarch64-apple-darwin",
       "filename": "ferryx-remote-helper",
-      "sha256": "1f291fad006e584dfd1de3b883dd9a49a21363218f6ce2bde740d4c9ca8c90fe",
-      "byteLength": 1552480,
+      "sha256": "e24db5699e3c905b76915b98bebda98372c4784480f5fead39c546f59cb4b37d",
+      "byteLength": 1574976,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -51,8 +51,8 @@
     {
       "target": "x86_64-apple-darwin",
       "filename": "ferryx-remote-helper",
-      "sha256": "5ef146c3070ee9372e19c46d0412ad4935370e6308b19da6b7c28cbee30a3b24",
-      "byteLength": 1613048,
+      "sha256": "7dca9ad943ecdde1653369a66b73f68b71e74b038ed411e6d81e19fe8b0c903a",
+      "byteLength": 1652184,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -64,8 +64,8 @@
     {
       "target": "x86_64-pc-windows-msvc",
       "filename": "ferryx-remote-helper.exe",
-      "sha256": "62b16d10fddc99f450c5301e63001ad22edacbca46f9a8fba0572f11adbd7f8f",
-      "byteLength": 1342464,
+      "sha256": "f8bea487b6987c28a437d8b32ca8bda0b0ff181ce42f1393eda6a9f2bb240360",
+      "byteLength": 1370112,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
