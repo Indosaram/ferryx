@@ -2824,7 +2824,7 @@ export const RemoteHostConnection: React.FC<{
     () =>
       !isAccountMode && token
         ? async (path: string) => {
-            const response = await fetch(apiUrl(transportBaseUrl, path), { headers: { Authorization: `Bearer ${token}` } });
+            const response = await remoteFetch(transportBaseUrl, path, { headers: { Authorization: `Bearer ${token}` } });
             return { status: response.status, body: await response.text() };
           }
         : null,
