@@ -16,6 +16,15 @@ import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 export const REMOTE_COLLAPSED_KEY_PREFIX = "ferryx.remote.sidebarCollapsed.";
 export const NOT_SYNCED_CAPTION = "Not synced with desktop";
 
+/**
+ * The section does not show what the desktop shows right now: the model was rebuilt from the
+ * inventory, or the desktop that published it is gone and the daemon dropped its live signals.
+ * Either way rows, activity and Inbox come from this machine's own session inventory.
+ */
+export function sidebarNotSynced(model: SidebarModel | null): boolean {
+  return model !== null && (model.source === "inventory" || model.signals === undefined);
+}
+
 /** This browser's folded groups for one machine; never sent back to the desktop. */
 function readCollapsed(machineId: string): string[] | null {
   let raw: string | null;
@@ -185,7 +194,7 @@ function MachineSection({ section, sidebar, first, heading, inbox }: SectionProp
   const select = (project: SidebarProjectNode, node: SidebarWorktreeNode) => {
     if (!locked) sidebar.onSelect({ machineId: section.machineId, project, node });
   };
-  const notSynced = section.model?.source === "inventory";
+  const notSynced = sidebarNotSynced(section.model);
   // The same derivation and filter the desktop Sidebar applies.
   const live = model && section.signals ? sidebarLiveState(model, section.signals, query) : null;
   // The project whose row the live state marks active is the active project, as on the desktop.
@@ -238,7 +247,7 @@ function MachineSection({ section, sidebar, first, heading, inbox }: SectionProp
                 node={node}
                 live={live}
                 density={sidebar.density}
-                disabled={locked}
+                disabled={locked || node.stale}
                 onSelect={() => select(project, node)}
               />
             </div>

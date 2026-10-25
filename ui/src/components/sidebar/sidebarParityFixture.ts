@@ -47,8 +47,9 @@ export type SidebarParityFixture = {
 /**
  * A local + SSH member of one repo with a custom row order, a standalone SSH project whose
  * listing fails, a local project with a waiting agent and a bell-marked idle row, an offline and an online paired
- * project, an unseen finished agent, the hub supervisor typing into the active row, a bell mark on
- * an idle row and an agent known only by its bare state.
+ * project (its last list shown as a stale, disabled row), an unseen finished agent, the hub
+ * supervisor typing into the active row, a bell mark on an idle row and an agent known only by its
+ * bare state.
  */
 export const sidebarParityFixture: SidebarParityFixture = {
   activeProjectId: "ferryx",
@@ -71,6 +72,12 @@ export const sidebarParityFixture: SidebarParityFixture = {
     "ssh:omarchy:ferryx": [row(FERRYX_SSH, "main", { workspaceId: "ssh:omarchy:ferryx", hostLabel: "omarchy" })],
     "ssh:omarchy:relay": [row(RELAY, "main", { workspaceId: "ssh:omarchy:relay", hostLabel: "omarchy" })],
     site: [row(SITE, "main"), row(`${SITE}/.orca-worktrees/site/launch-page`, "orca/site/launch-page")],
+    // The offline paired machine's last list, marked as inactiveProjectWorktrees marks it: the
+    // desktop disables a stale row, so a remote that lets it be clicked fails parity.
+    [API_ID]: [row("/Users/fixture/code/api", "main", {
+      workspaceId: API_ID, hostLabel: "Studio Mac", stale: true, offline: true, disabled: true, hostSummary: "Offline (stale)",
+      freshness: { stale: true, offline: true, generation: "1", cachedAt: 1 },
+    })],
   },
   sshHosts: [{ id: "omarchy", label: "omarchy" }],
   pairedHosts: {
@@ -84,8 +91,9 @@ export const sidebarParityFixture: SidebarParityFixture = {
     },
   },
   listingFailures: { "ssh:omarchy:relay": "Connection reset by peer" },
-  // The offline paired machine is folded: its header (and "Offline") shows, its row does not.
-  collapsedGroupIds: [API_ID],
+  // The SSH project whose listing fails is folded: its header (and "Unavailable") shows, its row
+  // does not. The offline paired project stays open so its stale row is compared.
+  collapsedGroupIds: ["ssh:omarchy:relay"],
   // Custom order: the dragged sidebar-polish row and the SSH root sit above the local root.
   worktreeOrder: {
     ferryx: [

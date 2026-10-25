@@ -267,6 +267,8 @@ describe("desktop and remote sidebar parity", () => {
     expect(desktopTree.filter((line) => line.startsWith("listitem")).length).toBeGreaterThanOrEqual(5);
     // A remote that ignores the desktop's collapsed set must fail, so the fixture folds a group.
     expect(desktopTree.filter((line) => line.includes("aria-expanded=false")).length).toBeGreaterThanOrEqual(1);
+    // A remote that lets a stale paired row be clicked must fail, so the fixture shows one.
+    expect(desktopTree.filter((line) => line.includes("aria-disabled=true")).length).toBeGreaterThanOrEqual(1);
     // The Inbox tab count is the desktop's (notification centre), not the remote's pane rows.
     expect(desktopTree).toContain(`tab name="Inbox (${fx.desktopAttention.length})" testid=- aria-selected=false`);
     expect(serializeSidebar(trees.remote)).toEqual(desktopTree);

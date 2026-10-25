@@ -13,7 +13,10 @@ export type FixtureWorktree = {
 
 export function sidebarModelFixture(
   worktrees: readonly FixtureWorktree[],
-  overrides: Partial<Pick<SidebarModel, "source" | "collapsedGroupIds" | "advancedFeatures" | "revision">> = {},
+  overrides: Partial<Pick<SidebarModel, "source" | "collapsedGroupIds" | "advancedFeatures" | "revision">> & {
+    /** A desktop snapshot whose live signals the daemon dropped (its desktop disconnected). */
+    readonly withoutSignals?: boolean;
+  } = {},
 ): SidebarModel {
   const projects = new Map<string, SidebarProjectNode>();
   for (const row of worktrees) {
@@ -41,15 +44,18 @@ export function sidebarModelFixture(
     });
     projects.set(row.workspaceId, project);
   }
+  const source = overrides.source ?? "desktop";
   return {
     schemaVersion: 1,
     revision: overrides.revision ?? 1,
     generatedAt: "2026-10-24T00:00:00.000Z",
-    source: overrides.source ?? "desktop",
+    source,
     projects: [...projects.values()],
     collapsedGroupIds: overrides.collapsedGroupIds ?? [],
     advancedFeatures: overrides.advancedFeatures ?? false,
     emptyState: projects.size === 0 ? "noProjects" : null,
+    // A connected desktop always publishes its live signals; these carry no activity or Inbox.
+    ...(source === "desktop" && !overrides.withoutSignals ? { signals: { unreadWorktreePaths: {}, agentStateByPath: {} } } : {}),
   };
 }
 
