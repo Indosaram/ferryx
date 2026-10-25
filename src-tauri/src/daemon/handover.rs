@@ -1862,7 +1862,10 @@ impl HandoverManager {
                 return;
             }
         }
-        if self.is_draining() && terminal_service.list_sessions().is_empty() {
+        let recovering_ssh = terminal_service.remote().list().iter().any(|id| {
+            terminal_service.remote().keeps_predecessor_alive(id)
+        });
+        if self.is_draining() && live_session_count(terminal_service) == 0 && !recovering_ssh {
             self.retire();
         }
     }

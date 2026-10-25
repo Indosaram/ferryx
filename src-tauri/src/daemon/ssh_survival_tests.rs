@@ -1,6 +1,89 @@
 use super::*;
 
 #[tokio::test]
+async fn ssh_expired_session_settles_exited_and_preserves_agent_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let descriptor = serde_json::from_value(handover_persistence_record("ended-ssh", "ended-target")["descriptor"].clone()).unwrap();
+    daemon.terminal_service.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, None).unwrap();
+    daemon.session_service.agent_states.publish_canonical(crate::daemon::agent_state::AgentState {
+        session_id: "ended-ssh".into(), state: "idle".into(), agent: Some("claude".into()),
+        provider_session: Some(serde_json::from_value(serde_json::json!({"key":"session_id","id":"conversation-original"})).unwrap()),
+        detail: None, origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+    });
+    let before = daemon.session_service.agent_states.current("ended-ssh").unwrap();
+    let mut events = daemon.remote_event_tx.subscribe();
+    let (_, mut output) = daemon.terminal_service.output_hub().subscribe("ended-ssh").unwrap();
+    let entry = daemon.terminal_service.remote().entry_for_test("ended-ssh").unwrap();
+    {
+        let mut state = entry.state.lock();
+        state.details.state = crate::terminal::remote::RemoteConnectionState::Expired;
+        state.details.failure = Some(crate::terminal::remote::RemoteFailure {
+            kind: crate::terminal::remote::RemoteFailureKind::Expired, message: "owner epoch changed".into(),
+        });
+    }
+    daemon.session_service.watch_remote_session("ended-ssh").unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.event == "terminal_lifecycle" { break event; }
+        }
+    }).await.unwrap();
+    assert_eq!(exit.payload["state"], "exited");
+    assert!(exit.payload["reason"].as_str().is_some_and(|reason| !reason.is_empty()));
+    assert!(!daemon.terminal_service.list_sessions().contains(&"ended-ssh".into()));
+    assert_eq!(daemon.session_service.agent_states.current("ended-ssh").unwrap(), before);
+    drop(entry);
+    assert!(matches!(output.recv().await, Err(tokio::sync::broadcast::error::RecvError::Closed)));
+    println!("QA_EXPIRED_SETTLED session=ended-ssh state=exited identity=preserved");
+}
+
+#[tokio::test]
+async fn ssh_all_dead_predecessor_retires_but_connected_session_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Arc::new(DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth"))));
+    let descriptor = serde_json::from_value(handover_persistence_record("dead-ssh", "dead-target")["descriptor"].clone()).unwrap();
+    daemon.terminal_service.remote().live_import(crate::terminal::remote::RemoteExportState {
+        descriptor, generation: 1, pending_size: None, pid: None, bridge_transfer: None,
+    }, None).unwrap();
+    let (retired_tx, mut retired) = tokio::sync::watch::channel(false);
+    daemon.handover_manager.set_retirement_action(move || { retired_tx.send_replace(true); });
+    daemon.handover_manager.force_prepared_for_test(dir.path().join("legacy.sock"));
+    let manager = daemon.handover_manager.clone();
+    let terminals = daemon.terminal_service.clone();
+    tokio::task::spawn_blocking(move || manager.commit_handover_v5(&terminals)).await.unwrap().unwrap();
+    daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Draining);
+    let entry = daemon.terminal_service.remote().entry_for_test("dead-ssh").unwrap();
+    entry.state.lock().details.state = crate::terminal::remote::RemoteConnectionState::Expired;
+    daemon.handover_manager.check_retirement_if_empty(&daemon.terminal_service);
+    tokio::time::timeout(Duration::from_secs(5), retired.wait_for(|done| *done)).await.unwrap().unwrap();
+    assert_eq!(daemon.handover_manager.status(), crate::daemon::handover::HandoverStatus::Retired);
+    assert!(daemon.terminal_service.remote().contains("dead-ssh"));
+    println!("QA_DEAD_PREDECESSOR_RETIRED connected=retained dead=retired");
+}
+
+#[tokio::test]
+async fn ssh_handover_prunes_sessions_not_owned_by_reachable_predecessor() {
+    let legacy = FakeLegacyDaemon::start(serde_json::json!({"type":"listSessionsOk","sessions":["live-ssh"]}));
+    let path = legacy.socket_path.with_file_name("handover_routes.json");
+    crate::daemon::manifest::HandoverManifest { routes: vec![crate::daemon::manifest::HandoverRoute {
+        legacy_socket_path: legacy.socket_path.clone(), sessions: vec!["live-ssh".into(), "ghost-ssh".into()],
+    }] }.save_to_path(&path).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let router = &daemon.session_router;
+    router.adopt_routes_from_manifest_at(path.clone()).await.unwrap();
+    assert!(router.find_legacy_peer_for_session("live-ssh").is_some());
+    assert!(router.find_legacy_peer_for_session("ghost-ssh").is_none());
+    let manifest = crate::daemon::manifest::HandoverManifest::load_from_path(&path);
+    assert_eq!(manifest.routes[0].sessions, vec!["live-ssh"]);
+    assert!(crate::remote::backend::RemoteSessionBackend::describe_session(router.as_ref(), "ghost-ssh").await.is_err());
+}
+
+#[tokio::test]
 async fn ssh_daemon_restart_restores_identity_without_local_pty() {
     let dir = tempfile::tempdir().unwrap();
     let server = DaemonServer::new_with_paths(

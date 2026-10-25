@@ -337,11 +337,13 @@ pub(crate) struct TransportQaOwnerEvent {
     pub target: TargetRef,
     pub generation: Option<u64>,
 }
-/// Transport outages are retried for as long as the session lives: a parked session never
-/// recovers on its own, so the reconnect loop instead backs off to a bounded interval
-/// (250 ms doubling up to 2^MAX_BACKOFF_SHIFT, i.e. 32 s) and keeps dialing until the
-/// host answers, the user closes the session, or a non-transport failure ends it.
+/// Transport outages are retried with a bounded backoff (250 ms doubling up to
+/// 2^MAX_BACKOFF_SHIFT, i.e. 32 s) until the host answers, the user closes the session, a
+/// non-transport failure ends it, or MAX_RECONNECT_ATTEMPTS consecutive redials fail (about an
+/// hour of continuous outage). An exhausted session settles as ended (`Expired` with a transport
+/// failure naming the cause) instead of dialing an unreachable host forever.
 const MAX_BACKOFF_SHIFT: u32 = 7;
+pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = 120;
 impl RemoteRuntime {
     pub fn new(hub: Arc<TerminalOutputHub>) -> Self {
         Self::with_connector(hub, Arc::new(SshConnector))
@@ -689,6 +691,40 @@ impl RemoteRuntime {
     }
     pub fn details(&self, id: &str) -> Option<RemoteSessionDetails> {
         self.entry(id).ok().map(|e| e.state.lock().details.clone())
+    }
+    /// Forgets a session whose target has ended (`Expired`: the remote process exited, its
+    /// helper no longer owns it, or redials were exhausted). The entry leaves the runtime, so it
+    /// is neither listed nor counted live, and its output hub entry is released. Nothing is sent
+    /// to the remote host. Returns false when the session is not registered or not ended.
+    pub fn settle_ended(&self, id: &str) -> bool {
+        let entry = {
+            let mut map = self.sessions.lock();
+            let ended = map.get(id).is_some_and(|e| {
+                let s = e.state.lock();
+                s.details.state == RemoteConnectionState::Expired && !s.closing
+            });
+            if !ended {
+                return false;
+            }
+            map.remove(id)
+        };
+        if let Some(entry) = entry {
+            if let Some(task) = entry.state.lock().task.take() {
+                task.abort();
+            }
+        }
+        self.hub.remove_session(id);
+        true
+    }
+    pub(crate) fn keeps_predecessor_alive(&self, id: &str) -> bool {
+        self.entry(id).is_ok_and(|entry| {
+            let state = entry.state.lock();
+            match state.details.state {
+                RemoteConnectionState::Connected => true,
+                RemoteConnectionState::Reconnecting => state.task.as_ref().is_some_and(|task| !task.is_finished()),
+                RemoteConnectionState::Disconnected | RemoteConnectionState::Expired => false,
+            }
+        })
     }
     #[cfg(test)]
     pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
@@ -1470,6 +1506,18 @@ async fn run(
                 .unwrap_or_else(|| RemoteFailure::from_bridge(&error));
             fail(&mut s, failure.clone());
             if failure.kind != RemoteFailureKind::Transport {
+                return;
+            }
+            if attempts >= MAX_RECONNECT_ATTEMPTS {
+                s.details.state = RemoteConnectionState::Expired;
+                s.details.failure = Some(RemoteFailure::new(
+                    RemoteFailureKind::Transport,
+                    format!(
+                        "Remote host unreachable after {attempts} reconnect attempts; the session ended ({})",
+                        failure.message
+                    ),
+                ));
+                Entry::notify(&s);
                 return;
             }
             attempts = attempts.saturating_add(1);

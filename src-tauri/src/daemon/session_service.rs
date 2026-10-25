@@ -1715,6 +1715,8 @@ impl DaemonSessionService {
         let path = self.remote_sessions_path.clone();
         let lock = self.remote_persistence_lock.clone();
         let cleanup_session_id = id.to_string();
+        let terminals = Arc::downgrade(&self.terminal_service);
+        let handover = self.handover_manager.clone();
         let mut record_removable = false;
         tokio::spawn(async move {
             loop {
@@ -1732,6 +1734,21 @@ impl DaemonSessionService {
                     None => (false, false),
                 };
                 if expired || vanished {
+                    if expired {
+                        // Deliver terminal status before dropping the runtime sender. Do not clear
+                        // agent_states or startup metadata: the ended pane can still resume its agent.
+                        let _ = tx.send(DaemonRemoteEvent {
+                            event: "terminal_remote_status".into(),
+                            payload: serde_json::json!({"sessionId":cleanup_session_id,"state":details.state,"generation":details.generation,"failure":details.failure,"descriptor":details.descriptor}),
+                        });
+                        if let Some(runtime) = runtime.upgrade() {
+                            runtime.settle_ended(&cleanup_session_id);
+                        }
+                        let _ = tx.send(DaemonRemoteEvent {
+                            event: "terminal_lifecycle".into(),
+                            payload: serde_json::json!({"sessionId":cleanup_session_id,"state":"exited","exitCode":null,"reason":details.failure.as_ref().map(|failure| &failure.message),"incarnation":details.descriptor.client_request_id}),
+                        });
+                    }
                     record_removable = true;
                     break;
                 }
@@ -1774,6 +1791,9 @@ impl DaemonSessionService {
                 .await
                 {
                     tracing::error!(%error, "Remote session record removal failed");
+                }
+                if let (Some(manager), Some(terminals)) = (handover.upgrade(), terminals.upgrade()) {
+                    manager.check_retirement_if_empty(&terminals);
                 }
             }
         });
