@@ -162,6 +162,8 @@ import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
 import { createClosedTabStack } from "./lib/closedTabStack";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
+import { useDesktopSidebarPublisher } from "./lib/desktopSidebarSync";
+import { withBackendSessions } from "./components/sidebar/sidebarSessionSignals";
 import {
   isTerminalTab,
   worktreeIdentity,
@@ -2084,6 +2086,25 @@ function WorkspaceApp({
     // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
     [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
+  // Publishes what the Sidebar draws, Inbox rows included (declared here, after attentionRows). The
+  // published rows carry each pane's backend session id so a remote can open that exact pane.
+  const publishedAttentionRows = useMemo(
+    () => withBackendSessions(attentionRows, [[state.workspaceId, state], ...listWorkspaceSnapshots()]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads only sessions and worktrees; parkedActivityVersion tracks the parked snapshots
+    [attentionRows, state.workspaceId, state.sessions, state.worktrees, parkedActivityVersion],
+  );
+  useDesktopSidebarPublisher({
+    enabled: isNativeRuntime,
+    projects,
+    activeProjectId: activeProject.workspaceId,
+    worktrees: state.worktrees,
+    inactiveProjectWorktrees,
+    emptyWorkspaceIds: emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots()),
+    activityByWorktreePath: worktreeActivity,
+    unreadWorktreePaths: state.unreadWorktreePaths,
+    agents,
+    attentionRows: publishedAttentionRows,
+  });
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
     tabId: string;

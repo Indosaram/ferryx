@@ -110,15 +110,16 @@ describe("remote terminal ordinal matches the rendered selection", () => {
     ).toEqual(["tab-third", "tab-first", "tab-second"]);
   });
 
-  it("closes the drawer when a tab row is tapped, like every other row", () => {
+  it("selects a tapped strip tab without touching the drawer, which the strip sits outside of", () => {
     const { onSelect, onSelectorOpenChange } = renderOrdinalMirror(ordinalModel());
-    const dialog = screen.getByRole("dialog", { name: "Workspace context" });
+    const tablist = screen.getByRole("tablist", { name: "Terminal tabs" });
+    expect(screen.getByRole("dialog", { name: "Workspace context" })).not.toContainElement(tablist);
 
-    fireEvent.click(within(dialog).getByRole("tab", { name: "first" }));
+    fireEvent.click(within(tablist).getByRole("tab", { name: "first" }));
 
     expect(onSelect).toHaveBeenCalledWith(
       expect.objectContaining({ tabId: "tab-first", sessionId: "s-first" }),
     );
-    expect(onSelectorOpenChange).toHaveBeenCalledWith(false);
+    expect(onSelectorOpenChange).not.toHaveBeenCalled();
   });
 });

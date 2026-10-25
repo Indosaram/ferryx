@@ -598,53 +598,6 @@ export function inventorySessionsFor(
     .sort((a, b) => (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
 }
 
-export type InventoryWorktreeGroup = {
-  workspaceId: string;
-  workspaceLabel: string | null;
-  worktreeSlug: string | null;
-  worktreeLabel: string | null;
-  sessions: RemoteSessionInventoryEntry[];
-};
-
-/**
- * Groups rows by worktree for the picker tree. Root worktrees keep their `null` slug as
- * a distinct group, and the same workspace id on two machines stays separate because
- * every group is built from one machine-scoped inventory.
- */
-export function groupInventoryByWorktree(
-  inventory: RemoteSessionInventory | null,
-  projects?: unknown,
-): InventoryWorktreeGroup[] {
-  if (!inventory) return [];
-  const workspaceLabels = projects ? workspaceLabelsFromCatalog(projects) : new Map<string, string>();
-  const groups = new Map<string, InventoryWorktreeGroup>();
-  for (const entry of inventory.entries) {
-    const key = worktreeKey(entry.workspaceId, entry.worktreeSlug);
-    const existing = groups.get(key);
-    if (existing) {
-      existing.sessions.push(entry);
-      continue;
-    }
-    groups.set(key, {
-      workspaceId: entry.workspaceId,
-      workspaceLabel: workspaceLabels.get(entry.workspaceId) ?? null,
-      worktreeSlug: entry.worktreeSlug,
-      worktreeLabel: entry.worktreeLabel,
-      sessions: [entry],
-    });
-  }
-  const list = [...groups.values()];
-  for (const group of list) {
-    group.sessions.sort((a, b) => (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
-  }
-  return list.sort((a, b) => {
-    if (a.workspaceId !== b.workspaceId) return a.workspaceId < b.workspaceId ? -1 : 1;
-    const left = a.worktreeSlug ?? "";
-    const right = b.worktreeSlug ?? "";
-    return left < right ? -1 : left > right ? 1 : 0;
-  });
-}
-
 export type InventoryActivityLabel = {
   state: SessionActivityState | null;
   detail: "working" | "waiting" | "done" | "running" | "stopped";

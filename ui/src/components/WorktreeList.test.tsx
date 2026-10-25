@@ -6,12 +6,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ActiveAgent, Worktree } from "../lib/types";
 import {
-  EmptyWorktreesHint,
   WorktreeList,
   isPrimaryWorktree,
   isSameWorktreePath,
   normalizeWorktreePath,
 } from "./WorktreeList";
+import { SidebarWorktreesEmpty } from "./sidebar/SidebarWorktreeRow";
+import { SIDEBAR_EMPTY_TEXT } from "./sidebar/sidebarLabels";
 
 const nativeMenu = vi.hoisted(() => ({
   openNativePopupMenu: vi.fn(),
@@ -224,7 +225,7 @@ describe("WorktreeList actions", () => {
         statuses={{}}
         onSelect={vi.fn()}
         onDelete={vi.fn()}
-        emptyState={<EmptyWorktreesHint onCreateWorktree={onCreateWorktree} />}
+        emptyState={<SidebarWorktreesEmpty text={SIDEBAR_EMPTY_TEXT.noWorktrees} onCreateWorktree={onCreateWorktree} />}
       />,
     );
 

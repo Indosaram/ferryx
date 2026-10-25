@@ -66,6 +66,7 @@ function emitFailureTrace(label: string, ...mocks: unknown[]): void {
   for (const line of buildFailureTrace(label, ...mocks)) emitLine(line);
 }
 
+import { requireSidebarRow, SIDEBAR_PATH, sidebarBody } from "./remoteSidebarTestUtils";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
@@ -449,7 +450,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     expect(worktreesTab.getAttribute("aria-selected")).toBe("true");
 
     const optionBtn = await waitFor(() =>
-      within(picker).getByRole("button", { name: "ws-ferryx / main" })
+      requireSidebarRow("ws-ferryx", "main", picker)
     );
     // Desktop-style worktree list only: no machine names, machine groups, or machine choice.
     expect(picker.textContent).not.toContain("Work MacBook Pro");
@@ -572,6 +573,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
         if (url.includes("/api/v1/socket-ticket")) {
           return new Response(JSON.stringify({ ticket: "ui-test-ticket", expiresAt: 9999999999 }), { status: 200 });
         }
+        // The desktop publishes the two projects of the workspace state as its sidebar.
+        if (url.includes(SIDEBAR_PATH)) {
+          return new Response(sidebarBody([{ workspaceId: "wsA", slug: "main" }, { workspaceId: "wsB", slug: "feature-b" }]), { status: 200 });
+        }
         return inner(input, init);
       }) as unknown as typeof fetch;
     };
@@ -591,7 +596,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
 
     const selectWsBBtn = await waitFor(() =>
-      screen.getByRole("button", { name: /feature-b/i })
+      requireSidebarRow("wsB", "feature-b")
     );
     fireEvent.click(selectWsBBtn);
 
@@ -699,6 +704,10 @@ describe("RemoteApp - Account Session Phone Flow", () => {
         if (url.includes("/api/v1/socket-ticket")) {
           return new Response(JSON.stringify({ ticket: "ui-test-ticket", expiresAt: 9999999999 }), { status: 200 });
         }
+        // The desktop publishes the two projects of the workspace state as its sidebar.
+        if (url.includes(SIDEBAR_PATH)) {
+          return new Response(sidebarBody([{ workspaceId: "wsA", slug: "main" }, { workspaceId: "wsB", slug: "feature-b" }]), { status: 200 });
+        }
         return inner(input, init);
       }) as unknown as typeof fetch;
     };
@@ -713,7 +722,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     act(() => {
       fireEvent.click(trigger);
     });
-    fireEvent.click(await waitFor(() => screen.getByRole("button", { name: /feature-b/i })));
+    fireEvent.click(await waitFor(() => requireSidebarRow("wsB", "feature-b")));
 
     await waitFor(() => {
       expect(
@@ -986,7 +995,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const picker = await openWorkspacePicker();
 
     const selectWsBBtn = await waitFor(() =>
-      within(picker).getByRole("button", { name: /feature-b/i })
+      requireSidebarRow("wsB", "feature-b", picker)
     );
     fireEvent.click(selectWsBBtn);
 
@@ -1229,7 +1238,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const picker = await openWorkspacePicker();
 
     const selectWsBBtn = await waitFor(() =>
-      within(picker).getByRole("button", { name: /feature-b/i })
+      requireSidebarRow("wsB", "feature-b", picker)
     );
 
     vi.useFakeTimers();
@@ -1486,11 +1495,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const picker = await openWorkspacePicker();
 
     const worktreeOptionBtn = await waitFor(() => {
-      return within(picker).getByRole("button", {
-        name: (content, element) =>
-          element?.getAttribute("aria-label") === "project-2a54aface19a497491abc9ed791fd65d / main" ||
-          content.trim() === "project-2a54aface19a497491abc9ed791fd65d / main",
-      });
+      return requireSidebarRow("project-2a54aface19a497491abc9ed791fd65d", null, picker);
     });
 
     await act(async () => {
@@ -1547,11 +1552,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const remountPicker = await openWorkspacePicker();
 
     const remountWorktreeBtn = await waitFor(() => {
-      return within(remountPicker).getByRole("button", {
-        name: (content, element) =>
-          element?.getAttribute("aria-label") === "project-2a54aface19a497491abc9ed791fd65d / main" ||
-          content.trim() === "project-2a54aface19a497491abc9ed791fd65d / main",
-      });
+      return requireSidebarRow("project-2a54aface19a497491abc9ed791fd65d", null, remountPicker);
     });
 
     await act(async () => {
@@ -1634,10 +1635,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const pickWorktree = async () => {
       const picker = await openWorkspacePicker();
       const option = await waitFor(() => {
-        return within(picker).getByRole("button", {
-          name: (content, element) =>
-            element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
-        });
+        return requireSidebarRow(WS, null, picker);
       });
       await act(async () => { fireEvent.click(option); });
     };
@@ -1724,10 +1722,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const pickWorktree = async () => {
       const picker = await openWorkspacePicker();
       const option = await waitFor(() => {
-        return within(picker).getByRole("button", {
-          name: (content, element) =>
-            element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
-        });
+        return requireSidebarRow(WS, null, picker);
       });
       await act(async () => { fireEvent.click(option); });
     };
@@ -1803,10 +1798,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     render(<RemoteApp />);
     const picker = await openWorkspacePicker();
     const option = await waitFor(() => {
-      return within(picker).getByRole("button", {
-        name: (content, element) =>
-          element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
-      });
+      return requireSidebarRow(WS, null, picker);
     });
     discoveryDone = true;
 
@@ -1891,10 +1883,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const pickMain = async () => {
       const picker = await openWorkspacePicker();
       return await waitFor(() => {
-        return within(picker).getByRole("button", {
-          name: (content, element) =>
-            element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
-        });
+        return requireSidebarRow(WS, null, picker);
       });
     };
 
@@ -2028,10 +2017,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     render(<RemoteApp />);
     const picker = await openWorkspacePicker();
     const option = await waitFor(() => {
-      return within(picker).getByRole("button", {
-        name: (content, element) =>
-          element?.getAttribute("aria-label") === `${WS} / main` || content.trim() === `${WS} / main`,
-      });
+      return requireSidebarRow(WS, null, picker);
     });
     await act(async () => { fireEvent.click(option); });
     await waitFor(() => expect(screen.getByTestId("remote-view-mode-terminal")).toBeInTheDocument());
@@ -2430,11 +2416,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     const picker = await openWorkspacePicker();
 
     const worktreeOptionBtn = await waitFor(() => {
-      return within(picker).getByRole("button", {
-        name: (content, element) =>
-          element?.getAttribute("aria-label") === "ws-chat / main" ||
-          content.trim() === "ws-chat / main",
-      });
+      return requireSidebarRow("ws-chat", null, picker);
     });
 
     await act(async () => {

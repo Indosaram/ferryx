@@ -12,6 +12,7 @@ import type { PhoneDestination } from "../remote/home/usePhoneNavigation";
 import { WorktreesHome } from "../remote/home/WorktreesHome";
 import type { LanePauseResult } from "../remote/remoteSupervisor";
 import { RemoteWorkspaceMirror, type RemoteWorkspaceModel } from "../remote/RemoteSessionList";
+import { sidebarParitySections } from "./sidebarParityQa";
 
 export const PHONE_HOME_QA_STATES = [
   "home-supervisor",
@@ -126,6 +127,8 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
   const [accountOpen, setAccountOpen] = useState(state === "account-delete");
   const machines = useMemo(() => machinesFor(state), [state]);
   const rows = useMemo(() => inboxRows(), []);
+  // The connected desktop's list plus an offline second machine, as an account phone sees them.
+  const sidebarSections = useMemo(() => sidebarParitySections("desktop", { offlineMachine: true }), []);
   return (
     <div className="remote-app-root flex h-[100dvh] w-full flex-col bg-chat-screen">
       <PhoneHomeView
@@ -151,6 +154,7 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
               onCreateTerminal={() => undefined}
               onCreateWorktree={() => undefined}
               onSignOut={() => undefined}
+              sidebarSections={sidebarSections}
             />
           </WorktreesHome>
         }

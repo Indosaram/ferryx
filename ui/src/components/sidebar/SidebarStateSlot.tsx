@@ -38,6 +38,8 @@ export function SidebarStateSlot({ state, label, host, onActivate, title, ariaLa
       {state ? <StatusDot state={state} /> : null}
     </>
   );
+  // The slot's state as data, so tests compare dots whose colour is their only difference.
+  const stateData = state ? { "data-slot-state": state } : {};
   const classes = cn("inline-flex shrink-0 items-center gap-1 text-[10px] leading-none text-muted-foreground", className);
 
   if (onActivate) {
@@ -52,6 +54,7 @@ export function SidebarStateSlot({ state, label, host, onActivate, title, ariaLa
           event.stopPropagation();
           onActivate();
         }}
+        {...stateData}
         {...data}
       >
         {content}
@@ -59,7 +62,7 @@ export function SidebarStateSlot({ state, label, host, onActivate, title, ariaLa
     );
   }
   return (
-    <span title={title} aria-label={ariaLabel} className={classes} {...data}>
+    <span title={title} aria-label={ariaLabel} className={classes} {...stateData} {...data}>
       {content}
     </span>
   );

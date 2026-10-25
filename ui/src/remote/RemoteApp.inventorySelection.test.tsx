@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { findSidebarRow, SIDEBAR_PATH, sidebarBody } from "./remoteSidebarTestUtils";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
@@ -212,6 +213,10 @@ async function mountAccountHarness(initial: SessionRow[], chat?: {
         displayName: "Parity Mac",
       });
     }
+    if (path === SIDEBAR_PATH) {
+      const workspaces = desktopScopedProjects?.map((project) => project.workspaceId) ?? ["ws-ferryx"];
+      return respond(JSON.parse(sidebarBody(workspaces.map((workspaceId) => ({ workspaceId, slug: "main" })))));
+    }
     if (path === "/api/v1/workspace/projects") {
       if (desktopScopedProjects) return respond({ revision: "1", completeness: "complete", desktopLocalSnapshotExists: true, projects: [], unavailableWorkspaceIds: [] });
       return respond({
@@ -349,38 +354,33 @@ async function mountAccountHarness(initial: SessionRow[], chat?: {
 }
 
 async function openContextPicker(): Promise<void> {
-  await openWorkspacePicker();
+  await ensureSessionRowsVisible();
 }
 
+/* Session rows live in the terminal tab strip of the attached worktree, so the worktree row is
+   selected first; its sessions then render as strip tabs. */
 async function ensureSessionRowsVisible(): Promise<void> {
   await openWorkspacePicker();
+  if (terminalStripTabs().length > 0) return;
+  const row = await findSidebarRow("ws-ferryx", "main");
+  await act(async () => { fireEvent.click(row); });
 }
 
-/* The sidebar represents a session either as a session row (a still-existing session) or as
-   a pane row (the session this client is attached to). Both are inventory truth. */
-function inventoryRows(): HTMLElement[] {
-  return [...screen.queryAllByTestId("remote-session-row"), ...screen.queryAllByRole("tab")];
+function terminalStripTabs(): HTMLElement[] {
+  const strip = screen.queryByRole("tablist", { name: "Terminal tabs" });
+  return strip ? within(strip).queryAllByRole("tab") : [];
 }
 
+/* Every session the remote offers: the strip tabs of the attached worktree. */
 function inventoryRowTexts(): string {
-  const containers = screen.queryAllByTestId("remote-session-rows").map((element) => element.textContent ?? "");
-  const rows = inventoryRows().map(
-    (element) => `${element.getAttribute("aria-label") ?? ""} ${element.textContent ?? ""}`,
-  );
-  return [...containers, ...rows].join(" | ");
+  return terminalStripTabs()
+    .map((element) => `${element.getAttribute("data-session-id") ?? ""} ${element.getAttribute("aria-label") ?? ""} ${element.textContent ?? ""}`)
+    .join(" | ");
 }
-
 
 function sessionRow(needle: RegExp): HTMLElement | null {
-  const byTestId = screen
-    .queryAllByTestId("remote-session-row")
-    .find((element) => needle.test(element.textContent ?? ""));
-  if (byTestId) return byTestId;
-  return (
-    screen
-      .queryAllByRole("button")
-      .find((element) => needle.test(`${element.getAttribute("aria-label") ?? ""} ${element.textContent ?? ""}`)) ?? null
-  );
+  return terminalStripTabs().find((element) =>
+    needle.test(`${element.getAttribute("data-session-id") ?? ""} ${element.getAttribute("aria-label") ?? ""} ${element.textContent ?? ""}`)) ?? null;
 }
 
 /* Rows are identified by their session id suffix: the title is display data that can
@@ -496,7 +496,7 @@ describe("RemoteApp machine inventory selection", () => {
       terminalReady: (socket) => terminalRead?.resolve(socket),
     });
     const rowsReady = r25State(() => sessionRow(SID_SECOND_ROW) !== null);
-    await openWorkspacePicker();
+    await ensureSessionRowsVisible();
     await rowsReady;
     const row = sessionRow(SID_SECOND_ROW);
     if (!row) throw new Error("Missing R25 native session row");

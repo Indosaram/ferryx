@@ -590,6 +590,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::DeleteWorktree { .. } => "deleteWorktree",
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
         DaemonRequest::SyncDesktopLocalProjects { .. } => "syncDesktopLocalProjects",
+        DaemonRequest::SyncDesktopSidebar { .. } => "syncDesktopSidebar",
         DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
         DaemonRequest::Spawn { .. } => "spawn",
         DaemonRequest::SpawnOperationStatus { .. } => "spawnOperationStatus",
@@ -3384,6 +3385,29 @@ impl DaemonClient {
         }
     }
 
+    pub async fn sync_desktop_sidebar(&self, model: serde_json::Value) -> Result<u64, IpcError> {
+        match self
+            .send_request(DaemonRequest::SyncDesktopSidebar { model })
+            .await?
+        {
+            DaemonResponse::SyncDesktopSidebarOk { revision } => Ok(revision),
+            DaemonResponse::Error {
+                message,
+                code,
+                details,
+            } => {
+                let mut error = IpcError::new(
+                    code.as_deref()
+                        .map_or(IpcErrorCode::InternalError, IpcErrorCode::from_code_str),
+                    message,
+                );
+                error.details = details;
+                Err(error)
+            }
+            _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
+    }
+
     pub async fn register_workspace(
         &self,
         workspace_id: &str,
@@ -3731,6 +3755,8 @@ impl DaemonClient {
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
+            // Held open for the stream's life: the daemon reads EOF on it as "the desktop is gone".
+            let _write_half = write_half;
             let mut line = String::new();
             while let Ok(n) = reader.read_line(&mut line).await {
                 if n == 0 {

@@ -68,6 +68,7 @@ function emitFailureTrace(label: string, ...mocks: unknown[]): void {
 }
 
 import { RemoteApp } from "./RemoteApp";
+import { sidebarFixtureResponse } from "./remoteSidebarTestUtils";
 
 /**
  * Chat is the default surface at every width now (plan task 12), so a test that asserts the
@@ -184,6 +185,8 @@ function ticketed(inner: typeof fetch): typeof fetch {
     }
     const lane = chatLaneFixture(url);
     if (lane !== null) return lane;
+    const sidebar = sidebarFixtureResponse(url);
+    if (sidebar !== null) return sidebar;
     return inner(input, init);
   }) as unknown as typeof fetch;
 }
@@ -386,7 +389,7 @@ describe("RemoteAttention Affordance", () => {
     }
   });
 
-  it("keeps the worktree list as the sheet default and opens the two-state inbox from its icon", async () => {
+  it("keeps the worktree list as the drawer default and opens the two-state inbox from its view tab", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithAttention = {
       ...baseState,
@@ -410,14 +413,17 @@ describe("RemoteAttention Affordance", () => {
     render(<RemoteApp />);
     await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
-    await openWorktreeSheet();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    });
+    const drawer = screen.getByRole("dialog", { name: "Workspace context" });
 
-    expect(screen.queryByTestId("remote-attention-inbox")).not.toBeInTheDocument();
-    expect(screen.getByRole("tablist", { name: "Terminal tabs" })).toBeInTheDocument();
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Inbox (2)" })); });
-    expect(screen.queryByRole("tablist", { name: "Terminal tabs" })).not.toBeInTheDocument();
+    expect(within(drawer).queryAllByTestId("attention-row")).toHaveLength(0);
+    expect(within(drawer).getByRole("tab", { name: "Worktrees" })).toHaveAttribute("aria-selected", "true");
+    await act(async () => { fireEvent.click(within(drawer).getByRole("tab", { name: "Inbox (2)" })); });
+    expect(within(drawer).getByTestId("worktree-region")).not.toBeVisible();
 
-    const inbox = screen.getByTestId("remote-attention-inbox");
+    const inbox = drawer;
     expect(within(inbox).getAllByTestId("attention-row").map((row) => row.dataset.attentionState)).toEqual(["needs-you", "done"]);
     expect(within(inbox).getByText("omo")).toBeInTheDocument();
     expect(within(inbox).getByTestId("attention-row-text")).toHaveTextContent("Fix login");
@@ -434,6 +440,39 @@ describe("RemoteAttention Affordance", () => {
       );
     });
     expect(screen.queryByRole("dialog", { name: "Workspace context" })).not.toBeInTheDocument();
+  });
+
+  it("offers no Dismiss on its own Inbox rows when no desktop publishes any", async () => {
+    localStorage.setItem("ferryx_remote_token", "test-token");
+    const stateWithAttention = {
+      ...baseState,
+      activeContext: {
+        ...baseState.activeContext,
+        tabId: "tab-1",
+        terminalTabs: [
+          { id: "tab-1", label: "Editor" },
+          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex" },
+          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo" },
+        ],
+      },
+    };
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(stateWithAttention))
+      .mockResolvedValue(jsonResponse({ accepted: true }));
+    vi.stubGlobal("fetch", ticketed(fetchMock));
+    vi.stubGlobal("WebSocket", EventWebSocket);
+
+    render(<RemoteApp />);
+    await switchToTerminalMode();
+    await screen.findByTestId("remote-terminal");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
+    });
+    const drawer = screen.getByRole("dialog", { name: "Workspace context" });
+    await act(async () => { fireEvent.click(within(drawer).getByRole("tab", { name: "Inbox (2)" })); });
+
+    expect(within(drawer).getAllByTestId("attention-row")).toHaveLength(2);
+    expect(within(drawer).queryAllByRole("button", { name: /^Dismiss/ })).toHaveLength(0);
   });
 
   it("renders attention affordance with accessible name when a background tab enters waiting state", async () => {

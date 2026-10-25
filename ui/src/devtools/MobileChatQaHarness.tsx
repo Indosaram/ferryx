@@ -10,6 +10,7 @@ import { MobileChatWorkspace } from "../remote/chat/MobileChatWorkspace";
 import type { MobileChatMessageProps } from "../remote/chat/MobileChatMessage";
 import type { ChatAttachment, ChatWorkItem } from "../remote/chat/MobileChatComponents";
 import { PHONE_HOME_QA_STATES, PhoneHomeQaState, QaSessionStrip, SESSION_STRIP_QA_STATES } from "./phoneHomeQaStates";
+import { SIDEBAR_PARITY_QA_STATES, SidebarParityQaState } from "./sidebarParityQa";
 
 const STATE = (() => {
   if (typeof window === "undefined") return "stream";
@@ -254,6 +255,9 @@ export const MobileChatQaHarness: React.FC = () => {
   }, []);
   if ((PHONE_HOME_QA_STATES as readonly string[]).includes(STATE)) {
     return <PhoneHomeQaState state={STATE} model={SEEDED_MODEL} />;
+  }
+  if ((SIDEBAR_PARITY_QA_STATES as readonly string[]).includes(STATE)) {
+    return <SidebarParityQaState state={STATE} model={SEEDED_MODEL} />;
   }
   return <ChatQaHarness />;
 };

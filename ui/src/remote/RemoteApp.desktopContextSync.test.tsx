@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { findSidebarRow, SIDEBAR_PATH, sidebarBody } from "./remoteSidebarTestUtils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteApp, desktopContextSyncDecision } from "./RemoteApp";
 import { normalizeRemoteWorkspaceState } from "./RemoteSessionList";
@@ -178,44 +179,43 @@ async function mountAccountApp() {
   });
 }
 
-function inventoryRows(): HTMLElement[] {
-  return [...screen.queryAllByTestId("remote-session-row"), ...screen.queryAllByRole("tab")];
-}
-
-async function ensureSessionRowsVisible(): Promise<void> {
+async function openPicker(): Promise<void> {
   const trigger = await waitFor(() =>
     screen.getByRole("button", { name: /Change workspace context/i }),
   );
-  if (inventoryRows().length === 0 && trigger.getAttribute("aria-expanded") !== "true") {
+  if (trigger.getAttribute("aria-expanded") !== "true") {
     act(() => {
       fireEvent.click(trigger);
     });
   }
 }
 
+/* Selects the worktree row; the attached worktree's sessions then fill the terminal tab strip. */
+async function selectWorktreeRow() {
+  await openPicker();
+  const row = await findSidebarRow("ws-ferryx", worktreeIdentitySlug);
+  act(() => {
+    fireEvent.click(row);
+  });
+}
+
+/* A session is picked from the tab strip of its worktree, so the worktree is selected first. */
 async function pickSession(sessionId: string) {
-  await ensureSessionRowsVisible();
-  const row = await waitFor(() => {
-    const found = document.querySelector<HTMLElement>(`[data-session-id="${sessionId}"]`);
-    if (!found) throw new Error(`session row ${sessionId} not rendered`);
+  await selectWorktreeRow();
+  const tab = await waitFor(() => {
+    const found = document.querySelector<HTMLElement>(`[role="tab"][data-session-id="${sessionId}"]`);
+    if (!found) throw new Error(`session tab ${sessionId} not rendered`);
+    expect(found).toBeEnabled();
     return found;
   });
   act(() => {
-    fireEvent.click(row);
+    fireEvent.click(tab);
   });
   fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
 }
 
 async function pickWorktree() {
-  await ensureSessionRowsVisible();
-  const matches = await waitFor(() => {
-    const found = screen.queryAllByRole("button", { name: "ws-ferryx / main" });
-    if (found.length === 0) throw new Error("worktree row not rendered");
-    return found;
-  });
-  act(() => {
-    fireEvent.click(matches[0]);
-  });
+  await selectWorktreeRow();
   fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
 }
 
@@ -317,6 +317,9 @@ beforeEach(() => {
           machineId: MACHINE_ID,
           displayName: "Desktop Mac",
         });
+      }
+      if (path === SIDEBAR_PATH) {
+        return respond(JSON.parse(sidebarBody([{ workspaceId: "ws-ferryx", slug: worktreeIdentitySlug }])));
       }
       if (path === "/api/v1/workspace/projects") {
         return respond({
@@ -477,7 +480,6 @@ describe("read-only desktop context sync", () => {
     expect(postSelectPaths()).toHaveLength(0);
     expect(stateGetCount()).toBeGreaterThanOrEqual(1);
 
-    await ensureSessionRowsVisible();
     expect(marked(sessionRow(SID_DESKTOP))).toBe(true);
     expect(marked(sessionRow(SID_FIRST))).toBe(false);
   });
@@ -660,7 +662,6 @@ describe("always-follow desktop focus", () => {
     await waitFor(() => {
       expect(terminalPaths().some((entry) => entry.includes(SID_DESKTOP))).toBe(true);
     });
-    await ensureSessionRowsVisible();
     await waitFor(() => {
       expect(marked(sessionRow(SID_DESKTOP))).toBe(true);
     });

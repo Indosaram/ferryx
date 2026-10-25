@@ -3,7 +3,6 @@ import {
   applySessionActivity,
   applyWorktreeLabels,
   emptyInventory,
-  groupInventoryByWorktree,
   inventoryActivityLabel,
   inventorySessionsFor,
   mergeSessionInventory,
@@ -513,42 +512,6 @@ describe("activity observations", () => {
   });
 });
 
-describe("groupInventoryByWorktree", () => {
-  it("groups by workspace, slug and machine without collapsing sessions", () => {
-    const first = parseSessionsPayload(MACHINE, boundaryPayload());
-    const second = parseSessionsPayload("mach-linux-headless-02", {
-      completeness: "complete",
-      sessions: [
-        {
-          workspaceId: "ws-ferryx-core",
-          worktree: { wsId: "ws-ferryx-core", slug: "headless-dev" },
-          target: { sessionId: "s-h1", daemonEpoch: 201 },
-          sessionId: "s-h1",
-          running: true,
-        },
-      ],
-    });
-    expect(first.ok && second.ok).toBe(true);
-    if (!first.ok || !second.ok) return;
-    const groups = groupInventoryByWorktree(first.inventory);
-    /* Group order is the picker's concern; this asserts the group set and the rows inside
-       each group, not the array order the comparator happens to produce. */
-    expect(
-      groups.map((group) => `${group.workspaceId}:${group.worktreeSlug ?? "root"}`).sort(),
-    ).toEqual(["ws-docs:docs", "ws-ferryx-core:main", "ws-ferryx-core:root"].sort());
-    const main = groups.find((group) => group.worktreeSlug === "main");
-    expect(main?.sessions.map((entry) => entry.sessionId)).toEqual(["s-1a-working", "s-1b-waiting"]);
-    expect(groupInventoryByWorktree(second.inventory)[0]?.sessions.map((e) => e.sessionId)).toEqual(["s-h1"]);
-  });
-
-  it("leaves rows without a matching project unchanged when labels cannot be resolved", () => {
-    const parsed = parseSessionsPayload(MACHINE, boundaryPayload());
-    if (!parsed.ok) return;
-    expect(applyWorktreeLabels(parsed.inventory.entries, { projects: [] })).toEqual(parsed.inventory.entries);
-    expect(applyWorktreeLabels(parsed.inventory.entries, null)).toEqual(parsed.inventory.entries);
-  });
-});
-
 describe("workspace labels", () => {
   const catalog = {
     projects: [
@@ -569,14 +532,11 @@ describe("workspace labels", () => {
     }
   });
 
-  it("carries the workspace label onto inventory groups", () => {
+  it("leaves rows without a matching project unchanged when labels cannot be resolved", () => {
     const parsed = parseSessionsPayload(MACHINE, boundaryPayload());
     if (!parsed.ok) return;
-    const groups = groupInventoryByWorktree(parsed.inventory, catalog);
-    const core = groups.find((group) => group.workspaceId === "ws-ferryx-core" && group.worktreeSlug === "main");
-    expect(core?.workspaceLabel).toBe("ferryx");
-    const docs = groups.find((group) => group.workspaceId === "ws-docs");
-    expect(docs?.workspaceLabel).toBe("ferryx-docs");
+    expect(applyWorktreeLabels(parsed.inventory.entries, { projects: [] })).toEqual(parsed.inventory.entries);
+    expect(applyWorktreeLabels(parsed.inventory.entries, null)).toEqual(parsed.inventory.entries);
   });
 });
 

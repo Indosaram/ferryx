@@ -1,5 +1,4 @@
 import {
-  type DragCancelEvent,
   type DragEndEvent,
   DragOverlay,
   type DragStartEvent,
@@ -15,38 +14,15 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import {
-  Activity,
-  CheckCheck,
-  ChevronRight,
-  Folder,
-  MoreHorizontal,
-  PanelLeftClose,
-  Plus,
-  Settings2,
-  Eye,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
-import { toast } from "sonner";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
 
-import { combineActivitySummaries, resolveActivityIndicator, type ActivitySummary } from "../lib/activity";
-import { cn } from "../lib/cn";
-import { workspaceName } from "../lib/branchFilter";
+import type { ActivitySummary } from "../lib/activity";
 import { projectRootWorktree } from "../lib/projectIdentity";
-import { groupProjects, isProjectGroupActive } from "../lib/projectGrouping";
+import { groupProjects } from "../lib/projectGrouping";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
 import { useSshHosts } from "../lib/sshHosts";
-import { MACHINE_STATE_LABELS, pairedMachineStatus } from "../lib/machineStatus";
 import type { RemoteContext } from "../lib/machineNavigation";
-import {
-  getPairedHostReachability,
-  subscribePairedHostReachability,
-  usePairedHostReachability,
-  type PairedHostReachabilityView,
-} from "../lib/pairedHostReachability";
-import { remoteHostStore, type RemoteHostState } from "../state/remoteHostStore";
-import { worktreeListingFailureStore } from "../state/worktreeListingFailures";
-import { resolveWorktreeOwnerId } from "../lib/worktreeOwnership";
+import { remoteHostStore } from "../state/remoteHostStore";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import {
   clampSidebarWidth,
@@ -65,22 +41,28 @@ import {
   SIDEBAR_WIDTH_STORAGE_KEY,
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../lib/storageKeys";
-import { revealPath, type RegisteredProject } from "../lib/tauri";
-import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import type { RegisteredProject } from "../lib/tauri";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
-import { worktreeIdentity, type ActiveAgent, type DirtyState, type Worktree } from "../lib/types";
-import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
-import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
-import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
-import { IconButton } from "./ui/IconButton";
-import { Input } from "./ui/input";
-import { SectionHeader } from "./ui/SectionHeader";
-import { SegmentedControl } from "./ui/SegmentedControl";
-import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
+import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
-import { SidebarStateSlot, type SidebarSlotState } from "./sidebar/SidebarStateSlot";
+import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
+import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type SidebarDragData } from "./sidebar-dnd/sidebarDragData";
+import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
+import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
+import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
+import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
+import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
+import { SidebarProjectHeader } from "./sidebar/SidebarProjectHeader";
+import { agentStatesByPath, useSidebarModel } from "./sidebar/useSidebarModel";
+import { sidebarSessionSignals } from "./sidebar/sidebarSessionSignals";
+import { supervisorTypingIn } from "./sidebar/sidebarSupervisor";
+import { SidebarView, type SidebarReorder } from "./sidebar/SidebarView";
+import type { SidebarViewId } from "./sidebar/SidebarViewTabs";
+import { SidebarWorktreeRow } from "./sidebar/SidebarWorktreeRow";
 import type { SectionId } from "./settings/types";
-import { EmptyWorktreesHint, fileManagerActionLabel, WorktreeList, WorktreeRow, worktreeSortableId } from "./WorktreeList";
+import { openProjectMenu } from "./sidebarProjectMenu";
+import { agentsByWorktreePath, SortableWorktreeRow, WorktreeRow, worktreeListRowProps, worktreeSortableId } from "./WorktreeList";
+import { useSupervisor } from "../lib/supervisor";
 
 export {
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
@@ -88,20 +70,7 @@ export {
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 };
 const SIDEBAR_KEYBOARD_STEP = 16;
-
-type SidebarProjectDragData = {
-  type: "sidebar-project";
-  workspaceId: string;
-};
-
-type SidebarWorktreeDragData = {
-  type: "sidebar-worktree";
-  workspaceId: string;
-  worktreePath: string;
-  rowWorkspaceId?: string;
-};
-
-type SidebarDragData = SidebarProjectDragData | SidebarWorktreeDragData;
+const noop = () => undefined;
 
 type SidebarProps = {
   open?: boolean;
@@ -145,6 +114,10 @@ export type SidebarAttention = {
   onInboxOpenChange: (open: boolean) => void;
 };
 
+/**
+ * Desktop container around the shared SidebarView: it owns persistence (width, order, collapsed
+ * set), resize, drag-and-drop and the native menus, and feeds the view a SidebarModel.
+ */
 export function Sidebar({
   open = true,
   isMac = isMacShortcutPlatform(),
@@ -158,13 +131,13 @@ export function Sidebar({
   statuses = {},
   unreadWorktreePaths,
   activityByWorktreePath,
-  onSelectProject = () => undefined,
-  onReorderProjects = () => undefined,
-  onAddProject = () => undefined,
+  onSelectProject = noop,
+  onReorderProjects = noop,
+  onAddProject = noop,
   onRemoveProject,
   onSelectWorktree,
   onCreateWorktree,
-  onDeleteWorktree = () => undefined,
+  onDeleteWorktree = noop,
   onResetAgentState,
   onManageDisk,
   onOpenHistory,
@@ -174,13 +147,12 @@ export function Sidebar({
   onHide,
   attention,
 }: SidebarProps) {
-  const selectWorktree = onSelectWorktree;
   const inboxOpen = attention?.inboxOpen ?? false;
   const [supervisorOpenState, setSupervisorOpen] = useState(false);
   const advancedFeatures = useAdvancedFeatures();
   const supervisorOpen = supervisorOpenState && !inboxOpen && advancedFeatures;
   const supervisorTyping = useSupervisorTyping();
-  const sidebarView = supervisorOpen ? "supervisor" : inboxOpen ? "inbox" : "worktrees";
+  const sidebarView: SidebarViewId = supervisorOpen ? "supervisor" : inboxOpen ? "inbox" : "worktrees";
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   const [width, setWidth] = useState(loadSidebarWidth);
@@ -190,6 +162,8 @@ export function Sidebar({
   const worktreeOrderRef = useRef(worktreeOrder);
   worktreeOrderRef.current = worktreeOrder;
   const [activeDrag, setActiveDrag] = useState<SidebarDragData | null>(null);
+  const menuAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => menuAbortRef.current?.abort(), []);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -197,122 +171,196 @@ export function Sidebar({
 
   const projectGroups = useMemo(() => groupProjects(projects), [projects]);
   const emptyGroupIds = useMemo(
-    () => new Set(projectGroups
-      .filter((group) => group.memberProjects.every((member) => emptyWorkspaceIds?.includes(member.workspaceId)))
-      .map((group) => group.groupId)),
+    () => emptyProjectGroupIds(projectGroups, emptyWorkspaceIds),
     [emptyWorkspaceIds, projectGroups],
   );
 
-  // Accordion state is stored as the set of *collapsed* projects, so each project keeps its own
-  // open/closed state and toggling one never disturbs another. Projects the user has never
-  // toggled default to collapsed unless they are the active project.
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
-    const stored = loadCollapsedProjects();
-    // Once the user has toggled anything the persisted set is authoritative; only a first run
-    // (nothing persisted) falls back to "everything but the active project starts collapsed".
-    return new Set([
-      ...(stored ?? seedCollapsedProjects(new Set<string>(), projects, activeProjectId)),
-      ...emptyGroupIds,
-    ]);
-  });
+  // Accordion state is the set of *collapsed* groups. The container owns it and persists every
+  // change (toggles, seeding of new projects, empty-group transitions) so the published model
+  // (desktopSidebarSync) always matches what this sidebar shows.
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() =>
+    initialCollapsedProjects({ stored: loadCollapsedProjects(), projects, activeProjectId, emptyGroupIds }));
+  const updateCollapsed = useCallback((update: (current: Set<string>) => Set<string>) => {
+    setCollapsedProjects((current) => {
+      const next = update(current);
+      if (next !== current) persistCollapsedProjects(next);
+      return next;
+    });
+  }, []);
   const previousEmptyGroupIds = useRef(emptyGroupIds);
   useEffect(() => {
     const newlyEmpty = [...emptyGroupIds].filter((id) => !previousEmptyGroupIds.current.has(id));
     const restored = [...previousEmptyGroupIds.current].filter((id) => !emptyGroupIds.has(id));
     previousEmptyGroupIds.current = emptyGroupIds;
     if (newlyEmpty.length === 0 && restored.length === 0) return;
-    setCollapsedProjects((current) => {
+    updateCollapsed((current) => {
       const next = new Set(current);
       for (const id of newlyEmpty) next.add(id);
       for (const id of restored) next.delete(id);
       return next;
     });
-  }, [emptyGroupIds]);
+  }, [emptyGroupIds, updateCollapsed]);
   const knownProjectsRef = useRef<Set<string> | null>(null);
   if (knownProjectsRef.current === null) {
     knownProjectsRef.current = new Set(projects.map((project) => project.workspaceId));
   }
-
   useEffect(() => {
-    if (knownProjectsRef.current === null) {
-      knownProjectsRef.current = new Set(projects.map((project) => project.workspaceId));
-    }
+    const known = knownProjectsRef.current ?? new Set<string>();
+    knownProjectsRef.current = known;
     // Projects registered after mount inherit the same default as the initial seed.
-    const known = knownProjectsRef.current;
     const unseen = projects.filter((project) => !known.has(project.workspaceId));
     if (unseen.length === 0) return;
     for (const project of unseen) known.add(project.workspaceId);
-    setCollapsedProjects((current) => seedCollapsedProjects(current, unseen, activeProjectId));
-  }, [activeProjectId, projects]);
+    updateCollapsed((current) => seedCollapsedProjects(current, unseen, activeProjectId));
+  }, [activeProjectId, projects, updateCollapsed]);
 
-  const toggleProject = useCallback((workspaceId: string) => {
-    setCollapsedProjects((current) => {
+  const toggleProject = useCallback((groupId: string) => {
+    updateCollapsed((current) => {
       const next = new Set(current);
-      if (next.has(workspaceId)) next.delete(workspaceId);
-      else next.add(workspaceId);
-      persistCollapsedProjects(next);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
       return next;
     });
-  }, []);
+  }, [updateCollapsed]);
 
   const { hosts } = useSshHosts();
-
   const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  // Paired worktree rows read reachability non-reactively, so regroup whenever it changes.
-  const [reachabilityVersion, bumpReachabilityVersion] = useReducer((version: number) => version + 1, 0);
-  useEffect(() => {
-    const unsubscribe = subscribePairedHostReachability(bumpReachabilityVersion);
-    return () => { unsubscribe(); };
-  }, []);
-  const naturalWorktreesByProject = useMemo(
-    () => groupWorktreesByProject(
-      worktrees,
-      projects,
-      activeProjectId,
-      inactiveProjectWorktrees,
-      hosts,
-      remoteState,
-    ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store read inside
-    [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState, reachabilityVersion],
+  const { model, rowsInput } = useSidebarModel(
+    { projects, activeProjectId, worktrees, inactiveProjectWorktrees },
+    { worktreeOrder, collapsedGroupIds: collapsedProjects },
   );
+  const naturalWorktreesByProject = useMemo(() => groupWorktreesByProject(rowsInput), [rowsInput]);
   const worktreesByProject = useMemo(
     () => applyWorktreeOrder(naturalWorktreesByProject, worktreeOrder),
     [naturalWorktreesByProject, worktreeOrder],
   );
-  const projectSortableItems = useMemo(
-    () => projectGroups.map((group) => projectSortableId(group.groupId)),
-    [projectGroups],
-  );
+  const projectById = useMemo(() => new Map(projects.map((project) => [project.workspaceId, project])), [projects]);
+  const groupById = useMemo(() => new Map(projectGroups.map((group) => [group.groupId, group])), [projectGroups]);
+  const worktreeByKey = useMemo(() => {
+    const byKey = new Map<string, Worktree>();
+    for (const group of projectGroups) {
+      for (const row of worktreesByProject.get(group.primaryProject.workspaceId) ?? []) {
+        byKey.set(worktreeSortableId(group.groupId, row.path, row.workspaceId), row);
+      }
+    }
+    return byKey;
+  }, [projectGroups, worktreesByProject]);
+  const agentsByPath = useMemo(() => agentsByWorktreePath(agents), [agents]);
 
   // The filter is session-only UI state: never persisted.
   const [filterQuery, setFilterQuery] = useState("");
-  const visibleProjectGroups = useMemo(
-    () => filterProjectGroups(projectGroups, worktreesByProject, filterQuery, hosts, remoteState),
-    [filterQuery, hosts, projectGroups, remoteState, worktreesByProject],
-  );
-  const statusFooterText = useMemo(
-    () => sidebarStatusFooterText(visibleProjectGroups.flatMap((entry) => entry.rows), activityByWorktreePath),
-    [activityByWorktreePath, visibleProjectGroups],
-  );
+  const { snapshot: supervisorSnapshot, now: supervisorNow } = useSupervisor();
+  const live = useMemo(() => sidebarLiveState(model, {
+    activityByWorktreePath,
+    // The same reduced signals the publisher sends to the remote (its activity overrides the raw map).
+    ...sidebarSessionSignals(model, { activityByWorktreePath, unreadWorktreePaths, agentStateByPath: agentStatesByPath(agentsByPath) }),
+    activeWorkspaceId: activeProjectId,
+    activePath,
+    isSupervisorTyping: (path) => supervisorTypingIn(supervisorSnapshot, supervisorNow, path),
+  }, filterQuery), [activePath, activeProjectId, activityByWorktreePath, agentsByPath, filterQuery, model, supervisorNow, supervisorSnapshot, unreadWorktreePaths]);
+  const canCreateWorktree = (project: RegisteredProject) => project.gitRoot !== null && project.target?.kind !== "ssh";
 
-  // The active row is highlighted in whichever project's group actually renders
-  // it, so a nested project sharing the path prefix does not light up too.
-  // Only the active project can own the active row. Matching by path alone lit
-  // up an inactive project whose list still contained that path.
-  const activeWorktreeOwnerId = useMemo(() => {
-    if (!activePath || !activeProjectId) return undefined;
-    const activeGroup = projectGroups.find((g) => isProjectGroupActive(g, activeProjectId));
-    if (!activeGroup) return undefined;
-    const activeRows = worktreesByProject.get(activeGroup.primaryProject.workspaceId);
-    return activeRows?.some(
-      (row) =>
-        row.path === activePath &&
-        (row.workspaceId ? row.workspaceId === activeProjectId : true),
-    )
-      ? activeGroup.primaryProject.workspaceId
+  const projectChrome = (node: SidebarProjectNode) => {
+    const project = projectById.get(node.primaryWorkspaceId);
+    if (!project) return {};
+    const remote = project.target && project.target.kind !== "local" ? project.target : null;
+    const slot = live.projects[node.groupId] ?? { kind: "none" as const };
+    const pairedHostId = remote?.kind === "pairedDaemon" ? remote.hostId : null;
+    const onActivateSlot = slot.kind === "paired" && !slot.connected && pairedHostId && onOpenSettings
+      ? () => onOpenSettings("remote", {
+          page: "machines",
+          filter: "all",
+          machine: { kind: "pairedDaemon", hostId: pairedHostId, generation: remoteState.hosts[pairedHostId]?.generation ?? "" },
+        })
       : undefined;
-  }, [activePath, activeProjectId, projectGroups, worktreesByProject]);
+    const isLocal = !isRemoteWorkspaceId(project.workspaceId) && !isPairedWorkspaceId(project.workspaceId);
+    const showMenu = (position: { x: number; y: number }) => {
+      menuAbortRef.current?.abort();
+      const controller = new AbortController();
+      menuAbortRef.current = controller;
+      openProjectMenu(project, position, {
+        onCreateWorktree: () => onCreateWorktree(project),
+        onManageDisk: onManageDisk ? () => onManageDisk(project) : undefined,
+        onOpenHistory: onOpenHistory && isLocal ? () => onOpenHistory(project) : undefined,
+        onRemoveProject: onRemoveProject ? () => onRemoveProject(project) : undefined,
+      }, controller.signal);
+    };
+    return {
+      title: remote ? `SSH: ${node.hostLabel} - ${project.repoRoot}` : project.repoRoot,
+      addWorktreeLabel: `Add worktree to ${project.workspaceId}`,
+      onAddWorktree: project.gitRoot !== null ? () => onCreateWorktree(project) : undefined,
+      onMoreActions: (event: MouseEvent<HTMLButtonElement>) => {
+        event.stopPropagation();
+        const rect = event.currentTarget.getBoundingClientRect();
+        showMenu({ x: rect.left, y: rect.bottom });
+      },
+      onContextMenu: (event: MouseEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        showMenu({ x: event.clientX, y: event.clientY });
+      },
+      onActivateSlot,
+      slotAriaLabel: onActivateSlot ? `${slot.kind === "none" ? "" : slot.label}: open remote settings for ${node.hostLabel ?? node.label}` : undefined,
+      onCreateWorktree: canCreateWorktree(project) ? () => onCreateWorktree(project) : undefined,
+    };
+  };
+
+  const renderRow = (node: SidebarProjectNode, row: SidebarWorktreeNode, rowLive: SidebarRowLive) => {
+    const project = projectById.get(node.primaryWorkspaceId);
+    const group = groupById.get(node.groupId);
+    if (!project || !group) return null;
+    if (isStandaloneRemoteGroup(group)) {
+      const root = projectRootWorktree(project, node.hostLabel ?? undefined);
+      return (
+        <div role="listitem">
+          <SidebarWorktreeRow
+            node={row}
+            live={rowLive}
+            title={`Remote worktree: ${project.repoRoot}${node.hostLabel ? ` (${node.hostLabel})` : ""}`}
+            slotTitle={rowLive.slot ? undefined : node.hostLabel ?? undefined}
+            shortcutWorkspaceId={project.workspaceId}
+            onSelect={() => onSelectWorktree(root)}
+          />
+        </div>
+      );
+    }
+    const worktree = worktreeByKey.get(row.key);
+    if (!worktree) return null;
+    return (
+      <SortableWorktreeRow
+        workspaceId={node.groupId}
+        {...worktreeListRowProps(worktree, {
+          repoRoot: project.repoRoot,
+          activePath: rowLive.active ? activePath : "",
+          activeWorkspaceId: activeProjectId,
+          statuses,
+          unreadWorktreePaths,
+          activityByWorktreePath,
+          onSelect: onSelectWorktree,
+          onCreateWorktree: canCreateWorktree(project) ? () => onCreateWorktree(project) : undefined,
+          onDelete: onDeleteWorktree,
+          onResetAgentState,
+          sortableWorkspaceId: node.groupId,
+          agentsByPath,
+        })}
+        live={rowLive}
+      />
+    );
+  };
+
+  const reorder: SidebarReorder = {
+    projects: (children) => (
+      <SortableContext items={model.projects.map((node) => projectSortableId(node.groupId))} strategy={verticalListSortingStrategy}>
+        {children}
+      </SortableContext>
+    ),
+    section: (node, header, body) => (
+      <SortableProjectSection workspaceId={node.groupId} header={header}>{body}</SortableProjectSection>
+    ),
+    rows: (_node, rows, children) => (
+      <SortableContext items={rows.map((row) => row.key)} strategy={verticalListSortingStrategy}>{children}</SortableContext>
+    ),
+  };
 
   const endResize = useCallback(() => {
     if (!dragRef.current) return;
@@ -330,7 +378,6 @@ export function Sidebar({
       widthRef.current = nextWidth;
       setWidth(nextWidth);
     };
-
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", endResize);
     window.addEventListener("pointercancel", endResize);
@@ -366,8 +413,6 @@ export function Sidebar({
     persistSidebarWidth(nextWidth);
   };
 
-  const clearActiveDrag = () => setActiveDrag(null);
-
   const handleDragStart = (event: DragStartEvent) => {
     const data = readSidebarDragData(event.active.data.current);
     if (data) setActiveDrag(data);
@@ -376,7 +421,7 @@ export function Sidebar({
   const handleDragEnd = (event: DragEndEvent) => {
     const active = readSidebarDragData(event.active.data.current);
     const over = readSidebarDragData(event.over?.data.current);
-    clearActiveDrag();
+    setActiveDrag(null);
     if (active?.type === "sidebar-worktree") {
       const prunedOrder = pruneWorktreeOrder(worktreeOrderRef.current, naturalWorktreesByProject);
       if (!worktreeOrdersEqual(prunedOrder, worktreeOrderRef.current)) {
@@ -396,11 +441,7 @@ export function Sidebar({
       return;
     }
 
-    if (
-      active.type !== "sidebar-worktree" ||
-      over.type !== "sidebar-worktree" ||
-      active.workspaceId !== over.workspaceId
-    ) {
+    if (active.type !== "sidebar-worktree" || over.type !== "sidebar-worktree" || active.workspaceId !== over.workspaceId) {
       return;
     }
     const rows = worktreesByProject.get(active.workspaceId) ?? [];
@@ -410,10 +451,7 @@ export function Sidebar({
     if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
 
     const nextOrder = pruneWorktreeOrder(
-      {
-        ...worktreeOrderRef.current,
-        [active.workspaceId]: arrayMove(paths, fromIndex, toIndex),
-      },
+      { ...worktreeOrderRef.current, [active.workspaceId]: arrayMove(paths, fromIndex, toIndex) },
       naturalWorktreesByProject,
     );
     worktreeOrderRef.current = nextOrder;
@@ -421,12 +459,8 @@ export function Sidebar({
     persistWorktreeOrder(nextOrder);
   };
 
-  const handleDragCancel = (_event: DragCancelEvent) => clearActiveDrag();
-
   const activeProjectOverlay =
-    activeDrag?.type === "sidebar-project"
-      ? projects.find((project) => project.workspaceId === activeDrag.workspaceId)
-      : undefined;
+    activeDrag?.type === "sidebar-project" ? projectById.get(activeDrag.workspaceId) : undefined;
   const activeWorktreeOverlay =
     activeDrag?.type === "sidebar-worktree"
       ? worktreesByProject
@@ -439,274 +473,54 @@ export function Sidebar({
     return null;
   }
 
+  const hide = onToggle ?? onHide;
   return (
-    <DndContext
-      sensors={sensors}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-      onDragCancel={handleDragCancel}
-    >
+    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveDrag(null)}>
       <aside
         className="relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
         style={{ width: `${width}px`, minWidth: `${MIN_SIDEBAR_WIDTH}px`, maxWidth: `${MAX_SIDEBAR_WIDTH}px` }}
       >
-        <div
-          data-testid="sidebar-drag-region"
-          data-tauri-drag-region
-          className="flex h-titlebar shrink-0 items-center px-2 gap-0.5"
-        >
-          {isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
-          <IconButton
-            label="Hide sidebar"
-            data-shortcut={onToggle || onHide ? "sidebar.left.toggle" : undefined}
-            className="no-drag"
-            size="sm"
-            onClick={onToggle ?? onHide}
-          >
-            <PanelLeftClose className="size-3.5" />
-          </IconButton>
-          <IconButton
-            data-shortcut="project.add"
-            label="Add project"
-            className="no-drag"
-            size="sm"
-            onClick={onAddProject}
-          >
-            <Plus className="size-3.5" />
-          </IconButton>
-          {attention ? (
-            <div className="ml-auto flex items-center gap-0.5">
-              {inboxOpen ? (
-                <IconButton
-                  label="Mark all read"
-                  className="no-drag"
-                  size="sm"
-                  disabled={attention.rows.length === 0}
-                  onClick={attention.onDismissAll}
-                >
-                  <CheckCheck className="size-3.5" />
-                </IconButton>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-
-        {attention ? (
-          <div className="shrink-0 px-2 pb-1">
-            <SegmentedControl
-              label="Sidebar view"
-              value={sidebarView}
-              onChange={(view) => {
-                setSupervisorOpen(view === "supervisor");
-                if ((view === "inbox") !== inboxOpen) attention.onInboxOpenChange(view === "inbox");
-              }}
-              options={[
-                { value: "worktrees", label: "Worktrees" },
-                {
-                  value: "inbox",
-                  label: "Inbox",
-                  ariaLabel: attention.rows.length > 0 ? `Inbox (${attention.rows.length})` : "Inbox",
-                  count: attention.rows.length > 0 ? (attention.rows.length > 9 ? "9+" : attention.rows.length) : undefined,
-                  countTestId: "sidebar-attention-badge",
-                  "data-shortcut": "notifications.toggle",
-                },
-                ...(advancedFeatures
-                  ? [{
-                      value: "supervisor" as const,
-                      label: "Supervisor",
-                      ariaLabel: supervisorTyping ? "Supervisor (typing)" : "Supervisor",
-                      count: supervisorTyping ? <Eye aria-hidden="true" className="size-3 text-foreground" /> : undefined,
-                      countTestId: "sidebar-supervisor-typing",
-                    }]
-                  : []),
-              ]}
-            />
-          </div>
-        ) : null}
-
-        {attention && supervisorOpen ? <SupervisorPanel /> : null}
-
-        {attention && inboxOpen ? (
-          <AttentionInbox
-            rows={attention.rows}
-            onOpen={attention.onOpen}
-            onDismiss={attention.onDismiss}
-          />
-        ) : null}
-
-        <div
-          data-testid="worktree-region"
-          hidden={inboxOpen || supervisorOpen || undefined}
-          className={cn("min-h-0 flex-1 flex-col", inboxOpen || supervisorOpen ? "hidden" : "flex")}
-        >
-          <div className="shrink-0 px-2 pt-1">
-            <Input
-              type="search"
-              value={filterQuery}
-              placeholder="Filter worktrees"
-              aria-label="Filter worktrees"
-              className="h-7 text-[12px] md:text-[12px]"
-              onChange={(event) => setFilterQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Escape" || filterQuery === "") return;
-                event.preventDefault();
-                event.stopPropagation();
-                setFilterQuery("");
-              }}
-            />
-          </div>
-          <SectionHeader title="Projects" count={projectGroups.length} className="shrink-0" />
-          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 scrollbar-sleek">
-            {projects.length === 0 ? (
-              <p className="px-2 py-3 text-[11px] leading-relaxed text-muted-foreground">
-                No projects registered yet.
-              </p>
-            ) : null}
-
-            <SortableContext items={projectSortableItems} strategy={verticalListSortingStrategy}>
-              {visibleProjectGroups.map(({ group, rows: projectWorktrees, forceExpanded }) => {
-                const project = group.primaryProject;
-                const active = isProjectGroupActive(group, activeProjectId);
-                const expanded = forceExpanded || !collapsedProjects.has(group.groupId);
-                const staleSummary = projectWorktrees.find((w) => w.stale || w.freshness?.stale)?.hostSummary;
-                const projectActivity = summarizeProjectActivity(
-                  projectWorktrees,
-                  activityByWorktreePath,
-                  unreadWorktreePaths,
-                );
-                const attentionState = projectAttentionState(projectActivity);
-                const activityIndicator = resolveActivityIndicator(projectActivity);
-                const isStandaloneRemote =
-                  project.target?.kind === "ssh" &&
-                  group.memberProjects.length === 1 &&
-                  !group.memberProjects.some((p) => p.target?.kind !== "ssh");
-                const standaloneRemote = project.target?.kind === "ssh" ? project.target : null;
-                const standaloneHost = standaloneRemote
-                  ? hosts.find((h) => h.id === standaloneRemote.hostId)
-                  : null;
-                const standaloneHostLabel = standaloneHost?.label ?? project.hostLabel ?? standaloneRemote?.hostId;
-                const standaloneRootWorktree = projectRootWorktree(project, standaloneHostLabel);
-                const standaloneDisplayName = workspaceName(standaloneRootWorktree);
-                const isLocal =
-                  !isRemoteWorkspaceId(project.workspaceId) &&
-                  !isPairedWorkspaceId(project.workspaceId);
-                const header = (
-                  <ProjectHeader
-                    project={project}
-                    active={active}
-                    expanded={expanded}
-                    activity={projectActivity}
-                    attentionState={attentionState}
-                    onToggle={() => toggleProject(group.groupId)}
-                    onSelect={() => {
-                      onSelectProject(project);
-                      if (!expanded) toggleProject(group.groupId);
-                    }}
-                    onCreateWorktree={() => onCreateWorktree(project)}
-                    onRemoveProject={onRemoveProject ? () => onRemoveProject(project) : undefined}
-                    onManageDisk={onManageDisk ? () => onManageDisk(project) : undefined}
-                    onOpenHistory={onOpenHistory && isLocal ? () => onOpenHistory(project) : undefined}
-                    isStandaloneRemote={isStandaloneRemote || (project.target?.kind === "pairedDaemon" && group.memberProjects.length === 1)}
-                    staleSummary={staleSummary}
-                    onOpenRemoteSettings={onOpenSettings ? (context) => onOpenSettings("remote", context) : undefined}
-                  />
-                );
-
-                return (
-                  <SortableProjectSection key={group.groupId} workspaceId={group.groupId} header={header}>
-                    {expanded ? (
-                      <div
-                        className="ml-3 border-l border-worktree-sidebar-border pl-2 pr-0.5 pt-0.5"
-                        onPointerDown={(event) => event.stopPropagation()}
-                      >
-                        <SortableContext
-                          items={projectWorktrees.map((row) => worktreeSortableId(group.groupId, row.path, row.workspaceId))}
-                          strategy={verticalListSortingStrategy}
-                        >
-                          {isStandaloneRemote ? (
-                            <button
-                              type="button"
-                              className={cn(
-                                "group/worktree-row relative my-0.5 flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-xs transition-colors",
-                                activeWorktreeOwnerId === project.workspaceId
-                                  ? "bg-worktree-sidebar-accent text-foreground"
-                                  : "bg-transparent hover:bg-white/[0.04]",
-                              )}
-                              aria-current={activeWorktreeOwnerId === project.workspaceId ? "true" : undefined}
-                              title={`Remote worktree: ${project.repoRoot}${standaloneHostLabel ? ` (${standaloneHostLabel})` : ""}`}
-                              data-shortcut-worktree-path={project.repoRoot}
-                              data-shortcut-workspace-id={project.workspaceId}
-                              onClick={() => selectWorktree(standaloneRootWorktree)}
-                            >
-                              {activeWorktreeOwnerId === project.workspaceId ? (
-                                <span
-                                  aria-hidden="true"
-                                  data-testid="worktree-rail-active"
-                                  className="pointer-events-none absolute -left-[9px] top-1 bottom-1 w-px bg-worktree-sidebar-ring"
-                                />
-                              ) : null}
-                              <span
-                                className={cn(
-                                  "min-w-0 truncate text-[12px] font-semibold leading-tight",
-                                  activeWorktreeOwnerId === project.workspaceId ? "text-foreground" : "text-worktree-sidebar-foreground",
-                                )}
-                              >
-                                {standaloneDisplayName}
-                              </span>
-                              <SidebarStateSlot
-                                state={activityIndicator}
-                                host={standaloneHostLabel}
-                                title={activityIndicator ? undefined : standaloneHostLabel}
-                                className="ml-auto min-w-0 truncate"
-                                data-testid={activityIndicator ? "worktree-status-dot" : "remote-machine-badge"}
-                              />
-                            </button>
-                          ) : <WorktreeList
-                            worktrees={projectWorktrees}
-                            repoRoot={project.repoRoot}
-                            agents={agents}
-                            activePath={activeWorktreeOwnerId === project.workspaceId ? activePath : ""}
-                            activeWorkspaceId={activeProjectId}
-                            statuses={statuses}
-                            unreadWorktreePaths={unreadWorktreePaths}
-                            activityByWorktreePath={activityByWorktreePath}
-                            onSelect={selectWorktree}
-                            onCreateWorktree={
-                              project.gitRoot !== null && project.target?.kind !== "ssh" ? () => onCreateWorktree(project) : undefined
-                            }
-                            onDelete={onDeleteWorktree}
-                            onResetAgentState={onResetAgentState}
-                            sortableWorkspaceId={group.groupId}
-                            label={`${group.groupId} worktrees`}
-                            emptyState={
-                              <EmptyWorktreesHint
-                                onCreateWorktree={
-                                  project.gitRoot !== null && project.target?.kind !== "ssh" ? () => onCreateWorktree(project) : undefined
-                                }
-                              />
-                            }
-                          />}
-                        </SortableContext>
-                      </div>
-                    ) : null}
-                  </SortableProjectSection>
-                );
-              })}
-            </SortableContext>
-          </div>
-        </div>
-
-        <div className="flex shrink-0 items-center justify-end gap-1 border-t border-worktree-sidebar-border px-2 py-1.5">
-          <span data-testid="sidebar-status-footer" className="mr-auto min-w-0 truncate pl-0.5 text-[10px] text-muted-foreground">
-            {statusFooterText}
-          </span>
-          <IconButton label="System resources" size="sm" onClick={onOpenResources}>
-            <Activity className="size-3.5" />
-          </IconButton>
-          <IconButton data-shortcut={onOpenSettings ? "settings.toggle" : undefined} label="Settings" size="sm" onClick={() => onOpenSettings?.()}>
-            <Settings2 className="size-3.5" />
-          </IconButton>
-        </div>
+        <SidebarView
+          model={model}
+          live={live}
+          activeWorkspaceId={activeProjectId}
+          actions={{
+            selectWorktree: (_node, row) => {
+              const worktree = worktreeByKey.get(row.key);
+              if (worktree) onSelectWorktree(worktree);
+            },
+            toggleGroup: toggleProject,
+            selectProject: (node) => {
+              const project = projectById.get(node.primaryWorkspaceId);
+              if (project) onSelectProject(project);
+            },
+            addProject: onAddProject,
+            hideSidebar: hide ?? noop,
+            openSettings: () => onOpenSettings?.(),
+            openResources: onOpenResources ?? noop,
+            onViewChange: attention
+              ? (view) => {
+                  setSupervisorOpen(view === "supervisor");
+                  if ((view === "inbox") !== inboxOpen) attention.onInboxOpenChange(view === "inbox");
+                }
+              : undefined,
+          }}
+          filter={{ query: filterQuery, onChange: setFilterQuery }}
+          view={sidebarView}
+          inbox={attention}
+          supervisor={attention ? { typing: supervisorTyping, content: <SupervisorPanel /> } : undefined}
+          titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
+          titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
+          shortcuts={{
+            hideSidebar: hide ? "sidebar.left.toggle" : undefined,
+            addProject: "project.add",
+            settings: onOpenSettings ? "settings.toggle" : undefined,
+            inbox: "notifications.toggle",
+          }}
+          projectChrome={projectChrome}
+          renderRow={renderRow}
+          reorder={reorder}
+        />
 
         <div
           role="separator"
@@ -734,22 +548,14 @@ export function Sidebar({
         {activeProjectOverlay ? (
           <div data-testid="sidebar-drag-overlay" className="w-sidebar max-w-[calc(100vw-1rem)]">
             <SidebarDragRow kind="project" overlay>
-              <ProjectHeader
-                project={activeProjectOverlay}
+              <SidebarProjectHeader
+                label={projectDisplayLabel(activeProjectOverlay, projectHostLabel(activeProjectOverlay, { hosts, remoteState }), true)}
                 active={activeProjectOverlay.workspaceId === activeProjectId}
                 expanded={!collapsedProjects.has(activeProjectOverlay.workspaceId)}
-                activity={summarizeProjectActivity(
-                  worktreesByProject.get(activeProjectOverlay.workspaceId) ?? [],
-                  activityByWorktreePath,
-                  unreadWorktreePaths,
-                )}
-                attentionState={projectAttentionState(
-                  summarizeProjectActivity(
-                    worktreesByProject.get(activeProjectOverlay.workspaceId) ?? [],
-                    activityByWorktreePath,
-                    unreadWorktreePaths,
-                  ),
-                )}
+                slot={live.projects[activeProjectOverlay.workspaceId] ?? { kind: "none" }}
+                onAddWorktree={activeProjectOverlay.gitRoot !== null ? noop : undefined}
+                addWorktreeLabel={`Add worktree to ${activeProjectOverlay.workspaceId}`}
+                onMoreActions={noop}
                 inert
               />
             </SidebarDragRow>
@@ -759,14 +565,14 @@ export function Sidebar({
             <SidebarDragRow kind="worktree" overlay>
               <WorktreeRow
                 worktree={activeWorktreeOverlay}
-                repoRoot={projects.find((p) => p.workspaceId === activeDrag.workspaceId)?.repoRoot}
-                active={activeWorktreeOwnerId === activeDrag.workspaceId && activeWorktreeOverlay.path === activePath}
+                repoRoot={projectById.get(activeDrag.workspaceId)?.repoRoot}
+                active={live.rows[worktreeSortableId(activeDrag.workspaceId, activeWorktreeOverlay.path, activeWorktreeOverlay.workspaceId)]?.active ?? false}
                 agent={agents.find((agent) => agent.worktreePath === activeWorktreeOverlay.path)}
                 status={statuses[activeWorktreeOverlay.path]}
                 unread={Boolean(unreadWorktreePaths?.[activeWorktreeOverlay.path])}
                 activitySummary={activityByWorktreePath?.[activeWorktreeOverlay.path]}
-                onSelect={() => undefined}
-                onDelete={() => undefined}
+                onSelect={noop}
+                onDelete={noop}
               />
             </SidebarDragRow>
           </div>
@@ -775,624 +581,3 @@ export function Sidebar({
     </DndContext>
   );
 }
-
-type ProjectHeaderProps = {
-  project: RegisteredProject;
-  active: boolean;
-  expanded: boolean;
-  activity: ActivitySummary;
-  attentionState: "waiting" | "done" | "unread" | null;
-  onToggle?: () => void;
-  onSelect?: () => void;
-  onCreateWorktree?: () => void;
-  onRemoveProject?: () => void;
-  onManageDisk?: () => void;
-  onOpenHistory?: () => void;
-  inert?: boolean;
-  isStandaloneRemote?: boolean;
-  staleSummary?: string;
-  onOpenRemoteSettings?: (context: RemoteContext) => void;
-};
-
-function ProjectHeader({
-  project,
-  active,
-  expanded,
-  activity,
-  attentionState,
-  onToggle,
-  onSelect,
-  onCreateWorktree,
-  onRemoveProject,
-  onManageDisk,
-  onOpenHistory,
-  inert = false,
-  isStandaloneRemote = true,
-  staleSummary,
-  onOpenRemoteSettings,
-}: ProjectHeaderProps) {
-  const { hosts } = useSshHosts();
-  const remoteState = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
-  const reachability = usePairedHostReachability(project.target?.kind === "pairedDaemon" ? project.target.hostId : "");
-  const listingFailure = useSyncExternalStore(
-    worktreeListingFailureStore.subscribe,
-    worktreeListingFailureStore.getState,
-  )[project.workspaceId];
-  const remote = project.target && project.target.kind !== "local" ? project.target : null;
-  const hostLabel = remote?.kind === "pairedDaemon"
-    ? (remoteState.hosts[remote.hostId]?.name ?? project.hostLabel ?? remote.hostId)
-    : remote ? (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId) : null;
-  const folderName = remote
-    ? (project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/")
-    : project.workspaceId;
-  const projectLabel = remote
-    ? (isStandaloneRemote && hostLabel ? `${folderName} (${hostLabel})` : folderName)
-    : project.workspaceId;
-  const menuUnlistenRef = useRef<(() => void) | null>(null);
-  const slot = projectSlot({
-    listingFailure,
-    activity,
-    attentionState,
-    paired: remote?.kind === "pairedDaemon"
-      ? { staleSummary, ...pairedSlotStatus(remote.hostId, remoteState, reachability) }
-      : null,
-  });
-  const pairedHostId = remote?.kind === "pairedDaemon" ? remote.hostId : null;
-  const activateSlot = slot.kind === "paired" && !slot.connected && pairedHostId && onOpenRemoteSettings && !inert
-    ? () => onOpenRemoteSettings({
-        page: "machines",
-        filter: "all",
-        machine: { kind: "pairedDaemon", hostId: pairedHostId, generation: remoteState.hosts[pairedHostId]?.generation ?? "" },
-      })
-    : undefined;
-  const slotElement = slot.kind === "none" ? null : (
-    <SidebarStateSlot
-      state={slot.state}
-      label={slot.label}
-      title={slot.title}
-      className={slot.kind === "failure" ? "text-destructive" : undefined}
-      data-testid={slot.testId}
-      data-attention-state={slot.kind === "attention" ? slot.state ?? undefined : undefined}
-      onActivate={activateSlot}
-      ariaLabel={activateSlot ? `${slot.label}: open remote settings for ${hostLabel ?? projectLabel}` : undefined}
-    />
-  );
-
-  useEffect(() => {
-    return () => {
-      menuUnlistenRef.current?.();
-      menuUnlistenRef.current = null;
-    };
-  }, []);
-
-  const openProjectMenu = (position: { x: number; y: number }) => {
-    const items: NativeMenuEntry[] = [
-      { kind: "item", id: "add-worktree", label: "Add Worktree", enabled: project.gitRoot !== null, icon: "add" },
-      { kind: "item", id: "manage-disk", label: "Manage Worktree Disk…", enabled: !remote && project.gitRoot !== null, icon: "disk" },
-      { kind: "item", id: "past-conversations", label: "Past Conversations…", enabled: Boolean(onOpenHistory), icon: "history" },
-      { kind: "item", id: "reveal", label: remote ? "Local reveal unavailable over SSH" : fileManagerActionLabel(), enabled: !remote, icon: "reveal" },
-      { kind: "item", id: "copy-path", label: "Copy Project Path" },
-      { kind: "separator" },
-      { kind: "item", id: "remove", label: "Remove Project", enabled: Boolean(onRemoveProject), icon: "trash" },
-    ];
-    menuUnlistenRef.current?.();
-    const controller = new AbortController();
-    menuUnlistenRef.current = () => controller.abort();
-    void openNativePopupMenu(
-      "cmd_native_sidebar_context_menu",
-      items,
-      position,
-      (id) => {
-        menuUnlistenRef.current?.();
-        menuUnlistenRef.current = null;
-        if (id === "add-worktree") onCreateWorktree?.();
-        else if (id === "manage-disk") onManageDisk?.();
-        else if (id === "past-conversations") onOpenHistory?.();
-        else if (id === "reveal" && !remote) {
-          revealPath(project.repoRoot).catch((err: unknown) => {
-            toast.error(`Failed to reveal path: ${err instanceof Error ? err.message : String(err)}`);
-          });
-        } else if (id === "copy-path") {
-          if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-            navigator.clipboard
-              .writeText(project.repoRoot)
-              .then(() => toast.success("Path copied to clipboard"))
-              .catch(() => toast.error("Failed to copy to clipboard"));
-          } else {
-            toast.error("Clipboard API unavailable");
-          }
-        } else if (id === "remove") onRemoveProject?.();
-      },
-      controller.signal,
-    ).catch((error: unknown) => console.warn("Could not open native project menu", error));
-  };
-
-  const handleContextMenu = (event: React.MouseEvent) => {
-    if (inert) return;
-    event.preventDefault();
-    event.stopPropagation();
-    openProjectMenu({ x: event.clientX, y: event.clientY });
-  };
-
-  const handleMoreActions = (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (inert) return;
-    event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
-    openProjectMenu({ x: rect.left, y: rect.bottom });
-  };
-
-  return (
-    <>
-      <div
-        onContextMenu={handleContextMenu}
-        className="group/project flex h-7 w-full items-center gap-0.5 rounded-md pr-1 text-worktree-sidebar-foreground/65 transition-colors hover:bg-worktree-sidebar-accent/60 hover:text-worktree-sidebar-foreground"
-      >
-        <button
-          type="button"
-          disabled={inert}
-          onClick={onToggle}
-          onPointerDown={(event) => event.stopPropagation()}
-          aria-expanded={expanded}
-          aria-label={`${expanded ? "Collapse" : "Expand"} ${projectLabel}`}
-          className="flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
-        >
-          <ChevronRight
-            aria-hidden="true"
-            className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")}
-          />
-        </button>
-        <button
-          type="button"
-          disabled={inert}
-          onClick={onSelect}
-          aria-current={active ? "true" : undefined}
-          aria-label={projectLabel}
-          title={remote ? `SSH: ${hostLabel} - ${project.repoRoot}` : project.repoRoot}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left text-[12px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
-        >
-          <Folder className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{projectLabel}</span>
-          {activateSlot ? null : slotElement}
-        </button>
-        {activateSlot ? slotElement : null}
-        {project.gitRoot !== null ? (
-          <IconButton
-            label={`Add worktree to ${project.workspaceId}`}
-            size="sm"
-            disabled={inert}
-            className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
-            onClick={onCreateWorktree}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <Plus className="size-3.5" />
-          </IconButton>
-        ) : null}
-        <IconButton
-          label={`More actions for ${projectLabel}`}
-          size="sm"
-          disabled={inert}
-          className="size-5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/project:opacity-100"
-          onClick={handleMoreActions}
-          onPointerDown={(event) => event.stopPropagation()}
-        >
-          <MoreHorizontal className="size-3.5" />
-        </IconButton>
-      </div>
-
-    </>
-  );
-}
-
-type ProjectSlot =
-  | { kind: "none" }
-  | { kind: "failure" | "attention" | "working" | "paired"; state: SidebarSlotState; label?: string; title?: string; testId?: string; connected?: boolean };
-
-/**
- * One status slot per project row (ui/DESIGN.md section 4 rule 7): listing failure > needs input >
- * unseen completion > running > unread > paired machine state. An unseen completion outranks live
- * work, as in resolveActivityIndicator, so a finished agent is never hidden behind a spinner.
- */
-function projectSlot({ listingFailure, activity, attentionState, paired }: {
-  listingFailure: string | undefined;
-  activity: ActivitySummary;
-  attentionState: "waiting" | "done" | "unread" | null;
-  paired: { staleSummary?: string; label: string; connected: boolean; reason: string | null } | null;
-}): ProjectSlot {
-  if (listingFailure) {
-    return { kind: "failure", state: null, label: "Unavailable", title: `Couldn't load worktrees: ${listingFailure}`, testId: "project-worktrees-unavailable" };
-  }
-  if (attentionState && (attentionState === "waiting" || activity.hasDone || !activity.hasWorking)) {
-    return {
-      kind: "attention",
-      state: attentionState,
-      title: attentionState === "waiting" ? "Agent needs attention" : "Unread activity",
-      testId: "project-attention-indicator",
-    };
-  }
-  if (activity.hasWorking) {
-    return {
-      kind: "working",
-      state: "working",
-      label: activity.runningCount > 1 ? `${activity.runningCount} running` : undefined,
-      testId: "project-running-badge",
-    };
-  }
-  if (paired) {
-    const connected = paired.connected && !paired.staleSummary;
-    return {
-      kind: "paired",
-      state: null,
-      label: paired.staleSummary ?? paired.label,
-      title: connected ? undefined : paired.reason ?? undefined,
-      connected,
-    };
-  }
-  return { kind: "none" };
-}
-
-/**
- * Paired machine text for the project slot and its worktree rows, from the shared remote status
- * vocabulary, so the header and the rows never disagree.
- */
-function pairedSlotStatus(
-  hostId: string,
-  state: RemoteHostState,
-  reachability: PairedHostReachabilityView,
-): { label: string; connected: boolean; reason: string | null } {
-  const host = state.hosts[hostId];
-  if (state.machineFeaturesEnabled === false) return { label: MACHINE_STATE_LABELS.disabled, connected: false, reason: null };
-  // Native inventory still booting: not an error yet.
-  if (state.nativeStatus !== "ready") return { label: MACHINE_STATE_LABELS.checking, connected: false, reason: null };
-  if (!host) return { label: "Unavailable", connected: false, reason: null };
-  const status = pairedMachineStatus({
-    host,
-    nativeReady: true,
-    accountEnrolled: false,
-    reachability,
-  });
-  return { label: status.label, connected: status.state === "connected", reason: status.reason };
-}
-
-function pairedRowSummary(hostId: string, state: RemoteHostState | undefined): string {
-  return state ? pairedSlotStatus(hostId, state, getPairedHostReachability(hostId)).label : "Unavailable";
-}
-
-function projectAttentionState(activity: ActivitySummary): "waiting" | "done" | "unread" | null {
-  if (activity.hasWaiting) return "waiting";
-  if (activity.hasUnread) return "unread";
-  return activity.hasDone ? "done" : null;
-}
-
-function summarizeProjectActivity(
-  worktrees: Worktree[],
-  activityByWorktreePath: Record<string, ActivitySummary | undefined> | undefined,
-  unreadWorktreePaths: Record<string, boolean> | undefined,
-): ActivitySummary {
-  const summaries = worktrees
-    .map((worktree) => worktree.workspaceId?.startsWith("daemon:") ? undefined : activityByWorktreePath?.[worktree.path])
-    .filter((summary): summary is ActivitySummary => Boolean(summary));
-  const hasUnread = worktrees.some((worktree) => !worktree.workspaceId?.startsWith("daemon:") && Boolean(unreadWorktreePaths?.[worktree.path]));
-  return combineActivitySummaries(summaries, hasUnread);
-}
-
-/**
- * Worktrees carry their owning project inside their `orca/<wsId>/<slug>` branch name. Anything
- * without that identity is attributed by path — a project root, or a path nested under one — so a
- * plain-folder project's root row never lands under whichever project happens to be active.
- */
-function groupWorktreesByProject(
-  worktrees: Worktree[],
-  projects: RegisteredProject[],
-  activeProjectId: string | undefined,
-  inactiveProjectWorktrees?: Record<string, Worktree[]>,
-  hosts?: Array<{ id: string; label: string }>,
-  remoteState?: RemoteHostState,
-) {
-  const groups = groupProjects(projects);
-  const grouped = new Map<string, Worktree[]>();
-  for (const group of groups) {
-    const primaryId = group.primaryProject.workspaceId;
-    const listed = group.memberProjects.flatMap((member) => {
-      const hasActiveWorktrees = worktrees.some(
-        (w) => resolveWorktreeOwnerId(w, projects, activeProjectId) === member.workspaceId,
-      );
-      if (member.workspaceId === activeProjectId && hasActiveWorktrees) return [];
-      return (inactiveProjectWorktrees?.[member.workspaceId] ?? []).map((row) =>
-        (member.workspaceId === primaryId && member.target?.kind !== "pairedDaemon") || row.workspaceId
-          ? row
-          : { ...row, workspaceId: member.workspaceId });
-    });
-    grouped.set(primaryId, listed);
-  }
-
-  for (const worktree of worktrees) {
-    const owner = resolveWorktreeOwnerId(worktree, projects, activeProjectId);
-    if (!owner) continue;
-    const targetGroup = groups.find((g) => g.memberProjects.some((m) => m.workspaceId === owner));
-    const targetId = targetGroup ? targetGroup.primaryProject.workspaceId : owner;
-    const bucket = grouped.get(targetId);
-    const resolvedWorkspaceId = worktree.workspaceId ?? owner;
-    if (
-      !bucket ||
-      bucket.some(
-        (candidate) =>
-          candidate.path === worktree.path &&
-          (candidate.workspaceId ?? targetId) === resolvedWorkspaceId,
-      )
-    ) {
-      continue;
-    }
-    const member = targetGroup?.memberProjects.find((m) => m.workspaceId === resolvedWorkspaceId);
-    let resolvedWorktree = owner !== targetId && !worktree.workspaceId
-      ? { ...worktree, workspaceId: owner }
-      : worktree;
-    const memberTarget = member?.target;
-    if (!resolvedWorktree.hostLabel && memberTarget?.kind === "ssh") {
-      const hostLabel = hosts?.find((h) => h.id === memberTarget.hostId)?.label ?? memberTarget.hostId;
-      resolvedWorktree = { ...resolvedWorktree, hostLabel, ...(worktree.workspaceId ? {} : { workspaceId: owner }) };
-    }
-    bucket.push(resolvedWorktree);
-  }
-
-  if (activeProjectId) {
-    const activeGroup = groups.find((g) => g.memberProjects.some((m) => m.workspaceId === activeProjectId));
-    const activePrimaryId = activeGroup ? activeGroup.primaryProject.workspaceId : activeProjectId;
-    const activeBucket = grouped.get(activePrimaryId);
-    if (activeBucket) {
-      const activeProj = projects.find((p) => p.workspaceId === activeProjectId);
-      const isLocalActive = activeProj?.target?.kind !== "ssh";
-      const hasLocalActiveWorktree = activeBucket.some(
-        (candidate) => (candidate.workspaceId ?? activePrimaryId) === activeProjectId && !candidate.hostLabel,
-      );
-      if (isLocalActive && !hasLocalActiveWorktree) {
-        const cached = inactiveProjectWorktrees?.[activeProjectId] ?? inactiveProjectWorktrees?.[activePrimaryId];
-        if (cached && cached.length > 0) {
-          for (const row of cached) {
-            if (
-              !activeBucket.some(
-                (candidate) =>
-                  candidate.path === row.path &&
-                  (candidate.workspaceId ?? activePrimaryId) === (row.workspaceId ?? activePrimaryId),
-              )
-            ) {
-              activeBucket.push(row);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // A non-Git project has no git worktrees at all, so without a synthesized
-  // folder row its group would render empty and the folder would be
-  // unselectable - including while it is the active project.
-  for (const group of groups) {
-    const project = group.primaryProject;
-    const bucket = grouped.get(project.workspaceId);
-    if (!bucket) continue;
-    if (project.gitRoot === null && project.target?.kind !== "ssh" && bucket.length === 0) {
-      bucket.push(projectRootWorktree(project));
-    }
-
-    for (const member of group.memberProjects) {
-      const target = member.target;
-      if (target?.kind === "ssh" || target?.kind === "pairedDaemon") {
-        const existingIndex = bucket.findIndex(
-          (candidate) =>
-            candidate.path === member.repoRoot &&
-            (candidate.workspaceId ?? project.workspaceId) === member.workspaceId,
-        );
-        const hostLabel = (target.kind === "pairedDaemon" ? remoteState?.hosts[target.hostId]?.name : hosts?.find((h) => h.id === target.hostId)?.label) ?? member.hostLabel ?? target.hostId;
-        if (target.kind === "pairedDaemon") {
-          for (let i = 0; i < bucket.length; i++) {
-            if ((bucket[i].workspaceId ?? project.workspaceId) === member.workspaceId) {
-              const row = bucket[i];
-              const isStale = Boolean(row.stale || row.freshness?.stale);
-              const summary = isStale && row.hostSummary
-                ? row.hostSummary
-                : pairedRowSummary(target.hostId, remoteState);
-              bucket[i] = { ...row, workspaceId: member.workspaceId, hostLabel, hostSummary: summary };
-            }
-          }
-        }
-        if (existingIndex === -1) {
-          bucket.push({ ...projectRootWorktree(member, hostLabel), ...(target.kind === "pairedDaemon" ? { hostSummary: pairedRowSummary(target.hostId, remoteState) } : {}) });
-        } else {
-          const row = bucket[existingIndex];
-          const remoteFolder = target.kind === "ssh" && member.gitRoot !== null && member.gitRoot !== undefined &&
-            member.gitRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() !==
-              member.repoRoot.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-          const newBranch = remoteFolder ? null : member.gitBranch !== undefined ? member.gitBranch : row.branch;
-          const newHead = remoteFolder ? "" : member.gitHead !== undefined ? (member.gitHead ?? "") : row.head;
-          const newDetached = Boolean(newHead && !newBranch);
-          bucket[existingIndex] = {
-            ...row,
-            hostLabel: hostLabel ?? row.hostLabel,
-            branch: newBranch,
-            head: newHead,
-            detached: newDetached,
-          };
-        }
-      }
-    }
-  }
-
-  return grouped;
-}
-
-function applyWorktreeOrder(grouped: Map<string, Worktree[]>, order: WorktreeOrder) {
-  const ordered = new Map<string, Worktree[]>();
-  for (const [workspaceId, rows] of grouped) {
-    const rowKey = (r: Worktree) => worktreeSortableId(workspaceId, r.path, r.workspaceId);
-    const byKey = new Map(rows.map((row) => [rowKey(row), row]));
-    const seen = new Set<string>();
-    const next: Worktree[] = [];
-    for (const path of order[workspaceId] ?? []) {
-      // Prefer the qualified ID, then accept previously stored member keys or paths.
-      const row = byKey.get(path) ?? rows.find((r) =>
-        (r.path === path || (r.workspaceId && `${r.workspaceId}:${r.path}` === path)) && !seen.has(rowKey(r)));
-      if (!row || seen.has(rowKey(row))) continue;
-      seen.add(rowKey(row));
-      next.push(row);
-    }
-    for (const row of rows) {
-      const key = rowKey(row);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      next.push(row);
-    }
-    ordered.set(workspaceId, next);
-  }
-  return ordered;
-}
-
-function pruneWorktreeOrder(order: WorktreeOrder, grouped: Map<string, Worktree[]>) {
-  const pruned: WorktreeOrder = {};
-  for (const [workspaceId, storedPaths] of Object.entries(order)) {
-    const rows = grouped.get(workspaceId) ?? [];
-    const seen = new Set<string>();
-    const next = storedPaths.flatMap((path) => {
-      const row = rows.find((row) => worktreeSortableId(workspaceId, row.path, row.workspaceId) === path)
-        ?? rows.find((row) => (row.path === path || (row.workspaceId && `${row.workspaceId}:${row.path}` === path)) &&
-          !seen.has(worktreeSortableId(workspaceId, row.path, row.workspaceId)));
-      if (!row) return [];
-      const id = worktreeSortableId(workspaceId, row.path, row.workspaceId);
-      if (seen.has(id)) return [];
-      seen.add(id);
-      return [id];
-    });
-    if (next.length > 0) pruned[workspaceId] = next;
-  }
-  return pruned;
-}
-
-function worktreeOrdersEqual(left: WorktreeOrder, right: WorktreeOrder) {
-  const leftEntries = Object.entries(left);
-  const rightEntries = Object.entries(right);
-  if (leftEntries.length !== rightEntries.length) return false;
-  return leftEntries.every(([workspaceId, paths]) => {
-    const other = right[workspaceId];
-    return other?.length === paths.length && paths.every((path, index) => path === other[index]);
-  });
-}
-
-function readSidebarDragData(value: unknown): SidebarDragData | null {
-  if (!value || typeof value !== "object" || !("type" in value)) return null;
-  if (value.type === "sidebar-project") {
-    return "workspaceId" in value && typeof value.workspaceId === "string"
-      ? { type: value.type, workspaceId: value.workspaceId }
-      : null;
-  }
-  if (value.type === "sidebar-worktree") {
-    return "workspaceId" in value &&
-      typeof value.workspaceId === "string" &&
-      "worktreePath" in value &&
-      typeof value.worktreePath === "string"
-      ? { type: value.type, workspaceId: value.workspaceId, worktreePath: value.worktreePath,
-          rowWorkspaceId: "rowWorkspaceId" in value && typeof value.rowWorkspaceId === "string" ? value.rowWorkspaceId : undefined }
-      : null;
-  }
-  return null;
-}
-
-function seedCollapsedProjects(
-  collapsed: Set<string>,
-  projects: RegisteredProject[],
-  activeProjectId: string | undefined,
-) {
-  const groups = groupProjects(projects);
-  const activeGroup = groups.find((g) => isProjectGroupActive(g, activeProjectId));
-  const seeded = groups.filter(
-    (group) => group.groupId !== activeGroup?.groupId && !collapsed.has(group.groupId),
-  );
-  if (seeded.length === 0) return collapsed;
-  const next = new Set(collapsed);
-  for (const group of seeded) next.add(group.groupId);
-  return next;
-}
-
-type ProjectGroup = ReturnType<typeof groupProjects>[number];
-
-type VisibleProjectGroup = {
-  group: ProjectGroup;
-  rows: Worktree[];
-  /** True while a non-empty filter matched one of this project's worktrees. */
-  forceExpanded: boolean;
-};
-
-/** Mirrors ProjectHeader's visible label so the filter matches what the user reads. */
-function projectFilterLabels(
-  group: ProjectGroup,
-  hosts: Array<{ id: string; label: string }>,
-  remoteState: RemoteHostState,
-): string[] {
-  return group.memberProjects.flatMap((project) => {
-    const remote = project.target && project.target.kind !== "local" ? project.target : null;
-    if (!remote) return [project.workspaceId];
-    const hostLabel = remote.kind === "pairedDaemon"
-      ? (remoteState.hosts[remote.hostId]?.name ?? project.hostLabel ?? remote.hostId)
-      : (hosts.find((host) => host.id === remote.hostId)?.label ?? project.hostLabel ?? remote.hostId);
-    const folderName = project.repoRoot.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) ?? "/";
-    return [folderName, hostLabel];
-  });
-}
-
-function worktreeFilterLabel(worktree: Worktree): string {
-  return worktreeIdentity(worktree)?.slug ?? workspaceName(worktree);
-}
-
-/**
- * Case-insensitive substring filter over project labels and worktree display names. A project
- * whose label matches keeps all its rows; otherwise only matching rows stay and the project is
- * forced open so they are visible.
- */
-function filterProjectGroups(
-  groups: ProjectGroup[],
-  worktreesByProject: Map<string, Worktree[]>,
-  query: string,
-  hosts: Array<{ id: string; label: string }>,
-  remoteState: RemoteHostState,
-): VisibleProjectGroup[] {
-  const needle = query.trim().toLowerCase();
-  const entries = groups.map((group) => ({
-    group,
-    rows: worktreesByProject.get(group.primaryProject.workspaceId) ?? [],
-    forceExpanded: false,
-  }));
-  if (!needle) return entries;
-  return entries.flatMap((entry) => {
-    const matchingRows = entry.rows.filter((row) => worktreeFilterLabel(row).toLowerCase().includes(needle));
-    const projectMatches = projectFilterLabels(entry.group, hosts, remoteState)
-      .some((label) => label.toLowerCase().includes(needle));
-    if (projectMatches) return [{ ...entry, forceExpanded: matchingRows.length > 0 }];
-    if (matchingRows.length === 0) return [];
-    return [{ ...entry, rows: matchingRows, forceExpanded: true }];
-  });
-}
-
-/**
- * Footer aggregate (ui/DESIGN.md section 4 rule 10): each worktree counts once, needs input
- * outranking running as in the row state slot. Zero parts are omitted; both zero is empty.
- */
-export function sidebarStatusFooterText(
-  worktrees: readonly Worktree[],
-  activityByWorktreePath: Record<string, ActivitySummary | undefined> | undefined,
-): string {
-  let running = 0;
-  let waiting = 0;
-  const seen = new Set<string>();
-  for (const worktree of worktrees) {
-    if (worktree.workspaceId?.startsWith("daemon:")) continue;
-    const key = `${worktree.workspaceId ?? ""}:${worktree.path}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const activity = activityByWorktreePath?.[worktree.path];
-    if (activity?.hasWaiting) waiting += 1;
-    else if (activity?.hasWorking) running += 1;
-  }
-  return [
-    running > 0 ? `${running} running` : null,
-    waiting > 0 ? `${waiting} needs input` : null,
-  ].filter(Boolean).join(" · ");
-}
-

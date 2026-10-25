@@ -1,40 +1,12 @@
-import {
-  ChevronLeft,
-  ChevronRight,
-  GitBranch,
-  Inbox,
-  LoaderCircle,
-  LogOut,
-  PanelLeft,
-  Plus,
-  Server,
-  Terminal as TerminalIcon,
-  X,
-} from "lucide-react";
+import { GitBranch, LogOut, PanelLeft, Plus, Server, Terminal as TerminalIcon, X } from "lucide-react";
 import React, { useEffect, useMemo, useState, type ReactNode } from "react";
+import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { IconButton } from "../components/ui/IconButton";
-import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
 import { buildRemoteAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
-import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
-import { cn } from "../lib/cn";
-import {
-  RemoteInventoryProjectRow,
-  RemoteInventoryRail,
-  RemoteInventorySessionRow,
-  RemoteInventoryWorktreeRow,
-  touchStatusLabel,
-  withTouchCaption,
-  type RemoteInventoryRowDensity,
-} from "./remoteInventoryRows";
-import {
-  buildRemoteInventory,
-  declaresOwnProperty,
-  selectionOption,
-  type RemoteInventoryEntry,
-  type RemoteInventoryModel,
-  type RemoteInventorySelectionTarget,
-  type RemoteInventoryWorktree,
-} from "./remoteInventoryView";
+import { buildRemoteInventory, declaresOwnProperty, type RemoteInventoryModel } from "./remoteInventoryView";
+import { RemoteSidebar, type PublishedAttentionTarget, type RemoteSidebarTarget } from "./RemoteSidebar";
+import { RemoteTerminalTabStrip, stripTabs, type RemoteStripTab } from "./RemoteTerminalTabStrip";
+import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 
 export type RemoteTerminalTabInfo = {
   id: string;
@@ -92,6 +64,11 @@ export type RemoteContextOption = {
    * row identity. It is never rendered; the picker shows worktrees exactly like the desktop.
    */
   machineId?: string;
+  /**
+   * Open only what the machine already runs: never start a terminal for this choice. Set on a
+   * desktop-published Inbox row, which names an existing pane, so a stale row cannot spawn a shell.
+   */
+  attachOnly?: boolean;
 };
 
 export type RemoteWorkspaceModel = {
@@ -408,11 +385,6 @@ export function contextName(context: Pick<RemoteContext, "workspaceId" | "worktr
   return worktree ? `${workspace} / ${worktree}` : workspace;
 }
 
-function optionName(option: RemoteContextOption) {
-  const name = `${contextName(option)}${option.sessionLabel ? ` / ${option.sessionLabel}` : ""}`;
-  return option.attention ? `${name} (${option.attention})` : name;
-}
-
 export function getRemoteDocumentTitle(model: RemoteWorkspaceModel): string {
   if (!model.context.activeTerminal && (!model.context.terminalTabs || model.context.terminalTabs.length === 0)) {
     return "Ferryx";
@@ -429,6 +401,10 @@ export function getRemoteDocumentTitle(model: RemoteWorkspaceModel): string {
   return title ? `${title} - Ferryx` : "Ferryx";
 }
 
+
+/** The remote supervisor view the sidebar's Supervisor tab shows. */
+export type RemoteSidebarSupervisor = { readonly typing: boolean; readonly content: ReactNode };
+
 type RemoteWorkspaceMirrorProps = {
   model: RemoteWorkspaceModel;
   pending: RemoteContextOption | null;
@@ -443,11 +419,16 @@ type RemoteWorkspaceMirrorProps = {
   creationError?: string | null;
   /** Machine that owns model.context; account options from other machines are never current. */
   activeMachineId?: string | null;
-  /** Inventory loading/offline/error rows, rendered only inside the opened picker. */
+  /** Each machine's sidebar as its desktop publishes it, one section per machine. */
+  sidebarSections?: readonly RemoteSidebarSection[];
+  /** Account mode: the Supervisor tab's content; absent hides the tab. */
+  supervisor?: RemoteSidebarSupervisor;
+  onSidebarViewChange?: (view: SidebarViewId) => void;
+  /** Inventory loading/offline/error rows, rendered above the tree. */
   pickerStatus?: ReactNode;
   /**
-   * Phone home only: render the inventory as a full-width page body instead of a drawer, without
-   * the session-scoped inbox toggle, pane stepper or close control. `children` is ignored.
+   * Phone home only: render the sidebar as a full-width page body instead of a drawer, without
+   * the view tabs, terminal tab strip or close control. `children` is ignored.
    */
   inline?: boolean;
   children?: ReactNode;
@@ -519,6 +500,48 @@ export function paneSelectionOption(
   };
 }
 
+/** The option a sidebar row selects: the inventory's own option for that worktree when one
+ * exists (it carries the account machine), otherwise the row's identity. */
+export function sidebarRowOption(model: RemoteWorkspaceModel, target: RemoteSidebarTarget): RemoteContextOption {
+  const { node } = target;
+  const accountMachines = model.options.some((option) => option.machineId !== undefined);
+  const known = model.options.find((option) =>
+    !option.sessionId &&
+    option.workspaceId === node.workspaceId &&
+    option.worktreeSlug === node.worktreeSlug &&
+    (!accountMachines || option.machineId === target.machineId));
+  if (known) return known;
+  return {
+    workspaceId: node.workspaceId,
+    worktreeSlug: node.worktreeSlug,
+    worktreeLabel: node.worktreeSlug ?? node.label,
+    ...(accountMachines ? { machineId: target.machineId } : {}),
+  };
+}
+
+/**
+ * The option a desktop-published Inbox row opens, read-only and never creating a terminal: that
+ * machine's session by the pane's backend session id, otherwise the pane's worktree, otherwise the
+ * workspace (its root worktree first). The row's own `sessionId` is the desktop's local pane id and
+ * is never matched against the inventory.
+ */
+export function publishedAttentionOption(model: RemoteWorkspaceModel, target: PublishedAttentionTarget): RemoteContextOption {
+  const { machineId, row } = target;
+  const accountMachines = model.options.some((option) => option.machineId !== undefined);
+  const onMachine = (option: RemoteContextOption) =>
+    !option.unavailable && option.workspaceId === row.workspaceId && (!accountMachines || option.machineId === machineId);
+  const attachOnly = (option: RemoteContextOption): RemoteContextOption => ({ ...option, attachOnly: true });
+  const session = row.backendSessionId
+    ? model.options.find((option) => onMachine(option) && option.sessionId === row.backendSessionId)
+    : undefined;
+  if (session) return attachOnly(session);
+  const worktrees = model.options.filter((option) => onMachine(option) && !option.sessionId);
+  const known = (row.worktreeSlug !== undefined ? worktrees.find((option) => option.worktreeSlug === row.worktreeSlug) : undefined) ??
+    worktrees.find((option) => option.worktreeSlug === null) ?? worktrees[0];
+  if (known) return attachOnly(known);
+  return attachOnly({ workspaceId: row.workspaceId, worktreeSlug: null, worktreeLabel: null, ...(accountMachines ? { machineId } : {}) });
+}
+
 export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   model,
   pending,
@@ -531,380 +554,92 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   onCreateWorktree,
   creationError,
   activeMachineId = null,
+  sidebarSections = [],
+  supervisor,
+  onSidebarViewChange,
   pickerStatus,
   inline = false,
   children,
 }) => {
   const desktopSidebar = useRemoteDesktopSidebar();
-  // Touch density only when the drawer (not the desktop sidebar) renders these rows.
-  const rowDensity: RemoteInventoryRowDensity = desktopSidebar ? "compact" : "touch";
   const paneTabs = model.context.terminalTabs ?? [];
-
-  const inventory = useMemo(
-    () => mirrorInventory(model, activeMachineId),
-    [activeMachineId, model, paneTabs],
+  const inventory = useMemo(() => mirrorInventory(model, activeMachineId), [activeMachineId, model]);
+  const tabs = useMemo(
+    () => stripTabs(inventory, model.context.activeTabId ?? null, {
+      workspaceId: model.context.workspaceId,
+      worktreeSlug: model.context.worktreeSlug,
+      worktreeLabel: model.context.worktreeLabel,
+      activeMachineId,
+    }),
+    [activeMachineId, inventory, model.context],
   );
-  // The position arrows and ordinal describe the rows the tablist actually renders as
-  // selected, in render order — never the desktop tab-strip order, and never a first-row
-  // fallback when no rendered row holds the selection.
-  const renderedPanes = useMemo(() => renderedPaneOrder(inventory), [inventory]);
-  const currentPaneIndex = renderedPanes.findIndex((tab) => tab.id === model.context.activeTabId);
-  const currentPaneOrdinal = currentPaneIndex >= 0 ? currentPaneIndex + 1 : 0;
 
   const selectOption = (option: RemoteContextOption) => {
     onSelect(option);
     focusTerminalInput();
   };
-
-  const selectPane = (tab: RemoteTerminalTabInfo) => {
-    const option = paneSelectionOption(model, tab);
-    if (!option) return;
-    selectOption(option);
+  const selectTab = (tab: RemoteStripTab) => {
+    const option = tab.pane ? paneSelectionOption(model, tab.pane) : tab.option;
+    if (option) selectOption(option);
   };
 
-  const selectSelection = (selection: RemoteInventorySelectionTarget) => {
-    selectOption(selectionOption(selection));
+  const [view, setView] = useState<SidebarViewId>("worktrees");
+  useEffect(() => {
+    if (!selectorOpen && !desktopSidebar) setView("worktrees");
+  }, [desktopSidebar, selectorOpen]);
+  const changeView = (next: SidebarViewId) => {
+    setView(next);
+    onSidebarViewChange?.(next);
   };
-
-  const isPendingOption = (option: RemoteContextOption) =>
-    pending
-      ? (pending.machineId ?? null) === (option.machineId ?? null) &&
-        pending.workspaceId === option.workspaceId &&
-        pending.worktreeSlug === option.worktreeSlug &&
-        pending.worktreeLabel === option.worktreeLabel &&
-        pending.sessionId === option.sessionId
-      : false;
 
   const attentionRows = model.context.workspaceId
     ? buildRemoteAttentionRows(model.context.workspaceId, model.context.workspaceId, paneTabs, model.context.activeTabId)
     : [];
   const openAttentionRow = (row: AttentionRow) => {
     const tab = paneTabs.find((candidate) => candidate.id === row.id);
-    if (!tab) return;
-    selectPane(tab);
+    const option = tab ? paneSelectionOption(model, tab) : null;
+    if (!option) return;
+    selectOption(option);
     onSelectorOpenChange(false);
   };
-  // The worktree list is the sheet's default; the inbox is a sub view the header icon opens.
-  const [inboxOpen, setInboxOpen] = useState(false);
-  useEffect(() => {
-    if (!selectorOpen) setInboxOpen(false);
-  }, [selectorOpen]);
-  // Projects start expanded, like the desktop sidebar; only the ones the user folds are tracked.
-  const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleProject = (key: string) => {
-    setCollapsedProjects((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+
+  const openPublishedAttention = (target: PublishedAttentionTarget) => {
+    if (pending !== null) return;
+    onSelectorOpenChange(false);
+    selectOption(publishedAttentionOption(model, target));
   };
 
-  const renderPaneRow = (tab: RemoteTerminalTabInfo, siblingWorktreeLabel: string | null | undefined) => {
-    const logo = resolveAgentLogo(tab.agentType);
-    const monochrome = isMonochromeAgentLogo(tab.agentType);
-    const paneActive = tab.id === model.context.activeTabId;
-    // The worktree disambiguates same-named panes, exactly as the old tab strip did.
-    const foreignWorktree =
-      tab.worktreeLabel && tab.worktreeLabel !== siblingWorktreeLabel ? tab.worktreeLabel : null;
-    const tabDescription = foreignWorktree ? `${tab.label} - ${foreignWorktree}` : tab.label;
-    const tabAriaLabel = tab.activityState
-      ? `${tabDescription} (${tab.activityState})`
-      : tabDescription;
-    const caption = rowDensity === "touch" ? touchStatusLabel(tab.activityState ?? null) : null;
-    const row = (
-      <button
-        key={tab.id}
-        type="button"
-        role="tab"
-        data-session-id={tab.sessionId ?? undefined}
-        aria-selected={paneActive}
-        aria-label={tabAriaLabel}
-        disabled={pending !== null}
-        onClick={() => {
-          // Like every other row: the drawer covers the terminal, so leaving it open makes the
-          // switch invisible and the tap look dead.
-          onSelectorOpenChange(false);
-          selectPane(tab);
-        }}
-        className={cn(
-          rowDensity === "touch"
-            ? "flex min-h-11 w-full items-center gap-1.5 rounded-md py-0.5 pl-4 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-            : "flex min-h-[24px] w-full items-center gap-1.5 rounded-md py-0.5 pl-4 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60",
-          caption ? "pr-16" : null,
-          paneActive ? "bg-white/[0.06] text-foreground" : "text-worktree-sidebar-foreground/85 hover:bg-white/[0.04]",
-        )}
-      >
-        {logo ? (
-          <img
-            src={logo}
-            alt=""
-            data-testid="tab-agent-icon"
-            data-agent-type={tab.agentType}
-            className={cn(
-              rowDensity === "touch" ? "size-4 shrink-0" : "size-3 shrink-0",
-              monochrome && "agent-tab-logo--monochrome opacity-80",
-            )}
-          />
-        ) : (
-          <TerminalIcon
-            data-testid="tab-terminal-icon"
-            className={
-              rowDensity === "touch"
-                ? "size-4 shrink-0 opacity-70"
-                : "size-3 shrink-0 opacity-70"
-            }
-            aria-hidden="true"
-          />
-        )}
-        <span
-          className={
-            rowDensity === "touch"
-              ? "min-w-0 flex-1 truncate text-[14px] leading-tight"
-              : "min-w-0 flex-1 truncate text-[11px] leading-tight"
-          }
-        >
-          {tab.label}
-        </span>
-        {tab.activityState === "working" ? (
-          <LoaderCircle
-            aria-hidden="true"
-            data-testid="tab-working-indicator"
-            className="size-2.5 shrink-0 animate-spin text-status-working motion-reduce:animate-none"
-          />
-        ) : tab.activityState === "waiting" ? (
-          <span
-            aria-hidden="true"
-            data-testid="tab-waiting-indicator"
-            className="size-1.5 shrink-0 rounded-full bg-status-warning ring-2 ring-status-warning/20"
-          />
-        ) : tab.activityState === "done" ? (
-          <span
-            aria-hidden="true"
-            data-testid="tab-done-indicator"
-            className="size-1.5 shrink-0 rounded-full bg-status-success"
-          />
-        ) : null}
-      </button>
-    );
-    return rowDensity === "touch"
-      ? withTouchCaption(row, tab.activityState ?? null, pending !== null)
-      : row;
-  };
-
-  const renderEntry = (entry: RemoteInventoryEntry) => {
-    if (entry.kind === "pane") {
-      return renderPaneRow(entry.tab, model.context.worktreeLabel);
-    }
-    if (entry.pane) {
-      return renderPaneRow(entry.pane, model.context.worktreeLabel);
-    }
-    return (
-      <RemoteInventorySessionRow
-        key={entry.key}
-        testId="remote-session-row"
-        label={entry.label}
-        sessionId={entry.sessionId}
-        activity={entry.activity}
-        agentType={entry.option.agentType ?? null}
-        active={entry.active}
-        disabled={pending !== null || entry.option.unavailable === true}
-        busy={isPendingOption(entry.option)}
-        density={rowDensity}
-        onSelect={() => {
-          onSelectorOpenChange(false);
-          selectSelection(entry.selection);
-        }}
-      />
-    );
-  };
-
-  const renderWorktree = (worktree: RemoteInventoryWorktree) => {
-    const selectable = worktree.option ?? selectionOption(worktree.selection);
-    // The project header already names the project, so the row shows the worktree alone; the root
-    // worktree never inherits the active context's worktree name.
-    const visibleLabel = worktree.isRootWorktree
-      ? (selectable.unavailable ? "Unavailable" : "root")
-      : worktree.label ?? worktree.slug ?? "Worktree";
-    return (
-      <div key={worktree.key} data-testid="remote-worktree-group">
-        <RemoteInventoryWorktreeRow
-          label={optionName(selectable)}
-          visibleLabel={visibleLabel}
-          active={worktree.active}
-          disabled={pending !== null || selectable.unavailable === true}
-          busy={isPendingOption(selectable)}
-          activity={worktree.activity}
-          density={rowDensity}
-          onSelect={() => {
-            onSelectorOpenChange(false);
-            selectSelection(worktree.selection);
-          }}
-        />
-        {worktree.entries.length > 0 ? (
-          <div className="mt-px" data-testid="remote-session-rows" data-worktree={visibleLabel}>
-            {worktree.entries.map((entry) => renderEntry(entry))}
-          </div>
-        ) : null}
-      </div>
-    );
-  };
-
-  const inventoryEmpty = inventory.projects.length === 0 && inventory.orphanPanes.length === 0;
+  const sidebarEmpty = sidebarSections.length === 0;
+  const busyTab = pending?.sessionId ? tabs.find((tab) => tab.sessionId === pending.sessionId)?.key ?? null : null;
+  const createDisabled = pending !== null || !model.context.workspaceId;
 
   const sidebarBody = (
     <>
-      {inline ? null : (
-      <div className="flex h-8 items-center justify-between border-b border-worktree-sidebar-border px-1.5">
-        <button
-          type="button"
-          aria-label={attentionRows.length > 0 ? `Inbox (${attentionRows.length})` : "Inbox"}
-          aria-pressed={inboxOpen}
-          onClick={() => setInboxOpen((open) => !open)}
-          className={cn(
-            "relative flex size-6 items-center justify-center rounded-md transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-            inboxOpen ? "bg-white/[0.08] text-worktree-sidebar-foreground" : "text-muted-foreground",
-          )}
-        >
-          <Inbox className="size-3.5" aria-hidden="true" />
-          {attentionRows.length > 0 ? (
-            <span
-              data-testid="remote-attention-count"
-              className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
-            >
-              {attentionRows.length > 9 ? "9+" : attentionRows.length}
-            </span>
-          ) : null}
-        </button>
-        {desktopSidebar ? null : (
-          <button
-            type="button"
-            aria-label="Close worktree list"
-            onClick={() => onSelectorOpenChange(false)}
-            className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
+      {inline || desktopSidebar ? null : (
+        <div className="flex h-8 shrink-0 items-center justify-end px-1.5">
+          <IconButton label="Close worktree list" onClick={() => onSelectorOpenChange(false)}>
             <X className="size-3.5" aria-hidden="true" />
-          </button>
-        )}
+          </IconButton>
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <RemoteSidebar
+          sections={sidebarSections}
+          density={desktopSidebar ? "compact" : "touch"}
+          pending={pending ? { machineId: pending.machineId ?? null, workspaceId: pending.workspaceId, worktreeSlug: pending.worktreeSlug } : null}
+          onSelect={(target) => {
+            onSelectorOpenChange(false);
+            selectOption(sidebarRowOption(model, target));
+          }}
+          view={inline ? "worktrees" : view}
+          {...(inline ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow }, onOpenPublishedAttention: openPublishedAttention })}
+          {...(supervisor && !inline ? { supervisor } : {})}
+          status={pickerStatus}
+        />
+        {sidebarEmpty && !pickerStatus ? (
+          <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">No selectable desktop worktrees are available.</p>
+        ) : null}
       </div>
-      )}
-      {inboxOpen && !inline ? (
-        <div data-testid="remote-attention-inbox" className="flex max-h-96 min-h-0 flex-col">
-          <AttentionInbox rows={attentionRows} onOpen={openAttentionRow} compact />
-        </div>
-      ) : (
-        <>
-          {inline ? null : (
-          <div className="flex h-7 shrink-0 items-center gap-0.5 border-b border-worktree-sidebar-border px-1">
-            <button
-              type="button"
-              aria-label="Previous terminal tab"
-              disabled={pending !== null || currentPaneIndex <= 0}
-              onClick={() => {
-                const prevTab = renderedPanes[currentPaneIndex - 1];
-                if (prevTab) selectPane(prevTab);
-              }}
-              className="relative flex size-6 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
-            >
-              <ChevronLeft className="size-3.5" aria-hidden="true" />
-            </button>
-            <span
-              className="px-1 text-[11px] font-mono font-medium text-muted-foreground select-none"
-              aria-label={
-                currentPaneIndex >= 0
-                  ? `Terminal position: Tab ${currentPaneOrdinal} of ${paneTabs.length}`
-                  : `Terminal position: unknown of ${paneTabs.length}`
-              }
-            >
-              {currentPaneIndex >= 0 ? `${currentPaneOrdinal} / ${paneTabs.length}` : `? / ${paneTabs.length}`}
-            </span>
-            <button
-              type="button"
-              aria-label="Next terminal tab"
-              disabled={
-                pending !== null ||
-                currentPaneIndex < 0 ||
-                currentPaneIndex >= renderedPanes.length - 1
-              }
-              onClick={() => {
-                const nextTab = renderedPanes[currentPaneIndex + 1];
-                if (nextTab) selectPane(nextTab);
-              }}
-              className="relative flex size-6 touch-manipulation items-center justify-center rounded text-muted-foreground transition-colors hover:bg-worktree-sidebar-accent hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
-            >
-              <ChevronRight className="size-3.5" aria-hidden="true" />
-            </button>
-          </div>
-          )}
-          <div
-            role="tablist"
-            aria-label="Terminal tabs"
-            className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-1.5 scrollbar-sleek"
-          >
-            {pickerStatus}
-            {inventoryEmpty ? (
-              pickerStatus ? null : (
-                <p className="px-2 py-6 text-center text-[11px] text-muted-foreground">
-                  No selectable desktop worktrees are available.
-                </p>
-              )
-            ) : (
-              inventory.projects.map((project) => {
-                const expanded = !collapsedProjects.has(project.key);
-                return (
-                  <section
-                    key={project.key}
-                    data-project-key={project.key}
-                    className="mb-0.5 last:mb-0"
-                    aria-label={project.workspaceId}
-                  >
-                    <RemoteInventoryProjectRow
-                      label={project.label}
-                      activity={project.activity}
-                      expanded={expanded}
-                      onToggle={() => toggleProject(project.key)}
-                      density={rowDensity}
-                    />
-                    {expanded ? (
-                      <RemoteInventoryRail>
-                        {project.worktrees.map((worktree) => renderWorktree(worktree))}
-                      </RemoteInventoryRail>
-                    ) : null}
-                  </section>
-                );
-              })
-            )}
-            {inventory.orphanPanes.length > 0 ? (
-              <section className="mb-0.5 last:mb-0" aria-label="Other panes">
-                <div
-                  className={
-                    rowDensity === "touch"
-                      ? "flex min-h-9 items-center gap-1.5 border-b border-worktree-sidebar-border px-2 pb-1.5 pt-2 text-[12px] font-medium text-chat-foreground-secondary"
-                      : "flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-worktree-sidebar-foreground/65"
-                  }
-                >
-                  <h3 className="min-w-0 flex-1 truncate">Other panes</h3>
-                </div>
-                <div>{inventory.orphanPanes.map((tab) => renderPaneRow(tab, model.context.worktreeLabel))}</div>
-              </section>
-            ) : null}
-          </div>
-        </>
-      )}
-      {onCreateTerminal ? (
-        <div className="border-t border-worktree-sidebar-border p-1">
-          <button
-            type="button"
-            data-testid="remote-new-terminal"
-            disabled={pending !== null || !model.context.workspaceId}
-            onClick={onCreateTerminal}
-            className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[11px] font-medium text-worktree-sidebar-foreground transition-colors hover:bg-worktree-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
-          >
-            <Plus className="size-3 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate">New terminal</span>
-          </button>
-        </div>
-      ) : null}
       <div className="flex h-8 shrink-0 items-center justify-between gap-1 border-t border-worktree-sidebar-border px-1.5">
         {onSignOut ? (
           <IconButton label="Sign out" onClick={onSignOut}>
@@ -919,20 +654,12 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
         )}
         <div className="flex items-center gap-1">
           {onCreateWorktree ? (
-            <IconButton
-              label="New worktree"
-              disabled={pending !== null || !model.context.workspaceId}
-              onClick={onCreateWorktree}
-            >
+            <IconButton label="New worktree" disabled={createDisabled} onClick={onCreateWorktree}>
               <GitBranch className="size-3.5" aria-hidden="true" />
             </IconButton>
           ) : null}
-          {onCreateTerminal ? (
-            <IconButton
-              label="New terminal tab"
-              disabled={pending !== null || !model.context.workspaceId}
-              onClick={onCreateTerminal}
-            >
+          {inline && onCreateTerminal ? (
+            <IconButton label="New terminal tab" disabled={createDisabled} onClick={onCreateTerminal}>
               <Plus className="size-3.5" aria-hidden="true" />
             </IconButton>
           ) : null}
@@ -985,6 +712,15 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
       ) : null}
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <RemoteTerminalTabStrip
+          tabs={tabs}
+          paneCount={paneTabs.length}
+          locked={pending !== null}
+          busyKey={busyTab}
+          onSelect={selectTab}
+          {...(onCreateTerminal ? { onCreateTerminal } : {})}
+          createDisabled={createDisabled}
+        />
         {creationError ? <p role="alert" className="shrink-0 px-3 py-2 text-xs text-destructive">{creationError}</p> : null}
 
         <div className="flex min-h-0 flex-1 flex-col">
@@ -1002,8 +738,8 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
                 </span>
                 <h2 className="mt-4 text-sm font-semibold text-foreground">No focused terminal</h2>
                 <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                  {model.context.terminalTabs && model.context.terminalTabs.length > 0
-                    ? "Pick a terminal from the list to mirror it here. Browser tabs stay private."
+                  {paneTabs.length > 0
+                    ? "Pick a terminal from the tabs to mirror it here. Browser tabs stay private."
                     : "Open a terminal in Ferryx Desktop to mirror it here. Browser tabs stay private."}
                 </p>
               </div>

@@ -9,13 +9,16 @@ import {
 } from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
 import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
+import { sidebarParityFixture } from "../components/sidebar/sidebarParityFixture";
 import "../index.css";
 import "../settings-runtime.css";
 
 // Fixture-only entry: no real daemon, SSH target, account, or terminal is contacted.
 // Query params: width (px, default 236), theme (light|dark, default dark). The Sidebar has no
 // filter input, so a `filter` param is accepted and ignored.
+// `fixture=parity` renders the shared sidebar parity fixture the remote QA harness also renders.
 const params = new URLSearchParams(location.search);
+const parity = params.get("fixture") === "parity";
 const parsedWidth = Number(params.get("width"));
 const width = Number.isFinite(parsedWidth) && parsedWidth > 0 ? Math.round(parsedWidth) : 236;
 document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
@@ -36,8 +39,9 @@ const SITE_ROOT = "/fixture/code/site";
 
 // The Sidebar reads width, collapsed projects, and row order from storage on mount.
 localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
-localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([SITE_ID]));
-localStorage.removeItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY);
+localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify(parity ? sidebarParityFixture.collapsedGroupIds : [SITE_ID]));
+if (parity) localStorage.setItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY, JSON.stringify(sidebarParityFixture.worktreeOrder));
+else localStorage.removeItem(SIDEBAR_WORKTREE_ORDER_STORAGE_KEY);
 
 const omarchy: SshHost = {
   id: "omarchy",
@@ -139,6 +143,13 @@ const markFixture = (key: string) => (value?: { path?: string; workspaceId?: str
 };
 
 const { Sidebar } = await import("../components/Sidebar");
+// Imported after `isTauri` is defined: the host store picks its desktop mode at module load.
+const { remoteHostStore } = await import("../state/remoteHostStore");
+const { updateListingFailures } = await import("../state/worktreeListingFailures");
+if (parity) {
+  remoteHostStore.setState((state) => ({ ...state, hosts: sidebarParityFixture.pairedHosts, nativeStatus: "ready", machineFeaturesEnabled: true }));
+  updateListingFailures(() => sidebarParityFixture.listingFailures);
+}
 const attention = {
   rows: [1, 2, 3].map((n) => ({
     id: `qa-row-${n}`, revision: 1, workspaceId: LOCAL_ID, sessionId: `qa-sess-${n}`, state: "needs-you" as const,
@@ -151,7 +162,30 @@ const attention = {
   onInboxOpenChange: () => markFixture("fixtureInboxToggle")(),
 };
 const root = document.getElementById("root");
-if (root) {
+if (root && parity) {
+  const fixture = sidebarParityFixture;
+  ReactDOM.createRoot(root).render(
+    <div data-testid="sidebar-qa-root" className="flex overflow-hidden bg-background" style={{ width: `${width}px`, height: "100vh" }}>
+      <Sidebar
+        open
+        projects={fixture.projects}
+        activeProjectId={fixture.activeProjectId}
+        worktrees={fixture.worktrees}
+        inactiveProjectWorktrees={fixture.inactiveProjectWorktrees}
+        agents={[...sidebarParityFixture.desktopAgents]}
+        activePath={fixture.active.path}
+        unreadWorktreePaths={sidebarParityFixture.desktopUnread}
+        activityByWorktreePath={sidebarParityFixture.desktopActivity}
+        onSelectProject={markFixture("fixtureSelectedProject")}
+        onSelectWorktree={markFixture("fixtureSelectedWorktree")}
+        onCreateWorktree={markFixture("fixtureCreateWorktree")}
+        onOpenSettings={() => markFixture("fixtureOpenSettings")()}
+        attention={{ ...attention, rows: [...sidebarParityFixture.desktopAttention] }}
+      />
+    </div>,
+  );
+  document.documentElement.dataset.qaReady = "true";
+} else if (root) {
   ReactDOM.createRoot(root).render(
     <div data-testid="sidebar-qa-root" className="flex overflow-hidden bg-background" style={{ width: `${width}px`, height: "100vh" }}>
       <Sidebar

@@ -64,6 +64,7 @@ const native = {
   listWorktrees: vi.fn().mockResolvedValue([]),
   registerProject: vi.fn(),
   syncDesktopLocalProjects: vi.fn().mockResolvedValue(undefined),
+  syncDesktopSidebar: vi.fn().mockResolvedValue(1),
   signalTerminal: vi.fn(),
   saveSession: vi.fn().mockResolvedValue(undefined),
   loadSession: vi.fn().mockResolvedValue(null),
@@ -214,6 +215,7 @@ vi.mock("./lib/tauri", () => ({
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
   syncDesktopLocalProjects: native.syncDesktopLocalProjects,
+  syncDesktopSidebar: native.syncDesktopSidebar,
   signalTerminal: native.signalTerminal,
   saveSession: native.saveSession,
   loadSession: native.loadSession,
@@ -667,6 +669,45 @@ describe("App project workspace flow", () => {
       [[{ workspaceId: "first", repoRoot: "/repo/first" }]],
       [[{ workspaceId: "latest", repoRoot: "/repo/latest" }]],
     ]);
+  });
+
+  it("publishes the desktop sidebar model with SSH and paired members once per distinct model", async () => {
+    const pairedId = `daemon:${"a".repeat(64)}`;
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+      { workspaceId: "publish-local", repoRoot: "/repo/publish-local", gitRoot: "/repo/publish-local" },
+      { workspaceId: "ssh:publish-box", repoRoot: "/srv/publish-box", gitRoot: "/srv/publish-box", target: { kind: "ssh", hostId: "box" } },
+      { workspaceId: pairedId, repoRoot: "/work/site", gitRoot: "/work/site", target: { kind: "pairedDaemon", hostId: "studio" }, remoteWorkspaceId: "site" },
+    ]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "publish-local");
+    native.isTauriRuntime.mockReturnValue(true);
+    native.getInitialProject.mockResolvedValue({ workspaceId: "publish-local", repoRoot: "/repo/publish-local" });
+    native.syncDesktopSidebar.mockReset().mockResolvedValue(1);
+
+    render(<App />);
+    await waitFor(() => expect(native.syncDesktopSidebar).toHaveBeenCalledTimes(1));
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage")); });
+
+    expect(native.syncDesktopSidebar).toHaveBeenCalledTimes(1);
+    const [model] = native.syncDesktopSidebar.mock.calls[0] as [{ source: string; projects: { members: { workspaceId: string; kind: string }[] }[] }];
+    expect(model.source).toBe("desktop");
+    expect(model.projects.flatMap((node) => node.members.map((member) => [member.workspaceId, member.kind]))).toEqual(
+      expect.arrayContaining([["publish-local", "local"], ["ssh:publish-box", "ssh"], [pairedId, "paired"]]),
+    );
+  });
+
+  it("does not publish the sidebar model outside the native runtime", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+      { workspaceId: "web-local", repoRoot: "/repo/web-local", gitRoot: "/repo/web-local" },
+    ]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "web-local");
+    native.isTauriRuntime.mockReturnValue(false);
+    native.syncDesktopSidebar.mockReset().mockResolvedValue(1);
+
+    render(<App />);
+    expect(await screen.findByText("Active project web-local")).toBeInTheDocument();
+    await act(async () => { window.dispatchEvent(new StorageEvent("storage")); });
+
+    expect(native.syncDesktopSidebar).not.toHaveBeenCalled();
   });
 
   it("resends unchanged desktop membership after reconnect and includes failed registrations", async () => {

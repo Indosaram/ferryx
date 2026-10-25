@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { RemoteApp } from "./RemoteApp";
 import { openWorkspacePicker } from "./home/phoneHomeTestUtils";
+import { requireSidebarRow } from "./remoteSidebarTestUtils";
 import { clearStoredAccountSessionToken, storeAccountSessionToken } from "./accountSession";
 import * as accountSessionModule from "./accountSession";
 import * as attachTunnelModule from "./attachTunnel";
@@ -237,7 +238,7 @@ describe("reference chat gateway identity across a machine switch", () => {
     render(<RemoteApp />);
     const pick = async (workspaceId: string) => {
       const picker = await openWorkspacePicker();
-      const option = await within(picker).findByRole("button", { name: `${workspaceId} / main` }, { timeout: 5000 });
+      const option = await waitFor(() => requireSidebarRow(workspaceId, "main", picker), { timeout: 5000 });
       act(() => {
         fireEvent.click(option);
       });
@@ -377,7 +378,7 @@ describe("reference chat gateway identity across a machine switch", () => {
     render(<RemoteApp />);
     const pick = async (workspaceId: string) => {
       const picker = await openWorkspacePicker();
-      const option = await within(picker).findByRole("button", { name: `${workspaceId} / main` }, { timeout: 5000 });
+      const option = await waitFor(() => requireSidebarRow(workspaceId, "main", picker), { timeout: 5000 });
       act(() => {
         fireEvent.click(option);
       });

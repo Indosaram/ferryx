@@ -7592,6 +7592,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             ),
         )
         .route(
+            "/api/v1/workspace/sidebar",
+            get(super::workspace_api::sidebar),
+        )
+        .route(
             "/api/v1/workspace/operations/{requestId}",
             get(operation_boundary),
         )

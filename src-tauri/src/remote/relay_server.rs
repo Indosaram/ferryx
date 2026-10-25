@@ -2619,6 +2619,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["fs", "repositories"])
             | ("GET" | "POST", ["workspace", "projects"])
             | ("DELETE", ["workspace", "projects", _])
+            | ("GET", ["workspace", "sidebar"])
             | ("GET" | "POST" | "DELETE", ["workspace", "worktrees"])
             | ("GET", ["workspace", "worktrees", "status"])
             | ("GET", ["workspace", "operations", _])
@@ -4677,6 +4678,20 @@ mod tests {
         assert!(!allowed_http_route(&Method::DELETE, "workspace/paste-upload"));
         assert!(!allowed_http_route(&Method::POST, "workspace/file-read/extra"));
         assert!(!allowed_http_route(&Method::POST, "workspace/../file-read"));
+    }
+
+    #[test]
+    fn test_allowed_http_route_admits_workspace_sidebar_read_only() {
+        assert!(allowed_http_route(&Method::GET, "workspace/sidebar"));
+        assert!(validate_http_query("workspace/sidebar", None).is_ok());
+        for method in [Method::POST, Method::DELETE, Method::PUT] {
+            assert!(
+                !allowed_http_route(&method, "workspace/sidebar"),
+                "{method} stays refused"
+            );
+        }
+        assert!(!allowed_http_route(&Method::GET, "workspace/sidebar/extra"));
+        assert!(!allowed_http_route(&Method::GET, "workspace/../sidebar"));
     }
 
     #[test]

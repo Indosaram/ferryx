@@ -6223,6 +6223,18 @@ impl DaemonServer {
                         Err(error) => daemon_error(error.to_string()),
                     }
                 }
+                Ok(DaemonRequest::SyncDesktopSidebar { model }) => {
+                    let service = Arc::clone(&self.session_service.workspace_service);
+                    match crate::ipc::run_blocking(move || Ok(service.sync_desktop_sidebar(model))).await {
+                        Ok(Ok(revision)) => DaemonResponse::SyncDesktopSidebarOk { revision },
+                        Ok(Err(rejection)) => DaemonResponse::Error {
+                            code: Some(rejection.code().into()),
+                            message: rejection.to_string(),
+                            details: None,
+                        },
+                        Err(error) => daemon_error(error.to_string()),
+                    }
+                }
                 Ok(DaemonRequest::RegisterWorkspace {
                     workspace_id,
                     repo_root,
@@ -7308,6 +7320,9 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::SubscribeRemoteEvents) => {
                     let mut events = self.remote_event_tx.subscribe();
+                    // The desktop holds this stream for as long as it runs; when its last stream
+                    // ends, the sidebar's published live signals are dropped (the guard's Drop).
+                    let mut desktop_stream = Some(self.session_service.workspace_service.desktop_stream_opened());
                     let mut resp_json =
                         serde_json::to_string(&DaemonResponse::SubscribeRemoteEventsOk).unwrap();
                     resp_json.push('\n');
@@ -7317,7 +7332,24 @@ impl DaemonServer {
                         return;
                     }
                     loop {
-                        match events.recv().await {
+                        // The desktop never writes after subscribing; EOF on its side means it is
+                        // gone (app quit or crash). A client that half-closes right away only loses
+                        // its live sidebar signals; its events keep flowing.
+                        let received = tokio::select! {
+                            read = reader.read_line(&mut line), if desktop_stream.is_some() => Err(read),
+                            received = events.recv() => Ok(received),
+                        };
+                        let received = match received {
+                            Ok(received) => received,
+                            Err(read) => {
+                                if matches!(read, Ok(0) | Err(_)) {
+                                    desktop_stream = None;
+                                }
+                                line.clear();
+                                continue;
+                            }
+                        };
+                        match received {
                             Ok(event) => {
                                 let Ok(mut line) = serde_json::to_string(&event) else {
                                     continue;
