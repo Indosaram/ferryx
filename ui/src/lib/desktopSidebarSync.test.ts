@@ -4,6 +4,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 const tauri = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: tauri.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
+vi.mock("./sshHosts", () => ({ useSshHosts: () => ({ hosts: [] }) }));
 
 import { buildSidebarModel, type SidebarModel } from "../components/sidebar/sidebarModel";
 import type { RemoteHostState } from "../state/remoteHostStore";
