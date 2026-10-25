@@ -37,23 +37,17 @@ pub fn classifier_allows(text: &str) -> bool {
     !DENY.iter().any(|pattern| lower.contains(pattern))
 }
 
-pub fn auto_answer(reading: &Reading, suggested: &str) -> AutoDecision {
+/// What the hub does with a prompt it sees in a pane.
+///
+/// The hub has no answer of its own: `suggested` is only the prompt's question text, and the
+/// pane-side answer path types an option index, so answering here would pick option 1 for the
+/// owner. Every readable prompt goes to the owner; an unreadable screen is held. `Answer` stays
+/// for a caller that has a real answer source (a judge verdict), which none has today.
+pub fn auto_answer(reading: &Reading, _suggested: &str) -> AutoDecision {
     if !reading.screen_readable {
         return AutoDecision::Hold;
     }
-    let screen_approval =
-        reading.kind.as_deref() == Some("approval") && reading.state_source != "provider";
-    if screen_approval {
-        return AutoDecision::EscalateOwner;
-    }
-    let source_ok =
-        reading.state_source == "provider" || reading.kind.as_deref() == Some("question");
-    if !source_ok || !classifier_allows(suggested) {
-        return AutoDecision::EscalateOwner;
-    }
-    AutoDecision::Answer {
-        text: suggested.to_owned(),
-    }
+    AutoDecision::EscalateOwner
 }
 
 #[cfg(test)]
@@ -69,18 +63,22 @@ mod tests {
     }
 
     #[test]
-    fn auto_answer_follows_the_source_rule() {
-        assert!(matches!(
+    fn auto_answer_never_answers_for_the_owner() {
+        assert_eq!(
             auto_answer(&reading("provider", Some("approval"), true), "yes"),
-            AutoDecision::Answer { .. }
-        ));
-        assert!(matches!(
+            AutoDecision::EscalateOwner
+        );
+        assert_eq!(
             auto_answer(
                 &reading("screen", Some("question"), true),
                 "the first option"
             ),
-            AutoDecision::Answer { .. }
-        ));
+            AutoDecision::EscalateOwner
+        );
+        assert_eq!(
+            auto_answer(&reading("provider", Some("question"), true), "Which plan?"),
+            AutoDecision::EscalateOwner
+        );
         assert_eq!(
             auto_answer(&reading("screen", Some("approval"), true), "yes"),
             AutoDecision::EscalateOwner

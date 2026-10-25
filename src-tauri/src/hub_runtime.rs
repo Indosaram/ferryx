@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ferryx_hub::agent_control::{AgentControl, AgentOp, TaskLauncher};
-use ferryx_hub::security::{auto_answer, AutoDecision, Reading};
 use ferryx_hub::sessions::watch::Observation;
 use ferryx_hub::{Hub, HubConfig, HubError};
 use serde_json::{json, Value};
@@ -986,8 +985,12 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let watch_server = Arc::clone(&launch.server);
     let model_url = launch.config.supervisor_listen_url.clone();
     let lead = launch.config.meta_session_id.clone().unwrap_or_else(|| "meta".into());
+    // The omo session poller reports omo panes (by omo session id, on every host), so the pane
+    // observer leaves them to it instead of sending a second notice under the pane id.
+    let omo_polled = ferryx_hub::sessions::omo_poll::enabled() && ferryx_hub::sessions::omo_poll::binary().is_some();
+    tasks.push(tokio::spawn(ferryx_hub::sessions::omo_poll::run(Arc::clone(&launch.hub))));
     tasks.push(tokio::spawn(async move {
-        let mut answered = std::collections::HashSet::new();
+        let mut agents = std::collections::HashMap::new();
         let mut runs = std::collections::HashMap::new();
         let mut worked = std::collections::HashSet::new();
         loop {
@@ -1005,7 +1008,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                         );
                     }
                     let run = state_run(&mut runs, &observation);
-                    if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut answered, run, observation).await {
+                    if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut agents, omo_polled, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
                     }
                     if idle {
@@ -1535,37 +1538,52 @@ fn approval_card(session_id: &str, read: &Value) -> Option<ferryx_hub::sessions:
     })
 }
 
+/// Turns one pane observation into owner notices. The hub never types into the pane here: a
+/// question or approval waits for the owner, who answers from the notice card or the terminal.
 async fn on_agent_event(
     hub: &Arc<Hub>,
     control: &DaemonBridge,
-    answered: &mut std::collections::HashSet<String>,
+    agents: &mut std::collections::HashMap<String, String>,
+    omo_polled: bool,
     run: u64,
     observation: crate::agent_control::events::AgentObservation,
 ) -> Result<(), HubError> {
     let session_id = observation.session_id.clone();
     let mut question = None;
     let mut approval = None;
-    let mut screen_readable = observation.screen_revision.is_some() && observation.state_source != AgentStateSource::None;
-    if observation.prompt_id.is_some() {
+    let mut name = None;
+    let wants_owner = observation.prompt_id.is_some() || matches!(observation.state, AgentControlState::Blocked);
+    if wants_owner {
         if let Ok(value) = control.execute(None, AgentOp::Read { session_id: session_id.clone() }).await {
-            question = value.pointer("/session/pending/question").and_then(Value::as_str).map(str::to_owned);
-            approval = approval_card(&session_id, &value);
-            if value.pointer("/session/screen/text").and_then(Value::as_str).unwrap_or("").is_empty() {
-                screen_readable = false;
+            if let Some(agent) = value.pointer("/session/agent").and_then(Value::as_str) {
+                agents.insert(session_id.clone(), agent.to_owned());
+            }
+            name = value
+                .pointer("/session/cwd")
+                .and_then(Value::as_str)
+                .and_then(|cwd| std::path::Path::new(cwd).file_name())
+                .map(|base| base.to_string_lossy().into_owned());
+            if observation.prompt_id.is_some() {
+                question = value.pointer("/session/pending/question").and_then(Value::as_str).map(str::to_owned);
+                approval = approval_card(&session_id, &value);
             }
         }
     }
+    if omo_polled && agents.get(&session_id).map(String::as_str) == Some("omo") {
+        return Ok(());
+    }
     let target = format!("local:{session_id}");
     let watched = ferryx_hub::sessions::watch::Watcher::is_watched(&hub.pool, &target).await?;
+    let shown = ferryx_hub::sessions::watch::short_id(&session_id).to_owned();
     let obs = Observation {
         target: target.clone(),
         machine: "local".into(),
         session_id: session_id.clone(),
-        name: session_id.clone(),
+        name: name.map_or(shown.clone(), |base| format!("{base} {shown}")),
         message_count: run,
         streaming: matches!(observation.state, AgentControlState::Working),
         blocking_question: matches!(observation.state, AgentControlState::Blocked) && question.is_none(),
-        question: question.clone(),
+        question,
         last_assistant: String::new(),
         watched,
         machine_failed: false,
@@ -1576,57 +1594,6 @@ async fn on_agent_event(
         approval,
     };
     hub.ingest(&obs).await?;
-    let reading = Reading {
-        state_source: match observation.state_source {
-            AgentStateSource::Provider => "provider".into(),
-            AgentStateSource::Screen => "screen".into(),
-            AgentStateSource::None => "none".into(),
-        },
-        kind: observation.kind.clone(),
-        screen_readable,
-    };
-    let suggested = question.unwrap_or_default();
-    if let (Some(prompt_id), Some(revision)) = (observation.prompt_id.clone(), observation.screen_revision.clone()) {
-        if answered.insert(prompt_id.clone()) {
-            match auto_answer(&reading, &suggested) {
-                // A person paused this pane's lane: the supervisor keeps watching but types
-                // nothing. Escalations still reach the owner.
-                AutoDecision::Answer { .. }
-                    if ferryx_hub::lanes::supervised::session_paused(&hub.pool, &session_id).await? =>
-                {
-                    // Forget the prompt so a resume can still answer it.
-                    answered.remove(&prompt_id);
-                }
-                AutoDecision::Answer { .. } => {
-                    let _ = control
-                        .execute(
-                            None,
-                            AgentOp::Answer {
-                                session_id,
-                                prompt_id: prompt_id.clone(),
-                                screen_revision: revision,
-                                answer: json!({"optionIndex": 0}),
-                                request_id: format!("hub-auto-{prompt_id}"),
-                            },
-                        )
-                        .await;
-                }
-                AutoDecision::EscalateOwner => {
-                    // A card is the only notice for this prompt. The plain line is for an
-                    // escalation the watcher cannot turn into buttons.
-                    if let Some(text) = ferryx_hub::sessions::watch::escalation_plain_text(
-                        &prompt_id,
-                        &target,
-                        obs.approval.is_some(),
-                    ) {
-                        let session = hub.owner_session();
-                        let _ = ferryx_hub::chat::reply::chat_reply(&hub.pool, &session, &text, None).await;
-                    }
-                }
-                AutoDecision::Hold => {}
-            }
-        }
-    }
     Ok(())
 }
 

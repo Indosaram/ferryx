@@ -41,6 +41,8 @@ fn script(messages: &[&str], approval: bool) -> Script {
         queued_ticks: 0,
         tick: std::time::Duration::ZERO,
         no_ack: false,
+        switch_error: None,
+        silent_first_turn: false,
     }
 }
 

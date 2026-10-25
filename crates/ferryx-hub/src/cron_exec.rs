@@ -316,8 +316,12 @@ fn timeout_secs(payload: &Value) -> u64 {
         .or_else(|| payload.get("script_timeout"))
         .or_else(|| payload.get("script_timeout_seconds"))
         .and_then(Value::as_u64)
-        .unwrap_or(30)
+        .unwrap_or(DEFAULT_SCRIPT_TIMEOUT_SECS)
 }
+
+/// A cron script with no timeout of its own. 30s killed report and sync scripts that take a
+/// few minutes (2026-10-23/24 cron failures).
+pub const DEFAULT_SCRIPT_TIMEOUT_SECS: u64 = 300;
 
 async fn read_prompt(payload: &Value) -> Result<String> {
     if let Some(path) = payload.get("brief_file").and_then(Value::as_str) {
@@ -458,6 +462,12 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[test]
+    fn a_script_without_a_timeout_gets_five_minutes() {
+        assert_eq!(timeout_secs(&serde_json::json!({"script": "x"})), 300);
+        assert_eq!(timeout_secs(&serde_json::json!({"timeout_secs": 30})), 30);
+    }
 
     #[test]
     fn missing_commands_are_found_in_script_output() {

@@ -20,7 +20,9 @@ pub const KAKAO_FIRST: Duration = Duration::from_secs(120);
 pub const KAKAO_EVERY: Duration = Duration::from_secs(120);
 pub const GITHUB_EVERY: Duration = Duration::from_secs(300);
 pub const MAIL_ACCOUNT_DEFAULT: &str = "freedomzero91@gmail.com";
-pub const MAIL_FILTER: &str = "is:unread -category:promotions -category:social -category:updates";
+/// Updates stay in: security, billing and account notices land there. The prefilter drops the
+/// rest of the Updates tab.
+pub const MAIL_FILTER: &str = "is:unread -category:promotions -category:social";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InboxWatcherEvent {
@@ -1138,6 +1140,16 @@ async fn tail_text(stderr: Option<tokio::process::ChildStderr>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Security, billing and account mail lands in Gmail's Updates tab; the watch must
+    /// fetch it so the prefilter can pass it to the owner.
+    #[test]
+    fn the_mail_watch_keeps_the_updates_tab() {
+        assert!(!MAIL_FILTER.contains("category:updates"));
+        assert!(MAIL_FILTER.contains("-category:promotions"));
+        let args = mail_watch_command("me@example.com");
+        assert_eq!(args.last().map(String::as_str), Some(MAIL_FILTER));
+    }
 
     #[tokio::test]
     async fn a_burst_of_mail_events_collapses_into_one_fetch_plus_one_trailing() {

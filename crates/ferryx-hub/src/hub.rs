@@ -57,15 +57,24 @@ impl Hub {
         }
         let mut policy = NotifyPolicy::from_env();
         policy.mode = crate::sessions::watch::effective_notify_mode(&pool).await?;
+        Ok(Self::with_policy(pool, control, config, policy))
+    }
+
+    pub fn with_policy(
+        pool: SqlitePool,
+        control: Arc<dyn AgentControl>,
+        config: HubConfig,
+        policy: NotifyPolicy,
+    ) -> Arc<Self> {
         let watcher = Arc::new(Watcher::new(pool.clone(), policy));
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             pool,
             control,
             watcher,
             config,
             latest: std::sync::Mutex::new(HashMap::new()),
             wakes: std::sync::Mutex::new(HashMap::new()),
-        }))
+        })
     }
 
     /// Where owner notices, approval cards, and auto-answer escalations go.
