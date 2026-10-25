@@ -598,4 +598,70 @@ prunable reason gitdir gone
             Err(WorktreeError::InvalidRepoRoot { .. })
         ));
     }
+
+    fn exclude_file_of(manager: &WorktreeManager) -> std::path::PathBuf {
+        let common = git::run_git(manager.repo_root(), &["rev-parse", "--git-common-dir"]).unwrap();
+        naming::exclude_file(manager.repo_root(), &common)
+    }
+
+    #[test]
+    fn creating_a_worktree_excludes_it_from_status() {
+        let (_dir, manager) = setup_test_repo();
+        for slug in ["first", "second"] {
+            let path = manager.worktree_path_for("ws-ex", slug).unwrap();
+            manager
+                .create_worktree(CreateWorktreeOptions::new("ws-ex", slug, &path))
+                .unwrap();
+        }
+        let status = git::run_git(manager.repo_root(), &["status", "--porcelain"]).unwrap();
+        assert_eq!(status.trim(), "", "managed worktrees leaked into git status");
+        assert!(
+            !manager.repo_root().join(".gitignore").exists(),
+            "the user's .gitignore must never be written"
+        );
+        let exclude = fs::read_to_string(exclude_file_of(&manager)).unwrap();
+        let pattern = naming::exclude_pattern(naming::WORKTREE_DIR);
+        assert_eq!(exclude.lines().filter(|line| *line == pattern).count(), 1);
+    }
+
+    #[test]
+    fn exclude_is_written_once() {
+        let (_dir, manager) = setup_test_repo();
+        let file = exclude_file_of(&manager);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // No trailing newline: the appended pattern must still land on its own line.
+        fs::write(&file, "# user rule\n*.log").unwrap();
+        fs::create_dir_all(manager.repo_root().join(naming::LEGACY_WORKTREE_DIRS[0])).unwrap();
+        let patterns = naming::managed_exclude_patterns(manager.repo_root(), naming::WORKTREE_DIR);
+        assert_eq!(
+            patterns,
+            vec!["/.ferryx-worktrees/".to_string(), "/.orca-worktrees/".to_string()]
+        );
+        assert_eq!(naming::ensure_excluded(&file, &patterns).unwrap(), 2);
+        assert_eq!(naming::ensure_excluded(&file, &patterns).unwrap(), 0);
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "# user rule\n*.log\n/.ferryx-worktrees/\n/.orca-worktrees/\n"
+        );
+        // A bare entry the user already wrote covers the dir.
+        fs::write(&file, ".ferryx-worktrees\n").unwrap();
+        let current = [naming::exclude_pattern(naming::WORKTREE_DIR)];
+        assert_eq!(naming::ensure_excluded(&file, &current).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_creation_survives_an_unwritable_exclude() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, manager) = setup_test_repo();
+        let info = exclude_file_of(&manager).parent().unwrap().to_path_buf();
+        fs::create_dir_all(&info).unwrap();
+        let _ = fs::remove_file(info.join("exclude"));
+        fs::set_permissions(&info, fs::Permissions::from_mode(0o555)).unwrap();
+        let path = manager.worktree_path_for("ws-ro", "task").unwrap();
+        let created = manager.create_worktree(CreateWorktreeOptions::new("ws-ro", "task", &path));
+        fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(created.is_ok(), "{created:?}");
+        assert!(!info.join("exclude").exists());
+    }
 }
