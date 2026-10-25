@@ -118,6 +118,29 @@ function cell(entry) {
   return entry.status;
 }
 
+/** Bytes as MiB with one decimal ("52.4 MiB"); "-" for anything that is not a byte count. */
+export function formatBytes(bytes) {
+  return Number.isFinite(bytes) && bytes >= 0 ? `${(bytes / (1024 * 1024)).toFixed(1)} MiB` : "-";
+}
+
+/**
+ * Markdown table of footprint.json samples (bench/footprint/run.mjs): one row per session count.
+ * Returns [] when the document carries no samples array.
+ */
+export function renderFootprintTable(footprint) {
+  const samples = Array.isArray(footprint?.samples) ? footprint.samples : null;
+  if (!samples) return [];
+  const count = (v) => (Number.isInteger(v) ? String(v) : "-");
+  const lines = [
+    "| Sessions | Daemon RSS | GUI RSS | FD count | Runtime dir size |",
+    "| --- | --- | --- | --- | --- |",
+  ];
+  for (const s of [...samples].sort((a, b) => (a?.sessions ?? 0) - (b?.sessions ?? 0))) {
+    lines.push(`| ${count(s?.sessions)} | ${formatBytes(s?.daemonRssBytes)} | ${formatBytes(s?.guiRssBytes)} | ${count(s?.fdCount)} | ${formatBytes(s?.daemonRuntimeBytes)} |`);
+  }
+  return lines;
+}
+
 /** Markdown report: scenario x platform PASS/FAIL table with session counts, waiver and footprint. */
 export function renderSurvivalReport(result) {
   const lines = [
@@ -137,6 +160,16 @@ export function renderSurvivalReport(result) {
     lines.push(`| ${p} | ${info?.host ?? "-"} | ${info?.runId ?? info?.state ?? "-"} | ${info?.commit ?? "-"} |`);
   }
   lines.push("", `Footprint (footprint.json): ${result.footprint ? "present" : "MISSING"}.`);
+  if (result.footprint) {
+    const data = result.footprint.data;
+    const table = renderFootprintTable(data);
+    if (table.length) {
+      const source = [data.platform, data.commit ? `commit \`${data.commit}\`` : null, data.timestamp].filter(Boolean).join(", ");
+      lines.push("", ...(source ? [`Footprint measured on ${source}.`, ""] : []), ...table);
+    } else {
+      lines.push("", "footprint.json has no samples to tabulate.");
+    }
+  }
   if (result.waiver) {
     lines.push("", `**Survival waiver (owner override):** ${result.waiver}`);
     const waived = result.problems.filter((p) => !result.blocking.includes(p));

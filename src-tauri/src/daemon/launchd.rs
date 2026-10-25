@@ -310,6 +310,12 @@ pub(crate) mod generation {
         format!("{base}.{key}")
     }
 
+    /// Whether launchd has a job for `label`. Only `NotRegistered` is unloaded; an idle, running or
+    /// unverifiable job counts as loaded, so its runtime generation is never pruned.
+    pub(crate) fn job_loaded(launchctl: &dyn Launchctl, uid: u32, label: &str) -> bool {
+        !matches!(print_job(launchctl, uid, label), JobState::NotRegistered)
+    }
+
     /// Directory of the generation plists: `~/Library/LaunchAgents`, or for QA the directory named
     /// by `FERRYX_DAEMON_PLIST_PATH` (a directory, or the directory of a `.plist` path). An empty
     /// override resolves to nothing, like [`super::launchd_plist_path_for`].
