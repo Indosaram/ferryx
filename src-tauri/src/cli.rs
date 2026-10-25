@@ -3729,6 +3729,14 @@ where
     LaunchMode::Gui
 }
 
+/// Whether `args` (the full command line) is a plain app launch rather than a command.
+///
+/// Only the bare executable opens the window. macOS may still append a `-psn_<id>` process serial
+/// number when Launch Services starts the bundle; that is a launch, not a command.
+pub fn is_bare_gui_launch<T: AsRef<str>>(args: &[T]) -> bool {
+    args.iter().skip(1).all(|arg| arg.as_ref().starts_with("-psn_"))
+}
+
 /// Runs the `--daemon-supervisor` watchdog and returns its exit code.
 ///
 /// `args` is the full command line. The task forwards the isolation variables as `--env KEY=VALUE`
@@ -4524,6 +4532,16 @@ mod tests {
         assert_eq!(parse_launch_mode(&args), LaunchMode::DaemonSupervisor);
         let malformed = vec!["ferryx".to_string(), "--daemon-supervisor".to_string(), "--bogus".to_string()];
         assert_eq!(run_daemon_supervisor(&malformed), 2);
+    }
+
+    #[test]
+    fn only_a_bare_launch_opens_the_gui() {
+        assert!(is_bare_gui_launch(&["ferryx"]));
+        assert!(is_bare_gui_launch(&["ferryx", "-psn_0_12345"]));
+        assert!(!is_bare_gui_launch(&["ferryx", "agents", "--help"]));
+        assert!(!is_bare_gui_launch(&["ferryx", "--version"]));
+        assert!(!is_bare_gui_launch(&["ferryx", "--help"]));
+        assert!(!is_bare_gui_launch(&["ferryx", "-psn_0_1", "agents"]));
     }
 
     #[test]

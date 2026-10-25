@@ -133,6 +133,17 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
+            // The app binary only opens a window when launched bare. Anything else is a command
+            // typed into a terminal: starting the whole app runtime there spawns SSH supervisors and
+            // shells under that terminal and never returns it.
+            if !is_bare_gui_launch(&args) {
+                eprintln!(
+                    "UNKNOWN_COMMAND: `{}` is not a Ferryx app command. Use `ferryx-cli` for \
+                     command-line use (for example `ferryx-cli agents` or `ferryx-cli --version`).",
+                    args[1..].join(" ")
+                );
+                std::process::exit(2);
+            }
             let _ = raised_limit;
             ferryx_lib::run();
         }

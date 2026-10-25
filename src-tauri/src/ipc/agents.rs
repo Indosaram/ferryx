@@ -1094,7 +1094,8 @@ fn login_shell_path() -> Option<OsString> {
     // budget is 10 s - leaving room for the rest of spawn on the fallback path.
     const RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
     let shell = env::var("SHELL").ok().filter(|s| !s.trim().is_empty())?;
-    let mut child = crate::util::no_window_command(&shell)
+    let mut command = crate::util::no_window_command(&shell);
+    command
         .args(["-lic", "printf %s \"$PATH\""])
         .env("PROMPT_EOL_MARK", "")
         .stdin(std::process::Stdio::null())
@@ -1102,9 +1103,9 @@ fn login_shell_path() -> Option<OsString> {
         // Captured-and-discarded, matching the old `.output()` semantics; we
         // never read stderr, so piping it could let a chatty rc chain fill the
         // pipe and trip the deadline.
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    without_controlling_terminal(&mut command);
+    let mut child = command.spawn().ok()?;
     // Drain stdout on its own thread so a shell that writes more than a pipe
     // buffer cannot block on write until the deadline kills it (same pattern as
     // `run_clipboard_tool` in clipboard_image.rs).
@@ -1148,6 +1149,35 @@ fn login_shell_path() -> Option<OsString> {
     }
     Some(OsString::from(value))
 }
+
+/// Runs the child in a new session with no controlling terminal.
+///
+/// `-i` turns on job control, and an interactive shell that inherits a terminal makes its own
+/// process group that terminal's foreground group. When this process was started from a terminal
+/// (the app binary run as a command), the shell took that terminal; once the deadline above killed
+/// it, the foreground stayed with a dead group and the user's shell or agent stopped on its next
+/// read with "suspended (tty input)". A child with no controlling terminal cannot take one.
+#[cfg(unix)]
+fn without_controlling_terminal(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY:
+    // Category: Foreign Function Interface (FFI).
+    // Invariant: `pre_exec` runs between fork and exec, where only async-signal-safe calls are
+    // legal; `setsid` qualifies - it takes no pointers, allocates nothing, and returns a value
+    // instead of unwinding. A failure is returned as an `io::Error`, which fails the spawn.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Windows consoles have no foreground process group for a child to take.
+#[cfg(not(unix))]
+fn without_controlling_terminal(_command: &mut std::process::Command) {}
 
 pub(crate) fn resolve_binary(name: &str, search_paths: &[PathBuf]) -> Option<PathBuf> {
     resolve_binary_with_env(
@@ -1267,6 +1297,30 @@ fn probe_stdout(tool: &str, command: &mut std::process::Command) -> Option<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The login-shell probe must not be able to take the terminal of the process that ran it.
+    /// A child in its own session has no controlling terminal, so `/dev/tty` cannot be opened.
+    #[cfg(unix)]
+    #[test]
+    fn login_shell_probe_child_has_no_controlling_terminal() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "if (exec 3</dev/tty) 2>/dev/null; then echo has-tty; else echo no-tty; fi; ps -o pgid= -p $$"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        without_controlling_terminal(&mut command);
+        let output = command.output().expect("spawn probe child");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.starts_with("no-tty"), "child still has a controlling terminal: {text}");
+        let own_group = unsafe { libc::getpgrp() } as u32;
+        let child_group: u32 = text
+            .lines()
+            .nth(1)
+            .and_then(|line| line.split_whitespace().last())
+            .and_then(|pgid| pgid.parse().ok())
+            .expect("child pgid");
+        assert_ne!(child_group, own_group, "child must lead its own session and group");
+    }
 
     #[test]
     fn omo_session_id_in_table_uses_the_owning_process_only() {
