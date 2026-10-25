@@ -66,14 +66,59 @@ struct LoopItem {
 }
 
 impl LoopItem {
+    /// One readable line per item: `[카톡 · 봇 처리] 여신님: <message>`. The owner sees this
+    /// text in the turn status message, so it carries no internal kind names.
     fn format_entry(&self) -> String {
+        let source = source_label(&self.source);
+        let tag = match kind_label(&self.kind) {
+            Some(kind) => format!("[{source} · {kind}]"),
+            None => format!("[{source}]"),
+        };
         match &self.link {
-            Some(link) if !link.is_empty() => {
-                format!("[{}:{}] {} ({})", self.kind, self.source, self.line, link)
-            }
-            _ => format!("[{}:{}] {}", self.kind, self.source, self.line),
+            Some(link) if !link.is_empty() => format!("{tag} {} ({link})", self.line),
+            _ => format!("{tag} {}", self.line),
         }
     }
+}
+
+fn source_label(source: &str) -> &str {
+    match source {
+        "kakao" => "카톡",
+        "mail" => "메일",
+        "imessage" => "문자",
+        "github" => "GitHub",
+        "slack" => "슬랙",
+        "cron" => "크론",
+        other => other,
+    }
+}
+
+fn kind_label(kind: &str) -> Option<&'static str> {
+    match kind {
+        "inbox_bot" => Some("봇 처리"),
+        "inbox_owner" => Some("대표 확인 필요"),
+        _ => None,
+    }
+}
+
+/// Kakao rows carry the room name as both author and title, so the message itself is in
+/// the snippet; mail rows carry a real subject.
+fn item_text(author: &str, title: &str, snippet: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() || title == author.trim() {
+        one_line(snippet, 120)
+    } else {
+        one_line(title, 120)
+    }
+}
+
+/// The triage reason is worth showing only when it says something beyond the class token.
+fn readable_reason(reason: &str) -> Option<String> {
+    let reason = reason.trim();
+    let raw = reason.is_empty()
+        || crate::inbox::TRIAGE_OPTIONS.contains(&reason)
+        || matches!(reason, "bot" | "owner" | "bot can reply");
+    (!raw).then(|| one_line(reason, 80))
 }
 
 #[derive(sqlx::FromRow)]
@@ -462,8 +507,8 @@ pub async fn retire_unfiltered_kakao_backlog(pool: &SqlitePool) -> Result<u64> {
 async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopItem>> {
     let oldest = age_cutoff(now);
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(String, String, String, String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT d.item_id, d.class, COALESCE(d.reason, ''), i.source, COALESCE(i.author, ''), COALESCE(i.title, ''), i.link
+    let rows: Vec<(String, String, String, String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT d.item_id, d.class, COALESCE(d.reason, ''), i.source, COALESCE(i.author, ''), COALESCE(i.title, ''), COALESCE(i.snippet, ''), i.link
          FROM inbox_decisions d
          JOIN inbox_items i ON i.id = d.item_id
          WHERE d.class IN ('bot', 'owner')
@@ -478,21 +523,22 @@ async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopI
     .await?;
     let mut out: Vec<LoopItem> = rows
         .into_iter()
-        .map(|(id, class, reason, source, author, title, link)| {
+        .map(|(id, class, reason, source, author, title, snippet, link)| {
+            let text = item_text(&author, &title, &snippet);
             let author = if author.trim().is_empty() {
-                "unknown".to_owned()
+                "보낸 사람 없음".to_owned()
             } else {
                 author.trim().to_owned()
+            };
+            let line = match readable_reason(&reason) {
+                Some(reason) => format!("{author}: {text} — {reason}"),
+                None => format!("{author}: {text}"),
             };
             LoopItem {
                 item_key: format!("inbox:{id}"),
                 kind: format!("inbox_{class}"),
                 source,
-                line: format!(
-                    "content from {author}: {} ({})",
-                    one_line(&title, 120),
-                    one_line(&reason, 80)
-                ),
+                line,
                 link,
                 attempts: 1,
             }
@@ -520,7 +566,7 @@ async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopI
                 line: if author.trim().is_empty() {
                     one_line(&title, 160)
                 } else {
-                    format!("content from {}: {}", author.trim(), one_line(&title, 140))
+                    format!("{}: {}", author.trim(), one_line(&title, 140))
                 },
                 link,
                 attempts: 1,
@@ -718,6 +764,31 @@ mod tests {
         assert_eq!(DEFAULT_DAILY_CAP, 24);
     }
 
+    #[test]
+    fn a_kakao_entry_shows_the_message_not_the_room_twice() {
+        let item = LoopItem {
+            item_key: "inbox:k".into(),
+            kind: "inbox_bot".into(),
+            source: "kakao".into(),
+            line: format!(
+                "여신님: {}",
+                item_text("여신님", "여신님", "이거 한국어로 번역 가능?")
+            ),
+            link: None,
+            attempts: 1,
+        };
+        assert_eq!(
+            item.format_entry(),
+            "[카톡 · 봇 처리] 여신님: 이거 한국어로 번역 가능?"
+        );
+        assert_eq!(item_text("X", "New login", "body"), "New login");
+        assert_eq!(readable_reason("bot_can_handle"), None);
+        assert_eq!(
+            readable_reason("인증 코드 도착").as_deref(),
+            Some("인증 코드 도착")
+        );
+    }
+
     #[tokio::test]
     async fn a_flush_enqueues_once_and_a_read_proposal_runs_when_the_ledger_is_on() {
         let pool = crate::storage::memory().await.unwrap();
@@ -765,7 +836,7 @@ mod tests {
                 .await
                 .unwrap();
         assert!(
-            body.starts_with("[inbox_bot:mail] content from unknown: Ping (bot can reply)"),
+            body.starts_with("[메일 · 봇 처리] 보낸 사람 없음: Ping"),
             "{body}"
         );
         assert!(loop_.flush(now).await.unwrap().is_none());
