@@ -2778,6 +2778,7 @@ fn pane_liveness_registration_matches(
 mod pane_liveness_native_binding_tests {
     use super::pane_liveness_tuple_matches;
     use crate::daemon::protocol::PaneAttachTuple;
+    use crate::native_terminal::engine::TerminalEngine;
 
     fn tuple() -> PaneAttachTuple {
         serde_json::from_value(serde_json::json!({
@@ -2992,6 +2993,39 @@ mod pane_liveness_native_binding_tests {
         let rows = visible_text(&state, &new.backend_session_id);
         assert_eq!(&rows[..2], ["top line", "rewritten"], "resident grid must survive a handover rebind");
         assert_eq!(state.sessions.lock()[&new.backend_session_id].last_sequence, Some(12));
+        state.teardown();
+    }
+
+    #[tokio::test]
+    async fn reattach_with_gap_preserves_pre_gap_scrollback() {
+        let state = super::NativeTerminalSurfaceHostState::default();
+        let active = tuple();
+        let id = &active.backend_session_id;
+        state.attach_test_session_for_liveness(id, 7, None).unwrap();
+        let token = state.begin_replay_request_with_tuple(id, Some(active.clone())).unwrap();
+        let (mut offer, _first) = resident_offer(id, 7, 1, 30, b"");
+        offer.history = bytes::Bytes::from(
+            (0..30).map(|line| format!("before-gap-{line}\r\n")).collect::<String>(),
+        );
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            id, offer, None, None, Some(token),
+        ).unwrap();
+        let token = state.begin_replay_request_with_tuple(id, Some(active.clone())).unwrap();
+        let (mut offer, _second) = resident_offer(id, 7, 40, 41, b"after-gap\r\n");
+        offer.gap = Some(crate::terminal::ReplayGap {
+            requested_after_sequence: 30,
+            available_from_sequence: 40,
+        });
+        state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+            id, offer, None, None, Some(token),
+        ).unwrap();
+        {
+            let sessions = state.sessions.lock();
+            let session = &sessions[id];
+            assert!(!session.terminal.search_grid("before-gap-0", false).unwrap().is_empty());
+            assert!(!session.terminal.search_grid("after-gap", false).unwrap().is_empty());
+            assert_eq!(session.last_sequence, Some(41));
+        }
         state.teardown();
     }
 
@@ -4110,7 +4144,17 @@ impl NativeTerminalSurfaceHostState {
                     session.terminal.discard_buffered_pty_writes();
                     session.terminal.set_pty_writes_suppressed(true);
                     if verdict == ReplayVerdict::Rebuild {
-                        session.terminal.reset();
+                        if attachment.gap.is_some() && !lifetime_changed && session.last_sequence.is_some() {
+                            // A missing tail does not invalidate the same PTY's resident history.
+                            // Leave the parser at ground before replaying across the missing bytes.
+                            session.terminal.feed(b"\x18\x1b\\\x1b[0m")?;
+                            session.terminal.finish_synchronized_output()?;
+                            session.terminal.feed_str(
+                                "\r\n\x1b[33m[Ferryx: output stream resynced - output below may repeat lines above]\x1b[0m\r\n",
+                            )?;
+                        } else {
+                            session.terminal.reset();
+                        }
                     }
                     if verdict != ReplayVerdict::NoOp {
                         feed_attachment_history(
