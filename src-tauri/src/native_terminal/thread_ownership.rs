@@ -69,13 +69,7 @@ impl GpuWorker {
         let handle = thread::Builder::new().name(name.into()).spawn(move || {
             let token = GpuThread(PhantomData);
             while let Ok(job) = rx.recv() {
-                job(&token);
-                #[cfg(target_os = "macos")]
-                // This worker has no run loop to commit implicit CAMetalLayer resize changes.
-                // SAFETY: CATransaction.flush commits only the calling thread's transaction.
-                unsafe {
-                    let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
-                }
+                run_job(job, &token);
             }
         })?;
         Ok(Self {
@@ -109,6 +103,30 @@ impl Drop for GpuWorker {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Runs one job inside its own autorelease pool.
+///
+/// A spawned thread has no run loop, so nothing ever drains its implicit pool: every object
+/// Metal and CoreAnimation autorelease during a frame (drawables, CAMetalLayer and IOSurface
+/// references) would live until the thread exits. Measured on 2026.1025.2 after about a day:
+/// 82 CAMetalLayers and 1.7 GB of display drawables pinned by this thread's pool pages while
+/// only one terminal view was alive.
+#[cfg(target_os = "macos")]
+fn run_job(job: Job, token: &GpuThread) {
+    objc2::rc::autoreleasepool(|_| {
+        job(token);
+        // This worker has no run loop to commit implicit CAMetalLayer resize changes.
+        // SAFETY: CATransaction.flush commits only the calling thread's transaction.
+        unsafe {
+            let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_job(job: Job, token: &GpuThread) {
+    job(token);
 }
 
 struct LentCell<T> {
@@ -415,6 +433,41 @@ mod tests {
         assert!(
             !worker.submit(|_gpu| {}),
             "a shut-down worker must reject work instead of panicking"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn objects_autoreleased_by_a_job_are_freed_when_the_job_returns() {
+        use objc2::rc::{Retained, Weak};
+        use objc2::runtime::NSObject;
+        use std::cell::RefCell;
+
+        thread_local! {
+            static AUTORELEASED: RefCell<Option<Weak<NSObject>>> = const { RefCell::new(None) };
+        }
+
+        let worker = GpuWorker::new("ferryx-gpu-autorelease").expect("worker must spawn");
+        // Metal hands back drawables and layer references autoreleased; without a pool per job
+        // they stay alive until the worker thread exits, which is never for the app.
+        assert!(worker.submit(|_gpu| {
+            let object = NSObject::new();
+            AUTORELEASED.with(|slot| *slot.borrow_mut() = Some(Weak::from_retained(&object)));
+            let _ = Retained::autorelease_ptr(object);
+        }));
+        let (tx, rx) = mpsc::channel();
+        assert!(worker.submit(move |_gpu| {
+            let alive = AUTORELEASED.with(|slot| {
+                slot.borrow().as_ref().and_then(Weak::load).is_some()
+            });
+            tx.send(alive).expect("send liveness");
+        }));
+        let alive = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("second job must run");
+        assert!(
+            !alive,
+            "an object autoreleased inside a GPU job must be freed once that job returns"
         );
     }
 
