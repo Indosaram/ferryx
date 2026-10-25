@@ -592,11 +592,12 @@ async fn ssh_reconnect_unreachable_target_exhausts_budget_and_settles() {
         dialer.clock.add_permits(1);
     }
     let ended = state(&mut rx, |d| d.state == RemoteConnectionState::Expired).await;
-    assert!(!runtime.keeps_predecessor_alive("local-stable"));
+    assert!(runtime.keeps_predecessor_alive("local-stable"));
     assert_eq!(ended.attempts, MAX_RECONNECT_ATTEMPTS);
     assert!(ended.failure.unwrap().message.contains("reconnect attempts"));
     assert!(runtime.retry("local-stable").is_err());
     assert!(runtime.settle_ended("local-stable"));
+    assert!(!runtime.keeps_predecessor_alive("local-stable"));
     assert!(!runtime.contains("local-stable"));
     assert!(!hub.has_session("local-stable"));
     assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
