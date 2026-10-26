@@ -1381,8 +1381,8 @@ pub fn is_draft_path(path: &str, cwd: Option<&str>) -> bool {
     let p = path.trim();
     if p.starts_with("/tmp")
         || p.starts_with("/private/tmp")
-        || p.contains("/.omon/workspace")
-        || p.starts_with("~/.omon/workspace")
+        || p.contains("/.ferryx/hub/workspace")
+        || p.starts_with("~/.ferryx/hub/workspace")
     {
         return true;
     }
@@ -1391,8 +1391,8 @@ pub fn is_draft_path(path: &str, cwd: Option<&str>) -> bool {
             let c = c.trim();
             if c.starts_with("/tmp")
                 || c.starts_with("/private/tmp")
-                || c.contains("/.omon/workspace")
-                || c.starts_with("~/.omon/workspace")
+                || c.contains("/.ferryx/hub/workspace")
+                || c.starts_with("~/.ferryx/hub/workspace")
             {
                 return true;
             }
@@ -1453,7 +1453,7 @@ fn normalize_target(raw: &str) -> String {
         .strip_prefix("/private/tmp")
         .map(|rest| format!("/tmp{rest}"))
         .unwrap_or_else(|| trimmed.to_string());
-    if let Some(idx) = trimmed.find("/.omon/workspace/agents/") {
+    if let Some(idx) = trimmed.find("/.ferryx/hub/workspace/agents/") {
         let rest = &trimmed[idx + 1..];
         return format!("~/{rest}");
     }
@@ -2154,6 +2154,23 @@ mod tests {
             classify_command("npm run build", REPO).signature,
             classify_command("npm run deploy", REPO).signature,
             "a package-script precedent must not cover another script"
+        );
+    }
+
+    #[test]
+    fn the_hub_workspace_is_a_draft_area() {
+        assert!(is_draft_path(
+            "/Users/me/.ferryx/hub/workspace/agents/bot-1/notes.md",
+            None
+        ));
+        assert!(is_draft_path(
+            "notes.md",
+            Some("~/.ferryx/hub/workspace/agents/bot-1")
+        ));
+        assert!(!is_draft_path("/Users/me/.omon/workspace/notes.md", None));
+        assert_eq!(
+            normalize_target("/Users/me/.ferryx/hub/workspace/agents/bot-1/notes.md"),
+            "~/.ferryx/hub/workspace/agents/bot-1/notes.md"
         );
     }
 }

@@ -1174,7 +1174,7 @@ pub fn token_from_file(path: &std::path::Path) -> Option<String> {
 }
 
 /// The workspace omo-gateway gives Slack turns: `<root>/agents/bot-<persona>` plus
-/// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.omon/workspace`. Absent when the
+/// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.ferryx/hub/workspace`. Absent when the
 /// directory does not exist, so the engine keeps its own default.
 pub fn slack_workspace() -> Option<protocol::Workspace> {
     let root = crate::hub_env::var("OMON_WORKSPACE_ROOT")
@@ -1183,7 +1183,7 @@ pub fn slack_workspace() -> Option<protocol::Workspace> {
         .map(PathBuf::from)
         .or_else(|| {
             crate::hub_env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".omon").join("workspace"))
+                .map(|home| PathBuf::from(home).join(".ferryx/hub/workspace"))
         })?;
     let persona = crate::hub_env::var("OMON_SLACK_PERSONA_FROM")
         .ok()

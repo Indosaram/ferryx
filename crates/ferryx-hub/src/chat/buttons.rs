@@ -1,5 +1,5 @@
 //! Slack `omon:btn:<namespace>:<action>:<arg>` clicks. The command comes from
-//! `~/.omon/button-actions.json` (override `OMON_BUTTON_ACTIONS_FILE`). The environment is cleared
+//! `~/.ferryx/hub/button-actions.json` (override `OMON_BUTTON_ACTIONS_FILE`). The environment is cleared
 //! so gateway credentials are not copied in, then the click's user, channel, and message are added.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -83,8 +83,7 @@ pub fn button_actions_path() -> PathBuf {
     crate::hub_env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
-        .join(".omon")
-        .join("button-actions.json")
+        .join(".ferryx/hub/button-actions.json")
 }
 
 pub fn load_button_action(path: &Path, namespace: &str) -> Result<Option<ButtonActionConfig>> {

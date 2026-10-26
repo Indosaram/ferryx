@@ -803,10 +803,7 @@ impl HubRuntime {
             briefs: home.join(".ferryx/hub/cron-briefs"),
             owner_session,
             quota_url: "http://127.0.0.1:18801".into(),
-            log_paths: vec![
-                home.join(".ferryx/hub/hub.log"),
-                home.join(".omon/gateway.log"),
-            ],
+            log_paths: vec![home.join(".ferryx/hub/hub.log")],
         }
     }
 }

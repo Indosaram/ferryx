@@ -1,5 +1,5 @@
 //! omo-gateway's inbox prefilter (`src/inbox/prefilter.rs`): noise that never reaches triage.
-//! Rules are read from omo's `~/.omon/inbox-filters.json` (never written here); a missing file
+//! Rules are read from `~/.ferryx/hub/inbox-filters.json` (never written here); a missing file
 //! uses omo's defaults. Drops are counted per KST day in `inbox_filter_stats` like omo.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ impl Default for PrefilterRules {
 }
 
 pub fn rules_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".omon/inbox-filters.json"))
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ferryx/hub/inbox-filters.json"))
 }
 
 impl PrefilterRules {

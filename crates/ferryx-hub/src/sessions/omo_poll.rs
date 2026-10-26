@@ -1,14 +1,14 @@
 //! omo sessions on every machine, polled the way omo-gateway's session watcher did.
 //!
 //! The daemon's agent observer only sees Ferryx panes on this machine. omo sessions also run in
-//! plain terminals and on other hosts (`~/.omon/session-hosts.json`), and omo reports a pending
+//! plain terminals and on other hosts (`OMON_SESSION_HOSTS`), and omo reports a pending
 //! `ask_user_question` over its RPC socket, not on the screen. Every interval the hub runs
 //! `omo-gateway sessions overview --json` (local plus every configured host in one call) and feeds
 //! each session to [`Hub::ingest`], so a question, a terminal-only question, or a watched
 //! session's finished turn becomes the same owner notice a Ferryx pane produces.
 //!
 //! `FERRYX_HUB_OMO_SESSIONS=off` turns it off. `FERRYX_HUB_OMO_SESSIONS_BIN` names the
-//! `omo-gateway` binary (default `~/.omon/bin/omo-gateway`); `FERRYX_HUB_OMO_POLL_SECS` sets the
+//! `omo-gateway` binary (default `~/.ferryx/hub/bin/omo-gateway`); `FERRYX_HUB_OMO_POLL_SECS` sets the
 //! interval (default 60, minimum 10).
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -53,7 +53,7 @@ pub fn binary() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| {
             crate::hub_env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".omon/bin/omo-gateway"))
+                .map(|home| PathBuf::from(home).join(".ferryx/hub/bin/omo-gateway"))
         })?;
     path.is_file().then_some(path)
 }

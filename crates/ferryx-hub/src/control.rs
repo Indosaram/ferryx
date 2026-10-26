@@ -30,7 +30,7 @@ pub fn control_socket(home: &std::path::Path) -> std::path::PathBuf {
 
 /// `hub stop` writes `hub_stopped = 1` and `hub start` writes `hub_stopped = 0`.
 /// A hub database with neither is a fresh install. It stays stopped too, because the
-/// hub reads omo's own `~/.omon/secrets` Slack tokens and would otherwise open a second
+/// hub uses the Slack tokens omo-gateway used and would otherwise open a second
 /// Socket Mode connection next to a running omo-gateway. Only an explicit `hub start`
 /// (the cutover script sends one after omo is unloaded) or `FERRYX_HUB=on` opens it.
 pub async fn mark_stopped(pool: &sqlx::SqlitePool) -> Result<()> {

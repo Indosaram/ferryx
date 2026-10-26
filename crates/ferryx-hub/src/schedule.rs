@@ -347,11 +347,10 @@ pub fn socket_paths(home: &std::path::Path) -> (std::path::PathBuf, std::path::P
     (dir.join("cron.sock"), dir.join("cron-run-now.sock"))
 }
 
-/// Existing `omo-gateway cron run-now` clients connect to `~/.omon/cron-run-now.sock`.
-/// The ferryx names carry the same line protocol.
+/// The sockets the hub serves: `cron.sock` and `cron-run-now.sock` under `~/.ferryx/hub`.
 pub fn native_socket_paths(home: &std::path::Path) -> Vec<std::path::PathBuf> {
     let (cron, run_now) = socket_paths(home);
-    vec![home.join(".omon").join("cron-run-now.sock"), cron, run_now]
+    vec![cron, run_now]
 }
 
 pub const PUBLISHING_JOBS: [&str; 3] = [

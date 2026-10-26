@@ -1,4 +1,4 @@
-//! The omo-gateway dashboard API the omo web UI (`~/.omon/web`) calls on the tracker port.
+//! The omo-gateway dashboard API the omo web UI (`~/.ferryx/hub/web`) calls on the tracker port.
 //!
 //! omo's `src/dashboard.rs` is the spec: the Host/Origin guard, session detail, messages and
 //! delete, cron job get/update/delete, and bot profile CRUD. List routes return omo's
@@ -1402,7 +1402,7 @@ pub async fn precedents(State(state): State<HttpState>) -> ApiResult<Json<Value>
 }
 
 /// The dashboard web root: `DASHBOARD_WEB_ROOT` (the omo plist name) unless
-/// `FERRYX_HUB_WEB_ROOT` overrides it, else `~/.omon/web`.
+/// `FERRYX_HUB_WEB_ROOT` overrides it, else `~/.ferryx/hub/web`.
 pub fn web_root_from(
     ferryx: Option<std::ffi::OsString>,
     omo: Option<std::ffi::OsString>,
@@ -1414,8 +1414,8 @@ pub fn web_root_from(
     if let Some(path) = omo.filter(|p| !p.is_empty()) {
         return path.into();
     }
-    home.map(|home| std::path::PathBuf::from(home).join(".omon").join("web"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".omon/web"))
+    home.map(|home| std::path::PathBuf::from(home).join(".ferryx/hub/web"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub/web"))
 }
 
 #[cfg(test)]
@@ -1805,7 +1805,7 @@ mod tests {
         );
         assert_eq!(
             web_root_from(None, None, home),
-            std::path::PathBuf::from("/Users/me/.omon/web")
+            std::path::PathBuf::from("/Users/me/.ferryx/hub/web")
         );
     }
 }
