@@ -29,11 +29,12 @@ function coldAgent(): TerminalSession {
 }
 
 describe("agent reconnect cross-layer contracts", () => {
-  it("persists recovered OMO CWD and transcript without changing the workspace root", async () => {
+  it.each([undefined, "mhc"] as const)("preserves launcher %s through restore, reconnect and persistence", async (launcher) => {
     const providerSession = {
       key: "session_id",
       id: "omo-provider",
       transcriptPath: "/home/user/.omo/agent/sessions/project/session.jsonl",
+      ...(launcher ? { launcher } : {}),
     } as const;
     const persisted: PersistedWorkspaceSession = {
       version: 2, timestamp: 1, activeWorkspaceId: "ws",

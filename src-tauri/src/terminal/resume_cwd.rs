@@ -260,6 +260,7 @@ mod tests {
 
     fn provider(path: Option<&Path>) -> AgentProviderSession {
         AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: SESSION_ID.to_string(),
             transcript_path: path.map(|p| p.to_string_lossy().into_owned()),
@@ -416,6 +417,7 @@ mod tests {
 
     fn stored(id: &str) -> AgentProviderSession {
         AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: id.to_string(),
             transcript_path: None,

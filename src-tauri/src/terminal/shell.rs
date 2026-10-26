@@ -8,6 +8,8 @@ pub enum AgentResumeError {
     RemoteSshRequiresWorkspace,
     #[error("Unsupported agent type: {0}")]
     UnsupportedAgent(String),
+    #[error("The mhc launcher is only valid for omo sessions")]
+    InvalidLauncher,
     #[error("Invalid provider session id: {0}")]
     InvalidSessionId(String),
     #[error(
@@ -102,6 +104,9 @@ pub fn resolve_agent_resume_plan(
     provider_session: &AgentProviderSession,
 ) -> Result<ShellCommandPlan, AgentResumeError> {
     let norm_agent = agent_type.trim().to_ascii_lowercase();
+    if provider_session.launcher.is_some() && norm_agent != "omo" {
+        return Err(AgentResumeError::InvalidLauncher);
+    }
     let validated_id = validate_agent_session_id(&provider_session.id)?;
     let validated_transcript =
         validate_transcript_path(provider_session.transcript_path.as_deref())?;
@@ -205,7 +210,10 @@ pub fn resolve_agent_resume_plan(
         "omo" => {
             ensure_key(AgentProviderSessionKey::SessionId)?;
             Ok(ShellCommandPlan {
-                program: "omo".to_string(),
+                program: match provider_session.launcher {
+                    Some(crate::daemon::protocol::AgentLauncher::Mhc) => "mhc",
+                    None => "omo",
+                }.to_string(),
                 args: vec!["--session".to_string(), validated_id],
             })
         }
@@ -1229,6 +1237,7 @@ mod tests {
 
         for (agent, key, id, transcript, expected_bin, expected_args) in cases {
             let session = AgentProviderSession {
+                launcher: None,
                 key,
                 id: id.to_string(),
                 transcript_path: transcript.map(|s| s.to_string()),
@@ -1243,8 +1252,23 @@ mod tests {
     }
 
     #[test]
+    fn test_mhc_launcher_roundtrips_and_resumes_native_binary() {
+        let wire = r#"{"key":"session_id","id":"native-session","launcher":"mhc"}"#;
+        let session: AgentProviderSession = serde_json::from_str(wire).expect("decode mhc reference");
+        assert_eq!(serde_json::to_string(&session).unwrap(), wire);
+        let plan = resolve_agent_resume_plan("omo", &session).expect("resolve mhc");
+        assert_eq!(plan.program, "mhc");
+        assert_eq!(plan.args, ["--session", "native-session"]);
+        assert!(matches!(resolve_agent_resume_plan("claude", &session), Err(AgentResumeError::InvalidLauncher)));
+        assert!(serde_json::from_str::<AgentProviderSession>(
+            r#"{"key":"session_id","id":"native-session","launcher":"other"}"#
+        ).is_err());
+    }
+
+    #[test]
     fn test_resolve_agent_resume_omo_never_uses_session_id_flag() {
         let session = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "omo-sess-123".to_string(),
             transcript_path: None,
@@ -1261,6 +1285,7 @@ mod tests {
     #[test]
     fn test_agent_resume_validation_rejects_leading_dash() {
         let session = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "--new".to_string(),
             transcript_path: None,
@@ -1294,6 +1319,7 @@ mod tests {
     fn test_agent_resume_validation_rejects_latest() {
         for val in ["latest", "LATEST", "Latest", "  latest  "] {
             let session = AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: val.to_string(),
                 transcript_path: None,
@@ -1307,6 +1333,7 @@ mod tests {
     #[test]
     fn test_agent_resume_validation_rejects_control_characters() {
         let session = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "session\x00id".to_string(),
             transcript_path: None,
@@ -1316,6 +1343,7 @@ mod tests {
         assert!(matches!(err, AgentResumeError::InvalidSessionId(_)));
 
         let session2 = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "session\x1b[31mid".to_string(),
             transcript_path: None,
@@ -1328,6 +1356,7 @@ mod tests {
     #[test]
     fn test_agent_resume_validation_rejects_empty_or_too_long() {
         let session_empty = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "   ".to_string(),
             transcript_path: None,
@@ -1338,6 +1367,7 @@ mod tests {
 
         let long_id = "a".repeat(513);
         let session_long = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: long_id,
             transcript_path: None,
@@ -1350,6 +1380,7 @@ mod tests {
     #[test]
     fn test_agent_resume_validation_rejects_wrong_key() {
         let session_claude_wrong = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::ConversationId,
             id: "sess-1".to_string(),
             transcript_path: None,
@@ -1359,6 +1390,7 @@ mod tests {
         assert!(matches!(err1, AgentResumeError::InvalidKey { .. }));
 
         let session_agy_wrong = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::ConversationId,
             id: "conv-1".to_string(),
             transcript_path: None,
@@ -1371,6 +1403,7 @@ mod tests {
     #[test]
     fn test_agent_resume_validation_rejects_missing_transcript_for_pi_and_prime() {
         let session_pi_no_transcript = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "pi-1".to_string(),
             transcript_path: None,
@@ -1380,6 +1413,7 @@ mod tests {
         assert!(matches!(err_pi, AgentResumeError::MissingTranscriptPath(_)));
 
         let session_prime_no_transcript = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "prime-1".to_string(),
             transcript_path: None,
@@ -1395,6 +1429,7 @@ mod tests {
     #[test]
     fn test_agent_resume_validation_rejects_unsupported_agent() {
         let session = AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: "sess-1".to_string(),
             transcript_path: None,
@@ -1409,6 +1444,7 @@ mod tests {
         let startup = TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
             provider_session: AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "sess-claude-xyz".to_string(),
                 transcript_path: None,
@@ -1442,6 +1478,7 @@ mod tests {
         let startup = TerminalStartup::AgentResume {
             agent_type: "omo".to_string(),
             provider_session: AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "sess-omo-abc".to_string(),
                 transcript_path: None,

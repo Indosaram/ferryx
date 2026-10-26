@@ -70,6 +70,7 @@ pub async fn publish_discovered(owner: &DaemonServer, root: &Path, session: &Val
         agent: Some("omo".into()),
         detail: None,
         provider_session: Some(AgentProviderSession {
+            launcher: None,
             key: AgentProviderSessionKey::SessionId,
             id: provider_id.clone(),
             transcript_path: None,

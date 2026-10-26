@@ -113,6 +113,13 @@ describe("agentResume adapter module", () => {
       expect(normalizeAgentProviderSession("string")).toBeNull();
     });
 
+    it("preserves the native launcher and rejects unknown launchers", () => {
+      const provider = { key: "session_id", id: "native-session", launcher: "mhc" } as const;
+      expect(normalizeAgentProviderSession(provider)).toEqual(provider);
+      expect(normalizeAgentProviderSession({ ...provider, launcher: "other" })).toBeNull();
+      expect(agentProviderSessionsEqual("omo", provider, { key: "session_id", id: provider.id })).toBe(true);
+    });
+
     it("bounds transcript paths and accepts only absolute path forms", () => {
       const base = { key: "session_id", id: "provider-id" } as const;
       expect(normalizeAgentProviderSession({ ...base, transcriptPath: "relative/session.json" })).toEqual(base);
@@ -366,6 +373,12 @@ describe("agentResume adapter module", () => {
         const providerSession: AgentProviderSession = { key: "session_id", id: "omo-sess-404" };
         expect(getAgentResumeArgv("omo", providerSession)).toEqual(["omo", "--session", "omo-sess-404"]);
         expect(buildResumeArgv({ agentType: "omo", providerSession })).toEqual(["omo", "--session", "omo-sess-404"]);
+      });
+
+      it("resumes native mhc without changing the shared provider identity", () => {
+        const providerSession = { key: "session_id", id: "native-session", launcher: "mhc" } as const;
+        expect(buildResumeArgv({ agentType: "omo", providerSession })).toEqual(["mhc", "--session", "native-session"]);
+        expect(getAgentResumeArgv("claude", providerSession)).toBeNull();
       });
 
       it("never resumes omo through the id-minting --session-id flag", () => {

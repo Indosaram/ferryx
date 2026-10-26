@@ -2164,7 +2164,7 @@ where
         Ok(control) => control,
         Err(()) => {
             let bounded_provider = state.provider_session.as_ref().map(|ps| {
-                crate::daemon::protocol::AgentProviderSession {
+                crate::daemon::protocol::AgentProviderSession { launcher: ps.launcher,
                     key: ps.key,
                     id: ps.id.clone(),
                     transcript_path: None, // Exclude oversized transcript paths; root badge requires key+id

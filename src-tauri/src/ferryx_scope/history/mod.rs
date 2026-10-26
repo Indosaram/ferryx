@@ -258,7 +258,7 @@ fn checked_cwd(cwd: &str) -> Result<String> {
     if Path::new(cwd).is_absolute() { Ok(cwd.to_owned()) } else { Err(HistoryError::InvalidIdentity) }
 }
 fn make_entry(provider: CanonicalProvider, id: String, cwd: String, version: Option<String>, parent_id: Option<String>, transcript_path: Option<String>) -> Entry {
-    Entry { entry_key: String::new(), provider, provider_session: AgentProviderSession { key: AgentProviderSessionKey::SessionId, id, transcript_path }, cwd, version, parent_id, modified_ms: None }
+    Entry { entry_key: String::new(), provider, provider_session: AgentProviderSession { launcher: None, key: AgentProviderSessionKey::SessionId, id, transcript_path }, cwd, version, parent_id, modified_ms: None }
 }
 fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message>,Vec<String>)> {
     let mut identity: Option<(String,String)> = None; let mut version = None; let mut parent_id = None; let mut messages = vec![]; let mut warnings = vec![];

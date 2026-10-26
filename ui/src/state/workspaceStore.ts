@@ -599,7 +599,8 @@ function sameProviderSession(
   b: AgentProviderSession | null | undefined,
 ): boolean {
   if (!a || !b) return !a && !b;
-  return a.key === b.key && a.id === b.id && (a.transcriptPath ?? null) === (b.transcriptPath ?? null);
+  return a.key === b.key && a.id === b.id && (a.transcriptPath ?? null) === (b.transcriptPath ?? null)
+    && a.launcher === b.launcher;
 }
 
 /**

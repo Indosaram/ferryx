@@ -55,6 +55,15 @@ function titleAction(title: string) {
 }
 
 describe("agent activity survives non-status terminal titles", () => {
+  it("retains a newly reported native launcher for an existing provider session", () => {
+    const state = stateWithSession("tab-a");
+    state.sessions["session-a"].agentType = "omo";
+    state.sessions["session-a"].providerSession = { key: "session_id", id: "native-session" };
+    const providerSession = { key: "session_id", id: "native-session", launcher: "mhc" } as const;
+    const updated = workspaceReducer(state, { type: "APPLY_PROVIDER_SESSION", sessionId: "session-a", agentType: "omo", providerSession });
+    expect(updated.sessions["session-a"].providerSession).toEqual(providerSession);
+  });
+
   it("keeps the working state when the agent writes a title carrying no status word", () => {
     let state = stateWithSession("tab-b");
     state = workspaceReducer(state, titleAction("\u280b codex: running tests"));

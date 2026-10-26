@@ -105,6 +105,8 @@ struct ProviderWire {
     id: String,
     #[serde(default, deserialize_with = "optional_text")]
     transcript_path: Option<String>,
+    #[serde(default)]
+    launcher: Option<crate::daemon::protocol::AgentLauncher>,
 }
 impl From<ProviderWire> for crate::daemon::protocol::AgentProviderSession {
     fn from(v: ProviderWire) -> Self {
@@ -112,6 +114,7 @@ impl From<ProviderWire> for crate::daemon::protocol::AgentProviderSession {
             key: v.key,
             id: v.id,
             transcript_path: v.transcript_path,
+            launcher: v.launcher,
         }
     }
 }

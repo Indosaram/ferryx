@@ -127,8 +127,10 @@ export function normalizeAgentProviderSession(raw: unknown): AgentProviderSessio
   if (key !== "session_id" && key !== "conversation_id") return null;
   const id = normalizeSessionId(record.id);
   if (!id) return null;
+  const launcher = record.launcher;
+  if (launcher !== undefined && launcher !== null && launcher !== "mhc") return null;
   const transcriptPath = readTranscriptPath(record, ["transcriptPath", "transcript_path"]);
-  return transcriptPath ? { key, id, transcriptPath } : { key, id };
+  return { key, id, ...(transcriptPath ? { transcriptPath } : {}), ...(launcher ? { launcher } : {}) };
 }
 
 export function agentProviderSessionsEqual(
@@ -185,10 +187,12 @@ export function getAgentResumeArgv(
 ): string[] | null {
   const normSession = normalizeAgentProviderSession(providerSession);
   if (!normSession) return null;
-  const builder = RESUME_BUILDERS[normalizeAgentType(agent)];
+  const normAgent = normalizeAgentType(agent);
+  const builder = RESUME_BUILDERS[normAgent];
   if (!builder || builder.key !== normSession.key) return null;
+  if (normSession.launcher && normAgent !== "omo") return null;
   const args = builder.args(normSession.id, normSession, ompResumeFilePath);
-  return args.length > 0 ? [builder.binary, ...args] : null;
+  return args.length > 0 ? [normSession.launcher ?? builder.binary, ...args] : null;
 }
 
 export function buildResumeArgv(ref: AgentSessionRef): string[] | null {
@@ -197,7 +201,7 @@ export function buildResumeArgv(ref: AgentSessionRef): string[] | null {
   if (!normAgent) return null;
 
   let session = ref.providerSession ? normalizeAgentProviderSession(ref.providerSession) : null;
-  if (!session && typeof ref.sessionId === "string") {
+  if (!ref.providerSession && typeof ref.sessionId === "string") {
     session = normalizeAgentProviderSession({ key: "session_id", id: ref.sessionId });
   }
   if (!session) return null;

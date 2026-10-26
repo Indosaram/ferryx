@@ -1000,6 +1000,7 @@ mod p09_tests {
     #[test]
     fn an_opencode_provider_session_resolves_to_a_resume_plan() {
         let provider = crate::daemon::protocol::AgentProviderSession {
+            launcher: None,
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: "ses_e9d886f2bffeJp9DsEMPfnB25I".to_string(),
             transcript_path: None,

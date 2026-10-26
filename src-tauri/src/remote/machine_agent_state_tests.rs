@@ -222,6 +222,7 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             state: "working".into(),
             agent: Some("omo".into()),
             provider_session: Some(AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "initial-provider-id-42".into(),
                 transcript_path: None,
@@ -237,6 +238,7 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             state: "done".into(),
             agent: Some("unrelated-agent".into()),
             provider_session: Some(AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::ConversationId,
                 id: "unrelated-conv-id".into(),
                 transcript_path: None,
@@ -295,6 +297,7 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             state: "working".into(),
             agent: Some("other".into()),
             provider_session: Some(AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "unrelated-barrier-id".into(),
                 transcript_path: None,
@@ -308,6 +311,7 @@ async fn machine_terminal_websocket_publishes_authoritative_agent_state_and_igno
             state: "waiting".into(),
             agent: Some("omo".into()),
             provider_session: Some(AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "rotated-provider-id-99".into(),
                 transcript_path: None,
