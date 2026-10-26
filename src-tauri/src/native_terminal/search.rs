@@ -2,6 +2,9 @@
 
 use std::ptr::NonNull;
 
+#[path = "search_matching.rs"]
+mod matching;
+
 use super::error::NativeTerminalError;
 use super::sys::ffi::{ghostty_grid_ref_graphemes, ghostty_terminal_grid_ref};
 use super::sys::types::{
@@ -92,24 +95,13 @@ pub fn search_grid(
             cells.push(screen_cell_text(handle, col, row as u32)?);
         }
 
-        for start in 0..cols {
-            let mut candidate = String::new();
-            for end in start..cols {
-                candidate.push_str(&cells[end as usize]);
-                let normalized_candidate = if case_sensitive {
-                    candidate.as_str().into()
-                } else {
-                    candidate.to_lowercase()
-                };
-                if normalized_candidate == normalized_query {
-                    matches.push((row as u16, start, end));
-                    break;
-                }
-                if normalized_candidate.len() >= normalized_query.len() {
-                    break;
-                }
-            }
-        }
+        matching::append_row_matches(
+            &cells,
+            &normalized_query,
+            case_sensitive,
+            row as u16,
+            &mut matches,
+        );
     }
     Ok(matches)
 }

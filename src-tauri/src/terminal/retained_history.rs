@@ -283,12 +283,13 @@ impl RetainedHistory {
                 Some(record) => {
                     self.image_bytes -= record.bytes.len();
                     let group = record.image_group;
-                    self.images.retain(|part| {
-                        if part.image_group == group {
-                            self.image_bytes -= part.bytes.len();
-                            false
-                        } else { true }
-                    });
+                    // retain_unit appends all parts of a completed image group together.
+                    // Only its consecutive front records can share this group: scanning
+                    // every surviving image here makes steady-state eviction quadratic.
+                    while self.images.front().is_some_and(|part| part.image_group == group) {
+                        let part = self.images.pop_front().expect("front image part exists");
+                        self.image_bytes -= part.bytes.len();
+                    }
                 }
                 None => break,
             }
@@ -305,6 +306,64 @@ mod tests {
         out.extend(std::iter::repeat_n(b'A', payload));
         out.extend_from_slice(b"\x1b\\");
         out
+    }
+
+    #[test]
+    fn eviction_removes_whole_front_groups_and_preserves_later_images_and_text() {
+        let first = b"\x1b_Ga=T,m=1;AAAA\x1b\\";
+        let last = b"\x1b_Gm=0;BBBB\x1b\\";
+        let second = b"\x1b_Ga=p,i=2;\x1b\\";
+        let third = b"\x1b_Ga=p,i=3;\x1b\\";
+        let mut retained = RetainedHistory::new(RetentionBudget {
+            text_bytes: 4096,
+            image_bytes: first.len() + last.len() + second.len(),
+        });
+        retained.push(1, first);
+        retained.push(2, b"INTERLEAVED\r\n");
+        retained.push(3, last);
+        retained.push(4, second);
+        assert_eq!(retained.image_bytes(), first.len() + last.len() + second.len());
+
+        // Exceeding the budget by one small command removes the entire first multipart
+        // group, not merely its first part, and leaves both later groups in stream order.
+        retained.push(5, third);
+        assert_eq!(retained.image_bytes(), second.len() + third.len());
+        assert_eq!(retained.replay(), [b"INTERLEAVED\r\n".as_slice(), second, third].concat());
+
+        // One push may evict several groups. The replacement image fits the budget alone.
+        let replacement = kitty(retained.budget().image_bytes - kitty(0).len());
+        retained.push(6, &replacement);
+        assert_eq!(retained.image_bytes(), replacement.len());
+        assert_eq!(retained.replay(), [b"INTERLEAVED\r\n".as_slice(), &replacement].concat());
+    }
+
+    #[test]
+    fn reseeded_history_keeps_image_groups_atomic_during_eviction() {
+        let first = b"\x1b_Ga=T,m=1;AAAA\x1b\\";
+        let last = b"\x1b_Gm=0;BBBB\x1b\\";
+        let later = b"\x1b_Ga=p,i=2;\x1b\\";
+        let budget = RetentionBudget {
+            text_bytes: 4096,
+            image_bytes: first.len() + last.len() + later.len(),
+        };
+        let mut original = RetainedHistory::new(budget);
+        original.push(1, first);
+        original.push(2, b"BETWEEN");
+        original.push(3, last);
+        original.push(4, later);
+        // Snapshot restoration also reconstructs retention through push, never by
+        // inserting individual records into its private image queue.
+        let mut restored = RetainedHistory::new(budget);
+        for (sequence, bytes) in original.records() {
+            restored.push(sequence, bytes);
+        }
+        restored.restore_state(original.state());
+        assert_eq!(restored.replay(), original.replay());
+        restored.push(5, later);
+        original.push(5, later);
+        assert_eq!(restored.image_bytes(), 2 * later.len());
+        assert_eq!(restored.replay(), original.replay());
+        assert_eq!(restored.replay(), [b"BETWEEN".as_slice(), later, later].concat());
     }
 
     #[test]
