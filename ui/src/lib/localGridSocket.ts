@@ -2,6 +2,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type { WebSocketLike } from "../remote/RemoteTerminal";
 
+const pendingWrites = new Map<string, Promise<void>>();
+
 /**
  * A WebSocketLike backed by the local grid stream IPC (`cmd_terminal_grid_*`), so the remote
  * client's DOM grid renderer can draw a local session when the native GPU renderer is
@@ -11,6 +13,18 @@ import type { WebSocketLike } from "../remote/RemoteTerminal";
 export function createLocalGridSocket(sessionId: string): WebSocketLike {
   let streamId: string | null = null;
   let closed = false;
+  function write(data: string): void {
+    const pending = (pendingWrites.get(sessionId) ?? Promise.resolve())
+      .then(() => invoke<void>("cmd_terminal_write", { sessionId, data }))
+      .catch((error: unknown) => {
+        console.warn("Compatibility renderer input failed", error);
+        socket.onerror?.(error);
+      });
+    pendingWrites.set(sessionId, pending);
+    void pending.then(() => {
+      if (pendingWrites.get(sessionId) === pending) pendingWrites.delete(sessionId);
+    });
+  }
   const socket: WebSocketLike = {
     readyState: 0,
     binaryType: "arraybuffer",
@@ -36,14 +50,12 @@ export function createLocalGridSocket(sessionId: string): WebSocketLike {
           return;
         }
         if (control?.type === "signal" && control.signal === "interrupt") {
-          void invoke("cmd_terminal_write", { sessionId, data: "\u0003" })
-            .catch((error: unknown) => console.warn("Compatibility renderer interrupt failed", error));
+          write("\u0003");
           return;
         }
         if (control?.type === "scroll") return;
       }
-      void invoke("cmd_terminal_write", { sessionId, data: text })
-        .catch((error: unknown) => console.warn("Compatibility renderer input failed", error));
+      write(text);
     },
     close() {
       if (closed) return;
