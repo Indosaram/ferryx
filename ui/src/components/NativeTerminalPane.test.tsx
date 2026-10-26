@@ -1941,7 +1941,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       if (cmd === "cmd_native_terminal_send_input") {
         sendInputAttempts++;
         if (sendInputAttempts === 1) {
-          throw { code: "INTERNAL_ERROR", message: "NoValue", details: { inputWritten: false } };
+          throw { code: "SESSION_NOT_FOUND", message: "NoValue", details: { inputWritten: false } };
         }
         return { cursorCol: 5, cursorRow: 10, cellWidthPx: 8, cellHeightPx: 16 };
       }
@@ -1974,7 +1974,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
       if (cmd === "cmd_native_terminal_send_input") {
         sendInputAttempts++;
-        throw { code: "INTERNAL_ERROR", message: "PermanentDetachedError", details: { inputWritten: false } };
+        throw { code: "SESSION_NOT_FOUND", message: "PermanentDetachedError", details: { inputWritten: false } };
       }
       if (cmd === "cmd_native_terminal_attach") {
         attachCount++;
@@ -2017,6 +2017,45 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
 
     expect(getByRole("alert")).toHaveTextContent("Input dropped");
+  });
+
+  it("shows partial input delivery without retrying the whole input", async () => {
+    const session = createSession("term-session-partial");
+    const { getByTestId, getByRole } = await renderNative(<NativeTerminalPane sessionId="term-session-partial" session={session} />);
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_send_input") {
+        throw { code: "PTY_IO_ERROR", message: "stalled", details: { inputWritten: true, partial: true, bytesWritten: 1 } };
+      }
+      return undefined;
+    });
+    await act(async () => {
+      fireEvent.input(getByTestId("native-terminal-focus-sink"), { target: { value: "ab" } });
+    });
+    expect(getByRole("alert")).toBeVisible();
+    expect(tauriCoreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toHaveLength(1);
+  });
+
+  it.each([true, false])("shows a paste failure without replay when its byte count is exact=%s", async (exact) => {
+    const session = createSession("term-session-paste-failure");
+    const { getByTestId, getByRole } = await renderNative(<NativeTerminalPane sessionId={session.id} session={session} />);
+    tauriCoreMocks.invoke.mockClear();
+    tauriCoreMocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "cmd_native_terminal_paste") {
+        throw { code: "PTY_IO_ERROR", message: "stalled", details: {
+          inputWritten: exact ? true : null, partial: true,
+          bytesWritten: exact ? 1 : 0, bytesWrittenExact: exact,
+        } };
+      }
+      return undefined;
+    });
+    await act(async () => {
+      fireEvent.paste(getByTestId("native-terminal-focus-sink"), {
+        clipboardData: { types: ["text/plain"], getData: () => "ab", files: [] },
+      });
+    });
+    expect(getByRole("alert")).toBeVisible();
+    expect(tauriCoreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_paste")).toHaveLength(1);
   });
 
   it("delivers every key of a printable burst typed faster than the input IPC round trip", async () => {
@@ -2696,6 +2735,52 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         text: "shift insert text",
       });
     });
+  });
+
+  it("delivers Escape during a pending large paste before later text", async () => {
+    const session = createSession("term-paste-control");
+    let releasePaste!: () => void;
+    let pasteStarted!: () => void;
+    let controlSent!: () => void;
+    const pendingPaste = new Promise<void>(resolve => { releasePaste = resolve; });
+    const started = new Promise<void>(resolve => { pasteStarted = resolve; });
+    const interrupted = new Promise<void>(resolve => { controlSent = resolve; });
+    const delivered: string[] = [];
+    tauriCoreMocks.invoke.mockImplementation(async cmd => {
+      if (cmd === "cmd_native_terminal_clipboard_content") return { kind: "text", text: "x".repeat(300 * 1024) };
+      if (cmd === "cmd_native_terminal_paste") {
+        pasteStarted();
+        await pendingPaste;
+        delivered.push("paste");
+      }
+      if (cmd === "cmd_native_terminal_send_input") {
+        delivered.push("key");
+        controlSent();
+      }
+      return undefined;
+    });
+    const view = await renderNative(<NativeTerminalPane sessionId={session.id} session={session} />);
+    const sink = view.getByTestId("native-terminal-focus-sink");
+    sink.focus();
+    let deadlineTimer!: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_, reject) => {
+      deadlineTimer = setTimeout(() => reject(new Error("Paste/control IPC event not received")), 2000);
+    });
+    try {
+      await act(async () => {
+        fireEvent.keyDown(sink, { key: "Insert", code: "Insert", shiftKey: true });
+        await Promise.race([started, deadline]);
+      });
+      await act(async () => {
+        fireEvent.keyDown(sink, { key: "Escape", code: "Escape" });
+        await Promise.race([interrupted, deadline]);
+      });
+      expect(delivered).toEqual(["key"]);
+    } finally {
+      clearTimeout(deadlineTimer);
+      await act(async () => { releasePaste(); await pendingPaste; });
+    }
+    expect(delivered).toEqual(["key", "paste"]);
   });
 
   it("claims Ctrl+V on focused textarea and saves clipboard image locally, pasting the local path", async () => {
@@ -7597,7 +7682,14 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
     });
   });
 
-  it("does not trigger performAttach when send_input fails with Busy and inputWritten:false", async () => {
+  it.each([
+    { code: "INTERNAL_ERROR", kind: "busy" },
+    { code: "LIMIT_EXCEEDED", kind: "error" },
+    { code: "INVALID_ARGUMENT", kind: "error" },
+    { code: "INTERNAL_ERROR", kind: "error" },
+    { code: "INTERNAL_ERROR", kind: "staleGeneration" },
+    { code: "PTY_IO_ERROR", kind: "error" },
+  ])("does not reattach for rejected input $code/$kind", async ({ code, kind }) => {
     const session = createSession("term-session-busy-no-attach");
     const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-busy-no-attach" session={session} />);
     const sink = getByTestId("native-terminal-focus-sink");
@@ -7607,8 +7699,8 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       if (cmd === "cmd_native_terminal_send_input") {
         const error = new Error("Remote control is busy; input was not queued");
         Object.assign(error, {
-          code: "INTERNAL_ERROR",
-          details: { kind: "busy", inputWritten: false },
+          code,
+          details: { kind, inputWritten: false },
         });
         throw error;
       }
@@ -7626,6 +7718,9 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       ([cmd]) => cmd === "cmd_native_terminal_attach",
     );
     expect(attachCalls).toHaveLength(0);
+    expect(tauriCoreMocks.invoke.mock.calls.filter(
+      ([cmd]) => cmd === "cmd_native_terminal_send_input",
+    )).toHaveLength(1);
   });
 
   it("delivers preedit update enqueued while input send is in flight strictly after input in NativeTerminalPane", async () => {
@@ -7756,6 +7851,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       fireEvent.keyDown(view2.getByTestId("native-terminal-focus-sink"), { key: "b" });
     });
     expect(getTerminalInputDropCount("outage")).toBe(1);
+    expect(view2.getByRole("alert")).toBeVisible();
     view2.unmount();
 
     // Scenario 3: quarantined (input failure; the recovery reattach finds the session missing)
@@ -7769,7 +7865,7 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       if (cmd === "cmd_native_terminal_send_input") {
         const err = new Error("input failed");
         Object.assign(err, {
-          code: "INTERNAL_ERROR",
+          code: "SESSION_NOT_FOUND",
           details: { inputWritten: false, kind: "error" },
         });
         throw err;

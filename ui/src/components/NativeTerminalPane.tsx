@@ -1618,6 +1618,7 @@ export function NativeTerminalPane({
     );
     if (isOutage) {
       recordTerminalInputDrop("outage");
+      setError("Input not sent: reconnecting");
       switchDebug("terminal.surface.input.dropped.outage", {
         backendSessionId: targetSessionId,
         state: session?.remoteConnectionState,
@@ -1639,6 +1640,11 @@ export function NativeTerminalPane({
     const isCurrentOwner = () => owner !== null && owner.sessionId === currentSessionId && surfaceOwnerRef.current === owner;
     const generation = isRemote ? session?.remoteGeneration ?? null : null;
     const payloadBytes = estimateInputBytes(input);
+    const controlInput = "text" in input
+      ? ["\u0003", "\u0004", "\u001a", "\u001b"].includes(input.text)
+      : !input.keyEvent.modifiers.alt && !input.keyEvent.modifiers.superKey &&
+        (input.keyEvent.key === "Escape" ||
+          (input.keyEvent.modifiers.ctrl && ["c", "d", "z"].includes(input.keyEvent.key.toLowerCase())));
 
     // A send that failed without writing is recovered while it still holds the session's
     // input lane, so the retried keystroke is written before any later keystroke.
@@ -1648,7 +1654,8 @@ export function NativeTerminalPane({
     };
     const recoverInput = async (error: unknown): Promise<boolean> => {
       if (recovery.attempted || !isCurrentOwner()) return false;
-      if (!isStructuredIpcError(error) || error.details?.inputWritten !== false || error.details?.kind === "busy") {
+      if (!isStructuredIpcError(error) || error.code !== "SESSION_NOT_FOUND" ||
+          error.details?.inputWritten !== false || error.details?.kind === "busy") {
         return false;
       }
       recovery.attempted = true;
@@ -1717,6 +1724,7 @@ export function NativeTerminalPane({
           undefined,
           {
             recover: recoverInput,
+            ...(controlInput ? { lane: "control" as const } : {}),
             ...(isCoalescablePrintableText(input)
               ? { coalesceText: { text: input.text, send: sendText } }
               : {}),
@@ -1792,6 +1800,10 @@ export function NativeTerminalPane({
           // A dropped keystroke that says nothing is the worst outcome here: the user believes
           // they typed it. Surface the drop so they know to retype rather than trusting the buffer.
           setError("Input dropped: the terminal is not keeping up. Retype the last characters.");
+          return;
+        }
+        if (isStructuredIpcError(error) && error.details?.partial === true) {
+          setError("Input was only partially delivered. Check the command line before continuing.");
           return;
         }
         if (isStructuredIpcError(error) && error.details?.inputWritten === true) {
@@ -1904,6 +1916,8 @@ export function NativeTerminalPane({
         session?.remoteConnectionState === "expired"
       );
       if (isOutage) {
+        recordTerminalInputDrop("outage");
+        setError("Input not sent: reconnecting");
         return;
       }
       const generation = isRemote ? session?.remoteGeneration ?? null : null;
@@ -1911,14 +1925,20 @@ export function NativeTerminalPane({
 
       void terminalInputQueue
         .enqueue(targetSessionId, generation, payloadBytes, () =>
-          invoke<NativeTerminalReceipt>("cmd_native_terminal_paste", {
+          invoke<void>("cmd_native_terminal_paste", {
             sessionId: targetSessionId,
             text,
             ...(generation != null ? { generation } : {}),
           }),
+          undefined, "paste", undefined, { lane: "paste" },
         )
-        .then(updateImeAnchor)
         .catch((error: unknown) => {
+          if (isStructuredIpcError(error) && error.details?.partial === true) {
+            setError(error.details.bytesWrittenExact === false
+              ? "Paste delivery could not be confirmed; check the command line before running it."
+              : "Paste was only partially pasted into the terminal; check the command line before running it.");
+            return;
+          }
           if (isStructuredIpcError(error) && error.details?.inputWritten === true) {
             return;
           }
