@@ -987,4 +987,236 @@ describe("NativeTerminalInputQueueManager", () => {
       expect(sent).toEqual(["a", "b", "c", "de"]);
     });
   });
+
+  describe("paste and control lanes", () => {
+    const PASTE = { lane: "paste" } as const;
+    const CONTROL = { lane: "control" } as const;
+
+    function enqueuePaste<T>(target: NativeTerminalInputQueueManager, generation: number | null, bytes: number, op: () => Promise<T>) {
+      return target.enqueue("s", generation, bytes, op, undefined, "paste", undefined, PASTE);
+    }
+    function enqueueControl<T>(target: NativeTerminalInputQueueManager, generation: number | null, op: () => Promise<T>) {
+      return target.enqueue("s", generation, 1, op, undefined, "key", undefined, CONTROL);
+    }
+
+    it("resolves a control key before an unresolved paste while later text stays queued", async () => {
+      const order: string[] = [];
+      const paste = createDeferred<string>();
+      let pasteSettled = false;
+      const pastePromise = enqueuePaste(queue, 1, 900, async () => {
+        order.push("paste");
+        return paste.promise;
+      }).finally(() => {
+        pasteSettled = true;
+      });
+      const controlPromise = enqueueControl(queue, 1, async () => {
+        order.push("ctrl-c");
+        return "ctrl-c";
+      });
+      const text = vi.fn(async () => {
+        order.push("text");
+        return "text";
+      });
+      const textPromise = queue.enqueue("s", 1, 1, text);
+
+      await expect(controlPromise).resolves.toBe("ctrl-c");
+      expect(pasteSettled).toBe(false);
+      expect(text).not.toHaveBeenCalled();
+      expect(queue.getQueuedCount("s")).toBe(2);
+      expect(queue.getQueuedBytes("s")).toBe(901);
+
+      paste.resolve("pasted");
+      await expect(pastePromise).resolves.toBe("pasted");
+      await expect(textPromise).resolves.toBe("text");
+      expect(order).toEqual(["paste", "ctrl-c", "text"]);
+      expect(queue.getQueuedCount("s")).toBe(0);
+      expect(queue.getQueuedBytes("s")).toBe(0);
+    });
+
+    it("serializes control keys among themselves during an in-flight paste", async () => {
+      const order: string[] = [];
+      const paste = createDeferred<void>();
+      const first = createDeferred<void>();
+      const pastePromise = enqueuePaste(queue, null, 10, () => paste.promise);
+      const c1 = enqueueControl(queue, null, async () => {
+        order.push("start:c1");
+        await first.promise;
+        order.push("end:c1");
+      });
+      const c2 = enqueueControl(queue, null, async () => {
+        order.push("c2");
+      });
+      expect(order).toEqual(["start:c1"]);
+      first.resolve();
+      await c1;
+      await c2;
+      expect(order).toEqual(["start:c1", "end:c1", "c2"]);
+      expect(queue.isRunning("s")).toBe(true);
+      paste.resolve();
+      await pastePromise;
+      expect(queue.isRunning("s")).toBe(false);
+    });
+
+    it("does not let a control key overtake earlier queued text or in-flight ordinary input", async () => {
+      const order: string[] = [];
+      const paste = createDeferred<void>();
+      const pastePromise = enqueuePaste(queue, null, 10, async () => {
+        order.push("paste");
+        await paste.promise;
+      });
+      const textPromise = queue.enqueue("s", null, 1, async () => {
+        order.push("text");
+      });
+      const control = vi.fn(async () => {
+        order.push("ctrl-c");
+      });
+      const controlPromise = enqueueControl(queue, null, control);
+      expect(control).not.toHaveBeenCalled();
+      paste.resolve();
+      await Promise.all([pastePromise, textPromise, controlPromise]);
+      expect(order).toEqual(["paste", "text", "ctrl-c"]);
+
+      const ordinary = createDeferred<void>();
+      const ordinaryPromise = queue.enqueue("s", null, 1, () => ordinary.promise);
+      const control2 = vi.fn(async () => undefined);
+      const control2Promise = enqueueControl(queue, null, control2);
+      expect(control2).not.toHaveBeenCalled();
+      ordinary.resolve();
+      await Promise.all([ordinaryPromise, control2Promise]);
+      expect(control2).toHaveBeenCalledTimes(1);
+    });
+
+    it("admits a 512 KiB paste by default and still admits control keys and typing beside it", async () => {
+      const defaults = new NativeTerminalInputQueueManager();
+      const paste = createDeferred<string>();
+      const pastePromise = enqueuePaste(defaults, null, 512 * 1024, () => paste.promise);
+      await expect(enqueuePaste(defaults, null, 1, async () => "more"))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      await expect(enqueueControl(defaults, null, async () => "ctrl")).resolves.toBe("ctrl");
+      const textPromise = defaults.enqueue("s", null, 1, async () => "t");
+      expect(defaults.getQueuedBytes("s")).toBe(512 * 1024 + 1);
+      paste.resolve("pasted");
+      await expect(pastePromise).resolves.toBe("pasted");
+      await expect(textPromise).resolves.toBe("t");
+      expect(defaults.getQueuedBytes("s")).toBe(0);
+
+      await expect(enqueuePaste(defaults, null, 512 * 1024 + 1, async () => "too big"))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      // Ordinary input keeps its own 256 KiB byte bound.
+      await expect(defaults.enqueue("s", null, 256 * 1024 + 1, async () => "too big"))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      expect(defaults.getQueuedBytes("s")).toBe(0);
+    });
+
+    it("bounds control entries separately from a full ordinary queue", async () => {
+      const paste = createDeferred<void>();
+      const held = createDeferred<void>();
+      const items: Promise<unknown>[] = [enqueuePaste(queue, null, 10, () => paste.promise)];
+      for (let index = 0; index < 3; index += 1) {
+        items.push(queue.enqueue("s", null, 1, async () => index));
+      }
+      await expect(queue.enqueue("s", null, 1, async () => "overflow"))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      await expect(enqueuePaste(queue, null, 1, async () => "overflow"))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+
+      items.push(enqueueControl(queue, null, () => held.promise));
+      for (let index = 0; index < 3; index += 1) {
+        items.push(enqueueControl(queue, null, async () => index));
+      }
+      expect(queue.getQueuedCount("s")).toBe(8);
+      await expect(enqueueControl(queue, null, async () => "overflow"))
+        .rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+
+      held.resolve();
+      paste.resolve();
+      await Promise.all(items);
+      expect(queue.getQueuedCount("s")).toBe(0);
+      expect(queue.getQueuedBytes("s")).toBe(0);
+    });
+
+    it("fences queued control keys and text by generation while paste and control are in flight", async () => {
+      const paste = createDeferred<string>();
+      const c1 = createDeferred<string>();
+      const pastePromise = enqueuePaste(queue, 1, 10, () => paste.promise);
+      const c1Promise = enqueueControl(queue, 1, () => c1.promise);
+      const staleControl = vi.fn(async () => "stale");
+      const staleControlPromise = enqueueControl(queue, 1, staleControl);
+      const staleText = vi.fn(async () => "stale");
+      const staleTextPromise = queue.enqueue("s", 1, 1, staleText);
+
+      queue.invalidateOldGenerations("s", 2);
+      await expect(staleControlPromise).rejects.toBeInstanceOf(NativeTerminalStaleGenerationError);
+      await expect(staleTextPromise).rejects.toBeInstanceOf(NativeTerminalStaleGenerationError);
+      await expect(enqueueControl(queue, 1, async () => "old"))
+        .rejects.toBeInstanceOf(NativeTerminalStaleGenerationError);
+      expect(queue.getQueuedCount("s")).toBe(2);
+      expect(queue.getQueuedBytes("s")).toBe(11);
+
+      const fresh = enqueueControl(queue, 2, async () => "fresh");
+      c1.resolve("c1");
+      await expect(c1Promise).resolves.toBe("c1");
+      await expect(fresh).resolves.toBe("fresh");
+      paste.resolve("pasted");
+      await expect(pastePromise).resolves.toBe("pasted");
+      expect(staleControl).not.toHaveBeenCalled();
+      expect(staleText).not.toHaveBeenCalled();
+      expect(queue.getQueuedBytes("s")).toBe(0);
+    });
+
+    it("clear rejects queued control keys and text while in-flight paste and control finish their accounting", async () => {
+      const paste = createDeferred<string>();
+      const c1 = createDeferred<string>();
+      const pastePromise = enqueuePaste(queue, 3, 10, () => paste.promise);
+      const c1Promise = enqueueControl(queue, 3, () => c1.promise);
+      const queuedControl = vi.fn(async () => "never");
+      const queuedControlPromise = enqueueControl(queue, 3, queuedControl);
+      const queuedTextPromise = queue.enqueue("s", 3, 1, async () => "never");
+      queue.invalidateOldGenerations("s", 3);
+
+      queue.clear("s");
+      await expect(queuedControlPromise).rejects.toThrow("Terminal input queue cleared");
+      await expect(queuedTextPromise).rejects.toThrow("Terminal input queue cleared");
+      expect(queue.getQueuedBytes("s")).toBe(11);
+
+      c1.resolve("c1");
+      await expect(c1Promise).resolves.toBe("c1");
+      paste.resolve("pasted");
+      await expect(pastePromise).resolves.toBe("pasted");
+      expect(queuedControl).not.toHaveBeenCalled();
+      expect(queue.isRunning("s")).toBe(false);
+      expect(queue.getQueuedBytes("s")).toBe(0);
+      // The cleared session was dropped once idle: its remembered generation is gone.
+      await expect(enqueueControl(queue, 1, async () => "fresh")).resolves.toBe("fresh");
+    });
+
+    it("never coalesces text admitted after a queued control key into an earlier text tail", async () => {
+      const order: string[] = [];
+      const paste = createDeferred<void>();
+      const send = async (text: string) => {
+        order.push(text);
+        return text;
+      };
+      const enqueueText = (text: string) =>
+        queue.enqueue("s", null, 1, () => send(text), undefined, "input", undefined, {
+          coalesceText: { text, send },
+        });
+      const items: Promise<unknown>[] = [
+        enqueuePaste(queue, null, 10, async () => {
+          order.push("paste");
+          await paste.promise;
+        }),
+        enqueueText("a"),
+        enqueueText("b"),
+        enqueueText("c"),
+        enqueueControl(queue, null, async () => {
+          order.push("ctrl-c");
+        }),
+      ];
+      await expect(enqueueText("d")).rejects.toBeInstanceOf(NativeTerminalQueueOverflowError);
+      paste.resolve();
+      await Promise.all(items);
+      expect(order).toEqual(["paste", "a", "b", "c", "ctrl-c"]);
+    });
+  });
 });

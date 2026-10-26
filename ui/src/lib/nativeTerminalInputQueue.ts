@@ -81,6 +81,14 @@ export interface InputIdentityMeta {
   readonly incarnation?: string | null;
 }
 
+/**
+ * Input lanes beside ordinary FIFO input.
+ * - "paste": large bracketed-paste writes; bytes count against a separate paste budget.
+ * - "control": control keys (Ctrl-C, Esc, ...); own admission budget and a serialized lane that
+ *   may dispatch while a paste is in flight, so a running paste can be interrupted.
+ */
+export type NativeTerminalInputLane = "paste" | "control";
+
 interface QueuedItem<T = unknown> {
   readonly id: number;
   readonly requestId: string;
@@ -93,6 +101,7 @@ interface QueuedItem<T = unknown> {
   reject: (error: unknown) => void;
   /** "pointer" items (wheel/mouse) are bounded separately so momentum scrolling cannot evict keystrokes. */
   readonly kind?: "input" | "preedit" | "pointer";
+  readonly lane?: NativeTerminalInputLane;
   readonly supersededResolvers?: Array<(value: T) => void>;
   readonly identityMeta?: InputIdentityMeta;
   readonly recover?: (error: unknown) => Promise<boolean>;
@@ -109,13 +118,23 @@ interface LaneExecutionState {
 
 interface SessionQueueState {
   items: QueuedItem[];
+  /** Control-lane items, in admission order. Never part of items. */
+  controlItems: QueuedItem[];
   allocatedBytes: number;
   allocatedEntries: number;
+  /** Bytes held by paste-lane items (queued or in flight); their entries stay in allocatedEntries. */
+  pasteBytes: number;
+  controlBytes: number;
+  controlEntries: number;
   pointerEntries: number;
   running: boolean;
+  /** True while the input lane's in-flight item is a paste. */
+  inputRunningPaste: boolean;
   preeditRunning: boolean;
+  controlRunning: boolean;
   inputLane: LaneExecutionState;
   preeditLane: LaneExecutionState;
+  controlLane: LaneExecutionState;
   activeGeneration: number | null;
   /** Set by clear() while a lane is still running; the entry is dropped once it goes idle. */
   cleared?: boolean;
@@ -125,11 +144,22 @@ interface SessionQueueState {
 export interface NativeTerminalInputQueueOptions {
   readonly maxQueueBytes?: number;
   readonly maxQueueEntries?: number;
+  /** Byte budget for paste-lane items (one paste may use all of it). Default 512 KiB. */
+  readonly maxPasteBytes?: number;
+  /** Entry cap for control-lane items. Defaults to maxQueueEntries. */
+  readonly maxControlEntries?: number;
 }
 
 export interface NativeTerminalEnqueueOptions {
   /** Wheel/mouse items: counted against their own entry cap, never the keystroke cap. */
   readonly pointer?: boolean;
+  /**
+   * "paste": FIFO with ordinary input, bytes bounded by maxPasteBytes instead of maxQueueBytes.
+   * "control": admitted against its own budget (a full paste never blocks it), serialized with
+   * other control keys, FIFO with ordinary input except that it may dispatch while a paste is in
+   * flight. Ignored together with pointer; coalesceText is ignored when a lane is set.
+   */
+  readonly lane?: NativeTerminalInputLane;
   /**
    * Called when the operation fails. Resolving true re-executes the same item once while it
    * still holds the session lane, so later items cannot overtake it.
@@ -153,6 +183,8 @@ const DEFAULT_MAX_QUEUE_BYTES = 256 * 1024;
 // which counts in-flight and queued ops together). Buffering far more entries
 // locally would only turn entries 18+ into explicit Busy rejections downstream.
 const DEFAULT_MAX_QUEUE_ENTRIES = 17;
+// One bracketed paste may be admitted whole; held outside maxQueueBytes so it never starves typing.
+const DEFAULT_MAX_PASTE_BYTES = 512 * 1024;
 // One coalesced text write never exceeds the backend's per-input text limit
 // (MAX_NATIVE_INPUT_BYTES in src-tauri/src/native_terminal/input.rs).
 const MAX_COALESCED_TEXT_BYTES = 8192;
@@ -174,13 +206,20 @@ function notifySuperseded<T>(
 function createSessionState(activeGeneration: number | null): SessionQueueState {
   return {
     items: [],
+    controlItems: [],
     allocatedBytes: 0,
     allocatedEntries: 0,
+    pasteBytes: 0,
+    controlBytes: 0,
+    controlEntries: 0,
     pointerEntries: 0,
     running: false,
+    inputRunningPaste: false,
     preeditRunning: false,
+    controlRunning: false,
     inputLane: { runningSince: null, runningRequestId: null },
     preeditLane: { runningSince: null, runningRequestId: null },
+    controlLane: { runningSince: null, runningRequestId: null },
     activeGeneration,
   };
 }
@@ -190,23 +229,47 @@ function releaseItem(state: SessionQueueState, item: QueuedItem): void {
     state.pointerEntries = Math.max(0, state.pointerEntries - 1);
     return;
   }
-  state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
+  if (item.lane === "control") {
+    state.controlBytes = Math.max(0, state.controlBytes - item.bytes);
+    state.controlEntries = Math.max(0, state.controlEntries - 1);
+    return;
+  }
+  if (item.lane === "paste") {
+    state.pasteBytes = Math.max(0, state.pasteBytes - item.bytes);
+  } else {
+    state.allocatedBytes = Math.max(0, state.allocatedBytes - item.bytes);
+  }
   state.allocatedEntries = Math.max(0, state.allocatedEntries - 1);
+}
+
+/** Earliest-admitted queued (not running) item across the input and control queues. */
+function queuedHead(state: SessionQueueState): QueuedItem | undefined {
+  const input = state.items[0];
+  const control = state.controlItems[0];
+  if (!input) return control;
+  if (!control) return input;
+  return control.id < input.id ? control : input;
 }
 
 export class NativeTerminalInputQueueManager {
   private readonly maxQueueBytes: number;
   private readonly maxQueueEntries: number;
+  private readonly maxPasteBytes: number;
+  private readonly maxControlEntries: number;
   private readonly sessions = new Map<string, SessionQueueState>();
   private nextItemId = 1;
 
   constructor(options?: NativeTerminalInputQueueOptions) {
     this.maxQueueBytes = options?.maxQueueBytes ?? DEFAULT_MAX_QUEUE_BYTES;
     this.maxQueueEntries = options?.maxQueueEntries ?? DEFAULT_MAX_QUEUE_ENTRIES;
+    this.maxPasteBytes = options?.maxPasteBytes ?? DEFAULT_MAX_PASTE_BYTES;
+    this.maxControlEntries = options?.maxControlEntries ?? this.maxQueueEntries;
   }
 
+  /** Bytes held across ordinary, paste and control items (queued or in flight). */
   public getQueuedBytes(sessionId: string): number {
-    return this.sessions.get(sessionId)?.allocatedBytes ?? 0;
+    const s = this.sessions.get(sessionId);
+    return s ? s.allocatedBytes + s.pasteBytes + s.controlBytes : 0;
   }
 
   public getAllocatedBytes(sessionId: string): number {
@@ -214,42 +277,45 @@ export class NativeTerminalInputQueueManager {
   }
 
   public getQueuedCount(sessionId: string): number {
-    return this.sessions.get(sessionId)?.allocatedEntries ?? 0;
+    const s = this.sessions.get(sessionId);
+    return s ? s.allocatedEntries + s.controlEntries : 0;
   }
 
   public isRunning(sessionId: string): boolean {
     const s = this.sessions.get(sessionId);
-    return (s?.running ?? false) || (s?.preeditRunning ?? false);
+    return (s?.running ?? false) || (s?.preeditRunning ?? false) || (s?.controlRunning ?? false);
   }
 
   public getInFlightRequestId(sessionId: string): string | null {
     const s = this.sessions.get(sessionId);
     if (!s) return null;
-    return s.inputLane.runningRequestId ?? s.preeditLane.runningRequestId ?? null;
+    return (
+      s.inputLane.runningRequestId ??
+      s.controlLane.runningRequestId ??
+      s.preeditLane.runningRequestId ??
+      null
+    );
   }
 
   public getQueuedHeadAgeMs(sessionId: string): number | null {
     const s = this.sessions.get(sessionId);
-    if (!s || s.items.length === 0) return null;
-    return Math.max(0, Date.now() - s.items[0].queuedAt);
+    const head = s ? queuedHead(s) : undefined;
+    if (!head) return null;
+    return Math.max(0, Date.now() - head.queuedAt);
   }
 
   public getHeadQueuedRequestId(sessionId: string): string | null {
     const s = this.sessions.get(sessionId);
-    if (!s || s.items.length === 0) return null;
-    return s.items[0].requestId;
+    return (s ? queuedHead(s)?.requestId : undefined) ?? null;
   }
 
   public getRunningAgeMs(sessionId: string): number | null {
     const s = this.sessions.get(sessionId);
     if (!s) return null;
-    const inputSince = s.inputLane.runningSince;
-    const preeditSince = s.preeditLane.runningSince;
-    const earliestSince =
-      inputSince !== null && preeditSince !== null
-        ? Math.min(inputSince, preeditSince)
-        : (inputSince ?? preeditSince);
-    return earliestSince == null ? null : Math.max(0, Date.now() - earliestSince);
+    const since = [s.inputLane, s.preeditLane, s.controlLane]
+      .map((lane) => lane.runningSince)
+      .filter((value): value is number => value !== null);
+    return since.length === 0 ? null : Math.max(0, Date.now() - Math.min(...since));
   }
 
   public recordDrop(reason: TerminalInputDropReason): void {
@@ -286,32 +352,37 @@ export class NativeTerminalInputQueueManager {
     }
 
     state.activeGeneration = currentGeneration;
-    if (state.items.length === 0) return;
-
-    const remaining: QueuedItem[] = [];
-    for (const item of state.items) {
-      if (item.generation !== null && item.generation < currentGeneration) {
-        releaseItem(state, item);
-        item.reject(new NativeTerminalStaleGenerationError());
-        notifySuperseded(item.supersededResolvers, undefined);
-      } else {
-        remaining.push(item);
+    const keepCurrent = (items: QueuedItem[]): QueuedItem[] => {
+      const remaining: QueuedItem[] = [];
+      for (const item of items) {
+        if (item.generation !== null && item.generation < currentGeneration) {
+          releaseItem(state, item);
+          item.reject(new NativeTerminalStaleGenerationError());
+          notifySuperseded(item.supersededResolvers, undefined);
+        } else {
+          remaining.push(item);
+        }
       }
-    }
-    state.items = remaining;
+      return remaining;
+    };
+    if (state.items.length > 0) state.items = keepCurrent(state.items);
+    if (state.controlItems.length > 0) state.controlItems = keepCurrent(state.controlItems);
+    // Dropping stale items may unblock a queued item of the other lane.
+    this.pump(sessionId);
   }
 
   public clear(sessionId: string): void {
     const state = this.sessions.get(sessionId);
     if (!state) return;
 
-    for (const lane of [state.inputLane, state.preeditLane]) {
+    for (const lane of [state.inputLane, state.preeditLane, state.controlLane]) {
       if (lane.inFlightTimer) clearTimeout(lane.inFlightTimer);
       lane.inFlightTimer = null;
     }
 
-    const items = state.items;
+    const items = [...state.items, ...state.controlItems];
     state.items = [];
+    state.controlItems = [];
 
     for (const item of items) {
       releaseItem(state, item);
@@ -319,7 +390,7 @@ export class NativeTerminalInputQueueManager {
       notifySuperseded(item.supersededResolvers, undefined);
     }
 
-    if (!state.running && !state.preeditRunning) {
+    if (!state.running && !state.preeditRunning && !state.controlRunning) {
       this.sessions.delete(sessionId);
     } else {
       state.cleared = true;
@@ -375,7 +446,8 @@ export class NativeTerminalInputQueueManager {
 
     const boundedBytes = Math.max(1, payloadBytes);
     const pointer = options?.pointer === true;
-    const coalesceText = pointer ? undefined : options?.coalesceText;
+    const lane = pointer ? undefined : options?.lane;
+    const coalesceText = pointer || lane ? undefined : options?.coalesceText;
     if (
       coalesceText &&
       state.allocatedEntries >= this.maxQueueEntries &&
@@ -384,12 +456,15 @@ export class NativeTerminalInputQueueManager {
       // Only the queued tail is a merge target, so a merge never reorders input. Items in
       // state.items are never running (pump shifts the head out before dispatch).
       const tail = state.items[state.items.length - 1];
+      const lastControl = state.controlItems[state.controlItems.length - 1];
       if (
         tail &&
         tail.kind === "input" &&
         tail.coalesce &&
         tail.generation === generation &&
-        tail.bytes + boundedBytes <= MAX_COALESCED_TEXT_BYTES
+        tail.bytes + boundedBytes <= MAX_COALESCED_TEXT_BYTES &&
+        // Merging into a tail admitted before a queued control key would move this text ahead of it.
+        !(lastControl && lastControl.id > tail.id)
       ) {
         const target = tail as QueuedItem<T>;
         target.coalesce!.text += coalesceText.text;
@@ -416,17 +491,28 @@ export class NativeTerminalInputQueueManager {
         });
       }
     }
-    if (
-      pointer
-        ? state.pointerEntries >= this.maxQueueEntries
-        : state.allocatedEntries >= this.maxQueueEntries ||
-          state.allocatedBytes + boundedBytes > this.maxQueueBytes
-    ) {
+    const overflow = pointer
+      ? state.pointerEntries >= this.maxQueueEntries
+      : lane === "control"
+        ? state.controlEntries >= this.maxControlEntries ||
+          state.controlBytes + boundedBytes > this.maxQueueBytes
+        : lane === "paste"
+          ? state.allocatedEntries >= this.maxQueueEntries ||
+            state.pasteBytes + boundedBytes > this.maxPasteBytes
+          : state.allocatedEntries >= this.maxQueueEntries ||
+            state.allocatedBytes + boundedBytes > this.maxQueueBytes;
+    if (overflow) {
       return Promise.reject(new NativeTerminalQueueOverflowError());
     }
 
     if (pointer) {
       state.pointerEntries += 1;
+    } else if (lane === "control") {
+      state.controlBytes += boundedBytes;
+      state.controlEntries += 1;
+    } else if (lane === "paste") {
+      state.pasteBytes += boundedBytes;
+      state.allocatedEntries += 1;
     } else {
       state.allocatedBytes += boundedBytes;
       state.allocatedEntries += 1;
@@ -448,6 +534,7 @@ export class NativeTerminalInputQueueManager {
         resolve,
         reject,
         kind: pointer ? "pointer" : "input",
+        lane,
         identityMeta,
         recover: options?.recover,
         coalesce: coalesceText
@@ -458,10 +545,15 @@ export class NativeTerminalInputQueueManager {
           : undefined,
       };
 
-      state.items.push(item as QueuedItem);
+      if (lane === "control") {
+        state.controlItems.push(item as QueuedItem);
+      } else {
+        state.items.push(item as QueuedItem);
+      }
       switchDebug("terminal.surface.input.accepted", {
         operationId: requestId,
         backendSessionId: sessionId,
+        lane: lane ?? (pointer ? "pointer" : "input"),
         paneIdentity: identityMeta?.paneIdentity ?? null,
         bindingKey: identityMeta?.bindingKey ?? null,
         attemptGeneration: identityMeta?.attemptGeneration ?? generation,
@@ -573,28 +665,75 @@ export class NativeTerminalInputQueueManager {
     });
   }
 
+  /**
+   * Ordering rules: items (input/preedit/pointer/paste) run one at a time in FIFO order and never
+   * pass an earlier control key. Control keys run one at a time; each waits for every earlier
+   * queued item and for in-flight non-paste input, but may dispatch while a paste is in flight.
+   */
   private pump(sessionId: string): void {
     const state = this.sessions.get(sessionId);
-    if (!state || state.items.length === 0) return;
+    if (!state) return;
 
-    if (state.running || state.preeditRunning) return;
-
-    const item = state.items.shift();
-    if (!item) return;
-
-    const isInput = item.kind !== "preedit";
-    const lane = isInput ? state.inputLane : state.preeditLane;
-    if (isInput) {
-      state.running = true;
-    } else {
-      state.preeditRunning = true;
+    const head = state.items[0];
+    if (
+      head &&
+      !state.running &&
+      !state.preeditRunning &&
+      !state.controlRunning &&
+      !(state.controlItems.length > 0 && state.controlItems[0].id < head.id)
+    ) {
+      state.items.shift();
+      this.dispatch(sessionId, state, head, head.kind === "preedit" ? "preedit" : "input");
     }
+
+    const control = state.controlItems[0];
+    if (
+      control &&
+      !state.controlRunning &&
+      !state.preeditRunning &&
+      (!state.running || state.inputRunningPaste) &&
+      !state.items.some((item) => item.id < control.id)
+    ) {
+      state.controlItems.shift();
+      this.dispatch(sessionId, state, control, "control");
+    }
+  }
+
+  private setLaneRunning(
+    state: SessionQueueState,
+    laneKind: "input" | "preedit" | "control",
+    running: boolean,
+    item: QueuedItem,
+  ): void {
+    if (laneKind === "input") {
+      state.running = running;
+      state.inputRunningPaste = running && item.lane === "paste";
+    } else if (laneKind === "preedit") {
+      state.preeditRunning = running;
+    } else {
+      state.controlRunning = running;
+    }
+  }
+
+  private dispatch(
+    sessionId: string,
+    state: SessionQueueState,
+    item: QueuedItem,
+    laneKind: "input" | "preedit" | "control",
+  ): void {
+    const lane =
+      laneKind === "input"
+        ? state.inputLane
+        : laneKind === "preedit"
+          ? state.preeditLane
+          : state.controlLane;
+    this.setLaneRunning(state, laneKind, true, item);
     const startedAt = Date.now();
     lane.runningSince = startedAt;
     lane.runningRequestId = item.requestId;
     item.dispatchedAt = startedAt;
     lane.inFlightTimer = setTimeout(() => {
-      if (lane.runningRequestId === item.requestId && (state.running || state.preeditRunning)) {
+      if (lane.runningRequestId === item.requestId) {
         switchDebug("terminal.surface.input.in_flight_slow", {
           backendSessionId: sessionId,
           inFlightRequestId: item.requestId,
@@ -654,18 +793,16 @@ export class NativeTerminalInputQueueManager {
           });
         }
         releaseItem(state, item);
-        if (isInput) {
-          state.running = false;
-        } else {
-          state.preeditRunning = false;
-        }
+        this.setLaneRunning(state, laneKind, false, item);
         lane.runningSince = null;
         lane.runningRequestId = null;
         if (
           state.cleared &&
           !state.running &&
           !state.preeditRunning &&
+          !state.controlRunning &&
           state.items.length === 0 &&
+          state.controlItems.length === 0 &&
           this.sessions.get(sessionId) === state
         ) {
           this.sessions.delete(sessionId);
