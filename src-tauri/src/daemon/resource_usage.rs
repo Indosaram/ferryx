@@ -743,9 +743,13 @@ mod platform {
             return (None, None);
         }
         let block = stat.f_frsize;
+        #[cfg(target_os = "macos")]
+        let (blocks, available) = (u64::from(stat.f_blocks), u64::from(stat.f_bavail));
+        #[cfg(not(target_os = "macos"))]
+        let (blocks, available) = (stat.f_blocks, stat.f_bavail);
         (
-            Some(stat.f_blocks.saturating_mul(block)),
-            Some(stat.f_bavail.saturating_mul(block)),
+            Some(blocks.saturating_mul(block)),
+            Some(available.saturating_mul(block)),
         )
     }
 }

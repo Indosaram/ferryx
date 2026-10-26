@@ -323,6 +323,8 @@ mod tests {
         NotificationPlatform, NotificationProbeOutcome, NotificationSource, PlaySoundReason,
     };
     use serde_json::json;
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    use tauri::Manager;
 
     /// Mock app managing the same audio and activation state `lib.rs` registers.
     fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
