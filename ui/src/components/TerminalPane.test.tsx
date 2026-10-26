@@ -159,7 +159,11 @@ describe("TerminalPane native routing contract", () => {
     expect(surface).toContainElement(badge);
     expect(surface).toContainElement(nativePane);
     expect(badge.parentElement).toBe(surface);
-    expect(nativePane.parentElement).toBe(surface);
+    const viewport = screen.getByTestId("terminal-native-viewport");
+    expect(nativePane.parentElement).toBe(viewport);
+    expect(viewport.parentElement).toBe(surface);
+    expect(viewport).toHaveStyle({ top: "0px" });
+    expect(viewport).toHaveClass("absolute", "inset-x-0", "bottom-0");
     expect(nativePane).not.toContainElement(badge);
 
     expect(badge).toHaveClass("absolute");
