@@ -4368,7 +4368,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
         socket_path,
         vec![legacy_session_id.clone()],
     ));
-    session_router.add_legacy_peer(legacy_peer);
+    session_router.add_legacy_peer(Arc::clone(&legacy_peer));
 
     let state = Arc::new(RemoteGatewayState::new_with_backend(
         session_router,
@@ -4465,6 +4465,11 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
         String::from_utf8_lossy(&output_bytes).contains("legacy live chunk"),
         "output must contain live chunk"
     );
+
+    // Recovery classification returns no remote-runtime metadata for this local
+    // PTY. That must not evict the route needed by the subsequent input write.
+    assert!(legacy_peer.contains_session(&legacy_session_id),
+        "local legacy PTY route must survive absent remote-runtime metadata");
 
     // 5. Send binary input over WS and verify mock server receives it
     tokio::time::timeout(

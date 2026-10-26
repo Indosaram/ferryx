@@ -10276,6 +10276,22 @@ mod tests {
             DaemonResponse::SubscribeRemoteEventsOk
         ));
 
+        // Opening the desktop stream invalidates its sidebar snapshot before any
+        // selection event. Assert that protocol event instead of mistaking it
+        // for the selection requested below.
+        line.clear();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("initial desktop resync must arrive")
+        .expect("read initial desktop resync");
+        assert!(read > 0, "subscription closed before initial resync");
+        let event: DaemonRemoteEvent = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(event.event, "desktop_local_projects_resync");
+        assert_eq!(event.payload, serde_json::Value::Null);
+
         // Drive the real HTTP endpoint the phone calls, with a paired control
         // device, instead of poking the sink directly.
         let repo = tempfile::tempdir().expect("tempdir");
@@ -10345,13 +10361,36 @@ mod tests {
             DaemonResponse::SubscribeRemoteEventsOk
         ));
 
+        // Opening the desktop stream invalidates its sidebar snapshot before any
+        // selection event. Assert that protocol event instead of mistaking it
+        // for the selection requested below.
+        line.clear();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("initial desktop resync must arrive")
+        .expect("read initial desktop resync");
+        assert!(read > 0, "subscription closed before initial resync");
+        let event: DaemonRemoteEvent = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(event.event, "desktop_local_projects_resync");
+        assert_eq!(event.payload, serde_json::Value::Null);
+
         server.remote_state.emit_desktop_event(
             "remote_selection_requested",
             serde_json::json!({ "workspaceId": "ws", "tabId": "tab:a::leaf:b" }),
         );
 
         line.clear();
-        reader.read_line(&mut line).await.unwrap();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("selection event must arrive")
+        .expect("read selection event");
+        assert!(read > 0, "subscription closed before selection event");
         let event: DaemonRemoteEvent = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(event.event, "remote_selection_requested");
         assert_eq!(event.payload["tabId"], "tab:a::leaf:b");
