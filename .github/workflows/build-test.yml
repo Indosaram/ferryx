@@ -49,6 +49,10 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
+      # audiopus_sys 0.2.2 bundles Opus with a CMake 3.1 policy declaration.
+      # CMake 4 removed <3.5 compatibility; use its supported external policy floor
+      # without patching vendored sources or disabling the voice feature/tests.
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
     steps:
       - name: 'Checkout repository (submodules: recursive)'
         uses: actions/checkout@v4
