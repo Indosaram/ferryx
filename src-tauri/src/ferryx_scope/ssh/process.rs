@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const HELPER_VERSION: &str = "2026.1025.1";
+pub const HELPER_VERSION: &str = "2026.1025.2";
 
 /// Capability tokens this helper can advertise, in handshake order. The last one
 /// is bound at runtime, so the handshake omits it when the listener is unavailable.
