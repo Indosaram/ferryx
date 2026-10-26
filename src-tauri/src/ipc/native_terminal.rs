@@ -835,6 +835,7 @@ struct PtyGeometryRequest {
     cols: u16,
     rows: u16,
     redraw: bool,
+    resize: bool,
 }
 
 fn merge_pty_request(
@@ -846,9 +847,9 @@ fn merge_pty_request(
         .find(|previous| previous.session_id == request.session_id)
     {
         let redraw = previous.redraw || request.redraw;
-        if request.redraw && !previous.redraw {
+        if !request.resize && previous.resize {
             // A redraw never sets the size; the queued resize still decides it.
-            previous.redraw = true;
+            previous.redraw = redraw;
         } else {
             *previous = PtyGeometryRequest { redraw, ..request };
         }
@@ -857,59 +858,161 @@ fn merge_pty_request(
     }
 }
 
+/// Queues a request, noting when it replaces the target of an operation already in flight so a
+/// failed or restoring operation does not overwrite the newer size.
+fn accept_pty_request(
+    pending: &mut std::collections::VecDeque<PtyGeometryRequest>,
+    in_flight: &std::collections::HashSet<String>,
+    superseded: &mut std::collections::HashSet<String>,
+    request: PtyGeometryRequest,
+) {
+    if request.resize && in_flight.contains(&request.session_id) {
+        superseded.insert(request.session_id.clone());
+    }
+    merge_pty_request(pending, request);
+}
+
+/// One session's in-flight geometry operation. A redraw applies the nudge size and then holds it
+/// for `PTY_REDRAW_NUDGE_SETTLE`; `operation` keeps the real size the dispatcher restores.
+async fn run_pty_geometry_operation<Fut>(
+    operation: PtyGeometryRequest,
+    applying: Fut,
+) -> (PtyGeometryRequest, Result<(), IpcError>)
+where
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let result = applying.await;
+    if operation.redraw {
+        if let Err(error) = &result {
+            tracing::warn!(session_id = %operation.session_id, %error, "PTY redraw nudge failed");
+        }
+        tokio::time::sleep(PTY_REDRAW_NUDGE_SETTLE).await;
+    }
+    (operation, result)
+}
+
+/// Applies queued PTY geometry with at most one operation in flight per session, so a slow or
+/// retrying session never blocks another session while each session stays strictly ordered.
 async fn dispatch_pty_resizes<F, Fut>(
     mut receiver: mpsc::UnboundedReceiver<PtyGeometryRequest>,
     mut resize: F,
 ) where
     F: FnMut(String, u16, u16) -> Fut,
-    Fut: std::future::Future<Output = ()>,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
 {
+    use futures_util::StreamExt as _;
+
     let mut pending = std::collections::VecDeque::<PtyGeometryRequest>::new();
     let mut applied = std::collections::HashMap::<String, (u16, u16)>::new();
+    let mut retries = std::collections::HashMap::<String, (tokio::time::Instant, std::time::Duration)>::new();
+    let mut in_flight = std::collections::HashSet::<String>::new();
+    let mut superseded = std::collections::HashSet::<String>::new();
+    let mut operations = futures_util::stream::FuturesUnordered::new();
+    let mut receiver_open = true;
     loop {
-        if pending.is_empty() {
-            match receiver.recv().await {
-                Some(request) => pending.push_back(request),
-                None => break,
+        while receiver_open {
+            match receiver.try_recv() {
+                Ok(request) => accept_pty_request(&mut pending, &in_flight, &mut superseded, request),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => receiver_open = false,
             }
         }
-        while let Ok(request) = receiver.try_recv() {
-            merge_pty_request(&mut pending, request);
-        }
-        let Some(request) = pending.pop_front() else {
-            continue;
-        };
-        let PtyGeometryRequest { session_id, cols, rows, redraw } = request;
-        if !redraw {
-            resize(session_id.clone(), cols, rows).await;
-            applied.insert(session_id, (cols, rows));
-            continue;
-        }
-        // Repaint at the size the PTY already has; the grid size is only a fallback.
-        let (cols, rows) = applied.get(&session_id).copied().unwrap_or((cols, rows));
-        resize(session_id.clone(), cols, rows.saturating_add(1).min(1000)).await;
-        tokio::time::sleep(PTY_REDRAW_NUDGE_SETTLE).await;
-        let mut target = (cols, rows);
-        let mut deferred = Vec::new();
-        while let Ok(request) = receiver.try_recv() {
-            if request.session_id == session_id && !request.redraw {
-                target = (request.cols, request.rows);
+        let now = tokio::time::Instant::now();
+        let mut index = 0;
+        while index < pending.len() {
+            let queued = &pending[index];
+            if in_flight.contains(&queued.session_id)
+                || retries.get(&queued.session_id).is_some_and(|(at, _)| *at > now)
+            {
+                index += 1;
+                continue;
+            }
+            let request = pending.remove(index).expect("index is within pending");
+            let PtyGeometryRequest { session_id, cols, rows, redraw, resize: sets_size } = request;
+            // Repaint at the size the PTY already has; the grid size is only a fallback.
+            // A redraw merged into a failed resize must not discard its unapplied target.
+            let (cols, rows) = if !sets_size && !retries.contains_key(&session_id) {
+                applied.get(&session_id).copied().unwrap_or((cols, rows))
             } else {
-                deferred.push(request);
-            }
+                (cols, rows)
+            };
+            let applying_rows = if redraw { rows.saturating_add(1).min(1000) } else { rows };
+            let applying = resize(session_id.clone(), cols, applying_rows);
+            in_flight.insert(session_id.clone());
+            operations.push(run_pty_geometry_operation(
+                PtyGeometryRequest { session_id, cols, rows, redraw, resize: sets_size },
+                applying,
+            ));
         }
-        if let Some(index) = pending
+        if !receiver_open && pending.is_empty() && operations.is_empty() {
+            break;
+        }
+        let next_retry = pending
             .iter()
-            .position(|queued| queued.session_id == session_id && !queued.redraw)
-        {
-            let queued = pending.remove(index).expect("index from position");
-            target = (queued.cols, queued.rows);
+            .filter(|queued| !in_flight.contains(&queued.session_id))
+            .filter_map(|queued| retries.get(&queued.session_id).map(|(at, _)| *at))
+            .min();
+        tokio::select! {
+            request = receiver.recv(), if receiver_open => match request {
+                Some(request) => accept_pty_request(&mut pending, &in_flight, &mut superseded, request),
+                None => receiver_open = false,
+            },
+            Some((operation, result)) = operations.next(), if !operations.is_empty() => {
+                let PtyGeometryRequest { session_id, cols, rows, redraw, .. } = operation;
+                in_flight.remove(&session_id);
+                let replaced = superseded.remove(&session_id);
+                if redraw {
+                    // The settle window has elapsed; restore the real size, or the newer
+                    // target queued while the nudge was held.
+                    let mut target = (cols, rows);
+                    if replaced {
+                        let queued = pending.iter().position(|queued| queued.session_id == session_id);
+                        if let Some(index) = queued {
+                            target = (pending[index].cols, pending[index].rows);
+                            if !pending[index].redraw {
+                                pending.remove(index);
+                            }
+                        }
+                    }
+                    // A failed restore must retry the real size, not leave the temporary nudge applied.
+                    pending.push_front(PtyGeometryRequest {
+                        session_id, cols: target.0, rows: target.1, redraw: false, resize: true,
+                    });
+                } else {
+                    match result {
+                        Ok(()) => {
+                            retries.remove(&session_id);
+                            applied.insert(session_id, (cols, rows));
+                        }
+                        Err(error) => {
+                            tracing::warn!(%session_id, %error, "PTY resize was not applied");
+                            if error.code == IpcErrorCode::SessionNotFound {
+                                retries.remove(&session_id);
+                                applied.remove(&session_id);
+                            } else {
+                                let delay = retries.get(&session_id).map_or(
+                                    std::time::Duration::from_millis(100),
+                                    |(_, delay)| (*delay * 2).min(std::time::Duration::from_secs(2)),
+                                );
+                                retries.insert(session_id.clone(), (tokio::time::Instant::now() + delay, delay));
+                                // A newer size queued meanwhile wins; otherwise retry this one,
+                                // keeping a redraw queued meanwhile merged on top of it.
+                                if !replaced {
+                                    let queued = pending.iter().position(|queued| queued.session_id == session_id);
+                                    let queued = queued.and_then(|index| pending.remove(index));
+                                    pending.push_back(PtyGeometryRequest { session_id, cols, rows, redraw: false, resize: true });
+                                    if let Some(queued) = queued {
+                                        merge_pty_request(&mut pending, queued);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(next_retry.unwrap_or(now)), if next_retry.is_some() => {}
+            else => break,
         }
-        for request in deferred {
-            merge_pty_request(&mut pending, request);
-        }
-        resize(session_id.clone(), target.0, target.1).await;
-        applied.insert(session_id, target);
     }
 }
 
@@ -920,7 +1023,7 @@ fn install_pty_resize_dispatcher(
     let (sender, receiver) = mpsc::unbounded_channel::<PtyGeometryRequest>();
     let redraw_sender = sender.clone();
     let installed = state.set_pty_resize_sink_if_absent(Arc::new(move |session_id, cols, rows| {
-        let request = PtyGeometryRequest { session_id: session_id.to_string(), cols, rows, redraw: false };
+        let request = PtyGeometryRequest { session_id: session_id.to_string(), cols, rows, redraw: false, resize: true };
         if let Err(error) = sender.send(request) {
             tracing::warn!(
                 session_id,
@@ -935,7 +1038,7 @@ fn install_pty_resize_dispatcher(
         return;
     }
     state.set_pty_redraw_sink_if_absent(Arc::new(move |session_id, cols, rows| {
-        let request = PtyGeometryRequest { session_id: session_id.to_string(), cols, rows, redraw: true };
+        let request = PtyGeometryRequest { session_id: session_id.to_string(), cols, rows, redraw: true, resize: false };
         if let Err(error) = redraw_sender.send(request) {
             tracing::warn!(session_id, %error, "Failed to queue native terminal PTY redraw");
         }
@@ -944,15 +1047,7 @@ fn install_pty_resize_dispatcher(
         dispatch_pty_resizes(receiver, |session_id, cols, rows| {
             let daemon_client = Arc::clone(&daemon_client);
             async move {
-                if let Err(error) = daemon_client.resize_terminal(&session_id, cols, rows).await {
-                    tracing::warn!(
-                        session_id,
-                        cols,
-                        rows,
-                        %error,
-                        "Failed to resize native terminal PTY"
-                    );
-                }
+                daemon_client.resize_terminal(&session_id, cols, rows).await.map_err(IpcError::from)
             }
         })
         .await;
@@ -3244,11 +3339,11 @@ mod tests {
     }
 
     fn resize_req(session: &str, cols: u16, rows: u16) -> PtyGeometryRequest {
-        PtyGeometryRequest { session_id: session.into(), cols, rows, redraw: false }
+        PtyGeometryRequest { session_id: session.into(), cols, rows, redraw: false, resize: true }
     }
 
     fn redraw_req(session: &str, cols: u16, rows: u16) -> PtyGeometryRequest {
-        PtyGeometryRequest { session_id: session.into(), cols, rows, redraw: true }
+        PtyGeometryRequest { session_id: session.into(), cols, rows, redraw: true, resize: false }
     }
 
     #[tokio::test(start_paused = true)]
@@ -3262,7 +3357,7 @@ mod tests {
 
         dispatch_pty_resizes(receiver, move |session, cols, rows| {
             observed.lock().push((session, cols, rows, started.elapsed()));
-            std::future::ready(())
+            std::future::ready(Ok(()))
         })
         .await;
 
@@ -3280,13 +3375,19 @@ mod tests {
     async fn pty_redraw_restores_to_the_last_applied_size_not_the_grid() {
         let (sender, receiver) = mpsc::unbounded_channel();
         sender.send(resize_req("pane", 100, 30)).unwrap();
+        let (applied_tx, applied_rx) = oneshot::channel();
+        let mut applied_tx = Some(applied_tx);
         let applied = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let observed = Arc::clone(&applied);
         let worker = tokio::spawn(dispatch_pty_resizes(receiver, move |session, cols, rows| {
             observed.lock().push((session, cols, rows));
-            std::future::ready(())
+            if let Some(tx) = applied_tx.take() {
+                tx.send(()).unwrap();
+            }
+            std::future::ready(Ok(()))
         }));
-        tokio::task::yield_now().await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), applied_rx)
+            .await.unwrap().unwrap();
         sender.send(redraw_req("pane", 80, 24)).unwrap();
         drop(sender);
         worker.await.unwrap();
@@ -3314,7 +3415,7 @@ mod tests {
             if let Some(tx) = nudged_tx.take() {
                 let _ = tx.send(());
             }
-            std::future::ready(())
+            std::future::ready(Ok(()))
         }));
         nudged_rx.await.unwrap();
         sender.send(resize_req("pane", 132, 50)).unwrap();
@@ -3334,7 +3435,32 @@ mod tests {
         merge_pty_request(&mut pending, resize_req("pane", 100, 30));
         merge_pty_request(&mut pending, redraw_req("pane", 80, 24));
         merge_pty_request(&mut pending, resize_req("pane", 120, 40));
-        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![redraw_req("pane", 120, 40)]);
+        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![PtyGeometryRequest {
+            redraw: true, ..resize_req("pane", 120, 40)
+        }]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn redraw_merged_with_resize_keeps_the_new_target_after_an_applied_size() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender.send(resize_req("pane", 80, 24)).unwrap();
+        let mut sender = Some(sender);
+        let mut applied = Vec::new();
+
+        dispatch_pty_resizes(receiver, |session, cols, rows| {
+            applied.push((session, cols, rows));
+            if let Some(sender) = sender.take() {
+                sender.send(resize_req("pane", 120, 40)).unwrap();
+                sender.send(redraw_req("pane", 80, 24)).unwrap();
+            }
+            std::future::ready(Ok(()))
+        }).await;
+
+        assert_eq!(applied, vec![
+            ("pane".into(), 80, 24),
+            ("pane".into(), 120, 41),
+            ("pane".into(), 120, 40),
+        ]);
     }
 
 
@@ -3350,7 +3476,7 @@ mod tests {
 
         dispatch_pty_resizes(receiver, |session, cols, rows| {
             applied.push((session, cols, rows));
-            std::future::ready(())
+            std::future::ready(Ok(()))
         })
         .await;
 
@@ -3384,6 +3510,48 @@ mod tests {
         assert_eq!(json["presented"], false);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn failed_pty_resize_retries_without_blocking_other_panes() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender.send(resize_req("left", 120, 40)).unwrap();
+        sender.send(resize_req("right", 100, 30)).unwrap();
+        drop(sender);
+        let mut attempts = Vec::new();
+        let mut failed = false;
+        dispatch_pty_resizes(receiver, |session, cols, rows| {
+            attempts.push((session.clone(), cols, rows));
+            let result = if session == "left" && !failed {
+                failed = true;
+                Err(IpcError::internal("temporary transport failure"))
+            } else {
+                Ok(())
+            };
+            std::future::ready(result)
+        }).await;
+        assert_eq!(attempts, vec![
+            ("left".into(), 120, 40),
+            ("right".into(), 100, 30),
+            ("left".into(), 120, 40),
+        ]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_pty_redraw_restore_retries_the_real_size() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender.send(redraw_req("pane", 80, 24)).unwrap();
+        drop(sender);
+        let mut attempts = Vec::new();
+        dispatch_pty_resizes(receiver, |session, cols, rows| {
+            attempts.push((session, cols, rows));
+            std::future::ready(if attempts.len() == 2 {
+                Err(IpcError::internal("restore failed"))
+            } else { Ok(()) })
+        }).await;
+        assert_eq!(attempts, vec![
+            ("pane".into(), 80, 25), ("pane".into(), 80, 24), ("pane".into(), 80, 24),
+        ]);
+    }
+
     #[tokio::test]
     async fn pty_resize_queue_coalesces_updates_arriving_during_an_inflight_request() {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -3407,6 +3575,7 @@ mod tests {
                     if let Some(released) = released {
                         released.await.unwrap();
                     }
+                    Ok(())
                 }
             },
         ));
@@ -3427,14 +3596,66 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(
-            *applied.lock(),
-            vec![
-                ("left".into(), 80, 24),
-                ("left".into(), 120, 40),
-                ("right".into(), 100, 30),
-            ]
+        let applied = applied.lock();
+        let applied_for = |pane: &str| {
+            applied
+                .iter()
+                .filter(|(session, _, _)| session == pane)
+                .map(|(_, cols, rows)| (*cols, *rows))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(applied_for("left"), vec![(80, 24), (120, 40)]);
+        assert_eq!(applied_for("right"), vec![(100, 30)]);
+        assert_eq!(applied.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn pty_resize_for_one_pane_does_not_wait_for_another_panes_inflight_resize() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (left_started_tx, left_started) = oneshot::channel();
+        let (right_done_tx, right_done) = oneshot::channel();
+        let (release_left, left_released) = oneshot::channel::<()>();
+        let mut left_started_tx = Some(left_started_tx);
+        let mut right_done_tx = Some(right_done_tx);
+        let mut left_released = Some(left_released);
+        let left_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let left_finished_in_resize = Arc::clone(&left_finished);
+        let worker = tokio::spawn(dispatch_pty_resizes(receiver, move |session, cols, rows| {
+            let left = session == "left";
+            let started = if left { left_started_tx.take() } else { None };
+            let released = if left { left_released.take() } else { None };
+            let done = if left { None } else { right_done_tx.take() };
+            let left_finished = Arc::clone(&left_finished_in_resize);
+            async move {
+                if let Some(started) = started {
+                    started.send(()).unwrap();
+                }
+                if let Some(released) = released {
+                    released.await.unwrap();
+                    left_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                if let Some(done) = done {
+                    done.send((session, cols, rows)).unwrap();
+                }
+                Ok(())
+            }
+        }));
+        let bound = std::time::Duration::from_secs(5);
+
+        sender.send(resize_req("left", 120, 40)).unwrap();
+        tokio::time::timeout(bound, left_started).await.unwrap().unwrap();
+        sender.send(resize_req("right", 100, 30)).unwrap();
+        let right = tokio::time::timeout(bound, right_done).await.unwrap().unwrap();
+
+        assert_eq!(right, ("right".into(), 100, 30));
+        assert!(
+            !left_finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the right pane resized while the left pane's resize was still in flight"
         );
+        release_left.send(()).unwrap();
+        drop(sender);
+        tokio::time::timeout(bound, worker).await.unwrap().unwrap();
+        assert!(left_finished.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
