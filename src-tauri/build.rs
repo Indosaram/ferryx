@@ -58,6 +58,9 @@ fn validate_bundled_helpers_gate(repo_root: &std::path::Path) -> Result<(), Stri
 }
 
 fn main() {
+    // Unit-test CLI builds must preserve Cargo's explicit target layout.
+    let build_target = std::env::var("TARGET").expect("Cargo provides TARGET");
+    println!("cargo::rustc-env=FERRYX_BUILD_TARGET={build_target}");
     println!("cargo::rustc-check-cfg=cfg(a10_wire_red)");
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)

@@ -38,11 +38,10 @@ jobs:
     # Public repositories use this standard ARM64 runner without runner-minute charges.
     # Pin the OS; do not select a paid -xlarge runner or change the aarch64 target.
     runs-on: macos-15
-    # The full test step measured ~15 minutes on the previous runner (the library suite
-    # alone was ~8). This explicit deadline turns a genuine hang - such as the
-    # 20-minute runner-communication losses seen during bring-up - into a clear "timed out" result
-    # instead of a run that ends with no logs at all.
-    timeout-minutes: 45
+    # A cold standard ARM64 run needs ~30 minutes just to compile the Rust test
+    # targets, after ~10 minutes of setup/UI, before running the native suites.
+    # Keep a bounded deadline without cancelling healthy cold builds mid-test.
+    timeout-minutes: 90
     # Keep test compilation within the ephemeral runner's disk budget. Assertions remain on.
     env:
       CARGO_BUILD_JOBS: '1'
@@ -181,6 +180,7 @@ jobs:
         # dispatch can settle the integration targets in a fraction of the full step.
         env:
           TEST_SUITE: ${{ inputs.suite || 'full' }}
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
         run: |
           suite_flags=(--lib)
           if [ "$TEST_SUITE" = "integration" ]; then
@@ -219,6 +219,9 @@ jobs:
       # frames parse in the actual frontend parser. It lives here, not in the UI job, because it
       # needs the Rust toolchain and the Ghostty submodule.
       - name: Remote Grid Frame Seam (Rust -> TypeScript)
+        # Reuse the explicit-target native test artifacts instead of rebuilding host crates.
+        env:
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
         run: bun run --cwd ui src/remote/gridFrameSeam.check.ts
 
       - name: Report final disk usage
