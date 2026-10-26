@@ -1410,13 +1410,18 @@ pub(crate) fn acquire_daemon_locks(
     acquire_daemon_locks_until(persistent_path, legacy_path, deadline)
 }
 
-/// The daemon's startup lock acquisition, awaited from the serving runtime.
+/// The daemon's startup lock acquisition, awaited from the serving runtime. A successor's
+/// wait sleeps between attempts, so it runs on the blocking pool instead of the runtime.
 async fn acquire_daemon_locks_off_runtime(
     persistent_path: Option<PathBuf>,
     legacy_path: PathBuf,
     deadline: Option<std::time::Instant>,
 ) -> Result<DaemonLockFiles, String> {
-    acquire_daemon_locks_until(persistent_path.as_deref(), &legacy_path, deadline)
+    tokio::task::spawn_blocking(move || {
+        acquire_daemon_locks_until(persistent_path.as_deref(), &legacy_path, deadline)
+    })
+    .await
+    .map_err(|error| format!("Daemon lock acquisition task failed: {error}"))?
 }
 
 fn acquire_daemon_locks_until(
@@ -1910,12 +1915,30 @@ fn discovered_machine_report(
     )
 }
 
-/// The observer's probe bookkeeping for one pane's current agent process.
 /// Takes the full process listing the foreground observer classifies sessions against.
 type ProcessSnapshotCapture = Arc<
     dyn Fn() -> std::io::Result<crate::terminal::foreground::ProcessSnapshot> + Send + Sync,
 >;
 
+/// Longest an unchanged set of panes goes without a full process listing. A foreground
+/// change inside the same process group (an `exec`, a job without job control) is caught here.
+const FOREGROUND_IDLE_REFRESH: Duration = Duration::from_secs(2);
+
+/// One pane's cheap per-tick foreground marker: its foreground process group on Unix. ConPTY
+/// has no equivalent, so there the observer relies on the idle refresh alone.
+fn foreground_marker(session: &crate::terminal::session::PtySession) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        session.foreground_process_group().ok().flatten()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = session;
+        None
+    }
+}
+
+/// The observer's probe bookkeeping for one pane's current agent process.
 struct MachineIdentityProbe {
     agent_pid: u32,
     agent: &'static str,
@@ -4698,6 +4721,11 @@ impl DaemonServer {
         tokio::spawn(async move {
             let mut transitions =
                 HashMap::<String, crate::terminal::foreground::ProcessTransition>::new();
+            // Each session's cheap foreground marker (tcgetpgrp on Unix) as of the last full
+            // listing. An idle pane's foreground cannot change without this marker changing,
+            // so the full listing only runs on a change, a due probe, or the slow refresh.
+            let mut sampled_markers = HashMap::<String, Option<u32>>::new();
+            let mut last_snapshot_at: Option<tokio::time::Instant> = None;
             // Re-explore-4 G2: per-pane discovery of the provider session an agent that reports
             // nothing holds. Probes run off the tick and post back whether to stop.
             let mut probes = HashMap::<String, MachineIdentityProbe>::new();
@@ -4733,8 +4761,25 @@ impl DaemonServer {
                 }
                 // No live session means nothing to classify: skip the process listing.
                 if sessions.is_empty() {
+                    sampled_markers.clear();
                     continue;
                 }
+                let markers: HashMap<String, Option<u32>> = sessions
+                    .iter()
+                    .map(|(id, session)| (id.clone(), foreground_marker(session)))
+                    .collect();
+                let now = tokio::time::Instant::now();
+                let probe_due = probes
+                    .values()
+                    .any(|probe| !probe.finished && !probe.in_flight && now >= probe.next_at);
+                let refresh_due = last_snapshot_at.is_none_or(|at| {
+                    now.duration_since(at) >= FOREGROUND_IDLE_REFRESH
+                });
+                if markers == sampled_markers && !probe_due && !refresh_due {
+                    continue;
+                }
+                sampled_markers = markers;
+                last_snapshot_at = Some(now);
                 let capture = Arc::clone(&capture);
                 let observations = crate::ipc::run_blocking(move || {
                     // One process listing per tick. On Windows that listing is a full
