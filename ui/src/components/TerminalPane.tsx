@@ -512,7 +512,9 @@ export function TerminalPane({
                         : "Shell not running"
                     : isAgentSession
                       ? "Session disconnected"
-                      : "Shell exited"}
+                      : session.exitCode != null && session.exitCode !== 0
+                        ? `Shell exited (code ${session.exitCode})`
+                        : "Shell exited"}
             </h2>
 
             {isAgentSession ? (

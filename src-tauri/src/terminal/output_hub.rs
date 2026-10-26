@@ -15,6 +15,7 @@ const BROADCAST_CAPACITY: usize = 64;
 // metadata and no ReplayGap resynchronization, so lagging would silently drop output.
 const RAW_BROADCAST_CAPACITY: usize = 1024;
 const RESIZE_LEDGER_CAPACITY: usize = 4096;
+pub(crate) type ExitStatusSlot = Arc<RwLock<Option<i32>>>;
 
 /// Output after which the screen holds nothing drawn earlier: a full reset (RIS), an erase of
 /// the whole display (ED 2), or entering the alternate screen, which starts blank.
@@ -750,6 +751,7 @@ pub mod vt_state;
 pub mod vt_stream;
 
 pub struct SessionHub {
+    exit_status: ExitStatusSlot,
     machine_senders: Vec<machine_output::MachineSender>,
     pub(crate) buffer: BoundedBuffer,
     pub(crate) sender: broadcast::Sender<OutputChunk>,
@@ -822,6 +824,7 @@ impl SessionHub {
 pub struct TerminalOutputHub {
     sessions: Arc<RwLock<HashMap<String, Arc<RwLock<SessionHub>>>>>,
     transport_owners: Arc<RwLock<std::collections::HashSet<String>>>,
+    exits: Arc<parking_lot::Mutex<HashMap<String, ExitStatusSlot>>>,
     capacity: usize,
     retention: retained_history::RetentionBudget,
 }
@@ -849,9 +852,45 @@ impl TerminalOutputHub {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             transport_owners: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            exits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             capacity,
             retention,
         }
+    }
+
+    /// Records how a session's process ended. `None` is an unknown status, not a success.
+    pub fn record_exit(&self, session_id: &str, code: Option<i32>) {
+        if let Some(status) = self.exit_status(session_id) {
+            *status.write() = code;
+        }
+    }
+
+    /// The recorded exit code of the session's process, if it ended with a known one.
+    pub fn exit_code(&self, session_id: &str) -> Option<i32> {
+        self.exit_status(session_id).and_then(|status| *status.read())
+    }
+
+    pub(crate) fn exit_status(&self, session_id: &str) -> Option<ExitStatusSlot> {
+        if let Some(status) = self.exits.lock().get(session_id).cloned() {
+            return Some(status);
+        }
+        if let Some(hub) = self.sessions.read().get(session_id) {
+            return Some(Arc::clone(&hub.read().exit_status));
+        }
+        None
+    }
+
+    pub(crate) fn begin_exit_status(&self, session_id: &str) -> ExitStatusSlot {
+        let status = Arc::new(RwLock::new(None));
+        let mut exits = self.exits.lock();
+        // Keep the status alive between PTY creation and output registration even
+        // when a fast child exits and leaves the PTY registry during that interval.
+        exits.insert(session_id.to_string(), Arc::clone(&status));
+        drop(exits);
+        if let Some(hub) = self.sessions.read().get(session_id) {
+            hub.write().exit_status = Arc::clone(&status);
+        }
+        status
     }
 
     pub fn register_session(&self, session_id: &str) -> broadcast::Receiver<Vec<u8>> {
@@ -877,6 +916,7 @@ impl TerminalOutputHub {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
         let (raw_tx, raw_rx) = broadcast::channel(RAW_BROADCAST_CAPACITY);
         let hub = SessionHub {
+            exit_status: self.exit_status(session_id).unwrap_or_else(|| self.begin_exit_status(session_id)),
             machine_senders: Vec::new(),
             buffer: BoundedBuffer::with_retention(self.capacity, self.retention),
             sender: tx,
@@ -1135,9 +1175,9 @@ impl TerminalOutputHub {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Option<(SessionAttachment, Vec<HistoryRange>)> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
         let (mut attachment, mut ranges) =
             self.subscribe_with_sequence_ranges(session_id, after_sequence)?;
-        let session_hub = self.sessions.read().get(session_id).cloned()?;
         let hub = session_hub.read();
         let retained_lost_bytes = hub.buffer.retained_start_sequence().is_some_and(|seq| seq > 1);
         let is_full_replay = after_sequence.is_none() || attachment.snapshot.gap.is_some();
@@ -1157,6 +1197,7 @@ impl TerminalOutputHub {
 
     pub fn remove_session(&self, session_id: &str) {
         self.sessions.write().remove(session_id);
+        self.exits.lock().remove(session_id);
         self.transport_owners.write().remove(session_id);
     }
 
@@ -1189,6 +1230,7 @@ impl TerminalOutputHub {
         if sessions.get(session_id).is_some_and(|hub| hub.read().ended) {
             sessions.remove(session_id);
             drop(sessions);
+            self.exits.lock().remove(session_id);
             self.transport_owners.write().remove(session_id);
         }
     }
@@ -1281,6 +1323,7 @@ impl TerminalOutputHub {
             }
         };
         let hub = SessionHub {
+            exit_status: self.exit_status(session_id).unwrap_or_else(|| self.begin_exit_status(session_id)),
             machine_senders: Vec::new(),
             buffer,
             sender: tx,
@@ -1332,6 +1375,62 @@ mod tests {
     use super::*;
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
+
+    #[test]
+    fn output_registration_preserves_a_fast_child_exit() {
+        let hub = TerminalOutputHub::default();
+        let status = hub.begin_exit_status("fast-child");
+        hub.record_exit("fast-child", Some(37));
+        drop(status);
+        let _output = hub.register_session("fast-child");
+        assert_eq!(hub.exit_code("fast-child"), Some(37));
+    }
+
+    #[test]
+    fn new_pty_lifetime_forgets_the_previous_exit() {
+        let hub = TerminalOutputHub::default();
+        let previous = hub.begin_exit_status("reused-id");
+        hub.record_exit("reused-id", Some(37));
+        let _current = hub.begin_exit_status("reused-id");
+        let _output = hub.register_session("reused-id");
+        assert_eq!(hub.exit_code("reused-id"), None);
+        hub.record_exit("reused-id", Some(9));
+        assert_eq!(hub.exit_code("reused-id"), Some(9));
+        assert_eq!(*previous.read(), Some(37));
+    }
+
+    #[test]
+    fn late_attach_retains_exit_across_many_other_exits() {
+        let hub = TerminalOutputHub::default();
+        let output = hub.register_session("late");
+        hub.record_exit("late", Some(37));
+        assert!(!hub.end_session("late"));
+        drop(output);
+        for index in 0..300 {
+            let id = format!("other-{index}");
+            let output = hub.register_session(&id);
+            hub.record_exit(&id, Some(1));
+            hub.remove_session(&id);
+            drop(output);
+        }
+        let status = hub.exit_status("late").expect("retained status");
+        let _attachment = hub.subscribe_with_screen_mirror("late", None).expect("late attach");
+        assert!(!hub.has_session("late"));
+        assert_eq!(*status.read(), Some(37));
+        drop(status);
+        let _next = hub.begin_exit_status("next");
+        assert!(!hub.exits.lock().contains_key("late"));
+    }
+
+    #[test]
+    fn imported_output_retains_the_adopted_child_status() {
+        let hub = TerminalOutputHub::default();
+        let _output = hub.register_session("adopted");
+        let status = hub.begin_exit_status("adopted");
+        *status.write() = Some(7);
+        drop(status);
+        assert_eq!(hub.exit_code("adopted"), Some(7));
+    }
 
     struct CountingAlloc;
     thread_local! {

@@ -15,9 +15,12 @@ use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::winerror::{HRESULT, S_OK};
 use winapi::um::handleapi::*;
+use winapi::um::jobapi::IsProcessInJob;
+use winapi::um::jobapi2::AssignProcessToJobObject;
 use winapi::um::processthreadsapi::*;
 use winapi::um::winbase::{
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
@@ -135,6 +138,9 @@ impl PsuedoCon {
 
         let cwd = cmd.current_directory();
 
+        // Created before the child so a failure leaves nothing running.
+        let job = super::kill_on_close_job()?;
+
         let res = unsafe {
             CreateProcessW(
                 exe.as_mut_slice().as_mut_ptr(),
@@ -142,7 +148,9 @@ impl PsuedoCon {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+                // Suspended until it is in the job: the shell cannot start a descendant that
+                // escapes the job before the assignment below.
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                 cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
                 cwd.as_ref()
                     .map(|c| c.as_slice().as_ptr())
@@ -165,11 +173,44 @@ impl PsuedoCon {
 
         // Make sure we close out the thread handle so we don't leak it;
         // we do this simply by making it owned
-        let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
+        let main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
+
+        // Fails closed: a child that cannot be put in the job, or that does not resume, is
+        // terminated through its own handle so no unsupervised shell is ever handed back.
+        let fail = |what: &str| -> Error {
+            let err = IoError::last_os_error();
+            unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
+            let msg = format!("{what} for `{:?}` failed: {}", cmd_os, err);
+            log::error!("{}", msg);
+            anyhow::anyhow!(msg)
+        };
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle() as _, proc.as_raw_handle() as _) }
+            == 0
+        {
+            return Err(fail("AssignProcessToJobObject"));
+        }
+        let mut in_job = 0;
+        if unsafe {
+            IsProcessInJob(
+                proc.as_raw_handle() as _,
+                job.as_raw_handle() as _,
+                &mut in_job,
+            )
+        } == 0
+            || in_job == 0
+        {
+            return Err(fail("IsProcessInJob"));
+        }
+        if unsafe { ResumeThread(main_thread.as_raw_handle() as _) } == DWORD::MAX {
+            return Err(fail("ResumeThread"));
+        }
+        // The thread handle is closed here; only the process and job handles are retained.
+        drop(main_thread);
 
         Ok(WinChild {
             proc: Mutex::new(proc),
+            job: std::sync::Arc::new(job),
         })
     }
 }

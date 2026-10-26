@@ -763,7 +763,7 @@ export type WorkspaceAction =
   | { type: "EQUALIZE_TAB_GROUP_RUN"; path: string }
   | { type: "EQUALIZE_PANE_RUN"; tabId: string; path: string }
   | { type: "SWAP_PANES"; tabId: string; sourceLeafId: string; targetLeafId: string }
-  | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle; incarnation?: string | null; daemonEpoch?: string | null }
+  | { type: "SESSION_LIFECYCLE"; backendSessionId: string; lifecycle: TerminalLifecycle; incarnation?: string | null; daemonEpoch?: string | null; exitCode?: number | null }
   | {
       type: "SESSION_BACKEND_UNAVAILABLE";
       sessionId: string;
@@ -1088,6 +1088,7 @@ export function useWorkspaceStore({
         type: "SESSION_LIFECYCLE",
         backendSessionId: payload.sessionId,
         lifecycle: mapBackendLifecycle(payload),
+        exitCode: payload.exitCode ?? null,
         incarnation: payload.incarnation ?? null,
         daemonEpoch: payload.daemonEpoch ?? null,
       };
@@ -3720,6 +3721,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             backendSessionId: null,
             remoteConnectionState: undefined,
             reconnectLifecycle: "idle",
+            exitCode: liveInfo.recoveryAuthority.exitCode ?? null,
             backendUnavailableReason: liveInfo.recoveryAuthority.exitReason ?? null,
           };
         } else {
@@ -3767,6 +3769,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             {
               ...session,
               lifecycle: action.lifecycle,
+              exitCode: action.lifecycle === "exited" ? action.exitCode ?? null : null,
               backendSessionId: dead ? null : session.backendSessionId,
               reconnectLifecycle: dead ? "idle" : session.reconnectLifecycle,
               ...(dead ? clearedTransportState(session) : {}),
@@ -3809,6 +3812,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const updatedSession: TerminalSession = {
         ...session,
         lifecycle: "exited",
+        exitCode: action.exitCode ?? null,
         backendSessionId: null,
         reconnectLifecycle: "idle",
         ...clearedTransportState(session),
@@ -4063,6 +4067,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...session,
             backendSessionId: action.backendSessionId,
             processState: "running",
+            exitCode: null,
             cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
             daemonEpoch: action.daemonEpoch ?? null,
             ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),

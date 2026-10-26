@@ -76,10 +76,11 @@ describe("workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer", (
       key: "key-1",
       token: 1,
       reason: "process-exited",
+      exitCode: 37,
     });
 
     expect(next.sessions["term-1"].remoteConnectionState).toBeUndefined();
-    expect(next.sessions["term-1"]).toMatchObject({ lifecycle: "exited", processState: "standby", reconnectLifecycle: "idle" });
+    expect(next.sessions["term-1"]).toMatchObject({ lifecycle: "exited", processState: "standby", reconnectLifecycle: "idle", exitCode: 37 });
   });
 
   it("drops a stale disconnected transport state when an identity-fenced local PTY exit arrives", () => {
@@ -106,6 +107,32 @@ describe("workspaceStore SESSION_BACKEND_UNAVAILABLE compare-and-set reducer", (
 
     expect(next.sessions["term-1"].remoteConnectionState).toBeUndefined();
     expect(next.sessions["term-1"]).toMatchObject({ lifecycle: "exited", backendSessionId: null, processState: "standby" });
+  });
+
+  it.each([0, 37, null])("retains fenced exit status %s and clears it on rebinding", (exitCode) => {
+    const session: TerminalSession = {
+      id: "term-exit", cwd: "/repo", workspaceId: "ws-local", worktree: null,
+      backendSessionId: "backend-exit", lifecycle: "running",
+      incarnation: "inc-exit", daemonEpoch: "epoch-exit",
+    };
+    const state = createInitialState(session);
+    const stale = workspaceReducer(state, {
+      type: "SESSION_LIFECYCLE", backendSessionId: "backend-exit", lifecycle: "exited",
+      incarnation: "old-incarnation", daemonEpoch: "epoch-exit", exitCode,
+    });
+    expect(stale.sessions[session.id].exitCode).toBeUndefined();
+    expect(stale.sessions[session.id].backendSessionId).toBe("backend-exit");
+    const ended = workspaceReducer(state, {
+      type: "SESSION_LIFECYCLE", backendSessionId: "backend-exit", lifecycle: "exited",
+      incarnation: "inc-exit", daemonEpoch: "epoch-exit", exitCode,
+    });
+    expect(ended.sessions[session.id].exitCode).toBe(exitCode);
+    const rebound = workspaceReducer(ended, {
+      type: "REBIND_SESSION_BACKEND", sessionId: session.id,
+      backendSessionId: "backend-new", incarnation: "inc-new", daemonEpoch: "epoch-exit",
+    });
+    expect(rebound.sessions[session.id].exitCode).toBeNull();
+    expect(rebound.sessions[session.id].backendSessionId).toBe("backend-new");
   });
 
   it("is a no-op when backendSessionId has already re-bound to a different ID", () => {

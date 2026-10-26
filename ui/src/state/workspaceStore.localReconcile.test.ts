@@ -188,7 +188,7 @@ describe("LOCAL_SESSIONS_RECONCILED", () => {
     expect(next.sessions.s1).toMatchObject({ backendSessionId: "b1", remoteConnectionState: "reconnecting" });
   });
 
-  it("settles a local session as exited when authoritative inventory proves affirmative exit", () => {
+  it.each([0, 37, null])("retains exit code %s when authoritative inventory proves affirmative exit", (exitCode) => {
     const state = stateWith([session("s1", "local", "b1")]);
     const next = workspaceReducer(state, {
       type: "LOCAL_SESSIONS_RECONCILED",
@@ -201,7 +201,7 @@ describe("LOCAL_SESSIONS_RECONCILED", () => {
             incarnation: "incarnation-1",
             recoveryAuthority: {
               status: "affirmative_exit",
-              exitCode: 0,
+              exitCode,
               incarnation: "incarnation-1",
               daemonEpoch: "epoch-old",
             },
@@ -209,7 +209,7 @@ describe("LOCAL_SESSIONS_RECONCILED", () => {
         ],
       ]),
     });
-    expect(next.sessions.s1).toMatchObject({ lifecycle: "exited", backendSessionId: null });
+    expect(next.sessions.s1).toMatchObject({ lifecycle: "exited", backendSessionId: null, exitCode });
   });
 
   it("leaves ssh and paired sessions untouched", () => {

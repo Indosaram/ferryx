@@ -747,7 +747,12 @@ impl PtyManager {
 
                 match session.poll_exit_code() {
                     Ok(Some(code)) => {
-                        manager.finalize_natural_exit(&session_id, code).await;
+                        manager.finalize_natural_exit(&session_id, Some(code)).await;
+                        break;
+                    }
+                    // Gone with no readable status (an adopted child this daemon cannot reap).
+                    Ok(None) if session.is_reaped() => {
+                        manager.finalize_natural_exit(&session_id, None).await;
                         break;
                     }
                     Ok(None)
@@ -786,7 +791,7 @@ impl PtyManager {
         });
     }
 
-    async fn finalize_natural_exit(&self, session_id: &str, code: i32) {
+    async fn finalize_natural_exit(&self, session_id: &str, code: Option<i32>) {
         let Some(session) = self.get_session(session_id) else {
             return;
         };
@@ -799,8 +804,13 @@ impl PtyManager {
         // the stream; the cancellation inside is the bounded fallback for a host that never exits,
         // never the first move.
         session.close_io();
-        let _ = Self::end_reader_after_close(&session).await;
-        session.mark_exited(Some(code));
+        if let Err(error) = Self::end_reader_after_close(&session).await {
+            // Reported, not ignored: a reader that outlives its session leaks a thread and holds
+            // the output channel open. Wake it once more so it ends as soon as it can.
+            tracing::warn!(session_id, %error, "PTY reader did not end after the shell exited");
+            session.request_reader_stop();
+        }
+        session.mark_exited(code);
         session.close_output();
         self.remove_from_registry(session_id);
     }
@@ -2392,6 +2402,49 @@ mod tests {
         succ_pump.abort();
     }
 
+    /// An adopted child is never this daemon's child, so its wait status cannot be read. Its exit
+    /// used to be recorded as `Some(0)` - a success the shell may never have had. It must end as
+    /// `Exited { code: None }` (unknown), and the hub's Exit-frame source must report no code.
+    #[tokio::test]
+    async fn adopted_child_exit_is_unknown_not_success() {
+        let predecessor = PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("read line; exit 3");
+        let (session_id, _pred_rx) = predecessor.spawn(cmd, 80, 24).expect("spawn shell");
+        let export = predecessor.export_session(&session_id).expect("export session");
+        let (master_fd, snapshot) = export.into_parts();
+
+        let successor_hub = Arc::new(TerminalOutputHub::new(4096));
+        let successor = PtyManager::new().with_output_hub(Arc::clone(&successor_hub));
+        successor.expect_transferred_owner(snapshot.clone()).expect("predecessor identity");
+        let _succ_rx = successor
+            .adopt_transferred_session(master_fd, snapshot)
+            .expect("adopt session");
+        let adopted = successor.get_session(&session_id).expect("adopted session");
+
+        let removal = successor.removal_notify();
+        successor.write_input(&session_id, b"go\n").expect("release the shell");
+        tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            while successor.has_session(&session_id) {
+                let notified = removal.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !successor.has_session(&session_id) {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("the adopted shell's exit must be observed");
+
+        assert_eq!(adopted.state(), PtySessionState::Exited { code: None });
+        assert_eq!(successor_hub.exit_code(&session_id), None);
+        // The predecessor is the real parent; it alone may reap the shell.
+        drop(predecessor);
+    }
+
     /// Regression: closing an adopted session whose shell is running a foreground job.
     ///
     /// Job control puts the foreground job in its own process group. Handover used to record
@@ -2583,7 +2636,7 @@ mod tests {
         let manager = PtyManager::new();
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.arg("-c");
-        cmd.arg("trap '' TERM; echo TRAP_READY; while true; do sleep 1; done");
+        cmd.arg("trap '' HUP TERM; echo TRAP_READY; while true; do sleep 1; done");
         let (session_id, mut rx) = manager
             .spawn(cmd, 80, 24)
             .expect("spawn TERM-resistant session");
@@ -2655,7 +2708,7 @@ mod tests {
         let manager = PtyManager::new();
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.arg("-c");
-        cmd.arg("trap '' TERM; echo TRAP_READY; while true; do sleep 1; done");
+        cmd.arg("trap '' HUP TERM; echo TRAP_READY; while true; do sleep 1; done");
         let (session_id, mut rx) = manager
             .spawn(cmd, 80, 24)
             .expect("spawn a TERM-resistant session");
@@ -2760,7 +2813,7 @@ mod tests {
             let manager = PtyManager::new();
             let mut cmd = CommandBuilder::new("/bin/sh");
             cmd.arg("-c");
-            cmd.arg("trap '' TERM; touch \"$1\"; while true; do sleep 1; done");
+            cmd.arg("trap '' HUP TERM; touch \"$1\"; while true; do sleep 1; done");
             cmd.arg("ferryx-close-fence");
             cmd.arg(&marker_arg);
             let (session_id, _rx) = manager
@@ -3056,6 +3109,162 @@ mod tests {
         assert!(
             session.is_reader_finished(),
             "the close must end the reader the release had unblocked"
+        );
+    }
+
+    /// Read a session's output until `tag` is followed by a complete decimal number, bounded, and
+    /// return that number. The terminal echoes the typed command (`BG=$!`) before the shell runs it,
+    /// so only digits after the tag count, and only once a non-digit ends them.
+    async fn read_tagged_number(rx: &mut mpsc::Receiver<Vec<u8>>, tag: &str) -> u32 {
+        let mut seen = String::new();
+        let found = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
+            loop {
+                let Some(chunk) = rx.recv().await else {
+                    return None;
+                };
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+                for (index, _) in seen.match_indices(tag) {
+                    let rest = &seen[index + tag.len()..];
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    if !digits.is_empty() && rest.len() > digits.len() {
+                        return Some(digits.parse::<u32>().expect("tagged number"));
+                    }
+                }
+            }
+        })
+        .await;
+        match found {
+            Ok(Some(value)) => value,
+            _ => panic!("never saw '{tag}<number>' in the output: {seen:?}"),
+        }
+    }
+
+    /// An interactive bash with no startup files and no history file, so a test neither depends on
+    /// nor writes the host user's shell state.
+    fn interactive_bash() -> CommandBuilder {
+        let mut cmd = CommandBuilder::new("/bin/bash");
+        cmd.args(["--noprofile", "--norc", "-i"]);
+        cmd.env("HISTFILE", "/dev/null");
+        cmd
+    }
+
+    #[tokio::test]
+    async fn close_preserves_a_background_job_that_ignores_hangup() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager.spawn(interactive_bash(), 80, 24).expect("spawn bash");
+        manager
+            .write_input(
+                &session_id,
+                b"sh -c 'trap \"\" HUP; echo READY=$$; exec sleep 300' &\n",
+            )
+            .expect("start hangup-resistant background job");
+        // The child announces its own PID only after installing the HUP disposition.
+        let job = read_tagged_number(&mut rx, "READY=").await;
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id)).await;
+        let survived = child_is_running(job);
+        // Clean up only the exact fixture PID, even when the close assertion fails.
+        let cleanup = std::process::Command::new("/bin/kill")
+            .args(["-KILL", &job.to_string()])
+            .output()
+            .expect("clean up the recorded background job");
+        assert!(cleanup.status.success() || !survived, "fixture cleanup failed");
+        assert_close_completed(close.expect("close must be bounded"), "close with HUP ignored");
+        assert!(survived, "closing a pane must not TERM/KILL its HUP-resistant background job");
+    }
+
+    /// GAP-1: a shell that exits while a background job still holds the terminal open.
+    ///
+    /// The job keeps the slave side open, so the spawned reader never sees EOF and used to wait in
+    /// `poll(-1)` with nothing able to wake it: the session's output never ended, and the reader
+    /// thread leaked. The exit must be reported and the reader must end within 3 s.
+    #[tokio::test]
+    async fn shell_exit_with_a_background_job_holding_the_tty_reports_exit_and_ends_the_reader() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager
+            .spawn(CommandBuilder::new("/bin/sh"), 80, 24)
+            .expect("spawn sh");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        manager
+            .write_input(&session_id, b"sleep 300 & echo BG=$!\n")
+            .expect("start background job");
+        let job = read_tagged_number(&mut rx, "BG=").await;
+
+        manager.write_input(&session_id, b"exit\n").expect("exit the shell");
+        let ended = tokio::time::timeout(Duration::from_secs(3), async {
+            while rx.recv().await.is_some() {}
+        })
+        .await
+        .is_ok();
+        let reader_finished = session.is_reader_finished();
+        let state = session.state();
+
+        // The job is this test's to clean up. Killing it also closes the slave end a stuck reader
+        // waits on, so a failing run reports instead of hanging the runtime's shutdown.
+        unsafe { libc::kill(job as libc::pid_t, libc::SIGKILL) };
+
+        assert!(ended, "the session's output never ended after the shell exited (reader stuck)");
+        assert!(reader_finished, "the reader task must have finished");
+        assert!(
+            matches!(state, PtySessionState::Exited { .. }),
+            "the session must report its exit, got {state:?}"
+        );
+    }
+
+    /// GAP-1: Close ends the shell's whole terminal session, background jobs included.
+    ///
+    /// Job control puts `sleep 300 &` in its own process group, which the close's TERM/KILL (shell
+    /// group and foreground group only) never reached: the job survived its pane.
+    #[tokio::test]
+    async fn close_ends_a_background_job_of_the_shell() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager.spawn(interactive_bash(), 80, 24).expect("spawn bash");
+
+        manager
+            .write_input(&session_id, b"sleep 300 & echo BG=$!\n")
+            .expect("start background job");
+        let job = read_tagged_number(&mut rx, "BG=").await;
+        assert!(child_is_running(job), "the background job must be running before the close");
+
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded");
+        assert_close_completed(close, "close with a background job");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut survived = child_is_running(job);
+        while survived && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            survived = child_is_running(job);
+        }
+        if survived {
+            unsafe { libc::kill(job as libc::pid_t, libc::SIGKILL) };
+        }
+        assert!(!survived, "the background job {job} survived the close of its session");
+    }
+
+    /// GAP-1: an idle interactive shell closes on SIGHUP, like any terminal emulator's close.
+    ///
+    /// Interactive bash ignores SIGTERM, so a close that opens with TERM always waits out the whole
+    /// 1 s grace before KILL. SIGHUP first ends it at once.
+    #[tokio::test]
+    async fn close_of_an_idle_bash_session_does_not_wait_out_the_term_grace() {
+        let manager = PtyManager::new();
+        let (session_id, mut rx) = manager.spawn(interactive_bash(), 80, 24).expect("spawn bash");
+        manager
+            .write_input(&session_id, b"echo READY=$((40+2))\n")
+            .expect("probe the shell");
+        assert_eq!(read_tagged_number(&mut rx, "READY=").await, 42);
+
+        let started = std::time::Instant::now();
+        let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
+            .await
+            .expect("close must be bounded");
+        let elapsed = started.elapsed();
+        close.expect("close of an idle shell succeeds");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "closing an idle bash took {elapsed:?}; it must not wait out the TERM grace"
         );
     }
 }

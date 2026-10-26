@@ -6710,6 +6710,7 @@ impl DaemonServer {
                         daemon_error(error.to_string())
                     } else if self.session_router.is_local_session(&session_id) {
                         let is_remote = self.terminal_service.remote().contains(&session_id);
+                        let exit_status = self.terminal_service.output_hub().exit_status(&session_id);
                         match self
                             .terminal_service
                             .attach_remote_with_sequence_ranges(&session_id, if is_remote { None } else { after_sequence })
@@ -6762,6 +6763,7 @@ impl DaemonServer {
                                     write_half,
                                     Some(agent_subscription),
                                     Some(&mut reader),
+                                    exit_status,
                                 )
                                 .await;
                                 return;
@@ -8615,6 +8617,7 @@ impl DaemonServer {
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let exit_status = hub.exit_status(&session_id);
         Self::pump_sequenced_stream_with_agent_state(
             session_id,
             rx,
@@ -8623,6 +8626,7 @@ impl DaemonServer {
             None,
             None::<tokio::io::Empty>,
             None,
+            exit_status,
         )
         .await
     }
@@ -8635,6 +8639,7 @@ impl DaemonServer {
         writer: W,
         agent_rx: Option<AgentStateSubscription>,
         client_reader: Option<R>,
+        exit_status: Option<crate::terminal::output_hub::ExitStatusSlot>,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
@@ -8652,7 +8657,7 @@ impl DaemonServer {
             if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch { return; }
             let (input, output) = tokio::io::duplex(64 * 1024);
             let pump = Self::pump_sequenced_stream_with_agent_state(
-                session_id.clone(), rx, hub, output, agent_rx, client_reader, incarnation,
+                session_id.clone(), rx, hub, output, agent_rx, client_reader, incarnation, exit_status,
             );
             tokio::pin!(pump);
             let mut lines = BufReader::new(input).lines();
@@ -8725,6 +8730,7 @@ impl DaemonServer {
                 agent_rx,
                 client_reader,
                 incarnation,
+                exit_status,
             )
             .await;
             return;
@@ -8738,6 +8744,7 @@ impl DaemonServer {
             agent_rx,
             client_reader,
             incarnation,
+            exit_status,
         );
         tokio::pin!(pump);
         let mut lines = BufReader::new(input).lines();
@@ -8783,6 +8790,7 @@ impl DaemonServer {
         mut agent_state_rx: Option<AgentStateSubscription>,
         mut client_reader: Option<R>,
         incarnation: Option<String>,
+        exit_status: Option<crate::terminal::output_hub::ExitStatusSlot>,
     ) where
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
@@ -9054,9 +9062,11 @@ impl DaemonServer {
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
+                    // A local PTY records its exit status before its output closes; `None` means
+                    // the status is unknown (closed by request, adopted child, remote session).
                     let msg = DaemonStreamMessage::Exit {
                         session_id: Cow::Borrowed(&session_id),
-                        exit_code: None,
+                        exit_code: exit_status.as_ref().and_then(|status| *status.read()),
                         incarnation: incarnation.as_deref().map(Cow::Borrowed),
                     };
                     frame_buf.clear();
@@ -9795,6 +9805,7 @@ mod tests {
             None,
             None::<tokio::io::Empty>,
             Some("incarnation-under-test".to_string()),
+            None,
         ));
 
         drop(tx);
@@ -9807,6 +9818,40 @@ mod tests {
         assert_eq!(incarnation.as_deref(), Some("incarnation-under-test"));
 
         let _ = pump_handle.await;
+    }
+
+    #[tokio::test]
+    async fn delayed_exit_stream_keeps_its_status_after_hub_removal_and_id_reuse() {
+        let hub = Arc::new(TerminalOutputHub::default());
+        let (_, rx) = hub.register_session_channels("delayed-exit");
+        let status = hub.exit_status("delayed-exit").expect("original status");
+        hub.record_exit("delayed-exit", Some(37));
+        hub.remove_session("delayed-exit");
+        for index in 0..300 {
+            let id = format!("other-exit-{index}");
+            let _rx = hub.register_session(&id);
+            hub.record_exit(&id, Some(1));
+            hub.remove_session(&id);
+        }
+        let _replacement = hub.register_session("delayed-exit");
+        hub.record_exit("delayed-exit", Some(9));
+        let (client, server_side) = tokio::io::duplex(4096);
+        let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
+            "delayed-exit".to_string(), rx, hub, server_side, None,
+            None::<tokio::io::Empty>, Some("original-incarnation".to_string()), Some(status),
+        ));
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await.expect("exit frame within bound").expect("read exit frame");
+        let frame: DaemonStreamMessage<'_> = serde_json::from_str(line.trim()).unwrap();
+        let DaemonStreamMessage::Exit { exit_code, incarnation, .. } = frame else {
+            panic!("expected exit frame: {line}");
+        };
+        assert_eq!(exit_code, Some(37));
+        assert_eq!(incarnation.as_deref(), Some("original-incarnation"));
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await.expect("pump completed").expect("pump succeeded");
     }
 
     #[tokio::test]
@@ -11304,6 +11349,7 @@ mod tests {
             Some(agent_rx),
             None::<tokio::io::Empty>,
             None,
+            None,
         ));
 
         // Send the foreign report FIRST, then this session's own report. The pump processes the
@@ -12194,6 +12240,7 @@ mod tests {
             None,
             Some(server_read_side),
             None,
+            None,
         ));
 
         // Terminal is completely idle: no output sent.
@@ -12264,6 +12311,95 @@ mod tests {
             result.is_ok(),
             "handle_client must terminate promptly when client disconnects from idle attach"
         );
+    }
+
+    /// GAP-1: an attached client learns how the shell ended. The stream's Exit frame used to be
+    /// written with `exit_code: None` for every session, so a pane could never show a failure.
+    /// Exercised through the real attach path: spawn, Attach over `handle_client`, shell exit.
+    #[tokio::test]
+    async fn attach_stream_exit_frame_carries_the_shell_exit_code() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = init_test_git_repo();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+
+        for expected in [7, 0] {
+            let session_id = server
+                .handle_spawn(
+                    &format!("req-exit-code-{expected}"),
+                    "default",
+                    crate::daemon::session_service::SpawnOptions {
+                        worktree: None, cwd: None, cols: 80, rows: 24,
+                        shell: Some("/bin/sh".to_string()),
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let (client_stream, server_stream) = UnixStream::pair().expect("isolated UDS pair");
+            let server_clone = Arc::clone(&server);
+            let server_task = tokio::spawn(async move {
+                server_clone.handle_client(server_stream).await;
+            });
+            let (read_half, mut write_half) = tokio::io::split(client_stream);
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+
+            let mut hs_json = serde_json::to_string(&DaemonRequest::Handshake {
+                version: DAEMON_PROTOCOL_VERSION,
+                token: None,
+            })
+            .unwrap();
+            hs_json.push('\n');
+            write_half.write_all(hs_json.as_bytes()).await.unwrap();
+            write_half.flush().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await.expect("handshake response within bound").unwrap();
+
+            let mut attach_json = serde_json::to_string(&DaemonRequest::Attach {
+                session_id: session_id.clone(),
+                after_sequence: None,
+            })
+            .unwrap();
+            attach_json.push('\n');
+            write_half.write_all(attach_json.as_bytes()).await.unwrap();
+            write_half.flush().await.unwrap();
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+                .await.expect("attach response within bound").unwrap();
+            let resp: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+            assert!(matches!(resp, DaemonResponse::AttachOk { .. }), "{line}");
+
+            server
+                .terminal_service()
+                .write_input(&session_id, format!("exit {expected}\n").as_bytes())
+                .expect("write exit command");
+
+            // Bounded anti-hang only: the frame either arrives or the stream never ends.
+            let exit_code = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    line.clear();
+                    let read = reader.read_line(&mut line).await.expect("read stream frame");
+                    assert!(read > 0, "stream ended without an exit frame");
+                    if let Ok(DaemonStreamMessage::Exit { exit_code, .. }) =
+                        serde_json::from_str::<DaemonStreamMessage<'_>>(line.trim())
+                    {
+                        eprintln!("PTY_EXIT_UDS_FRAME={}", line.trim());
+                        return exit_code;
+                    }
+                }
+            })
+            .await
+            .expect("exit frame within bound");
+            assert_eq!(exit_code, Some(expected), "exit frame must carry the shell's code");
+
+            drop(reader);
+            drop(write_half);
+            tokio::time::timeout(Duration::from_secs(5), server_task)
+                .await.expect("attach task ends").expect("attach task succeeds");
+        }
     }
 
     #[tokio::test]
@@ -12989,6 +13125,7 @@ mod instance_lock_deadline_tests {
                     rx,
                     hub,
                     server_writer,
+                    None,
                     None,
                     None,
                 )

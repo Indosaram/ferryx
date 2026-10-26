@@ -333,6 +333,7 @@ export type TerminalSession = {
   /** Backing-process resource state, independent from agent activity. */
   processState?: SessionProcessState;
   lifecycle: TerminalLifecycle;
+  exitCode?: number | null;
   ownerId?: string | null;
   daemonEpoch?: string | null;
   lastOutputSequence?: string | null;

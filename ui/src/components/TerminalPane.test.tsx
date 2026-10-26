@@ -302,6 +302,29 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.getByText("Shell exited")).toBeInTheDocument();
     expect(screen.queryByText("Not started yet")).toBeNull();
   });
+  it.each([7, 37])("renders the failed shell exit code %s", (exitCode) => {
+    render(
+      <TerminalPane
+        session={createExitedSession({ agentType: null, providerSession: null, exitCode })}
+        active={true}
+        onOpenNewShell={vi.fn()}
+      />,
+    );
+    const displayedCodes = screen.getByRole("heading", { level: 2 }).textContent?.match(/\d+/g);
+    expect(displayedCodes?.map(Number)).toEqual([exitCode]);
+  });
+
+  it.each([0, null])("does not show failure digits for exit code %s", (exitCode) => {
+    render(
+      <TerminalPane
+        session={createExitedSession({ agentType: null, providerSession: null, exitCode })}
+        active={true}
+        onOpenNewShell={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 2 }).textContent?.match(/\d+/g)).toBeNull();
+  });
+
   it("calls reconnect once with the local session id and disables repeat activation while pending", () => {
     // Given: an exited Omo session with an authoritative provider reference.
     const onReconnect = vi.fn(() => new Promise<void>(() => undefined));

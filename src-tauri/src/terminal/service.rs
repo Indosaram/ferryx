@@ -512,9 +512,9 @@ impl TerminalService {
                 .await
                 .map_err(|e| PtyError::Other(e.to_string()));
         }
-        self.output_hub.remove_session(session_id);
         let result = self.pty_manager.close_session(session_id).await;
         if result.is_ok() {
+            self.output_hub.remove_session(session_id);
             self.lifecycle.lock().remove(session_id);
         }
         result

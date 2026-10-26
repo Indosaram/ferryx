@@ -110,6 +110,11 @@ features = [
     # CancelIoEx/GetOverlappedResult in ioapiset. Nothing else is added.
     "minwinbase",
     "ioapiset",
+    # Kill-on-close job object that owns every ConPTY child and its descendants
+    # (win/mod.rs `kill_on_close_job`, win/psuedocon.rs `spawn_command`).
+    "jobapi",
+    "jobapi2",
+    "winnt",
 ]
 
 [target."cfg(windows)".dependencies.winreg]
