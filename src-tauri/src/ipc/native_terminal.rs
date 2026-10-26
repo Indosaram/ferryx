@@ -1344,8 +1344,8 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                     Some(request) => state_inner.render_fenced(&surface_window, request, render_tuple.as_ref()),
                     None => state_inner.render_current_fenced(&surface_window, &session_id_clone, render_tuple.as_ref()),
                 }
-                .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone, receipt))
-                .map_err(IpcError::from);
+                .map_err(|error| set_bounds_render_error(&state_inner, &session_id_clone, render_tuple.as_ref(), error))
+                .map(|receipt| into_bound_ipc_receipt(&state_inner, session_id_clone, receipt));
                 let _ = sender.send(result);
             })
             .map_err(|error| {
@@ -1359,7 +1359,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
             IpcError::internal("Main thread stopped before native terminal render completed")
         })??;
         if state.session_attach_tuple(&session_id) != expected_tuple {
-            return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+            return Err(set_bounds_tuple_moved_error(state.inner(), session_id, expected_tuple.as_ref()));
         }
         if !receipt.render_deferred {
             return Ok(receipt);
@@ -1378,7 +1378,7 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                         IpcError::from(NativeTerminalError::SessionDetached(session_id.clone()))
                     })?;
                     if state.session_attach_tuple(&session_id) != expected_tuple {
-                        return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
+                        return Err(set_bounds_tuple_moved_error(state.inner(), session_id, expected_tuple.as_ref()));
                     }
                     if let Some(presented) = presented_after(&slot, &mut presentations, awaited_generation) {
                         return Ok(into_bound_ipc_receipt(state.inner(), session_id, presented));
@@ -1399,6 +1399,51 @@ pub async fn cmd_native_terminal_set_bounds<R: Runtime>(
                 }
             }
         }
+    }
+}
+
+/// True when the surface is still attached but bound to a different tuple than the request
+/// carried: the pane rotated its attach tuple while this request was in flight.
+fn attach_tuple_is_stale(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    expected: Option<&crate::daemon::protocol::PaneAttachTuple>,
+) -> bool {
+    let Some(expected) = expected else { return false };
+    state
+        .session_attach_tuple(session_id)
+        .is_some_and(|active| &active != expected)
+}
+
+/// Error for a set-bounds whose tuple no longer matches the surface after dispatch. A rotated
+/// tuple is reported as `stale_tuple` so the frontend re-sends with its current tuple; a
+/// surface that is gone stays the benign detached error.
+fn set_bounds_tuple_moved_error(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: String,
+    expected: Option<&crate::daemon::protocol::PaneAttachTuple>,
+) -> IpcError {
+    if attach_tuple_is_stale(state, &session_id, expected) {
+        IpcError::stale_attach_tuple(&session_id)
+    } else {
+        IpcError::from(NativeTerminalError::SessionDetached(session_id))
+    }
+}
+
+/// Maps a fenced render failure. The surface host answers a tuple mismatch with
+/// `SessionDetached`; tell a rotated tuple apart from a released surface here.
+fn set_bounds_render_error(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+    expected: Option<&crate::daemon::protocol::PaneAttachTuple>,
+    error: NativeTerminalError,
+) -> IpcError {
+    if matches!(error, NativeTerminalError::SessionDetached(_))
+        && attach_tuple_is_stale(state, session_id, expected)
+    {
+        IpcError::stale_attach_tuple(session_id)
+    } else {
+        IpcError::from(error)
     }
 }
 
@@ -3023,6 +3068,42 @@ mod tests {
             select_attached_native_terminal(&state, "range", &out_of_bounds),
             Err(NativeTerminalError::InvalidValue(_))
         ));
+        state.teardown();
+    }
+
+    #[test]
+    fn stale_tuple_set_bounds_reports_reason_so_the_pane_resends() {
+        // Given a surface that rotated to attempt generation 4 while a set-bounds for 3 was in flight.
+        let tuple = |generation| crate::daemon::protocol::PaneAttachTuple {
+            backend_session_id: "backend".into(), incarnation: Some("incarnation".into()),
+            daemon_epoch: "8".into(), frontend_session_id: "frontend".into(),
+            pane_identity: "pane".into(), binding_key: "binding".into(), attempt_generation: generation,
+        };
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("backend", 8, None).unwrap();
+        state.begin_replay_request_with_tuple("backend", Some(tuple(4))).unwrap();
+
+        // When the fenced render refuses the old tuple.
+        let error = set_bounds_render_error(
+            &state, "backend", Some(&tuple(3)),
+            NativeTerminalError::SessionDetached("backend".into()),
+        );
+        let moved = set_bounds_tuple_moved_error(&state, "backend".into(), Some(&tuple(3)));
+
+        // Then both paths keep the benign code and name the stale tuple.
+        for error in [error, moved] {
+            assert_eq!(error.code, IpcErrorCode::SessionNotFound);
+            assert_eq!(error.details.as_ref().and_then(|d| d.get("reason")), Some(&serde_json::json!("stale_tuple")));
+        }
+        // A request carrying the current tuple, or a released surface, stays a plain detach.
+        let current = set_bounds_render_error(
+            &state, "backend", Some(&tuple(4)),
+            NativeTerminalError::SessionDetached("backend".into()),
+        );
+        assert_eq!(current.details, None);
+        let released = set_bounds_tuple_moved_error(&state, "gone".into(), Some(&tuple(3)));
+        assert_eq!(released.code, IpcErrorCode::SessionNotFound);
+        assert_eq!(released.details, None);
         state.teardown();
     }
 

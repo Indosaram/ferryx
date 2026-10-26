@@ -282,6 +282,17 @@ impl IpcError {
         Self::new(IpcErrorCode::InternalError, message.to_string())
     }
 
+    /// A native surface request carried an attach tuple the surface is no longer bound to.
+    /// Keeps the benign `SESSION_NOT_FOUND` code older frontends drop, and adds
+    /// `details.reason = "stale_tuple"` so a current frontend re-sends with its newer tuple.
+    pub fn stale_attach_tuple(session_id: &str) -> Self {
+        Self::new(
+            IpcErrorCode::SessionNotFound,
+            format!("Native terminal session {session_id} is bound to a newer attach tuple"),
+        )
+        .with_details(json!({ "reason": "stale_tuple", "sessionId": session_id }))
+    }
+
     pub fn native_terminal_unsupported() -> Self {
         Self::new(
             IpcErrorCode::NativeTerminalUnsupported,
