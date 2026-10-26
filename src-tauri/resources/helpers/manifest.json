@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "helperVersion": "2026.1025.1",
+  "helperVersion": "2026.1025.2",
   "protocolVersion": 1,
-  "sourceFingerprint": "4b8db6c369fe7f09c7e2d4a46a73c64235bc7000ef355d4c3a5529290328452f",
+  "sourceFingerprint": "c7f86c0a51ce148b99527fec2032624d25cb2038a37c051937306ef35756e1a3",
   "requiredCapabilities": [
     "sshHelperV1",
     "dagSubscribeV1",
@@ -12,7 +12,7 @@
     {
       "target": "x86_64-unknown-linux-gnu",
       "filename": "ferryx-remote-helper",
-      "sha256": "5e0651439494d5fefcd1decaab976954188fc3607b1a98bc9659daea3dfa1457",
+      "sha256": "84056136535eb8c496b68eb682823d3b51b1ab07b94b761aa79203b1d332171d",
       "byteLength": 1529176,
       "capabilities": [
         "sshHelperV1",
@@ -25,7 +25,7 @@
     {
       "target": "aarch64-unknown-linux-gnu",
       "filename": "ferryx-remote-helper",
-      "sha256": "5c154ed33bde3d6ccbdb4b2c1b8c718adce66400180b76f0ee07c451047f9805",
+      "sha256": "8f11c8bb796d511f283754b09f1ea5a1a48ebeb4b3bc3f9a513fe6897cad521d",
       "byteLength": 1375032,
       "capabilities": [
         "sshHelperV1",
@@ -38,8 +38,8 @@
     {
       "target": "aarch64-apple-darwin",
       "filename": "ferryx-remote-helper",
-      "sha256": "e24db5699e3c905b76915b98bebda98372c4784480f5fead39c546f59cb4b37d",
-      "byteLength": 1574976,
+      "sha256": "feaad6c1b0084ca9f2b97c255676ecc46bfb804e958bd3d49b16439cf49f6d12",
+      "byteLength": 1574032,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -51,8 +51,8 @@
     {
       "target": "x86_64-apple-darwin",
       "filename": "ferryx-remote-helper",
-      "sha256": "7dca9ad943ecdde1653369a66b73f68b71e74b038ed411e6d81e19fe8b0c903a",
-      "byteLength": 1652184,
+      "sha256": "435ee8f1a1dbdc77ef89d010fc1f1d7400f193f0acd93eb5da46946a4e5a225f",
+      "byteLength": 1651240,
       "capabilities": [
         "sshHelperV1",
         "dagStreamingV1",
@@ -64,7 +64,7 @@
     {
       "target": "x86_64-pc-windows-msvc",
       "filename": "ferryx-remote-helper.exe",
-      "sha256": "f8bea487b6987c28a437d8b32ca8bda0b0ff181ce42f1393eda6a9f2bb240360",
+      "sha256": "7a0e78480138a04b948e645e2cd74b4db73330e9f3725a365efaf83364d78c8f",
       "byteLength": 1370112,
       "capabilities": [
         "sshHelperV1",
