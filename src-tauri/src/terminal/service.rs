@@ -119,7 +119,7 @@ impl TerminalService {
 
         // Perform the write asynchronously off the Tokio worker thread to avoid blocking
         // the reactor when the PTY input queue is full.
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             const MAX_CHUNK_SIZE: usize = 65536;
             Ok(Box::pin(async move {
@@ -139,7 +139,7 @@ impl TerminalService {
             }))
         }
 
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(Box::pin(async move {
                 tokio::task::spawn_blocking(move || session.write_input(&data))
@@ -916,6 +916,44 @@ mod preparation_tests {
         assert!(matches!(setup, Ok((_, Ok(_)))), "{setup:?}");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(git_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn windows_input_operation_uses_cancellable_native_writer() {
+        struct RejectedBlockingWriter;
+        impl std::io::Write for RejectedBlockingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("blocking input writer was used"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let service = TerminalService::default();
+        let root = tempfile::tempdir().unwrap();
+        let mut command = portable_pty::CommandBuilder::new("cmd.exe");
+        command.args(["/D", "/Q", "/K"]);
+        let (id, _output) = service.spawn_resolved_with_id(
+            uuid::Uuid::new_v4().to_string(),
+            command,
+            80,
+            24,
+            super::super::pty::ResolvedSpawnContext {
+                root: root.path().to_owned(),
+                cwd: root.path().to_owned(),
+                managed_workspace_id: None,
+            },
+        ).expect("spawn isolated input fixture");
+        service.get_session(&id).unwrap()
+            .set_writer_for_test(Box::new(RejectedBlockingWriter));
+
+        let result = service.write_input_operation(&id, 0, b"\r".to_vec())
+            .expect("admit input").await;
+        let closed = service.close_session(&id).await;
+        assert!(closed.is_ok(), "{closed:?}");
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
