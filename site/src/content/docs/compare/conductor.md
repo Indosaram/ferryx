@@ -12,7 +12,7 @@ That's the practical difference. The rest of this page covers what Conductor act
 | | Ferryx | Conductor |
 | :--- | :--- | :--- |
 | macOS | Universal DMG | Yes, the only supported platform |
-| Windows | x64 installer (not code-signed yet) | Not available yet |
+| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (signed) and x64 `.exe` installer | Not available yet |
 | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | Not available yet |
 | Licensing | Source-available under the Ferryx License, free for individuals and small companies | Closed source; free tier plus paid plans from $50/mo |
 | Agents | Any command you can start in a shell; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Claude Code, Codex, Cursor, and OpenCode |

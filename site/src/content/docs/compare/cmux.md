@@ -13,7 +13,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the cmux [README](https://git
 | | Ferryx | cmux |
 | :--- | :--- | :--- |
 | macOS | Universal DMG | Yes, native Swift/AppKit app (DMG or Homebrew cask) |
-| Windows | x64 installer (not code-signed yet) | No desktop app; [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) is open |
+| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (signed) and x64 `.exe` installer | No desktop app; [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) is open |
 | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | No desktop app; [Linux request #330](https://github.com/manaflow-ai/cmux/issues/330) is open, its most-reacted issue |
 | Terminal core | libghostty-vt parser, WGPU renderer | libghostty, reads your existing Ghostty config |
 | License | Source-available under the Ferryx License, free for individuals and small companies | The README calls it "Free and GPL-licensed" |

@@ -28,7 +28,7 @@ const faqs: { q: string; a: string }[] = [
   },
   {
     q: "Why does Windows warn when I install it?",
-    a: "The Windows installer is not code-signed yet, so SmartScreen warns before it runs. Every release publishes SHA256SUMS.txt; verify the download with sha256sum -c SHA256SUMS.txt.",
+    a: "Install from the Microsoft Store (https://apps.microsoft.com/detail/9NLHQL5JNLM4 or winget install --source msstore 9NLHQL5JNLM4) for the signed build with no SmartScreen warning. The standalone GitHub .exe installer is not code-signed, so SmartScreen warns before it runs; verify it against SHA256SUMS.txt with sha256sum -c SHA256SUMS.txt.",
   },
   {
     q: "Does it run on a headless Linux server?",

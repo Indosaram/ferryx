@@ -15,7 +15,7 @@ use Ctrl in place of ⌘.
 1. Download the build for your platform from the
    [releases page](https://github.com/Indosaram/ferryx/releases/latest) and check it against the
    published `SHA256SUMS.txt`. Platform notes: [macOS](/blog/ferryx-install-macos/),
-   [Windows](/blog/ferryx-install-windows/) (the installer is not code-signed yet, so SmartScreen
+   [Windows](/blog/ferryx-install-windows/) (signed on the [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) or `winget install --source msstore 9NLHQL5JNLM4`; the direct `.exe` installer is not code-signed, so SmartScreen
    warns on first run), [Linux](/blog/ferryx-install-linux/).
 2. Launch Ferryx and add a project folder with the **+** button at the top of the sidebar. The
    project appears in the sidebar with its primary checkout listed as `main`.

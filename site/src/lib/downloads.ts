@@ -21,15 +21,12 @@ export const GITHUB_RELEASE_LATEST = 'https://github.com/Indosaram/ferryx/releas
 export const GITHUB_RELEASE_DOWNLOAD_BASE = 'https://github.com/Indosaram/ferryx/releases/latest/download';
 
 /**
- * Not a download destination. Ferryx has no published Microsoft Store listing: as of
- * 2026-10-24 `bun scripts/store-listing-status.mjs` reports product 9NLHQL5JNLM4 as not live
- * (apps.microsoft.com redirects to 404/ProductNotFound), and the MSIX in the GitHub release is an
- * unsigned Store-ingestion package. The Store is the signed Windows channel once certified. This
- * constant exists only so analytics can still recognise a Store link; when the status script
- * reports live, replace it with https://apps.microsoft.com/detail/9NLHQL5JNLM4 and make the
- * Store the first Windows download, keeping the .exe as the secondary unsigned installer.
+ * Canonical Microsoft Store product page for Ferryx (ProductId 9NLHQL5JNLM4), verified live by
+ * `bun scripts/store-listing-status.mjs`. The Store is the signed Windows channel with automatic
+ * background updates; the GitHub release .exe stays available as the secondary unsigned installer.
  */
-export const MICROSOFT_STORE_SEARCH_URL = 'https://apps.microsoft.com/search?query=Ferryx';
+export const MICROSOFT_STORE_URL = 'https://apps.microsoft.com/detail/9NLHQL5JNLM4';
+export const MICROSOFT_STORE_SEARCH_URL = MICROSOFT_STORE_URL;
 
 export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = {
   macos: {
@@ -64,26 +61,33 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
     badge: 'Windows 10/11 (64-bit)',
     systemReqs: 'x64 Architecture with WebView2',
     defaultAsset: {
-      id: 'windows-installer',
-      name: 'Windows Installer',
-      architecture: 'x64',
-      fileType: '.exe',
-      url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
+      id: 'windows-store',
+      name: 'Microsoft Store',
+      architecture: 'x64 · MSIX',
+      fileType: 'Store',
+      url: MICROSOFT_STORE_URL,
       recommended: true,
-      notes: 'Not code-signed; Store version pending certification. Installs for the current user and updates itself in place',
+      notes: 'Signed by Microsoft Store with automatic updates (or winget install --source msstore 9NLHQL5JNLM4)',
     },
     assets: [
+      {
+        id: 'windows-store',
+        name: 'Microsoft Store',
+        architecture: 'x64 · MSIX (signed)',
+        fileType: 'Store',
+        url: MICROSOFT_STORE_URL,
+        recommended: true,
+        notes: 'Signed by the Microsoft Store with automatic updates (winget install --source msstore 9NLHQL5JNLM4)',
+      },
       {
         id: 'windows-installer',
         name: 'Windows Installer (.exe)',
         architecture: 'x64',
         fileType: '.exe',
         url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
-        recommended: true,
-        // The installer is not Authenticode-signed (the signed channel is the Microsoft Store,
-        // which is still pending certification), so SmartScreen warns on first run; saying so
-        // here is more useful than letting the warning come as a surprise.
-        notes: 'Not code-signed; Store version pending certification. SmartScreen shows a warning — check SHA256SUMS.txt before running',
+        // The direct installer is not Authenticode-signed (the signed channel is the Microsoft
+        // Store above), so SmartScreen warns on first run; saying so here avoids surprise.
+        notes: 'Direct installer (not code-signed). SmartScreen shows a warning — check SHA256SUMS.txt before running',
       },
     ],
   },
