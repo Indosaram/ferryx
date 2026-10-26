@@ -238,6 +238,31 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke.mock.calls[0][1]).not.toHaveProperty("command");
   });
 
+  it("spawn request includes known cols/rows geometry", async () => {
+    core.invoke.mockResolvedValue({ sessionId: "backend-sized" });
+
+    await spawnTerminal({ workspaceId: "workspace-main", worktree: null, cols: 132, rows: 40 });
+
+    expect(core.invoke.mock.calls[0][1].request).toMatchObject({ cols: 132, rows: 40 });
+  });
+
+  it.each<{ label: string; cols?: number | null; rows?: number | null }>([
+    { label: "absent" },
+    { label: "null", cols: null, rows: null },
+    { label: "zero", cols: 0, rows: 0 },
+    { label: "oversized", cols: 1001, rows: 1001 },
+    { label: "fractional", cols: 132.5, rows: 40.5 },
+    { label: "NaN", cols: Number.NaN, rows: Number.NaN },
+  ])("spawn request omits $label cols/rows so the backend default applies", async ({ cols, rows }) => {
+    core.invoke.mockResolvedValue({ sessionId: "backend-default" });
+
+    await spawnTerminal({ workspaceId: "workspace-main", worktree: null, cols, rows });
+
+    const request = core.invoke.mock.calls[0][1].request;
+    expect(request).not.toHaveProperty("cols");
+    expect(request).not.toHaveProperty("rows");
+  });
+
   it("spawns terminals with custom shell override", async () => {
     core.invoke.mockResolvedValue({ sessionId: "backend-session-2" });
 

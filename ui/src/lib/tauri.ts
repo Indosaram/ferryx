@@ -156,6 +156,8 @@ export type SpawnTerminalRequest = {
   shell?: string | null;
   /** Inherit the live CWD of this backend session when `cwd` is not pinned. */
   inheritFromSessionId?: string | null;
+  cols?: number | null;
+  rows?: number | null;
   startup?: {
     kind: "agentResume";
     agentType: string;
@@ -553,6 +555,8 @@ function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTe
 }
 
 function sanitizeSpawnRequest(request: SpawnTerminalRequest) {
+  const cols = sanitizeSpawnDimension(request.cols);
+  const rows = sanitizeSpawnDimension(request.rows);
   return {
     workspaceId: String(request.workspaceId ?? ""),
     worktree: request.worktree
@@ -568,7 +572,17 @@ function sanitizeSpawnRequest(request: SpawnTerminalRequest) {
     startup: sanitizeSpawnStartup(request.startup),
     inheritFromSessionId:
       typeof request.inheritFromSessionId === "string" ? request.inheritFromSessionId : null,
+    ...(cols !== null ? { cols } : {}),
+    ...(rows !== null ? { rows } : {}),
   };
+}
+
+const MAX_SPAWN_DIMENSION = 1000;
+
+function sanitizeSpawnDimension(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_SPAWN_DIMENSION
+    ? value
+    : null;
 }
 
 function reportUnserializableSpawnRequest(request: SpawnTerminalRequest): void {

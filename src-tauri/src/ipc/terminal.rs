@@ -502,6 +502,41 @@ pub fn start_managed_pump_token<R: Runtime>(
     map.insert(session_id, PumpHandle { token, task, stream_task });
 }
 
+/// Physical cell size from the native font manager, used by the frontend to derive the initial
+/// PTY grid from a measured pane rect before spawning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCellMetricsResponse {
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+#[cfg(feature = "native-terminal")]
+fn terminal_cell_metrics_for_scale(scale_factor: f64) -> TerminalCellMetricsResponse {
+    let metrics =
+        crate::native_terminal::renderer::font_manager::derived_cell_metrics_for_scale(scale_factor);
+    TerminalCellMetricsResponse { width_px: metrics.width_px, height_px: metrics.height_px }
+}
+
+#[cfg(all(feature = "desktop", feature = "native-terminal"))]
+#[tauri::command]
+pub fn cmd_terminal_cell_metrics(scale_factor: f64) -> TerminalCellMetricsResponse {
+    terminal_cell_metrics_for_scale(scale_factor)
+}
+
+#[cfg(any(feature = "desktop", test))]
+const DEFAULT_SPAWN_COLS: u16 = 80;
+#[cfg(any(feature = "desktop", test))]
+const DEFAULT_SPAWN_ROWS: u16 = 24;
+
+#[cfg(any(feature = "desktop", test))]
+fn spawn_dimension(value: Option<u16>, default: u16, max: u16) -> u16 {
+    match value {
+        Some(value) if value > 0 && value <= max => value,
+        _ => default,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpawnTerminalRequest {
@@ -4141,7 +4176,10 @@ pub async fn cmd_terminal_spawn_operation(
             Ok(SplitOperationResponse::Prepare { prepared: PreparedLocalSplit {
                 identity, workspace_id: request.workspace_id, worktree: request.worktree,
                 cwd: cwd.to_string_lossy().into_owned(), shell: request.shell.or(default_shell),
-                cols: request.cols.unwrap_or(80), rows: request.rows.unwrap_or(24),
+                cols: spawn_dimension(request.cols, DEFAULT_SPAWN_COLS,
+                    crate::terminal::protocol_dto::MAX_RESIZE_COLS),
+                rows: spawn_dimension(request.rows, DEFAULT_SPAWN_ROWS,
+                    crate::terminal::protocol_dto::MAX_RESIZE_ROWS),
             } })
         }
         SplitOperationRequest::Status { identity, remaining_ms } => {
@@ -4241,8 +4279,10 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         "[cmd_terminal_spawn] request received has_worktree={has_worktree} has_cwd={has_cwd} has_client_request_id={has_client_request_id}"
     );
 
-    let cols = request.cols.unwrap_or(80);
-    let rows = request.rows.unwrap_or(24);
+    let cols = spawn_dimension(request.cols, DEFAULT_SPAWN_COLS,
+        crate::terminal::protocol_dto::MAX_RESIZE_COLS);
+    let rows = spawn_dimension(request.rows, DEFAULT_SPAWN_ROWS,
+        crate::terminal::protocol_dto::MAX_RESIZE_ROWS);
     let is_remote_workspace = crate::ssh::projects::is_remote(&request.workspace_id);
     let is_paired_workspace = request.workspace_id.starts_with("daemon:")
         || matches!(request.startup, Some(TerminalStartup::PairedDaemon { .. }));
@@ -5659,6 +5699,71 @@ mod tests {
         assert_eq!(inherited_split_cwd(Err(missing)).unwrap(), None);
         let transport = IpcError::new(IpcErrorCode::SpawnAttemptTimeout, "timed out");
         assert_eq!(inherited_split_cwd(Err(transport)).unwrap_err().code, IpcErrorCode::SpawnAttemptTimeout);
+    }
+
+    fn spawn_size_from_wire(json: serde_json::Value) -> (u16, u16) {
+        let request: SpawnTerminalRequest = serde_json::from_value(json).unwrap();
+        (
+            spawn_dimension(request.cols, DEFAULT_SPAWN_COLS, crate::terminal::protocol_dto::MAX_RESIZE_COLS),
+            spawn_dimension(request.rows, DEFAULT_SPAWN_ROWS, crate::terminal::protocol_dto::MAX_RESIZE_ROWS),
+        )
+    }
+
+    #[test]
+    fn spawn_request_initial_size_reaches_spawn_and_rejects_invalid() {
+        let base = serde_json::json!({ "workspaceId": "ws", "worktree": null });
+        let with = |cols: serde_json::Value, rows: serde_json::Value| {
+            let mut json = base.clone();
+            json["cols"] = cols;
+            json["rows"] = rows;
+            json
+        };
+        assert_eq!(spawn_size_from_wire(with(132.into(), 40.into())), (132, 40));
+        assert_eq!(spawn_size_from_wire(base.clone()), (80, 24));
+        assert_eq!(spawn_size_from_wire(with(serde_json::Value::Null, serde_json::Value::Null)), (80, 24));
+        assert_eq!(spawn_size_from_wire(with(0.into(), 0.into())), (80, 24));
+        assert_eq!(spawn_size_from_wire(with(1001.into(), 1001.into())), (80, 24));
+        assert_eq!(spawn_size_from_wire(with(1000.into(), 1.into())), (1000, 1));
+        assert!(serde_json::from_value::<SpawnTerminalRequest>(with((-1).into(), 40.into())).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initial_spawn_wire_dimensions_are_visible_to_the_real_pty() {
+        let (cols, rows) = spawn_size_from_wire(serde_json::json!({
+            "workspaceId": "ws", "worktree": null, "cols": 132, "rows": 40,
+        }));
+        let manager = crate::terminal::PtyManager::new();
+        let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+        command.args(["-c", "stty size"]);
+        let (session_id, mut output) = manager.spawn(command, cols, rows).unwrap();
+        let captured = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = output.recv().await {
+                bytes.extend_from_slice(&chunk);
+            }
+            bytes
+        }).await;
+        if manager.has_session(&session_id) {
+            manager.close_session(&session_id).await.unwrap();
+        }
+        let bytes = captured.expect("stty completes before timeout");
+        let size = String::from_utf8(bytes).unwrap();
+        assert_eq!(size.split_whitespace().collect::<Vec<_>>(), ["40", "132"]);
+        eprintln!("INITIAL_PTY_SIZE={}", size.trim());
+    }
+
+    #[cfg(feature = "native-terminal")]
+    #[test]
+    fn terminal_cell_metrics_match_font_manager_and_serialize_camel_case() {
+        let expected =
+            crate::native_terminal::renderer::font_manager::derived_cell_metrics_for_scale(2.0);
+        let response = terminal_cell_metrics_for_scale(2.0);
+        assert_eq!((response.width_px, response.height_px), (expected.width_px, expected.height_px));
+        assert!(response.width_px > 0 && response.height_px > 0);
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["widthPx"], expected.width_px);
+        assert_eq!(json["heightPx"], expected.height_px);
     }
 
     #[tokio::test]

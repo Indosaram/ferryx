@@ -3850,6 +3850,7 @@ export function NativeTerminalPane({
       <div
         ref={viewportRef}
         data-testid="native-terminal-viewport"
+        data-frontend-session-id={sessionId}
         className="absolute inset-0"
       >
         <textarea

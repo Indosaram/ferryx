@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import { initialGridFields, measureInitialGeometry, type InitialGeometryTarget, type InitialPtyGrid } from "../lib/initialPtyGeometry";
 
 import {
   activityStateToAgentState,
@@ -60,7 +62,7 @@ import type {
   Worktree,
   WorktreeIdentity,
 } from "../lib/types";
-import { createLayoutState, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
+import { createLayoutState, getFocusedGroupId, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
 import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 import { notificationCenterStore, type NotificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
@@ -646,6 +648,8 @@ export type WorkspaceServices = {
     shell?: string | null;
     inheritFromSessionId?: string | null;
     startup?: SpawnTerminalRequest["startup"];
+    cols?: number | null;
+    rows?: number | null;
   }) => Promise<string>;
   /** Optional detailed spawn carrying the daemon-resolved cwd and the session identity; enables
    *  the single-hop split path and lets a spawned pane record its incarnation immediately. */
@@ -657,6 +661,8 @@ export type WorkspaceServices = {
     shell?: string | null;
     inheritFromSessionId?: string | null;
     startup?: SpawnTerminalRequest["startup"];
+    cols?: number | null;
+    rows?: number | null;
   }) => Promise<{ sessionId: string; daemonEpoch?: string | null; session?: { cwd?: string | null; incarnation?: string | null } | null }>;
   /** Optional batch spawn for restore/recovery; falls back to per-session spawns when absent. */
   spawnTerminalsBatch?: (spawns: Array<Parameters<WorkspaceServices["spawnTerminal"]>[0]>) => Promise<Array<{ index: number; sessionId: string | null; error: string | null }>>;
@@ -666,6 +672,8 @@ export type WorkspaceServices = {
   splitOperation?: (request: import("../lib/types").SplitOperationRequest) => Promise<import("../lib/types").SplitOperationResponse>;
   splitCreate?: typeof tauriIpc.spawnTerminalDetailed;
   splitAttach?: typeof tauriIpc.attachTerminal;
+  /** Measures the initial PTY grid for a pane about to be spawned; null when geometry is unavailable. */
+  measureInitialGeometry?: (target: InitialGeometryTarget) => Promise<InitialPtyGrid | null>;
 };
 
 export type SplitPaneOptions = {
@@ -868,6 +876,7 @@ const defaultServices: WorkspaceServices = {
   get splitAttach() {
     return tauriIpc.attachTerminal;
   },
+  measureInitialGeometry,
 };
 
 export function useWorkspaceStore({
@@ -1280,12 +1289,18 @@ export function useWorkspaceStore({
       let incarnation: string | null = null;
       let backendSessionId = backendSessionIdOverride;
       if (!backendSessionId) {
+        // Measured before the spawn: the new tab will fill the focused group's body.
+        const grid = await measureFor(services, {
+          kind: "newTab",
+          groupId: getFocusedGroupId(stateRef.current.layout),
+        });
         if (services.spawnTerminalDetailed) {
           const detailed = await spawnDetailedForLogicalAction(services, {
             workspaceId,
             worktree: worktreeIdentity(worktree),
             cwd: worktree.path,
             shell,
+            ...initialGridFields(grid),
           });
           backendSessionId = detailed.sessionId;
           daemonEpoch = detailed.daemonEpoch ?? null;
@@ -1296,6 +1311,7 @@ export function useWorkspaceStore({
             worktree: worktreeIdentity(worktree),
             cwd: worktree.path,
             shell,
+            ...initialGridFields(grid),
           });
         }
       }
@@ -1501,16 +1517,18 @@ export function useWorkspaceStore({
       // transport supports it. Per-session fallback keeps mock services working.
       if (services.spawnTerminalsBatch && targets.length > 1) {
         await services.ensureTerminalEvents();
-        const requests = targets.map((sessionId) => {
+        const requests = await Promise.all(targets.map(async (sessionId) => {
           const session = stateRef.current.sessions[sessionId];
           const startup = resolvePairedStartup(workspaceId);
+          const grid = await measureFor(services, { kind: "session", sessionId });
           return {
             workspaceId,
             worktree: session?.worktree ?? null,
             cwd: session?.cwd ?? session?.worktreePath ?? null,
             ...(startup ? { startup } : {}),
+            ...initialGridFields(grid),
           };
-        });
+        }));
         let entries: Array<{ index: number; sessionId: string | null; error: string | null }> = [];
         try {
           entries = await services.spawnTerminalsBatch(requests);
@@ -1575,12 +1593,14 @@ export function useWorkspaceStore({
             if (!session || session.backendSessionId != null) return;
             await services.ensureTerminalEvents();
             const startup = resolvePairedStartup(workspaceId);
+            const grid = await measureFor(services, { kind: "session", sessionId });
             try {
               const backendSessionId = await services.spawnTerminal({
                 workspaceId,
                 worktree: session.worktree,
                 cwd: session.cwd ?? session.worktreePath,
                 ...(startup ? { startup } : {}),
+                ...initialGridFields(grid),
               });
               // Recovery spawns can outlive a project switch, a pane close, or a newer
               // binding; in each case this PTY has no owner and must not leak.
@@ -1827,15 +1847,18 @@ export function useWorkspaceStore({
         };
       }
 
-      dispatch({
-        type: "SPLIT_PANE",
-        tabId: targetTab.id,
-        targetLeafId,
-        direction,
-        position: options.position,
-        newLeafId,
-        content: options.content,
-        session,
+      // Commit synchronously so the new leaf's pane is laid out before its PTY size is measured.
+      flushSync(() => {
+        dispatch({
+          type: "SPLIT_PANE",
+          tabId: targetTab.id,
+          targetLeafId,
+          direction,
+          position: options.position,
+          newLeafId,
+          content: options.content,
+          session,
+        });
       });
       switchDebug("split.pane.dispatched", {
         reason: `tabId=${targetTab.id} targetLeafId=${targetLeafId} direction=${direction} newLeafId=${newLeafId}`,
@@ -1845,12 +1868,15 @@ export function useWorkspaceStore({
         return;
       }
 
+      const grid = await measureFor(services, { kind: "session", sessionId: localSessionId });
+
       if (session.spawnIntent) {
         const controller = splitController(session);
         await controller?.run({
           workspaceId: session.workspaceId,
           worktree: session.worktree,
           inheritFromSessionId: sourceSession.backendSessionId,
+          ...initialGridFields(grid),
         });
         return;
       }
@@ -1874,6 +1900,7 @@ export function useWorkspaceStore({
             worktree: sourceSession.worktree,
             cwd: isPaired ? sourceSession.cwd : null,
             inheritFromSessionId: sourceSession.backendSessionId,
+            ...initialGridFields(grid),
           });
           backendSessionId = result.sessionId;
           daemonEpoch = result.daemonEpoch ?? null;
@@ -1894,6 +1921,7 @@ export function useWorkspaceStore({
             workspaceId: sourceSession.workspaceId || workspaceId,
             worktree: sourceSession.worktree,
             cwd: liveCwd,
+            ...initialGridFields(grid),
           });
         }
 
@@ -4712,9 +4740,29 @@ function clearWorktreeUnreadWhenRead(
 
 // resolvePairedStartup is imported from ../lib/remoteProject
 
+type LogicalSpawnRequest = {
+  workspaceId: string;
+  worktree: WorktreeIdentity | null;
+  cwd?: string | null;
+  shell?: string | null;
+  inheritFromSessionId?: string | null;
+  cols?: number;
+  rows?: number;
+};
+
+/** Geometry measurement must never block a spawn: any failure means "unavailable". */
+async function measureFor(services: WorkspaceServices, target: InitialGeometryTarget): Promise<InitialPtyGrid | null> {
+  if (!services.measureInitialGeometry) return null;
+  try {
+    return await services.measureInitialGeometry(target);
+  } catch {
+    return null;
+  }
+}
+
 async function spawnTerminalForLogicalAction(
   services: WorkspaceServices,
-  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null; inheritFromSessionId?: string | null },
+  request: LogicalSpawnRequest,
 ): Promise<string> {
   const clientRequestId = createClientRequestId();
   const startup = resolvePairedStartup(request.workspaceId);
@@ -4729,7 +4777,7 @@ async function spawnTerminalForLogicalAction(
 
 async function spawnDetailedForLogicalAction(
   services: WorkspaceServices,
-  request: { workspaceId: string; worktree: WorktreeIdentity | null; cwd?: string | null; shell?: string | null; inheritFromSessionId?: string | null },
+  request: LogicalSpawnRequest,
 ): Promise<Awaited<ReturnType<NonNullable<WorkspaceServices["spawnTerminalDetailed"]>>>> {
   const clientRequestId = createClientRequestId();
   const startup = resolvePairedStartup(request.workspaceId);

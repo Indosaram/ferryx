@@ -123,6 +123,7 @@ import {
   saveSession,
   setBadgeCount,
   spawnTerminal,
+  spawnTerminalDetailed,
   retryPairedSession,
   retryTerminalRemoteSession,
   getTerminalRemoteStatus,
@@ -151,6 +152,7 @@ import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { reconnectLocalSession, replaceExitedShellSession } from "./lib/shellReplacement";
+import { initialGridFields, measureInitialGeometry } from "./lib/initialPtyGeometry";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
@@ -1530,6 +1532,11 @@ function WorkspaceApp({
       return replaceExitedShellSession(sessionId, {
         getSessions: () => stateRef.current.sessions,
         dispatch: dispatchWorkspaceAction,
+        // Restart reuses the mounted pane, so its measured viewport sizes the new PTY.
+        spawn: async (request, options) => {
+          const grid = await measureInitialGeometry({ kind: "session", sessionId }).catch(() => null);
+          return spawnTerminalDetailed({ ...request, ...initialGridFields(grid) }, options);
+        },
         persist: async (result, localSession) => {
           const current = stateRef.current;
           const nextState = workspaceReducer(current, {
@@ -2633,10 +2640,15 @@ function WorkspaceApp({
         const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
         if (!targetWorktree) return;
         await ensureTerminalEvents().catch(() => undefined);
+        const agentGrid = await measureInitialGeometry({
+          kind: "newTab",
+          groupId: stateRef.current.layout.focusedGroupId ?? null,
+        }).catch(() => null);
         const backendSessionId = await spawnTerminal({
           workspaceId: activeProjectRef.current.workspaceId,
           worktree: worktreeIdentity(targetWorktree),
           cwd: targetWorktree.path,
+          ...initialGridFields(agentGrid),
         });
         const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
         await openTab(targetWorktree, label, backendSessionId);
@@ -4247,10 +4259,15 @@ function WorkspaceApp({
                 stateRef.current.worktrees.find((wt) => resolveWorktreeOwnerId(wt, projectsRef.current, project.workspaceId) === project.workspaceId) ??
                 stateRef.current.worktrees[0];
               await ensureTerminalEvents().catch(() => undefined);
+              const grid = await measureInitialGeometry({
+                kind: "newTab",
+                groupId: stateRef.current.layout.focusedGroupId ?? null,
+              }).catch(() => null);
               const backendSessionId = await spawnTerminal({
                 workspaceId: project.workspaceId,
                 worktree: targetWorktree ? worktreeIdentity(targetWorktree) : null,
                 cwd: entry.cwd || targetWorktree?.path || project.repoRoot,
+                ...initialGridFields(grid),
                 startup: {
                   kind: "agentResume",
                   agentType: entry.provider,
