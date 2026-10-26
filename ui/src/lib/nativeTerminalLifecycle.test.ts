@@ -13,6 +13,7 @@ import {
   registerDurableNativeBinding,
   getDurableNativeBinding,
   nativeBindingRemainingMs,
+  nativeBindingStartupExpired,
   subscribeNativeTerminalPresentation,
   type NativeTerminalPresentationReceipt,
   type NativeTerminalPresentationSubscription,
@@ -74,12 +75,21 @@ describe("nativeTerminalLifecycle presentation budget", () => {
     expect(registerDurableNativeBinding(tuple)).toBe(true);
     nowMs = 15_000;
     presentNativeTerminalLifecycle("back");
-    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+    expect(nativeBindingStartupExpired("back")).toBe(true);
     expect(registerDurableNativeBinding(tuple)).toBe(true);
 
     emitNativeTerminalPresentation(tuple);
 
-    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+    expect(nativeBindingStartupExpired("back")).toBe(true);
+  });
+
+  it("never sends a zero budget once the startup deadline has expired", () => {
+    expect(registerDurableNativeBinding(tuple)).toBe(true);
+    nowMs = 15_000;
+
+    expect(nativeBindingStartupExpired("back")).toBe(true);
+    expect(nativeBindingRemainingMs("back", 2_000)).toBe(2_000);
+    expect(nativeBindingRemainingMs("back", 4_000)).toBe(4_000);
   });
 
   it("does not complete startup for a receipt mismatching any tuple field", () => {
@@ -97,7 +107,7 @@ describe("nativeTerminalLifecycle presentation budget", () => {
       expect(nativeBindingRemainingMs("back", 2_000)).toBe(1_000);
     }
     nowMs = 15_000;
-    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+    expect(nativeBindingStartupExpired("back")).toBe(true);
   });
 
   it("starts a new generation deadline without inheriting ready state", () => {
@@ -112,7 +122,7 @@ describe("nativeTerminalLifecycle presentation budget", () => {
 
     expect(nativeBindingRemainingMs("back", 2_000)).toBe(1_000);
     nowMs = 35_000;
-    expect(nativeBindingRemainingMs("back", 2_000)).toBe(0);
+    expect(nativeBindingStartupExpired("back")).toBe(true);
     nowMs = 36_000;
     const next = { ...tuple, attemptGeneration: 5 };
     expect(registerDurableNativeBinding(next)).toBe(true);

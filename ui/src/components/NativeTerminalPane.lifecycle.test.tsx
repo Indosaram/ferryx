@@ -1482,6 +1482,167 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     expect(tauriInvoke).not.toHaveBeenCalledWith("cmd_native_terminal_set_bounds", expect.anything());
   });
 
+  it("retries a cancelled recovery admission instead of latching the pane blank", async () => {
+    vi.useFakeTimers();
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    const registered = deferred(); const admitted = deferred();
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") { ended = handler; registered.resolve(); }
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach" && args.attachTuple.daemonEpoch === "admitted") admitted.resolve();
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const retained = { ...session("cancelled-admission"), incarnation: "process" };
+    let calls = 0;
+    const refresh = vi.fn((_id: string, result: (value: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => {
+      result(++calls === 1 ? { kind: "cancelled" } : { kind: "ready", session: { ...retained, daemonEpoch: "admitted" } });
+      return () => {};
+    });
+    const view = render(<NativeTerminalPane session={retained} onRefreshSessionIdentity={refresh} />);
+    try {
+      await act(async () => { await registered.promise; });
+      await act(async () => { ended!({ payload: { sessionId: "cancelled-admission" } }); });
+      expect(refresh).toHaveBeenCalledTimes(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); await admitted.promise; });
+
+      expect(refresh).toHaveBeenCalledTimes(2);
+      expect(tauriInvoke.mock.calls.some(([command]) => command.includes("spawn"))).toBe(false);
+    } finally {
+      await act(async () => { view.unmount(); });
+      vi.useRealTimers();
+      tauriListen.mockImplementation(async () => () => undefined);
+    }
+  });
+
+  it("shows a clickable error when an exited admission latches recovery", async () => {
+    let ended: ((event: { payload: { sessionId: string } }) => void) | undefined;
+    const registered = deferred(); const started = deferred();
+    tauriListen.mockImplementation(async (event, handler) => {
+      if (event === "native_terminal_stream_ended") { ended = handler; registered.resolve(); }
+      return () => undefined;
+    });
+    tauriInvoke.mockImplementation(async command => command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined);
+    const retained = { ...session("exited-admission"), incarnation: "process" };
+    const refresh = vi.fn((_id: string, result: (value: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => {
+      started.resolve(); result({ kind: "exited" }); return () => {};
+    });
+    const view = render(<NativeTerminalPane session={retained} onRefreshSessionIdentity={refresh} />);
+    await act(async () => { await registered.promise; });
+    await act(async () => { ended!({ payload: { sessionId: "exited-admission" } }); await started.promise; });
+
+    expect(view.getByRole("alert").textContent).toContain("Terminal session ended");
+    await act(async () => { view.unmount(); });
+    tauriListen.mockImplementation(async () => () => undefined);
+  });
+
+  it("surfaces exhausted unpresented retries and re-reports bounds on click", async () => {
+    vi.useFakeTimers();
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => { frames.delete(id); });
+    const settle = async () => {
+      // Each round runs the queued frame callbacks, then the longest retry backoff (2s).
+      for (let round = 0; round < 20; round++) {
+        await act(async () => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          for (const callback of callbacks) callback(16);
+          await vi.advanceTimersByTimeAsync(2_000);
+        });
+      }
+    };
+    tauriInvoke.mockImplementation(async command => command === "cmd_native_terminal_set_bounds"
+      ? { presented: false, cols: 80, rows: 24, cursorCol: 0, cursorRow: 0, cellWidthPx: 10, cellHeightPx: 20 }
+      : undefined);
+    const boundsCalls = () => tauriInvoke.mock.calls.filter(([command]) => command === "cmd_native_terminal_set_bounds").length;
+    const view = render(<NativeTerminalPane session={session("unpresented-exhausted")} />);
+    try {
+      await settle();
+      const exhausted = boundsCalls();
+      expect(exhausted).toBeGreaterThanOrEqual(11);
+      const alert = view.getByRole("alert");
+      await settle();
+      expect(boundsCalls()).toBe(exhausted);
+
+      await act(async () => { fireEvent.click(alert); });
+
+      expect(boundsCalls()).toBeGreaterThan(exhausted);
+    } finally {
+      await act(async () => { view.unmount(); });
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-sends bounds with the current tuple after a stale_tuple refusal", async () => {
+    const resent = deferred();
+    const boundsTuples: number[] = [];
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command !== "cmd_native_terminal_set_bounds") return undefined;
+      boundsTuples.push(args.attachTuple.attemptGeneration);
+      if (boundsTuples.length === 1) {
+        // The pane rotated its tuple while this request was in flight.
+        registerDurableNativeBinding({ ...args.attachTuple, attemptGeneration: args.attachTuple.attemptGeneration + 1 });
+        throw { code: "SESSION_NOT_FOUND", message: "bound to a newer attach tuple",
+          details: { reason: "stale_tuple", sessionId: args.sessionId } };
+      }
+      resent.resolve();
+      return PRESENTED;
+    });
+    const view = render(<NativeTerminalPane session={session("stale-bounds")} />);
+    await act(async () => { await resent.promise; });
+
+    expect(boundsTuples).toEqual([0, 1]);
+    expect(view.queryByRole("alert")).toBeNull();
+    await act(async () => { view.unmount(); });
+  });
+
+  it("retries attach when an exit proof names a tuple the pane already rotated away from", async () => {
+    vi.useFakeTimers();
+    const id = "rotated-exit";
+    const tuple = { backendSessionId: id, incarnation: "inc", daemonEpoch: "7", frontendSessionId: `frontend-${id}`,
+      paneIdentity: `frontend-${id}`, bindingKey: `${id}:7:0::inc`, attemptGeneration: 0 };
+    registerDurableNativeBinding(tuple);
+    const retried = deferred();
+    let attaches = 0;
+    tauriInvoke.mockImplementation(async (command, args) => {
+      if (command === "cmd_native_terminal_attach") {
+        if (++attaches === 1) {
+          registerDurableNativeBinding({ ...args.attachTuple, attemptGeneration: args.attachTuple.attemptGeneration + 1 });
+          throw { code: "SESSION_NOT_FOUND", message: `Session '${id}' not found`, details: {
+            source: "daemon_attach", kind: "session_not_found", sessionId: id, affirmativeExit: true,
+            incarnation: "inc", daemonEpoch: "7",
+          } };
+        }
+        retried.resolve();
+      }
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+    const unavailable = vi.fn();
+    const pane: TerminalSession = { id: `frontend-${id}`, cwd: "/workspace/orca-lite", workspaceId: "ws-main",
+      worktree: { wsId: "ws-main", slug: "main" }, backendSessionId: id, lifecycle: "working",
+      daemonEpoch: "7", incarnation: "inc" };
+    const view = render(<NativeTerminalPane session={pane} onBackendSessionUnavailable={unavailable} />);
+    try {
+      await act(async () => {});
+      expect(attaches).toBe(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(250); await retried.promise; });
+
+      expect(attaches).toBe(2);
+      expect(unavailable).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => { view.unmount(); });
+      vi.useRealTimers();
+    }
+  });
+
   it("does not block a new split pane attach behind an unrelated session", async () => {
     const oldAttach = deferred();
     const oldStarted = deferred();

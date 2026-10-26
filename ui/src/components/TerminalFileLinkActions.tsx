@@ -100,6 +100,7 @@ export function TerminalFileLinkActions() {
             <div
               role="dialog"
               aria-label="Terminal link actions"
+              data-native-terminal-yield="off"
               tabIndex={-1}
               onKeyDown={(event) => {
                 if (event.key === "Escape") {

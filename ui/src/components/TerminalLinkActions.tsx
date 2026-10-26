@@ -38,6 +38,7 @@ export function TerminalLinkActions() {
             <div
               role="dialog"
               aria-label="Terminal link actions"
+              data-native-terminal-yield="off"
               className="w-[min(26rem,calc(100vw-2rem))] rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-2xl"
             >
               <div className="flex items-start gap-3">

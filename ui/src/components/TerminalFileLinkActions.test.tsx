@@ -438,4 +438,17 @@ describe("TerminalFileLinkActions", () => {
       expect(mockToast.error).toHaveBeenCalledWith("Could not copy to clipboard.");
     });
   });
+
+  it("keeps the terminal visible and interactive while the non-modal popover is open", () => {
+    render(<TerminalFileLinkActions />);
+    window.dispatchEvent(
+      new CustomEvent(TERMINAL_FILE_LINK_ACTION_EVENT, {
+        detail: { token: { type: "file", path: "/path/to/src/main.rs" }, open: vi.fn() },
+      }),
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "Terminal link actions" });
+    // nativeTerminalVisibility treats an opted-out dialog as non-yielding.
+    expect(dialog.closest('[data-native-terminal-yield="off"]')).toBe(dialog);
+  });
 });

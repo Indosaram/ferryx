@@ -292,7 +292,9 @@ export function TerminalPane({
   }, [active, activity?.state, isExited, session]);
 
   useEffect(() => {
-    if (splitIntent || !isExited || isPending || isRecoveryBlocked || isRecoveryExited || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
+    // Lazy restore: only the pane the user is looking at may start its shell. A hidden tab
+    // stays asleep until it becomes active, so restoring a workspace spawns nothing unseen.
+    if (!active || splitIntent || !isExited || isPending || isRecoveryBlocked || isRecoveryExited || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
     const key = `${session.id}:${session.backendSessionId ?? "none"}:${session.reconnectLifecycle ?? "idle"}`;
     if (autoResumeKeyRef.current === key) return;
     if (isAgentSession) {

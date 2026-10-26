@@ -215,6 +215,25 @@ describe("TerminalPane native routing contract", () => {
     expect(onOpenNewShell).toHaveBeenCalledTimes(1);
   });
 
+  it("does not spawn a sleeping standby shell in a hidden tab until it becomes active", async () => {
+    const standby = createExitedSession({
+      id: "session-standby-hidden",
+      backendSessionId: "standby:session-standby-hidden",
+      agentType: null,
+      providerSession: null,
+      agentSessionId: null,
+    });
+    const onOpenNewShell = vi.fn().mockResolvedValue(undefined);
+    setSessionSleeping(standby.id, true);
+    const view = render(<TerminalPane session={standby} active={false} onOpenNewShell={onOpenNewShell} />);
+
+    expect(onOpenNewShell).not.toHaveBeenCalled();
+
+    view.rerender(<TerminalPane session={standby} active={true} onOpenNewShell={onOpenNewShell} />);
+    await waitFor(() => expect(onOpenNewShell).toHaveBeenCalledWith("session-standby-hidden"));
+    expect(onOpenNewShell).toHaveBeenCalledTimes(1);
+  });
+
   it("shows a restored standby shell as starting while its shell spawns, never as Shell exited", () => {
     const standby = createExitedSession({
       id: "session-standby-starting",

@@ -441,6 +441,16 @@ function isDetachedSurfaceError(error: unknown): boolean {
   return isStructuredIpcError(error) && error.code === "SESSION_NOT_FOUND";
 }
 
+/**
+ * A set-bounds refused because the surface is now bound to a newer attach tuple than the one
+ * this request carried. Unlike a detached surface, the pane is still live: the update has to be
+ * re-sent with the current durable tuple or the pane keeps its old geometry.
+ */
+function isStaleTupleBoundsError(error: unknown): boolean {
+  return isStructuredIpcError(error) && error.code === "SESSION_NOT_FOUND" &&
+    error.details?.reason === "stale_tuple";
+}
+
 function isEditableElement(el: Element | null): boolean {
   if (!el || el === document.body) return false;
   const tag = el.tagName.toLowerCase();
@@ -2987,6 +2997,8 @@ export function NativeTerminalPane({
                   lastGeometry = null;
                   reportBounds();
                 };
+                // Without a visible error the pane stays blank with nothing to click.
+                setError("Terminal did not finish drawing. Click to retry.");
               }
               return;
             }
@@ -3076,6 +3088,22 @@ export function NativeTerminalPane({
           // drop it and let the next measurement through.
           if (isGeometryEqual(lastGeometry, nextGeometry)) {
             lastGeometry = null;
+          }
+          if (isStaleTupleBoundsError(error)) {
+            const currentTuple = getDurableNativeBinding(targetSessionId);
+            switchDebug("terminal.surface.bounds.stale_tuple", {
+              localSessionId: sessionId,
+              backendSessionId: targetSessionId,
+              dispatchedGeneration: dispatchedTuple.attemptGeneration,
+              currentGeneration: currentTuple?.attemptGeneration ?? null,
+            });
+            // Re-send only when the pane has since moved to a newer tuple; resending the same
+            // tuple would be refused again.
+            if (isSubscribed && currentTuple && !matchesAttachTuple(currentTuple, dispatchedTuple)) {
+              lastGeometry = null;
+              reportBounds();
+            }
+            return;
           }
           if (isDetachedSurfaceError(error)) {
             switchDebug("terminal.surface.bounds.detached", {
@@ -3239,8 +3267,15 @@ export function NativeTerminalPane({
           });
           if (!isSubscribed || attachmentOwnerRef.current !== owner || !owner?.live) return false;
           if (result.kind !== "ready") {
+            // A cancelled admission is transient (the owner was superseded or the recovery
+            // window moved on): let the caller's backoff retry admit again.
+            if (result.kind === "cancelled") return false;
+            // Blocked and exited are final for this attachment, so the pane must say so with
+            // a clickable error instead of sitting blank.
             refreshBlocked = true;
-            if (result.kind === "blocked") setError(result.reason === "identity_conflict" ? "Native terminal identity conflict" : result.reason);
+            setError(result.kind === "blocked"
+              ? (result.reason === "identity_conflict" ? "Native terminal identity conflict" : result.reason)
+              : "Terminal session ended. Click to reconnect.");
             return false;
           }
           const refreshed = result.session;
@@ -3410,33 +3445,46 @@ export function NativeTerminalPane({
           });
           if (classification.status === "confirmed-missing") {
             const currentTuple = getDurableNativeBinding(targetSessionId);
-            if (!capturedAttachTuple || !currentTuple || !matchesAttachTuple(currentTuple, capturedAttachTuple) ||
-                !settleNativeTerminalExit(sessionId ?? "", capturedAttachTuple)) return;
-            cancelRetry();
-            retryCount = bannerRetryThreshold;
-            if (bindingKey) {
-              quarantinedBindingRef.current = { sessionId: targetSessionId, bindingKey };
+            const settled = Boolean(capturedAttachTuple && currentTuple &&
+              matchesAttachTuple(currentTuple, capturedAttachTuple) &&
+              settleNativeTerminalExit(sessionId ?? "", capturedAttachTuple));
+            if (!settled || !capturedAttachTuple) {
+              // The exit proof was for a tuple the pane has since rotated away from. It says
+              // nothing about the current tuple, so fall through to the normal retry path
+              // instead of leaving the pane with no attach and no error.
+              switchDebug("terminal.surface.attach.confirmed_missing_stale_tuple", {
+                localSessionId: sessionId,
+                backendSessionId: targetSessionId,
+                attemptedGeneration: capturedAttachTuple?.attemptGeneration ?? null,
+                currentGeneration: currentTuple?.attemptGeneration ?? null,
+              });
+            } else {
+              cancelRetry();
+              retryCount = bannerRetryThreshold;
+              if (bindingKey) {
+                quarantinedBindingRef.current = { sessionId: targetSessionId, bindingKey };
+              }
+              cancelRetry();
+              setError(null);
+              void appendNativeRecoveryEvent({
+                kind: "attempt",
+                attachTuple: capturedAttachTuple,
+                attempt: retryCount,
+                outcome: "missing",
+                producerComponent: "native-frontend-attach-attempt",
+                payload: { sessionId: targetSessionId, attempt: retryCount, outcome: "missing" },
+              }).catch(() => {});
+              switchDebug("terminal.surface.attach.confirmed_missing", {
+                localSessionId: sessionId,
+                backendSessionId: targetSessionId,
+                reason: classification.reason,
+              });
+              if (!notifiedMissing) {
+                notifiedMissing = true;
+                onBackendSessionUnavailable?.(targetSessionId, classification.reason, bindingKey);
+              }
+              return;
             }
-            cancelRetry();
-            setError(null);
-            void appendNativeRecoveryEvent({
-              kind: "attempt",
-              attachTuple: capturedAttachTuple,
-              attempt: retryCount,
-              outcome: "missing",
-              producerComponent: "native-frontend-attach-attempt",
-              payload: { sessionId: targetSessionId, attempt: retryCount, outcome: "missing" },
-            }).catch(() => {});
-            switchDebug("terminal.surface.attach.confirmed_missing", {
-              localSessionId: sessionId,
-              backendSessionId: targetSessionId,
-              reason: classification.reason,
-            });
-            if (!notifiedMissing) {
-              notifiedMissing = true;
-              onBackendSessionUnavailable?.(targetSessionId, classification.reason, bindingKey);
-            }
-            return;
           }
 
           // A detached refusal that is not a confirmed-missing PTY is how attach rejects a tuple
@@ -3496,6 +3544,8 @@ export function NativeTerminalPane({
     retryAttachRef.current = () => {
       if (!isSubscribed) return;
       cancelRetry();
+      // An explicit click is a fresh request for admission, even after a final refusal.
+      refreshBlocked = false;
       lastGeometry = null;
       void attemptAttach(0, true);
     };

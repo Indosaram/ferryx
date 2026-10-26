@@ -48,11 +48,22 @@ export function getDurableNativeBinding(sessionId: string): PaneAttachTuple | un
 }
 
 export function nativeBindingRemainingMs(sessionId: string, stageCapMs: number): number {
+  const stageCap = Math.max(0, stageCapMs);
   const binding = durableBindings.get(sessionId);
   if (!binding) return 0;
   // A presented binding uses a fresh bounded deadline per operation, not the
   // completed startup deadline. Unready bindings retain their original budget.
-  return binding.budget === null ? Math.max(0, stageCapMs) : binding.budget.stageBudget(stageCapMs);
+  if (binding.budget === null) return stageCap;
+  // An expired startup budget must not send `remainingMs: 0`: the backend would time the
+  // operation out before dispatching it, so every retry of a slow pane failed instantly.
+  // Fall back to the stage cap; the expired budget still refuses late startup receipts.
+  const remaining = binding.budget.stageBudget(stageCapMs);
+  return remaining > 0 ? remaining : stageCap;
+}
+
+/** True while a binding is still unready and its startup deadline has passed. */
+export function nativeBindingStartupExpired(sessionId: string): boolean {
+  return durableBindings.get(sessionId)?.budget?.isExpired() ?? false;
 }
 
 type NativeTerminalLifecycleOperation<T> = () => Promise<T>;

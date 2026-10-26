@@ -113,4 +113,18 @@ describe("TerminalLinkActions", () => {
 
     expect(mockToast.dismiss).toHaveBeenCalledWith("toast-789");
   });
+
+  it("keeps the terminal visible and interactive while the non-modal popover is open", () => {
+    render(<TerminalLinkActions />);
+    window.dispatchEvent(
+      new CustomEvent(TERMINAL_LINK_ACTION_EVENT, {
+        detail: { url: "https://example.com/docs" },
+      }),
+    );
+    const { getByRole } = render(customToastRender!("toast-yield") as React.ReactElement);
+
+    const dialog = getByRole("dialog", { name: "Terminal link actions" });
+    // nativeTerminalVisibility treats an opted-out dialog as non-yielding.
+    expect(dialog.closest('[data-native-terminal-yield="off"]')).toBe(dialog);
+  });
 });

@@ -5082,12 +5082,12 @@ describe("App project workspace flow", () => {
       expect(screen.getByRole("button", { name: "Add Project" })).toBeInTheDocument();
     });
 
-    it("renders DaemonConnectionBanner on local project registration failure with DAEMON_UNAVAILABLE", async () => {
+    it("renders DaemonConnectionBanner on local project registration failure with HOST_UNAVAILABLE", async () => {
       localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
       localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
       native.getInitialProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
       native.registerProject.mockRejectedValue({
-        code: "DAEMON_UNAVAILABLE",
+        code: "HOST_UNAVAILABLE",
         message: "background service is unreachable",
       });
 
@@ -5095,7 +5095,7 @@ describe("App project workspace flow", () => {
 
       expect(await screen.findByTestId("daemon-connection-banner")).toBeInTheDocument();
       expect(screen.getByText("Ferryx can't reach its background service")).toBeInTheDocument();
-      expect(screen.getByText("DAEMON_UNAVAILABLE")).toBeInTheDocument();
+      expect(screen.getByText("HOST_UNAVAILABLE")).toBeInTheDocument();
       expect(screen.getByTestId("daemon-connection-retry")).toBeInTheDocument();
     });
   });

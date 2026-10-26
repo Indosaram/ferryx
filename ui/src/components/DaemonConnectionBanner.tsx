@@ -18,6 +18,42 @@ export type ProjectConnectionError = {
   details?: Record<string, unknown>;
 };
 
+/**
+ * Copy for every daemon-connection error code the desktop daemon client can report
+ * (`IpcErrorCode::Daemon*` and `HostUnavailable` in src-tauri/src/ipc/error.rs).
+ * `DAEMON_UPDATE_PENDING` carries its own actions below; its entry is the fallback text.
+ */
+export const DAEMON_CONNECTION_COPY: Readonly<Record<string, { readonly title: string; readonly body: string }>> = {
+  HOST_UNAVAILABLE: {
+    title: "Ferryx can't reach its background service",
+    body: "Your saved tabs and panes are kept. Retry, or quit and reopen Ferryx if this keeps happening.",
+  },
+  DAEMON_BUSY: {
+    title: "The background service is not answering",
+    body: "It is still running, so nothing was started or replaced. Retry in a moment; your terminals are kept.",
+  },
+  DAEMON_RETIRING: {
+    title: "The background service is shutting down",
+    body: "It is finishing its last terminals and accepts no new ones. Retry to start a fresh one.",
+  },
+  DAEMON_DETACH_UNAVAILABLE: {
+    title: "Ferryx can't start its background service here",
+    body: "Ferryx was launched in a way that would close terminals with the window. Start Ferryx from the Start menu or Explorer, then retry.",
+  },
+  DAEMON_PROTOCOL_MISMATCH: {
+    title: "The background service is from a different Ferryx version",
+    body: "Running terminals are kept. Quit and reopen Ferryx to finish the update.",
+  },
+  DAEMON_UPGRADE_REQUIRED: {
+    title: "The background service needs a restart",
+    body: "This change takes effect after the background service restarts. Running terminals are kept until then.",
+  },
+  DAEMON_UPDATE_PENDING: {
+    title: "Update installed",
+    body: "The previous version keeps its terminals and stops by itself when the last one closes.",
+  },
+};
+
 function UpdatePendingActions(props: {
   initial: DaemonUpdatePending;
   onRetry: () => void;
@@ -92,19 +128,12 @@ export function DaemonConnectionBanner(props: {
   let title = "Couldn't open this project";
   let body = error.message;
   const updatePending = daemonUpdatePendingFrom(error);
-
-  if (error.code === "DAEMON_UNAVAILABLE") {
-    title = "Ferryx can't reach its background service";
-    body =
-      "Your saved tabs and panes are kept. Retry, or quit and reopen Ferryx if this keeps happening.";
-  } else if (error.code === "DAEMON_PROTOCOL_MISMATCH") {
-    title = "The background service is from a different Ferryx version";
-    body =
-      "Running terminals are kept. Quit and reopen Ferryx to finish the update.";
-  } else if (updatePending) {
-    title = "Update installed";
-    body =
-      "The previous version keeps its terminals and stops by itself when the last one closes.";
+  const copy = Object.prototype.hasOwnProperty.call(DAEMON_CONNECTION_COPY, error.code)
+    ? DAEMON_CONNECTION_COPY[error.code]
+    : undefined;
+  if (copy) {
+    title = copy.title;
+    body = copy.body;
   }
 
   return (
