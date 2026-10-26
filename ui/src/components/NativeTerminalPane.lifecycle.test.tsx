@@ -159,7 +159,7 @@ const PRESENTED = {
 };
 
 const INPUT_NOT_WRITTEN = {
-  code: "INTERNAL_ERROR",
+  code: "SESSION_NOT_FOUND",
   message: "Native input surface is detached",
   details: { inputWritten: false },
 };
