@@ -495,7 +495,10 @@ async fn ssh_process_survival_same_target_replay_and_close() {
     tx.send(Ok(output(1, false))).unwrap();
     tx.send(Ok(output(8, true))).unwrap();
     let recovered = state(&mut rx, |d| d.descriptor.remote_cursor == RemoteCursor(8)).await;
-    assert_eq!(hub.subscribe("local-stable").unwrap().0, b"record-8;");
+    let replay = hub.subscribe_with_sequence("local-stable", None).unwrap();
+    assert!(replay.snapshot.history.starts_with(b"record-1;"));
+    assert!(replay.snapshot.history.ends_with(b"record-8;"));
+    assert!(replay.snapshot.history_incomplete);
     let boundary = live.receiver.try_recv().unwrap();
     assert!(boundary.bytes.is_empty());
     assert!(boundary.replay_gap.is_some());
