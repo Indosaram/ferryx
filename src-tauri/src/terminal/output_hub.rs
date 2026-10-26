@@ -144,6 +144,9 @@ pub struct SessionHubSnapshot {
     pub resize_ledger: Vec<ResizePoint>,
     pub replay_gap: Option<ReplayGap>,
     #[serde(default)]
+    pub gap_floor: u64,
+
+    #[serde(default)]
     pub transport_owner: bool,
     /// Eviction-accumulated VT state. The full-snapshot reconstruction replays `retained`,
     /// which derives its prelude from bytes that may already be gone from `chunks`; without
@@ -172,6 +175,9 @@ impl SessionHubSnapshot {
     ) -> Result<(), OutputHubSnapshotError> {
         if self.next_sequence == 0 {
             return Err(OutputHubSnapshotError::InvalidNextSequence(0));
+        }
+        if self.gap_floor > self.next_sequence {
+            return Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(self.gap_floor));
         }
 
         let mut prev_chunk_seq = 0u64;
@@ -264,6 +270,7 @@ pub struct BoundedBuffer {
     next_sequence: u64,
     bracketed_paste_enabled: bool,
     retained: retained_history::RetainedHistory,
+    gap_floor: u64,
 }
 
 pub fn scan_dec_mode_2004(bytes: &[u8]) -> Option<bool> {
@@ -314,6 +321,7 @@ impl BoundedBuffer {
             next_sequence: 1,
             bracketed_paste_enabled: false,
             retained: retained_history::RetainedHistory::new(budget),
+            gap_floor: 0,
         }
     }
 
@@ -434,6 +442,7 @@ impl BoundedBuffer {
             next_sequence,
             bracketed_paste_enabled,
             retained,
+            gap_floor: 0,
         }
     }
 
@@ -509,12 +518,18 @@ impl BoundedBuffer {
         from_retained: bool,
     ) -> RangedHistory {
         let first = if from_retained {
-            self.retained_start_sequence()
+            self.retained_start_sequence().map(|sequence| sequence.max(self.gap_floor))
         } else {
             self.start_sequence()
         };
         let last = self.end_sequence();
         let gap = after_sequence.and_then(|requested| {
+            if self.gap_floor > 0 && requested < self.gap_floor {
+                return Some(ReplayGap {
+                    requested_after_sequence: requested,
+                    available_from_sequence: self.gap_floor,
+                });
+            }
             if let Some(first) = first {
                 if requested < first.saturating_sub(1) || requested > last.unwrap_or(0) {
                     Some(ReplayGap {
@@ -764,6 +779,7 @@ impl SessionHub {
             bracketed_paste_enabled: self.buffer.bracketed_paste_enabled,
             resize_ledger: self.resize_ledger.clone(),
             replay_gap: self.replay_gap.clone(),
+            gap_floor: self.buffer.gap_floor,
             transport_owner: false,
             retained_state: Some(self.buffer.retained.state()),
             screen_seed: self
@@ -891,14 +907,24 @@ impl TerminalOutputHub {
             requested_after_sequence: sequence.saturating_sub(1),
             available_from_sequence: sequence + 1,
         };
-        hub.buffer.chunks.clear();
-        hub.buffer.current_size = 0;
-        hub.buffer.retained.clear();
-        let size = hub.resize_ledger.last().cloned();
-        hub.resize_ledger.clear();
-        if let Some(mut size) = size {
-            size.sequence = sequence;
-            hub.resize_ledger.push(size);
+        hub.buffer.gap_floor = sequence + 1;
+        const GAP_SEAM: &[u8] = b"\r\n\x1b[0m\x1b[33m[Ferryx: output stream gap - some terminal output was missed]\x1b[0m\r\n";
+        hub.buffer.retained.push(sequence, GAP_SEAM);
+        let seam = OutputChunk {
+            sequence,
+            bytes: Arc::from(GAP_SEAM),
+            metrics_read_unix_micros: None,
+            replay_gap: None,
+        };
+        hub.buffer.current_size += seam.bytes.len();
+        hub.buffer.chunks.push_back(seam);
+        while hub.buffer.current_size > hub.buffer.capacity && !hub.buffer.chunks.is_empty() {
+            if let Some(front) = hub.buffer.chunks.pop_front() {
+                hub.buffer.current_size -= front.bytes.len();
+            }
+        }
+        if let Some(screen) = hub.screen.as_ref() {
+            screen.lock().feed(GAP_SEAM);
         }
         hub.replay_gap = Some(gap.clone());
         hub.history_incomplete = true;
@@ -1227,13 +1253,15 @@ impl TerminalOutputHub {
             self.capacity
         };
 
-        let buffer = BoundedBuffer::from_snapshot(
+        let replay_gap = snapshot.replay_gap.clone();
+        let mut buffer = BoundedBuffer::from_snapshot(
             capacity,
             snapshot.chunks,
             snapshot.next_sequence,
             snapshot.bracketed_paste_enabled,
             snapshot.retained_state,
         );
+        buffer.gap_floor = snapshot.gap_floor;
 
         let is_transport_owner = snapshot.transport_owner;
         // The predecessor's mirrored screen is the authoritative starting point; without one the
@@ -1259,7 +1287,7 @@ impl TerminalOutputHub {
             raw_sender: raw_tx,
             resize_ledger: snapshot.resize_ledger,
             history_incomplete: snapshot.history_incomplete,
-            replay_gap: snapshot.replay_gap,
+            replay_gap,
             subscribed: false,
             ended: false,
             published_bytes: 0,
@@ -1424,14 +1452,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_process_survival_gap_precedes_recovered_bytes_and_invalidates_history() {
+    async fn ssh_process_survival_gap_precedes_recovered_bytes_and_keeps_history_behind_seam() {
         let hub = TerminalOutputHub::new(1024);
         hub.register_session("remote");
         hub.publish("remote", b"stale".to_vec());
         let mut live = hub.subscribe_with_sequence("remote", Some(1)).unwrap();
         hub.publish_gap("remote").unwrap();
         let between = hub.subscribe_with_sequence("remote", Some(1)).unwrap();
-        assert!(between.snapshot.history.is_empty());
+        assert!(between.snapshot.history.starts_with(b"stale"));
+        assert!(between.snapshot.history.windows(9).any(|w| w == b"[Ferryx: "));
+        assert!(between.snapshot.history_incomplete);
         assert!(between.snapshot.gap.is_some());
         hub.publish("remote", b"recovered".to_vec());
         let boundary = live.receiver.try_recv().unwrap();
@@ -1441,9 +1471,54 @@ mod tests {
         let output = live.receiver.try_recv().unwrap();
         assert_eq!(&*output.bytes, b"recovered");
         assert_eq!(gap.available_from_sequence, output.sequence);
+        let recovered_state = hub.export_session_state("remote").expect("export recovered gap state");
+        assert_eq!(recovered_state.replay_gap, None);
+        assert_eq!(recovered_state.gap_floor, gap.available_from_sequence);
+        let successor = TerminalOutputHub::new(1024);
+        successor.import_session_state("remote", recovered_state).expect("import recovered gap state");
+        let after_handover = successor.subscribe_with_sequence("remote", Some(1)).unwrap();
+        assert_eq!(after_handover.snapshot.gap.as_ref().map(|g| g.available_from_sequence), Some(gap.available_from_sequence));
+        assert!(after_handover.snapshot.history.windows(9).any(|w| w == b"[Ferryx: "));
         let late = hub.subscribe_with_sequence("remote", Some(1)).unwrap();
-        assert_eq!(late.snapshot.history, b"recovered");
+        assert!(late.snapshot.history.starts_with(b"stale"));
+        assert!(late.snapshot.history.ends_with(b"recovered"));
         assert_eq!(late.snapshot.gap, Some(gap));
+    }
+
+    #[tokio::test]
+    async fn remote_gap_keeps_pre_gap_lines_and_replays_them_before_the_seam() {
+        let hub = TerminalOutputHub::new(1024);
+        hub.register_session("gap-history");
+        for line in 0..5 {
+            hub.publish("gap-history", format!("line-{line}\r\n").into_bytes());
+        }
+        let boundary = hub.publish_gap("gap-history").expect("publish gap");
+        let full = hub.subscribe_with_sequence("gap-history", None).expect("full attach");
+        assert!(full.snapshot.history.starts_with(b"line-0\r\nline-1\r\nline-2\r\nline-3\r\nline-4\r\n"));
+        assert!(full.snapshot.history.windows(9).any(|w| w == b"[Ferryx: "));
+        assert!(full.snapshot.history_incomplete);
+        assert!(full.snapshot.gap.is_none());
+
+        hub.publish("gap-history", b"after-gap\r\n".to_vec());
+        let stale = hub.subscribe_with_sequence("gap-history", Some(4)).expect("stale attach");
+        assert!(stale.snapshot.history.starts_with(b"line-0\r\nline-1\r\nline-2\r\nline-3\r\nline-4\r\n"));
+        assert!(stale.snapshot.history.windows(9).any(|w| w == b"[Ferryx: "));
+        assert!(stale.snapshot.history.ends_with(b"after-gap\r\n"));
+        assert_eq!(stale.snapshot.gap.as_ref().map(|gap| gap.available_from_sequence), boundary.replay_gap.as_ref().map(|gap| gap.available_from_sequence));
+
+        let exported = hub.export_session_state("gap-history").expect("export gap state");
+        assert_eq!(exported.gap_floor, boundary.sequence + 1);
+        let successor = TerminalOutputHub::new(1024);
+        successor.import_session_state("gap-history", exported).expect("import gap state");
+        let after_handover = successor.subscribe_with_sequence("gap-history", Some(4)).expect("reattach after handover");
+        assert!(after_handover.snapshot.history.starts_with(b"line-0\r\nline-1\r\nline-2\r\nline-3\r\nline-4\r\n"));
+        assert!(after_handover.snapshot.history.windows(9).any(|w| w == b"[Ferryx: "));
+        assert!(after_handover.snapshot.history.ends_with(b"after-gap\r\n"));
+        assert_eq!(after_handover.snapshot.gap.as_ref().map(|gap| gap.available_from_sequence), boundary.replay_gap.as_ref().map(|gap| gap.available_from_sequence));
+
+        let recovered = hub.subscribe_with_sequence("gap-history", None).expect("recovered attach");
+        assert!(recovered.snapshot.history.ends_with(b"after-gap\r\n"));
+        assert!(recovered.snapshot.history_incomplete);
     }
 
     #[tokio::test]
@@ -1964,11 +2039,11 @@ mod tests {
             .subscribe_with_sequence(session_id, None)
             .expect("pred attachment");
         assert_eq!(pred_attachment.snapshot.gap, None);
-        assert_eq!(pred_attachment.snapshot.history_start_sequence, Some(2));
+        assert_eq!(pred_attachment.snapshot.history_start_sequence, Some(1));
         assert_eq!(pred_attachment.snapshot.history_end_sequence, Some(3));
         assert_eq!(
             pred_attachment.snapshot.history,
-            b"\x1b[?2004hfirst chunk second chunk\n"
+            b"\r\n\x1b[0m\x1b[33m[Ferryx: output stream gap - some terminal output was missed]\x1b[0m\r\n\x1b[?2004hfirst chunk second chunk\n"
         );
         assert_eq!(pred_attachment.snapshot.history_segments.len(), 2);
         // Last segment is trailing empty segment from resize at seq 4
@@ -1995,8 +2070,9 @@ mod tests {
         assert_eq!(snapshot.next_sequence, 5);
         assert!(snapshot.bracketed_paste_enabled);
         assert_eq!(snapshot.replay_gap, None);
+        assert_eq!(snapshot.gap_floor, 2);
         assert!(snapshot.transport_owner);
-        assert_eq!(snapshot.chunks.len(), 2);
+        assert_eq!(snapshot.chunks.len(), 3);
         assert_eq!(snapshot.resize_ledger.len(), 2);
 
         // Serde roundtrip
@@ -2150,6 +2226,7 @@ mod tests {
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
           replay_gap: None,
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2173,6 +2250,7 @@ mod tests {
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
           replay_gap: None,
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2196,6 +2274,7 @@ mod tests {
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
           replay_gap: None,
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2227,6 +2306,7 @@ mod tests {
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
           replay_gap: None,
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2249,6 +2329,7 @@ mod tests {
               rows: 24,
           }],
           replay_gap: None,
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2278,6 +2359,7 @@ mod tests {
               },
           ],
           replay_gap: None,
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2301,6 +2383,7 @@ mod tests {
           bracketed_paste_enabled: false,
           resize_ledger: Vec::new(),
           replay_gap: None,
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2325,6 +2408,7 @@ mod tests {
               requested_after_sequence: 5,
               available_from_sequence: 5,
           }),
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2349,6 +2433,7 @@ mod tests {
               requested_after_sequence: 8,
               available_from_sequence: 11,
           }),
+          gap_floor: 0,
           transport_owner: false,
           retained_state: None,
           screen_seed: None,
@@ -2356,6 +2441,24 @@ mod tests {
         };
         assert_eq!(
             snap_gap_future.validate(),
+            Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(11))
+        );
+
+        let snap_gap_floor_future = SessionHubSnapshot {
+            capacity: 512,
+            chunks: Vec::new(),
+            next_sequence: 10,
+            bracketed_paste_enabled: false,
+            resize_ledger: Vec::new(),
+            replay_gap: None,
+            gap_floor: 11,
+            transport_owner: false,
+            retained_state: None,
+            screen_seed: None,
+            history_incomplete: false,
+        };
+        assert_eq!(
+            snap_gap_floor_future.validate(),
             Err(OutputHubSnapshotError::ReplayGapExceedsNextSequence(11))
         );
     }

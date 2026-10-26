@@ -352,17 +352,17 @@ async fn ssh_reconnect_safety_web_grid_gap_order() {
     };
     assert!(old.contains("OLD"));
     backend.hub.publish_gap("session").unwrap();
-    backend
-        .hub
-        .publish("session", b"RECOVERED".to_vec())
-        .unwrap();
     let ServerWebSocketFrame::Text(reset) = frame(&mut socket).await else {
         panic!("reset grid")
     };
     let reset: serde_json::Value = serde_json::from_str(&reset).unwrap();
     assert_eq!(reset["type"], "grid");
-    assert!(!reset.to_string().contains("OLD"));
-    assert!(!reset.to_string().contains("READY"));
+    assert!(reset.to_string().contains("OLD"));
+    assert!(reset.to_string().contains("READY"));
+    backend
+        .hub
+        .publish("session", b"RECOVERED".to_vec())
+        .unwrap();
     let ServerWebSocketFrame::Text(output) = frame(&mut socket).await else {
         panic!("recovered grid")
     };

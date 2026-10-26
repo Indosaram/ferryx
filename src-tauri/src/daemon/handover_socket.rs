@@ -1101,6 +1101,7 @@ mod tests {
             bracketed_paste_enabled: false,
             resize_ledger: Vec::new(),
             replay_gap: None,
+            gap_floor: 0,
             transport_owner: false,
             retained_state: None,
             screen_seed: None,

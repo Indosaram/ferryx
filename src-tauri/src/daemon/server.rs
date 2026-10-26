@@ -9521,6 +9521,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_pty_gap_attach_preserves_output_before_the_seam() {
+        let server = Arc::new(DaemonServer::new_with_paths(None, None));
+        let repo = init_test_git_repo();
+        server.handle_register_workspace("default", repo.path().to_str().unwrap()).unwrap();
+        let session_id = server.handle_spawn(
+            "gap-attach-qa", "default", crate::daemon::session_service::SpawnOptions {
+                worktree: None, cwd: None, cols: 80, rows: 24,
+                shell: Some("/bin/sh".to_string()),
+            }, None,
+        ).await.unwrap();
+        let hub = server.terminal_service().output_hub();
+        let mut live = hub.subscribe_with_sequence(&session_id, None).unwrap();
+        // The marker is split in the command so terminal echo cannot satisfy the assertion.
+        server.terminal_service().write_input(
+            &session_id,
+            b"printf '\\033[31m%s%s\\033[0m\\r\\n' BEFORE _GAP; printf '%s%s\\r\\n' OUTPUT _READY\n",
+        ).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut output = live.snapshot.history.to_vec();
+            while !output.windows(b"OUTPUT_READY".len()).any(|s| s == b"OUTPUT_READY") {
+                output.extend_from_slice(&live.receiver.recv().await.unwrap().bytes);
+            }
+            assert!(output.windows(b"BEFORE_GAP".len()).any(|s| s == b"BEFORE_GAP"));
+            hub.publish_gap(&session_id).unwrap();
+            let (client, peer) = UnixStream::pair().unwrap();
+            let owner = Arc::clone(&server);
+            let mut handler = AbortTask(tokio::spawn(async move { owner.handle_client(peer).await; }));
+            let (read, mut write) = tokio::io::split(client);
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            for request in [
+                DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION, token: None },
+                DaemonRequest::Attach { session_id: session_id.clone(), after_sequence: None },
+            ] {
+                let attaching = matches!(request, DaemonRequest::Attach { .. });
+                let json = serde_json::to_string(&request).unwrap() + "\n";
+                write.write_all(json.as_bytes()).await.unwrap();
+                write.flush().await.unwrap();
+                line.clear();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let response: DaemonResponse = serde_json::from_str(line.trim()).unwrap();
+                match response {
+                    DaemonResponse::HandshakeOk { .. } if !attaching => {}
+                    DaemonResponse::AttachOk { history, .. } if attaching => {
+                        let before = history.windows(b"BEFORE_GAP".len())
+                            .position(|s| s == b"BEFORE_GAP").expect("real PTY output survived gap");
+                        let seam = history.windows(b"[Ferryx: ".len())
+                            .position(|s| s == b"[Ferryx: ").expect("gap seam is visible");
+                        assert!(before < seam, "pre-gap output precedes the gap marker");
+                        eprintln!("PTY_GAP_ATTACH_HISTORY={}", String::from_utf8_lossy(&history));
+                    }
+                    response => panic!("unexpected gap attach response: {response:?}"),
+                }
+            }
+            drop(reader);
+            drop(write);
+            (&mut handler.0).await.unwrap();
+        }).await;
+        server.terminal_service().close_session(&session_id).await.unwrap();
+        result.expect("real PTY gap attach completes within bound");
+    }
+
+    #[tokio::test]
     async fn test_serve_dag_stream_inventory_and_unsubscribe() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
