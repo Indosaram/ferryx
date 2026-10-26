@@ -5701,6 +5701,71 @@ mod tests {
         assert_eq!(inherited_split_cwd(Err(transport)).unwrap_err().code, IpcErrorCode::SpawnAttemptTimeout);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_command_sends_requested_dimensions_to_daemon() {
+        use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tauri::Manager;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "--quiet"]).arg(&repo).status().unwrap().success());
+        let registry = WorkspaceRegistry::new();
+        registry.register("geometry-command", &repo).unwrap();
+        let socket = root.path().join("geometry.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (size_tx, size_rx) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let mut size_tx = Some(size_tx);
+            for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                let registered = matches!(&request, DaemonRequest::RegisterWorkspace { .. });
+                let response = match request {
+                    DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                        version: DAEMON_PROTOCOL_VERSION, pid: std::process::id(), epoch: 1,
+                        binary_path: None, binary_mtime_ms: None, daemon_version: None,
+                        capabilities: Vec::new(), admission_time_unix_ms: None,
+                    },
+                    DaemonRequest::RegisterWorkspace { .. } => DaemonResponse::RegisterWorkspaceOk,
+                    DaemonRequest::Spawn { cols, rows, .. } => {
+                        size_tx.take().unwrap().send((cols, rows)).unwrap();
+                        DaemonResponse::Error {
+                            code: Some("INVALID_VALUE".into()),
+                            message: "fixture stops after observing spawn".into(), details: None,
+                        }
+                    }
+                    other => panic!("unexpected geometry command request: {other:?}"),
+                };
+                write.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
+                if registered || size_tx.is_none() { break; }
+            }
+            }
+        });
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(DaemonClient::new_with_socket(socket)))
+            .manage(registry)
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "workspaceId": "geometry-command", "worktree": null,
+            "cols": 132, "rows": 40, "shell": "/bin/sh",
+        })).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            let response = cmd_terminal_spawn(app.handle().clone(), app.state(), app.state(), request).await;
+            let size = size_rx.await.unwrap();
+            (response, size)
+        }).await;
+        peer.abort();
+        let _ = peer.await;
+        let (response, size) = outcome.expect("spawn command reaches private daemon");
+        assert!(response.is_err(), "fixture deliberately refuses after observing spawn");
+        assert_eq!(size, (132, 40));
+    }
+
     fn spawn_size_from_wire(json: serde_json::Value) -> (u16, u16) {
         let request: SpawnTerminalRequest = serde_json::from_value(json).unwrap();
         (
