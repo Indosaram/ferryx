@@ -140,5 +140,25 @@ class SkipSetupGuardTests(unittest.TestCase):
                 smoke.guarded_skip_setup_point(1278, 850, expected, owner, window, active)
 
 
+class SparsePostStartupTests(unittest.TestCase):
+    def test_reviewed_empty_workspace_is_post_startup_valid_only(self):
+        metrics = smoke.parse_capture_metrics('1022 680 329 0.0135897')
+        self.assertFalse(smoke.meaningful_content(metrics))
+        self.assertTrue(smoke.nonblank_post_startup_content(metrics))
+
+    def test_actual_blank_capture_fails_both_gates(self):
+        metrics = smoke.parse_capture_metrics('1022 680 1 0')
+        self.assertFalse(smoke.meaningful_content(metrics))
+        self.assertFalse(smoke.nonblank_post_startup_content(metrics))
+
+    def test_post_startup_still_rejects_invalid_or_tiny_frames(self):
+        for width, height, colors, entropy in [(1022, 680, 15, .01), (100, 60, 329, .01),
+                                               (1022, 680, 329, 0), (1022, 680, 329, float('nan')),
+                                               (1022, 680, 329, float('inf'))]:
+            metrics = dict(width=width, height=height, colors=colors, entropy=entropy)
+            with self.subTest(metrics=metrics):
+                self.assertFalse(smoke.nonblank_post_startup_content(metrics))
+
+
 if __name__ == '__main__':
     unittest.main()
