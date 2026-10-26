@@ -34,6 +34,59 @@ class BoundedCommandTests(unittest.TestCase):
             self.assertIn(b"stdout-marker\n", result.stdout)
             self.assertIn(b"stderr-marker\n", result.stdout)
 
+    def check_stopped_console_consumer(self, terminate):
+        source = ("import os,pathlib,time; "
+                  "pathlib.Path(%r).write_text(str(os.getpid())); "
+                  "os.write(1,b'~'*1048576); print('FULL_OUTPUT_END',flush=True); time.sleep(60)"
+                  % str(self.root / "descendant.pid"))
+        process = subprocess.Popen(self.command(source, timeout=5 if terminate else .5),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            # Deliberately never drain stdout until the wrapper has already exited.
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if self.log.exists() and b'FULL_OUTPUT_END' in self.log.read_bytes():
+                    break
+                time.sleep(.01)
+            self.assertIn(b'FULL_OUTPUT_END', self.log.read_bytes())
+            if terminate:
+                process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=4), 143 if terminate else 124)
+            output = self.log.read_bytes()
+            self.assertEqual(output.count(b'~'), 1048576)
+            self.assertIn(b'console_backpressure', output)
+            self.assertIn(b'console_dropped_bytes=', output)
+            self.assert_descendant_stopped()
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=3)
+            # Safety net if a regression strands the intentionally long-lived child.
+            pidfile = self.root / "descendant.pid"
+            if pidfile.exists():
+                try:
+                    os.killpg(int(pidfile.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_timeout_with_stopped_console_consumer(self):
+        self.check_stopped_console_consumer(False)
+
+    def test_sigterm_with_stopped_console_consumer(self):
+        self.check_stopped_console_consumer(True)
+
+    def test_stdout_shared_descriptor_blocking_flag_is_restored(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            self.assertTrue(os.get_blocking(write_fd))
+            result = subprocess.run(self.command("print('small-output')"),
+                                    stdout=write_fd, stderr=subprocess.PIPE, timeout=4)
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(os.get_blocking(write_fd))
+        finally:
+            os.close(write_fd)
+            os.close(read_fd)
+
     def test_child_signal_exit_is_reported_without_success_masking(self):
         result = subprocess.run(self.command(
             "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"

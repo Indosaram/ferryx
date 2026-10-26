@@ -1,0 +1,63 @@
+{
+  "head": "8b72ee5cb50cf44d7e4a2ab2b0e28a51a93ef27c",
+  "baseline": "eab2e8e4712e60fa155cf794ad5885afff943244",
+  "harness_sha256": "c9a924b4f7178d64c2bda9b21529c3df075bb85da48d7587bc93aac0b541bd13",
+  "baseline_harness_sha256": "c9a924b4f7178d64c2bda9b21529c3df075bb85da48d7587bc93aac0b541bd13",
+  "cargo_lock_sha256": "c00c839b77359a6396e1c0a6d6c3e2fd58048a1f499850ad992be79ae29eecef",
+  "profile": "dev; opt-level=0; debug=0; incremental=0; default features",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "runs": 5,
+  "warmups": 2,
+  "resource_scope": "getrusage(RUSAGE_SELF): process CPU delta per phase; process lifetime peak RSS KiB, not retained heap or phase delta",
+  "exclusions": [
+    "GPU",
+    "window compositor",
+    "real PTY read",
+    "daemon sockets",
+    "user-input-to-display latency"
+  ],
+  "shared_ui_dist": "Baseline build required ui/dist; reused built artifact because diff of production UI source between revisions is empty. Harness does not execute UI.",
+  "rustc": "1.99.1 (58cf8f9c3 2026-10-13), LLVM 23.1.1",
+  "ghostty": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "date": "2026-10-26",
+  "remote_head": "504b1b159c2f5dbde9dc88ae643b6b45ae7d7e3a",
+  "head_tree": "05d3ba9fe36c8bd0dfe65a16a11fb57173eea417",
+  "remote_equivalence": "GitHub git commit API tree verified by parent against local git rev-parse, 2026-10-26",
+  "comparison_note": "Baseline original final asserted runs reused from earlier same-day same-machine/profile measurement; final head measured later sequentially, not a randomized paired experiment.",
+  "modes": [
+    "qa",
+    "search",
+    "history"
+  ],
+  "subsequent_source_equivalence": {
+    "pr": {
+      "remote": "6514c2f1197484879e066fd465e7e7c43c1d39fa",
+      "local": "43d20def0d3ece4be75f814a2281763beb65f09a",
+      "tree": "6808bad17e9d6744c3dbccc4d567dd528553a4c4",
+      "changed_since_compiled": [
+        "scripts/qa/pr24-native-smoke.py",
+        "scripts/qa/pr24_native_smoke_test.py"
+      ]
+    },
+    "temporary_qa_branch": {
+      "remote": "78d6f1234014cfc2e908f8f5bf12f6564ed9b0a0",
+      "local": "17c76c138eca3e1180b61b30b911014c054e7059",
+      "tree": "dbc3b361874645255d2a9f1a37839e905b412949",
+      "changed_since_pr": [
+        ".github/workflows/native-runtime-qa.yml",
+        "scripts/qa/pr24-native-smoke.py",
+        "scripts/qa/pr24_native_smoke_test.py"
+      ]
+    },
+    "scope": "Git diff verified no production/build/harness changes. Does not assert native GUI acceptance. Temporary QA-only branch trigger is not a production change."
+  },
+  "earlier_qa_only_revision": {
+    "remote_head": "8dbe34d6a90dccfa59fdb4f6cd76df272182df79",
+    "local_head": "b182251d5ebe788fa7c8d2cc4199a1d7b62034fc",
+    "source_equivalence": "Only two QA Python scripts differ from actually compiled8b72ee5c; production/build/harness source unchanged.",
+    "changed_paths": [
+      "scripts/qa/pr24-native-smoke.py",
+      "scripts/qa/pr24_native_smoke_test.py"
+    ]
+  }
+}

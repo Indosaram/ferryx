@@ -107,3 +107,58 @@ socket bind or restriction bypass was attempted. See the separate
 [Linux offscreen evidence](../evidence/pr24-linux-offscreen/README.md) for renderer
 checks and known pre-existing combining/emoji rendering gaps. Full interactive desktop
 acceptance remains distinct from this headless pipeline QA.
+
+
+## Refreshed production-source measurements — 504b1b15
+
+After the legacy-PTY route correction, the actual production library and this unchanged
+harness were rebuilt in **3m03s**. Separate `qa`, `search`, and `history` processes all
+exited successfully, including the exact decoded-RGBA and multipart-resize/handover
+assertions. The earlier table/raw runs above are retained rather than overwritten.
+
+- Actually compiled local commit: `8b72ee5cb50cf44d7e4a2ab2b0e28a51a93ef27c`;
+  corresponding remote source: `504b1b159c2f5dbde9dc88ae643b6b45ae7d7e3a`;
+  tree: `05d3ba9fe36c8bd0dfe65a16a11fb57173eea417`.
+- Identical harness SHA-256:
+  `c9a924b4f7178d64c2bda9b21529c3df075bb85da48d7587bc93aac0b541bd13`.
+- Same machine, compiler, Cargo.lock, Ghostty revision, default features and unoptimized
+  dev profile as the original runs. Baseline measurements are reused from earlier
+  the same day; head was measured later, with no concurrent builds/benchmarks.
+- Five samples after two warmups, per phase. These sequential runs are not a randomized
+  paired experiment; ranges show noticeable variation, not statistical confidence bounds.
+- Raw [search samples](evidence/head-504b1b15-search.jsonl),
+  [history samples](evidence/head-504b1b15-history.jsonl), and
+  [exact provenance/metadata](evidence/head-504b1b15-metadata.json).
+
+| Phase | Baseline median ms | Refreshed median ms | Refreshed min–max ms | Baseline/refreshed | Refreshed CPU median ms |
+|---|---:|---:|---:|---:|---:|
+| search_ascii_missing | 2685.335 | 202.149 | 181.303–277.113 | 13.28× | 202.149 |
+| search_ascii_overlaps | 2710.580 | 1240.322 | 1132.502–1306.789 | 2.19× | 1240.136 |
+| search_unicode_sensitive | 1649.108 | 477.071 | 415.072–494.481 | 3.46× | 477.041 |
+| search_unicode_insensitive | 608.018 | 568.472 | 546.123–624.188 | 1.07× | 568.417 |
+| mixed_hub_publish_snapshot_ghostty_reconstruct | 22.869 | 4.917 | 4.831–5.320 | 4.65× | 4.918 |
+| hub_publish_saturated_65536 | 16.028 | 1.312 | 1.227–1.381 | 12.22× | 1.313 |
+| hub_snapshot_65536 | 0.263 | 0.249 | 0.227–0.364 | 1.06× | 0.250 |
+| ghostty_reconstruct_65536 | 0.996 | 1.035 | 0.942–1.090 | 0.96× | 1.036 |
+| hub_publish_saturated_8388608 | 1795.746 | 1.381 | 1.283–1.560 | 1300.09× | 1.382 |
+| hub_snapshot_8388608 | 36.155 | 32.072 | 29.029–35.269 | 1.13× | 32.068 |
+| ghostty_reconstruct_8388608 | 92.435 | 82.088 | 74.478–87.844 | 1.13× | 82.089 |
+
+
+Wall/CPU values are milliseconds; CPU is process user+system delta. Largest lifetime
+RSS was **16,264 KiB** for refreshed search and **83,780 KiB** for refreshed history
+(baseline: 16,164 / 83,888 KiB). These include QA, preparation, prior phases and warmups;
+they are **not phase heap measurements or evidence of memory savings**.
+
+The 64 KiB reconstruction median increased from 0.996 to 1.035 ms (about 4%); its
+small change and the unchanged Unicode-insensitive control are not attributed to an
+optimization. Mixed-output timing includes two searches. The roughly 1,300× saturated
+publication ratio applies only to the pathological many-small-placement-groups fixture,
+not whole-terminal speed. That saturated replay no longer retains the initial image
+transmission; independent decoded-image tests provide the image-correctness evidence.
+
+These refreshed measurements still exclude real PTY delivery, sockets, GPU/compositor
+rendering and interactive desktop acceptance. **They do not establish a current native
+GUI pass**, on Linux or macOS. Later QA-only script/workflow changes do not change the
+measured production/build/harness sources; exact revision equivalence is recorded in
+metadata without relabeling the binary's actually compiled revision.

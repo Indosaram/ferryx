@@ -176,7 +176,7 @@ describe("shortcut registry", () => {
     expect(shortcutLabel("tab.previous", true)).toBe("⌘⇧[");
     expect(shortcutAliasesLabels("tab.previous", true)).toEqual(["⌃PgUp", "⌃⇧Tab"]);
     expect(shortcutLabel("terminal.search", true)).toBe("⌘F");
-    expect(shortcutLabel("terminal.search", false)).toBe("Ctrl+F");
+    expect(shortcutLabel("terminal.search", false)).toBe("Ctrl+Shift+F");
     expect(shortcutLabel("terminal.copyMode", true)).toBe("⌘⇧Space");
     expect(shortcutLabel("terminal.copyMode", false)).toBe("Ctrl+Shift+Space");
     expect(shortcutAliasesLabels("terminal.copyMode", false)).toEqual(["Ctrl+Shift+X"]);

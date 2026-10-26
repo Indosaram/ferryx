@@ -2,7 +2,8 @@
 """Bound a POSIX CI command, tee its output, and clean up its owned process group.
 
 Diagnostics never print command arguments or environment values. The command's own
-stdout/stderr is intentionally forwarded unchanged. Descendants must remain in the
+stdout/stderr is preserved in the logfile. Live console output is best-effort
+under backpressure, with dropped-byte accounting in that logfile. Descendants must remain in the
 new process group (a deliberately daemonized/setsid process is outside this contract).
 """
 import argparse
@@ -68,19 +69,35 @@ def run(args):
     child = None
     selector = selectors.DefaultSelector()
     stdout_available = True
+    stdout_fd = sys.stdout.fileno()
+    stdout_was_blocking = os.get_blocking(stdout_fd)
+    console_dropped = 0
+    os.set_blocking(stdout_fd, False)
     started = time.monotonic()
     try:
         with Path(args.log).open("wb") as log:
             def emit(data):
-                nonlocal stdout_available
+                nonlocal stdout_available, console_dropped
                 log.write(data)
                 log.flush()
-                if stdout_available:
+                # Never let an undrained CI log pipe suspend deadline/signal handling.
+                # Child reads are bounded at 64 KiB; no unbounded console queue exists.
+                remaining = memoryview(data)
+                while stdout_available and remaining:
                     try:
-                        sys.stdout.buffer.write(data)
-                        sys.stdout.buffer.flush()
+                        written = os.write(stdout_fd, remaining)
+                        if written == 0:
+                            break
+                        remaining = remaining[written:]
+                    except BlockingIOError:
+                        break
                     except BrokenPipeError:
                         stdout_available = False
+                if remaining:
+                    if console_dropped == 0:
+                        log.write(b"\n[ci-bounded] console_backpressure live_output_dropped; full command output remains in logfile\n")
+                    console_dropped += len(remaining)
+                    log.flush()
 
             def diagnostic(message):
                 emit(("[ci-bounded] " + message + "\n").encode())
@@ -147,15 +164,23 @@ def run(args):
             child.wait(timeout=1)
             diagnostic("finished exit_code={} elapsed_seconds={:.1f}".format(
                 final_code, time.monotonic() - started))
+            if console_dropped:
+                log.write(("[ci-bounded] console_dropped_bytes={} logfile_complete=true\n".format(
+                    console_dropped)).encode())
+                log.flush()
             return final_code
     finally:
-        if child is not None:
-            group_signal(child.pid, signal.SIGKILL)
-            child.wait(timeout=2)
-            child.stdout.close()
-        selector.close()
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
+        try:
+            if child is not None:
+                group_signal(child.pid, signal.SIGKILL)
+                child.wait(timeout=2)
+                child.stdout.close()
+        finally:
+            selector.close()
+            os.set_blocking(stdout_fd, stdout_was_blocking)
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+
 
 
 def main():

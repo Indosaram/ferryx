@@ -13,8 +13,10 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import signal
+import stat
 import shutil
 import shlex
 import secrets
@@ -39,8 +41,15 @@ def assert_offline_namespace():
     return {'interfaces': links, 'namespace': os.readlink('/proc/self/ns/net')}
 
 
+class SmokeInterrupted(BaseException):
+    """Termination must bypass best-effort diagnostic `except Exception` blocks."""
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__(f"interrupted by signal {signum}")
+
+
 def interrupted(signum, _frame):
-    raise RuntimeError(f"interrupted by signal {signum}")
+    raise SmokeInterrupted(signum)
 
 
 def parse_capture_metrics(output):
@@ -125,6 +134,107 @@ def guarded_skip_setup_point(width, height, expected_pid, owner_pid, window_id, 
     return 530, 599
 
 
+def xprop_window_ids(output, property_name):
+    match = re.fullmatch(re.escape(property_name) + r"\(WINDOW\): window id #\s*(.*)", output.strip())
+    if not match:
+        return []
+    values = match.group(1).strip()
+    if not values:
+        return []
+    tokens = [value.strip() for value in values.split(',')]
+    if not all(re.fullmatch(r"0x[0-9a-fA-F]+", token) for token in tokens):
+        return []
+    return [int(token, 16) for token in tokens]
+
+
+def xprop_supported_atoms(output):
+    match = re.fullmatch(r"_NET_SUPPORTED\(ATOM\) = (.*)", output.strip())
+    return set(value.strip() for value in match.group(1).split(',')) if match else set()
+
+
+def wm_check_ready(root_check, child_check, supported):
+    root_ids = xprop_window_ids(root_check, '_NET_SUPPORTING_WM_CHECK')
+    return (len(root_ids) == 1 and root_ids[0] != 0
+            and xprop_window_ids(child_check, '_NET_SUPPORTING_WM_CHECK') == root_ids
+            and '_NET_ACTIVE_WINDOW' in xprop_supported_atoms(supported))
+
+
+def bounded_command_failure(error):
+    stderr = error.stderr or ''
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode('utf-8', errors='replace')
+    return {'returncode': getattr(error, 'returncode', None),
+            'timed_out': isinstance(error, subprocess.TimeoutExpired), 'stderr': stderr[:2048]}
+
+
+OWNED_DEBUG_LOGS = ('ferryx-switch-debug.jsonl', 'ferryx-switch-debug-render.jsonl')
+MAX_DEBUG_TAIL = 1024 * 1024
+
+
+def owned_debug_tail(directory, name, limit=MAX_DEBUG_TAIL):
+    if name not in OWNED_DEBUG_LOGS or not 0 < limit <= MAX_DEBUG_TAIL:
+        raise ValueError('unapproved debug log or tail bound')
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if os.fstat(directory_fd).st_uid != os.geteuid():
+            raise RuntimeError('debug directory is not owned by this run user')
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                raise RuntimeError('debug log must be an owned regular single-link file')
+            start = max(0, info.st_size - limit)
+            os.lseek(descriptor, start, os.SEEK_SET)
+            data = os.read(descriptor, limit)
+            # Avoid a truncated leading JSON record when the log exceeded the bound.
+            if start:
+                data = data.partition(b'\n')[2]
+            return data
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(directory_fd)
+
+
+def parse_x_numeric(output):
+    value = output.strip()
+    if not re.fullmatch(r'[0-9]+', value) or not 0 <= int(value) <= 0xffffffff:
+        raise ValueError('expected only a numeric X window/PID value')
+    return int(value)
+
+
+def ctrl_m_diagnostic_allowed(receipt_exists, snapshot):
+    pid, window = snapshot.get('app_pid'), snapshot.get('owned_window')
+    return (not receipt_exists and isinstance(pid, int) and pid > 0
+            and isinstance(window, int) and window > 0
+            and snapshot.get('active_window') == window
+            and snapshot.get('resolved_focus_window') == window
+            and snapshot.get('active_window_owner_pid') == pid
+            and snapshot.get('resolved_focus_window_owner_pid') == pid)
+
+
+def terminal_smoke_status(original_return_failed):
+    return 'FAILED_RETURN_KEY_DIAGNOSTIC' if original_return_failed else 'CAPTURED_REQUIRES_VISUAL_REVIEW'
+
+
+class WaitTimeout(RuntimeError):
+    pass
+
+
+LINUX_SEARCH_CHORD = 'ctrl+shift+f'
+
+
+def search_review_requirements():
+    # Pixel variation alone cannot distinguish a search overlay from terminal output.
+    # No browser/IPC mock or guessed accessibility result may turn capture into PASS.
+    return {'automated_search_verified': False, 'status': 'REQUIRES_VISUAL_REVIEW',
+            'required_checks': ['search overlay visible before query typing',
+                                'unique marker query and 1/1 count visible',
+                                'Escape closes the overlay',
+                                'reopened overlay again shows marker and 1/1'],
+            'shortcut': LINUX_SEARCH_CHORD}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['binary', 'ui-dist', 'evidence-dir', 'isolation-root']:
@@ -137,11 +247,12 @@ def main():
     evidence, root = args.evidence_dir.resolve(), args.isolation_root.resolve()
     evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
-    dirs = {name: root / name for name in ['home', 'data', 'runtime', 'session', 'xdg', 'config', 'cache']}
+    dirs = {name: root / name for name in ['home', 'data', 'runtime', 'session', 'xdg', 'config', 'cache', 'tmp']}
     for path in dirs.values():
         path.mkdir(mode=0o700)
     env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C.UTF-8',
-           'HOME': str(dirs['home']), 'XDG_RUNTIME_DIR': str(dirs['xdg']),
+           'HOME': str(dirs['home']),
+           'TMPDIR': str(dirs['tmp']), 'TMP': str(dirs['tmp']), 'TEMP': str(dirs['tmp']), 'XDG_RUNTIME_DIR': str(dirs['xdg']),
            'XDG_CONFIG_HOME': str(dirs['config']), 'XDG_CACHE_HOME': str(dirs['cache']),
            'FERRYX_DATA_DIR': str(dirs['data']), 'FERRYX_RUNTIME_DIR': str(dirs['runtime']),
            'FERRYX_SESSION_DIR': str(dirs['session']), 'GDK_BACKEND': 'x11',
@@ -169,7 +280,28 @@ def main():
             if predicate():
                 return
             time.sleep(.2)
-        raise RuntimeError('timed out: ' + description)
+        raise WaitTimeout('timed out: ' + description)
+
+    def focus_snapshot(stage):
+        snapshot = {'stage': stage, 'monotonic_seconds': time.monotonic(),
+                    'app_pid': app.pid, 'owned_window': int(window)}
+        for field, command in [('focus_window', ['getwindowfocus', '-f']),
+                               ('active_window', ['getactivewindow']),
+                               ('resolved_focus_window', ['getwindowfocus'])]:
+            try:
+                value = parse_x_numeric(subprocess.run(['xdotool', *command], env=env, check=True,
+                        capture_output=True, text=True, timeout=2).stdout)
+                snapshot[field] = value
+                if value:
+                    snapshot[field + '_owner_pid'] = parse_x_numeric(
+                        subprocess.run(['xdotool', 'getwindowpid', str(value)], env=env, check=True,
+                            capture_output=True, text=True, timeout=2).stdout)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                snapshot[field + '_error'] = bounded_command_failure(error)
+            except ValueError:
+                snapshot[field + '_error'] = {'code': 'INVALID_NUMERIC_METADATA'}
+        result.setdefault('focus_snapshots', []).append(snapshot)
+        return snapshot
 
     pixel_frames = {}
 
@@ -256,7 +388,35 @@ def main():
                     return True
             return False
         wait_for(bus_ready, 'owned session bus')
-        spawn('openbox', ['openbox', '--sm-disable'])
+        wm = spawn('openbox', ['openbox', '--sm-disable'])
+        # EWMH sections 3.1/3.2/3.10: observe readiness, not arbitrary startup sleeps.
+        # https://specifications.freedesktop.org/wm/latest-single/
+        # No WM PID property is required by this standard. This owned X server has
+        # only the Openbox process launched above; also require that child alive.
+        def property_value(target, name):
+            response = subprocess.run(['xprop', *target, name], env=env,
+                                      capture_output=True, text=True, timeout=2)
+            if response.returncode:
+                result['wm_last_probe_error'] = {'returncode': response.returncode,
+                                                'stderr': response.stderr[:2048]}
+                return ''
+            return response.stdout[:16384]
+
+        def wm_ready():
+            if wm.poll() is not None:
+                raise RuntimeError('owned window manager exited before readiness')
+            root_check = property_value(['-root'], '_NET_SUPPORTING_WM_CHECK')
+            ids = xprop_window_ids(root_check, '_NET_SUPPORTING_WM_CHECK')
+            if len(ids) != 1 or ids[0] == 0:
+                return False
+            child_check = property_value(['-id', hex(ids[0])], '_NET_SUPPORTING_WM_CHECK')
+            supported = property_value(['-root'], '_NET_SUPPORTED')
+            ready = wm_check_ready(root_check, child_check, supported)
+            if ready:
+                result['wm_ready'] = {'check_window': ids[0], 'supports_active_window': True}
+            return ready
+        wait_for(wm_ready, 'owned EWMH window-manager readiness', 15)
+
         # Workflow builds tauri/custom-protocol: the real built UI is embedded.
         # No development server or network-access substitution is used.
         app = spawn('app', [str(binary)], cwd=fixture_dir)
@@ -272,7 +432,18 @@ def main():
         if len(windows) != 1:
             raise RuntimeError('ambiguous owned top-level window')
         window = windows[0]
-        run(['xdotool', 'windowactivate', '--sync', window], env=env)
+        def managed_window_ready():
+            if wm.poll() is not None or app.poll() is not None:
+                raise RuntimeError('owned app/window manager exited before window management')
+            clients = xprop_window_ids(property_value(['-root'], '_NET_CLIENT_LIST'), '_NET_CLIENT_LIST')
+            return int(window) in clients
+        wait_for(managed_window_ready, 'owned app in EWMH managed-client list', 15)
+        try:
+            run(['xdotool', 'windowactivate', '--sync', window], env=env)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            result['activation_error'] = bounded_command_failure(error)
+            raise RuntimeError('owned-window activation failed; see bounded activation_error diagnostics') from None
+
         await_rendered_content()
         capture('01-startup', startup=True)
         geometry = run(['xdotool', 'getwindowgeometry', '--shell', window], env=env).stdout
@@ -322,24 +493,53 @@ def main():
         command = fixture_command(fixture_script)
         if marker in command:
             raise RuntimeError('marker must not appear in the echoed shell command')
+        focus_snapshot('before_fixture_typing')
         run(['xdotool', 'type', '--clearmodifiers', '--delay', '5', command], env=env)
+        focus_snapshot('before_fixture_return')
         run(['xdotool', 'key', '--clearmodifiers', 'Return'], env=env)
+        focus_snapshot('after_fixture_return')
         try:
             wait_for(receipt_path.is_file, 'actual PTY fixture receipt', 30)
-            result['pty_receipt'] = validated_receipt(receipt_path, marker)
-        except Exception:
-            # Preserve the actual terminal/UI even if still blank or refused. Do not
-            # retry the command, execute the fixture ourselves, or hide the failure.
+        except WaitTimeout as original_error:
+            result['original_return_failure'] = {'error': str(original_error), 'wait_seconds': 30}
+            result['status'] = terminal_smoke_status(True)
             try:
                 capture_pair('04-pty-receipt-failed')
             except Exception as diagnostic_error:
                 result['receipt_failure_capture_error'] = str(diagnostic_error)
-            raise
+            (evidence / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+            # Controlled diagnostic only: never retype or run the fixture outside the
+            # app. A late/invalid receipt or uncertain/foreign focus forbids Ctrl+M.
+            snapshot = focus_snapshot('before_ctrl_m_diagnostic')
+            if not ctrl_m_diagnostic_allowed(os.path.lexists(receipt_path), snapshot):
+                result['ctrl_m_diagnostic'] = {'status': 'REFUSED_UNSAFE_OR_LATE_RECEIPT'}
+                raise RuntimeError('original Return failed; controlled Ctrl+M diagnostic refused') from None
+            result['ctrl_m_diagnostic'] = {'status': 'ONE_INPUT_SENT', 'method': 'CTRL_M'}
+            run(['xdotool', 'key', '--clearmodifiers', 'ctrl+m'], env=env)
+            focus_snapshot('after_ctrl_m_diagnostic')
+            wait_for(receipt_path.is_file, 'controlled Ctrl+M diagnostic receipt', 10)
+            result['pty_receipt'] = validated_receipt(receipt_path, marker)
+            result['ctrl_m_diagnostic']['status'] = 'VALID_RECEIPT_NOT_RETURN_SUCCESS'
+            result['pty_receipt_method'] = 'CTRL_M_DIAGNOSTIC'
+        else:
+            # Invalid receipts are failures, never grounds for sending another key.
+            try:
+                result['pty_receipt'] = validated_receipt(receipt_path, marker)
+            except Exception:
+                try:
+                    capture_pair('04-invalid-pty-receipt')
+                except Exception as diagnostic_error:
+                    result['receipt_failure_capture_error'] = str(diagnostic_error)
+                raise
+            result['pty_receipt_method'] = 'RETURN'
 
         shutil.copyfile(receipt_path, evidence / 'pty-receipt.json')
         time.sleep(2)
         capture('04-terminal-marker-image')
-        run(['xdotool', 'key', '--clearmodifiers', 'ctrl+f'], env=env)
+        result['search_review'] = search_review_requirements()
+        run(['xdotool', 'key', '--clearmodifiers', LINUX_SEARCH_CHORD], env=env)
+        time.sleep(1)
+        capture('04b-search-overlay-before-query')
         run(['xdotool', 'type', '--clearmodifiers', '--delay', '5', marker], env=env)
         time.sleep(2)
         capture('05-terminal-search')
@@ -355,8 +555,11 @@ def main():
         run(['xdotool', 'windowsize', '--sync', window, str(width), str(height)], env=env)
         time.sleep(2)
         capture('07-image-after-redraw')
-        run(['xdotool', 'key', '--clearmodifiers', 'ctrl+f'], env=env)
-        run(['xdotool', 'key', '--clearmodifiers', 'ctrl+a'], env=env)
+        run(['xdotool', 'key', '--clearmodifiers', LINUX_SEARCH_CHORD], env=env)
+        time.sleep(1)
+        capture('07b-search-overlay-before-repeat-query')
+        # TerminalSearchOverlay focuses/selects its input on mount. Do not send
+        # Ctrl+A speculatively: if the overlay is absent it would edit the shell line.
         run(['xdotool', 'type', '--clearmodifiers', '--delay', '5', marker], env=env)
         time.sleep(2)
         capture('08-search-repeat')
@@ -367,6 +570,7 @@ def main():
             'image_after_resize_redraw': 'REQUIRES_VISUAL_REVIEW',
             'search_cancel_and_repeat': 'REQUIRES_VISUAL_REVIEW',
             'search_expected_1_of_1': 'REQUIRES_VISUAL_REVIEW',
+            'automated_search_verified': False,
         }
         # Numeric metadata only; no argv/environment or credentials are recorded.
         for _ in range(10):
@@ -375,9 +579,19 @@ def main():
             sample = run(['ps', '-o', 'pid=,ppid=,pcpu=,rss=,time=', '-p', str(app.pid)]).stdout.strip()
             result['samples'].append({'monotonic_seconds': time.monotonic(), 'app_ps': sample})
             time.sleep(.5)
-        result['status'] = 'CAPTURED_REQUIRES_VISUAL_REVIEW'
+        result['status'] = terminal_smoke_status('original_return_failure' in result)
+        if 'original_return_failure' in result:
+            raise RuntimeError('original Return failed; later Ctrl+M diagnostics cannot make this run pass')
+    except SmokeInterrupted as error:
+        result['error'] = str(error)
+        result['interrupted_signal'] = error.signum
+        if 'original_return_failure' in result:
+            result['status'] = terminal_smoke_status(True)
+        raise
     except Exception as error:
         result['error'] = str(error)
+        if 'original_return_failure' in result:
+            result['status'] = terminal_smoke_status(True)
         raise
     finally:
         # Repeated termination must not interrupt bounded cleanup/artifact persistence.
@@ -411,6 +625,19 @@ def main():
                 stream.close()
             except OSError as error:
                 result['cleanup_errors'].append(str(error))
+        # Product debug.rs sanitizes these records before persistence. Collect only
+        # the two known logs from this run's private TMPDIR, never shared /tmp files.
+        result['owned_debug_logs'] = []
+        for name in OWNED_DEBUG_LOGS:
+            try:
+                tail = owned_debug_tail(dirs['tmp'], name)
+                (evidence / name).write_bytes(tail)
+                result['owned_debug_logs'].append({'file': name, 'tail_bytes': len(tail)})
+            except FileNotFoundError:
+                result['owned_debug_logs'].append({'file': name, 'status': 'NOT_PRESENT'})
+            except (OSError, RuntimeError) as error:
+                result['owned_debug_logs'].append({'file': name, 'status': 'REFUSED_OR_UNREADABLE',
+                                                  'error_type': type(error).__name__})
         (evidence / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
 
 

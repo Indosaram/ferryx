@@ -183,6 +183,11 @@ jobs:
           CARGO_BUILD_TARGET: aarch64-apple-darwin
         run: python3 scripts/ci-run-bounded.py --timeout-seconds 2400 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-compile.log" -- bash scripts/ci-native-tests.sh compile
 
+      - name: Preserve successful native compilation if later tests fail
+        # Keep the existing dependency cache scope; runtime fixture state is not cached.
+        # Set only after the full selected target set compiled successfully.
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
+
       - name: Cargo Test (unit and integration suites)
         shell: bash
         timeout-minutes: 32
