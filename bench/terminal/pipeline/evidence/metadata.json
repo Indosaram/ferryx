@@ -1,0 +1,26 @@
+{
+  "head": "8837b2ae958d74ba23e28f6ea3e3900c79b59355",
+  "baseline": "eab2e8e4712e60fa155cf794ad5885afff943244",
+  "harness_sha256": "c9a924b4f7178d64c2bda9b21529c3df075bb85da48d7587bc93aac0b541bd13",
+  "baseline_harness_sha256": "c9a924b4f7178d64c2bda9b21529c3df075bb85da48d7587bc93aac0b541bd13",
+  "cargo_lock_sha256": "c00c839b77359a6396e1c0a6d6c3e2fd58048a1f499850ad992be79ae29eecef",
+  "profile": "dev; opt-level=0; debug=0; incremental=0; default features",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "runs": 5,
+  "warmups": 2,
+  "resource_scope": "getrusage(RUSAGE_SELF): process CPU delta per phase; process lifetime peak RSS KiB, not retained heap or phase delta",
+  "exclusions": [
+    "GPU",
+    "window compositor",
+    "real PTY read",
+    "daemon sockets",
+    "user-input-to-display latency"
+  ],
+  "shared_ui_dist": "Baseline build required ui/dist; reused built artifact because diff of production UI source between revisions is empty. Harness does not execute UI.",
+  "rustc": "1.99.1 (58cf8f9c3 2026-10-13), LLVM 23.1.1",
+  "ghostty": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+  "date": "2026-10-26",
+  "remote_head": "d2b3e909e78f93ee0e0da880f7e985f348d6e254",
+  "head_tree": "9da99219209f2e60dcfb33d6d4e905f1f00b260f",
+  "remote_equivalence": "GitHub git commit API tree verified by parent against local git rev-parse, 2026-10-26"
+}
