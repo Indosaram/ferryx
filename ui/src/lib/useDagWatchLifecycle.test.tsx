@@ -34,7 +34,7 @@ it("waits for listener readiness before subscribing a remote-only project", asyn
   vi.mocked(bridge.watchDagSshProject).mockResolvedValue({ projectPath: key, runs: [] });
   const view = renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [target], watchKey: key }));
   expect(bridge.watchDagSshProject).not.toHaveBeenCalled();
-  await act(async () => { ready.resolve(vi.fn()); await ready.promise; });
+  await act(async () => { ready.resolve(vi.fn<() => void>()); await ready.promise; });
   expect(bridge.watchDagSshProject).toHaveBeenCalledWith("workspace", "/remote:repo");
   view.unmount();
 });
@@ -42,7 +42,7 @@ it("waits for listener readiness before subscribing a remote-only project", asyn
 it("does not let delayed initial inventory replace a live snapshot", async () => {
   const response = deferred<bridge.DagWatchProjectResult>();
   let emit: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn<() => void>(); });
   vi.mocked(bridge.watchDagSshProject).mockReturnValue(response.promise);
   const snapshot = parseDagRunSnapshot(fixture);
   if (!snapshot) throw new Error("invalid fixture");
@@ -55,7 +55,7 @@ it("does not let delayed initial inventory replace a live snapshot", async () =>
 
 it("discards removed-project hydration and releases its late subscription", async () => {
   const response = deferred<bridge.DagWatchProjectResult>();
-  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn<() => void>());
   vi.mocked(bridge.watchDagSshProject).mockReturnValue(response.promise);
   const snapshot = parseDagRunSnapshot(fixture);
   if (!snapshot) throw new Error("invalid fixture");
@@ -73,7 +73,7 @@ it("waits for old unsubscribe before readding the same paired project", async ()
   const released = deferred<void>();
   const paired = { ...target, kind: "pairedDaemon" } as const;
   const pairedKey = "paired:workspace:/remote:repo";
-  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn<() => void>());
   vi.mocked(bridge.watchDagPairedProject).mockResolvedValue({ projectPath: pairedKey, runs: [] });
   vi.mocked(bridge.unwatchDagProject).mockReturnValueOnce(released.promise);
   const view = renderHook(({ active }) => useDagWatchLifecycle({
@@ -92,7 +92,7 @@ it("waits for old unsubscribe before readding the same paired project", async ()
 
 it("releases a listener that finishes registering after unmount without starting watches", async () => {
   const ready = deferred<() => void>();
-  const unlisten = vi.fn();
+  const unlisten = vi.fn<() => void>();
   const registering = deferred<void>();
   vi.mocked(bridge.listenDagRunUpdated).mockImplementation(() => {
     registering.resolve();
@@ -108,7 +108,7 @@ it("releases a listener that finishes registering after unmount without starting
 
 it("retries a rejected subscription without requiring a project change", async () => {
   vi.useFakeTimers();
-  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn<() => void>());
   vi.mocked(bridge.watchDagSshProject)
     .mockRejectedValueOnce(new Error("daemon restarting"))
     .mockResolvedValue({ projectPath: key, runs: [] });
@@ -123,7 +123,7 @@ it("retries listener registration before opening subscriptions", async () => {
   vi.useFakeTimers();
   vi.mocked(bridge.listenDagRunUpdated)
     .mockRejectedValueOnce(new Error("event service restarting"))
-    .mockResolvedValue(vi.fn());
+    .mockResolvedValue(vi.fn<() => void>());
   vi.mocked(bridge.watchDagSshProject).mockResolvedValue({ projectPath: key, runs: [] });
   renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [target], watchKey: key }));
   await act(async () => {});
@@ -135,7 +135,7 @@ it("retries listener registration before opening subscriptions", async () => {
 
 it("cancels a scheduled retry when the hook unmounts", async () => {
   vi.useFakeTimers();
-  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn<() => void>());
   vi.mocked(bridge.watchDagSshProject).mockRejectedValue(new Error("offline"));
   const view = renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [target], watchKey: key }));
   await act(async () => {});
@@ -150,7 +150,7 @@ it("rejects events from the previous backend generation after rewatch", async ()
   const snapshot = parseDagRunSnapshot(fixture);
   if (!snapshot) throw new Error("invalid fixture");
   let emit: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn<() => void>(); });
   const first = { projectPath: key, generation: 10, runs: [] };
   const second = { projectPath: key, generation: 11, runs: [] };
   vi.mocked(bridge.watchDagSshProject).mockResolvedValueOnce(first).mockResolvedValue(second);
@@ -171,7 +171,7 @@ it("buffers generation-tagged events until the watch response establishes owners
   if (!snapshot) throw new Error("invalid fixture");
   const response = deferred<bridge.DagWatchProjectResult>();
   let emit: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn<() => void>(); });
   vi.mocked(bridge.watchDagSshProject).mockReturnValue(response.promise);
   renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [target], watchKey: key }));
   await act(async () => {});
@@ -191,7 +191,7 @@ it("continues accepting discovered local roots outside the explicit watch list",
   const snapshot = parseDagRunSnapshot(fixture);
   if (!snapshot) throw new Error("invalid fixture");
   let emit: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn<() => void>(); });
   renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [], watchKey: "" }));
   await act(async () => {});
   act(() => emit({ projectPath: "/discovered/sibling", generation: 12, snapshot }));
@@ -202,7 +202,7 @@ it("does not let an untagged event bypass an established remote generation", asy
   const snapshot = parseDagRunSnapshot(fixture);
   if (!snapshot) throw new Error("invalid fixture");
   let emit: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn<() => void>(); });
   vi.mocked(bridge.watchDagSshProject).mockResolvedValue({ projectPath: key, generation: 15, runs: [] });
   renderHook(() => useDagWatchLifecycle({ localRoots: [], remoteTargets: [target], watchKey: key }));
   await act(async () => {});
@@ -253,7 +253,7 @@ const pairedCanonicalKey = "paired:workspace:/remote:repo";
 
 it("subscribes the watch-status channel once the run listener is ready and releases it on unmount", async () => {
   const ready = deferred<() => void>();
-  const statusUnlisten = vi.fn();
+  const statusUnlisten = vi.fn<() => void>();
   vi.mocked(bridge.listenDagRunUpdated).mockReturnValue(ready.promise);
   vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async () => statusUnlisten);
   vi.mocked(bridge.watchDagPairedProject).mockResolvedValue({ projectPath: pairedCanonicalKey, runs: [] });
@@ -262,7 +262,7 @@ it("subscribes the watch-status channel once the run listener is ready and relea
   }));
   await act(async () => {});
   expect(bridge.listenDagWatchStatus).not.toHaveBeenCalled();
-  await act(async () => { ready.resolve(vi.fn()); await ready.promise; });
+  await act(async () => { ready.resolve(vi.fn<() => void>()); await ready.promise; });
   expect(bridge.listenDagWatchStatus).toHaveBeenCalledTimes(1);
   view.unmount();
   await act(async () => {});
@@ -272,8 +272,8 @@ it("subscribes the watch-status channel once the run listener is ready and relea
 it("records a pushed watch failure for the paired canonical key and rejects stale or untagged generations", async () => {
   const response = deferred<bridge.DagWatchProjectResult>();
   let emitStatus: Parameters<typeof bridge.listenDagWatchStatus>[0] = () => { throw new Error("status listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
-  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => { emitStatus = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn<() => void>());
+  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => { emitStatus = handler; return vi.fn<() => void>(); });
   vi.mocked(bridge.watchDagPairedProject).mockReturnValue(response.promise);
   renderHook(() => useDagWatchLifecycle({
     localRoots: [], remoteTargets: [pairedTarget], watchKey: pairedCanonicalKey,
@@ -298,13 +298,13 @@ it("records a pushed watch failure for the paired canonical key and rejects stal
 
 it("clears a recorded paired failure when a rewatch succeeds and rejects the retired generation's status", async () => {
   let emitStatus: Parameters<typeof bridge.listenDagWatchStatus>[0] = () => { throw new Error("status listener absent"); };
-  const firstStatusUnlisten = vi.fn();
+  const firstStatusUnlisten = vi.fn<() => void>();
   let statusRegistrations = 0;
-  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn());
+  vi.mocked(bridge.listenDagRunUpdated).mockResolvedValue(vi.fn<() => void>());
   vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => {
     emitStatus = handler;
     statusRegistrations += 1;
-    return statusRegistrations === 1 ? firstStatusUnlisten : vi.fn();
+    return statusRegistrations === 1 ? firstStatusUnlisten : vi.fn<() => void>();
   });
   vi.mocked(bridge.watchDagPairedProject)
     .mockResolvedValueOnce({ projectPath: pairedCanonicalKey, generation: 7, runs: [] })
@@ -332,8 +332,8 @@ it("clears a recorded paired failure on an accepted snapshot and keeps it for a 
   if (!snapshot) throw new Error("invalid fixture");
   let emitStatus: Parameters<typeof bridge.listenDagWatchStatus>[0] = () => { throw new Error("status listener absent"); };
   let emitRun: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("run listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emitRun = handler; return vi.fn(); });
-  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => { emitStatus = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emitRun = handler; return vi.fn<() => void>(); });
+  vi.mocked(bridge.listenDagWatchStatus).mockImplementation(async (handler) => { emitStatus = handler; return vi.fn<() => void>(); });
   vi.mocked(bridge.watchDagPairedProject).mockResolvedValue({ projectPath: pairedCanonicalKey, generation: 7, runs: [] });
   renderHook(() => useDagWatchLifecycle({
     localRoots: [], remoteTargets: [pairedTarget], watchKey: pairedCanonicalKey,

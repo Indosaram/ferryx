@@ -6,6 +6,7 @@ import {
   loadAppearanceSettings,
 } from "../lib/appearanceSettings";
 import { SHORTCUTS, shortcutLabel } from "../lib/shortcuts";
+import * as shortcutsModule from "../lib/shortcuts";
 import { SIDEBAR_OPEN_STORAGE_KEY } from "../lib/storageKeys";
 import { resetTerminalPreferencesCache, TERMINAL_SETTINGS_STORAGE_KEY } from "../lib/terminalSettings";
 import { SettingsDialog } from "./SettingsDialog";
@@ -295,6 +296,7 @@ describe("SettingsDialog", () => {
   });
 
   it("fetches Ghostty preferences and shows the effective terminal value/source", async () => {
+    vi.spyOn(shortcutsModule, "isMacShortcutPlatform").mockReturnValue(true);
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
 
@@ -345,7 +347,8 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(screen.getByText(/Ghostty · Imported/i)).toBeInTheDocument());
   });
 
-  it("shows the registered shortcuts in the dedicated Keyboard Shortcuts section", () => {
+  it.each([true, false])("shows the registered shortcuts for isMac=%s in the dedicated Keyboard Shortcuts section", (isMac) => {
+    vi.spyOn(shortcutsModule, "isMacShortcutPlatform").mockReturnValue(isMac);
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Keyboard Shortcuts" }));
 
@@ -354,7 +357,7 @@ describe("SettingsDialog", () => {
       expect(titleEl).toBeInTheDocument();
       const row = titleEl.closest(".min-h-10") ?? (titleEl.parentElement?.parentElement as HTMLElement);
       expect(row).not.toBeNull();
-      expect(within(row as HTMLElement).getByText(shortcutLabel(shortcut.id))).toBeInTheDocument();
+      expect(within(row as HTMLElement).getByText(shortcutLabel(shortcut.id, isMac, {}, isMac ? "default" : "terminal-first"))).toBeInTheDocument();
     }
     expect(screen.getByRole("region", { name: "Keyboard Shortcuts" })).toBeInTheDocument();
   });

@@ -1523,6 +1523,9 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () => {
   let restorePaneRect: () => void;
   beforeEach(() => {
+    // This group exercises Cmd-based macOS shortcuts by default. Ctrl-based cases
+    // explicitly opt into useNonMacShortcutPlatform rather than depending on the CI host.
+    vi.spyOn(shortcutsModule, "isMacShortcutPlatform").mockReturnValue(true);
     resetNativeTerminalPaneForTest();
     resetNativeTerminalLifecycleForTest();
     restorePaneRect = stubPaneRect();
@@ -4716,6 +4719,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("copies native selection to navigator.clipboard on platform copy shortcut", async () => {
+    useNonMacShortcutPlatform();
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
     const originalProcessPlatform = process.platform;
@@ -5007,6 +5011,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("surfaces browser clipboard write rejection on non-macOS platforms", async () => {
+    useNonMacShortcutPlatform();
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
     const originalProcessPlatform = process.platform;

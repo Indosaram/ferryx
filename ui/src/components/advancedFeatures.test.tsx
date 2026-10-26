@@ -12,7 +12,8 @@ import { SettingsDialog } from "./SettingsDialog";
 import { Sidebar } from "./Sidebar";
 import { TerminalPane } from "./TerminalPane";
 
-vi.mock("../lib/updater", () => ({
+vi.mock("../lib/updater", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/updater")>(),
   cancelUpdateDownload: vi.fn(),
   checkForUpdate: vi.fn(),
   downloadAndInstallUpdate: vi.fn(),

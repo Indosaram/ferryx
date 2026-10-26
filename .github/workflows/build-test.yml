@@ -1,6 +1,6 @@
 name: CI Build & Check
 
-# Phase 1 precheck: lint gates plus the Rust unit and integration suites, on the XenoCI macOS
+# Phase 1 precheck: lint gates plus the Rust unit and integration suites, on a standard GitHub-hosted ARM64 macOS
 # runner. Everything else in this file (the ubuntu UI job and the Linux/Windows cargo legs) is
 # kept but runs only on manual dispatch, so a pull request gets one fast macOS job.
 on:
@@ -31,13 +31,15 @@ concurrency:
 
 jobs:
   # =========================================================================
-  # 0. PHASE 1 PRECHECK: LINT + UNIT/INTEGRATION TESTS (XenoCI macOS)
+  # 0. PHASE 1 PRECHECK: LINT + UNIT/INTEGRATION TESTS (GitHub-hosted macOS)
   # =========================================================================
   precheck:
     name: Lint, unit and integration tests (macOS)
-    runs-on: xenoci-macos
-    # The full test step measures ~15 minutes (the library suite alone is ~8), and the platform's
-    # own job cap is 60. This earlier, explicit deadline turns a genuine hang - such as the
+    # Public repositories use this standard ARM64 runner without runner-minute charges.
+    # Pin the OS; do not select a paid -xlarge runner or change the aarch64 target.
+    runs-on: macos-15
+    # The full test step measured ~15 minutes on the previous runner (the library suite
+    # alone was ~8). This explicit deadline turns a genuine hang - such as the
     # 20-minute runner-communication losses seen during bring-up - into a clear "timed out" result
     # instead of a run that ends with no logs at all.
     timeout-minutes: 45
@@ -76,7 +78,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
-          shared-key: xenoci-tests-no-debuginfo-v1
+          shared-key: macos-15-tests-no-debuginfo-v1
 
       - name: Report disk space before compilation
         run: df -h . "$RUNNER_TEMP"
@@ -108,6 +110,14 @@ jobs:
 
       - name: Build Frontend UI (required for Tauri asset embed)
         run: bun run --cwd ui build
+
+      # Include test fixtures and real local-socket contracts in every PR, not only
+      # the manually dispatched legacy UI job. Network calls are mocked fail-closed.
+      - name: Typecheck Frontend Tests
+        run: bun run --cwd ui typecheck:test
+
+      - name: Test Frontend UI
+        run: bun run --cwd ui test
 
       # The ssh bridge and helper-setup suites execute the real helper binary: bridge_tests
       # asserts `remote-helper/target/debug/ferryx-remote-helper` exists before any assertion

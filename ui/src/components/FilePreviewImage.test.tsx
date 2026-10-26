@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { FilePreviewImage } from "./FilePreviewImage";
-import type { FilePreviewPayload } from "../lib/filePreviewTypes";
+import type { FilePreviewImageProps, FilePreviewPayload } from "../lib/filePreviewTypes";
 
 /**
  * Task 4 renderer tests.
@@ -33,15 +33,15 @@ function imagePayload(overrides: Partial<FilePreviewPayload> = {}): FilePreviewP
   };
 }
 
-type Handlers = {
-  onReload: ReturnType<typeof vi.fn>;
-  onExternalOpen: ReturnType<typeof vi.fn>;
-  onFailure: ReturnType<typeof vi.fn>;
-};
-
-function handlers(): Handlers {
-  return { onReload: vi.fn(), onExternalOpen: vi.fn(), onFailure: vi.fn() };
+function handlers() {
+  return {
+    onReload: vi.fn<FilePreviewImageProps["onReload"]>(),
+    onExternalOpen: vi.fn<FilePreviewImageProps["onExternalOpen"]>(),
+    onFailure: vi.fn<FilePreviewImageProps["onFailure"]>(),
+  };
 }
+
+type Handlers = ReturnType<typeof handlers>;
 
 function renderImage(payload: FilePreviewPayload, generation = 1, spies: Handlers = handlers()) {
   const view = render(
