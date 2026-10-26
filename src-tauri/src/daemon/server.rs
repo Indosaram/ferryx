@@ -1405,12 +1405,35 @@ fn lock_file_with_optional_wait_internal<F: FnMut()>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn acquire_daemon_locks(
     persistent_path: Option<&Path>,
     legacy_path: &Path,
 ) -> Result<DaemonLockFiles, String> {
     let deadline = crate::daemon::handover::successor_wait_from_env()
         .map(|wait| std::time::Instant::now() + wait);
+    acquire_daemon_locks_until(persistent_path, legacy_path, deadline)
+}
+
+/// The daemon's startup lock acquisition, awaited from the serving runtime. A successor's
+/// wait sleeps between attempts, so it runs on the blocking pool instead of the runtime.
+async fn acquire_daemon_locks_off_runtime(
+    persistent_path: Option<PathBuf>,
+    legacy_path: PathBuf,
+    deadline: Option<std::time::Instant>,
+) -> Result<DaemonLockFiles, String> {
+    tokio::task::spawn_blocking(move || {
+        acquire_daemon_locks_until(persistent_path.as_deref(), &legacy_path, deadline)
+    })
+    .await
+    .map_err(|error| format!("Daemon lock acquisition task failed: {error}"))?
+}
+
+fn acquire_daemon_locks_until(
+    persistent_path: Option<&Path>,
+    legacy_path: &Path,
+    deadline: Option<std::time::Instant>,
+) -> Result<DaemonLockFiles, String> {
     let persistent = if let Some(path) = persistent_path {
         let parent = path
             .parent()
@@ -1895,6 +1918,29 @@ fn discovered_machine_report(
         }),
         retained.and_then(|state| state.detail.clone()),
     )
+}
+
+/// Takes the full process listing the foreground observer classifies sessions against.
+type ProcessSnapshotCapture = Arc<
+    dyn Fn() -> std::io::Result<crate::terminal::foreground::ProcessSnapshot> + Send + Sync,
+>;
+
+/// Longest an unchanged set of panes goes without a full process listing. A foreground
+/// change inside the same process group (an `exec`, a job without job control) is caught here.
+const FOREGROUND_IDLE_REFRESH: Duration = Duration::from_secs(2);
+
+/// One pane's cheap per-tick foreground marker: its foreground process group on Unix. ConPTY
+/// has no equivalent, so there the observer relies on the idle refresh alone.
+fn foreground_marker(session: &crate::terminal::session::PtySession) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        session.foreground_process_group().ok().flatten()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = session;
+        None
+    }
 }
 
 /// The observer's probe bookkeeping for one pane's current agent process.
@@ -4659,10 +4705,23 @@ impl DaemonServer {
     }
 
     fn spawn_foreground_observer(self: &Arc<Self>) {
+        self.spawn_foreground_observer_with(Arc::new(
+            crate::terminal::foreground::capture_process_snapshot,
+        ));
+    }
+
+    /// The observer with its full process listing injected, so a test can count how often
+    /// the expensive capture runs.
+    fn spawn_foreground_observer_with(self: &Arc<Self>, capture: ProcessSnapshotCapture) {
         let server = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut transitions =
                 HashMap::<String, crate::terminal::foreground::ProcessTransition>::new();
+            // Each session's cheap foreground marker (tcgetpgrp on Unix) as of the last full
+            // listing. An idle pane's foreground cannot change without this marker changing,
+            // so the full listing only runs on a change, a due probe, or the slow refresh.
+            let mut sampled_markers = HashMap::<String, Option<u32>>::new();
+            let mut last_snapshot_at: Option<tokio::time::Instant> = None;
             // Re-explore-4 G2: per-pane discovery of the provider session an agent that reports
             // nothing holds. Probes run off the tick and post back whether to stop.
             let mut probes = HashMap::<String, MachineIdentityProbe>::new();
@@ -4698,8 +4757,26 @@ impl DaemonServer {
                 }
                 // No live session means nothing to classify: skip the process listing.
                 if sessions.is_empty() {
+                    sampled_markers.clear();
                     continue;
                 }
+                let markers: HashMap<String, Option<u32>> = sessions
+                    .iter()
+                    .map(|(id, session)| (id.clone(), foreground_marker(session)))
+                    .collect();
+                let now = tokio::time::Instant::now();
+                let probe_due = probes
+                    .values()
+                    .any(|probe| !probe.finished && !probe.in_flight && now >= probe.next_at);
+                let refresh_due = last_snapshot_at.is_none_or(|at| {
+                    now.duration_since(at) >= FOREGROUND_IDLE_REFRESH
+                });
+                if markers == sampled_markers && !probe_due && !refresh_due {
+                    continue;
+                }
+                sampled_markers = markers;
+                last_snapshot_at = Some(now);
+                let capture = Arc::clone(&capture);
                 let observations = crate::ipc::run_blocking(move || {
                     // One process listing per tick. On Windows that listing is a full
                     // PowerShell enumeration, so capturing it per session multiplied the
@@ -4707,7 +4784,7 @@ impl DaemonServer {
                     // against the same sample. A failed capture is unknown ownership for
                     // all of them, which is the same evidence a failed per-session
                     // inspection already produced.
-                    let snapshot = crate::terminal::foreground::capture_process_snapshot();
+                    let snapshot = capture();
                     Ok(sessions
                         .into_iter()
                         .map(|(id, session)| {
@@ -5622,7 +5699,13 @@ impl DaemonServer {
         // The ordinary acquire/bind path is skipped when authority was adopted: the inherited
         // lock fds were already installed by install_adopted_authority.
         if !locks_installed {
-            let lock_files = acquire_daemon_locks(get_persistent_lock_path().as_deref(), &lock_path)?;
+            let lock_files = acquire_daemon_locks_off_runtime(
+                get_persistent_lock_path(),
+                lock_path.clone(),
+                crate::daemon::handover::successor_wait_from_env()
+                    .map(|wait| std::time::Instant::now() + wait),
+            )
+            .await?;
             self.handover_manager.set_lock_files(lock_files);
         }
         // Publish who owns the locks so launchers can tell this daemon from a reused pid, and
@@ -8996,6 +9079,101 @@ mod ssh_survival_tests;
 #[cfg(all(test, unix))]
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
+
+#[cfg(all(test, unix))]
+mod idle_cost_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An idle pane's foreground cannot change without its process group changing, so the
+    /// observer must not fork a full process listing every tick for it.
+    #[tokio::test]
+    async fn idle_session_takes_at_most_one_full_snapshot_per_two_seconds() {
+        let server = Arc::new(DaemonServer::new());
+        let mut command = portable_pty::CommandBuilder::new("/bin/bash");
+        command.args(["--noprofile", "--norc", "-i"]);
+        let (id, mut output) = server
+            .terminal_service
+            .pty_manager()
+            .spawn(command, 80, 24)
+            .unwrap();
+        let session = server.terminal_service.get_session(&id).unwrap();
+        // The quotes keep the echoed command line from containing the marker itself.
+        session
+            .write_input(b"stty -echo; PS1='SHELL_''READY>'\n")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut seen = Vec::new();
+            while let Some(chunk) = output.recv().await {
+                seen.extend(chunk);
+                if String::from_utf8_lossy(&seen).contains("SHELL_READY>") {
+                    return;
+                }
+            }
+            panic!("PTY closed before the prompt");
+        })
+        .await
+        .expect("shell prompt");
+
+        let taken = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&taken);
+        // The shell sits idle at its prompt from here on. The sampling rate is the behavior
+        // under test, so this window is measured in real time: paused virtual time cannot
+        // auto-advance while the daemon holds a long-lived blocking task.
+        server.spawn_foreground_observer_with(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            crate::terminal::foreground::capture_process_snapshot()
+        }));
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
+        let taken = taken.load(Ordering::SeqCst);
+        assert!(taken >= 1, "the observer must still classify the idle session");
+        // Windows starting at 0s, 2s and 4s: at most three listings in five idle seconds,
+        // where a per-tick listing takes about twenty.
+        assert!(
+            taken <= 3,
+            "an idle session allows at most one full snapshot per 2s window, took {taken} in 5s"
+        );
+
+        session.write_input(b"exit\n").unwrap();
+        server
+            .terminal_service
+            .pty_manager()
+            .close_session(&id)
+            .await
+            .unwrap();
+        drop(output);
+    }
+
+    /// A successor's lock wait sleeps between attempts; on a current_thread runtime another
+    /// task must keep running while it waits.
+    #[tokio::test]
+    async fn lock_wait_does_not_block_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("daemon.lock");
+        let held = acquire_daemon_locks_until(None, &legacy, None).expect("predecessor lock");
+
+        let mut wait = Box::pin(acquire_daemon_locks_off_runtime(
+            None,
+            legacy.clone(),
+            Some(std::time::Instant::now() + Duration::from_secs(10)),
+        ));
+        let yielded = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(wait.as_mut(), cx).is_pending())
+        })
+        .await;
+        drop(held);
+        assert!(
+            yielded,
+            "the lock wait ran to its deadline on the runtime thread instead of yielding"
+        );
+
+        let locks = tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .expect("wait ends once the predecessor releases")
+            .expect("lock acquired after release");
+        drop(locks);
+    }
+}
 
 #[cfg(test)]
 mod live_relay_apply_tests {

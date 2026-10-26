@@ -119,7 +119,6 @@ pub fn is_release_persisted_event(event: &str) -> bool {
             | "terminal.surface.input.stage.backend_write_start"
             | "terminal.surface.input.stage.backend_write"
             | "terminal.surface.input.stage.backend_write_result"
-            | "terminal.render.vt_consumed"
             | "terminal.surface.presentation.receipt"
             | "terminal.surface.presented"
             | "terminal.surface.bounds_acknowledged"
@@ -160,7 +159,9 @@ pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
         || event.starts_with("terminal.surface.input.stage")
         || event.starts_with("terminal.surface.input.stall")
         || event.starts_with("app.watchdog")
-        || event.starts_with("terminal.render.")
+        // Per-chunk render receipts are debug-only: one disk write per output chunk is the
+        // dominant idle-and-streaming cost of a release build.
+        || (event.starts_with("terminal.render.") && event != "terminal.render.vt_consumed")
         || event.starts_with("terminal.open.")
         || event.starts_with("project.register.")
         || event.starts_with("terminal.surface.attach.")
@@ -930,7 +931,11 @@ mod pane_liveness_diagnostics_tests {
         assert!(is_release_persisted_event("terminal.surface.input.dispatch"));
         assert!(is_release_persisted_event("terminal.surface.input.stage.backend_write_start"));
         assert!(is_release_persisted_event("terminal.surface.input.stage.backend_write"));
-        assert!(is_release_persisted_event("terminal.render.vt_consumed"));
+        assert!(!is_release_persisted_event("terminal.render.vt_consumed"));
+        // Per-chunk render receipts are debug-only: a release build must not write one per
+        // output chunk, through the allowlist or the terminal.render.* prefix.
+        assert!(!should_persist_entry(false, "terminal.render.vt_consumed"));
+        assert!(should_persist_entry(true, "terminal.render.vt_consumed"));
         assert!(is_release_persisted_event("terminal.surface.presentation.receipt"));
         assert!(is_release_persisted_event("terminal.surface.presented"));
         assert!(!is_release_persisted_event("project.select"));
