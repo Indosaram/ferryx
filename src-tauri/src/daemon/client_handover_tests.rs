@@ -228,6 +228,37 @@ async fn a_cached_slot_whose_peer_closed_is_reconnected_and_the_write_lands_once
 }
 
 #[tokio::test]
+async fn an_applied_write_without_a_reply_is_not_replayed() {
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let applied = Arc::clone(&writes);
+    let daemon = FakeDaemon::start(Arc::new(move |_: usize, request: &DaemonRequest| match request {
+        DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
+        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
+        DaemonRequest::Write { .. } => {
+            if applied.fetch_add(1, Ordering::SeqCst) == 0 {
+                Reply::Close
+            } else {
+                Reply::Send(DaemonResponse::WriteOk)
+            }
+        }
+        _ => Reply::Close,
+    }));
+    let client = daemon.client();
+    client.require_local_control("lost-reply").await.expect("warm cached slot");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.write_terminal("lost-reply", b"run-once\n".to_vec()),
+    )
+    .await
+    .expect("write settles");
+
+    assert_eq!(writes.load(Ordering::SeqCst), 1, "lost reply must not replay input");
+    let error = result.expect_err("delivery without acknowledgment is ambiguous");
+    assert_eq!(error.details.expect("delivery details")["type"], "ambiguousDelivery");
+}
+
+#[tokio::test]
 async fn attach_to_a_peer_that_never_answers_the_handshake_fails_within_six_seconds() {
     let daemon = FakeDaemon::start(Arc::new(|_: usize, _: &DaemonRequest| Reply::Silent));
     let client = daemon.client();

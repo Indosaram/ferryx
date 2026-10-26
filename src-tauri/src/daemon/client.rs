@@ -491,9 +491,8 @@ fn handshake_error_for_response(message: String, code: Option<&str>) -> IpcError
 struct RequestAttemptError {
     error: IpcError,
     may_have_been_delivered: bool,
-    /// The peer closed the connection (EOF or broken pipe) before any reply byte arrived. A
-    /// daemon answers every request it read before it closes a connection, so the request was
-    /// not executed and may be resent on a fresh connection.
+    /// The peer closed before any reply byte arrived. Delivery is still ambiguous:
+    /// the request may have executed before the connection or acknowledgment was lost.
     peer_closed_before_reply: bool,
 }
 
@@ -3447,10 +3446,12 @@ impl DaemonClient {
             };
             let timeout = std::time::Duration::from_secs(15);
             let mut res = active.request_with_timeout(&req, timeout).await;
-            // A cached connection to a daemon that has since handed over and closed it fails
-            // before any reply byte: nothing was executed, so it is resent once on a fresh
-            // connection to whichever daemon now owns the endpoint.
-            if reused && res.as_ref().is_err_and(|error| error.peer_closed_before_reply) {
+            // Reconnect stale cached slots for replay-safe queries only. EOF cannot prove
+            // a mutation was not executed; replaying it could duplicate terminal input.
+            if reused
+                && request_is_retry_safe(&req)
+                && res.as_ref().is_err_and(|error| error.peer_closed_before_reply)
+            {
                 active = self.connect_and_handshake().await?;
                 res = active.request_with_timeout(&req, timeout).await;
             }
