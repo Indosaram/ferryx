@@ -492,6 +492,9 @@ pub struct SessionTurn {
     /// Slack message that gets the 👀/✅/❌ status reactions.
     pub status_ts: Option<String>,
     pub text: String,
+    /// A turn the hub started itself (a lane event outside the owner DM). It runs on the
+    /// background model whatever the session's model is.
+    pub background: bool,
 }
 
 /// Where a session's assistant output goes: its Slack thread, or (for a web session) only the
@@ -546,12 +549,17 @@ pub async fn run_session_turn(
             .and_then(Value::as_str)
             .map(str::to_owned),
         system_prompt: state.system_prompt.clone(),
-        model: state
-            .active_model
-            .clone()
-            .or_else(|| config.default_model.clone()),
+        model: if turn.background {
+            Some(crate::model_policy::background_model())
+        } else {
+            state
+                .active_model
+                .clone()
+                .or_else(|| config.default_model.clone())
+        },
         toolsets: state.enabled_toolsets.clone(),
         text: turn.text.clone(),
+        pin_model: turn.background,
     };
     // omo: cron deliveries mirrored into this session ride on the next turn as context,
     // consumed only when that turn succeeds.
@@ -853,6 +861,7 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
             reply_thread: admitted.reply_thread,
             status_ts: Some(admitted.message_ts),
             text,
+            background: false,
         },
     ))
     .await;
@@ -884,6 +893,11 @@ pub async fn system_turn(
     let Ok(guard) = lock.clone().try_lock_owned() else {
         return false;
     };
+    // Only the owner DM (the supervisor's own conversation) keeps the session's model.
+    let background = !config
+        .allowed_users
+        .first()
+        .is_some_and(|owner| is_owner_dm(&key, owner));
     tokio::spawn(async move {
         // The admission lock is held until this task starts, then released before
         // `run_session_turn` takes the same lock for the whole turn.
@@ -899,11 +913,17 @@ pub async fn system_turn(
                 status_ts: None,
                 key,
                 text,
+                background,
             },
         )
         .await;
     });
     true
+}
+
+/// The owner's direct-message session, the one conversation that is not background work.
+fn is_owner_dm(key: &SessionKey, owner: &str) -> bool {
+    key.guild_id.is_none() && key.thread_id.is_none() && key.user_id == owner
 }
 
 /// omo-gateway's lane-event dispatcher on the Slack turn path: every 5s queued lane events
@@ -957,6 +977,7 @@ pub async fn run_dashboard_turn(
         status_ts: None,
         key,
         text,
+        background: false,
     };
     Box::pin(run_session_turn(config, pool, turn)).await
 }
@@ -1116,6 +1137,18 @@ mod tests {
     fn redelivered_events_run_once() {
         assert!(first_delivery("C9", "9.9"));
         assert!(!first_delivery("C9", "9.9"));
+    }
+
+    #[test]
+    fn only_the_owner_dm_is_not_background_work() {
+        let dm = SessionKey::new("slack", None::<String>, "D1", None::<String>, "UOWNER");
+        assert!(is_owner_dm(&dm, "UOWNER"));
+        let dm_thread = SessionKey::new("slack", None::<String>, "D1", Some("1.1"), "UOWNER");
+        assert!(!is_owner_dm(&dm_thread, "UOWNER"));
+        let home = SessionKey::new("slack", Some("T1"), "CHOME", None::<String>, "");
+        assert!(!is_owner_dm(&home, "UOWNER"));
+        let stranger = SessionKey::new("slack", None::<String>, "D2", None::<String>, "U2");
+        assert!(!is_owner_dm(&stranger, "UOWNER"));
     }
 
     #[tokio::test]

@@ -197,11 +197,8 @@ pub fn refs_prove_met(refs: &[String], evidence: &EvidenceBundle) -> bool {
             None if is_attested_ref(reference) => return false,
             None => {}
             Some(item) if is_failing(item) => return false,
-            Some(item) => {
-                if !is_claim(item) && is_attested_ref(reference) {
-                    has_proof = true;
-                }
-            }
+            Some(item) if !is_claim(item) && is_attested_ref(reference) => has_proof = true,
+            Some(_) => {}
         }
     }
     has_proof

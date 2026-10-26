@@ -256,11 +256,8 @@ pub async fn run_payload(
         task.push('\n');
         task.push_str(&context);
     }
-    let model_id = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty());
+    // An agent cron turn runs on the background model; a payload `model` does not change it.
+    let model_id = crate::model_policy::background_model();
     let toolsets = payload
         .get("enabled_toolsets")
         .and_then(Value::as_array)
@@ -274,7 +271,9 @@ pub async fn run_payload(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let output = model.complete_with(&task, model_id, &toolsets).await?;
+    let output = model
+        .complete_with(&task, Some(&model_id), &toolsets)
+        .await?;
     Ok(Executed {
         deliver: should_post(&output),
         output,
@@ -748,7 +747,8 @@ mod tests {
         .unwrap();
         assert_eq!(agent.output, "report");
         let (model_id, toolsets) = routed.0.lock().unwrap().clone();
-        assert_eq!(model_id, "mahoquot/gemini-3.8-flash-high");
+        assert_eq!(model_id, crate::model_policy::background_model());
+        assert_ne!(model_id, "mahoquot/gemini-3.8-flash-high");
         assert_eq!(toolsets, vec!["terminal", "browser", "file"]);
         let timed = run_payload(
             &pool,
