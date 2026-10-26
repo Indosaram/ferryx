@@ -63,6 +63,16 @@ const RESIZE_REDRAW_ARM_WINDOW: std::time::Duration = std::time::Duration::from_
 /// Upper bound on absorbing a post-resize redraw; shorter than an attach replay because the
 /// pane already shows content and a live stream must not look frozen after a resize.
 const RESIZE_REDRAW_ABSORB_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+const OUTPUT_BATCH_MAX: usize = 64;
+
+/// The pump wakes on an idle stream only for timed work: a skipped trailing agent detection or
+/// an armed replay/redraw absorb window. Otherwise it blocks on the stream.
+fn pump_idle_wakeup(
+    agent_detect_maybe_pending: bool,
+    replay_absorb_armed: bool,
+) -> Option<std::time::Duration> {
+    (agent_detect_maybe_pending || replay_absorb_armed).then_some(AGENT_DETECT_TRAILING_IDLE)
+}
 
 /// Whether an output burst is still being absorbed. The window closes on the first gap longer
 /// than [`REPLAY_ABSORB_IDLE`], or at `max` for a stream that never goes idle.
@@ -619,9 +629,10 @@ impl NativeTerminalSession {
 }
 
 pub struct NativeTerminalSurfaceHostState {
-    // Lock hosts before sessions and keep it through ownership checks and presentation.
+    // Lock order: hosts, then one session. The sessions map is a leaf lock held only to look up,
+    // insert or remove a handle; never wait on a session lock while holding it.
     hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
-    sessions: Arc<Mutex<HashMap<String, NativeTerminalSession>>>,
+    sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
     pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
     pty_redraw_sink: Arc<RwLock<Option<NativeTerminalPtyRedrawSink>>>,
@@ -651,7 +662,30 @@ impl NativeTerminalSurfaceHostState {
     }
 
     pub fn session_snapshot_slot(&self, session_id: &str) -> Option<Arc<SnapshotSlot>> {
-        self.sessions.lock().get(session_id).map(|s| Arc::clone(&s.snapshot_slot))
+        read_session(&self.sessions, session_id, |s| Arc::clone(&s.snapshot_slot))
+    }
+
+    fn session(&self, session_id: &str) -> Option<SessionHandle> {
+        session_handle(&self.sessions, session_id)
+    }
+
+    fn attached_render_target(
+        &self,
+        session_id: &str,
+    ) -> Option<(Arc<RenderScheduleCoordinator>, Arc<SnapshotSlot>)> {
+        let handle = self.session(session_id)?;
+        let session = handle.lock();
+        session.surface_attached.then(|| {
+            (Arc::clone(&session.render_coordinator), Arc::clone(&session.snapshot_slot))
+        })
+    }
+
+    fn session_handles(&self) -> Vec<(String, SessionHandle)> {
+        self.sessions
+            .lock()
+            .iter()
+            .map(|(id, session)| (id.clone(), Arc::clone(session)))
+            .collect()
     }
 
     /// Marks a session as freshly spawned so its initial startup VT queries (e.g. CPR) are preserved.
@@ -2673,31 +2707,104 @@ fn session_render_snapshot(
     })
 }
 
-/// Resolves a session only while `pump_generation` still owns it.
-///
-/// Every mutating pump branch goes through this: a retired pump can be parked on the `sessions`
-/// mutex at the moment a new attach takes ownership, so `get_mut` alone would hand it a session
-/// it no longer has any claim to. Aborting the task does not help, because cancellation is only
-/// observed at an await point and the branch has already passed its last one.
-fn session_owned_by<'a>(
-    sessions: &'a mut HashMap<String, NativeTerminalSession>,
-    session_id: &str,
-    pump_generation: u64,
-) -> Option<&'a mut NativeTerminalSession> {
-    sessions
-        .get_mut(session_id)
-        .filter(|session| session.pump_generation == pump_generation)
+type SessionHandle = Arc<Mutex<NativeTerminalSession>>;
+type SessionMap = Mutex<HashMap<String, SessionHandle>>;
+
+fn session_handle(sessions: &SessionMap, session_id: &str) -> Option<SessionHandle> {
+    sessions.lock().get(session_id).cloned()
 }
 
-fn lock_replay_to_bottom(
-    sessions: &mut HashMap<String, NativeTerminalSession>,
+fn read_session<T>(
+    sessions: &SessionMap,
     session_id: &str,
-    pump_generation: u64,
-) {
-    if let Some(session) = session_owned_by(sessions, session_id, pump_generation) {
+    f: impl FnOnce(&NativeTerminalSession) -> T,
+) -> Option<T> {
+    let handle = session_handle(sessions, session_id)?;
+    let session = handle.lock();
+    Some(f(&session))
+}
+
+/// Whether `handle` is still the session registered under `session_id`. Close removes a session
+/// while holding its lock, so a caller holding that lock gets a stable answer.
+fn session_is_registered(sessions: &SessionMap, session_id: &str, handle: &SessionHandle) -> bool {
+    sessions.lock().get(session_id).is_some_and(|current| Arc::ptr_eq(current, handle))
+}
+
+/// Runs `f` on a session only while `pump_generation` still owns it.
+///
+/// Every mutating pump branch goes through this: a retired pump can be parked on the session
+/// mutex at the moment a new attach takes ownership, so a plain lookup would hand it a session
+/// it no longer has any claim to. Aborting the task does not help, because cancellation is only
+/// observed at an await point and the branch has already passed its last one. The map lock is
+/// released before the session lock is taken, so feeding one session never blocks another.
+fn with_session_owned_by<T>(
+    sessions: &SessionMap,
+    session_id: &str,
+    owner: (u64, &Arc<SnapshotSlot>),
+    f: impl FnOnce(&mut NativeTerminalSession) -> T,
+) -> Option<T> {
+    let handle = session_handle(sessions, session_id)?;
+    let mut session = handle.lock();
+    if session.pump_generation != owner.0
+        || !Arc::ptr_eq(&session.snapshot_slot, owner.1)
+        || !session_is_registered(sessions, session_id, &handle)
+    {
+        return None;
+    }
+    Some(f(&mut session))
+}
+
+fn lock_replay_to_bottom(sessions: &SessionMap, session_id: &str, owner: (u64, &Arc<SnapshotSlot>)) {
+    with_session_owned_by(sessions, session_id, owner, |session| {
         let _ = session.terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
         session.publish_frame();
+    });
+}
+
+type OutputChunk = (u64, std::borrow::Cow<'static, [u8]>);
+
+/// Takes the output already queued behind `first` so one feed and one published frame cover it.
+/// Stops at the first non-output message and returns it so the pump handles it next, in order.
+fn drain_output_batch(
+    first_sequence: u64,
+    first_data: std::borrow::Cow<'static, [u8]>,
+    messages: &mut tokio::sync::mpsc::Receiver<DaemonStreamMessage<'static>>,
+) -> (Vec<OutputChunk>, Option<DaemonStreamMessage<'static>>) {
+    let mut batch = vec![(first_sequence, first_data)];
+    while batch.len() < OUTPUT_BATCH_MAX {
+        match messages.try_recv() {
+            Ok(DaemonStreamMessage::Output { sequence, data, .. }) => batch.push((sequence, data)),
+            Ok(other) => return (batch, Some(other)),
+            Err(_) => break,
+        }
     }
+    (batch, None)
+}
+
+/// Feeds every chunk above the applied watermark and returns the last sequence it applied.
+fn feed_output_batch(
+    session: &mut NativeTerminalSession,
+    session_id: &str,
+    batch: &[OutputChunk],
+) -> Option<u64> {
+    let mut applied = None;
+    for (sequence, data) in batch {
+        // A chunk at or below the watermark was already applied by the replay this pump was
+        // started from. Feeding it would duplicate output; adopting its sequence would rewind
+        // the cursor.
+        if session.last_sequence.is_some_and(|last| *sequence <= last) {
+            continue;
+        }
+        if let Err(err) = session.terminal.feed(data) {
+            tracing::warn!(session_id, error = %err, "Failed to feed daemon output to native terminal");
+        }
+        if let Ok(true) = session.terminal.bracketed_paste_enabled() {
+            session.bracketed_paste_seen = true;
+        }
+        session.last_sequence = Some(*sequence);
+        applied = Some(*sequence);
+    }
+    applied
 }
 
 /// Ownership token minted by [`NativeTerminalSurfaceHostState::begin_replay_request`].
@@ -2872,13 +2979,13 @@ mod pane_liveness_native_binding_tests {
         state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
             &new.backend_session_id, new_attachment, None, None, Some(new_token),
         ).unwrap();
-        let stream_id = state.sessions.lock()[&new.backend_session_id].stream_task.as_ref().unwrap().id();
+        let stream_id = state.test_session(&new.backend_session_id).lock().stream_task.as_ref().unwrap().id();
         let (old_attachment, _old_output) = attachment(&old.backend_session_id);
         assert!(state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
             &old.backend_session_id, old_attachment, None, None, Some(old_token),
         ).is_err());
         assert_eq!(state.session_attach_tuple(&new.backend_session_id), Some(new.clone()));
-        assert_eq!(state.sessions.lock()[&new.backend_session_id].stream_task.as_ref().unwrap().id(), stream_id);
+        assert_eq!(state.test_session(&new.backend_session_id).lock().stream_task.as_ref().unwrap().id(), stream_id);
         state.teardown();
     }
 
@@ -2896,7 +3003,7 @@ mod pane_liveness_native_binding_tests {
         ).unwrap();
         let mut detached = state.subscribe_session_detach(&new.backend_session_id).unwrap();
         detached.borrow_and_update();
-        let pump_id = state.sessions.lock()[&new.backend_session_id].pump_task.as_ref().unwrap().id();
+        let pump_id = state.test_session(&new.backend_session_id).lock().pump_task.as_ref().unwrap().id();
         let bounds = super::LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
         let layout = state.prepare_session_layout(super::NativeTerminalBoundsRequest {
             session_id: new.backend_session_id.clone(), bounds,
@@ -2916,7 +3023,7 @@ mod pane_liveness_native_binding_tests {
         assert!(!detached.has_changed().unwrap());
         assert!(!presentations.has_changed().unwrap());
         assert!(presentations.borrow().as_ref().unwrap().receipt.presented);
-        assert_eq!(state.sessions.lock()[&new.backend_session_id].pump_task.as_ref().unwrap().id(), pump_id);
+        assert_eq!(state.test_session(&new.backend_session_id).lock().pump_task.as_ref().unwrap().id(), pump_id);
         assert_eq!(state.session_attach_tuple(&new.backend_session_id), Some(new));
         state.teardown();
     }
@@ -2936,8 +3043,8 @@ mod pane_liveness_native_binding_tests {
             &new.backend_session_id, offer, None, None, Some(new_token),
         ).unwrap();
         assert_eq!(state.session_attach_tuple(&new.backend_session_id), Some(new.clone()));
-        assert_eq!(state.sessions.lock()[&new.backend_session_id].daemon_epoch, 8);
-        assert!(!state.sessions.lock()[&new.backend_session_id].owns_replay_request(&old_token));
+        assert_eq!(state.test_session(&new.backend_session_id).lock().daemon_epoch, 8);
+        assert!(!state.test_session(&new.backend_session_id).lock().owns_replay_request(&old_token));
         assert!(!state.detach_session_fenced(&new.backend_session_id, Some(&old)));
         let mut foreign = new.clone();
         foreign.incarnation = Some("foreign-lifetime".into());
@@ -2992,7 +3099,7 @@ mod pane_liveness_native_binding_tests {
 
         let rows = visible_text(&state, &new.backend_session_id);
         assert_eq!(&rows[..2], ["top line", "rewritten"], "resident grid must survive a handover rebind");
-        assert_eq!(state.sessions.lock()[&new.backend_session_id].last_sequence, Some(12));
+        assert_eq!(state.test_session(&new.backend_session_id).lock().last_sequence, Some(12));
         state.teardown();
     }
 
@@ -3020,8 +3127,8 @@ mod pane_liveness_native_binding_tests {
             id, offer, None, None, Some(token),
         ).unwrap();
         {
-            let sessions = state.sessions.lock();
-            let session = &sessions[id];
+            let handle = state.test_session(id);
+            let session = handle.lock();
             assert!(!session.terminal.search_grid("before-gap-0", false).unwrap().is_empty());
             assert!(!session.terminal.search_grid("after-gap", false).unwrap().is_empty());
             assert_eq!(session.last_sequence, Some(41));
@@ -3039,7 +3146,7 @@ mod pane_liveness_native_binding_tests {
         state.attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
             &old.backend_session_id, offer, None, None, Some(token),
         ).unwrap();
-        state.sessions.lock().get_mut(&old.backend_session_id).unwrap().incarnation = Some("previous-lifetime".into());
+        state.test_session(&old.backend_session_id).lock().incarnation = Some("previous-lifetime".into());
 
         let mut new = old.clone();
         new.daemon_epoch = "8".into();
@@ -3054,7 +3161,7 @@ mod pane_liveness_native_binding_tests {
         let rows = visible_text(&state, &new.backend_session_id);
         assert_eq!(rows[0], "fresh output");
         assert!(rows.iter().all(|row| !row.contains("stale output")));
-        assert_eq!(state.sessions.lock()[&new.backend_session_id].last_sequence, Some(3));
+        assert_eq!(state.test_session(&new.backend_session_id).lock().last_sequence, Some(3));
         state.teardown();
     }
 
@@ -3063,7 +3170,7 @@ mod pane_liveness_native_binding_tests {
         let state = super::NativeTerminalSurfaceHostState::default();
         let active = tuple();
         state.attach_test_session_for_liveness(&active.backend_session_id, 7, None).unwrap();
-        state.sessions.lock().get_mut(&active.backend_session_id).unwrap().active_attach_tuple = Some(active.clone());
+        state.test_session(&active.backend_session_id).lock().active_attach_tuple = Some(active.clone());
         let bounds = super::LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
         let layout = state.prepare_session_layout(super::NativeTerminalBoundsRequest {
             session_id: active.backend_session_id.clone(), bounds,
@@ -3137,7 +3244,7 @@ mod pane_liveness_native_binding_tests {
             session_id, attachment, None, None, Some(token),
         ).unwrap();
 
-        assert!(!state.sessions.lock()[session_id].output_stream_ended);
+        assert!(!state.test_session(session_id).lock().output_stream_ended);
 
         output.send(crate::daemon::DaemonStreamMessage::Exit {
             session_id: session_id.into(),
@@ -3145,14 +3252,14 @@ mod pane_liveness_native_binding_tests {
             incarnation: None,
         }).await.unwrap();
 
-        let mut pump_task = state.sessions.lock().get_mut(session_id)
-            .and_then(|s| s.pump_task.take()).expect("attached output pump");
+        let mut pump_task = state.test_session(session_id).lock()
+            .pump_task.take().expect("attached output pump");
         let completed = tokio::time::timeout(std::time::Duration::from_secs(3), &mut pump_task).await;
         if completed.is_err() {
             pump_task.abort();
             let _ = pump_task.await;
         }
-        let ended = state.sessions.lock()[session_id].output_stream_ended;
+        let ended = state.test_session(session_id).lock().output_stream_ended;
         state.teardown();
         completed.expect("Exit must complete the subscribed output pump").expect("output pump task");
         assert!(ended);
@@ -3187,7 +3294,7 @@ mod pane_liveness_native_binding_tests {
             session_id, attachment, None, None, None,
         ).unwrap();
 
-        let dims = state.sessions.lock()[session_id].terminal.dimensions().unwrap();
+        let dims = state.test_session(session_id).lock().terminal.dimensions().unwrap();
         assert_eq!(dims, (140, 50));
         state.teardown();
     }
@@ -3288,8 +3395,8 @@ impl NativeTerminalSurfaceHostState {
         app: Option<&tauri::AppHandle<R>>,
     ) {
         let changed = {
-            let mut sessions = self.sessions.lock();
-            if let Some(sess) = sessions.get_mut(session_id) {
+            if let Some(handle) = self.session(session_id) {
+                let mut sess = handle.lock();
                 sess.agent_reports_own_state = false;
                 sess.last_agent_activity = Some(crate::agent_detect::AgentActivity::Idle);
                 true
@@ -3316,7 +3423,10 @@ impl NativeTerminalSurfaceHostState {
     }
 
     pub fn has_focused_session(&self) -> bool {
-        self.sessions.lock().values().any(|session| session.focused)
+        self.session_handles().iter().any(|(_, session)| {
+            let focused = session.lock().focused;
+            focused
+        })
     }
 
     pub fn set_event_sink(&self, sink: NativeTerminalEventSink) {
@@ -3354,24 +3464,15 @@ impl NativeTerminalSurfaceHostState {
     }
 
     pub fn session_layout(&self, session_id: &str) -> Option<SurfaceCompositionLayout> {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .and_then(|session| session.layout)
+        read_session(&self.sessions, session_id, |session| session.layout).flatten()
     }
 
     pub fn session_logical_bounds(&self, session_id: &str) -> Option<LogicalBounds> {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .and_then(|session| session.logical_bounds)
+        read_session(&self.sessions, session_id, |session| session.logical_bounds).flatten()
     }
 
     pub fn session_cell_metrics(&self, session_id: &str) -> Option<CellMetrics> {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .and_then(|session| session.cell_metrics)
+        read_session(&self.sessions, session_id, |session| session.cell_metrics).flatten()
     }
 
     pub fn set_scrollbar_overlay_visible(
@@ -3380,10 +3481,8 @@ impl NativeTerminalSurfaceHostState {
         visible: bool,
     ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
-        let mut sessions = self.sessions.lock();
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or(NativeTerminalError::NoValue)?;
+        let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let mut session = handle.lock();
         session.scrollbar_overlay.visible = visible;
         if visible {
             if let Ok(scrollbar) = session.terminal.scrollbar() {
@@ -3399,10 +3498,8 @@ impl NativeTerminalSurfaceHostState {
         attention: bool,
     ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
-        let mut sessions = self.sessions.lock();
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or(NativeTerminalError::NoValue)?;
+        let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let mut session = handle.lock();
         session.attention_frame = attention;
         Ok(())
     }
@@ -3411,12 +3508,12 @@ impl NativeTerminalSurfaceHostState {
     /// Uses half-open bounds `left <= x < right` and `top <= y < bottom` so split
     /// boundaries deterministically map to exactly one pane.
     pub fn session_at_logical_point(&self, lx: f64, ly: f64) -> Option<String> {
-        let sessions = self.sessions.lock();
-        sessions.iter().find_map(|(id, session)| {
+        self.session_handles().into_iter().find_map(|(id, session)| {
+            let session = session.lock();
             if session.surface_attached {
                 if let Some(bounds) = session.logical_bounds {
                     if bounds.contains(lx, ly) {
-                        return Some(id.clone());
+                        return Some(id);
                     }
                 }
             }
@@ -3430,10 +3527,8 @@ impl NativeTerminalSurfaceHostState {
         f: impl FnOnce(&mut NativeTerminal, bool) -> Result<T, NativeTerminalError>,
     ) -> Result<T, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let mut sessions = self.sessions.lock();
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or(NativeTerminalError::NoValue)?;
+        let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let mut session = handle.lock();
         let is_agent = session.last_agent_activity.is_some() || session.agent_reports_own_state;
         let bracketed_effective = session.bracketed_paste_seen || is_agent;
         f(&mut session.terminal, bracketed_effective)
@@ -3449,9 +3544,9 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn reapply_theme_to_sessions(&self) {
         let theme = &cached_terminal_preferences().theme;
-        let mut sessions = self.sessions.lock();
-        for (session_id, session) in sessions.iter_mut() {
-            if let Err(error) = session.terminal.apply_theme_preferences(theme) {
+        for (session_id, session) in self.session_handles() {
+            let applied = session.lock().terminal.apply_theme_preferences(theme);
+            if let Err(error) = applied {
                 tracing::warn!(
                     session_id = %session_id,
                     ?error,
@@ -3463,12 +3558,9 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn reapply_scrollback_to_sessions(&self) {
         let scrollback = cached_terminal_preferences().scrollback;
-        let mut sessions = self.sessions.lock();
-        for (session_id, session) in sessions.iter_mut() {
-            if let Err(error) = session
-                .terminal
-                .set_scrollback_limit_lines(Some(scrollback))
-            {
+        for (session_id, session) in self.session_handles() {
+            let applied = session.lock().terminal.set_scrollback_limit_lines(Some(scrollback));
+            if let Err(error) = applied {
                 tracing::warn!(
                     session_id = %session_id,
                     ?error,
@@ -3481,11 +3573,11 @@ impl NativeTerminalSurfaceHostState {
     /// Notifies every live session whose program enabled DEC mode 2031 that the color scheme
     /// changed to `appearance`. Sessions without 2031, or replaying history, get nothing.
     ///
-    /// Holding the sessions lock serializes this with history replay, which runs under the same
-    /// lock with PTY writes suppressed.
+    /// Holding each session's lock serializes this with that session's history replay, which runs
+    /// under the same lock with PTY writes suppressed.
     pub fn report_color_scheme_to_sessions(&self, appearance: crate::terminal::TerminalAppearance) {
-        let sessions = self.sessions.lock();
-        for (session_id, session) in sessions.iter() {
+        for (session_id, session) in self.session_handles() {
+            let session = session.lock();
             if session.output_stream_ended {
                 continue;
             }
@@ -3505,9 +3597,8 @@ impl NativeTerminalSurfaceHostState {
     /// still streaming in the background after its pane unmounted.
     pub fn ensure_surface_attached(&self, session_id: &str) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
-        let sessions = self.sessions.lock();
-        match sessions.get(session_id) {
-            Some(session) if session.surface_attached => Ok(()),
+        match self.session(session_id) {
+            Some(session) if session.lock().surface_attached => Ok(()),
             Some(_) | None => Err(NativeTerminalError::SessionDetached(session_id.to_string())),
         }
     }
@@ -3530,12 +3621,11 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
     ) {
         let event = {
-            let mut sessions = self.sessions.lock();
-            let session = match sessions.get_mut(session_id) {
-                Some(s) => s,
-                None => return,
+            let Some(handle) = self.session(session_id) else {
+                return;
             };
-            take_native_terminal_scrollbar_event(session, session_id)
+            let mut session = handle.lock();
+            take_native_terminal_scrollbar_event(&mut session, session_id)
         };
         if let Some(event) = event {
             emit_native_terminal_event(app, &self.event_sink, event);
@@ -3558,17 +3648,15 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<SurfaceCompositionLayout, NativeTerminalError> {
         let layout = request.layout(cell_metrics)?;
         let mut sessions = self.sessions.lock();
-        if let Some(token) = token {
-            let session = sessions.get_mut(&request.session_id)
-                .filter(|session| session.owns_replay_request(token))
-                .ok_or_else(|| NativeTerminalError::SessionDetached(request.session_id.clone()))?;
-            session.surface_attached = true;
-        }
-        let (session, initialized) = match sessions.get_mut(&request.session_id) {
-            Some(session) if !session.surface_attached => {
+        let existing = sessions.get(&request.session_id).cloned();
+        let (handle, initialized) = match existing {
+            Some(handle) => {
+                drop(sessions);
+                (handle, false)
+            }
+            None if token.is_some() => {
                 return Err(NativeTerminalError::SessionDetached(request.session_id));
             }
-            Some(session) => (session, false),
             None => {
                 let mut terminal = NativeTerminal::new(layout.cols, layout.rows)?;
                 let prefs = cached_terminal_preferences();
@@ -3581,9 +3669,7 @@ impl NativeTerminalSurfaceHostState {
                 let _ = terminal.set_scrollback_limit_lines(Some(prefs.scrollback));
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
-                sessions.insert(
-                    request.session_id.clone(),
-                    NativeTerminalSession {
+                let handle = Arc::new(Mutex::new(NativeTerminalSession {
                         terminal,
                         focused: false,
                         preedit: None,
@@ -3617,16 +3703,24 @@ impl NativeTerminalSurfaceHostState {
                         bracketed_paste_seen: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
                         pty_resized_at: None,
-                    },
-                );
-                (
-                    sessions
-                        .get_mut(&request.session_id)
-                        .ok_or(NativeTerminalError::NoValue)?,
-                    true,
-                )
+                    }));
+                sessions.insert(request.session_id.clone(), Arc::clone(&handle));
+                drop(sessions);
+                (handle, true)
             }
         };
+        let mut session = handle.lock();
+        if let Some(token) = token {
+            if !session.owns_replay_request(token) {
+                return Err(NativeTerminalError::SessionDetached(request.session_id));
+            }
+            session.surface_attached = true;
+        }
+        if !session.surface_attached
+            || !session_is_registered(&self.sessions, &request.session_id, &handle)
+        {
+            return Err(NativeTerminalError::SessionDetached(request.session_id));
+        }
 
         let prior_scrollbar = session.terminal.scrollbar().ok();
         let is_at_bottom = prior_scrollbar.is_none_or(|sb| {
@@ -3688,7 +3782,7 @@ impl NativeTerminalSurfaceHostState {
         }
         session.snapshot_slot.set_attached(true);
         session.publish_frame();
-        drop(sessions);
+        drop(session);
         if initialized || resized {
             self.notify_pty_resize(&request.session_id, layout.cols, layout.rows);
         }
@@ -3799,10 +3893,13 @@ impl NativeTerminalSurfaceHostState {
         // its stored grid and density coherent with the already-created native child.
         let geometry = self.presentation_geometry_for_session(session_id);
         let _hosts = self.hosts.lock();
-        let mut sessions = self.sessions.lock();
-        let Some(session) = sessions.get_mut(session_id) else {
+        let Some(handle) = self.session(session_id) else {
             return Ok(false);
         };
+        let mut session = handle.lock();
+        if !session_is_registered(&self.sessions, session_id, &handle) {
+            return Ok(false);
+        }
         if tuple.is_none() && session.active_attach_tuple.is_some() {
             return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
         }
@@ -3936,7 +4033,7 @@ impl NativeTerminalSurfaceHostState {
         };
         session.publish_frame();
         session.render_coordinator.consume_render();
-        drop(sessions);
+        drop(session);
         if let Some((cols, rows)) = resized_dimensions {
             self.notify_pty_resize(session_id, cols, rows);
         }
@@ -4000,6 +4097,8 @@ impl NativeTerminalSurfaceHostState {
         let initial_generation = attachment.remote_generation;
         let initial_dims = (80, 24);
 
+        let existing_handle = self.session(session_id);
+        let created_handle: SessionHandle;
         let (
             update_sender,
             render_coordinator,
@@ -4009,20 +4108,24 @@ impl NativeTerminalSurfaceHostState {
             absorbs_replay_burst,
             redraw_dims,
         ) = {
-            let mut sessions = self.sessions.lock();
-            // The ownership check lives INSIDE the mutation lock. Checking it under a separate
+            if token.is_some() && existing_handle.is_none() {
+                attachment.stream_task.abort();
+                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+            }
+            let existing = existing_handle.as_ref().map(|handle| handle.lock());
+            if existing_handle.as_ref().is_some_and(|handle| {
+                !session_is_registered(&self.sessions, session_id, handle)
+            }) {
+                attachment.stream_task.abort();
+                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+            }
+            // The ownership check lives INSIDE the session's mutation lock. Checking it under a separate
             // lock first would leave a window where a newer attach takes ownership between the
             // check and the mutation, which is the very race the token exists to close. A missing
             // session is a rejection too: the pane was closed, and recreating it here would
             // resurrect a session the user already dismissed.
-            if let Some(ref token) = token {
-                let Some(session) = sessions.get(session_id) else {
-                    drop(sessions);
-                    attachment.stream_task.abort();
-                    return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
-                };
+            if let (Some(token), Some(session)) = (token.as_ref(), existing.as_ref()) {
                 if !session.owns_replay_request(token) {
-                    drop(sessions);
                     attachment.stream_task.abort();
                     return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
                 }
@@ -4032,7 +4135,6 @@ impl NativeTerminalSurfaceHostState {
                             && token.attach_tuple.is_none()
                             && token.generation != session.pump_generation)
                     {
-                        drop(sessions);
                         attachment.stream_task.abort();
                         return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
                     }
@@ -4043,18 +4145,16 @@ impl NativeTerminalSurfaceHostState {
                             || (active_tuple.attempt_generation == token_tuple.attempt_generation
                                 && !pane_liveness_tuple_matches(active_tuple, token_tuple))
                         {
-                            drop(sessions);
                             attachment.stream_task.abort();
                             return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
                         }
                     } else if session.attempt_generation > token_tuple.attempt_generation {
-                        drop(sessions);
                         attachment.stream_task.abort();
                         return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
                     }
                 }
             }
-            if token.is_none() && sessions.get(session_id).is_some_and(|session| session.active_attach_tuple.is_some()) {
+            if token.is_none() && existing.as_ref().is_some_and(|session| session.active_attach_tuple.is_some()) {
                 attachment.stream_task.abort();
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
@@ -4062,9 +4162,7 @@ impl NativeTerminalSurfaceHostState {
             // full-screen or inline TUI. The PTY is usually already at the pane size, so nothing
             // sends SIGWINCH; ask the program to repaint once the grid has been rebuilt.
             let mut redraw_dims = None;
-            let (update_sender, render_coordinator) = if let Some(session) =
-                sessions.get_mut(session_id)
-            {
+            let mut session = if let Some(mut session) = existing {
                 let is_fresh_startup = self.consume_pending_startup(session_id);
                 if let Some(ref token) = token {
                     if let Some(ref tuple) = token.attach_tuple {
@@ -4217,10 +4315,7 @@ impl NativeTerminalSurfaceHostState {
                 // pre-attach frame, so the first paint after attach shows stale content.
                 session.publish_frame();
                 session.render_coordinator.consume_render();
-                (
-                    session.update_sender.clone(),
-                    Arc::clone(&session.render_coordinator),
-                )
+                session
             } else {
                 let is_fresh_startup = self.consume_pending_startup(session_id);
                 let initial_cols = attachment.pty_cols.unwrap_or(initial_dims.0);
@@ -4283,9 +4378,7 @@ impl NativeTerminalSurfaceHostState {
                     ),
                     None => (None, 0, None),
                 };
-                sessions.insert(
-                    session_id.to_string(),
-                    NativeTerminalSession {
+                created_handle = Arc::new(Mutex::new(NativeTerminalSession {
                         terminal,
                         focused: false,
                         preedit: None,
@@ -4319,14 +4412,24 @@ impl NativeTerminalSurfaceHostState {
                         output_stream_ended: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
                         pty_resized_at: None,
-                    },
-                );
-                (update_sender, render_coordinator)
+                    }));
+                let session = created_handle.lock();
+                match self.sessions.lock().entry(session_id.to_string()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(Arc::clone(&created_handle));
+                    }
+                    // A concurrent attach created the session while this one built its grid
+                    // outside the map lock; that attach owns it.
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        attachment.stream_task.abort();
+                        return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+                    }
+                }
+                session
             };
-            let session = sessions
-                .get_mut(session_id)
-                .ok_or(NativeTerminalError::NoValue)?;
-            let events = take_native_terminal_events(session, session_id, true);
+            let update_sender = session.update_sender.clone();
+            let render_coordinator = Arc::clone(&session.render_coordinator);
+            let events = take_native_terminal_events(&mut session, session_id, true);
             // Captured from the SAME transaction that mutated the session. Re-reading these under
             // a fresh lock would sample state a newer attach may already own, so the pump would
             // run with a generation that never fences it.
@@ -4359,6 +4462,7 @@ impl NativeTerminalSurfaceHostState {
         let session_id_owned = session_id.to_string();
         let app_handle = app.clone();
         let gpu_worker = Arc::clone(&self.gpu_worker);
+        let attachment_slot = Arc::clone(&slot);
         let pump_task = tokio::spawn(async move {
             let schedule_render = || {
                 if render_coordinator.schedule_render() {
@@ -4378,27 +4482,31 @@ impl NativeTerminalSurfaceHostState {
                 }
             };
             let lock_to_bottom = || {
-                let mut sessions_guard = sessions.lock();
-                lock_replay_to_bottom(&mut sessions_guard, &session_id_owned, pump_generation);
+                lock_replay_to_bottom(&sessions, &session_id_owned, (pump_generation, &slot));
             };
             let mut replay_absorb = absorbs_replay_burst.then(|| {
                 let now = std::time::Instant::now();
                 (now, now, REPLAY_ABSORB_MAX, true)
             });
             // Only this task feeds the terminal or defers agent detection once it runs, so idle
-            // ticks skip the global sessions lock unless a handled message may have changed either.
+            // ticks skip the session lock unless a handled message may have changed either.
             let mut deadline = None;
             let mut refresh_deadline = true;
             let mut agent_detect_maybe_pending = false;
+            // A non-output message drained while batching output is handled on the next turn.
+            let mut carried: Option<DaemonStreamMessage<'static>> = None;
             loop {
                 if refresh_deadline {
-                    deadline = sessions
-                        .lock()
-                        .get(&session_id_owned)
-                        .and_then(|session| session.terminal.synchronized_output_deadline());
+                    deadline = read_session(&sessions, &session_id_owned, |session| {
+                        session.terminal.synchronized_output_deadline()
+                    })
+                    .flatten();
                 }
                 refresh_deadline = true;
-                let received = tokio::select! {
+                let received = if let Some(msg) = carried.take() {
+                    Ok(Some(msg))
+                } else {
+                    tokio::select! {
                     biased;
                     _ = async {
                         match deadline {
@@ -4406,40 +4514,35 @@ impl NativeTerminalSurfaceHostState {
                             None => std::future::pending::<()>().await,
                         }
                     } => {
-                        let mut sessions_guard = sessions.lock();
-                        if let Some(session) = sessions_guard
-                            .get_mut(&session_id_owned)
-                            .filter(|session| session.pump_generation == pump_generation)
-                        {
+                        with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |session| {
                             if let Err(error) = session.terminal.expire_synchronized_output(tokio::time::Instant::now()) {
                                 tracing::warn!(session_id = %session_id_owned, %error, "Failed to end synchronized output");
                             }
                             session.publish_frame();
-                        }
-                        drop(sessions_guard);
+                        });
                         update_sender.send_replace(());
                         schedule_render();
                         continue;
                     }
-                    result = tokio::time::timeout(AGENT_DETECT_TRAILING_IDLE, messages.recv()) => result,
+                    result = async {
+                        match pump_idle_wakeup(agent_detect_maybe_pending, replay_absorb.is_some()) {
+                            Some(idle) => tokio::time::timeout(idle, messages.recv()).await,
+                            None => Ok(messages.recv().await),
+                        }
+                    } => result,
+                    }
                 };
                 let msg = match received {
                     Ok(Some(msg)) => msg,
                     Ok(None) => {
-                        let mut sessions_guard = sessions.lock();
-                        let mut owned_stream_ended = false;
-                        if let Some(session) = sessions_guard
-                            .get_mut(&session_id_owned)
-                            .filter(|session| session.pump_generation == pump_generation)
-                        {
+                        let owned_stream_ended = with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |session| {
                             if let Err(error) = session.terminal.finish_synchronized_output() {
                                 tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
                             }
                             session.output_stream_ended = true;
                             session.publish_frame();
-                            owned_stream_ended = true;
-                        }
-                        drop(sessions_guard);
+                        })
+                        .is_some();
                         if owned_stream_ended {
                             if let Some(app) = app_handle.as_ref() {
                                 if let Err(error) = app.emit("native_terminal_stream_ended", NativeTerminalFocusPayload {
@@ -4462,20 +4565,14 @@ impl NativeTerminalSurfaceHostState {
                             (false, Vec::new())
                         } else {
                             agent_detect_maybe_pending = false;
-                            let mut sessions_guard = sessions.lock();
-                            match sessions_guard.get_mut(&session_id_owned) {
-                                Some(sess)
-                                    if sess.pump_generation == pump_generation
-                                        && sess.agent_detect_pending =>
-                                {
-                                    (
-                                        true,
-                                        take_native_terminal_events(sess, &session_id_owned, true),
-                                    )
+                            with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |sess| {
+                                if sess.agent_detect_pending {
+                                    (true, take_native_terminal_events(sess, &session_id_owned, true))
+                                } else {
+                                    (false, Vec::new())
                                 }
-                                Some(_) => (false, Vec::new()),
-                                None => (false, Vec::new()),
-                            }
+                            })
+                            .unwrap_or((false, Vec::new()))
                         };
                         for event in events {
                             emit_native_terminal_event(app_handle.as_ref(), &event_sink, event);
@@ -4504,40 +4601,20 @@ impl NativeTerminalSurfaceHostState {
                 };
                 match msg {
                     DaemonStreamMessage::Output { sequence, data, .. } => {
+                        let (batch, next) = drain_output_batch(sequence, data, &mut messages);
+                        carried = next;
                         let mut resized_at = None;
-                        let (session_exists, events) = {
-                            let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard
-                                .get_mut(&session_id_owned)
-                                .filter(|sess| sess.pump_generation == pump_generation)
-                                // A chunk at or below the watermark was already applied by the
-                                // replay this pump was started from. Feeding it would duplicate
-                                // output; adopting its sequence would rewind the cursor.
-                                .filter(|sess| {
-                                    sess.last_sequence.is_none_or(|applied| sequence > applied)
-                                })
-                            {
-                                resized_at = sess.pty_resized_at.take();
-                                if let Err(err) = sess.terminal.feed(&data) {
-                                    tracing::warn!(
-                                        session_id = %session_id_owned,
-                                        error = %err,
-                                        "Failed to feed daemon output to native terminal"
-                                    );
-                                }
-                                if let Ok(true) = sess.terminal.bracketed_paste_enabled() {
-                                    sess.bracketed_paste_seen = true;
-                                }
-                                sess.last_sequence = Some(sequence);
-                                sess.publish_frame();
-                                (
-                                    true,
-                                    take_native_terminal_events(sess, &session_id_owned, false),
-                                )
-                            } else {
-                                (false, Vec::new())
+                        let mut consumed_sequence = None;
+                        let (session_exists, events) = with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |sess| {
+                            consumed_sequence = feed_output_batch(sess, &session_id_owned, &batch);
+                            if consumed_sequence.is_none() {
+                                return (false, Vec::new());
                             }
-                        };
+                            resized_at = sess.pty_resized_at.take();
+                            sess.publish_frame();
+                            (true, take_native_terminal_events(sess, &session_id_owned, false))
+                        })
+                        .unwrap_or((false, Vec::new()));
 
                         if session_exists {
                             agent_detect_maybe_pending = true;
@@ -4545,7 +4622,7 @@ impl NativeTerminalSurfaceHostState {
                                 "event": "terminal.render.vt_consumed",
                                 "details": {
                                     "sessionId": session_id_owned,
-                                    "consumedSequence": sequence,
+                                    "consumedSequence": consumed_sequence,
                                     "renderedAt": std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .ok()
@@ -4604,10 +4681,17 @@ impl NativeTerminalSurfaceHostState {
                         ..
                     } => {
                         let (session_exists, events) = {
-                            let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard
-                                .get_mut(&session_id_owned)
-                                .filter(|sess| sess.pump_generation == pump_generation)
+                            let handle = session_handle(&sessions, &session_id_owned);
+                            let mut session_guard = handle.as_ref().map(|handle| handle.lock());
+                            if let Some(sess) = session_guard
+                                .as_deref_mut()
+                                .filter(|sess| {
+                                    sess.pump_generation == pump_generation
+                                        && Arc::ptr_eq(&sess.snapshot_slot, &slot)
+                                        && handle.as_ref().is_some_and(|handle| {
+                                            session_is_registered(&sessions, &session_id_owned, handle)
+                                        })
+                                })
                             {
                                 let verdict = classify_replay(
                                     sess.last_sequence,
@@ -4714,10 +4798,17 @@ impl NativeTerminalSurfaceHostState {
                         ..
                     } => {
                         let (session_exists, events) = {
-                            let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard
-                                .get_mut(&session_id_owned)
-                                .filter(|sess| sess.pump_generation == pump_generation)
+                            let handle = session_handle(&sessions, &session_id_owned);
+                            let mut session_guard = handle.as_ref().map(|handle| handle.lock());
+                            if let Some(sess) = session_guard
+                                .as_deref_mut()
+                                .filter(|sess| {
+                                    sess.pump_generation == pump_generation
+                                        && Arc::ptr_eq(&sess.snapshot_slot, &slot)
+                                        && handle.as_ref().is_some_and(|handle| {
+                                            session_is_registered(&sessions, &session_id_owned, handle)
+                                        })
+                                })
                             {
                                 let was_at_bottom =
                                     sess.terminal.scrollbar().ok().is_none_or(|sb| {
@@ -4792,10 +4883,17 @@ impl NativeTerminalSurfaceHostState {
                         };
                         if let Some(reported) = reported {
                             let changed = {
-                                let mut sessions_guard = sessions.lock();
-                                match sessions_guard
-                                    .get_mut(&session_id_owned)
-                                    .filter(|sess| sess.pump_generation == pump_generation)
+                                let handle = session_handle(&sessions, &session_id_owned);
+                                let mut session_guard = handle.as_ref().map(|handle| handle.lock());
+                                match session_guard
+                                    .as_deref_mut()
+                                    .filter(|sess| {
+                                        sess.pump_generation == pump_generation
+                                            && Arc::ptr_eq(&sess.snapshot_slot, &slot)
+                                            && handle.as_ref().is_some_and(|handle| {
+                                                session_is_registered(&sessions, &session_id_owned, handle)
+                                            })
+                                    })
                                 {
                                     Some(sess) => {
                                         // Screen inference is the FALLBACK, not a tiebreaker, and
@@ -4861,17 +4959,11 @@ impl NativeTerminalSurfaceHostState {
                         descriptor,
                         ..
                     } => {
-                        {
-                            let mut sessions_guard = sessions.lock();
-                            if let Some(sess) = sessions_guard
-                                .get_mut(&session_id_owned)
-                                .filter(|sess| sess.pump_generation == pump_generation)
-                            {
-                                sess.is_remote = true;
-                                sess.remote_generation = Some(generation);
-                                sess.terminal.set_remote_generation(Some(generation));
-                            }
-                        }
+                        with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |sess| {
+                            sess.is_remote = true;
+                            sess.remote_generation = Some(generation);
+                            sess.terminal.set_remote_generation(Some(generation));
+                        });
                         if let Some(app) = app_handle.as_ref() {
                             if let Err(error) = app.emit(
                                 "terminal_remote_status",
@@ -4891,20 +4983,14 @@ impl NativeTerminalSurfaceHostState {
                     DaemonStreamMessage::DagRunUpdated { .. }
                     | DaemonStreamMessage::DagInventory { .. } => {}
                     DaemonStreamMessage::Exit { .. } => {
-                        let mut sessions_guard = sessions.lock();
-                        let mut owned_stream_ended = false;
-                        if let Some(session) = sessions_guard
-                            .get_mut(&session_id_owned)
-                            .filter(|session| session.pump_generation == pump_generation)
-                        {
+                        let owned_stream_ended = with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |session| {
                             if let Err(error) = session.terminal.finish_synchronized_output() {
                                 tracing::warn!(session_id = %session_id_owned, %error, "Failed to finish terminal output");
                             }
                             session.output_stream_ended = true;
                             session.publish_frame();
-                            owned_stream_ended = true;
-                        }
-                        drop(sessions_guard);
+                        })
+                        .is_some();
                         if owned_stream_ended {
                             if let Some(app) = app_handle.as_ref() {
                                 if let Err(error) = app.emit("native_terminal_stream_ended", NativeTerminalFocusPayload {
@@ -4939,8 +5025,9 @@ impl NativeTerminalSurfaceHostState {
                         data,
                     } = record;
                     let (is_remote, current_gen) = {
-                        let guard = sessions.lock();
-                        let sess = guard.get(&id);
+                        let handle = session_handle(&sessions, &id);
+                        let guard = handle.as_ref().map(|handle| handle.lock());
+                        let sess = guard.as_deref();
                         (
                             sess.map(|s| s.is_remote).unwrap_or(false),
                             sess.and_then(|s| s.remote_generation),
@@ -4970,7 +5057,7 @@ impl NativeTerminalSurfaceHostState {
                                     < std::time::Duration::from_millis(2000)
                                 {
                                     if let Some(gen) =
-                                        sessions.lock().get(&id).and_then(|s| s.remote_generation)
+                                        read_session(&sessions, &id, |s| s.remote_generation).flatten()
                                     {
                                         resolved_gen = Some(gen);
                                         break;
@@ -4999,7 +5086,7 @@ impl NativeTerminalSurfaceHostState {
                                 Ok(()) => break,
                                 Err(err) if is_busy_error(&err) => {
                                     let current =
-                                        sessions.lock().get(&id).and_then(|s| s.remote_generation);
+                                        read_session(&sessions, &id, |s| s.remote_generation).flatten();
                                     if current != Some(target_gen) {
                                         tracing::warn!(
                                             session_id = %id,
@@ -5050,17 +5137,21 @@ impl NativeTerminalSurfaceHostState {
         };
 
         {
-            let mut sessions = self.sessions.lock();
+            let handle = self.session(session_id);
+            let mut session = handle.as_ref().map(|handle| handle.lock());
             // Install only if this attach still owns the session. A newer attach may have bumped
             // the generation while the pump/writer tasks were being spawned; overwriting its
             // handles here would abandon the live stream and leave the pane fed by a pump this
             // attach no longer has any claim to.
-            let owns = sessions.get(session_id).is_some_and(|session| {
+            let owns = session.as_ref().is_some_and(|session| {
                 session.pump_generation == pump_generation
+                    && Arc::ptr_eq(&session.snapshot_slot, &attachment_slot)
                     && session.active_attach_tuple.as_ref() == token.as_ref().and_then(|token| token.attach_tuple.as_ref())
-            });
+            }) && handle
+                .as_ref()
+                .is_some_and(|handle| session_is_registered(&self.sessions, session_id, handle));
             if !owns {
-                drop(sessions);
+                drop(session);
                 stream_task.abort();
                 pump_task.abort();
                 if let Some(task) = pty_write_task {
@@ -5068,7 +5159,7 @@ impl NativeTerminalSurfaceHostState {
                 }
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
-        if let Some(session) = sessions.get_mut(session_id) {
+            if let Some(session) = session.as_deref_mut() {
                 if let Some(sender) = pty_write_sender {
                     session.terminal.set_pty_write_sender(sender);
                 }
@@ -5094,10 +5185,10 @@ impl NativeTerminalSurfaceHostState {
         tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
     ) -> bool {
         let mut hosts = self.hosts.lock();
-        let mut sessions = self.sessions.lock();
-        let Some(session) = sessions.get_mut(session_id) else {
+        let Some(handle) = self.session(session_id) else {
             return false;
         };
+        let mut session = handle.lock();
         if session.active_attach_tuple.as_ref() != tuple {
             return false;
         }
@@ -5124,17 +5215,22 @@ impl NativeTerminalSurfaceHostState {
         tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
     ) -> bool {
         let mut hosts = self.hosts.lock();
-        let mut sessions = self.sessions.lock();
-        if let Some(expected) = tuple {
-            if sessions.get(session_id).is_some_and(|session| {
-                session.active_attach_tuple.as_ref() != Some(expected)
-                    || session.attempt_generation > expected.attempt_generation
-            }) {
+        let handle = self.session(session_id);
+        let mut session = handle.as_ref().map(|handle| handle.lock());
+        if let (Some(expected), Some(session)) = (tuple, session.as_ref()) {
+            if session.active_attach_tuple.as_ref() != Some(expected)
+                || session.attempt_generation > expected.attempt_generation
+            {
                 return false;
             }
         }
         self.clear_pending_session(session_id);
-        if let Some(mut session) = sessions.remove(session_id) {
+        if let (Some(handle), Some(session)) = (handle.as_ref(), session.as_deref_mut()) {
+            let mut sessions = self.sessions.lock();
+            if sessions.get(session_id).is_some_and(|current| Arc::ptr_eq(current, handle)) {
+                sessions.remove(session_id);
+            }
+            drop(sessions);
             session.snapshot_slot.set_attached(false);
             if let Some(task) = session.stream_task.take() {
                 task.abort();
@@ -5146,7 +5242,7 @@ impl NativeTerminalSurfaceHostState {
                 task.abort();
             }
         }
-        drop(sessions);
+        drop(session);
 
         hosts.remove(session_id);
         true
@@ -5154,19 +5250,19 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn teardown(&self) {
         let mut hosts = self.hosts.lock();
-        let mut sessions = self.sessions.lock();
-        for (_, session) in sessions.drain() {
-            if let Some(task) = session.stream_task {
+        let drained: Vec<SessionHandle> = self.sessions.lock().drain().map(|(_, s)| s).collect();
+        for handle in drained {
+            let mut session = handle.lock();
+            if let Some(task) = session.stream_task.take() {
                 task.abort();
             }
-            if let Some(task) = session.pump_task {
+            if let Some(task) = session.pump_task.take() {
                 task.abort();
             }
-            if let Some(task) = session.pty_write_task {
+            if let Some(task) = session.pty_write_task.take() {
                 task.abort();
             }
         }
-        drop(sessions);
         hosts.clear();
     }
 
@@ -5192,11 +5288,9 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
     ) -> Result<tokio::sync::watch::Receiver<()>, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let sessions = self.sessions.lock();
-        let session = sessions
-            .get(session_id)
-            .ok_or(NativeTerminalError::NoValue)?;
-        Ok(session.update_sender.subscribe())
+        let session = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let receiver = session.lock().update_sender.subscribe();
+        Ok(receiver)
     }
 
     pub(crate) fn subscribe_session_detach(
@@ -5204,44 +5298,35 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
     ) -> Result<tokio::sync::watch::Receiver<()>, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let sessions = self.sessions.lock();
-        let session = sessions
-            .get(session_id)
-            .ok_or(NativeTerminalError::NoValue)?;
-        Ok(session.detach_sender.subscribe())
+        let session = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let receiver = session.lock().detach_sender.subscribe();
+        Ok(receiver)
     }
 
     pub fn session_render_coordinator(
         &self,
         session_id: &str,
     ) -> Option<Arc<RenderScheduleCoordinator>> {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .map(|session| Arc::clone(&session.render_coordinator))
+        read_session(&self.sessions, session_id, |session| {
+            Arc::clone(&session.render_coordinator)
+        })
     }
 
     pub fn schedule_session_render(&self, session_id: &str) -> bool {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .map(|session| session.render_coordinator.schedule_render())
+        self.session_render_coordinator(session_id)
+            .map(|coordinator| coordinator.schedule_render())
             .unwrap_or(false)
     }
 
     pub fn consume_session_render(&self, session_id: &str) -> bool {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .map(|session| session.render_coordinator.consume_render())
+        self.session_render_coordinator(session_id)
+            .map(|coordinator| coordinator.consume_render())
             .unwrap_or(false)
     }
 
     pub fn is_session_render_pending(&self, session_id: &str) -> bool {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .map(|session| session.render_coordinator.is_render_pending())
+        self.session_render_coordinator(session_id)
+            .map(|coordinator| coordinator.is_render_pending())
             .unwrap_or(false)
     }
 
@@ -5266,8 +5351,11 @@ impl NativeTerminalSurfaceHostState {
         tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
     ) -> Option<ReplayRequestToken> {
         let _hosts = self.hosts.lock();
-        let mut sessions = self.sessions.lock();
-        let session = sessions.get_mut(session_id)?;
+        let handle = self.session(session_id)?;
+        let mut session = handle.lock();
+        if !session_is_registered(&self.sessions, session_id, &handle) {
+            return None;
+        }
 
         // If an active tuple exists and incoming tuple is strictly older, reject early!
         if let Some(ref incoming) = tuple {
@@ -5323,8 +5411,7 @@ impl NativeTerminalSurfaceHostState {
 
     /// Authoritative 7-field attach tuple currently bound to the native session.
     pub fn session_attach_tuple(&self, session_id: &str) -> Option<crate::daemon::protocol::PaneAttachTuple> {
-        let sessions = self.sessions.lock();
-        sessions.get(session_id).and_then(|s| s.active_attach_tuple.clone())
+        read_session(&self.sessions, session_id, |s| s.active_attach_tuple.clone()).flatten()
     }
 
     /// Drives the runner's `trigger-stale-binding` control against the LIVE
@@ -5432,10 +5519,10 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
         receipt: &NativeTerminalSurfaceReceipt,
     ) -> (Option<crate::daemon::protocol::PaneAttachTuple>, bool) {
-        let sessions = self.sessions.lock();
-        let Some(session) = sessions.get(session_id) else {
+        let Some(handle) = self.session(session_id) else {
             return (None, false);
         };
+        let session = handle.lock();
         let tuple = session.active_attach_tuple.clone();
         let presentations = session.snapshot_slot.subscribe_presentations();
         let observed = *presentations.borrow();
@@ -5457,25 +5544,25 @@ impl NativeTerminalSurfaceHostState {
         self.sessions.lock().contains_key(session_id)
     }
 
+    #[cfg(test)]
+    fn test_session(&self, session_id: &str) -> SessionHandle {
+        self.session(session_id).expect("session exists")
+    }
+
     /// Attempt generation currently bound to the native session.
     pub fn session_attempt_generation(&self, session_id: &str) -> Option<u64> {
-        let sessions = self.sessions.lock();
-        sessions.get(session_id).map(|s| s.attempt_generation)
+        read_session(&self.sessions, session_id, |s| s.attempt_generation)
     }
 
     /// Incarnation currently bound to the native session.
     pub fn session_incarnation(&self, session_id: &str) -> Option<String> {
-        let sessions = self.sessions.lock();
-        sessions.get(session_id).and_then(|s| s.incarnation.clone())
+        read_session(&self.sessions, session_id, |s| s.incarnation.clone()).flatten()
     }
 
     /// Last daemon sequence applied to the resident grid, for an attach that must request only
     /// the tail the grid has not seen.
     pub fn session_last_sequence(&self, session_id: &str) -> Option<u64> {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .and_then(|session| session.last_sequence)
+        read_session(&self.sessions, session_id, |session| session.last_sequence).flatten()
     }
 
     /// Task 3 (local-split-qa): producer component identity for the private
@@ -5532,7 +5619,9 @@ impl NativeTerminalSurfaceHostState {
             snapshot_slot: Arc::new(SnapshotSlot::new()),
             pty_resized_at: None,
         };
-        self.sessions.lock().insert(session_id.to_string(), session);
+        self.sessions
+            .lock()
+            .insert(session_id.to_string(), Arc::new(Mutex::new(session)));
         Ok(render_coordinator)
     }
 
@@ -5540,8 +5629,8 @@ impl NativeTerminalSurfaceHostState {
         &self,
         session_id: &str,
     ) -> Option<crate::ipc::debug::PaneLivenessSnapshot> {
-        let sessions = self.sessions.lock();
-        let session = sessions.get(session_id)?;
+        let handle = self.session(session_id)?;
+        let session = handle.lock();
         Some(crate::ipc::debug::PaneLivenessSnapshot {
             telemetry_available: true,
             session_id: Some(session_id.to_string()),
@@ -5658,10 +5747,9 @@ impl NativeTerminalSurfaceHostState {
     /// Resident replay cursor as `(daemon_epoch, last_sequence)`. The epoch travels with the
     /// sequence because a cursor is only meaningful inside the epoch that issued it.
     pub fn session_replay_cursor(&self, session_id: &str) -> Option<(u64, u64)> {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .and_then(|session| session.last_sequence.map(|seq| (session.daemon_epoch, seq)))
+        let handle = self.session(session_id)?;
+        let session = handle.lock();
+        session.last_sequence.map(|seq| (session.daemon_epoch, seq))
     }
 
     pub fn registered_session_ids(&self) -> Vec<String> {
@@ -5673,11 +5761,10 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
     ) -> Result<Option<RenderSnapshot>, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let sessions = self.sessions.lock();
-        let Some(session) = sessions.get(session_id) else {
+        let Some(handle) = self.session(session_id) else {
             return Ok(None);
         };
-        let render_input = session_render_snapshot(session)?;
+        let render_input = session_render_snapshot(&handle.lock())?;
         Ok(Some(render_input.snapshot))
     }
 
@@ -5687,13 +5774,13 @@ impl NativeTerminalSurfaceHostState {
         input: &NativeTerminalInput,
     ) -> Result<Vec<u8>, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let mut sessions = self.sessions.lock();
-        let session = match sessions.get_mut(session_id) {
-            Some(session) if session.surface_attached && !session.output_stream_ended => session,
-            Some(_) | None => {
-                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
-            }
-        };
+        let handle = self
+            .session(session_id)
+            .ok_or_else(|| NativeTerminalError::SessionDetached(session_id.to_string()))?;
+        let mut session = handle.lock();
+        if !session.surface_attached || session.output_stream_ended {
+            return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+        }
         let bytes = input.encoded(&session.terminal)?;
         if !bytes.is_empty() {
             let _ = session
@@ -5713,13 +5800,13 @@ impl NativeTerminalSurfaceHostState {
         behavior: crate::native_terminal::ScrollViewport,
     ) -> Result<(), NativeTerminalError> {
         validate_session_id(session_id)?;
-        let mut sessions = self.sessions.lock();
-        let session = match sessions.get_mut(session_id) {
-            Some(session) if session.surface_attached => session,
-            Some(_) | None => {
-                return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
-            }
-        };
+        let handle = self
+            .session(session_id)
+            .ok_or_else(|| NativeTerminalError::SessionDetached(session_id.to_string()))?;
+        let mut session = handle.lock();
+        if !session.surface_attached {
+            return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
+        }
         session.terminal.scroll_viewport(behavior)
     }
 
@@ -5730,17 +5817,15 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<Vec<u8>, NativeTerminalError> {
         validate_session_id(session_id)?;
         let mut sessions = self.sessions.lock();
-        let session = match sessions.get_mut(session_id) {
-            Some(session) => session,
+        let handle = match sessions.get(session_id).cloned() {
+            Some(handle) => handle,
             None => {
                 let mut terminal = NativeTerminal::new(80, 24)?;
                 let _ = terminal
                     .set_scrollback_limit_lines(Some(cached_terminal_preferences().scrollback));
                 let (update_sender, _) = tokio::sync::watch::channel(());
                 let render_coordinator = Arc::new(RenderScheduleCoordinator::new());
-                sessions.insert(
-                    session_id.to_string(),
-                    NativeTerminalSession {
+                let handle = Arc::new(Mutex::new(NativeTerminalSession {
                         terminal,
                         focused: false,
                         preedit: None,
@@ -5774,13 +5859,13 @@ impl NativeTerminalSurfaceHostState {
                         output_stream_ended: false,
                         snapshot_slot: Arc::new(SnapshotSlot::new()),
                         pty_resized_at: None,
-                    },
-                );
-                sessions
-                    .get_mut(session_id)
-                    .ok_or(NativeTerminalError::NoValue)?
+                    }));
+                sessions.insert(session_id.to_string(), Arc::clone(&handle));
+                handle
             }
         };
+        drop(sessions);
+        let mut session = handle.lock();
         let bytes = input.encoded(&session.terminal)?;
         if !bytes.is_empty() {
             let _ = session
@@ -5800,10 +5885,8 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let sessions = self.sessions.lock();
-        let session = sessions
-            .get(session_id)
-            .ok_or(NativeTerminalError::NoValue)?;
+        let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let session = handle.lock();
         let layout = session.layout.ok_or(NativeTerminalError::NoValue)?;
         let cell_metrics = session.cell_metrics.ok_or(NativeTerminalError::NoValue)?;
         let (cursor_col, cursor_row) = session
@@ -5834,8 +5917,11 @@ impl NativeTerminalSurfaceHostState {
     }
 
     pub fn degraded_receipt(&self, session_id: &str) -> NativeTerminalSurfaceReceipt {
-        let session_info = self.sessions.try_lock().and_then(|sessions| {
-            sessions.get(session_id).map(|session| {
+        let handle = self
+            .sessions
+            .try_lock()
+            .and_then(|sessions| sessions.get(session_id).cloned());
+        let session_info = handle.as_ref().and_then(|handle| handle.try_lock()).map(|session| {
                 let layout = session.layout;
                 let cell_metrics = session.cell_metrics;
                 let bounds = session.logical_bounds;
@@ -5846,8 +5932,7 @@ impl NativeTerminalSurfaceHostState {
                         .map(|f| (f.input.snapshot.cursor.x, f.input.snapshot.cursor.y))
                 });
                 (layout, cell_metrics, bounds, cursor)
-            })
-        });
+            });
 
         let (layout, cell_metrics, bounds, cursor) =
             session_info.unwrap_or((None, None, None, None));
@@ -5893,8 +5978,11 @@ impl NativeTerminalSurfaceHostState {
         // would rebuild a GPU surface for a pane nobody can see, so report the benign detached state
         // and let the caller drop the update.
         let mut hosts = self.lock_attached_hosts(&session_id)?;
-        if tuple.is_some() && self.sessions.lock().get(&session_id)
-            .is_none_or(|session| session.active_attach_tuple.as_ref() != tuple) {
+        if tuple.is_some()
+            && read_session(&self.sessions, &session_id, |session| {
+                session.active_attach_tuple.as_ref() == tuple
+            }) != Some(true)
+        {
             return Err(NativeTerminalError::SessionDetached(session_id));
         }
         let host = match hosts.entry(session_id.clone()) {
@@ -5911,11 +5999,9 @@ impl NativeTerminalSurfaceHostState {
         let logical_bounds = request.bounds;
         let layout = self.prepare_session_layout(request, cell_metrics)?;
         let render_input = {
-            let sessions = self.sessions.lock();
-            let session = sessions
-                .get(&session_id)
-                .ok_or(NativeTerminalError::NoValue)?;
-            session_render_snapshot(session)?
+            let handle = self.session(&session_id).ok_or(NativeTerminalError::NoValue)?;
+            let render_input = session_render_snapshot(&handle.lock())?;
+            render_input
         };
 
         let renderer_config = RendererConfig {
@@ -5940,13 +6026,7 @@ impl NativeTerminalSurfaceHostState {
         )?;
         drop(hosts);
         if receipt.render_deferred && !render_input.synchronized_output {
-            let schedule_info = {
-                let sessions = self.sessions.lock();
-                sessions
-                    .get(&session_id)
-                    .filter(|session| session.surface_attached)
-                    .map(|session| (Arc::clone(&session.render_coordinator), Arc::clone(&session.snapshot_slot)))
-            };
+            let schedule_info = self.attached_render_target(&session_id);
             if let Some((coordinator, slot)) = schedule_info {
                 if coordinator.schedule_render() {
                     let window = window.clone();
@@ -6003,10 +6083,8 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         let mut hosts = self.lock_attached_hosts(session_id)?;
         let (layout, logical_bounds, cell_metrics, render_input) = {
-            let mut sessions = self.sessions.lock();
-            let session = sessions
-                .get_mut(session_id)
-                .ok_or(NativeTerminalError::NoValue)?;
+            let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+            let mut session = handle.lock();
             if tuple.is_some() && session.active_attach_tuple.as_ref() != tuple {
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
@@ -6016,7 +6094,7 @@ impl NativeTerminalSurfaceHostState {
             let layout = session.layout.ok_or(NativeTerminalError::NoValue)?;
             let logical_bounds = session.logical_bounds.ok_or(NativeTerminalError::NoValue)?;
             let cell_metrics = session.cell_metrics.ok_or(NativeTerminalError::NoValue)?;
-            let render_input = session_render_snapshot(session)?;
+            let render_input = session_render_snapshot(&session)?;
             // The native host defers this frame to the GPU worker, which paints whatever the
             // slot holds. Publishing the snapshot that was just computed is what makes the
             // deferred pass paint THIS frame instead of the last one the pump happened to leave.
@@ -6043,18 +6121,7 @@ impl NativeTerminalSurfaceHostState {
             )?;
             drop(hosts);
             if receipt.render_deferred && !render_input.synchronized_output {
-                let schedule_info = {
-                    let sessions = self.sessions.lock();
-                    sessions
-                        .get(session_id)
-                        .filter(|session| session.surface_attached)
-                        .map(|session| {
-                            (
-                                Arc::clone(&session.render_coordinator),
-                                Arc::clone(&session.snapshot_slot),
-                            )
-                        })
-                };
+                let schedule_info = self.attached_render_target(session_id);
                 if let Some((coordinator, slot)) = schedule_info {
                     if coordinator.schedule_render() {
                         let window = window.clone();
@@ -6095,18 +6162,7 @@ impl NativeTerminalSurfaceHostState {
         if receipt.presented || receipt.render_deferred || receipt.render_suspended {
             return;
         }
-        let schedule_info = {
-            let sessions = self.sessions.lock();
-            sessions
-                .get(session_id)
-                .filter(|session| session.surface_attached)
-                .map(|session| {
-                    (
-                        Arc::clone(&session.render_coordinator),
-                        Arc::clone(&session.snapshot_slot),
-                    )
-                })
-        };
+        let schedule_info = self.attached_render_target(session_id);
         if let Some((coordinator, slot)) = schedule_info {
             if coordinator.schedule_render() {
                 let window = window.clone();
@@ -6135,10 +6191,8 @@ impl NativeTerminalSurfaceHostState {
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         validate_session_id(session_id)?;
         let (render_coordinator, slot) = {
-            let mut sessions = self.sessions.lock();
-            let session = sessions
-                .get_mut(session_id)
-                .ok_or(NativeTerminalError::NoValue)?;
+            let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+            let mut session = handle.lock();
             if preedit.as_ref().is_some_and(|p| !p.is_empty()) {
                 let _ = session
                     .terminal
@@ -6687,11 +6741,11 @@ impl NativeTerminalSurfaceHostState {
         session_id: &str,
     ) -> Result<Option<SessionRenderInput>, NativeTerminalError> {
         validate_session_id(session_id)?;
-        let sessions = self.sessions.lock();
-        let Some(session) = sessions.get(session_id) else {
+        let Some(handle) = self.session(session_id) else {
             return Ok(None);
         };
-        session_render_snapshot(session).map(Some)
+        let render_input = session_render_snapshot(&handle.lock());
+        render_input.map(Some)
     }
 }
 
@@ -6724,19 +6778,187 @@ mod tests {
             remote_generation: None, messages,
             stream_task: tokio::spawn(std::future::pending()),
         }, None).unwrap();
-        let mut sessions = state.sessions.lock();
-        let session = sessions.get_mut(id).unwrap();
+        let handle = state.test_session(id);
+        let mut session = handle.lock();
         let retired = session.pump_generation;
         session.pump_generation += 1;
         let current = session.pump_generation;
+        let slot = Arc::clone(&session.snapshot_slot);
         session.terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Top).unwrap();
         let before = session.terminal.scrollbar().unwrap();
         assert!(before.total > before.len);
-        lock_replay_to_bottom(&mut sessions, id, retired);
-        assert_eq!(sessions.get(id).unwrap().terminal.scrollbar().unwrap().offset, before.offset);
-        lock_replay_to_bottom(&mut sessions, id, current);
-        let after = sessions.get(id).unwrap().terminal.scrollbar().unwrap();
+        drop(session);
+        lock_replay_to_bottom(&state.sessions, id, (retired, &slot));
+        assert_eq!(handle.lock().terminal.scrollbar().unwrap().offset, before.offset);
+        lock_replay_to_bottom(&state.sessions, id, (current, &slot));
+        let after = handle.lock().terminal.scrollbar().unwrap();
         assert_eq!(after.offset, after.total.saturating_sub(after.len));
+    }
+
+    #[test]
+    fn retired_pump_cannot_end_recreated_session_with_same_generation() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let id = "recreated-pump-owner";
+        state.attach_test_session_for_liveness(id, 1, None).unwrap();
+        let retired = state.test_session(id);
+        let generation = retired.lock().pump_generation;
+        let slot = Arc::clone(&retired.lock().snapshot_slot);
+        state.close_session(id);
+        state.attach_test_session_for_liveness(id, 1, None).unwrap();
+        let current = state.test_session(id);
+        assert!(!Arc::ptr_eq(&retired, &current));
+        assert_eq!(current.lock().pump_generation, generation);
+
+        // Reproduce an old pump that already left its await before close aborted it.
+        // Its remaining synchronous branch must not resolve a new lifetime by id.
+        let applied = with_session_owned_by(&state.sessions, id, (generation, &slot), |session| {
+            session.output_stream_ended = true;
+        });
+        let ended = current.lock().output_stream_ended;
+        state.close_session(id);
+        assert!(applied.is_none(), "retired pump mutated the recreated session");
+        assert!(!ended, "new session inherited the retired stream end");
+    }
+
+    #[test]
+    fn current_pump_can_end_recreated_session_with_same_generation() {
+        let state = NativeTerminalSurfaceHostState::default();
+        let id = "current-recreated-pump";
+        state.attach_test_session_for_liveness(id, 1, None).unwrap();
+        state.close_session(id);
+        state.attach_test_session_for_liveness(id, 1, None).unwrap();
+        let current = state.test_session(id);
+        let generation = current.lock().pump_generation;
+        let slot = Arc::clone(&current.lock().snapshot_slot);
+
+        let applied = with_session_owned_by(&state.sessions, id, (generation, &slot), |session| {
+            session.output_stream_ended = true;
+        });
+        let ended = current.lock().output_stream_ended;
+        state.close_session(id);
+        assert!(applied.is_some(), "current pump lost its session ownership");
+        assert!(ended, "current stream end was discarded");
+    }
+
+    #[test]
+    fn input_on_session_b_completes_while_session_a_lock_is_held() {
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("lock-a", 1, None).unwrap();
+        state.attach_test_session_for_liveness("lock-b", 1, None).unwrap();
+        let session_a = state.test_session("lock-a");
+        let held_a = session_a.lock();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = state.clone();
+        let input = std::thread::spawn(move || {
+            let bytes = worker.encode_attached_input(
+                "lock-b",
+                &NativeTerminalInput::Text { text: "b".into() },
+            );
+            done_tx.send(bytes).unwrap();
+        });
+
+        // A stays locked until B's result arrives, so B can only answer if it never waits on A.
+        let bytes = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("input on session B must not wait on session A's lock")
+            .expect("encode input for session B");
+        assert_eq!(bytes, b"b");
+        drop(held_a);
+        input.join().unwrap();
+    }
+
+    #[test]
+    fn session_a_lock_does_not_hold_the_sessions_map() {
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("map-a", 1, None).unwrap();
+        let session_a = state.test_session("map-a");
+        let _held_a = session_a.lock();
+        assert!(state.sessions.try_lock().is_some(), "session A's lock must not hold the map");
+        state.attach_test_session_for_liveness("map-b", 1, None).unwrap();
+        assert_eq!(state.session_attempt_generation("map-b"), Some(0));
+    }
+
+    #[test]
+    fn idle_pump_blocks_without_pending_timed_work() {
+        assert_eq!(pump_idle_wakeup(false, false), None);
+        assert_eq!(pump_idle_wakeup(true, false), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(false, true), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(true, true), Some(AGENT_DETECT_TRAILING_IDLE));
+    }
+
+    fn output_message(sequence: u64, data: &'static [u8]) -> DaemonStreamMessage<'static> {
+        DaemonStreamMessage::Output {
+            session_id: "batch".into(),
+            sequence,
+            data: data.into(),
+            metrics_read_unix_micros: None,
+        }
+    }
+
+    #[test]
+    fn queued_output_drains_into_one_batch_and_stops_at_other_messages() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tx.try_send(output_message(2, b"b")).unwrap();
+        tx.try_send(output_message(3, b"c")).unwrap();
+        tx.try_send(DaemonStreamMessage::Exit {
+            session_id: "batch".into(),
+            exit_code: Some(0),
+            incarnation: None,
+        })
+        .unwrap();
+        tx.try_send(output_message(4, b"d")).unwrap();
+
+        let (batch, next) = drain_output_batch(1, b"a".as_slice().into(), &mut rx);
+        let sequences: Vec<u64> = batch.iter().map(|(sequence, _)| *sequence).collect();
+        assert_eq!(sequences, vec![1, 2, 3]);
+        assert!(matches!(next, Some(DaemonStreamMessage::Exit { .. })));
+        assert!(matches!(rx.try_recv(), Ok(DaemonStreamMessage::Output { sequence: 4, .. })));
+    }
+
+    #[test]
+    fn queued_output_batch_is_bounded() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(OUTPUT_BATCH_MAX * 2);
+        for sequence in 2..=(OUTPUT_BATCH_MAX as u64 + 1) {
+            tx.try_send(output_message(sequence, b"x")).unwrap();
+        }
+        let (batch, next) = drain_output_batch(1, b"x".as_slice().into(), &mut rx);
+        assert_eq!(batch.len(), OUTPUT_BATCH_MAX);
+        assert!(next.is_none());
+        assert!(matches!(rx.try_recv(), Ok(DaemonStreamMessage::Output { .. })));
+    }
+
+    #[test]
+    fn output_batch_feeds_only_past_the_watermark_without_publishing_per_chunk() {
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("batch-feed", 1, Some(1)).unwrap();
+        let handle = state.test_session("batch-feed");
+        let mut session = handle.lock();
+        session.layout = Some(
+            NativeTerminalBoundsRequest {
+                session_id: "batch-feed".into(),
+                bounds: LogicalBounds { x: 0.0, y: 0.0, width: 640.0, height: 384.0, scale_factor: 1.0 },
+            }
+            .layout(font_manager::derived_cell_metrics())
+            .unwrap(),
+        );
+        session.logical_bounds =
+            Some(LogicalBounds { x: 0.0, y: 0.0, width: 640.0, height: 384.0, scale_factor: 1.0 });
+        let batch: Vec<OutputChunk> = vec![
+            (1, b"stale".as_slice().into()),
+            (2, b"first ".as_slice().into()),
+            (3, b"second".as_slice().into()),
+        ];
+        let generation_before = session.snapshot_slot.generation();
+
+        assert_eq!(feed_output_batch(&mut session, "batch-feed", &batch), Some(3));
+        assert_eq!(session.snapshot_slot.generation(), generation_before);
+        session.publish_frame();
+        assert_eq!(session.snapshot_slot.generation(), generation_before + 1);
+        assert_eq!(session.last_sequence, Some(3));
+        assert!(session.terminal.search_grid("stale", false).unwrap().is_empty());
+        assert!(!session.terminal.search_grid("first second", false).unwrap().is_empty());
+        assert_eq!(feed_output_batch(&mut session, "batch-feed", &batch), None);
     }
 
     #[tokio::test]
@@ -6966,11 +7188,9 @@ mod tests {
                 .expect("prepare unchanged 80x24 grid");
             assert_eq!((layout.cols, layout.rows), (80, 24));
         }
-        let mut sessions = state.sessions.lock();
-        let terminal = &mut sessions
-            .get_mut(session_id)
-            .expect("prepared session")
-            .terminal;
+        let handle = state.test_session(session_id);
+        let mut session = handle.lock();
+        let terminal = &mut session.terminal;
         terminal.discard_buffered_pty_writes();
         terminal
             .feed(b"\x1b[16t")
@@ -7146,7 +7366,7 @@ mod tests {
                 .unwrap();
             let events = Arc::new(Mutex::new(Vec::new()));
             let hosts = Arc::downgrade(&state.hosts);
-            let sessions = Arc::downgrade(&state.sessions);
+            let session = Arc::downgrade(&state.test_session(&request.session_id));
             let host = NativeTerminalSurfaceHost {
                 frame_target: HostFrameTarget::Injected(InjectedFrameTarget {
                     acquisitions: acquisitions.into(),
@@ -7159,7 +7379,7 @@ mod tests {
                             "presentation must hold host ownership"
                         );
                         assert!(
-                            sessions.upgrade().unwrap().try_lock().is_some(),
+                            session.upgrade().unwrap().try_lock().is_some(),
                             "snapshot session guard must be released"
                         );
                     }),
@@ -7243,7 +7463,11 @@ mod tests {
                 "dispatch after host guard release"
             );
             assert!(
-                self.state.sessions.try_lock().is_some(),
+                self.state.sessions.try_lock().is_some()
+                    && self
+                        .state
+                        .session(&self.request.session_id)
+                        .is_none_or(|session| !session.is_locked()),
                 "dispatch after session guard release"
             );
             task(); // Execute the submitted main-thread task; never schedule another render here.
@@ -7266,7 +7490,7 @@ mod tests {
             daemon_epoch: "1".into(), frontend_session_id: "frontend".into(), pane_identity: "pane".into(),
             binding_key: "binding".into(), attempt_generation: 1,
         };
-        harness.state.sessions.lock().get_mut(&harness.request.session_id).unwrap().active_attach_tuple = Some(tuple.clone());
+        harness.state.test_session(&harness.request.session_id).lock().active_attach_tuple = Some(tuple.clone());
         let (sender, mut receipts) = tokio::sync::mpsc::unbounded_channel();
         let listener = harness._app.listen(crate::ipc::native_terminal::NATIVE_TERMINAL_PRESENTATION_RECEIPT_EVENT, move |event| {
             sender.send(event.payload().to_string()).unwrap();
@@ -7476,7 +7700,7 @@ mod tests {
             "no waiter may observe a presentation for an attachment that is gone"
         );
 
-        harness.state.sessions.lock()[&harness.request.session_id].publish_frame();
+        harness.state.test_session(&harness.request.session_id).lock().publish_frame();
         let live_generation = slot.generation();
         assert!(
             slot.publish_presentation(live_generation, live_epoch, None, stale_receipt),
@@ -8187,7 +8411,7 @@ mod tests {
             .set_focus(&harness.window, &harness.request.session_id, true)
             .unwrap();
         assert!(focused.presented);
-        assert!(harness.state.sessions.lock()[&harness.request.session_id].focused);
+        assert!(harness.state.test_session(&harness.request.session_id).lock().focused);
         assert!(!harness
             .state
             .is_session_render_pending(&harness.request.session_id));
@@ -8395,7 +8619,7 @@ mod tests {
             .set_focus(&harness.window, &harness.request.session_id, true)
             .unwrap();
         assert!(!receipt.presented);
-        assert!(harness.state.sessions.lock()[&harness.request.session_id].focused);
+        assert!(harness.state.test_session(&harness.request.session_id).lock().focused);
         harness.execute_dispatched().await;
         assert_eq!(
             *harness.events.lock(),
@@ -9013,12 +9237,12 @@ mod tests {
         let slot = state.session_snapshot_slot(session_b).unwrap();
         coordinator.schedule_render();
 
-        // Thread A holds the global sessions mutex (simulating VT feed or agent detect on pane A)
+        // Thread A holds pane A's session lock (simulating VT feed or agent detect on pane A)
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let sessions = Arc::clone(&state.sessions);
+        let session_a_handle = state.test_session(session_a);
         std::thread::spawn(move || {
-            let guard = sessions.lock();
+            let guard = session_a_handle.lock();
             held_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             drop(guard);
@@ -9146,7 +9370,7 @@ mod tests {
             None,
             None,
         ).unwrap();
-        let pump = state.sessions.lock().get_mut(session_id).unwrap().pump_task.take().unwrap();
+        let pump = state.test_session(session_id).lock().pump_task.take().unwrap();
         drop(output);
         tokio::time::timeout(std::time::Duration::from_secs(3), pump).await.unwrap().unwrap();
         let result = state.encode_attached_input(session_id, &NativeTerminalInput::Text { text: "x".into() });
@@ -9654,7 +9878,7 @@ mod tests {
             .get_receipt(&window.as_ref().window(), "receipt-scale")
             .expect("session receipt");
         assert_eq!(
-            state.sessions.lock()["receipt-scale"]
+            state.test_session("receipt-scale").lock()
                 .logical_bounds
                 .unwrap()
                 .scale_factor,
@@ -9931,7 +10155,7 @@ mod tests {
             vec![("blocked".to_string(), "omo".to_string())]
         );
 
-        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
+        let mut updates = state.test_session(session_id).lock().update_sender.subscribe();
         tx.send(DaemonStreamMessage::Output {
             session_id: session_id.into(),
             sequence: 2,
@@ -9944,7 +10168,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 updates.changed().await.expect("native pump alive");
-                if state.sessions.lock()[session_id].last_sequence == Some(2) {
+                if state.test_session(session_id).lock().last_sequence == Some(2) {
                     break;
                 }
             }
@@ -10025,7 +10249,7 @@ mod tests {
         // The agent's own leftover frame arrives after its idle report. The barrier is the
         // detection pass itself: `agent_detect_pending` clears only once this screen has been
         // through a detection attempt, whether inline or on the pump's trailing edge.
-        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
+        let mut updates = state.test_session(session_id).lock().update_sender.subscribe();
         tx.send(DaemonStreamMessage::Output {
             session_id: session_id.into(),
             sequence: 2,
@@ -10037,8 +10261,8 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 updates.changed().await.expect("native pump alive");
-                let sessions = state.sessions.lock();
-                let session = &sessions[session_id];
+                let handle = state.test_session(session_id);
+                let session = handle.lock();
                 if session.last_sequence == Some(2) && !session.agent_detect_pending {
                     break;
                 }
@@ -10127,7 +10351,7 @@ mod tests {
         // still the visible screen after the release. Inference is armed again here, so this is
         // exactly the content that would re-promote the pane to "working" with no agent alive.
         // The detection pass over this screen is the barrier, not elapsed time.
-        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
+        let mut updates = state.test_session(session_id).lock().update_sender.subscribe();
         tx.send(DaemonStreamMessage::Output {
             session_id: session_id.into(),
             sequence: 2,
@@ -10139,8 +10363,8 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 updates.changed().await.expect("native pump alive");
-                let sessions = state.sessions.lock();
-                let session = &sessions[session_id];
+                let handle = state.test_session(session_id);
+                let session = handle.lock();
                 if session.last_sequence == Some(2) && !session.agent_detect_pending {
                     break;
                 }
@@ -10269,7 +10493,7 @@ mod tests {
 
         // A repeat of the same conversation carries no news and must not be forwarded. The
         // following output frame is the barrier that proves the repeat was already processed.
-        let mut updates = state.sessions.lock()[session_id].update_sender.subscribe();
+        let mut updates = state.test_session(session_id).lock().update_sender.subscribe();
         tx.send(report("conversation-after-new"))
             .await
             .expect("send repeated agent state report");
@@ -10284,7 +10508,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 updates.changed().await.expect("native pump alive");
-                if state.sessions.lock()[session_id].last_sequence == Some(2) {
+                if state.test_session(session_id).lock().last_sequence == Some(2) {
                     break;
                 }
             }
@@ -10399,12 +10623,12 @@ mod tests {
             .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
             .expect("attach daemon session with reported pty size");
 
-        let sessions = state.sessions.lock();
-        let sess = sessions.get(session_id).unwrap();
+        let handle = state.test_session(session_id);
+        let sess = handle.lock();
         assert_eq!(sess.terminal.dimensions().unwrap(), (120, 30));
         let snap = sess.terminal.render_snapshot().unwrap();
         assert_eq!(snap.grid[0][99].text, "X");
-        drop(sessions);
+        drop(sess);
         state.teardown();
     }
 
@@ -10443,13 +10667,13 @@ mod tests {
             .attach_daemon_attachment::<tauri::Wry>(session_id, attachment, None)
             .expect("attach daemon session with segmented history");
 
-        let sessions = state.sessions.lock();
-        let sess = sessions.get(session_id).unwrap();
+        let handle = state.test_session(session_id);
+        let sess = handle.lock();
         assert_eq!(sess.terminal.dimensions().unwrap(), (120, 30));
         let snap = sess.terminal.render_snapshot().unwrap();
         assert_eq!(snap.grid[0][0].text, "A");
         assert_eq!(snap.grid[0][99].text, "X");
-        drop(sessions);
+        drop(sess);
         state.teardown();
     }
 
@@ -10553,8 +10777,8 @@ mod tests {
 
         // Now scroll up to half of scrollback
         let initial_sb = {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).unwrap();
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             session.terminal.scrollbar().unwrap()
         };
         let initial_max = initial_sb.total.saturating_sub(initial_sb.len);
@@ -10562,8 +10786,8 @@ mod tests {
 
         let half_offset = (initial_max / 2) as usize;
         {
-            let mut sessions = state.sessions.lock();
-            let session = sessions.get_mut(session_id).unwrap();
+            let handle = state.test_session(session_id);
+            let mut session = handle.lock();
             session
                 .terminal
                 .scroll_viewport(crate::native_terminal::ScrollViewport::Row(half_offset))
@@ -10577,8 +10801,8 @@ mod tests {
 
         // Check that after resize, we are still scrolled up near half rather than reset to 0 or max_offset
         let new_sb = {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).unwrap();
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             session.terminal.scrollbar().unwrap()
         };
         let new_max = new_sb.total.saturating_sub(new_sb.len);
@@ -10650,8 +10874,8 @@ mod tests {
 
         let assert_bottom_locked = |label: &str| {
             let sb = {
-                let sessions = state.sessions.lock();
-                let session = sessions.get(session_id).unwrap();
+                let handle = state.test_session(session_id);
+                let session = handle.lock();
                 session.terminal.scrollbar().unwrap()
             };
             let max_offset = sb.total.saturating_sub(sb.len);
@@ -10718,7 +10942,7 @@ mod tests {
         // paint decision in one poll with no await between, so once the last chunk is applied
         // its scheduling decision has been made too.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while harness.state.sessions.lock().get(&session_id).and_then(|s| s.last_sequence)
+            while read_session(&harness.state.sessions, &session_id, |s| s.last_sequence).flatten()
                 != Some(3)
             {
                 tokio::task::yield_now().await;
@@ -10952,8 +11176,8 @@ mod tests {
         );
 
         let dims = {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             session.terminal.dimensions().expect("terminal dimensions")
         };
         assert_eq!(
@@ -11005,8 +11229,8 @@ mod tests {
         );
 
         let dims = {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             session.terminal.dimensions().expect("terminal dimensions")
         };
         assert_eq!(dims, (80, 24), "terminal should keep existing dimensions");
@@ -11056,8 +11280,8 @@ mod tests {
             .expect("attach with bounds");
 
         let buffered_writes = {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             session.terminal.buffered_pty_writes()
         };
 
@@ -11099,8 +11323,8 @@ mod tests {
             .expect("attach reconstruction");
 
         let buffered_writes = {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             session.terminal.buffered_pty_writes()
         };
 
@@ -11204,8 +11428,8 @@ mod tests {
 
         // Verify initial content and scrollback are present
         {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             assert!(
                 session.terminal.scrollback_rows().expect("scrollback rows") > 0,
                 "terminal should have scrollback rows from initial 30 lines"
@@ -11221,6 +11445,7 @@ mod tests {
         }
 
         // Deliver a gap message through the stream pump
+        let mut updates = state.test_session(session_id).lock().update_sender.subscribe();
         tx.send(DaemonStreamMessage::Gap {
             session_id: session_id.into(),
             requested_after_sequence: 1,
@@ -11229,25 +11454,19 @@ mod tests {
         .await
         .expect("send gap message");
 
-        // Await processing of the gap message by waiting for last_sequence update
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let mut processed = false;
-        while std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let sessions = state.sessions.lock();
-            if let Some(session) = sessions.get(session_id) {
-                if session.last_sequence.is_some_and(|seq| seq >= 99) {
-                    processed = true;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                updates.changed().await.expect("pump publishes gap processing");
+                if state.test_session(session_id).lock().last_sequence.is_some_and(|seq| seq >= 99) {
                     break;
                 }
             }
-        }
-        assert!(processed, "pump task should have processed the gap message");
+        }).await.expect("pump task should have processed the gap message");
 
         // Assert earlier content and scrollback are STILL present!
         {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             assert!(
                 session.terminal.scrollback_rows().expect("scrollback rows") > 0,
                 "scrollback rows must survive the gap message"
@@ -11306,8 +11525,8 @@ mod tests {
 
         // Verify initial content and scrollback are present
         {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             assert!(
                 session.terminal.scrollback_rows().expect("scrollback rows") > 0,
                 "terminal should have scrollback rows from initial 30 lines"
@@ -11324,8 +11543,8 @@ mod tests {
 
         // Scroll the viewport up so the user is NOT at the bottom
         let offset_before = {
-            let mut sessions = state.sessions.lock();
-            let session = sessions.get_mut(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let mut session = handle.lock();
             session
                 .terminal
                 .scroll_viewport(crate::native_terminal::ScrollViewport::Top)
@@ -11341,6 +11560,7 @@ mod tests {
         };
 
         // Deliver a Lagged recovery that classify_replay must rebuild (replay_is_delta: None)
+        let mut updates = state.test_session(session_id).lock().update_sender.subscribe();
         tx.send(DaemonStreamMessage::Lagged {
             session_id: session_id.into(),
             requested_after_sequence: 1,
@@ -11354,25 +11574,19 @@ mod tests {
         .await
         .expect("send lagged recovery");
 
-        // Await processing of the lagged recovery by waiting for last_sequence update
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let mut processed = false;
-        while std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let sessions = state.sessions.lock();
-            if let Some(session) = sessions.get(session_id) {
-                if session.last_sequence.is_some_and(|seq| seq >= 60) {
-                    processed = true;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                updates.changed().await.expect("pump publishes lagged recovery");
+                if state.test_session(session_id).lock().last_sequence.is_some_and(|seq| seq >= 60) {
                     break;
                 }
             }
-        }
-        assert!(processed, "pump task should have processed the lagged message");
+        }).await.expect("pump task should have processed the lagged message");
 
         // Assert scrollback survived, resync notice landed, replay content landed, and viewport did not jump
         {
-            let sessions = state.sessions.lock();
-            let session = sessions.get(session_id).expect("session exists");
+            let handle = state.test_session(session_id);
+            let session = handle.lock();
             assert!(
                 session.terminal.scrollback_rows().expect("scrollback rows") > 0,
                 "scrollback rows must survive the lagged rebuild"
