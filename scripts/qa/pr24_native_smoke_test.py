@@ -125,5 +125,20 @@ class TerminalFixtureTests(unittest.TestCase):
                 smoke.validated_receipt(path, 'MARKER')
 
 
+class SkipSetupGuardTests(unittest.TestCase):
+    def test_reviewed_owned_active_geometry_has_only_skip_target(self):
+        self.assertEqual(smoke.guarded_skip_setup_point(1278, 850, 20, 20, 42, 42), (530, 599))
+
+    def test_changed_geometry_is_not_scaled_or_guessed(self):
+        for width, height in [(1280, 850), (1278, 849), (640, 480)]:
+            with self.subTest(size=(width, height)), self.assertRaises(RuntimeError):
+                smoke.guarded_skip_setup_point(width, height, 20, 20, 42, 42)
+
+    def test_foreign_or_unfocused_window_is_rejected(self):
+        for expected, owner, window, active in [(20, 21, 42, 42), (20, 20, 42, 43), (0, 0, 42, 42)]:
+            with self.subTest(owner=owner, active=active), self.assertRaises(RuntimeError):
+                smoke.guarded_skip_setup_point(1278, 850, expected, owner, window, active)
+
+
 if __name__ == '__main__':
     unittest.main()

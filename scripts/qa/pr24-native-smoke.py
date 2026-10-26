@@ -103,6 +103,18 @@ def validated_receipt(path, marker):
     return data
 
 
+def guarded_skip_setup_point(width, height, expected_pid, owner_pid, window_id, active_window_id):
+    # Calibrated against the reviewed first-run screenshot for this fixed Xvfb fixture.
+    # WelcomeWizard.tsx's visible onboarding-skip button invokes normal onSkip; this
+    # is NOT the sign-in, Continue, install-CLI, or permission-grant affordance.
+    # Refuse changed geometry/ownership rather than scale coordinates or guess.
+    if (width, height) != (1278, 850):
+        raise RuntimeError('Skip setup coordinate requires reviewed 1278x850 client geometry')
+    if expected_pid <= 0 or owner_pid != expected_pid or active_window_id != window_id:
+        raise RuntimeError('Skip setup requires the active app-owned window')
+    return 530, 599
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['binary', 'ui-dist', 'evidence-dir', 'isolation-root']:
@@ -252,6 +264,28 @@ def main():
         run(['xdotool', 'windowactivate', '--sync', window], env=env)
         await_rendered_content()
         capture('01-startup')
+        geometry = run(['xdotool', 'getwindowgeometry', '--shell', window], env=env).stdout
+        values = dict(line.split('=', 1) for line in geometry.splitlines() if '=' in line)
+        owner_pid = int(run(['xdotool', 'getwindowpid', window], env=env).stdout.strip())
+        active_window = int(run(['xdotool', 'getactivewindow'], env=env).stdout.strip())
+        x, y = guarded_skip_setup_point(int(values['WIDTH']), int(values['HEIGHT']),
+                                       app.pid, owner_pid, int(window), active_window)
+        screenshot_size = run(['identify', '-format', '%w %h',
+                               str(evidence / '01-startup.png')], env=env).stdout.strip()
+        if screenshot_size != '1278 850':
+            raise RuntimeError('Skip setup screenshot geometry differs from reviewed client')
+        # Exactly one visible normal-UI Skip setup click. Never enter account details,
+        # submit Sign in/Continue, or fabricate onboarding state through IPC/storage.
+        run(['xdotool', 'mousemove', '--sync', '--window', window, str(x), str(y),
+             'click', '1'], env=env)
+        result['setup_action'] = {'action': 'visible Skip setup click', 'window': window,
+                                  'client_x': x, 'client_y': y}
+        time.sleep(2)
+        capture('01b-setup-skipped')
+        skipped_changes = changed_pixels(pixel_frames['01-startup'], pixel_frames['01b-setup-skipped'])
+        result['setup_action']['changed_pixels'] = skipped_changes
+        if skipped_changes < 500:
+            raise RuntimeError('Skip setup click did not produce sufficient visible change')
         run(['xdotool', 'key', '--clearmodifiers', 'ctrl+o'], env=env)
         time.sleep(1)
         capture('02-add-project-key')
@@ -259,7 +293,7 @@ def main():
         time.sleep(1)
         capture('03-escape-key')
         result['interaction_pixel_changes'] = {
-            'add_project': changed_pixels(pixel_frames['01-startup'], pixel_frames['02-add-project-key']),
+            'add_project': changed_pixels(pixel_frames['01b-setup-skipped'], pixel_frames['02-add-project-key']),
             'escape': changed_pixels(pixel_frames['02-add-project-key'], pixel_frames['03-escape-key']),
         }
         if any(count < 500 for count in result['interaction_pixel_changes'].values()):
