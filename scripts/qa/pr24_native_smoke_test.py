@@ -1,5 +1,6 @@
 """Pure guard regressions; do not start displays, applications, or sockets."""
 import importlib.util
+import ast
 import base64
 import tempfile
 import subprocess
@@ -290,6 +291,42 @@ class TerminationDiagnosticTests(unittest.TestCase):
                     smoke.interrupted(signum, None)
                 except Exception:
                     self.fail('termination swallowed by diagnostic handler')
+
+
+class SearchReviewContractTests(unittest.TestCase):
+    def test_linux_search_uses_non_readline_chord(self):
+        self.assertEqual(smoke.LINUX_SEARCH_CHORD, 'ctrl+shift+f')
+
+    def test_screenshots_never_claim_automated_search_acceptance(self):
+        review = smoke.search_review_requirements()
+        self.assertIs(review['automated_search_verified'], False)
+        self.assertEqual(review['status'], 'REQUIRES_VISUAL_REVIEW')
+        self.assertEqual(len(review['required_checks']), 4)
+        self.assertTrue(any('1/1' in check for check in review['required_checks']))
+
+
+class SearchInputSequenceTests(unittest.TestCase):
+    def test_each_search_open_is_captured_before_query_and_cancel_is_captured(self):
+        source = Path(smoke.__file__).read_text()
+        tree = ast.parse(source)
+        events = []
+        for call in sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)), key=lambda node: node.lineno):
+            if not isinstance(call.func, ast.Name) or not call.args:
+                continue
+            if call.func.id == 'capture' and isinstance(call.args[0], ast.Constant):
+                name = call.args[0].value
+                if name in ['04b-search-overlay-before-query', '06-search-cancelled', '07b-search-overlay-before-repeat-query']:
+                    events.append(name)
+            if call.func.id == 'run' and isinstance(call.args[0], ast.List):
+                arguments = call.args[0].elts
+                if any(isinstance(value, ast.Name) and value.id == 'LINUX_SEARCH_CHORD' for value in arguments):
+                    events.append('open-search')
+                if any(isinstance(value, ast.Name) and value.id == 'marker' for value in arguments):
+                    events.append('type-query')
+                self.assertFalse(any(isinstance(value, ast.Constant) and value.value == 'ctrl+a' for value in arguments))
+        self.assertEqual(events, ['open-search', '04b-search-overlay-before-query', 'type-query',
+                                  '06-search-cancelled', 'open-search',
+                                  '07b-search-overlay-before-repeat-query', 'type-query'])
 
 
 if __name__ == '__main__':

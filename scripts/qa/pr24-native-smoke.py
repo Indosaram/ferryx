@@ -221,6 +221,20 @@ class WaitTimeout(RuntimeError):
     pass
 
 
+LINUX_SEARCH_CHORD = 'ctrl+shift+f'
+
+
+def search_review_requirements():
+    # Pixel variation alone cannot distinguish a search overlay from terminal output.
+    # No browser/IPC mock or guessed accessibility result may turn capture into PASS.
+    return {'automated_search_verified': False, 'status': 'REQUIRES_VISUAL_REVIEW',
+            'required_checks': ['search overlay visible before query typing',
+                                'unique marker query and 1/1 count visible',
+                                'Escape closes the overlay',
+                                'reopened overlay again shows marker and 1/1'],
+            'shortcut': LINUX_SEARCH_CHORD}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['binary', 'ui-dist', 'evidence-dir', 'isolation-root']:
@@ -522,7 +536,10 @@ def main():
         shutil.copyfile(receipt_path, evidence / 'pty-receipt.json')
         time.sleep(2)
         capture('04-terminal-marker-image')
-        run(['xdotool', 'key', '--clearmodifiers', 'ctrl+f'], env=env)
+        result['search_review'] = search_review_requirements()
+        run(['xdotool', 'key', '--clearmodifiers', LINUX_SEARCH_CHORD], env=env)
+        time.sleep(1)
+        capture('04b-search-overlay-before-query')
         run(['xdotool', 'type', '--clearmodifiers', '--delay', '5', marker], env=env)
         time.sleep(2)
         capture('05-terminal-search')
@@ -538,8 +555,11 @@ def main():
         run(['xdotool', 'windowsize', '--sync', window, str(width), str(height)], env=env)
         time.sleep(2)
         capture('07-image-after-redraw')
-        run(['xdotool', 'key', '--clearmodifiers', 'ctrl+f'], env=env)
-        run(['xdotool', 'key', '--clearmodifiers', 'ctrl+a'], env=env)
+        run(['xdotool', 'key', '--clearmodifiers', LINUX_SEARCH_CHORD], env=env)
+        time.sleep(1)
+        capture('07b-search-overlay-before-repeat-query')
+        # TerminalSearchOverlay focuses/selects its input on mount. Do not send
+        # Ctrl+A speculatively: if the overlay is absent it would edit the shell line.
         run(['xdotool', 'type', '--clearmodifiers', '--delay', '5', marker], env=env)
         time.sleep(2)
         capture('08-search-repeat')
@@ -550,6 +570,7 @@ def main():
             'image_after_resize_redraw': 'REQUIRES_VISUAL_REVIEW',
             'search_cancel_and_repeat': 'REQUIRES_VISUAL_REVIEW',
             'search_expected_1_of_1': 'REQUIRES_VISUAL_REVIEW',
+            'automated_search_verified': False,
         }
         # Numeric metadata only; no argv/environment or credentials are recorded.
         for _ in range(10):

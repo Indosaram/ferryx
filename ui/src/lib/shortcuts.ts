@@ -364,7 +364,10 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "terminal.search",
     title: "Find in terminal",
     group: "Terminal Panes",
-    binding: { key: "f", mod: true },
+    // Bare Ctrl+F belongs to readline while the terminal owns focus off macOS.
+    binding: { key: "f", mod: true, nonMac: { shift: true } },
+    // Preserve the old chord outside terminals; the yield policy still protects the shell.
+    aliases: [{ key: "f", mod: true }],
     source: "original",
   },
   {
@@ -642,7 +645,9 @@ export function shortcutAliasesLabels(
 ): string[] {
   const shortcut = resolvedShortcut(id, overrides, preset, isMac);
   if (!shortcut?.aliases?.length) return [];
-  return shortcut.aliases.map((alias) => formatBindingLabel(alias, isMac));
+  const primary = formatBindingLabel(shortcut.binding, isMac);
+  // Platform-specific primary bindings can coincide with a compatibility alias.
+  return shortcut.aliases.map((alias) => formatBindingLabel(alias, isMac)).filter((label) => label !== primary);
 }
 
 export function useShortcuts(
