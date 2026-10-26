@@ -490,6 +490,9 @@ fn handshake_error_for_response(message: String, code: Option<&str>) -> IpcError
 struct RequestAttemptError {
     error: IpcError,
     may_have_been_delivered: bool,
+    /// The peer closed before any reply byte arrived. Delivery is still ambiguous:
+    /// the request may have executed before the connection or acknowledgment was lost.
+    peer_closed_before_reply: bool,
 }
 
 impl RequestAttemptError {
@@ -497,6 +500,7 @@ impl RequestAttemptError {
         Self {
             error,
             may_have_been_delivered: false,
+            peer_closed_before_reply: false,
         }
     }
 
@@ -504,6 +508,31 @@ impl RequestAttemptError {
         Self {
             error,
             may_have_been_delivered: true,
+            peer_closed_before_reply: false,
+        }
+    }
+
+    fn peer_closed(error: IpcError) -> Self {
+        Self {
+            peer_closed_before_reply: true,
+            ..Self::ambiguous(error)
+        }
+    }
+
+    /// The error a failed write or flush is reported as.
+    fn from_send_error(error: std::io::Error, what: &str) -> Self {
+        let closed = matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+        );
+        let error = IpcError::new(IpcErrorCode::IoError, format!("Request {what} failed: {error}"));
+        if closed {
+            Self::peer_closed(error)
+        } else {
+            Self::ambiguous(error)
         }
     }
 
@@ -915,18 +944,11 @@ impl ActiveConnection {
         self.writer
             .write_all(req_json.as_bytes())
             .await
-            .map_err(|e| {
-                RequestAttemptError::ambiguous(IpcError::new(
-                    IpcErrorCode::IoError,
-                    format!("Request write failed: {e}"),
-                ))
-            })?;
-        self.writer.flush().await.map_err(|e| {
-            RequestAttemptError::ambiguous(IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Request flush failed: {e}"),
-            ))
-        })?;
+            .map_err(|e| RequestAttemptError::from_send_error(e, "write"))?;
+        self.writer
+            .flush()
+            .await
+            .map_err(|e| RequestAttemptError::from_send_error(e, "flush"))?;
         // A daemon that never answers must not hold the shared connection mutex
         // forever: without a response timeout, one stalled handler on the daemon
         // silently deadlocks every subsequent terminal request in this process.
@@ -940,13 +962,24 @@ impl ActiveConnection {
                 )))
             }
             Ok(result) => result.map_err(|e| {
-                RequestAttemptError::ambiguous(IpcError::new(
+                let error = IpcError::new(
                     IpcErrorCode::IoError,
                     format!("Response read failed: {e}"),
-                ))
+                );
+                if line.is_empty() && e.kind() == std::io::ErrorKind::ConnectionReset {
+                    RequestAttemptError::peer_closed(error)
+                } else {
+                    RequestAttemptError::ambiguous(error)
+                }
             })?,
         };
-        if bytes_read == 0 || line.trim().is_empty() {
+        if bytes_read == 0 {
+            return Err(RequestAttemptError::peer_closed(IpcError::new(
+                IpcErrorCode::IoError,
+                "Connection closed by daemon (EOF)",
+            )));
+        }
+        if line.trim().is_empty() {
             return Err(RequestAttemptError::ambiguous(IpcError::new(
                 IpcErrorCode::IoError,
                 "Connection closed by daemon (EOF)",
@@ -1057,6 +1090,34 @@ pub(crate) fn upgrade_route(hello: Option<&crate::daemon::control::HelloReply>) 
     } else {
         UpgradeRoute::Unsupported
     }
+}
+
+/// How long a GUI waits before it asks again after an upgrade attempt that could not reach a
+/// definitive answer.
+const UPGRADE_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// How long a local write or resize refused with HANDOVER_BUSY is retried. The refusal is given
+/// only while a handover commit is decided, and nothing was written.
+const HANDOVER_BUSY_RETRY_BUDGET: Duration = Duration::from_secs(2);
+
+/// The error a daemon `Error` reply to a local write or resize is reported as. The daemon's code
+/// is kept; a HANDOVER_BUSY refusal is marked retryable with nothing written.
+fn local_control_error(message: String, code: Option<String>) -> IpcError {
+    match code.as_deref() {
+        Some(crate::daemon::handover::HANDOVER_BUSY) => {
+            IpcError::new(IpcErrorCode::from_code_str(crate::daemon::handover::HANDOVER_BUSY), message)
+                .with_details(json!({ "inputWritten": false, "kind": "busy" }))
+        }
+        Some(code) => IpcError::new(IpcErrorCode::from_code_str(code), message),
+        None => IpcError::new(IpcErrorCode::InternalError, message),
+    }
+}
+
+fn is_handover_busy(response: &DaemonResponse) -> bool {
+    matches!(
+        response,
+        DaemonResponse::Error { code: Some(code), .. } if code == crate::daemon::handover::HANDOVER_BUSY
+    )
 }
 
 /// Result of [`request_upgrade_via_control`].
@@ -1335,6 +1396,12 @@ pub struct DaemonClient {
     local_connections: Arc<parking_lot::Mutex<HashMap<String, Arc<LocalSessionSlot>>>>,
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
     upgrade_requested: Arc<AtomicBool>,
+    /// Set when an upgrade attempt ended transiently: the latch was released, and no new attempt
+    /// is admitted before this instant.
+    upgrade_retry_after: Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
+    /// Sessions classified local, keyed by session id, with the daemon epoch they were classified
+    /// under. An entry is valid only while the client still talks to that epoch.
+    local_control_verified: Arc<parking_lot::Mutex<HashMap<String, u64>>>,
     spawn_lock: Arc<Mutex<()>>,
 }
 
@@ -1356,6 +1423,8 @@ impl DaemonClient {
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
+            upgrade_retry_after: Arc::new(parking_lot::Mutex::new(None)),
+            local_control_verified: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             spawn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -1370,6 +1439,8 @@ impl DaemonClient {
             local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
+            upgrade_retry_after: Arc::new(parking_lot::Mutex::new(None)),
+            local_control_verified: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             spawn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -1380,6 +1451,7 @@ impl DaemonClient {
         *self.spawn_connection.lock().await = None;
         self.local_connections.lock().clear();
         self.remote_connections.lock().clear();
+        self.local_control_verified.lock().clear();
     }
 
     async fn split_connect_until(
@@ -2555,6 +2627,8 @@ impl DaemonClient {
             local_connections: Arc::clone(&self.local_connections),
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::clone(&self.upgrade_requested),
+            upgrade_retry_after: Arc::clone(&self.upgrade_retry_after),
+            local_control_verified: Arc::clone(&self.local_control_verified),
             spawn_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -2582,11 +2656,7 @@ impl DaemonClient {
             return;
         }
 
-        if self
-            .upgrade_requested
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
+        if !self.admit_upgrade_attempt() {
             return;
         }
 
@@ -2594,62 +2664,110 @@ impl DaemonClient {
         let target_client = self.clone();
         let control_dir = self.control_runtime_dir();
 
-        tokio::spawn(async move {
-            // Handing a busy daemon of a lossy version over to this binary would kill the
-            // terminals it serves, so that daemon keeps running until it is idle. The flag stays
-            // set, so this GUI checks once per run instead of on every reconnect.
-            match temp_client.list_sessions().await {
-                Ok(sessions)
-                    if handover_would_lose_sessions(daemon_version.as_deref(), sessions.len()) =>
-                {
-                    tracing::warn!(
-                        daemon_version = ?daemon_version,
-                        live_sessions = sessions.len(),
-                        "Deferring the daemon upgrade: this daemon version loses sessions during a handover, so it is replaced only once it has none"
-                    );
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "Deferring the daemon upgrade: could not count the daemon's live sessions"
-                    );
-                    return;
-                }
+        tokio::spawn(Self::run_upgrade_attempt(
+            temp_client,
+            target_client,
+            control_dir,
+            daemon_version,
+            daemon_mtime_ms,
+            own_mtime,
+            stage_own_runtime,
+        ));
+    }
+
+    /// Takes the once-per-run upgrade latch.
+    fn admit_upgrade_attempt(&self) -> bool {
+        if self
+            .upgrade_retry_after
+            .lock()
+            .is_some_and(|after| std::time::Instant::now() < after)
+        {
+            return false;
+        }
+        self.upgrade_requested
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// The attempt ended without a definitive answer (the daemon could not be asked): a later
+    /// handshake may try again once the cooldown has passed.
+    fn release_upgrade_latch_after_transient_failure(&self) {
+        *self.upgrade_retry_after.lock() =
+            Some(std::time::Instant::now() + UPGRADE_RETRY_COOLDOWN);
+        self.upgrade_requested.store(false, Ordering::SeqCst);
+    }
+
+    /// One upgrade attempt against the running daemon, after the latch was taken.
+    async fn run_upgrade_attempt<F, Fut>(
+        temp_client: DaemonClient,
+        target_client: DaemonClient,
+        control_dir: PathBuf,
+        daemon_version: Option<String>,
+        daemon_mtime_ms: Option<u64>,
+        own_mtime: Option<u64>,
+        stage: F,
+    ) where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<crate::daemon::runtime_stage::StagedRuntime, String>>,
+    {
+        let own_version = env!("CARGO_PKG_VERSION");
+        // Handing a busy daemon of a lossy version over to this binary would kill the
+        // terminals it serves, so that daemon keeps running until it is idle. The flag stays
+        // set for that definitive answer, so this GUI checks once per run instead of on every
+        // reconnect; a transient failure releases it after a cooldown.
+        match temp_client.list_sessions().await {
+            Ok(sessions)
+                if handover_would_lose_sessions(daemon_version.as_deref(), sessions.len()) =>
+            {
+                tracing::warn!(
+                    daemon_version = ?daemon_version,
+                    live_sessions = sessions.len(),
+                    "Deferring the daemon upgrade: this daemon version loses sessions during a handover, so it is replaced only once it has none"
+                );
+                return;
             }
-            tracing::info!(
-                "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Requesting an upgrade through the control channel."
-            );
-            // Never UpgradeBinary (todo 8): a daemon without control-v1 is a pre-plan owner that
-            // stays alive until it exits on its own; a control daemon gets RequestUpgrade only
-            // when its Hello lists RequestUpgrade and handover-v1.
-            match request_upgrade_via_control(&control_dir, stage_own_runtime).await {
-                Ok(ControlUpgradeOutcome::Accepted) => {
-                    tracing::info!(
-                        "Daemon upgrade accepted: successor generation started as handover candidate. Invalidating cached connection."
-                    );
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    target_client.invalidate_cached_connections().await;
-                }
-                Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone) => {
-                    tracing::info!(
-                        "Running daemon predates the control channel; it is left running and is replaced only after it exits on its own."
-                    );
-                }
-                Ok(ControlUpgradeOutcome::Unsupported) => {
-                    tracing::info!(
-                        "Running daemon offers no handover upgrade on this platform. Suppressing further upgrade requests."
-                    );
-                }
-                Ok(ControlUpgradeOutcome::Refused(code)) => {
-                    tracing::info!(%code, "Daemon refused the upgrade request; it keeps serving every session.");
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to send daemon upgrade request: {e}");
-                }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Deferring the daemon upgrade: could not count the daemon's live sessions"
+                );
+                target_client.release_upgrade_latch_after_transient_failure();
+                return;
             }
-        });
+        }
+        tracing::info!(
+            "Daemon binary is stale (running daemon version: {daemon_version:?}, mtime: {daemon_mtime_ms:?}; own GUI version: {own_version}, mtime: {own_mtime:?}). Requesting an upgrade through the control channel."
+        );
+        // Never UpgradeBinary (todo 8): a daemon without control-v1 is a pre-plan owner that
+        // stays alive until it exits on its own; a control daemon gets RequestUpgrade only
+        // when its Hello lists RequestUpgrade and handover-v1.
+        match request_upgrade_via_control(&control_dir, stage).await {
+            Ok(ControlUpgradeOutcome::Accepted) => {
+                tracing::info!(
+                    "Daemon upgrade accepted: successor generation started as handover candidate. Invalidating cached connection."
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                target_client.invalidate_cached_connections().await;
+            }
+            Ok(ControlUpgradeOutcome::LegacyDaemonLeftAlone) => {
+                tracing::info!(
+                    "Running daemon predates the control channel; it is left running and is replaced only after it exits on its own."
+                );
+            }
+            Ok(ControlUpgradeOutcome::Unsupported) => {
+                tracing::info!(
+                    "Running daemon offers no handover upgrade on this platform. Suppressing further upgrade requests."
+                );
+            }
+            Ok(ControlUpgradeOutcome::Refused(code)) => {
+                tracing::info!(%code, "Daemon refused the upgrade request; it keeps serving every session.");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to send daemon upgrade request: {e}");
+                target_client.release_upgrade_latch_after_transient_failure();
+            }
+        }
     }
 
     async fn try_connect_existing_socket(&self) -> Result<DaemonStream, std::io::Error> {
@@ -3170,6 +3288,7 @@ impl DaemonClient {
     }
 
     pub fn remove_local_connection_for_session(&self, session_id: &str) {
+        self.local_control_verified.lock().remove(session_id);
         let mut map = self.local_connections.lock();
         if let Some(slot) = map.get(session_id) {
             slot.closed.store(true, Ordering::SeqCst);
@@ -3318,13 +3437,23 @@ impl DaemonClient {
                 ));
             }
 
-            let mut conn = slot.take();
-            if conn.is_none() {
-                conn = Some(self.connect_and_handshake().await?);
-            }
-            let mut active = conn.expect("connected");
+            let cached = slot.take();
+            let reused = cached.is_some();
+            let mut active = match cached {
+                Some(active) => active,
+                None => self.connect_and_handshake().await?,
+            };
             let timeout = std::time::Duration::from_secs(15);
-            let res = active.request_with_timeout(&req, timeout).await;
+            let mut res = active.request_with_timeout(&req, timeout).await;
+            // Reconnect stale cached slots for replay-safe queries only. EOF cannot prove
+            // a mutation was not executed; replaying it could duplicate terminal input.
+            if reused
+                && request_is_retry_safe(&req)
+                && res.as_ref().is_err_and(|error| error.peer_closed_before_reply)
+            {
+                active = self.connect_and_handshake().await?;
+                res = active.request_with_timeout(&req, timeout).await;
+            }
             return match res {
                 Ok(reply) => {
                     *slot = Some(active);
@@ -3663,17 +3792,13 @@ impl DaemonClient {
     pub async fn subscribe_remote_events(
         &self,
     ) -> Result<mpsc::Receiver<DaemonRemoteEvent>, IpcError> {
-        let stream = self.connect_or_spawn().await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
+        let ActiveConnection {
+            mut reader,
+            writer: mut write_half,
+        } = self.connect_and_handshake().await?;
 
-        for req in [
-            DaemonRequest::Handshake {
-                version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token_for(&self.socket_path),
-            },
-            DaemonRequest::SubscribeRemoteEvents,
-        ] {
+        {
+            let req = DaemonRequest::SubscribeRemoteEvents;
             let mut json = serde_json::to_string(&req).map_err(|e| {
                 IpcError::new(
                     IpcErrorCode::ParseError,
@@ -3714,14 +3839,6 @@ impl DaemonClient {
                 )
             })?;
             match resp {
-                DaemonResponse::HandshakeOk {
-                    version,
-                    binary_mtime_ms,
-                    daemon_version,
-                    ..
-                } if version == DAEMON_PROTOCOL_VERSION => {
-                    self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
-                }
                 DaemonResponse::SubscribeRemoteEventsOk => {}
                 DaemonResponse::Error { message, .. } => {
                     return Err(IpcError::new(IpcErrorCode::InternalError, message));
@@ -3773,21 +3890,17 @@ impl DaemonClient {
         project_path: &str,
         paired: Option<crate::daemon::protocol::PairedDagBinding>,
     ) -> Result<mpsc::Receiver<DaemonStreamMessage<'static>>, IpcError> {
-        let stream = self.connect_or_spawn().await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
+        let ActiveConnection {
+            mut reader,
+            writer: mut write_half,
+        } = self.connect_and_handshake().await?;
 
-        for req in [
-            DaemonRequest::Handshake {
-                version: DAEMON_PROTOCOL_VERSION,
-                token: read_transport_token_for(&self.socket_path),
-            },
-            DaemonRequest::SubscribeDag {
+        {
+            let req = DaemonRequest::SubscribeDag {
                 workspace_id: workspace_id.to_string(),
                 project_path: project_path.to_string(),
-                paired: paired.clone(),
-            },
-        ] {
+                paired,
+            };
             let mut json = serde_json::to_string(&req).map_err(|e| {
                 IpcError::new(
                     IpcErrorCode::ParseError,
@@ -3828,14 +3941,6 @@ impl DaemonClient {
                 )
             })?;
             match resp {
-                DaemonResponse::HandshakeOk {
-                    version,
-                    binary_mtime_ms,
-                    daemon_version,
-                    ..
-                } if version == DAEMON_PROTOCOL_VERSION => {
-                    self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
-                }
                 DaemonResponse::SubscribeDagOk => {}
                 DaemonResponse::Error { message, .. } => {
                     return Err(IpcError::new(IpcErrorCode::InternalError, message));
@@ -3901,86 +4006,14 @@ impl DaemonClient {
         session_id: &str,
         after_sequence: Option<u64>,
     ) -> Result<DaemonAttachment, IpcError> {
-        let stream = self.connect_or_spawn().await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-
-        let handshake = DaemonRequest::Handshake {
-            version: DAEMON_PROTOCOL_VERSION,
-            token: read_transport_token_for(&self.socket_path),
-        };
-        let mut json = serde_json::to_string(&handshake).map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::ParseError,
-                format!("Handshake serialization failed: {e}"),
-            )
-        })?;
-        json.push('\n');
-        write_half.write_all(json.as_bytes()).await.map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Handshake write failed: {e}"),
-            )
-        })?;
-        write_half.flush().await.map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Handshake flush failed: {e}"),
-            )
-        })?;
-
+        // The same bounded handshake every request connection uses: a silent owner is reported
+        // within the handshake wait, a retiring one is retried, and a mismatched one enters the
+        // update-pending path.
+        let ActiveConnection {
+            mut reader,
+            writer: mut write_half,
+        } = self.connect_and_handshake().await?;
         let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).await.map_err(|e| {
-            IpcError::new(IpcErrorCode::IoError, format!("Handshake read failed: {e}"))
-        })?;
-        if bytes_read == 0 || line.trim().is_empty() {
-            return Err(IpcError::new(
-                IpcErrorCode::IoError,
-                "Handshake failed: daemon disconnected unexpectedly",
-            ));
-        }
-
-        let hs_resp: DaemonResponse = serde_json::from_str(line.trim()).map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::ParseError,
-                format!("Handshake parse failed: {e}"),
-            )
-        })?;
-
-        match hs_resp {
-            DaemonResponse::HandshakeOk {
-                version,
-                binary_mtime_ms,
-                daemon_version,
-                ..
-            } if version == DAEMON_PROTOCOL_VERSION => {
-                self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
-            }
-            DaemonResponse::HandshakeOk { version, .. } => {
-                return Err(daemon_protocol_mismatch_error(
-                    DAEMON_PROTOCOL_VERSION,
-                    version,
-                ));
-            }
-            DaemonResponse::ProtocolMismatch {
-                expected_version,
-                received_version,
-            } => {
-                return Err(daemon_protocol_mismatch_error(
-                    expected_version,
-                    received_version,
-                ));
-            }
-            DaemonResponse::Error { message, .. } => {
-                return Err(IpcError::new(IpcErrorCode::InternalError, message));
-            }
-            _ => {
-                return Err(IpcError::new(
-                    IpcErrorCode::InternalError,
-                    "Unexpected handshake response from daemon",
-                ));
-            }
-        }
 
         let attach_req = DaemonRequest::Attach {
             session_id: session_id.to_string(),
@@ -4124,13 +4157,28 @@ impl DaemonClient {
     // Never infer a remote generation after an await. Generation-less platform
     // callbacks are local-only; remote panes must supply their observed generation.
     async fn require_local_control(&self, session_id: &str) -> Result<(), IpcError> {
+        // A session classified local stays local for the life of the daemon epoch that
+        // classified it, so per-keystroke writes skip the classification round trip.
+        let epoch = self.epoch();
+        if epoch.is_some() && self.local_control_verified.lock().get(session_id).copied() == epoch {
+            return Ok(());
+        }
         match self
             .send_interactive_request(DaemonRequest::RemoteSessionDetails {
                 session_id: session_id.into(),
             })
             .await?
         {
-            DaemonResponse::RemoteSessionDetailsOk { details: None, .. } => Ok(()),
+            DaemonResponse::RemoteSessionDetailsOk { details: None, .. } => {
+                // Recorded against the epoch the reply came from: the handshake that carried it
+                // set the client's epoch before the classification was sent.
+                if let Some(epoch) = self.epoch() {
+                    self.local_control_verified
+                        .lock()
+                        .insert(session_id.to_string(), epoch);
+                }
+                Ok(())
+            }
             DaemonResponse::RemoteSessionDetailsOk {
                 details: Some(_), ..
             } => Err(IpcError::internal(
@@ -4190,10 +4238,26 @@ impl DaemonClient {
         }
     }
 
+    /// Sends a local write or resize, resending it while the daemon refuses it HANDOVER_BUSY
+    /// (a commit is being decided and nothing was written), up to the retry budget.
+    async fn send_local_control(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
+        let deadline = tokio::time::Instant::now() + HANDOVER_BUSY_RETRY_BUDGET;
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            let response = self.send_interactive_request(req.clone()).await?;
+            let now = tokio::time::Instant::now();
+            if !is_handover_busy(&response) || now >= deadline {
+                return Ok(response);
+            }
+            tokio::time::sleep_until((now + backoff).min(deadline)).await;
+            backoff = (backoff * 2).min(Duration::from_millis(200));
+        }
+    }
+
     pub async fn write_terminal(&self, session_id: &str, data: Vec<u8>) -> Result<(), IpcError> {
         self.require_local_control(session_id).await?;
         let resp = self
-            .send_interactive_request(DaemonRequest::Write {
+            .send_local_control(DaemonRequest::Write {
                 session_id: session_id.to_string(),
                 data,
             })
@@ -4201,9 +4265,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::WriteOk => Ok(()),
-            DaemonResponse::Error { message, .. } => {
-                Err(IpcError::new(IpcErrorCode::InternalError, message))
-            }
+            DaemonResponse::Error { message, code, .. } => Err(local_control_error(message, code)),
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response",
@@ -4251,7 +4313,7 @@ impl DaemonClient {
             _ => {}
         }
         let resp = self
-            .send_interactive_request(DaemonRequest::Resize {
+            .send_local_control(DaemonRequest::Resize {
                 session_id: session_id.to_string(),
                 cols,
                 rows,
@@ -4260,9 +4322,7 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::ResizeOk => Ok(()),
-            DaemonResponse::Error { message, .. } => {
-                Err(IpcError::new(IpcErrorCode::InternalError, message))
-            }
+            DaemonResponse::Error { message, code, .. } => Err(local_control_error(message, code)),
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response",
@@ -4792,6 +4852,10 @@ impl DaemonClient {
     }
 }
 
+
+#[cfg(all(test, unix))]
+#[path = "client_handover_tests.rs"]
+mod client_handover_tests;
 
 #[cfg(test)]
 mod local_control_isolation_tests {
