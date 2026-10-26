@@ -1581,15 +1581,19 @@ function WorkspaceApp({
     [dispatchWorkspaceAction, handleOpenNewShell, persistSessionStrict],
   );
 
+  // One coalesced retry per SSH owner tuple, shared by every waiter (the Reconnect button and
+  // each pane's identity refresh). Waiters hold it through `acquire()`; the retry is cancelled
+  // only when the last holder releases, so a pane effect re-running never cancels a reconnect
+  // the user is still waiting on.
   const reconnectingSshRef = useRef<Map<string, {
     promise: Promise<import("./lib/types").TerminalRemoteStatus>;
     voidPromise?: Promise<void>;
-    cancel: () => void;
+    acquire: () => () => void;
   }>>(new Map());
   const getOrCreateSshOwnerRetryOperation = useCallback((sessionId: string): {
     promise: Promise<import("./lib/types").TerminalRemoteStatus>;
     voidPromise?: Promise<void>;
-    cancel: () => void;
+    acquire: () => () => void;
   } | null => {
     const session = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
     if (!session?.backendSessionId) return null;
@@ -1684,11 +1688,22 @@ function WorkspaceApp({
       reportRuntimeError(error);
     });
     const task = connected;
+    let holders = 0;
+    const acquire = () => {
+      holders += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        holders -= 1;
+        if (holders === 0) cancel();
+      };
+    };
     const operation: {
       promise: Promise<import("./lib/types").TerminalRemoteStatus>;
       voidPromise?: Promise<void>;
-      cancel: () => void;
-    } = { promise: task, cancel };
+      acquire: () => () => void;
+    } = { promise: task, acquire };
     reconnectingSshRef.current.set(key, operation);
     void task.finally(() => {
       if (reconnectingSshRef.current.get(key) === operation) reconnectingSshRef.current.delete(key);
@@ -1700,6 +1715,9 @@ function WorkspaceApp({
     (sessionId: string) => {
       const op = getOrCreateSshOwnerRetryOperation(sessionId);
       if (!op) return Promise.reject({ code: "SESSION_NOT_FOUND", message: "Retained SSH backend is unavailable" });
+      // The button holds the retry until it settles; it never cancels it.
+      const release = op.acquire();
+      void op.promise.then(release, release);
       op.voidPromise ??= op.promise.then(() => undefined);
       return op.voidPromise;
     },
@@ -1913,12 +1931,12 @@ function WorkspaceApp({
         const operation = getOrCreateSshOwnerRetryOperation(sessionId);
         if (!operation) { onResult({ kind: "cancelled" }); return () => {}; }
         let live = true;
-        let stopListening: (() => void) | undefined;
+        const release = operation.acquire();
         onResult({ kind: "pending" });
         const waiting = operation.promise;
-        stopListening = () => {
+        const stopListening = () => {
           live = false;
-          operation.cancel();
+          release();
         };
         void waiting.then((status) => {
           if (!live || activeProjectRef.current.workspaceId !== session.workspaceId) return;
@@ -1931,7 +1949,7 @@ function WorkspaceApp({
           }
           onResult({ kind: "ready", session: { ...current, remoteConnectionState: "connected", remoteGeneration: status.generation } });
         }).catch(() => { if (live) onResult({ kind: "cancelled" }); });
-        return () => { live = false; stopListening?.(); };
+        return () => { live = false; stopListening(); };
       }
 
       return requestLocalRecoveryAdmission(project.workspaceId, sessionId, true, onResult);

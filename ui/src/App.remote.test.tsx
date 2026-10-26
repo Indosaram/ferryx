@@ -421,7 +421,9 @@ describe("App SSH project lifecycle", () => {
       });
     });
 
-    expect(await oldOutcome).toMatchObject({ code: "RECOVERY_CANCELLED" });
+    // A pane disposing its refresh no longer cancels the button's wait; the old tuple ends
+    // because its owner was rebound.
+    expect(await oldOutcome).toMatchObject({ code: "RECOVERY_OWNER_CHANGED" });
     expect(oldResults).toEqual([{ kind: "pending" }]);
     expect(await newOutcome).toBe("ok");
     expect(newResults.at(-1)).toMatchObject({
@@ -435,6 +437,27 @@ describe("App SSH project lifecycle", () => {
       },
     });
     expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+  });
+  it("keeps the Reconnect SSH wait alive when a pane identity refresh on the same owner is disposed", async () => {
+    seed([remote]);
+    await mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /New Terminal/ })); });
+    const retained = Object.values((await import("./state/workspaceSnapshotCache")).getWorkspaceSnapshot(remote.workspaceId)!.sessions)[0];
+    const retry = deferred<{ type: string }>();
+    native.retryTerminalRemoteSession.mockReturnValue(retry.promise);
+    let reconnect!: Promise<void>;
+    let disposePane!: () => void;
+    await act(async () => {
+      disposePane = native.refresh!(retained.id, () => undefined);
+      reconnect = native.reconnect!(retained.id);
+    });
+    const outcome = reconnect.then(() => "ok", error => error);
+    // The pane effect re-runs (state flip) and disposes its refresh while the button still waits.
+    disposePane();
+    await act(async () => { retry.resolve({ type: "retryRemoteSessionOk" }); await retry.promise; });
+    await act(async () => { native.remoteStatusHandler!({ sessionId: retained.backendSessionId!, state: "connected", generation: 3, failure: null, replayGap: null }); });
+    expect(await outcome).toBe("ok");
+    expect(native.retryTerminalRemoteSession).toHaveBeenCalledTimes(1);
   });
   it("aborts before retryTerminalRemoteSession when cancelled during listener registration", async () => {
     seed([remote]);

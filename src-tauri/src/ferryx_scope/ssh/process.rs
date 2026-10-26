@@ -481,33 +481,67 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
         })?;
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            if is_live(&root, &host) {
-                let _ = std::fs::remove_file(&log_path);
+        let outcome = wait_for_spawned_helper(&root, &host, deadline, || {
+            let Ok(Some(status)) = child.try_wait() else {
+                return None;
+            };
+            let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let detail = detail.trim();
+            Some(if detail.is_empty() {
+                format!("REMOTE_RUNTIME_EXITED: helper daemon exited prematurely with status {status}")
+            } else {
+                format!("REMOTE_RUNTIME_EXITED: helper daemon exited ({status}): {detail}")
+            })
+        });
+        let _ = std::fs::remove_file(&log_path);
+        match outcome {
+            SpawnWait::Ready => {
                 println!("{}", json!({"event":"ready","protocol":1}));
                 std::io::stdout().flush().map_err(|e| e.to_string())?;
-                return Ok(());
+                Ok(())
             }
-            if let Ok(Some(status)) = child.try_wait() {
-                let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
-                let _ = std::fs::remove_file(&log_path);
-                let detail = detail.trim();
-                return if detail.is_empty() {
-                    Err(format!("REMOTE_RUNTIME_EXITED: helper daemon exited prematurely with status {status}"))
-                } else {
-                    Err(format!(
-                        "REMOTE_RUNTIME_EXITED: helper daemon exited ({status}): {detail}"
-                    ))
-                };
+            SpawnWait::Exited(message) => Err(message),
+            SpawnWait::Timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err("REMOTE_RUNTIME_TIMEOUT: helper daemon failed to become ready within deadline".into())
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = std::fs::remove_file(&log_path);
-        Err("REMOTE_RUNTIME_TIMEOUT: helper daemon failed to become ready within deadline".into())
     }
+}
+
+pub(crate) enum SpawnWait {
+    Ready,
+    Exited(String),
+    Timeout,
+}
+
+/// Waits for the helper this start spawned to answer the handshake. A spawned helper that exits
+/// because it lost `runtime.lock` lost a race to a concurrent start for the same root (two
+/// sessions on one host reconnecting together): the winner is the helper we wanted, so keep
+/// waiting for it to come up instead of failing the reconnect.
+pub(crate) fn wait_for_spawned_helper(
+    root: &Path,
+    host: &str,
+    deadline: std::time::Instant,
+    mut exited: impl FnMut() -> Option<String>,
+) -> SpawnWait {
+    let mut lost_lock_race = false;
+    while std::time::Instant::now() < deadline {
+        if is_live(root, host) {
+            return SpawnWait::Ready;
+        }
+        if !lost_lock_race {
+            if let Some(message) = exited() {
+                if !message.contains("REMOTE_RUNTIME_CONFLICT") {
+                    return SpawnWait::Exited(message);
+                }
+                lost_lock_race = true;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    SpawnWait::Timeout
 }
 
 #[cfg(any(target_os = "linux", test))]

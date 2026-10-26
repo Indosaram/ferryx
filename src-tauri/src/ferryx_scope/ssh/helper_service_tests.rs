@@ -217,6 +217,35 @@ fn ssh_process_survival_stale_endpoint_replaced_only_after_lock_release() {
     drop(second);
 }
 
+#[test]
+fn ssh_reconnect_spawned_helper_losing_lock_race_attaches_to_winner() {
+    let dir = private_tempdir();
+    let root = dir.path().to_path_buf();
+    let mut server = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let outcome = wait_for_spawned_helper(dir.path(), "qa-race", deadline, || {
+        // The concurrent start wins the lock and comes up only after our child has exited.
+        let winner = bind_runtime(&root, "qa-race".into()).unwrap();
+        server = Some(std::thread::spawn(move || {
+            let (stream, _) = winner.listener.accept().unwrap();
+            serve(stream, winner.runtime.clone()).unwrap();
+        }));
+        Some("REMOTE_RUNTIME_EXITED: helper daemon exited (exit status: 1): REMOTE_RUNTIME_CONFLICT: lock acquisition failed".into())
+    });
+    assert!(matches!(outcome, SpawnWait::Ready));
+    server.expect("exit was observed").join().unwrap();
+}
+
+#[test]
+fn ssh_reconnect_spawned_helper_real_exit_still_fails() {
+    let dir = private_tempdir();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let outcome = wait_for_spawned_helper(dir.path(), "qa-exit", deadline, || {
+        Some("REMOTE_RUNTIME_EXITED: helper daemon exited (exit status: 1): FORBIDDEN: bad root".into())
+    });
+    assert!(matches!(outcome, SpawnWait::Exited(ref message) if message.contains("FORBIDDEN")));
+}
+
 #[cfg(unix)]
 #[test]
 fn ssh_reconnect_safety_rejects_symlink_root_and_endpoint() {
