@@ -6841,6 +6841,46 @@ mod tests {
     }
 
     #[test]
+    fn input_on_another_session_completes_during_pump_mutation() {
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("pump-a", 1, None).unwrap();
+        state.attach_test_session_for_liveness("input-b", 1, None).unwrap();
+        let handle = state.test_session("pump-a");
+        let generation = handle.lock().pump_generation;
+        let slot = Arc::clone(&handle.lock().snapshot_slot);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let pump_state = state.clone();
+        let pump = std::thread::spawn(move || {
+            with_session_owned_by(&pump_state.sessions, "pump-a", (generation, &slot), |session| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                session.terminal.feed(b"output").unwrap();
+            })
+        });
+        let bound = std::time::Duration::from_secs(5);
+        let entered = entered_rx.recv_timeout(bound);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let input_state = state.clone();
+        let input = std::thread::spawn(move || {
+            let result = input_state.encode_attached_input(
+                "input-b", &NativeTerminalInput::Text { text: "b".into() },
+            );
+            done_tx.send(result).unwrap();
+        });
+        let result = done_rx.recv_timeout(bound);
+        // Release and join both workers before asserting, including the failing mutation.
+        let released = release_tx.send(());
+        let pumped = pump.join();
+        let encoded = input.join();
+        entered.expect("pump must enter its session mutation");
+        released.unwrap();
+        assert_eq!(pumped.unwrap(), Some(()));
+        encoded.unwrap();
+        assert_eq!(result.expect("input must not wait on another session's pump").unwrap(), b"b");
+    }
+
+    #[test]
     fn input_on_session_b_completes_while_session_a_lock_is_held() {
         let state = NativeTerminalSurfaceHostState::default();
         state.attach_test_session_for_liveness("lock-a", 1, None).unwrap();
