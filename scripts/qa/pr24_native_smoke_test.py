@@ -2,6 +2,7 @@
 import importlib.util
 import base64
 import tempfile
+import subprocess
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -158,6 +159,38 @@ class SparsePostStartupTests(unittest.TestCase):
             metrics = dict(width=width, height=height, colors=colors, entropy=entropy)
             with self.subTest(metrics=metrics):
                 self.assertFalse(smoke.nonblank_post_startup_content(metrics))
+
+
+class WindowManagerReadinessTests(unittest.TestCase):
+    ROOT = '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x200001'
+    SUPPORTED = '_NET_SUPPORTED(ATOM) = _NET_CLIENT_LIST, _NET_ACTIVE_WINDOW, _NET_WM_NAME'
+
+    def test_self_referenced_wm_and_supported_activation_required(self):
+        self.assertTrue(smoke.wm_check_ready(self.ROOT, self.ROOT, self.SUPPORTED))
+        self.assertFalse(smoke.wm_check_ready(self.ROOT, self.ROOT.replace('200001', '200002'), self.SUPPORTED))
+        self.assertFalse(smoke.wm_check_ready(self.ROOT, self.ROOT, '_NET_SUPPORTED(ATOM) = _NET_ACTIVE_WINDOW_EXTRA'))
+
+    def test_missing_zero_or_stale_check_never_ready(self):
+        for value in ['', '_NET_SUPPORTING_WM_CHECK: no such atom on any window.',
+                      self.ROOT.replace('200001', '0'), self.ROOT + ', 0x200002']:
+            self.assertFalse(smoke.wm_check_ready(value, self.ROOT, self.SUPPORTED))
+
+    def test_managed_window_ids_use_exact_numeric_membership(self):
+        ids = smoke.xprop_window_ids('_NET_CLIENT_LIST(WINDOW): window id # 0x400003, 0x500001', '_NET_CLIENT_LIST')
+        self.assertIn(4194307, ids)
+        self.assertNotIn(0x40000, ids)
+        self.assertEqual(smoke.xprop_window_ids('_NET_CLIENT_LIST(WINDOW): window id # 0x400003garbage', '_NET_CLIENT_LIST'), [])
+        self.assertEqual(smoke.xprop_window_ids('_OTHER(WINDOW): window id # 0x400003', '_NET_CLIENT_LIST'), [])
+
+    def test_diagnostics_exclude_command_and_bound_stderr(self):
+        error = subprocess.CalledProcessError(1, ['secret-argv'], stderr='x' * 5000)
+        result = smoke.bounded_command_failure(error)
+        self.assertEqual(result['returncode'], 1)
+        self.assertEqual(len(result['stderr']), 2048)
+        self.assertNotIn('secret-argv', str(result))
+        timeout = smoke.bounded_command_failure(subprocess.TimeoutExpired(['secret-argv'], 8, stderr=b'timeout'))
+        self.assertTrue(timeout['timed_out'])
+        self.assertEqual(timeout['stderr'], 'timeout')
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import signal
 import shutil
@@ -123,6 +124,39 @@ def guarded_skip_setup_point(width, height, expected_pid, owner_pid, window_id, 
     if expected_pid <= 0 or owner_pid != expected_pid or active_window_id != window_id:
         raise RuntimeError('Skip setup requires the active app-owned window')
     return 530, 599
+
+
+def xprop_window_ids(output, property_name):
+    match = re.fullmatch(re.escape(property_name) + r"\(WINDOW\): window id #\s*(.*)", output.strip())
+    if not match:
+        return []
+    values = match.group(1).strip()
+    if not values:
+        return []
+    tokens = [value.strip() for value in values.split(',')]
+    if not all(re.fullmatch(r"0x[0-9a-fA-F]+", token) for token in tokens):
+        return []
+    return [int(token, 16) for token in tokens]
+
+
+def xprop_supported_atoms(output):
+    match = re.fullmatch(r"_NET_SUPPORTED\(ATOM\) = (.*)", output.strip())
+    return set(value.strip() for value in match.group(1).split(',')) if match else set()
+
+
+def wm_check_ready(root_check, child_check, supported):
+    root_ids = xprop_window_ids(root_check, '_NET_SUPPORTING_WM_CHECK')
+    return (len(root_ids) == 1 and root_ids[0] != 0
+            and xprop_window_ids(child_check, '_NET_SUPPORTING_WM_CHECK') == root_ids
+            and '_NET_ACTIVE_WINDOW' in xprop_supported_atoms(supported))
+
+
+def bounded_command_failure(error):
+    stderr = error.stderr or ''
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode('utf-8', errors='replace')
+    return {'returncode': getattr(error, 'returncode', None),
+            'timed_out': isinstance(error, subprocess.TimeoutExpired), 'stderr': stderr[:2048]}
 
 
 def main():
@@ -256,7 +290,35 @@ def main():
                     return True
             return False
         wait_for(bus_ready, 'owned session bus')
-        spawn('openbox', ['openbox', '--sm-disable'])
+        wm = spawn('openbox', ['openbox', '--sm-disable'])
+        # EWMH sections 3.1/3.2/3.10: observe readiness, not arbitrary startup sleeps.
+        # https://specifications.freedesktop.org/wm/latest-single/
+        # No WM PID property is required by this standard. This owned X server has
+        # only the Openbox process launched above; also require that child alive.
+        def property_value(target, name):
+            response = subprocess.run(['xprop', *target, name], env=env,
+                                      capture_output=True, text=True, timeout=2)
+            if response.returncode:
+                result['wm_last_probe_error'] = {'returncode': response.returncode,
+                                                'stderr': response.stderr[:2048]}
+                return ''
+            return response.stdout[:16384]
+
+        def wm_ready():
+            if wm.poll() is not None:
+                raise RuntimeError('owned window manager exited before readiness')
+            root_check = property_value(['-root'], '_NET_SUPPORTING_WM_CHECK')
+            ids = xprop_window_ids(root_check, '_NET_SUPPORTING_WM_CHECK')
+            if len(ids) != 1 or ids[0] == 0:
+                return False
+            child_check = property_value(['-id', hex(ids[0])], '_NET_SUPPORTING_WM_CHECK')
+            supported = property_value(['-root'], '_NET_SUPPORTED')
+            ready = wm_check_ready(root_check, child_check, supported)
+            if ready:
+                result['wm_ready'] = {'check_window': ids[0], 'supports_active_window': True}
+            return ready
+        wait_for(wm_ready, 'owned EWMH window-manager readiness', 15)
+
         # Workflow builds tauri/custom-protocol: the real built UI is embedded.
         # No development server or network-access substitution is used.
         app = spawn('app', [str(binary)], cwd=fixture_dir)
@@ -272,7 +334,18 @@ def main():
         if len(windows) != 1:
             raise RuntimeError('ambiguous owned top-level window')
         window = windows[0]
-        run(['xdotool', 'windowactivate', '--sync', window], env=env)
+        def managed_window_ready():
+            if wm.poll() is not None or app.poll() is not None:
+                raise RuntimeError('owned app/window manager exited before window management')
+            clients = xprop_window_ids(property_value(['-root'], '_NET_CLIENT_LIST'), '_NET_CLIENT_LIST')
+            return int(window) in clients
+        wait_for(managed_window_ready, 'owned app in EWMH managed-client list', 15)
+        try:
+            run(['xdotool', 'windowactivate', '--sync', window], env=env)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            result['activation_error'] = bounded_command_failure(error)
+            raise RuntimeError('owned-window activation failed; see bounded activation_error diagnostics') from None
+
         await_rendered_content()
         capture('01-startup', startup=True)
         geometry = run(['xdotool', 'getwindowgeometry', '--shell', window], env=env).stdout

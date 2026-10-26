@@ -1,6 +1,9 @@
 name: Native desktop runtime QA
 
 on:
+  # Temporary exact-branch QA trigger; never integrate this trigger into PR24.
+  push:
+    branches: [qa/pr24-wm-ready-20261026]
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
