@@ -941,10 +941,29 @@ impl ActiveConnection {
             ))
         })?;
         req_json.push('\n');
-        self.writer
-            .write_all(req_json.as_bytes())
-            .await
-            .map_err(|e| RequestAttemptError::from_send_error(e, "write"))?;
+        let mut sent = 0;
+        while sent < req_json.len() {
+            match self.writer.write(&req_json.as_bytes()[sent..]).await {
+                Ok(0) => {
+                    let error = IpcError::new(IpcErrorCode::IoError, "Request write returned zero");
+                    return Err(if sent == 0 {
+                        RequestAttemptError::not_delivered(error)
+                    } else {
+                        RequestAttemptError::ambiguous(error)
+                    });
+                }
+                Ok(count) => sent += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    let error = IpcError::new(IpcErrorCode::IoError, format!("Request write failed: {error}"));
+                    return Err(if sent == 0 {
+                        RequestAttemptError::not_delivered(error)
+                    } else {
+                        RequestAttemptError::ambiguous(error)
+                    });
+                }
+            }
+        }
         self.writer
             .flush()
             .await
@@ -3445,11 +3464,14 @@ impl DaemonClient {
             };
             let timeout = std::time::Duration::from_secs(15);
             let mut res = active.request_with_timeout(&req, timeout).await;
-            // Reconnect stale cached slots for replay-safe queries only. EOF cannot prove
-            // a mutation was not executed; replaying it could duplicate terminal input.
+            // A failed first write accepted no request bytes and is safe to reconnect.
+            // After any send, only replay-safe queries may retry: EOF does not prove
+            // that a mutation was not executed.
             if reused
-                && request_is_retry_safe(&req)
-                && res.as_ref().is_err_and(|error| error.peer_closed_before_reply)
+                && res.as_ref().is_err_and(|error| {
+                    !error.may_have_been_delivered
+                        || (request_is_retry_safe(&req) && error.peer_closed_before_reply)
+                })
             {
                 active = self.connect_and_handshake().await?;
                 res = active.request_with_timeout(&req, timeout).await;

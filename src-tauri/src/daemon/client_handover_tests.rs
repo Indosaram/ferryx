@@ -202,6 +202,7 @@ async fn a_cached_slot_whose_peer_closed_is_reconnected_and_the_write_lands_once
         _ => Reply::Close,
     }));
     let client = daemon.client();
+    client.require_local_control("handed-over").await.expect("cache local classification before handover");
     // The slot holds a connection to a predecessor that committed and closed it.
     let (dead_client, dead_peer) = tokio::net::UnixStream::pair().unwrap();
     drop(dead_peer);
