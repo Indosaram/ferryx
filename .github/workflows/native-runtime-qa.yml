@@ -61,6 +61,11 @@ jobs:
           python3 scripts/ci-run-bounded.py --timeout-seconds 2400 \
             --log "$RUNNER_TEMP/desktop-qa/build.log" -- \
             cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx --features tauri/custom-protocol
+      - name: Preserve successful dependency compilation if later GUI assertions fail
+        # rust-cache v2's post-if reads this exported flag. Set it only AFTER a
+        # successful build, not for compilation failures. Existing cache paths
+        # and trust scope stay unchanged; no runtime fixture state is cached.
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
       - name: Run real GUI with no external network or host service access
         timeout-minutes: 7
         shell: bash

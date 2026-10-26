@@ -4,6 +4,7 @@ import base64
 import tempfile
 import subprocess
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -23,7 +24,7 @@ class NamespaceGuardTests(unittest.TestCase):
             return smoke.assert_offline_namespace()
 
     def test_signal_handler_raises_for_finally_cleanup(self):
-        with self.assertRaisesRegex(RuntimeError, 'interrupted by signal 15'):
+        with self.assertRaisesRegex(smoke.SmokeInterrupted, 'interrupted by signal 15'):
             smoke.interrupted(15, None)
 
     def test_only_loopback_is_accepted(self):
@@ -191,6 +192,104 @@ class WindowManagerReadinessTests(unittest.TestCase):
         timeout = smoke.bounded_command_failure(subprocess.TimeoutExpired(['secret-argv'], 8, stderr=b'timeout'))
         self.assertTrue(timeout['timed_out'])
         self.assertEqual(timeout['stderr'], 'timeout')
+
+
+class OwnedDebugDiagnosticsTests(unittest.TestCase):
+    def test_bounded_tail_keeps_only_owned_log_suffix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / smoke.OWNED_DEBUG_LOGS[0]
+            path.write_bytes(b'old-record\n' + b'new-record\n' * 10)
+            tail = smoke.owned_debug_tail(directory, path.name, 40)
+            self.assertLessEqual(len(tail), 40)
+            self.assertTrue(tail.endswith(b'new-record\n'))
+            self.assertNotIn(b'old-record', tail)
+
+    def test_unapproved_name_and_excess_limit_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name, limit in [('../foreign', 10), ('other.log', 10), (smoke.OWNED_DEBUG_LOGS[0], smoke.MAX_DEBUG_TAIL + 1)]:
+                with self.assertRaises(ValueError):
+                    smoke.owned_debug_tail(directory, name, limit)
+
+    def test_file_and_directory_symlinks_are_not_followed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            foreign = root / 'foreign'
+            foreign.mkdir()
+            (foreign / smoke.OWNED_DEBUG_LOGS[0]).write_bytes(b'not-owned-scope')
+            alias = root / 'alias'
+            alias.symlink_to(foreign, target_is_directory=True)
+            with self.assertRaises(OSError):
+                smoke.owned_debug_tail(alias, smoke.OWNED_DEBUG_LOGS[0])
+            (root / smoke.OWNED_DEBUG_LOGS[0]).symlink_to(foreign / smoke.OWNED_DEBUG_LOGS[0])
+            with self.assertRaises(OSError):
+                smoke.owned_debug_tail(root, smoke.OWNED_DEBUG_LOGS[0])
+
+    def test_hardlinked_log_and_foreign_directory_owner_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / 'other'
+            original.write_bytes(b'other')
+            os.link(original, root / smoke.OWNED_DEBUG_LOGS[0])
+            with self.assertRaises(RuntimeError):
+                smoke.owned_debug_tail(root, smoke.OWNED_DEBUG_LOGS[0])
+            with patch.object(smoke.os, 'geteuid', return_value=os.geteuid() + 1):
+                with self.assertRaises(RuntimeError):
+                    smoke.owned_debug_tail(root, smoke.OWNED_DEBUG_LOGS[0])
+
+    def test_focus_metadata_is_numeric_only(self):
+        self.assertEqual(smoke.parse_x_numeric('4194307\n'), 4194307)
+        for value in ['pid=42', '42 secret', '-1', '4294967296', '']:
+            with self.assertRaises(ValueError):
+                smoke.parse_x_numeric(value)
+
+
+class ControlledReturnDiagnosticTests(unittest.TestCase):
+    def snapshot(self):
+        return dict(app_pid=12, owned_window=99, active_window=99, resolved_focus_window=99,
+                    active_window_owner_pid=12, resolved_focus_window_owner_pid=12)
+
+    def test_only_absent_receipt_and_owned_active_resolved_focus_allow_diagnostic(self):
+        self.assertTrue(smoke.ctrl_m_diagnostic_allowed(False, self.snapshot()))
+        self.assertFalse(smoke.ctrl_m_diagnostic_allowed(True, self.snapshot()))
+        self.assertFalse(smoke.ctrl_m_diagnostic_allowed(False, {}))
+
+    def test_foreign_or_missing_focus_and_owner_fail_closed(self):
+        for key in ['active_window', 'resolved_focus_window', 'active_window_owner_pid', 'resolved_focus_window_owner_pid']:
+            value = self.snapshot()
+            value[key] = 12345
+            with self.subTest(key=key):
+                self.assertFalse(smoke.ctrl_m_diagnostic_allowed(False, value))
+            del value[key]
+            self.assertFalse(smoke.ctrl_m_diagnostic_allowed(False, value))
+
+    def test_diagnostic_success_never_changes_original_return_failure_to_pass(self):
+        self.assertEqual(smoke.terminal_smoke_status(True), 'FAILED_RETURN_KEY_DIAGNOSTIC')
+        self.assertEqual(smoke.terminal_smoke_status(False), 'CAPTURED_REQUIRES_VISUAL_REVIEW')
+
+
+class TerminationDiagnosticTests(unittest.TestCase):
+    def test_signal_during_best_effort_capture_aborts_before_fallback_and_runs_cleanup(self):
+        actions = []
+        with self.assertRaises(smoke.SmokeInterrupted) as caught:
+            try:
+                try:
+                    # Same best-effort Exception boundary as failure screenshot capture.
+                    smoke.interrupted(15, None)
+                except Exception:
+                    actions.append('capture-error-recorded')
+                actions.append('ctrl-m-fallback')
+            finally:
+                actions.append('cleanup')
+        self.assertEqual(caught.exception.signum, 15)
+        self.assertEqual(actions, ['cleanup'])
+
+    def test_hup_and_interrupt_also_bypass_diagnostic_exception_handlers(self):
+        for signum in [1, 2]:
+            with self.subTest(signum=signum), self.assertRaises(smoke.SmokeInterrupted):
+                try:
+                    smoke.interrupted(signum, None)
+                except Exception:
+                    self.fail('termination swallowed by diagnostic handler')
 
 
 if __name__ == '__main__':
