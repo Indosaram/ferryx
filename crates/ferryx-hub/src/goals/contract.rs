@@ -66,7 +66,7 @@ pub fn all_met(contract: &Contract) -> bool {
         })
 }
 
-fn validate(requirements: &[RequirementSpec], turn_limit: u32) -> Result<(), GoalError> {
+pub(crate) fn validate(requirements: &[RequirementSpec], turn_limit: u32) -> Result<(), GoalError> {
     if requirements.is_empty() {
         return Err(GoalError::EmptyContract);
     }

@@ -66,7 +66,7 @@ pub async fn memory() -> Result<SqlitePool> {
     Ok(pool)
 }
 
-async fn migrate(pool: &SqlitePool) -> Result<()> {
+pub(crate) async fn migrate(pool: &SqlitePool) -> Result<()> {
     // Embedded at build time: an installed binary has no source tree to read them from.
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
