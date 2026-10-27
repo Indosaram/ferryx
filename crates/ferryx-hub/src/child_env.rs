@@ -87,6 +87,66 @@ pub fn which_in(name: &str, path: &OsStr) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
+/// Portable executable lookup. `pathext` is a Windows `PATHEXT` list (`.COM;.EXE;.BAT;.CMD`);
+/// `None` keeps the unix rules of [`which_in`]. With a list, a name that already has an
+/// extension is tried as given first, then the name plus each listed extension in list order.
+/// A name with a path separator is resolved as a path, never searched on `path`.
+pub fn which_with_pathext(name: &str, path: &OsStr, pathext: Option<&OsStr>) -> Option<PathBuf> {
+    let Some(pathext) = pathext else {
+        return which_in(name, path);
+    };
+    let extensions: Vec<String> = pathext
+        .to_string_lossy()
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| {
+            if extension.starts_with('.') {
+                extension.to_owned()
+            } else {
+                format!(".{extension}")
+            }
+        })
+        .collect();
+    let resolve = |base: &Path| -> Option<PathBuf> {
+        if base.extension().is_some() && base.is_file() {
+            return Some(base.to_path_buf());
+        }
+        extensions
+            .iter()
+            .map(|extension| {
+                let mut candidate = base.as_os_str().to_owned();
+                candidate.push(extension);
+                PathBuf::from(candidate)
+            })
+            .find(|candidate| candidate.is_file())
+    };
+    let named = Path::new(name);
+    if named.is_absolute() || name.contains('/') || name.contains('\\') {
+        return resolve(named);
+    }
+    std::env::split_paths(path).find_map(|dir| resolve(&dir.join(name)))
+}
+
+/// This platform's `PATHEXT`: the hub environment's value (or the Windows default) on
+/// Windows, `None` elsewhere.
+pub fn platform_pathext() -> Option<OsString> {
+    if cfg!(windows) {
+        Some(
+            crate::hub_env::var_os("PATHEXT")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD")),
+        )
+    } else {
+        None
+    }
+}
+
+/// [`which_with_pathext`] on the hub child PATH with [`platform_pathext`].
+pub fn resolve_executable(name: &str) -> Option<PathBuf> {
+    which_with_pathext(name, child_path(), platform_pathext().as_deref())
+}
+
 fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {

@@ -772,7 +772,9 @@ impl From<ferryx_hub::goals::GoalError> for SupervisorGoalError {
             | GoalError::EvidenceRequired { .. }
             | GoalError::QuoteNotFound
             | GoalError::InvalidDecision(_) => Self::Invalid(message),
-            GoalError::JudgeUnavailable | GoalError::Sql(_) | GoalError::Hub(_) => Self::Storage(message),
+            GoalError::JudgeUnavailable | GoalError::SupervisorFault(_) | GoalError::Sql(_) | GoalError::Hub(_) => {
+                Self::Storage(message)
+            }
         }
     }
 }
@@ -1196,6 +1198,26 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             }
         }));
     }
+    // The retained mhc supervisor engine: one owned `mhc --mode rpc --multi-session` stdio host
+    // in `<data>/mhc-supervisor` with role-scoped sessions. Off unless FERRYX_HUB_MHC_SUPERVISOR
+    // turns it on. Hub generations share the one process-wide instance; each generation
+    // supervises it (launch, owned-exit watch, 5s..300s relaunch backoff). Aborting the
+    // generation's tasks (hub stop, handover retirement) closes the engine's stdin and kills
+    // it after a short grace; the next generation's supervise call re-enables it.
+    let mhc_supervisor = ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env().map(|config| {
+        ferryx_hub::meta::mhc_supervisor::install_with(|| {
+            let data_dir = ferryx_hub::meta::supervisor::state_dir_from_home()
+                .unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
+            ferryx_hub::meta::mhc_supervisor::MhcSupervisor::new(
+                ferryx_hub::meta::mhc_profile::MhcProfile::new(&data_dir, config),
+                std::sync::Arc::new(ferryx_hub::meta::mhc_supervisor::ProcessLauncher::new()),
+            )
+        })
+    });
+    if let Some(runtime) = &mhc_supervisor {
+        tracing::info!(cwd = %runtime.profile().cwd().display(), "mhc supervisor engine is configured");
+        tasks.push(tokio::spawn(runtime.clone().supervise()));
+    }
     #[cfg(unix)]
     {
         let home = home_dir();
@@ -1348,9 +1370,13 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 tracing::warn!(%error, %lead, "kibitzer lead was not registered");
             }
             let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-            let model = ferryx_hub::meta::backend::UrlModel::new(url);
+            // With the mhc supervisor configured it is the only model; there is no fallback.
+            let model: std::sync::Arc<dyn ferryx_hub::lanes::kibitzer::ModelTurn> = match mhc_supervisor {
+                Some(runtime) => std::sync::Arc::new(runtime.model()),
+                None => std::sync::Arc::new(ferryx_hub::meta::backend::UrlModel::new(url)),
+            };
             loop {
-                match ferryx_hub::lanes::kibitzer::evaluate(&pool, &lead, &judge, &model).await {
+                match ferryx_hub::lanes::kibitzer::evaluate(&pool, &lead, &judge, model.as_ref()).await {
                     Ok(true) => tracing::info!(%lead, "kibitzer woke the owner lead"),
                     Ok(false) => {}
                     Err(error) => tracing::warn!(%error, %lead, "kibitzer evaluation failed"),

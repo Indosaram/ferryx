@@ -329,7 +329,9 @@ impl Judge {
             forced: None,
             forced_noul: None,
             pool: ALERTS.get().map(|(pool, _)| pool.clone()),
-            fallback: default_fallback(),
+            // The retained mhc supervisor, when this hub configured one, is the only model the
+            // judge uses; it never falls back to the omo app-server.
+            fallback: crate::meta::mhc_supervisor::configured_model().or_else(default_fallback),
             bin: None,
             jev_cap: env_usize("OMON_JEV_DAILY_CAP", JEV_DAILY_CAP),
             fallback_cap: env_usize("OMON_JUDGE_FALLBACK_DAILY_CAP", FALLBACK_DAILY_CAP),
@@ -411,7 +413,9 @@ impl Judge {
     /// evaluators. It counts against the fallback daily cap and is a `judge_calls` row.
     /// No fallback model, an open breaker or a spent cap is
     /// [`GoalError::JudgeUnavailable`](crate::goals::GoalError::JudgeUnavailable), as is a
-    /// failed or timed-out model turn. typesafe-judge is never used for free text.
+    /// failed or timed-out model turn. A typed supervisor engine fault stays typed as
+    /// [`GoalError::SupervisorFault`](crate::goals::GoalError::SupervisorFault). A convergence
+    /// check asks the model for a fresh context. typesafe-judge is never used for free text.
     pub async fn structured(
         &self,
         purpose: Purpose,
@@ -441,22 +445,41 @@ impl Judge {
             return Err(GoalError::JudgeUnavailable);
         }
         let start = Instant::now();
-        let answer = tokio::time::timeout(FALLBACK_TIMEOUT, model.complete(prompt)).await;
+        let context = if purpose == Purpose::ConvergenceCheck {
+            crate::meta::mhc_fault::TurnContext::Fresh
+        } else {
+            crate::meta::mhc_fault::TurnContext::Retained
+        };
+        // The mhc supervisor bounds its own turns and reports a typed timeout; the 30s omo
+        // deadline would cut a longer decision short and hide why.
+        let turn = model.complete_typed(prompt, context);
+        let answer = if model.owns_deadline() {
+            Ok(turn.await)
+        } else {
+            tokio::time::timeout(FALLBACK_TIMEOUT, turn).await
+        };
         let (outcome, result) = match answer {
-            Ok(Ok(text)) => ("ok", Ok(text)),
-            Ok(Err(error)) => {
+            Ok(Ok(text)) => (std::borrow::Cow::Borrowed("ok"), Ok(text)),
+            Ok(Err(crate::meta::mhc_fault::TurnFault::Supervisor(fault))) => {
+                tracing::warn!(%fault, purpose = purpose.as_str(), "structured judge turn hit a supervisor engine fault");
+                (
+                    std::borrow::Cow::Owned(format!("fault:{}", fault.code())),
+                    Err(GoalError::SupervisorFault(fault)),
+                )
+            }
+            Ok(Err(crate::meta::mhc_fault::TurnFault::Other(error))) => {
                 tracing::warn!(%error, purpose = purpose.as_str(), "structured judge turn failed");
-                ("failed", Err(GoalError::JudgeUnavailable))
+                (std::borrow::Cow::Borrowed("failed"), Err(GoalError::JudgeUnavailable))
             }
             Err(_) => {
                 tracing::warn!(
                     purpose = purpose.as_str(),
                     "structured judge turn timed out"
                 );
-                ("timeout", Err(GoalError::JudgeUnavailable))
+                (std::borrow::Cow::Borrowed("timeout"), Err(GoalError::JudgeUnavailable))
             }
         };
-        self.record_kind(purpose, "structured", elapsed_ms(start), outcome, true)
+        self.record_kind(purpose, "structured", elapsed_ms(start), &outcome, true)
             .await;
         result
     }

@@ -312,6 +312,10 @@ async fn decide<C: AgentControl + ?Sized>(
         Err(GoalError::JudgeUnavailable) => {
             return stop(pool, lane_key, StopReason::JudgeUnavailable, None).await;
         }
+        Err(GoalError::SupervisorFault(fault)) => {
+            let detail = fault.to_string();
+            return stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await;
+        }
         Err(error) => return Err(error),
     };
     match assessment.decision {
@@ -342,6 +346,10 @@ async fn decide<C: AgentControl + ?Sized>(
         Decision::Complete => match converge::converge(judge, contract, bundle).await {
             Err(GoalError::JudgeUnavailable) => {
                 stop(pool, lane_key, StopReason::JudgeUnavailable, None).await
+            }
+            Err(GoalError::SupervisorFault(fault)) => {
+                let detail = fault.to_string();
+                stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await
             }
             Err(error) => Err(error),
             Ok(ConvergenceOutcome::Converged { verdicts }) => {
@@ -1010,6 +1018,49 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(outcome.stop_reason, Some(StopReason::JudgeUnavailable));
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        assert!(control.sends().is_empty());
+    }
+
+    /// A backend that names its failure, as the retained mhc supervisor does.
+    struct FaultingModel;
+
+    #[async_trait]
+    impl ModelTurn for FaultingModel {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            Err(HubError::message("untyped path must not be used"))
+        }
+
+        async fn complete_typed(
+            &self,
+            _prompt: &str,
+            _context: crate::meta::mhc_fault::TurnContext,
+        ) -> std::result::Result<String, crate::meta::mhc_fault::TurnFault> {
+            Err(crate::meta::mhc_fault::TurnFault::Supervisor(
+                crate::meta::mhc_fault::SupervisorFault::quota("429 usage limit reached"),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typed_supervisor_fault_stops_the_lane_as_degraded_not_judge_unavailable() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(FaultingModel));
+        let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::SupervisorDegraded));
+        let detail = contract.stop_detail.unwrap_or_default();
+        assert!(detail.starts_with("MHC_QUOTA:"), "{detail}");
         assert_eq!(
             status_of(&pool, LANE).await.unwrap(),
             Some(LaneStatus::Blocked)
