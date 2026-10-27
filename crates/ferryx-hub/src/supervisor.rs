@@ -1184,7 +1184,11 @@ async fn require_project_of(
 
 /// The owner's supervisor identity, created on first use. One per owner installation:
 /// repeated calls return the same UUID.
-pub async fn ensure_identity(
+///
+/// Test-only: it does not refuse a second owner, so [`provision_owner`] is the one production
+/// writer of identities and keeps one identity per installation.
+#[cfg(test)]
+pub(crate) async fn ensure_identity(
     pool: &SqlitePool,
     owner_principal: &str,
 ) -> Result<SupervisorIdentity, SupervisorError> {

@@ -210,13 +210,21 @@ async function runAdmission(ctx) {
   // task-owned lane worktrees the dispatcher creates (<repo>-lanes/<lane>).
   const workspaceRoot = join(data, 'ws');
   const repo = join(workspaceRoot, ADMISSION_PROJECT);
+  // A second real repository, outside the workspace: the target of the refused rebind.
+  const elsewhere = join(data, 'elsewhere');
   mkdirSync(repo, { recursive: true });
+  mkdirSync(elsewhere, { recursive: true });
   const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
-  for (const [label, args] of [['git-init', [...gitArgs, 'init', '-q', repo]], ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']]]) {
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]],
+    ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']],
+    ['git-init-elsewhere', [...gitArgs, 'init', '-q', elsewhere]],
+  ]) {
     const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
     if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
   }
   const gitCommonDir = realpathSync(join(repo, '.git'));
+  const elsewhereCommonDir = realpathSync(join(elsewhere, '.git'));
   const workerLogs = join(data, 'workers');
   mkdirSync(workerLogs, { recursive: true });
   const shell = join(data, 'bin', 'qa-worker-shell');
@@ -232,18 +240,24 @@ async function runAdmission(ctx) {
   });
   ctx.announce({ admission: 'fixture', workspaceRoot, repo, gitCommonDir, hubHttp: env.FERRYX_HUB_TRACKER_ADDR, dbPath });
 
-  // 1. Installation set-up through the product CLI: created, idempotent, conflict refused.
-  const setupArgs = (dir) => ['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', ADMISSION_PROJECT,
-    '--repo-identity', ADMISSION_REPO_IDENTITY, '--host', ADMISSION_HOST, '--git-common-dir', dir, '--json'];
+  // 1. Installation set-up through the product CLI: created, idempotent (also through another
+  //    spelling of the same checkout, which the CLI canonicalizes), conflicts refused.
+  const setupArgs = (dir, project = ADMISSION_PROJECT, repoIdentity = ADMISSION_REPO_IDENTITY) => ['supervisor', 'setup', '--owner', config.ownerPrincipal,
+    '--project', project, '--repo-identity', repoIdentity, '--host', ADMISSION_HOST, '--git-common-dir', dir, '--json'];
   const setup = await ctx.cli(setupArgs(gitCommonDir), { label: 'supervisor-setup', env });
   ctx.assert('setup-created-identity-project-and-host', setup.code === 0 && setup.json?.ok === true && setup.json?.ownerPrincipal === config.ownerPrincipal
     && typeof setup.json?.supervisorId === 'string' && typeof setup.json?.projectId === 'string' && setup.json?.hostId === ADMISSION_HOST
     && setup.json?.gitCommonDir === gitCommonDir, { code: setup.code, json: setup.json, stderr: setup.stderr });
-  const rerun = await ctx.cli(setupArgs(gitCommonDir), { label: 'supervisor-setup-rerun', env });
+  // The rerun names the checkout root with a trailing separator, not the common dir.
+  const rerun = await ctx.cli(setupArgs(`${realpathSync(repo)}/`), { label: 'supervisor-setup-rerun', env });
   ctx.assert('setup-rerun-returns-the-same-ids', rerun.code === 0 && rerun.json?.supervisorId === setup.json?.supervisorId
-    && rerun.json?.projectId === setup.json?.projectId, { code: rerun.code, json: rerun.json });
-  const moved = await ctx.cli(setupArgs(join(data, 'elsewhere', '.git')), { label: 'supervisor-setup-conflict', env });
-  ctx.assert('setup-conflicting-rebind-refused', moved.code === 4 && moved.json?.code === 'SETUP_CONFLICT', { code: moved.code, json: moved.json });
+    && rerun.json?.projectId === setup.json?.projectId && rerun.json?.gitCommonDir === gitCommonDir, { code: rerun.code, json: rerun.json });
+  // The project moved to another real repository, and another project on another spelling of
+  // the mapped checkout: both are true SETUP_CONFLICTs, never a not-found refusal.
+  const moved = await ctx.cli(setupArgs(elsewhereCommonDir), { label: 'supervisor-setup-conflict', env });
+  const respelled = await ctx.cli(setupArgs(realpathSync(repo), 'qa-other', 'qa:qa-other'), { label: 'supervisor-setup-respelled-conflict', env });
+  ctx.assert('setup-conflicting-rebind-refused', moved.code === 4 && moved.json?.code === 'SETUP_CONFLICT'
+    && respelled.code === 4 && respelled.json?.code === 'SETUP_CONFLICT', { moved: { code: moved.code, json: moved.json }, respelled: { code: respelled.code, json: respelled.json } });
   if (!setup.json?.projectId) throw new HarnessError('SETUP_FAILED', 'supervisor setup did not return a project; nothing further can be admitted');
 
   // 2. Isolated daemon (its hub runs the dispatcher) and the fixture workspace.
@@ -305,7 +319,9 @@ async function runAdmission(ctx) {
     && dispatch?.state === 'started' && dispatch?.request_id === receipt.dispatch_request_id && typeof dispatch?.provider_session_id === 'string'
     && binding?.provider_session_id === dispatch.provider_session_id && binding?.kind === 'pty' && toolsCalled.every((name) => name === 'supervisor.request'),
   { goal: dispatched.goal, dispatches: dispatched.dispatches, binding, toolsCalled });
-  // The start may be confirmed from the pane's echo before the worker's own report is logged.
+  // The start is confirmed by the worker's own agentState report (the pane's echo reads as
+  // Unknown, not Working), but the dispatch row can commit before the worker has logged that
+  // the report was delivered, so the worker log is awaited on its own.
   const reportedWorking = (entry) => entry.entries.some((line) => line.kind === 'reported' && line.state === 'working');
   const workerSettled = await waitForChange(ctx, 'worker working report', workerLogs, () => {
     const workers = readWorkerLogs(workerLogs);
@@ -313,9 +329,12 @@ async function runAdmission(ctx) {
   }, 30_000).then(() => true, (error) => { ctx.log(`worker report wait: ${error?.message ?? error}`); return false; });
   const workersAfterStart = readWorkerLogs(workerLogs);
   const worker = workersAfterStart[0] ?? null;
+  // The worker's first typed line is the dispatched instruction: it starts with the work's own
+  // instruction (admission's worker_instruction), not just any non-empty line.
+  const firstInput = worker?.entries.find((entry) => entry.kind === 'input' && entry.text.trim() !== '') ?? null;
   ctx.assert('exactly-one-worker-started', workerSettled && workersAfterStart.length === 1 && worker?.sessionId === dispatch?.provider_session_id
-    && worker.entries.some((entry) => entry.kind === 'input' && entry.text.trim() !== '') && reportedWorking(worker),
-  { workers: workersAfterStart.map(({ name, sessionId, entries }) => ({ name, sessionId, entries })) });
+    && typeof firstInput?.text === 'string' && firstInput.text.includes(ADMISSION_WORK.instruction) && reportedWorking(worker),
+  { firstInput, workers: workersAfterStart.map(({ name, sessionId, entries }) => ({ name, sessionId, entries })) });
   const afterStart = counts();
 
   // 6. Replay of the same source id and body: the same receipt, nothing new.
@@ -353,6 +372,10 @@ async function runAdmission(ctx) {
   const workers = readWorkerLogs(workerLogs);
   for (const entry of workers) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
   ctx.evidence.writeJson('admission.json', {
+    worker: {
+      kind: 'fixture',
+      note: 'The pane worker is fixture-worker.mjs launched through a runner-written SHELL wrapper; it reports agentState working on its first typed line, standing in for an agent extension. It is not a real provider worker and is no proof that a real worker was instructed.',
+    },
     sourceId, goalId, receipt, setup: setup.json, binding: finalBinding, goal: finalGoal, dispatches: dispatched.dispatches,
     counts: { afterStart, afterReplay, afterEdited, afterQuestion, final: finalCounts }, toolsCalled, hubHttp: env.FERRYX_HUB_TRACKER_ADDR,
   });

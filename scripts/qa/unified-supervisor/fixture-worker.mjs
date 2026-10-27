@@ -5,7 +5,8 @@
 // input lines and, on the first non-empty one (the dispatched instruction), reports
 // `agentState working` for its own pane to the daemon's agent-state socket, exactly as an agent
 // extension does. Everything it sees is appended to <logDir>/worker-<pid>.jsonl, which the
-// runner reads; it never decides PASS.
+// runner reads; it never decides PASS. It is a fixture standing in for an agent extension's
+// self-report, not a real provider worker. It exits when its input closes (the pane is gone).
 //   argv: <logDir> [--max-lifetime-ms=N]   (leak guard, default 600000)
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { createConnection } from 'node:net';
@@ -53,4 +54,7 @@ lines.on('line', (raw) => {
   reported = true;
   report('working');
 });
-lines.on('close', () => record({ kind: 'stdin-closed' }));
+lines.on('close', () => {
+  record({ kind: 'stdin-closed' });
+  process.exit(0);
+});

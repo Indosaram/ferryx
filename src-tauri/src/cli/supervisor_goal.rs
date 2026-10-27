@@ -6,6 +6,12 @@
 //! and its mapping on one host ([`ferryx_hub::supervisor::provision_owner`]). It writes the hub
 //! database the same way `ferryx-cli mcp` opens it, needs no running daemon and prints one JSON
 //! value. A conflicting set-up (SETUP_CONFLICT) exits 4 and writes nothing.
+//! The git common dir is resolved here, on the host it names: only `--host local` is accepted,
+//! the path must be a repository's common dir or a checkout root, and its canonical common dir
+//! is what is stored, so two spellings of one checkout are one mapping. A pane worker
+//! (FERRYX_SESSION_ID set) is refused: set-up is the owner's act.
+
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -60,11 +66,88 @@ pub fn parse_setup_cli(args: &[String]) -> Result<SetupArgs, UsageError> {
 fn setup_exit_code(code: &str) -> i32 {
     match code {
         ferryx_hub::supervisor::SETUP_CONFLICT => crate::agent_control::EXIT_REFUSED,
+        NOT_A_GIT_DIR | HOST_NOT_LOCAL => EXIT_INVALID,
         other => crate::agent_control::exit_code_for(other),
     }
 }
 
+/// `--git-common-dir` does not name an existing git common dir or checkout root (exit 2).
+pub const NOT_A_GIT_DIR: &str = "NOT_A_GIT_DIR";
+/// `--host` is not this host; its mapping has to be made on that host (exit 2).
+pub const HOST_NOT_LOCAL: &str = "HOST_NOT_LOCAL";
+
+/// Set-up is refused inside a Ferryx pane: a worker runs as the same OS user and must not
+/// provision the owner's supervisor.
+fn refused_in_pane(session_id: Option<&std::ffi::OsStr>) -> bool {
+    session_id.is_some_and(|session| !session.is_empty())
+}
+
+fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    Ok(PathBuf::from(crate::worktree::git::strip_verbatim_prefix(&resolved.to_string_lossy())))
+}
+
+/// One `git rev-parse <flag>` in `dir`, free of any inherited GIT_DIR-style override.
+fn rev_parse(dir: &Path, flag: &str) -> Option<String> {
+    let output = crate::util::no_window_command("git")
+        .args(["rev-parse", flag])
+        .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim_end_matches(['\r', '\n']);
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The canonical absolute git common dir `dir` names on `host`. Only this host (`local`) can
+/// resolve one. Accepted spellings are the common dir itself (`/r/.git`, `/r/.git/`, a symlink
+/// to it) and a checkout root (`/r`, a linked worktree's root); a path inside a repository or
+/// outside any is refused.
+pub fn canonical_git_common_dir(host: &str, dir: &str) -> Result<String, (&'static str, String)> {
+    let local = ferryx_hub::agent_control::LOCAL_HOST_ID;
+    if host != local {
+        return Err((
+            HOST_NOT_LOCAL,
+            format!("host {host} is not this host ({local}); its git common dir can only be resolved there, so run `ferryx-cli supervisor setup --host {local}` on that host"),
+        ));
+    }
+    let refuse = |why: String| (NOT_A_GIT_DIR, format!("{dir} is not a git common dir or checkout root: {why}"));
+    let given = canonical(Path::new(dir)).map_err(|error| refuse(error.to_string()))?;
+    if !given.is_dir() {
+        return Err(refuse("not a directory".into()));
+    }
+    let common = rev_parse(&given, "--git-common-dir").ok_or_else(|| refuse("git rev-parse --git-common-dir failed".into()))?;
+    let common = Path::new(&common);
+    let common = canonical(&if common.is_absolute() { common.to_path_buf() } else { given.join(common) })
+        .map_err(|error| refuse(error.to_string()))?;
+    let checkout_root = || {
+        rev_parse(&given, "--show-toplevel")
+            .and_then(|top| canonical(Path::new(&top)).ok())
+            .is_some_and(|top| top == given)
+    };
+    if given != common && !checkout_root() {
+        return Err(refuse(format!("it is inside the repository whose common dir is {}", common.display())));
+    }
+    common.to_str().map(str::to_owned).ok_or_else(|| refuse("the path is not UTF-8".into()))
+}
+
 async fn run_setup(setup: SetupArgs) -> (Value, i32) {
+    // Resolved before the database is opened: a refused path writes and migrates nothing.
+    let git_common_dir = match canonical_git_common_dir(&setup.host, &setup.git_common_dir) {
+        Ok(dir) => dir,
+        Err((code, message)) => {
+            let (value, _) = failure(code, &message);
+            return (value, setup_exit_code(code));
+        }
+    };
     // The same database `ferryx-cli mcp` and the daemon's hub open: the config file path wins,
     // then FERRYX_HUB_DB, then the default.
     let config = match ferryx_hub::HubConfig::load() {
@@ -73,7 +156,9 @@ async fn run_setup(setup: SetupArgs) -> (Value, i32) {
     };
     let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return failure("STORAGE", &format!("cannot create {}: {error}", parent.display()));
+        }
     }
     let pool = match ferryx_hub::storage::connect(&path).await {
         Ok(pool) => pool,
@@ -85,7 +170,7 @@ async fn run_setup(setup: SetupArgs) -> (Value, i32) {
         &setup.project,
         &setup.repo_identity,
         &setup.host,
-        &setup.git_common_dir,
+        &git_common_dir,
     )
     .await;
     pool.close().await;
@@ -114,6 +199,10 @@ async fn run_setup(setup: SetupArgs) -> (Value, i32) {
 /// Run `ferryx-cli supervisor setup ...`: print one JSON value on stdout and return the exit code.
 fn run_setup_cli(args: &[String]) -> i32 {
     let (value, code) = match parse_setup_cli(args) {
+        _ if refused_in_pane(std::env::var_os("FERRYX_SESSION_ID").as_deref()) => {
+            let (value, _) = failure("FORBIDDEN", "supervisor setup is the owner's act and is refused inside a Ferryx pane (FERRYX_SESSION_ID is set)");
+            (value, crate::agent_control::EXIT_REFUSED)
+        }
         Err(UsageError(message)) => {
             let (value, _) = failure("INVALID_REQUEST", &message);
             (value, EXIT_INVALID)
@@ -487,6 +576,84 @@ mod tests {
         assert!(parse_setup_cli(&relative).is_err(), "a relative dir is refused");
         assert_eq!(setup_exit_code(ferryx_hub::supervisor::SETUP_CONFLICT), EXIT_REFUSED);
         assert_eq!(setup_exit_code("INVALID_REQUEST"), EXIT_INVALID);
+        assert_eq!(setup_exit_code(NOT_A_GIT_DIR), EXIT_INVALID);
+        assert_eq!(setup_exit_code(HOST_NOT_LOCAL), EXIT_INVALID);
+        assert!(refused_in_pane(Some(std::ffi::OsStr::new("pane-1"))), "a pane worker never provisions");
+        assert!(!refused_in_pane(Some(std::ffi::OsStr::new(""))));
+        assert!(!refused_in_pane(None));
+    }
+
+    fn git_repo(root: &Path) -> PathBuf {
+        let repo = root.join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::worktree::git::run_git(&repo, &["init", "-q"]).unwrap();
+        canonical(&repo).unwrap()
+    }
+
+    /// Every spelling of one checkout resolves to one canonical common dir, so a second project
+    /// on another spelling is SETUP_CONFLICT, never a second mapping of the same checkout.
+    #[tokio::test]
+    async fn setup_spellings_of_one_checkout_are_one_mapping() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = git_repo(temp.path());
+        let common = repo.join(".git").to_string_lossy().into_owned();
+        let mut spellings = vec![
+            common.clone(),
+            format!("{common}{}", std::path::MAIN_SEPARATOR),
+            repo.to_string_lossy().into_owned(),
+        ];
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(&repo, &link).unwrap();
+            spellings.push(link.join(".git").to_string_lossy().into_owned());
+            spellings.push(link.to_string_lossy().into_owned());
+        }
+        for spelling in &spellings {
+            assert_eq!(canonical_git_common_dir("local", spelling).unwrap(), common, "{spelling}");
+        }
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let first = canonical_git_common_dir("local", &spellings[0]).unwrap();
+        let (_, project, _) =
+            ferryx_hub::supervisor::provision_owner(&pool, "qa-owner", "a", "id-a", "local", &first).await.unwrap();
+        for (index, spelling) in spellings.iter().enumerate().skip(1) {
+            let dir = canonical_git_common_dir("local", spelling).unwrap();
+            let refused = ferryx_hub::supervisor::provision_owner(
+                &pool,
+                "qa-owner",
+                &format!("b{index}"),
+                &format!("id-b{index}"),
+                "local",
+                &dir,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(refused.code(), ferryx_hub::supervisor::SETUP_CONFLICT, "{spelling}: {refused}");
+        }
+        let last = canonical_git_common_dir("local", spellings.last().unwrap()).unwrap();
+        let again = ferryx_hub::supervisor::provision_owner(&pool, "qa-owner", "a", "id-a", "local", &last)
+            .await
+            .unwrap();
+        assert_eq!(again.1, project, "the same project through another spelling is the same mapping");
+    }
+
+    #[test]
+    fn setup_refuses_missing_non_git_inner_and_remote_paths() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let missing = temp.path().join("missing").to_string_lossy().into_owned();
+        assert_eq!(canonical_git_common_dir("local", &missing).unwrap_err().0, NOT_A_GIT_DIR);
+        let plain = temp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(canonical_git_common_dir("local", &plain.to_string_lossy()).unwrap_err().0, NOT_A_GIT_DIR);
+        let repo = git_repo(temp.path());
+        let inner = repo.join("src");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert_eq!(canonical_git_common_dir("local", &inner.to_string_lossy()).unwrap_err().0, NOT_A_GIT_DIR);
+        let objects = repo.join(".git").join("objects");
+        assert_eq!(canonical_git_common_dir("local", &objects.to_string_lossy()).unwrap_err().0, NOT_A_GIT_DIR);
+        let remote = canonical_git_common_dir("host-b", &repo.join(".git").to_string_lossy()).unwrap_err();
+        assert_eq!(remote.0, HOST_NOT_LOCAL, "{}", remote.1);
     }
 
     #[test]

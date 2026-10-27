@@ -1962,11 +1962,10 @@ mod tests {
         use ferryx_hub::supervisor::{self as sv, AdmitRequest, ChannelProvider, ExecutionKind, ExecutionTarget};
         let pool = ferryx_hub::storage::memory().await.unwrap();
         let owner = "slack:T1:U-owner";
-        let identity = sv::ensure_identity(&pool, owner).await.unwrap();
-        let project = sv::create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/example/ferryx")
-            .await
-            .unwrap();
-        sv::bind_project_host(&pool, &project.project_id, "host-a", "/repo/.git").await.unwrap();
+        let (identity, project, _) =
+            sv::provision_owner(&pool, owner, "ferryx", "github.com/example/ferryx", "host-a", "/repo/.git")
+                .await
+                .unwrap();
         let request = AdmitRequest {
             supervisor_id: identity.supervisor_id,
             owner_principal: owner.into(),

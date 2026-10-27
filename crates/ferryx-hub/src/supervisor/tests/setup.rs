@@ -118,3 +118,58 @@ async fn setup_validates_its_arguments() {
     }
     assert_eq!(rows(&pool).await, [0, 0, 0]);
 }
+
+/// A WAL file database with several connections, so the two provisions really contend for the
+/// write lock (BEGIN IMMEDIATE) instead of sharing one in-memory connection.
+async fn file_pool() -> (SqlitePool, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("ferryx-hub-setup-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let pool = crate::storage::connect(&dir.join("hub.sqlite")).await.unwrap();
+    (pool, dir)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setups_keep_one_owner_and_one_mapping() {
+    let (pool, dir) = file_pool().await;
+    let (mine, theirs) = tokio::join!(
+        tokio::spawn({
+            let pool = pool.clone();
+            async move { provision_owner(&pool, OWNER, "qa-supervisor", REPO, HOST, DIR).await }
+        }),
+        tokio::spawn({
+            let pool = pool.clone();
+            async move { provision_owner(&pool, "someone-else", "theirs", "github.com/x/y", HOST, "/y/.git").await }
+        }),
+    );
+    let (mine, theirs) = (mine.unwrap(), theirs.unwrap());
+    assert_eq!(
+        usize::from(mine.is_ok()) + usize::from(theirs.is_ok()),
+        1,
+        "exactly one owner wins: {mine:?} / {theirs:?}"
+    );
+    let loser = mine.as_ref().err().or(theirs.as_ref().err()).unwrap();
+    assert_eq!(loser.code(), SETUP_CONFLICT, "{loser}");
+    assert_eq!(rows(&pool).await, [1, 1, 1]);
+    pool.close().await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let (pool, dir) = file_pool().await;
+    let (first, second) = tokio::join!(
+        tokio::spawn({
+            let pool = pool.clone();
+            async move { provision_owner(&pool, OWNER, "qa-supervisor", REPO, HOST, DIR).await }
+        }),
+        tokio::spawn({
+            let pool = pool.clone();
+            async move { provision_owner(&pool, OWNER, "qa-supervisor", REPO, HOST, DIR).await }
+        }),
+    );
+    let (first, second) = (first.unwrap().unwrap(), second.unwrap().unwrap());
+    assert_eq!(first.0, second.0, "one identity");
+    assert_eq!(first.1, second.1, "one project");
+    assert_eq!(first.2.project_id, second.2.project_id);
+    assert_eq!(first.2.git_common_dir, second.2.git_common_dir);
+    assert_eq!(rows(&pool).await, [1, 1, 1]);
+    pool.close().await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+}
