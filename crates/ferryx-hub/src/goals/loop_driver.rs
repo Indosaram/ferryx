@@ -312,6 +312,10 @@ async fn decide<C: AgentControl + ?Sized>(
         Err(GoalError::JudgeUnavailable) => {
             return stop(pool, lane_key, StopReason::JudgeUnavailable, None).await;
         }
+        Err(GoalError::SupervisorFault(fault)) => {
+            let detail = fault.to_string();
+            return stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await;
+        }
         Err(error) => return Err(error),
     };
     match assessment.decision {
@@ -342,6 +346,10 @@ async fn decide<C: AgentControl + ?Sized>(
         Decision::Complete => match converge::converge(judge, contract, bundle).await {
             Err(GoalError::JudgeUnavailable) => {
                 stop(pool, lane_key, StopReason::JudgeUnavailable, None).await
+            }
+            Err(GoalError::SupervisorFault(fault)) => {
+                let detail = fault.to_string();
+                stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await
             }
             Err(error) => Err(error),
             Ok(ConvergenceOutcome::Converged { verdicts }) => {
@@ -502,6 +510,7 @@ mod tests {
     use crate::goals::SendOutcome;
     use crate::lanes::kibitzer::ModelTurn;
     use crate::lanes::state::{insert_lane, set_pane, status_of, transition};
+    use crate::meta::mhc_fault::{SupervisorFault, TurnContext, TurnFault};
 
     const LANE: &str = "goal-a";
 
@@ -1015,5 +1024,178 @@ mod tests {
             Some(LaneStatus::Blocked)
         );
         assert!(control.sends().is_empty());
+    }
+
+    /// A backend that names its failure, as the retained mhc supervisor does.
+    struct FaultingModel;
+
+    #[async_trait]
+    impl ModelTurn for FaultingModel {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            Err(HubError::message("untyped path must not be used"))
+        }
+
+        async fn complete_typed(
+            &self,
+            _prompt: &str,
+            _context: crate::meta::mhc_fault::TurnContext,
+        ) -> std::result::Result<String, crate::meta::mhc_fault::TurnFault> {
+            Err(crate::meta::mhc_fault::TurnFault::Supervisor(
+                crate::meta::mhc_fault::SupervisorFault::quota("429 usage limit reached"),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typed_supervisor_fault_stops_the_lane_as_degraded_not_judge_unavailable() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(FaultingModel));
+        let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::SupervisorDegraded));
+        let detail = contract.stop_detail.unwrap_or_default();
+        assert!(detail.starts_with("MHC_QUOTA:"), "{detail}");
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        assert!(control.sends().is_empty());
+    }
+
+    /// The retained mhc supervisor that completes the assessment (a retained context) and
+    /// then faults on the convergence check (a fresh context).
+    struct ConvergeFaultingModel;
+
+    #[async_trait]
+    impl ModelTurn for ConvergeFaultingModel {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            Err(HubError::message("untyped path must not be used"))
+        }
+
+        async fn complete_typed(
+            &self,
+            _prompt: &str,
+            context: TurnContext,
+        ) -> std::result::Result<String, TurnFault> {
+            match context {
+                TurnContext::Retained => Ok(COMPLETE.to_owned()),
+                TurnContext::Fresh => Err(TurnFault::Supervisor(SupervisorFault::timeout(
+                    "supervisor turn",
+                ))),
+            }
+        }
+
+        fn owns_deadline(&self) -> bool {
+            true
+        }
+
+        fn is_supervisor_engine(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_fault_at_the_convergence_check_stops_the_lane_as_degraded() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(ConvergeFaultingModel));
+        let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::SupervisorDegraded));
+        let detail = contract.stop_detail.unwrap_or_default();
+        assert!(detail.starts_with("MHC_TIMEOUT:"), "{detail}");
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        assert!(control.sends().is_empty());
+    }
+
+    /// Scripted answers served as the retained mhc supervisor engine.
+    struct EngineModel(Arc<ScriptedModel>);
+
+    #[async_trait]
+    impl ModelTurn for EngineModel {
+        async fn complete(&self, prompt: &str) -> Result<String> {
+            self.0.complete(prompt).await
+        }
+
+        fn owns_deadline(&self) -> bool {
+            true
+        }
+
+        fn is_supervisor_engine(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_judge_breaker_and_a_spent_omo_cap_never_hold_a_supervisor_engine_goal() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        for _ in 0..crate::judge::FALLBACK_DAILY_CAP {
+            sqlx::query(
+                "INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at)
+                 VALUES(?, 'inbox_class', 'choice', 1, 'fyi', 1, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let breaker = Arc::new(Mutex::new(crate::judge::Breaker::default()));
+        for _ in 0..crate::judge::BREAKER_FAILURES {
+            breaker.lock().unwrap().failure(
+                true,
+                "401 Unauthorized",
+                std::time::Instant::now(),
+                chrono::Utc::now().date_naive(),
+            );
+        }
+        assert!(breaker
+            .lock()
+            .unwrap()
+            .open_until(std::time::Instant::now())
+            .is_some());
+
+        // The omo fallback model is held by both: the goal would stop as judge_unavailable.
+        let omo = Judge::bare()
+            .with_pool(pool.clone())
+            .with_breaker(breaker.clone())
+            .with_fallback(ScriptedModel::new(&[COMPLETE]));
+        assert!(matches!(
+            omo.structured(crate::judge::Purpose::GapAssess, "q").await,
+            Err(GoalError::JudgeUnavailable)
+        ));
+
+        let model = ScriptedModel::new(&[COMPLETE, CONVERGED]);
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_breaker(breaker)
+            .with_fallback(Arc::new(EngineModel(model.clone())));
+        let control = FakeControl::default();
+        let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, None);
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::VerifiedDone)
+        );
+        assert_eq!(model.calls(), 2);
     }
 }

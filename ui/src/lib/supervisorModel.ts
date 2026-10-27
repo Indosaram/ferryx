@@ -28,6 +28,7 @@ export const SUPERVISOR_STOP_REASONS = [
   "turn_limit",
   "delivery_uncertain",
   "judge_unavailable",
+  "supervisor_degraded",
 ] as const;
 export type SupervisorStopReason = (typeof SUPERVISOR_STOP_REASONS)[number];
 
@@ -38,6 +39,7 @@ export const SUPERVISOR_STOP_REASON_LABELS: Record<SupervisorStopReason, string>
   turn_limit: "Turn limit reached",
   delivery_uncertain: "Instruction may not have arrived",
   judge_unavailable: "Supervisor checker unavailable",
+  supervisor_degraded: "Supervisor engine degraded",
 };
 export const SUPERVISOR_AWAITING_APPROVAL_LABEL = "Next step ready for review";
 /** An unknown reason from a newer daemon still reads as a stop. */

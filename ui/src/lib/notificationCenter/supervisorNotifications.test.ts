@@ -41,7 +41,7 @@ afterEach(() => { stores.splice(0).forEach((store) => store.dispose()); localSto
 
 describe("supervisor stop-reason labels", () => {
   it("labels every Rust StopReason string", () => {
-    expect(SUPERVISOR_STOP_REASONS).toHaveLength(6);
+    expect(SUPERVISOR_STOP_REASONS).toHaveLength(7);
     for (const reason of SUPERVISOR_STOP_REASONS) {
       const label = SUPERVISOR_STOP_REASON_LABELS[reason];
       expect(typeof label).toBe("string");
