@@ -104,7 +104,7 @@ pub fn dispatch_action(command: DispatchCli) -> Result<SupervisorDispatchAction,
                 body: file.body,
                 host_id,
                 session_id,
-                work: file.work,
+                work: Box::new(file.work),
             })
         }
     }

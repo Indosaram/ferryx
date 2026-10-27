@@ -574,7 +574,7 @@ pub enum SupervisorDispatchAction {
         body: String,
         host_id: Option<String>,
         session_id: Option<String>,
-        work: ferryx_hub::supervisor::admission::SubmitWork,
+        work: Box<ferryx_hub::supervisor::admission::SubmitWork>,
     },
     /// The goal's state, binding and every dispatch with its receipts.
     Status { goal_id: String },

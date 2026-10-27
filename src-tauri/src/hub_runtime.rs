@@ -2174,7 +2174,7 @@ mod tests {
             body: "Create result.txt containing READY.".into(),
             host_id: Some("paired-1".into()),
             session_id: Some("pane-1".into()),
-            work: work.clone(),
+            work: Box::new(work.clone()),
         };
         let admitted = apply_dispatch_action(&pool, submit("m-1")).await.unwrap();
         assert_eq!(admitted["outcome"], "admitted", "{admitted}");
