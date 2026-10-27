@@ -2,6 +2,8 @@
 //! rollback and concurrency guarantees.
 //! `admission` covers work admission and the initial dispatcher.
 //! `receipts` covers causal worker receipts: accepted, started and settled per transport.
+//! `wakes` covers dependency waits, the state-event cursor and batched goal wakes (0021).
 mod admission;
 mod receipts;
 mod schema;
+mod wakes;
