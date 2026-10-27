@@ -17,6 +17,25 @@ pub const APPROVAL_DENIAL_TURN_LIMIT: u32 = 5;
 const DENIAL_REASON: &str =
     "denied by gateway policy - do not retry this tool; ask the user for the information instead";
 pub const TURN_START_ACK_WINDOW: Duration = Duration::from_secs(30);
+/// How long a successful turn's engine gets to exit on its own after stdin closes. A SIGKILL
+/// right after a good turn makes mhc record the session as interrupted on the next resume.
+const GRACEFUL_EXIT_WINDOW: Duration = Duration::from_secs(5);
+/// mhc's tool permission dialog arrives as a `select` with this title prefix.
+const PERMISSION_TITLE_PREFIX: &str = "Permission required:";
+const PERMISSION_ALLOW: &str = "Allow once";
+const PERMISSION_DENY: &str = "Deny";
+/// Real mhc tool ids `--tools` may name. Anything else (notably the legacy omo-gateway
+/// toolsets `terminal`, `browser`, `file`) would leave the model with zero tools.
+const MHC_TOOL_IDS: &[&str] = &[
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "eval",
+    "todo",
+    "web_search",
+    "webfetch",
+];
 pub const TURN_START_ACK_TIMEOUT: &str =
     "timeout waiting for mhc prompt acknowledgement; submission outcome unknown, do not resubmit";
 #[derive(Debug, Clone)]
@@ -409,9 +428,64 @@ impl Rpc {
             }
         }
     }
+    /// The one approval decision for confirm and permission-select dialogs: the retired
+    /// gateway is always declined, otherwise policy decides and the owner is asked about
+    /// anything policy would decline. Updates the turn's approval counters.
+    async fn decide(&mut self, policy_frame: &Value, cwd: Option<&str>) -> bool {
+        let retired = starts_retired_gateway(policy_frame);
+        let mut verdict = if retired {
+            Some(RETIRED_GATEWAY_REASON.into())
+        } else {
+            approval_verdict(policy_frame, cwd)
+        };
+        if !retired {
+            if let Some(reason) = verdict.clone() {
+                if let Ok(approver) = APPROVER.try_with(std::sync::Arc::clone) {
+                    verdict = match approver.ask(policy_frame, cwd, &reason).await {
+                        OwnerAnswer::Approve => None,
+                        OwnerAnswer::Deny => Some("denied by the owner".into()),
+                        OwnerAnswer::Unanswered => Some(UNANSWERED_REASON.into()),
+                    };
+                }
+            }
+        }
+        if verdict.is_none() {
+            self.allowed += 1;
+        } else if verdict.as_deref() != Some(UNANSWERED_REASON) {
+            self.denied += 1;
+        }
+        verdict.is_none()
+    }
+    fn denial_limit(&self) -> Result<()> {
+        if self.denied >= APPROVAL_DENIAL_TURN_LIMIT {
+            return Err(HubError::message("mhc approval denial limit reached"));
+        }
+        Ok(())
+    }
     async fn ui(&mut self, frame: &Value, cwd: Option<&str>) -> Result<()> {
         if frame["type"] != "extension_ui_request" {
             return Ok(());
+        }
+        let permission = frame["method"] == "select"
+            && frame["title"]
+                .as_str()
+                .is_some_and(|title| title.starts_with(PERMISSION_TITLE_PREFIX));
+        if permission {
+            let id = frame
+                .get("id")
+                .ok_or_else(|| HubError::message("mhc permission select missing id"))?;
+            // The title carries the tool, its detail line and patterns; keep the raw frame
+            // for the effect classifier and the owner's approval card.
+            let policy_frame = json!({"method":"item/tool/requestApproval","id":id,"params":{"command":frame["title"].as_str().unwrap_or(""),"request":frame}});
+            let approved = self.decide(&policy_frame, cwd).await;
+            let value = if approved {
+                PERMISSION_ALLOW
+            } else {
+                PERMISSION_DENY
+            };
+            self.send(json!({"type":"extension_ui_response","id":id,"value":value}))
+                .await?;
+            return self.denial_limit();
         }
         if matches!(frame["method"].as_str(), Some("select" | "input")) {
             // Approval cards provide a binary decision, not arbitrary text. Never fabricate
@@ -433,34 +507,10 @@ impl Rpc {
             .ok_or_else(|| HubError::message("mhc confirm missing id"))?;
         // Keep the raw title/message in the effect classifier and owner's approval card.
         let policy_frame = json!({"method":"item/tool/requestApproval","id":id,"params":{"command":frame["message"].as_str().unwrap_or(""),"request":frame}});
-        let retired = starts_retired_gateway(&policy_frame);
-        let mut verdict = if retired {
-            Some(RETIRED_GATEWAY_REASON.into())
-        } else {
-            approval_verdict(&policy_frame, cwd)
-        };
-        if !retired {
-            if let Some(reason) = verdict.clone() {
-                if let Ok(approver) = APPROVER.try_with(std::sync::Arc::clone) {
-                    verdict = match approver.ask(&policy_frame, cwd, &reason).await {
-                        OwnerAnswer::Approve => None,
-                        OwnerAnswer::Deny => Some("denied by the owner".into()),
-                        OwnerAnswer::Unanswered => Some(UNANSWERED_REASON.into()),
-                    };
-                }
-            }
-        }
-        if verdict.is_none() {
-            self.allowed += 1;
-        } else if verdict.as_deref() != Some(UNANSWERED_REASON) {
-            self.denied += 1;
-        }
-        self.send(json!({"type":"extension_ui_response","id":id,"confirmed":verdict.is_none()}))
+        let approved = self.decide(&policy_frame, cwd).await;
+        self.send(json!({"type":"extension_ui_response","id":id,"confirmed":approved}))
             .await?;
-        if self.denied >= APPROVAL_DENIAL_TURN_LIMIT {
-            return Err(HubError::message("mhc approval denial limit reached"));
-        }
-        Ok(())
+        self.denial_limit()
     }
     async fn request(&mut self, value: Value, cwd: Option<&str>) -> Result<Value> {
         let id = value["id"].clone();
@@ -469,12 +519,10 @@ impl Rpc {
             let f = self.read().await?;
             if f["type"] == "response" && f["id"] == id {
                 if f["success"] != true {
-                    let error = format!("{}: {}", f["command"], f["error"]);
-                    return Err(if f["command"] == "set_model" {
-                        failure(error, false)
-                    } else {
-                        HubError::message(error)
-                    });
+                    return Err(HubError::message(format!(
+                        "{}: {}",
+                        f["command"], f["error"]
+                    )));
                 }
                 return Ok(f["data"].clone());
             }
@@ -541,6 +589,27 @@ fn failure(error: String, side_effects: bool) -> HubError {
     })
 }
 
+/// The `--tools` value for the requested names, or `None` (mhc's default tool set) unless
+/// every name is a real mhc tool id. Never an empty list.
+fn mhc_tools(requested: &[String]) -> Option<String> {
+    if requested.is_empty() {
+        return None;
+    }
+    let dropped: Vec<&str> = requested
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !MHC_TOOL_IDS.contains(name))
+        .collect();
+    if !dropped.is_empty() {
+        tracing::warn!(
+            dropped = %dropped.join(","),
+            "requested toolsets are not mhc tool ids; launching mhc with its default tools"
+        );
+        return None;
+    }
+    Some(requested.join(","))
+}
+
 struct GuardDirectory(PathBuf);
 impl Drop for GuardDirectory {
     fn drop(&mut self) {
@@ -590,6 +659,12 @@ pub async fn run_turn(
     if let Some(path) = session_path.as_deref() {
         cmd.arg("--session").arg(path);
     }
+    // Launch flags select model and thinking for this process only; the matching RPC
+    // commands persist into the global agent settings and hot-reload mhc mid-turn.
+    if let Some(model) = request.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.arg("--thinking").arg(protocol::default_effort());
     let mut instructions = request.system_prompt.clone().unwrap_or_default();
     if let Some(w) = &config.workspace {
         cmd.current_dir(&w.cwd);
@@ -599,8 +674,8 @@ pub async fn run_turn(
     if !instructions.is_empty() {
         cmd.arg("--append-system-prompt").arg(instructions);
     }
-    if let Some(tools) = &request.toolsets {
-        cmd.arg("--tools").arg(tools.join(","));
+    if let Some(tools) = request.toolsets.as_deref().and_then(mhc_tools) {
+        cmd.arg("--tools").arg(tools);
     }
     let mut child = cmd
         .spawn()
@@ -654,7 +729,17 @@ pub async fn run_turn(
             Err(error) => tracing::warn!(%error,"mhc abort write timed out"),
         }
     }
+    let succeeded = result.is_ok();
     drop(rpc);
+    if succeeded {
+        // Closed stdin asks mhc to finish and record the session cleanly; the kill below is
+        // only the fallback for an engine that does not exit in time.
+        match tokio::time::timeout(GRACEFUL_EXIT_WINDOW, child.wait()).await {
+            Ok(Ok(_)) => return result,
+            Ok(Err(error)) => tracing::warn!(%error, "mhc RPC graceful exit wait failed"),
+            Err(_) => tracing::warn!("mhc RPC did not exit after stdin close; killing it"),
+        }
+    }
     reap(&mut child, process_group).await;
     result
 }
@@ -708,27 +793,9 @@ async fn run_owned(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| HubError::message("mhc get_state missing sessionFile"))?
         .to_owned();
-    // This native RPC persists retry.enabled=false in global agent settings. No supported
-    // CLI retry override exists; restoring it would race other sessions and reenable retry.
-    let mut retry = protocol::command("retry", "set_auto_retry");
-    retry["enabled"] = json!(false);
-    tokio::time::timeout(config.connect_timeout, rpc.request(retry, cwd))
-        .await
-        .map_err(|_| HubError::message("timeout disabling mhc auto retry"))??;
-    if let Some(model) = request.model.as_deref().filter(|s| !s.trim().is_empty()) {
-        let (provider, model_id) = model.split_once('/').unwrap_or(("", model));
-        let mut command = protocol::command("model", "set_model");
-        command["provider"] = json!(provider);
-        command["modelId"] = json!(model_id);
-        tokio::time::timeout(config.connect_timeout, rpc.request(command, cwd))
-            .await
-            .map_err(|_| HubError::message("timeout selecting mhc model"))??;
-    }
-    let mut thinking = protocol::command("thinking", "set_thinking_level");
-    thinking["level"] = json!(protocol::default_effort());
-    tokio::time::timeout(config.connect_timeout, rpc.request(thinking, cwd))
-        .await
-        .map_err(|_| HubError::message("timeout selecting mhc thinking level"))??;
+    // Model and thinking come from launch flags (run_turn). The set_model,
+    // set_thinking_level and set_auto_retry RPCs rewrite the global agent settings, which
+    // hot-reloads mhc and makes the next prompt fail with a stale extension context.
     let turn = uuid::Uuid::new_v4().to_string();
     let (sender, mut guidance) = mpsc::unbounded_channel();
     let active_key = (thread.clone(), turn.clone());
@@ -943,6 +1010,7 @@ def message(text, ident, **kw):
 assert '--mode' in sys.argv and 'rpc' in sys.argv
 assert sys.argv[1:4] == ['--mode','rpc','--no-model-fallback']
 assert '--multi-session' not in sys.argv
+(root / 'argv.json').write_text(json.dumps(sys.argv[1:]))
 for line in sys.stdin:
     c=json.loads(line)
     with log.open('a') as out: out.write(json.dumps(c)+'\n')
@@ -953,10 +1021,8 @@ for line in sys.stdin:
         if '--session' in sys.argv: assert sys.argv[sys.argv.index('--session')+1]==str(session)
         session.write_text(json.dumps(dict(type='session',id='durable-id'))+'\n')
         answer(c,dict(sessionId='durable-id',sessionFile=str(session)))
-    elif kind=='set_auto_retry':
-        assert c['enabled']==False
-        answer(c)
-    elif kind in ['set_model','set_thinking_level']: answer(c)
+    elif kind in ['set_auto_retry','set_model','set_thinking_level']:
+        emit(dict(type='response',id=c['id'],command=kind,success=False,error='persists global settings'))
     elif kind=='prompt':
         scenario=c['message']
         if scenario=='exit': sys.exit(17)
@@ -977,6 +1043,8 @@ for line in sys.stdin:
             event('extension_ui_request',id='approve',method='confirm',title='Run command',message='curl -X POST https://example.com --data payload')
         elif scenario=='retired':
             event('extension_ui_request',id='approve',method='confirm',title='Run command',message='launchctl enable gui/501/ai.omon.gateway')
+        elif scenario=='permission':
+            event('extension_ui_request',id='perm',method='select',title='Permission required: bash\n\nCommand: $ curl -X POST https://example.com --data payload\n\nPatterns:\n  - curl *',options=['Allow once','Allow always','Deny','Deny with feedback'],timeout=None)
         elif scenario in ['select','input']:
             event('extension_ui_request',id='dialog',method=scenario,title='Choose',options=['one','two'])
         elif scenario=='question':
@@ -997,6 +1065,7 @@ for line in sys.stdin:
         assert c['id'] != 'status'
         if scenario=='approval': assert c['confirmed']==True
         elif scenario in ['retired','owner-deny']: assert c['confirmed']==False
+        elif scenario=='permission': assert c['value'] in ['Allow once','Deny']
         else: assert c['cancelled']==True
         message('final','m2')
         event('agent_end',messages=[])
@@ -1021,6 +1090,17 @@ for line in sys.stdin:
                 .map(|s| serde_json::from_str(s).unwrap())
                 .collect()
         }
+        fn argv(&self) -> Vec<String> {
+            serde_json::from_str(&std::fs::read_to_string(self.dir.join("argv.json")).unwrap())
+                .unwrap()
+        }
+        fn last_ui_response(&self) -> Value {
+            self.commands()
+                .into_iter()
+                .rev()
+                .find(|frame| frame["type"] == "extension_ui_response")
+                .unwrap()
+        }
         async fn run(
             &self,
             text: &str,
@@ -1036,6 +1116,18 @@ for line in sys.stdin:
                     ..Default::default()
                 },
                 progress,
+            )
+            .await
+        }
+        async fn run_with_tools(&self, toolsets: &[&str]) -> Result<TurnOutcome> {
+            run_turn(
+                &self.config,
+                &TurnRequest {
+                    text: "normal".into(),
+                    toolsets: Some(toolsets.iter().map(|s| (*s).to_owned()).collect()),
+                    ..Default::default()
+                },
+                None,
             )
             .await
         }
@@ -1094,15 +1186,72 @@ for line in sys.stdin:
             commands.iter().filter(|c| c["type"] == "get_state").count(),
             2
         );
-        for prompt in commands
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c["type"] == "prompt")
-        {
-            assert!(commands[..prompt.0]
-                .iter()
-                .any(|c| c["type"] == "set_auto_retry" && c["enabled"] == false));
-        }
+        assert!(!commands.iter().any(|c| matches!(
+            c["type"].as_str(),
+            Some("set_model" | "set_thinking_level" | "set_auto_retry")
+        )));
+    }
+    #[tokio::test]
+    async fn model_and_thinking_are_launch_flags_not_persisted_rpcs() {
+        let script = Script::new();
+        script.run("normal", None, None).await.unwrap();
+        let argv = script.argv();
+        let flag = |name: &str| {
+            argv.iter()
+                .position(|arg| arg == name)
+                .map(|index| argv[index + 1].clone())
+        };
+        assert_eq!(flag("--model").as_deref(), Some("mahoquot/gpt-6-luna"));
+        assert_eq!(flag("--thinking"), Some(protocol::default_effort()));
+        assert!(!script.commands().iter().any(|c| matches!(
+            c["type"].as_str(),
+            Some("set_model" | "set_thinking_level" | "set_auto_retry")
+        )));
+    }
+    #[tokio::test]
+    async fn legacy_toolsets_launch_without_tools_flag() {
+        let script = Script::new();
+        script
+            .run_with_tools(&["terminal", "browser", "file"])
+            .await
+            .unwrap();
+        assert!(!script.argv().iter().any(|arg| arg == "--tools"));
+        script.run_with_tools(&["read", "terminal"]).await.unwrap();
+        assert!(!script.argv().iter().any(|arg| arg == "--tools"));
+        script.run_with_tools(&[]).await.unwrap();
+        assert!(!script.argv().iter().any(|arg| arg == "--tools"));
+        script.run_with_tools(&["read", "bash"]).await.unwrap();
+        let argv = script.argv();
+        let index = argv.iter().position(|arg| arg == "--tools").unwrap();
+        assert_eq!(argv[index + 1], "read,bash");
+    }
+    #[tokio::test]
+    async fn permission_select_is_answered_by_policy() {
+        let script = Script::new();
+        let allowed = FULL_ACCESS_TEST
+            .scope(true, script.run("permission", None, None))
+            .await
+            .unwrap();
+        assert_eq!(allowed.approvals_allowed, 1);
+        let response = script.last_ui_response();
+        assert_eq!(response["id"], "perm");
+        assert_eq!(response["value"], "Allow once");
+        assert!(response.get("cancelled").is_none());
+        let denied = FULL_ACCESS_TEST
+            .scope(
+                false,
+                with_approver(
+                    std::sync::Arc::new(Deny),
+                    script.run("permission", None, None),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.approvals_denied, 1);
+        assert_eq!(denied.approvals_allowed, 0);
+        let response = script.last_ui_response();
+        assert_eq!(response["id"], "perm");
+        assert_eq!(response["value"], "Deny");
     }
     #[tokio::test]
     async fn native_confirm_approvals_questions_and_retired_gateway_block() {
