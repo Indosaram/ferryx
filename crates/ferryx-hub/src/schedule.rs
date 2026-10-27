@@ -399,7 +399,17 @@ struct LegacyOwnerRow {
 pub async fn reconcile_cron_owner_items(pool: &SqlitePool) -> Result<u64> {
     const LEGACY: &str = "d.status = 'open' AND d.class = 'owner' AND i.source = 'cron'
         AND d.item_id LIKE 'cron:%' AND d.item_id NOT LIKE 'cron:job:%'";
-    let mut tx = pool.begin().await?;
+    // IMMEDIATE: see inbox::reconcile_owner_threads (deferred upgrade fails with 517).
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    // Remediation problem items (`cron:<problem id>`) were written without an author; take the
+    // job from the problem row so they collapse with the rest of the job.
+    sqlx::query(
+        "UPDATE inbox_items SET author = (SELECT p.job_id FROM cron_problems p WHERE p.id = inbox_items.source_ref)
+          WHERE source = 'cron' AND (author IS NULL OR author = '') AND id NOT LIKE 'cron:job:%'
+            AND EXISTS (SELECT 1 FROM cron_problems p WHERE p.id = inbox_items.source_ref)",
+    )
+    .execute(&mut *tx)
+    .await?;
     let jobs: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT DISTINCT i.author FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
           WHERE {LEGACY} AND i.author IS NOT NULL AND i.author != ''"
@@ -2640,5 +2650,40 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(reconcile_cron_owner_items(&pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_takes_the_job_of_an_authorless_problem_item_from_its_problem_row() {
+        let pool = crate::storage::memory().await.unwrap();
+        let at = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO cron_problems(id, job_id, created_at) VALUES('40', 'job', ?)")
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_items(id, source, source_ref, title, snippet, received_at, raw_hash, collected_at) VALUES('cron:40', 'cron', '40', 'job', 'boom', ?, 'cron', ?)")
+            .bind(&at)
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('cron:40', 'owner', 'failed', 'open', ?)")
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(reconcile_cron_owner_items(&pool).await.unwrap(), 1);
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("cron:40".to_owned(), "dismissed".to_owned()),
+                (cron_owner_item_id("job"), "open".to_owned()),
+            ]
+        );
     }
 }

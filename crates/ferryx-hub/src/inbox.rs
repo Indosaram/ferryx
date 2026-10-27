@@ -287,7 +287,9 @@ async fn supersede_in_thread(
 /// Collapses a backlog to the newest open owner decision per (source, thread_ref) and dismisses
 /// the rest. Items without a thread are left alone. Returns how many were dismissed; idempotent.
 pub async fn reconcile_owner_threads(pool: &SqlitePool) -> Result<u64> {
-    let mut tx = pool.begin().await?;
+    // IMMEDIATE: a deferred read-then-write transaction fails with SQLITE_BUSY_SNAPSHOT (517)
+    // when another writer commits in between, and busy_timeout cannot retry that.
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let older: Vec<String> = sqlx::query_scalar(
         "SELECT i.id FROM inbox_items i JOIN inbox_decisions d ON d.item_id = i.id
          WHERE d.status = 'open' AND d.class = 'owner' AND i.thread_ref IS NOT NULL
