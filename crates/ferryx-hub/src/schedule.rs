@@ -303,37 +303,202 @@ pub fn incident_kind(
     }
 }
 
-/// omo-gateway's `needs_owner`: a cron problem becomes an open owner item (`cron:<incident>`),
-/// so the owner alert sweep posts it to the owner's Slack DM and the digest lists it.
+/// The one owner inbox item a failing cron job holds, however often it fails.
+pub(crate) fn cron_owner_item_id(job_id: &str) -> String {
+    format!("cron:job:{job_id}")
+}
+
+/// The latest failure of a job, as its owner inbox item shows it.
+pub(crate) struct CronOwnerItem<'a> {
+    pub job_id: &'a str,
+    /// Keeps the `{job_id}: needs you - ` prefix the digest groups by.
+    pub title: &'a str,
+    /// Snippet and proposed action.
+    pub action: &'a str,
+    pub reason: &'a str,
+    pub lane_key: Option<&'a str>,
+    pub at: &'a str,
+}
+
+/// Upserts the job's single owner item to the latest failure. An item that was not open
+/// reopens with a fresh `decided_at` and loses its alert obligation, so the owner is told
+/// once; an open item keeps both, so repeat failures do not re-alert.
+pub(crate) async fn upsert_cron_owner_item(
+    conn: &mut sqlx::SqliteConnection,
+    item: &CronOwnerItem<'_>,
+) -> Result<()> {
+    let id = cron_owner_item_id(item.job_id);
+    sqlx::query(
+        "DELETE FROM delivery_obligations WHERE id = ?
+           AND NOT EXISTS (SELECT 1 FROM inbox_decisions WHERE item_id = ? AND status = 'open')",
+    )
+    .bind(format!("{}{id}", crate::owner_alert::OBLIGATION_PREFIX))
+    .bind(&id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, snippet = excluded.snippet, received_at = excluded.received_at",
+    )
+    .bind(&id)
+    .bind(&id)
+    .bind(item.job_id)
+    .bind(item.title)
+    .bind(item.action)
+    .bind(item.at)
+    .bind(item.at)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, lane_key, status, decided_at) VALUES(?, 'owner', ?, ?, ?, 'open', ?)
+         ON CONFLICT(item_id) DO UPDATE SET class = 'owner', reason = excluded.reason, proposed_action = excluded.proposed_action,
+           lane_key = COALESCE(excluded.lane_key, inbox_decisions.lane_key),
+           decided_at = CASE WHEN inbox_decisions.status = 'open' THEN inbox_decisions.decided_at ELSE excluded.decided_at END,
+           status = 'open'",
+    )
+    .bind(&id)
+    .bind(item.reason)
+    .bind(item.action)
+    .bind(item.lane_key)
+    .bind(item.at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// A clean run settles the job's owner item and any legacy per-incident items it left.
+pub(crate) async fn close_cron_owner_items(pool: &SqlitePool, job_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE inbox_decisions SET status = 'done'
+          WHERE status = 'open' AND class = 'owner'
+            AND (item_id = ?
+                 OR (item_id LIKE 'cron:%' AND item_id IN (SELECT id FROM inbox_items WHERE source = 'cron' AND author = ?)))",
+    )
+    .bind(cron_owner_item_id(job_id))
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The newest legacy owner item of a job, which its collapsed item inherits.
+#[derive(sqlx::FromRow)]
+struct LegacyOwnerRow {
+    title: Option<String>,
+    snippet: String,
+    received_at: String,
+    reason: String,
+    proposed_action: Option<String>,
+    lane_key: Option<String>,
+    decided_at: String,
+}
+
+/// Collapses the open legacy per-incident/per-problem cron owner items (`cron:<id>`) into one
+/// `cron:job:<job_id>` item per job, marked already alerted, and dismisses the legacy ones.
+/// Idempotent; returns how many legacy decisions were dismissed.
+pub async fn reconcile_cron_owner_items(pool: &SqlitePool) -> Result<u64> {
+    const LEGACY: &str = "d.status = 'open' AND d.class = 'owner' AND i.source = 'cron'
+        AND d.item_id LIKE 'cron:%' AND d.item_id NOT LIKE 'cron:job:%'";
+    let mut tx = pool.begin().await?;
+    let jobs: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT i.author FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+          WHERE {LEGACY} AND i.author IS NOT NULL AND i.author != ''"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut dismissed = 0_u64;
+    for job_id in jobs {
+        let id = cron_owner_item_id(&job_id);
+        let already_open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inbox_decisions WHERE item_id = ? AND status = 'open'",
+        )
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if already_open == 0 {
+            let newest: LegacyOwnerRow = sqlx::query_as(&format!(
+                "SELECT i.title, i.snippet, i.received_at, d.reason, d.proposed_action, d.lane_key, d.decided_at
+                   FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+                  WHERE {LEGACY} AND i.author = ?
+                  ORDER BY julianday(d.decided_at) DESC, d.item_id DESC LIMIT 1"
+            ))
+            .bind(&job_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?)
+                 ON CONFLICT(id) DO UPDATE SET title = excluded.title, snippet = excluded.snippet, received_at = excluded.received_at",
+            )
+            .bind(&id)
+            .bind(&id)
+            .bind(&job_id)
+            .bind(newest.title)
+            .bind(newest.snippet)
+            .bind(newest.received_at)
+            .bind(now_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, lane_key, status, decided_at) VALUES(?, 'owner', ?, ?, ?, 'open', ?)
+                 ON CONFLICT(item_id) DO UPDATE SET class = 'owner', reason = excluded.reason, proposed_action = excluded.proposed_action,
+                   lane_key = excluded.lane_key, status = 'open', decided_at = excluded.decided_at",
+            )
+            .bind(&id)
+            .bind(newest.reason)
+            .bind(newest.proposed_action)
+            .bind(newest.lane_key)
+            .bind(newest.decided_at)
+            .execute(&mut *tx)
+            .await?;
+            // The backlog was alerted item by item already; the collapsed item is not news.
+            sqlx::query(
+                "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'delivered', 'collapsed legacy cron owner items', ?)
+                 ON CONFLICT(id) DO UPDATE SET state = 'delivered', updated_at = excluded.updated_at",
+            )
+            .bind(format!("{}{id}", crate::owner_alert::OBLIGATION_PREFIX))
+            .bind(now_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+        }
+        let done = sqlx::query(&format!(
+            "UPDATE inbox_decisions SET status = 'dismissed'
+              WHERE item_id IN (SELECT d.item_id FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+                                 WHERE {LEGACY} AND i.author = ?)"
+        ))
+        .bind(&job_id)
+        .execute(&mut *tx)
+        .await?;
+        dismissed += done.rows_affected();
+    }
+    tx.commit().await?;
+    Ok(dismissed)
+}
+
+/// omo-gateway's `needs_owner`: a cron failure refreshes the job's one open owner item
+/// (`cron:job:<job_id>`), so the owner alert sweep posts it once and the digest lists it.
 async fn escalate_incident(
     pool: &SqlitePool,
-    incident: &str,
     job_id: &str,
     kind: &str,
     detail: &str,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let item = format!("cron:{incident}");
     let at = now.to_rfc3339();
     let action = crate::judge::scrub_for_external(detail);
+    let title = format!("{job_id}: needs you - {kind}: {action}");
     let mut tx = pool.begin().await?;
-    sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?) ON CONFLICT DO NOTHING")
-        .bind(&item)
-        .bind(incident)
-        .bind(job_id)
-        .bind(format!("{job_id}: needs you - {kind}: {action}"))
-        .bind(&action)
-        .bind(&at)
-        .bind(&at)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, status, decided_at) VALUES(?, 'owner', ?, ?, 'open', ?) ON CONFLICT(item_id) DO NOTHING")
-        .bind(&item)
-        .bind(kind)
-        .bind(&action)
-        .bind(&at)
-        .execute(&mut *tx)
-        .await?;
+    upsert_cron_owner_item(
+        &mut tx,
+        &CronOwnerItem {
+            job_id,
+            title: &title,
+            action: &action,
+            reason: kind,
+            lane_key: None,
+            at: &at,
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -974,7 +1139,7 @@ pub async fn finish_run(
                 .bind(now.to_rfc3339())
                 .execute(pool)
                 .await?;
-            escalate_incident(pool, &incident, job_id, kind, &detail, now).await?;
+            escalate_incident(pool, job_id, kind, &detail, now).await?;
         }
     }
     Ok(())
@@ -1232,6 +1397,7 @@ pub(crate) async fn note_run_health(
             .bind(job_id)
             .execute(pool)
             .await?;
+        close_cron_owner_items(pool, job_id).await?;
         crate::cron_remediate::reconcile_fixed(pool, job_id).await?;
         return Ok(());
     };
@@ -1844,7 +2010,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(alerts.len(), 1);
-        assert!(alerts[0].item_id.starts_with("cron:"));
+        assert_eq!(alerts[0].item_id, cron_owner_item_id("job"));
         assert_eq!(
             crate::owner_alert::alert_line(&alerts[0]),
             "📬 [크론] job — job: needs you - failed: boom"
@@ -2283,5 +2449,196 @@ mod tests {
         assert!(queued[0].1.contains("cron broken failed: socket refused"));
         let session = crate::chat::session::SessionKey::from_storage_key(&queued[0].0).unwrap();
         assert_eq!(session.channel_id, "CHOME");
+    }
+
+    async fn owner_items(pool: &SqlitePool) -> Vec<(String, String, String)> {
+        sqlx::query_as("SELECT item_id, status, decided_at FROM inbox_decisions WHERE item_id LIKE 'cron:%' ORDER BY item_id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn repeat_failures_of_a_job_refresh_one_open_owner_item() {
+        let pool = crate::storage::memory().await.unwrap();
+        let first = Utc::now() - TimeDelta::minutes(10);
+        escalate_incident(&pool, "job", "failed", "boom", first)
+            .await
+            .unwrap();
+        escalate_incident(&pool, "job", "stuck", "again", Utc::now())
+            .await
+            .unwrap();
+        let items = owner_items(&pool).await;
+        assert_eq!(
+            items,
+            vec![(
+                cron_owner_item_id("job"),
+                "open".to_owned(),
+                first.to_rfc3339()
+            )]
+        );
+        let (title, reason): (String, String) = sqlx::query_as(
+            "SELECT i.title, d.reason FROM inbox_items i JOIN inbox_decisions d ON d.item_id = i.id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(title, "job: needs you - stuck: again");
+        assert_eq!(reason, "stuck");
+    }
+
+    #[tokio::test]
+    async fn a_succeeded_run_closes_the_jobs_owner_item() {
+        let pool = crate::storage::memory().await.unwrap();
+        escalate_incident(&pool, "job", "failed", "boom", Utc::now())
+            .await
+            .unwrap();
+        escalate_incident(&pool, "other", "failed", "boom", Utc::now())
+            .await
+            .unwrap();
+        note_run_health(
+            &pool,
+            "job",
+            "r1",
+            "succeeded",
+            "ok",
+            None,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (cron_owner_item_id("job"), "done".to_owned()),
+                (cron_owner_item_id("other"), "open".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_a_close_reopens_the_item_and_clears_its_alert() {
+        let pool = crate::storage::memory().await.unwrap();
+        let obligation = format!(
+            "{}{}",
+            crate::owner_alert::OBLIGATION_PREFIX,
+            cron_owner_item_id("job")
+        );
+        let first = Utc::now() - TimeDelta::minutes(10);
+        escalate_incident(&pool, "job", "failed", "boom", first)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'delivered', 'told', ?)")
+            .bind(&obligation)
+            .bind(now_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        note_run_health(
+            &pool,
+            "job",
+            "r1",
+            "succeeded",
+            "ok",
+            None,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let later = Utc::now();
+        escalate_incident(&pool, "job", "failed", "boom", later)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner_items(&pool).await,
+            vec![(
+                cron_owner_item_id("job"),
+                "open".to_owned(),
+                later.to_rfc3339()
+            )]
+        );
+        let kept: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM delivery_obligations WHERE id = ?")
+                .bind(&obligation)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kept, 0);
+        let alerts = crate::owner_alert::pending_alerts(&pool, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].item_id, cron_owner_item_id("job"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_collapses_legacy_cron_owner_items_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        for (n, minutes) in [(1, 30_i64), (2, 10), (3, 20)] {
+            let at = (Utc::now() - TimeDelta::minutes(minutes)).to_rfc3339();
+            let id = format!("cron:legacy-{n}");
+            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, 'job', ?, ?, ?, 'cron', ?)")
+                .bind(&id)
+                .bind(&id)
+                .bind(format!("job: needs you - failed: boom {n}"))
+                .bind(format!("boom {n}"))
+                .bind(&at)
+                .bind(&at)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, status, decided_at) VALUES(?, 'owner', 'failed', ?, 'open', ?)")
+                .bind(&id)
+                .bind(format!("boom {n}"))
+                .bind(&at)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(reconcile_cron_owner_items(&pool).await.unwrap(), 3);
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (cron_owner_item_id("job"), "open".to_owned()),
+                ("cron:legacy-1".to_owned(), "dismissed".to_owned()),
+                ("cron:legacy-2".to_owned(), "dismissed".to_owned()),
+                ("cron:legacy-3".to_owned(), "dismissed".to_owned()),
+            ]
+        );
+        let (title, action): (String, String) = sqlx::query_as(
+            "SELECT i.title, d.proposed_action FROM inbox_items i JOIN inbox_decisions d ON d.item_id = i.id WHERE i.id = ?",
+        )
+        .bind(cron_owner_item_id("job"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(title, "job: needs you - failed: boom 2");
+        assert_eq!(action, "boom 2");
+        let obligation: String =
+            sqlx::query_scalar("SELECT state FROM delivery_obligations WHERE id = ?")
+                .bind(format!(
+                    "{}{}",
+                    crate::owner_alert::OBLIGATION_PREFIX,
+                    cron_owner_item_id("job")
+                ))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(obligation, "delivered");
+        assert!(crate::owner_alert::pending_alerts(&pool, Utc::now())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(reconcile_cron_owner_items(&pool).await.unwrap(), 0);
     }
 }

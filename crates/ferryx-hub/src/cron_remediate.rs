@@ -465,12 +465,11 @@ impl Remediator {
         Ok(())
     }
 
-    /// Escalates to the owner: an open owner inbox item (`cron:<id>`) and a message carrying a
-    /// fresh one-time approval token.
+    /// Escalates to the owner: the job's one open owner inbox item (`cron:job:<job_id>`) and a
+    /// message carrying a fresh one-time approval token.
     pub async fn needs_owner(&self, problem: &Problem, action: &str) -> Result<()> {
         let now = update_stamp();
         let action = scrub(action);
-        let item = format!("cron:{}", problem.id);
         let token = mint_owner_token();
         let mut tx = self.pool.begin().await?;
         let escalated = sqlx::query("UPDATE cron_problems SET status = 'needs_owner', updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status != 'fixed'")
@@ -497,24 +496,18 @@ impl Remediator {
         .bind(problem.id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, snippet = excluded.snippet")
-            .bind(&item)
-            .bind(problem.id.to_string())
-            .bind(&problem.job_id)
-            .bind(owner_message(&problem.job_id, &action))
-            .bind(&action)
-            .bind(&now)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, lane_key, status, decided_at) VALUES(?, 'owner', ?, ?, ?, 'open', ?) ON CONFLICT(item_id) DO UPDATE SET proposed_action = excluded.proposed_action, lane_key = excluded.lane_key, status = 'open', decided_at = excluded.decided_at")
-            .bind(&item)
-            .bind(&problem.kind)
-            .bind(&action)
-            .bind(&problem.lane_key)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
+        crate::schedule::upsert_cron_owner_item(
+            &mut tx,
+            &crate::schedule::CronOwnerItem {
+                job_id: &problem.job_id,
+                title: &owner_message(&problem.job_id, &action),
+                action: &action,
+                reason: &problem.kind,
+                lane_key: problem.lane_key.as_deref(),
+                at: &now,
+            },
+        )
+        .await?;
         tx.commit().await?;
         self.runtime
             .outcome(
@@ -617,6 +610,7 @@ impl Remediator {
             .bind(format!("cron:{id}"))
             .execute(&self.pool)
             .await?;
+            crate::schedule::close_cron_owner_items(&self.pool, &problem.job_id).await?;
             self.runtime
                 .outcome(
                     &problem,
@@ -1090,6 +1084,17 @@ pub async fn dispatch_once(pool: &SqlitePool, remediator: &Remediator) -> Result
 
 /// Installs the hub remediator and runs the dispatcher every 5 seconds.
 pub async fn serve(pool: SqlitePool, owner_session: Option<String>) {
+    match crate::schedule::reconcile_cron_owner_items(&pool).await {
+        Ok(dismissed) => {
+            tracing::info!(
+                dismissed,
+                "collapsed legacy cron owner items into one per job"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "legacy cron owner items were not collapsed");
+        }
+    }
     let remediator = Arc::new(Remediator {
         pool: pool.clone(),
         judge: Judge::from_config(crate::judge::typesafe_from_env()),
