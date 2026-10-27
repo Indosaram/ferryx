@@ -105,9 +105,10 @@ function freeLoopbackPort() {
 // ---------------------------------------------------------------------------
 // Loopback openai-completions stub. Records every request (method, path, model, whether a
 // tools list was offered and its names) and answers with one streamed assistant message, or
-// with an HTTP error while `failWith` is set.
+// with an HTTP error while `failWith` is set. The message is STUB_ASSESSMENT unless `answer`
+// (called with the parsed request body) returns another object for that request.
 
-export async function startProviderStub(ctx) {
+export async function startProviderStub(ctx, { answer = null } = {}) {
   const requests = [];
   const state = { failWith: null };
   const server = createServer((request, response) => {
@@ -139,10 +140,11 @@ export async function startProviderStub(ctx) {
       }
       const id = `qa-${requests.length}`;
       const model = json?.model ?? STUB_MODEL;
+      const reply = answer?.(json) ?? STUB_ASSESSMENT;
       const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model,
         choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-      response.write(chunk({ role: 'assistant', content: JSON.stringify(STUB_ASSESSMENT) }));
+      response.write(chunk({ role: 'assistant', content: JSON.stringify(reply) }));
       response.write(chunk({}, 'stop'));
       response.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);

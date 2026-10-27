@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 
 use super::types::{EvidenceSource, GoalError};
 use crate::agent_control::{AgentControl, AgentOp};
-use crate::lanes::signals::{check_signals, parse_signals};
+use crate::lanes::signals::{check_signals, parse_signals, DoneSignal};
 
 /// Longest screen excerpt an evidence item carries, taken from the screen's tail.
 pub const SCREEN_EXCERPT_MAX_CHARS: usize = 4000;
@@ -158,25 +158,143 @@ pub async fn collect<C: AgentControl + ?Sized>(
             detail: format!("done signals do not parse: {error}"),
         }),
     }
-    match crate::lanes::settle::worktree_reasons(pool, lane_key, &cwd).await {
-        Ok(reasons) if reasons.is_empty() => items.push(EvidenceItem {
+    items.push(git_item(pool, lane_key, &cwd).await);
+    if let Some(claim) = claim.filter(|text| !text.trim().is_empty()) {
+        items.push(EvidenceItem {
+            reference: CLAIM_REF.into(),
+            source: EvidenceSource::AgentClaim,
+            passed: None,
+            detail: crate::judge::scrub_for_external(&claim),
+        });
+    }
+    Ok(EvidenceBundle {
+        lane_key: lane_key.to_owned(),
+        items,
+    })
+}
+
+/// The lane worktree's git state on this machine: `git:clean`, `git:dirty` or `git:unknown`.
+async fn git_item(pool: &SqlitePool, lane_key: &str, cwd: &str) -> EvidenceItem {
+    match crate::lanes::settle::worktree_reasons(pool, lane_key, cwd).await {
+        Ok(reasons) if reasons.is_empty() => EvidenceItem {
             reference: "git:clean".into(),
             source: EvidenceSource::FerryxGit,
             passed: Some(true),
             detail: "no uncommitted tracked files or unpushed commits".into(),
-        }),
-        Ok(reasons) => items.push(EvidenceItem {
+        },
+        Ok(reasons) => EvidenceItem {
             reference: "git:dirty".into(),
             source: EvidenceSource::FerryxGit,
             passed: Some(false),
             detail: reasons.join("; "),
-        }),
-        Err(error) => items.push(EvidenceItem {
+        },
+        Err(error) => EvidenceItem {
             reference: "git:unknown".into(),
             source: EvidenceSource::FerryxGit,
             passed: None,
             detail: format!("git state could not be read: {error}"),
+        },
+    }
+}
+
+/// Ref id of the check Ferryx ran for one requirement's verifier: `sig:req:<id>`.
+pub fn requirement_check_ref(req_id: &str) -> String {
+    format!("sig:req:{req_id}")
+}
+
+/// The check Ferryx itself can run for a requirement's verifier, when it names one:
+/// - a done-signal `command [...]` or `file <path> [sha256=...]`;
+/// - the shorthand `<script>.sh exits 0` (one relative path, no spaces), run as `sh <script>`.
+///
+/// Anything else (prose, a remote check, a network signal) is not a Ferryx-run check, so the
+/// requirement can only be proven by an explicit owner waiver.
+pub fn verifier_signal(verifier: &str) -> Option<DoneSignal> {
+    if let Ok(mut signals) = parse_signals(verifier) {
+        if signals.len() == 1
+            && matches!(signals[0], DoneSignal::Command { .. } | DoneSignal::File { .. })
+        {
+            return signals.pop();
+        }
+        return None;
+    }
+    let script = verifier.trim().strip_suffix("exits 0")?.trim();
+    let plain = !script.is_empty()
+        && script.ends_with(".sh")
+        && !script.starts_with('-')
+        && !script.starts_with('/')
+        && !script.contains(char::is_whitespace)
+        && !script.split('/').any(|part| part == "..");
+    plain.then(|| DoneSignal::Command {
+        argv: vec!["sh".to_owned(), script.to_owned()],
+        stdout_regex: None,
+    })
+}
+
+/// A fresh evidence bundle for one supervisor run: the bound worker session read on its host
+/// (never `lanes.omo_thread_id`) and the latest claim; and, only when the run is on this
+/// machine (`host_id` is `None`), the lane's git state and one Ferryx-run check per
+/// requirement whose verifier names one ([`verifier_signal`], ref [`requirement_check_ref`]).
+/// A run on another host gets no local git and no local checks: this hub's checkout at the
+/// same path is not that host's. Waived requirements are not checked.
+pub async fn collect_for_run<C: AgentControl + ?Sized>(
+    pool: &SqlitePool,
+    control: &C,
+    lane_key: &str,
+    host_id: Option<&str>,
+    session_id: Option<String>,
+    requirements: &[super::contract::Requirement],
+) -> Result<EvidenceBundle, GoalError> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT cwd, claim_evidence FROM lanes WHERE key = ?")
+            .bind(lane_key)
+            .fetch_optional(pool)
+            .await?;
+    let Some((cwd, claim)) = row else {
+        return Err(GoalError::Hub(crate::error::HubError::message(format!(
+            "lane {lane_key} does not exist"
+        ))));
+    };
+    let mut items = Vec::new();
+    match session_id.filter(|id| !id.is_empty()) {
+        Some(session_id) => match control.execute(host_id, AgentOp::Read { session_id }).await {
+            Ok(value) => items.extend(read_items(&value)),
+            Err(error) => items.push(EvidenceItem {
+                reference: "observer:unreadable".into(),
+                source: EvidenceSource::FerryxObserver,
+                passed: Some(false),
+                detail: format!("the pane could not be read: {error}"),
+            }),
+        },
+        None => items.push(EvidenceItem {
+            reference: "observer:no-pane".into(),
+            source: EvidenceSource::FerryxObserver,
+            passed: Some(false),
+            detail: "the lane has no pane".into(),
         }),
+    }
+    if host_id.is_none() {
+        items.push(git_item(pool, lane_key, &cwd).await);
+        for requirement in requirements {
+            if requirement.status == super::types::RequirementStatus::Waived {
+                continue;
+            }
+            let Some(signal) = verifier_signal(&requirement.verifier) else {
+                continue;
+            };
+            let check = check_signals(std::slice::from_ref(&signal), std::path::Path::new(&cwd))
+                .await
+                .pop();
+            let (passed, detail) = match check {
+                Some(check) => (check.passed, format!("{}: {}", check.signal, check.detail)),
+                None => (false, "the check did not run".to_owned()),
+            };
+            items.push(EvidenceItem {
+                reference: requirement_check_ref(&requirement.id),
+                source: EvidenceSource::FerryxSignal,
+                passed: Some(passed),
+                detail: crate::judge::scrub_for_external(&detail),
+            });
+        }
     }
     if let Some(claim) = claim.filter(|text| !text.trim().is_empty()) {
         items.push(EvidenceItem {
@@ -190,6 +308,19 @@ pub async fn collect<C: AgentControl + ?Sized>(
         lane_key: lane_key.to_owned(),
         items,
     })
+}
+
+/// The source revision (`git rev-parse HEAD`) of `cwd`, when it is a repository with a commit.
+pub async fn source_revision(cwd: &str) -> Option<String> {
+    let output = crate::child_env::command("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
+        .output()
+        .await
+        .ok()?;
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success() && !head.is_empty()).then_some(head)
 }
 
 #[cfg(test)]
@@ -353,5 +484,27 @@ mod tests {
         let contract = contract_of(&pool, "lane-a").await.unwrap().unwrap();
         assert_eq!(contract.requirements[0].status, RequirementStatus::Met);
         assert_eq!(contract.requirements[0].evidence, ["sig:0", CLAIM_REF]);
+    }
+
+    #[test]
+    fn only_a_command_file_or_script_verifier_is_a_ferryx_check() {
+        assert_eq!(
+            verifier_signal("verify.sh exits 0"),
+            Some(DoneSignal::Command {
+                argv: vec!["sh".into(), "verify.sh".into()],
+                stdout_regex: None,
+            })
+        );
+        assert!(matches!(verifier_signal("file ok.txt"), Some(DoneSignal::File { .. })));
+        for prose in [
+            "the output looks right",
+            "/etc/verify.sh exits 0",
+            "../verify.sh exits 0",
+            "my verify.sh exits 0",
+            "verify.py exits 0",
+        ] {
+            assert_eq!(verifier_signal(prose), None, "{prose}");
+        }
+        assert_eq!(requirement_check_ref("r1"), "sig:req:r1");
     }
 }

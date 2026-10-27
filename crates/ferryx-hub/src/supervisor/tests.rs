@@ -6,8 +6,10 @@
 //! `setup` covers installation set-up ([`super::provision_owner`]).
 //! `bound_session` covers an owner-chosen existing pane bound at admission and the read-only
 //! dispatch status reader.
+//! `completion` covers verified completion from settled runs and owner precedence (todo 10).
 mod admission;
 mod bound_session;
+mod completion;
 mod receipts;
 mod schema;
 mod setup;

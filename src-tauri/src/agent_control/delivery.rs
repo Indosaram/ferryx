@@ -505,6 +505,24 @@ pub fn hub_delivery_from_reply(result: &serde_json::Value) -> ferryx_hub::agent_
     }
 }
 
+/// The supervisor's owner fence for one delivery, asked inside the pane's input step: refused
+/// (a pre-write `CONTROL_CONFLICT`) when an owner pause, cancel or correction revoked the
+/// request before its first byte; once the first byte is allowed, every later ask (the one
+/// before Enter) passes ([`ferryx_hub::supervisor::delivery::one_shot_fence`]).
+pub fn supervisor_fence(
+    request_id: &str,
+) -> Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> {
+    let check = ferryx_hub::supervisor::delivery::one_shot_fence(request_id.to_owned());
+    Arc::new(move || {
+        check().map_err(|code| ScopeError {
+            code: ScopeErrorCode::ControlConflict,
+            message: format!("{code}: the owner paused, cancelled or corrected the goal"),
+            retryable: false,
+            details: serde_json::Value::Null,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,6 +988,49 @@ mod tests {
             session_id: session_id.into(),
             code: ferryx_hub::agent_control::PANE_NOT_READY.into(),
         }
+    }
+
+    /// An owner hold revoked the supervisor request after its claim: the daemon's delivery
+    /// path (the fence `DaemonBridge::deliver` passes) types nothing and the hub reads it as a
+    /// refusal, never an uncertain send.
+    #[tokio::test(start_paused = true)]
+    async fn a_revoked_supervisor_request_types_nothing() {
+        let session_id = "deliver-revoked";
+        let request_id = "sv-goal-revoked-r1-d1";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        ready_pane(&state, session_id);
+        ferryx_hub::supervisor::delivery::revoke([request_id]);
+
+        let result = deliver(
+            &state,
+            session_id,
+            "do it".into(),
+            request_id.into(),
+            DEADLINE,
+            Some(supervisor_fence(request_id)),
+        )
+        .await;
+        ferryx_hub::supervisor::delivery::forget(request_id);
+        assert_eq!(backend.write_attempts.load(Ordering::SeqCst), 0, "nothing was written");
+        assert!(
+            matches!(hub_delivery(result), ferryx_hub::agent_control::Delivery::Refused { .. }),
+            "a pre-write refusal"
+        );
+    }
+
+    /// The fence refuses only before the first byte: once it passed, the ask before Enter
+    /// passes too, even if a revoke landed in between.
+    #[test]
+    fn the_supervisor_fence_refuses_only_before_the_first_byte() {
+        let request_id = "sv-goal-one-shot-r1-d1";
+        let fence = supervisor_fence(request_id);
+        assert!(fence().is_ok(), "before the first byte, not revoked");
+        ferryx_hub::supervisor::delivery::revoke([request_id]);
+        assert!(fence().is_ok(), "before Enter, after the first byte");
+        let fresh = supervisor_fence(request_id);
+        let refused = fresh().expect_err("a new delivery of a revoked request");
+        assert_eq!(refused.code, ScopeErrorCode::ControlConflict);
+        ferryx_hub::supervisor::delivery::forget(request_id);
     }
 
     #[tokio::test(start_paused = true)]

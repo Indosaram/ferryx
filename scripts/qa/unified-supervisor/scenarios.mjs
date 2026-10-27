@@ -16,6 +16,7 @@ import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HarnessError, isInside, POSIX, waitForPath } from './harness.mjs';
+import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -379,6 +380,181 @@ async function runAdmission(ctx) {
     sourceId, goalId, receipt, setup: setup.json, binding: finalBinding, goal: finalGoal, dispatches: dispatched.dispatches,
     counts: { afterStart, afterReplay, afterEdited, afterQuestion, final: finalCounts }, toolsCalled, hubHttp: env.FERRYX_HUB_TRACKER_ADDR,
   });
+}
+
+// ---------------------------------------------------------------------------
+// autonomy (plan task 10): one submit through MCP `supervisor.request`; the fixture worker's
+// first turn writes the wrong bytes, every later turn writes READY. The hub's own wakes grade
+// each settled run on the retained mhc engine (a loopback provider stub) and run the
+// requirement's verifier itself (`sig:req:r1`). The stub model claims completion every time
+// and cites that check, so only the check Ferryx ran decides: run 1 fails it and becomes one
+// corrective run without the owner, run 2 passes and completes the goal. The hub database is
+// only read, read-only.
+
+const AUTONOMY_WORKSPACE_ID = 'qa-autonomy';
+const AUTONOMY_PROJECT = 'qa-autonomy';
+const AUTONOMY_BODY = 'Create result.txt containing READY. Run the verifier. Correct failures until it passes.';
+const AUTONOMY_WORK = Object.freeze({
+  title: 'Write result.txt',
+  instruction: 'Create result.txt containing READY. Run verify.sh. Correct failures until it passes.',
+  requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+const AUTONOMY_VERIFY = 'test "$(cat result.txt)" = READY\n';
+// The blind convergence prompt's opening (crates/ferryx-hub/src/goals/converge.rs build_prompt).
+const CONVERGENCE_MARKER = 'You independently check whether a coding lane';
+const AUTONOMY_CONVERGED = Object.freeze({ requirements: [{ req_id: 'r1', met: true, evidence_refs: ['sig:req:r1'] }] });
+
+function promptTextOf(json) {
+  return (json?.messages ?? []).map((message) => (typeof message?.content === 'string' ? message.content
+    : (Array.isArray(message?.content) ? message.content.map((part) => part?.text ?? '').join('') : ''))).join('\n');
+}
+
+async function runAutonomy(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'autonomy runs a POSIX fixture worker pane (the Windows pane shell ignores SHELL); this scenario runs on Linux or macOS');
+  }
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the autonomy fixture project is a git repository');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `hub database ${dbPath} is outside the run root`);
+
+  // Fixture: a committed verify.sh (so every lane worktree has it) in a workspace checkout.
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, AUTONOMY_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'verify.sh'), AUTONOMY_VERIFY, { mode: 0o755 });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]],
+    ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
+    ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const gitCommonDir = realpathSync(join(repo, '.git'));
+  const workerLogs = join(data, 'workers');
+  mkdirSync(workerLogs, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn\n`, { mode: 0o755 });
+
+  // The decision engine: the hub's retained mhc on a loopback provider stub.
+  const stub = await startProviderStub(ctx, { answer: (json) => (promptTextOf(json).includes(CONVERGENCE_MARKER) ? AUTONOMY_CONVERGED : null) });
+  try {
+    const env = await prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: config.mhcBin, label: 'autonomy', extra: {
+      SHELL: shell,
+      FERRYX_HUB_WORKSPACE: AUTONOMY_WORKSPACE_ID,
+      OMON_LANE_AUTO_WORKTREE: '1',
+    } });
+    ctx.announce({ autonomy: 'fixture', workspaceRoot, repo, gitCommonDir, hubHttp: env.FERRYX_HUB_TRACKER_ADDR, dbPath, provider: stub.baseUrl });
+
+    const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', AUTONOMY_PROJECT, '--repo-identity', `qa:${AUTONOMY_PROJECT}`,
+      '--host', ADMISSION_HOST, '--git-common-dir', gitCommonDir, '--json'], { label: 'supervisor-setup', env });
+    if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${JSON.stringify(setup.json)} ${setup.stderr}`);
+
+    const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+    const engine = await awaitEngine(ctx, env, 'autonomy-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', engine?.engine?.state === 'ready', { engine });
+    const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), AUTONOMY_WORKSPACE_ID, realpathSync(workspaceRoot));
+    ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+
+    // The owner's one request, through the owned MCP channel.
+    const mcp = await ctx.spawn('mcp', config.ferryxCli, ['mcp'], { env, cwd: data, stdin: 'pipe', graceMs: 3_000 });
+    mcp.child.stdin.on('error', () => { /* the exit event decides */ });
+    const sourceId = `qa-autonomy-${ctx.runId}`;
+    const toolsCalled = ['supervisor.request'];
+    const frame = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'supervisor.request', arguments: { requestId: sourceId, action: 'submit', payload: { request: AUTONOMY_BODY, work: AUTONOMY_WORK } } } };
+    const cursor = ctx.journal.cursor();
+    ctx.evidence.appendJsonl('requests.jsonl', { label: 'submit', surface: 'ferryx-cli mcp', frame, at: new Date().toISOString() });
+    mcp.child.stdin.write(`${JSON.stringify(frame)}\n`);
+    const reply = await ctx.waitFor('mcp reply to submit', (e) => e.source === 'mcp' && e.kind === 'stdout' && e.json?.id === 1, { after: cursor, deadlineMs: 30_000 });
+    let body = null;
+    try { body = JSON.parse(reply.json?.result?.content?.[0]?.text ?? 'null'); } catch { /* asserted below */ }
+    ctx.evidence.appendJsonl('responses.jsonl', { label: 'submit', reply: reply.json, body, at: new Date().toISOString() });
+    const goalId = body?.receipt?.goal_id ?? null;
+    ctx.assert('submit-admitted', reply.json?.error == null && body?.outcome === 'admitted' && typeof goalId === 'string', { reply: reply.json, body });
+    if (!goalId) throw new HarnessError('ADMISSION_FAILED', 'the submit returned no goal; nothing can run');
+
+    // Nothing more is asked of anyone: the goal must end by itself.
+    const hub = await openHubReader(dbPath);
+    const observedDetails = [];
+    const ended = await waitForChange(ctx, 'goal to complete or hold', dirname(dbPath), () => {
+      const goal = hub.one('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goalId);
+      if (goal?.state_detail && observedDetails.at(-1) !== goal.state_detail) observedDetails.push(goal.state_detail);
+      return { done: HELD_STATES.has(goal?.run_state), goal };
+    }, 6 * 60_000);
+    const goal = ended.goal;
+    ctx.assert('goal-completed-without-owner', goal?.run_state === 'completed', { goal, observedDetails });
+
+    const dispatches = hub.all('SELECT id, request_id, goal_revision, state, run_id, instruction, created_at, settled_at FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId);
+    const [first, second] = dispatches;
+    const admittedRevision = first?.goal_revision ?? null;
+    ctx.assert('two-runs-at-admitted-revision', dispatches.length === 2 && dispatches.every((row) => row.state === 'settled' && row.goal_revision === admittedRevision && typeof row.run_id === 'string')
+      && first.request_id !== second.request_id && first.run_id !== second.run_id, { dispatches: dispatches.map(({ instruction, ...row }) => row) });
+    ctx.assert('correction-followed-first-settle-and-names-r1', Boolean(first?.settled_at && second?.created_at) && second.created_at >= first.settled_at
+      && second.instruction.includes('r1') && second.instruction.includes('Allowed operations: edit, test'), { first: first && { settledAt: first.settled_at }, second });
+    // state_detail is overwritten by later moves; the durable trace of the failed check is the
+    // verifying -> ready transition that queued the correction.
+    const events = hub.all("SELECT seq, from_state, to_state, from_revision, to_revision FROM supervisor_state_events WHERE goal_id = ? AND source = 'goal' ORDER BY seq", goalId);
+    ctx.assert('verifier-failure-took-the-corrective-path', events.some((event) => event.from_state === 'verifying' && event.to_state === 'ready')
+      && !events.some((event) => ['awaiting_owner', 'paused', 'degraded'].includes(event.to_state)), { events, observedDetails });
+    const terms = hub.one('SELECT turns_used FROM lane_goal WHERE lane_key = ?', goal?.lane_key ?? '');
+    ctx.assert('one-corrective-turn-counted', terms?.turns_used === 1, { terms });
+    let verified = null;
+    try { verified = JSON.parse((goal?.state_detail ?? '').replace(/^VERIFIED: /, '')); } catch { /* asserted below */ }
+    ctx.assert('verified-names-second-run-and-current-revision', goal?.state_detail?.startsWith('VERIFIED: ') && verified?.runId === second?.run_id
+      && verified?.requestId === second?.request_id && verified?.goalRevision === goal?.revision && verified?.evidenceRefs?.includes('sig:req:r1'), { detail: goal?.state_detail, verified });
+    const requirement = hub.one("SELECT status, evidence_json FROM lane_goal_requirements WHERE lane_key = ? AND req_id = 'r1'", goal?.lane_key ?? '');
+    let refs = [];
+    try { refs = JSON.parse(requirement?.evidence_json ?? '[]'); } catch { /* asserted below */ }
+    ctx.assert('r1-met-with-ferryx-check-and-run-provenance', requirement?.status === 'met' && refs.includes('sig:req:r1')
+      && refs.some((ref) => typeof ref === 'string' && ref.startsWith('run:') && ref.includes(second?.run_id ?? '\u0000')), { requirement, refs });
+    const calls = hub.all('SELECT purpose, kind, outcome, used_fallback FROM judge_calls ORDER BY rowid');
+    const graded = calls.filter((call) => ['gap_assess', 'convergence_check'].includes(call.purpose));
+    // Every grading turn ran on the retained mhc engine (kind mhc_*, outcome ok); none on omo.
+    ctx.assert('grading-ran-on-mhc', graded.length >= 4 && graded.every((call) => call.kind.startsWith('mhc_') && call.outcome === 'ok')
+      && stub.requests.some((request) => request.path?.endsWith('/chat/completions')), { calls, providerRequests: stub.requests.length });
+    // The runner sent one MCP frame (the submit) and nothing else; the hub holds one request.
+    const requests = hub.all('SELECT source_message_id FROM supervisor_requests');
+    ctx.assert('only-submit-was-requested', requests.length === 1 && toolsCalled.length === 1, { requests, toolsCalled });
+
+    const workers = readWorkerLogs(workerLogs);
+    const instructions = workers.flatMap((entry) => entry.entries.filter((line) => line.kind === 'instruction'));
+    const turns = workers.flatMap((entry) => entry.entries.filter((line) => line.kind === 'turn'));
+    ctx.assert('worker-received-exactly-two-instructions', workers.length === 1 && instructions.length === 2
+      && turns.map((line) => line.verifyExit).join(',') === '1,0' && instructions[0].text.includes(AUTONOMY_WORK.instruction), { instructions, turns });
+
+    // The runner checks the final bytes itself, in the lane's checkout.
+    const lane = hub.one('SELECT cwd FROM lanes WHERE key = ?', goal?.lane_key ?? '');
+    const cwd = lane?.cwd ?? null;
+    const check = cwd ? await ctx.run('verify-final', '/bin/sh', ['verify.sh'], { cwd, deadlineMs: 20_000 }) : null;
+    const bytes = cwd && existsSync(join(cwd, 'result.txt')) ? readFileSync(join(cwd, 'result.txt'), 'utf8') : null;
+    ctx.assert('final-bytes-verify-on-disk', check?.code === 0 && bytes === 'READY', { cwd, code: check?.code, bytes });
+
+    // Cleanup: stop the daemon; the fixture worker must exit by itself.
+    const workerPids = workers.map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
+    const cleanExit = new Set(['stdin-closed', 'hangup', 'terminated']);
+    await ctx.terminate(daemon, 'worker-cleanup');
+    const closed = await waitForChange(ctx, 'fixture worker exit', workerLogs, () => {
+      const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind)));
+      return { done: open.length === 0, open: open.map((entry) => entry.name) };
+    }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
+    const alive = workerPids.filter((pid) => pidAlive(pid));
+    ctx.assert('fixture-workers-gone', workerPids.length === 1 && closed && alive.length === 0, { workerPids, closed, alive });
+
+    for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+    ctx.evidence.writeJson('autonomy.json', {
+      worker: { kind: 'fixture', note: 'fixture-worker.mjs --multi-turn: wrong bytes on turn 1, READY after, runs verify.sh, reports working then idle. Not a real provider worker.' },
+      model: { kind: 'loopback stub', note: 'The stub always answers complete and cites sig:req:r1; the check Ferryx ran decides. It is no proof of a real model\'s judgment.' },
+      sourceId, goalId, goal, dispatches, events, observedDetails, terms, requirement, judgeCalls: calls, final: { cwd, code: check?.code, bytes },
+    });
+  } finally {
+    await stub.close();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +948,23 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runAdmission,
   }),
-  autonomy: planned('10', 'First verification forced to fail, corrected result allowed: two run ids, attested pass, one completed goal, no owner nudge'),
+  autonomy: Object.freeze({
+    implemented: true,
+    task: '10',
+    summary: 'First verification forced to fail, corrected result allowed: two run ids, attested pass, one completed goal, no owner nudge',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'workspace-registered', 'submit-admitted', 'goal-completed-without-owner', 'two-runs-at-admitted-revision',
+      'correction-followed-first-settle-and-names-r1', 'verifier-failure-took-the-corrective-path', 'one-corrective-turn-counted',
+      'verified-names-second-run-and-current-revision', 'r1-met-with-ferryx-check-and-run-provenance', 'grading-ran-on-mhc',
+      'only-submit-was-requested', 'worker-received-exactly-two-instructions', 'final-bytes-verify-on-disk', 'fixture-workers-gone',
+    ],
+    notCovered: [
+      { clause: 'model-judgment', reason: 'the provider is a loopback stub that always claims completion; only the Ferryx-run check decides', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/completion.rs' },
+      { clause: 'remote-run', reason: 'a run on a paired host is held REMOTE_CHECK_UNAVAILABLE, not graded', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/completion.rs a_remote_run_is_never_checked_against_the_local_checkout' },
+    ],
+    run: runAutonomy,
+  }),
   correction: planned('10', 'Owner correction "Use DONE instead of READY" before dispatch, stale expectedRevision replayed: final bytes DONE, stale mutation 409'),
   waiting: planned('9', 'Parent starts two children; one settles, then the second settles/fails: no decision while incomplete, one resume, failure is not completion'),
   burst: planned('9', 'Four ordinary reports at virtual 0,1,2,3s advanced to 30s: one admitted model turn with four receipts; urgent pause has zero delay'),

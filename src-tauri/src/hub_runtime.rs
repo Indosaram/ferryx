@@ -190,7 +190,19 @@ impl AgentControl for DaemonBridge {
                     code: ferryx_hub::goals::loop_driver::OBSERVER_UNAVAILABLE.into(),
                 };
             };
-            return match crate::remote::server::agent_control_service::handle(gateway, op).await {
+            // The supervisor's owner fence is asked inside the pane's input step, right before
+            // the first byte: a pause, cancel or correction that landed while the delivery
+            // waited for the pane refuses it with a code that proves nothing was typed. It is
+            // one-shot: once the first byte is allowed, the ask before Enter always passes.
+            let fence = crate::agent_control::delivery::supervisor_fence(&send.request_id);
+            return match crate::remote::server::agent_control_service::handle_as(
+                gateway,
+                op,
+                "owner",
+                Some(fence),
+            )
+            .await
+            {
                 Ok(result) => crate::agent_control::delivery::hub_delivery_from_reply(&result),
                 Err(error) => crate::agent_control::delivery::hub_delivery(Err(error)),
             };
@@ -1408,7 +1420,25 @@ fn settle_pty_run(
 /// runs while a goal waits. It recovers pending wakes and the state-event cursor at start.
 fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
     let pool = launch.hub.pool.clone();
-    let handler = std::sync::Arc::new(ferryx_hub::supervisor::wakes::StateHandler::new(pool.clone()));
+    // Settled runs are verified from their durable receipts: the deterministic state moves,
+    // then the contract's assessment and blind convergence check on fresh evidence.
+    // The pool is given explicitly: alerts (and with them the judge's default pool) are
+    // installed later in this generation, and without a pool the configured supervisor
+    // budget is not enforced and no judge_calls rows are written.
+    let judge = std::sync::Arc::new(
+        ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+            .with_pool(pool.clone()),
+    );
+    let driver = ferryx_hub::supervisor::completion::CompletionDriver::new(
+        pool.clone(),
+        judge,
+        launch.bridge.clone(),
+        ferryx_hub::agent_control::LOCAL_HOST_ID,
+    );
+    let handler = std::sync::Arc::new(ferryx_hub::supervisor::completion::CompletionHandler::new(
+        pool.clone(),
+        driver,
+    ));
     let scheduler = ferryx_hub::supervisor::wakes::WakeScheduler::new(pool, handler);
     tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
 }
