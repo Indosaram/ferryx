@@ -141,8 +141,8 @@ pub enum SupervisorError {
     )]
     SupervisorOwned { lane_key: String },
     /// An adoption whose legacy lane the legacy path still drives at commit, or whose legacy
-    /// goal became stricter (off, or supervised under a `full` adoption) after the adoption
-    /// read it.
+    /// goal became stricter (off, or supervised under a `full` adoption) or changed its
+    /// adopted terms after the adoption read it.
     #[error("legacy lane {lane_key} cannot be adopted now: {why}")]
     LegacyLaneLive { lane_key: String, why: String },
     #[error(transparent)]
@@ -585,7 +585,17 @@ pub struct AdmitTerms {
     /// or a legacy goal turn in flight, or its legacy goal is now stricter than the request's
     /// mode.
     pub adopts_lane: Option<String>,
+    /// The legacy goal as the adoption read it ([`LegacyGoalRead`]). When set, an adoption
+    /// whose legacy goal changed since (requirements or turn limit replaced, a turn counted,
+    /// a goal created or removed) is refused with `LEGACY_LANE_LIVE` under the write lock, so
+    /// the adopted terms are never stale.
+    pub legacy_goal_read: Option<LegacyGoalRead>,
 }
+
+/// `(revision, turns_used)` of a legacy lane's `lane_goal`, or `None` when it has none: what
+/// an adoption copies (requirements and turn limit bump the revision; the budget left is the
+/// turn limit minus the turns used). The mode is re-checked separately.
+pub type LegacyGoalRead = Option<(i64, u32)>;
 
 /// What admission persisted. A replay of the same source message returns the same receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1541,19 +1551,22 @@ pub async fn replayed_admission(
     .map(Some)
 }
 
+/// Status, attached pane, legacy proposal state and legacy goal mode of a legacy lane.
+type LegacyLaneRow = (String, Option<String>, Option<String>, Option<String>);
+
 /// Why a legacy lane cannot be adopted at `admitted_mode` now, or `None`: a worker attached to
 /// a lane that has not ended, a legacy goal turn in flight, or a legacy goal that became
 /// stricter after the adoption read it (now `off`, or `supervised` under a `full` adoption).
 /// `NOT_FOUND` for an unknown lane.
 ///
-/// The legacy budget needs no re-check: a legacy turn is counted only when it is sent to the
-/// lane's attached pane, which this refuses.
+/// The adopted requirements and budget are re-checked by the caller against
+/// [`AdmitTerms::legacy_goal_read`].
 async fn legacy_lane_live(
     conn: &mut SqliteConnection,
     lane_key: &str,
     admitted_mode: GoalMode,
 ) -> Result<Option<String>, SupervisorError> {
-    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let row: Option<LegacyLaneRow> = sqlx::query_as(
         "SELECT l.status, l.omo_thread_id, g.proposal_state, g.mode
          FROM lanes l LEFT JOIN lane_goal g ON g.lane_key = l.key WHERE l.key = ?",
     )
@@ -1720,6 +1733,19 @@ pub async fn admit_request_with(
                 lane_key: legacy.clone(),
                 why,
             });
+        }
+        if let Some(read) = terms.legacy_goal_read {
+            let now: Option<(i64, i64)> =
+                sqlx::query_as("SELECT revision, turns_used FROM lane_goal WHERE lane_key = ?")
+                    .bind(legacy)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if now != read.map(|(revision, used)| (revision, i64::from(used))) {
+                return Err(SupervisorError::LegacyLaneLive {
+                    lane_key: legacy.clone(),
+                    why: "its legacy goal's requirements, turn limit or turns used changed while the adoption was prepared; adopt it again to take its current terms".into(),
+                });
+            }
         }
     }
 
@@ -2924,9 +2950,10 @@ pub async fn consume_wake(pool: &SqlitePool, wake_id: i64) -> Result<bool, Super
     Ok(updated.rows_affected() == 1)
 }
 
-/// Refusal code of a legacy lane API (`lane.drive`, `lane.transition`, goal set, mode,
-/// approve, discard, and the legacy runner's pane attach) aimed at a lane that belongs to a
-/// supervisor goal.
+/// Refusal code of a legacy lane API (`lane.drive`, `lane.transition`, `lane.pause`,
+/// `lane.resume`, goal set, mode, approve, discard, revision accept and reject, a tracker
+/// move, and the legacy runner's pane attach) aimed at a lane that belongs to a supervisor
+/// goal. An owner reply in such a lane's thread is not refused but left to normal routing.
 pub const SUPERVISOR_OWNED: &str = "SUPERVISOR_OWNED";
 
 /// True when the supervisor owns the lane: a supervisor goal's own lane, whose worker is

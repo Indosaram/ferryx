@@ -3,9 +3,14 @@
 //! replies in the Slack thread of a closed, failed or verified-done lane, the reply is
 //! consumed before chat routing, the lane is reopened, and the text goes to its pane.
 //! A reply that cannot be applied stays recorded with its error and the lead is told once.
+//!
+//! A lane the supervisor owns ([`crate::supervisor::supervisor_owns_lane`], e.g. an adopted
+//! legacy lane) is never reopened or sent to here: its work continues in the supervisor goal,
+//! so the owner's reply is left to normal routing, the one conversation, instead of reaching
+//! the legacy pane as a second worker or being swallowed into the fenced lane's history.
 use sqlx::SqlitePool;
 
-use super::state::{transition, LaneStatus};
+use super::state::reopen_unless_supervised;
 use crate::agent_control::{AgentControl, AgentOp};
 use crate::error::Result;
 use crate::storage::now_rfc3339;
@@ -21,6 +26,7 @@ pub struct OwnerReply<'a> {
 
 /// True when the message was an owner reply to a finished lane and has been consumed
 /// (including a redelivered duplicate). False leaves the message to normal routing.
+/// A lane the supervisor owns is skipped, also when it was adopted during this call.
 pub async fn intercept(
     pool: &SqlitePool,
     control: &dyn AgentControl,
@@ -49,9 +55,12 @@ pub async fn intercept(
         "SELECT key, status, omo_thread_id, lead_session_key FROM lanes WHERE thread_channel_id = ?
          AND (status IN ('closed', 'failed', 'verified_done')
               OR EXISTS(SELECT 1 FROM lane_owner_replies r WHERE r.lane_key = lanes.key AND r.state = 'pending'))
+         AND NOT EXISTS(SELECT 1 FROM supervisor_goals g WHERE g.lane_key = lanes.key)
+         AND NOT EXISTS(SELECT 1 FROM supervisor_requests q WHERE q.source_message_id = ? || lanes.key)
          LIMIT 1",
     )
     .bind(&thread)
+    .bind(crate::supervisor::ADOPT_MESSAGE_PREFIX)
     .fetch_optional(pool)
     .await?;
     let Some((key, status, pane, lead)) = lane else {
@@ -81,11 +90,20 @@ pub async fn intercept(
     )
     .await
     {
-        Ok(()) => {
+        Ok(true) => {
             sqlx::query("UPDATE lane_owner_replies SET state = 'applied', error = NULL WHERE message_id = ?")
                 .bind(reply.message_id)
                 .execute(pool)
                 .await?;
+        }
+        Ok(false) => {
+            // Adopted after the lookup: nothing was reopened or sent. Forget the claim so the
+            // reply, and a redelivery of it, takes normal routing.
+            sqlx::query("DELETE FROM lane_owner_replies WHERE message_id = ?")
+                .bind(reply.message_id)
+                .execute(pool)
+                .await?;
+            return Ok(false);
         }
         Err(error) => {
             tracing::warn!(%key, %error, "owner reply remains pending");
@@ -114,6 +132,7 @@ pub async fn intercept(
     Ok(true)
 }
 
+/// False when the supervisor owns the lane and nothing was reopened or sent.
 async fn apply(
     pool: &SqlitePool,
     control: &dyn AgentControl,
@@ -122,15 +141,24 @@ async fn apply(
     pane: Option<&str>,
     message_id: &str,
     text: &str,
-) -> Result<()> {
+) -> Result<bool> {
     // omo closes a verified-done lane before reopening it from the owner's reply.
     if status == "verified_done" {
+        // An adopted lane's worktree may host its supervisor worker: never close it here.
+        if crate::supervisor::supervisor_owns_lane(pool, key).await? {
+            return Ok(false);
+        }
         super::worktree::close(pool, key, None).await?;
     }
     if matches!(status, "closed" | "failed" | "verified_done") {
-        transition(pool, key, LaneStatus::Working, Some("note: reopened"))
+        // The reopen refuses an adopted lane in the same statement, so an adoption that
+        // committed after the lookup leaves the lane ended and its pane untouched.
+        let reopened = reopen_unless_supervised(pool, key, Some("note: reopened"))
             .await
             .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+        if !reopened {
+            return Ok(false);
+        }
         super::worktree::restore(pool, key).await?;
     }
     if let Some(session_id) = pane.filter(|pane| !pane.is_empty()) {
@@ -147,14 +175,14 @@ async fn apply(
             )
             .await?;
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent_control::RecordingControl;
-    use crate::lanes::state::{insert_lane, set_pane};
+    use crate::lanes::state::{insert_lane, set_pane, transition, LaneStatus};
 
     async fn finished_lane(pool: &SqlitePool, key: &str, to: LaneStatus) {
         insert_lane(pool, key, "Ledger", "lead-key", "/tmp", "file marker")

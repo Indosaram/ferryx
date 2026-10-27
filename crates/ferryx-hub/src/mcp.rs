@@ -423,6 +423,8 @@ async fn call_tool(
         }
         "lane.pause" => {
             let key = required(args, "key")?;
+            // A supervisor lane, or an adopted one, is paused through the supervisor.
+            refuse_supervisor_owned(context, &key, "pause it through the supervisor").await?;
             let changed = crate::lanes::pause::pause(&context.pool, &key, "session:lead")
                 .await
                 .map_err(|error| error.to_string())?;
@@ -430,6 +432,7 @@ async fn call_tool(
         }
         "lane.resume" => {
             let key = required(args, "key")?;
+            refuse_supervisor_owned(context, &key, "resume it through the supervisor").await?;
             if !crate::lanes::pause::resume(&context.pool, &key)
                 .await
                 .map_err(|error| error.to_string())?
@@ -1051,6 +1054,18 @@ mod tests {
         )
         .await;
         assert!(close.to_string().contains("SUPERVISOR_OWNED"), "{close}");
+        // Its pause is the supervisor's too.
+        for tool in ["lane.pause", "lane.resume"] {
+            let refused = dispatch(&context, &call(tool, json!({"key": lane_key}))).await;
+            assert!(refused.to_string().contains("SUPERVISOR_OWNED"), "{tool}: {refused}");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM lane_pauses")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
         let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
             .bind(&lane_key)
             .fetch_one(&pool)

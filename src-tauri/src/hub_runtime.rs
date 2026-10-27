@@ -827,7 +827,13 @@ async fn apply_goal_action(
 ) -> Result<(String, Value), SupervisorGoalError> {
     use crate::daemon::protocol::SupervisorGoalAction as Action;
     use ferryx_hub::goals::{contract, revision, GoalMode, ProposalState};
-    if let Some(lane_key) = action.lane_key() {
+    // A revision names its lane only through the store; it is fenced like the lane actions,
+    // so a legacy revision proposed before an adoption is not applied after it.
+    let revision_lane = match &action {
+        Action::AcceptRevision { id } | Action::RejectRevision { id } => revision::lane_of(pool, *id).await?,
+        _ => None,
+    };
+    if let Some(lane_key) = action.lane_key().or(revision_lane.as_deref()) {
         if ferryx_hub::lanes::state::status_of(pool, lane_key)
             .await
             .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?
@@ -836,8 +842,8 @@ async fn apply_goal_action(
             return Err(SupervisorGoalError::NotFound(format!("lane not found: {lane_key}")));
         }
         // A supervisor goal's lane changes only through the supervisor (which bumps the goal
-        // revision), like `lane.drive`: the legacy set, mode, approve and discard paths are
-        // refused with SUPERVISOR_OWNED.
+        // revision), like `lane.drive`: the legacy set, mode, approve, discard and revision
+        // paths are refused with SUPERVISOR_OWNED.
         ferryx_hub::supervisor::refuse_legacy_goal_action(pool, lane_key, action.mutates())
             .await
             .map_err(|error| match error {
@@ -1849,6 +1855,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(shown, lane);
+        // A revision reaches the fence through its lane: proposed with the owner's words (the
+        // lane title), it is neither accepted nor rejected through the legacy path.
+        use ferryx_hub::goals::revision::{self, RevisionChange};
+        let proposed = revision::propose(
+            &pool,
+            &lane,
+            &RevisionChange::Waive { req_id: "r1".into() },
+            "Write result.txt",
+        )
+        .await
+        .unwrap();
+        let base = contract_of(&pool, &lane).await.unwrap().unwrap().revision;
+        for action in [Action::AcceptRevision { id: proposed.id }, Action::RejectRevision { id: proposed.id }] {
+            let refused = apply_goal_action(&pool, &control, action).await.unwrap_err();
+            assert!(
+                matches!(&refused, SupervisorGoalError::Conflict(message) if message.starts_with("SUPERVISOR_OWNED")),
+                "{refused}"
+            );
+        }
+        assert_eq!(revision::list_pending(&pool, &lane).await.unwrap().len(), 1);
+        assert_eq!(contract_of(&pool, &lane).await.unwrap().unwrap().revision, base);
         assert!(control.ops().is_empty());
     }
 

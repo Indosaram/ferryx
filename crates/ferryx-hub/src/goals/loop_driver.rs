@@ -377,7 +377,9 @@ async fn decide<C: AgentControl + ?Sized>(
 /// in flight is ignored.
 ///
 /// Returns `None` when nothing changed (no contract, mode off, a stopped or paused lane, an
-/// awaiting proposal), else what changed, for `supervisor_changed`.
+/// awaiting proposal, a lane the supervisor owns), else what changed, for `supervisor_changed`.
+/// An adopted legacy lane keeps its legacy contract as history; its work continues only in
+/// the adopting supervisor goal, so this loop never sends to its pane.
 pub async fn on_turn_settled<C: AgentControl + ?Sized>(
     pool: &SqlitePool,
     judge: &Judge,
@@ -404,6 +406,9 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
         return Ok(None);
     };
     if ended(status) || crate::lanes::pause::is_paused(pool, lane_key).await? {
+        return Ok(None);
+    }
+    if crate::supervisor::supervisor_owns_lane(pool, lane_key).await? {
         return Ok(None);
     }
     let mut superseded = false;

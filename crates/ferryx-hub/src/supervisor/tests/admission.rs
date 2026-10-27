@@ -1167,6 +1167,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
     let adopts = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("busy".into()),
+        legacy_goal_read: None,
     };
     // The store itself refuses while the legacy worker is attached, under its write lock. The
     // other order, an adoption committing during a legacy launch, is refused by the legacy
@@ -1182,6 +1183,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
     let elsewhere = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("ledger".into()),
+        legacy_goal_read: None,
     };
     let error = admit_request_with(&pool, &request, &elsewhere).await.unwrap_err();
     assert_eq!(error.code(), "INVALID_REQUEST", "{error}");
@@ -1197,6 +1199,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
     let held = AdmitTerms {
         owner_hold: Some(detail.clone()),
         adopts_lane: Some("busy".into()),
+        legacy_goal_read: None,
     };
     let admission = admit_request_with(&pool, &request, &held).await.unwrap();
     assert!(!admission.duplicate);
@@ -1248,6 +1251,7 @@ async fn two_adapters_adopting_one_lane_admit_one_goal() {
     let adopts = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("nightly".into()),
+        legacy_goal_read: None,
     };
     // Both adoptions reach the store as first ones, as when Slack and the desktop both pass
     // adopt_work's lookup before either commits.
@@ -1282,6 +1286,7 @@ async fn an_adoption_that_finds_the_legacy_goal_turned_off_is_refused_at_commit(
     let adopts = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("nightly".into()),
+        legacy_goal_read: None,
     };
     // The owner narrowed the legacy goal after adopt_work read it as full.
     set_mode(&pool, "nightly", GoalMode::Supervised).await.unwrap();
@@ -1302,6 +1307,7 @@ async fn an_adoption_that_finds_the_legacy_goal_turned_off_is_refused_at_commit(
     let terms = AdmitTerms {
         owner_hold: Some(format!("{OWNER_APPROVAL_REQUIRED}: the owner decides first")),
         adopts_lane: Some("nightly".into()),
+        legacy_goal_read: None,
     };
     assert!(!admit_request_with(&pool, &held, &terms).await.unwrap().duplicate);
 }
@@ -1361,6 +1367,10 @@ async fn an_adoption_during_a_legacy_launch_wins_and_the_legacy_drive_sends_noth
         .expect("the legacy drive finishes")
         .expect_err("an adopted lane is not driven");
     assert!(refused.to_string().starts_with(SUPERVISOR_OWNED), "{refused}");
+    assert!(
+        refused.to_string().contains("pane-legacy"),
+        "the unused pane is named so the owner can close it: {refused}"
+    );
     assert!(control.ops().is_empty(), "no brief was sent to the legacy pane");
     let (pane, status): (Option<String>, String) =
         sqlx::query_as("SELECT omo_thread_id, status FROM lanes WHERE key = 'nightly'")
@@ -1380,4 +1390,190 @@ async fn an_adoption_during_a_legacy_launch_wins_and_the_legacy_drive_sends_noth
         vec![(None, PANE.to_owned(), adopted.receipt.dispatch_request_id)]
     );
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_goals").await, 1);
+}
+
+/// The legacy paths that reopen an ended lane and send to its pane leave an adopted lane to
+/// its supervisor goal: an owner reply in its Slack thread falls through to normal routing, a
+/// tracker move is refused, the reopen statement itself refuses it, and the legacy goal loop
+/// never sends to its pane. The adopting goal is the one worker.
+#[tokio::test]
+async fn an_adopted_lane_is_not_reopened_or_sent_to_by_the_legacy_paths() {
+    use crate::lanes::owner_replies::{intercept, OwnerReply};
+    use crate::lanes::state::reopen_unless_supervised;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let pool = owner_pool().await;
+    legacy_lane(&pool, "nightly", GoalMode::Full, 10).await;
+    set_pane(&pool, "nightly", "pane-legacy").await.unwrap();
+    transition(&pool, "nightly", LaneStatus::Working, Some("launched"))
+        .await
+        .unwrap();
+    transition(&pool, "nightly", LaneStatus::Failed, Some("forced: test"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lanes SET thread_channel_id = 'slack:C1:1.1' WHERE key = 'nightly'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Ended, so not live: the adoption commits with the legacy pane still attached.
+    let adopted = admitted(
+        adopt_work(&pool, &actor("m-nightly", "adopt nightly"), &adopt_of("nightly"))
+            .await
+            .unwrap(),
+    );
+    let lane_state = || async {
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT status, omo_thread_id FROM lanes WHERE key = 'nightly'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let ended = ("failed".to_owned(), Some("pane-legacy".to_owned()));
+
+    // The owner's reply in the lane's thread is not consumed by the legacy lane.
+    let legacy = RecordingControl::default();
+    let reply = OwnerReply {
+        channel: "C1",
+        thread_ts: "1.1",
+        author: "UOWNER",
+        owner: "UOWNER",
+        message_id: "r1",
+        text: "keep going",
+    };
+    let consumed = intercept(&pool, &legacy, &reply).await.unwrap();
+    assert!(!consumed, "the reply is left to normal routing");
+    assert!(legacy.ops().is_empty(), "nothing reached the legacy pane");
+    assert_eq!(lane_state().await, ended);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM lane_owner_replies").await, 0);
+
+    // The reopen statement refuses it by itself, as when the adoption commits after a lookup.
+    let reopened = reopen_unless_supervised(&pool, "nightly", Some("note: reopened"))
+        .await
+        .unwrap();
+    assert!(!reopened);
+    assert_eq!(lane_state().await, ended);
+
+    // Moving its tracker issue to started is refused, not a reopen.
+    for sql in [
+        "INSERT INTO tracker_users(id, name, display_name, avatar_color, kind, is_me, created_at)
+         VALUES('u1', 'ada', 'Ada', '#000', 'human', 1, '2020-01-01T00:00:00Z')",
+        "INSERT INTO tracker_teams(id, key, name, icon, color, created_at)
+         VALUES('t1', 'AGT', 'Agents', 'bot', '#fff', '2020-01-01T00:00:00Z')",
+        "INSERT INTO tracker_states(id, team_id, name, type, color)
+         VALUES('s-todo', 't1', 'Todo', 'unstarted', '#fff')",
+        "INSERT INTO tracker_states(id, team_id, name, type, color)
+         VALUES('s-started', 't1', 'In Progress', 'started', '#fff')",
+        "INSERT INTO tracker_issues(id, team_id, number, identifier, title, state_id, priority,
+                sort_order, lane_key, creator_id, created_at, updated_at)
+         VALUES('i1', 't1', 1, 'AGT-1', 'Nightly', 's-todo', 0, 0, 'nightly', 'u1', '2020', '2020')",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let moved = crate::tracker_linear::router()
+        .with_state(pool.clone())
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/issues/i1")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state_id":"s-started"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(moved.into_body(), 64 * 1024).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains(SUPERVISOR_OWNED),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(lane_state().await, ended);
+
+    // Even with the lane forced back to work, the legacy goal loop sends nothing to its pane.
+    sqlx::query("UPDATE lanes SET status = 'working' WHERE key = 'nightly'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = lane_goal_snapshot(&pool, "nightly").await;
+    let settled = timeout(
+        DEADLINE,
+        crate::goals::loop_driver::on_turn_settled(
+            &pool,
+            &crate::judge::Judge::fallback_yes(),
+            &legacy,
+            "nightly",
+            true,
+        ),
+    )
+    .await
+    .expect("the loop pass finishes")
+    .unwrap();
+    assert_eq!(settled, None);
+    assert!(legacy.ops().is_empty(), "the legacy loop did not touch the legacy pane");
+    assert_eq!(lane_goal_snapshot(&pool, "nightly").await, before);
+
+    // The adopting goal is the one worker.
+    let worker = Arc::new(RecordingControl::default());
+    let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
+    assert_eq!(dispatcher.drain().await.len(), 1);
+    assert_eq!(
+        sends(&worker),
+        vec![(None, PANE.to_owned(), adopted.receipt.dispatch_request_id)]
+    );
+    assert!(legacy.ops().is_empty());
+}
+
+#[tokio::test]
+async fn an_adoption_that_finds_the_legacy_terms_changed_is_refused_at_commit() {
+    let pool = owner_pool().await;
+    legacy_lane(&pool, "nightly", GoalMode::Full, 5).await;
+    let request = adoption_request(&pool, "nightly", ChannelProvider::Slack).await;
+    let read_now = || async {
+        let contract = contract_of(&pool, "nightly").await.unwrap();
+        AdmitTerms {
+            owner_hold: None,
+            adopts_lane: Some("nightly".into()),
+            legacy_goal_read: Some(contract.map(|contract| (contract.revision, contract.turns_used))),
+        }
+    };
+
+    // The owner lowered the turn limit after adopt_work read the legacy goal.
+    let read = read_now().await;
+    let requirement = RequirementSpec {
+        id: "r-nightly".into(),
+        text: "reconcile runs".into(),
+        verifier: "cargo test reconcile".into(),
+    };
+    set_contract(&pool, "nightly", &[requirement], GoalMode::Full, 2)
+        .await
+        .unwrap();
+    let error = admit_request_with(&pool, &request, &read).await.unwrap_err();
+    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    // A legacy turn counted since the read is a change too.
+    let read = read_now().await;
+    sqlx::query("UPDATE lane_goal SET turns_used = turns_used + 1 WHERE lane_key = 'nightly'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = admit_request_with(&pool, &request, &read).await.unwrap_err();
+    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    // So is a legacy goal the lane did not have when it was read.
+    let without = AdmitTerms {
+        legacy_goal_read: Some(None),
+        ..read
+    };
+    let error = admit_request_with(&pool, &request, &without).await.unwrap_err();
+    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    for table in ["supervisor_goals", "supervisor_requests", "supervisor_dispatches"] {
+        assert_eq!(count(&pool, &format!("SELECT COUNT(*) FROM {table}")).await, 0, "{table}");
+    }
+
+    // Read again, the adoption takes the current terms and commits.
+    let current = read_now().await;
+    assert!(!admit_request_with(&pool, &request, &current).await.unwrap().duplicate);
+    assert!(supervisor_owns_lane(&pool, "nightly").await.unwrap());
 }

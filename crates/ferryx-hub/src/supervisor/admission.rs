@@ -31,7 +31,8 @@ use super::dispatcher::{OWNER_APPROVAL_REQUIRED, TURN_LIMIT};
 use super::{
     admit_request_with, goal_of, identity_of, replayed_admission, AdmissionReceipt, AdmitRequest,
     AdmitTerms, ChannelProvider, ExecutionKind, ExecutionTarget, RunState, SupervisorError,
-    SupervisorIdentity, ADOPT_MESSAGE_PREFIX, DEFAULT_TURN_LIMIT, LANE_KEY_PREFIX,
+    LegacyGoalRead, SupervisorIdentity, ADOPT_MESSAGE_PREFIX, DEFAULT_TURN_LIMIT,
+    LANE_KEY_PREFIX,
 };
 use crate::goals::contract::{contract_of, RequirementSpec};
 use crate::goals::types::{GoalError, GoalMode};
@@ -206,7 +207,7 @@ impl AdmissionError {
     pub fn code(&self) -> &'static str {
         match self {
             AdmissionError::Unauthorized(_) => "UNAUTHORIZED",
-            AdmissionError::Refused { code, .. } => *code,
+            AdmissionError::Refused { code, .. } => code,
             AdmissionError::Store(error) => error.code(),
         }
     }
@@ -376,11 +377,14 @@ pub async fn submit_work(
 /// turn limit. A lane the legacy path still drives (a worker attached, or a legacy turn in
 /// flight) is refused ([`LEGACY_LANE_LIVE`]): adopting it would start a second worker. That
 /// check runs under the admission's write lock, together with a re-check that the legacy goal
-/// did not become stricter since it was read here, and the legacy runner attaches a launched
-/// pane only in a statement that refuses an adopted lane ([`super::attach_legacy_pane`]), so
-/// of a racing adoption and legacy launch exactly one commits. A second adoption, from any
-/// adapter, returns the first one's goal, also when both race. Once adopted, the legacy lane is
-/// fenced from the legacy lane APIs ([`super::supervisor_owns_lane`]).
+/// did not become stricter or change its adopted terms since it was read here
+/// ([`AdmitTerms::legacy_goal_read`]), and the legacy runner attaches a launched pane only in
+/// a statement that refuses an adopted lane ([`super::attach_legacy_pane`]), so of a racing
+/// adoption and legacy launch exactly one commits. A second adoption, from any adapter,
+/// returns the first one's goal, also when both race. Once adopted, the legacy lane is fenced
+/// from the legacy lane APIs ([`super::supervisor_owns_lane`]), and the legacy paths that
+/// reopen an ended lane and send to its pane (owner replies, tracker moves) refuse it in the
+/// reopen statement itself ([`crate::lanes::state::reopen_unless_supervised`]).
 pub async fn adopt_work(
     pool: &SqlitePool,
     actor: &ActorContext,
@@ -437,6 +441,9 @@ pub async fn adopt_work(
     }
 
     let contract = contract_of(pool, lane_key).await?;
+    let legacy_goal_read: LegacyGoalRead = contract
+        .as_ref()
+        .map(|contract| (contract.revision, contract.turns_used));
     let mut owner_hold = None;
     let mut turn_limit = None;
     if let Some(contract) = &contract {
@@ -496,7 +503,16 @@ pub async fn adopt_work(
         operations: OperationClass::BASELINE.to_vec(),
         turn_limit,
     };
-    admit_scoped(pool, &identity, actor, &source, &work, owner_hold, Some(lane_key)).await
+    admit_scoped(
+        pool,
+        &identity,
+        actor,
+        &source,
+        &work,
+        owner_hold,
+        Some((lane_key, legacy_goal_read)),
+    )
+    .await
 }
 
 /// The goal an earlier admission of this source message created. Checked before any scope is
@@ -524,7 +540,8 @@ async fn replay(
 
 /// `owner_hold` is a `state_detail` reason that holds the goal for the owner whatever its
 /// scope (an adopted supervised lane). `adopts_lane` names the legacy lane an adoption takes
-/// over; its liveness is re-checked inside the admission transaction.
+/// over and its goal as read; its liveness and that goal are re-checked inside the admission
+/// transaction.
 async fn admit_scoped(
     pool: &SqlitePool,
     identity: &SupervisorIdentity,
@@ -532,7 +549,7 @@ async fn admit_scoped(
     source: &Source<'_>,
     work: &SubmitWork,
     owner_hold: Option<String>,
-    adopts_lane: Option<&str>,
+    adopts_lane: Option<(&str, LegacyGoalRead)>,
 ) -> Result<SubmitOutcome, AdmissionError> {
     if let Some(outcome) = replay(pool, identity, source).await? {
         return Ok(outcome);
@@ -579,7 +596,8 @@ async fn admit_scoped(
     // the dispatcher's rescan nor a crash can replace its reason with a generic one.
     let terms = AdmitTerms {
         owner_hold: (!holds.is_empty()).then(|| holds.join("; ")),
-        adopts_lane: adopts_lane.map(str::to_owned),
+        adopts_lane: adopts_lane.map(|(lane, _)| lane.to_owned()),
+        legacy_goal_read: adopts_lane.map(|(_, read)| read),
     };
     let admission = admit_request_with(pool, &request, &terms).await?;
     if admission.duplicate {

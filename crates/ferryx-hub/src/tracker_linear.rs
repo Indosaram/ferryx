@@ -508,6 +508,10 @@ fn timestamps_for(
 }
 
 /// omo's `lanes::handle_lane_state_transition`: moving a lane-linked issue drives its lane.
+/// A lane the supervisor owns (a supervisor goal's lane, or an adopted legacy lane) is refused
+/// with `SUPERVISOR_OWNED`, as `lane.transition` is: its state changes only through the
+/// supervisor, a close would remove a worktree its worker may run in, and a reopen would hand
+/// it back to the legacy goal loop as a second worker.
 async fn lane_state_transition(
     pool: &SqlitePool,
     lane_key: &str,
@@ -523,6 +527,18 @@ async fn lane_state_transition(
     let Some(status) = status else {
         return Err(format!("IllegalTransition: lane {lane_key} not found"));
     };
+    let owned = || {
+        format!(
+            "{}: lane {lane_key} belongs to a supervisor goal; change its state through the supervisor",
+            crate::supervisor::SUPERVISOR_OWNED
+        )
+    };
+    if crate::supervisor::supervisor_owns_lane(pool, lane_key)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Err(owned());
+    }
     let (target, reason) = match state_type {
         "completed" if status == "verified_done" => (LaneStatus::Closed, None),
         "completed" => match force_note.map(str::trim).filter(|note| !note.is_empty()) {
@@ -558,9 +574,15 @@ async fn lane_state_transition(
             .await
             .map_err(|error| error.to_string())?;
     } else {
-        crate::lanes::state::transition(pool, lane_key, target, reason.as_deref())
-            .await
-            .map_err(|error| error.to_string())?;
+        // The only other target is the reopen, which refuses a lane adopted since the check
+        // above in the same statement.
+        let reopened =
+            crate::lanes::state::reopen_unless_supervised(pool, lane_key, reason.as_deref())
+                .await
+                .map_err(|error| error.to_string())?;
+        if !reopened {
+            return Err(owned());
+        }
     }
     crate::tracker_lanes::sync(pool)
         .await

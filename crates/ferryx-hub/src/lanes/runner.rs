@@ -65,7 +65,7 @@ impl LaneRunner {
                     "lane was adopted by the supervisor during its legacy launch; the launched pane is left unused"
                 );
                 return Err(HubError::message(format!(
-                    "{}: lane {key} was adopted by the supervisor during its legacy launch; the hub dispatcher drives it",
+                    "{}: lane {key} was adopted by the supervisor during its legacy launch; the hub dispatcher drives it. The launched pane {session_id} was left unused and can be closed",
                     crate::supervisor::SUPERVISOR_OWNED
                 )));
             }
