@@ -788,8 +788,12 @@ async fn provider_503_runs_exactly_one_luna_fallback() {
     assert_eq!(frames.iter().filter(|f| f["type"] == "prompt").count(), 2);
     let models: Vec<_> = frames
         .iter()
-        .filter(|f| f["type"] == "set_model")
-        .map(|f| f["modelId"].as_str().unwrap())
+        .filter(|f| f["type"] == "fixture_launch")
+        .map(|f| {
+            let args = f["args"].as_array().unwrap();
+            let flag = args.iter().position(|arg| arg == "--model").unwrap();
+            args[flag + 1].as_str().unwrap()
+        })
         .collect();
-    assert_eq!(models, vec!["gpt-6-astra", "gpt-6-luna"]);
+    assert_eq!(models, vec!["mahoquot/gpt-6-astra", "mahoquot/gpt-6-luna"]);
 }

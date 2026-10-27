@@ -92,7 +92,10 @@ pub(crate) async fn serve(script: Script) -> (String, MockLog) {
 required = ['--mode', 'rpc', '--no-model-fallback']
 assert sys.argv[1:1 + len(required)] == required, sys.argv
 log = socket.create_connection(('127.0.0.1', cfg['port'])).makefile('rwb', buffering=0)
-log.write((json.dumps({'type':'fixture_launch', 'args':sys.argv[1:]}) + '\n').encode())
+# Every turn is a fresh process: the model comes from this launch's --model flag.
+launch_model = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else None
+model = launch_model.split('/', 1)[-1] if launch_model else None
+log.write((json.dumps({'type':'fixture_launch', 'args':sys.argv[1:], 'model':launch_model}) + '\n').encode())
 assert log.readline() == b'ok\n'
 def emit(value):
     print(json.dumps(value), flush=True)
@@ -110,13 +113,15 @@ for line in sys.stdin:
     if kind == 'extension_ui_response':
         finish()
         continue
-    response = {'type':'response', 'id':frame.get('id'), 'command':kind, 'success':True}
     assert 'sessionId' not in frame
+    if kind in ['set_model', 'set_thinking_level', 'set_auto_retry']:
+        emit({'type':'response', 'id':frame.get('id'), 'command':kind, 'success':False,
+              'error':'persists global settings'})
+        continue
+    response = {'type':'response', 'id':frame.get('id'), 'command':kind, 'success':True}
     if kind == 'get_state':
         response['data'] = {'sessionId':cfg['sessionId'], 'sessionFile':cfg['sessionFile']}
     emit(response)
-    if kind == 'set_model':
-        model = frame['modelId']
     if kind == 'prompt' and cfg['messages'] == ['__provider503__']:
         emit({'type':'agent_start'})
         if model != 'gpt-6-luna':

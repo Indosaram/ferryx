@@ -146,9 +146,17 @@ mod tests {
             .collect();
         assert_eq!(rpc[0]["type"], "get_state");
         assert!(!frames.iter().any(|f| f["type"] == "open_session"));
-        let model = frames.iter().find(|f| f["type"] == "set_model").unwrap();
-        assert_eq!(model["provider"], "mahoquot");
-        assert_eq!(model["modelId"], "gpt-6-luna");
+        let launch = frames
+            .iter()
+            .find(|f| f["type"] == "fixture_launch")
+            .unwrap();
+        let args = launch["args"].as_array().unwrap();
+        let flag = args.iter().position(|arg| arg == "--model").unwrap();
+        assert_eq!(args[flag + 1], "mahoquot/gpt-6-luna");
+        assert!(!frames.iter().any(|f| matches!(
+            f["type"].as_str(),
+            Some("set_model" | "set_thinking_level" | "set_auto_retry")
+        )));
         assert!(frames.iter().any(|f| f["type"] == "prompt"));
     }
 

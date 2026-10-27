@@ -2030,7 +2030,16 @@ mod tests {
         assert!(frames.iter().all(|frame| frame.get("sessionId").is_none()));
         let prompts: Vec<_> = frames.iter().filter(|f| f["type"] == "prompt").collect();
         assert_eq!(prompts.len(), 2);
-        assert!(frames.iter().any(|f| f["type"] == "set_model" && f["modelId"] == "model-x"));
+        assert!(launches.iter().all(|launch| {
+            let args = launch["args"].as_array().unwrap();
+            args.iter()
+                .position(|arg| arg == "--model")
+                .is_some_and(|flag| args[flag + 1] == "model-x")
+        }));
+        assert!(!frames.iter().any(|f| matches!(
+            f["type"].as_str(),
+            Some("set_model" | "set_thinking_level" | "set_auto_retry")
+        )));
         assert_eq!(prompts[0]["message"], "[Thu 1970-01-01 00:01:40 UTC] how are things?");
         let approval = frames.iter().find(|f| f["type"] == "extension_ui_response").unwrap();
         assert_eq!(approval["id"], "77");

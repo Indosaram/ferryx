@@ -732,10 +732,11 @@ pub async fn run_turn(
     let succeeded = result.is_ok();
     drop(rpc);
     if succeeded {
-        // Closed stdin asks mhc to finish and record the session cleanly; the kill below is
-        // only the fallback for an engine that does not exit in time.
+        // Closed stdin asks mhc to finish and record the session cleanly. reap still runs
+        // afterwards: it kills tool subprocesses left in the private group and is the
+        // fallback for an engine that does not exit in time.
         match tokio::time::timeout(GRACEFUL_EXIT_WINDOW, child.wait()).await {
-            Ok(Ok(_)) => return result,
+            Ok(Ok(_)) => {}
             Ok(Err(error)) => tracing::warn!(%error, "mhc RPC graceful exit wait failed"),
             Err(_) => tracing::warn!("mhc RPC did not exit after stdin close; killing it"),
         }
