@@ -516,7 +516,7 @@ impl Operation {
                 }
                 // A delivery rides the send route with `observeMs`, but only to a host that
                 // reports causal start receipts; any other host is never sent it. Its budget
-                // covers the host's submit deadline plus the start wait.
+                // covers the host's readiness wait, its submit deadline and the start wait.
                 if let crate::agent_control::AgentControlOp::Deliver { observe_ms, .. } = op {
                     r.capability = Some(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
                     let observe = crate::agent_control::delivery::observe_deadline(*observe_ms);
@@ -524,6 +524,7 @@ impl Operation {
                     r.budget_secs = Some(
                         submit
                             .div_ceil(1000)
+                            .saturating_add(crate::agent_control::delivery::PANE_READY_WAIT.as_secs())
                             .saturating_add(observe.as_secs())
                             .saturating_add(15)
                             .min(315),

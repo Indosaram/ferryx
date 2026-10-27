@@ -411,7 +411,7 @@ impl AgentControl for SignalControl {
         Delivery::Started(StartReceipt {
             request_id: send.request_id.clone(),
             session_id: send.session_id.clone(),
-            run_id: pty_run_id(&send.session_id, 1),
+            run_id: pty_run_id(&send.session_id, RecordingControl::EPOCH, 1),
         })
     }
 }
@@ -470,7 +470,7 @@ async fn one_request_admits_one_goal_and_starts_one_worker_without_a_drive_call(
     assert_eq!(binding.provider_session_id.as_deref(), Some(PANE));
     assert_eq!(
         binding.run_id,
-        Some(pty_run_id(PANE, 1)),
+        Some(pty_run_id(PANE, RecordingControl::EPOCH, 1)),
         "the run is the one the target's start receipt named, not the request id"
     );
     assert_eq!(dispatch_state(&pool, &request_id).await, "started");

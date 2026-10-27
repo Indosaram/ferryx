@@ -134,6 +134,9 @@ pub struct AgentEventBus {
     machine_events: Mutex<Option<Arc<crate::remote::machine_events::MachineEvents>>>,
     local_sequence: Mutex<u64>,
     inputs: Mutex<InputLedger>,
+    /// This bus's observer epoch. Sequences restart with the daemon, so a sequence is only
+    /// comparable with others of the same epoch; run ids and wait replies carry it.
+    instance: String,
 }
 
 impl AgentEventBus {
@@ -152,7 +155,18 @@ impl AgentEventBus {
             machine_events: Mutex::new(None),
             local_sequence: Mutex::new(0),
             inputs: Mutex::new(InputLedger::default()),
+            instance: uuid::Uuid::new_v4().simple().to_string(),
         }
+    }
+
+    /// The observer epoch of every sequence this bus issues.
+    pub fn instance(&self) -> &str {
+        &self.instance
+    }
+
+    /// The latest reading of every session, by session id.
+    pub fn snapshot(&self) -> Vec<AgentObservation> {
+        snapshot_of(&self.log.lock().latest)
     }
 
     pub fn attach_machine_events(&self, events: Arc<crate::remote::machine_events::MachineEvents>) {
@@ -177,7 +191,9 @@ impl AgentEventBus {
         self.inputs.lock().issued
     }
 
-    /// Record that input under `request_id` reached (or may have reached) `session_id`.
+    /// Record that input under `request_id` (`None`: raw keys) is reaching `session_id`. Every
+    /// writer calls it right before its bytes go out: the per-target input queue's writer for
+    /// chat, agent-control and phone input, and each raw write path for keystrokes and pastes.
     pub fn note_input(&self, session_id: &str, request_id: Option<&str>) {
         let mut guard = self.inputs.lock();
         let ledger = &mut *guard;

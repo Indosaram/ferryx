@@ -1986,13 +1986,29 @@ pub async fn transition_goal(
     to: RunState,
     detail: Option<&str>,
 ) -> Result<SupervisorGoal, SupervisorError> {
+    let mut tx = pool.begin_write().await?;
+    let goal =
+        transition_goal_in(&mut tx, goal_id, expected_revision, expected_state, to, detail).await?;
+    tx.commit().await?;
+    Ok(goal)
+}
+
+/// [`transition_goal`]'s checks and writes, inside the caller's transaction. Nothing is
+/// written when it refuses.
+async fn transition_goal_in(
+    conn: &mut SqliteConnection,
+    goal_id: &str,
+    expected_revision: i64,
+    expected_state: RunState,
+    to: RunState,
+    detail: Option<&str>,
+) -> Result<SupervisorGoal, SupervisorError> {
     if to == RunState::Dispatching {
         return Err(SupervisorError::Invalid(
             "a goal enters dispatching only by claiming its ready dispatch".into(),
         ));
     }
-    let mut tx = pool.begin_write().await?;
-    let goal = require_goal(&mut tx, goal_id).await?;
+    let goal = require_goal(conn, goal_id).await?;
     check_revision(&goal, expected_revision)?;
     if goal.run_state != expected_state {
         return Err(SupervisorError::StateConflict {
@@ -2008,13 +2024,13 @@ pub async fn transition_goal(
             to,
         });
     }
-    if to == RunState::Running && !has_live_run(&mut tx, goal_id).await? {
+    if to == RunState::Running && !has_live_run(conn, goal_id).await? {
         return Err(SupervisorError::NoLiveRun {
             goal_id: goal_id.to_owned(),
         });
     }
     if to == RunState::Ready {
-        require_nothing_in_flight(&mut tx, goal_id).await?;
+        require_nothing_in_flight(conn, goal_id).await?;
     }
     let revision = if to.is_owner_hold() {
         goal.revision + 1
@@ -2033,7 +2049,7 @@ pub async fn transition_goal(
     .bind(goal_id)
     .bind(expected_revision)
     .bind(expected_state.as_str())
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     if moved.rows_affected() != 1 {
         return Err(SupervisorError::RevisionConflict {
@@ -2050,7 +2066,7 @@ pub async fn transition_goal(
         .bind(&now)
         .bind(goal_id)
         .bind(revision)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
     if to == RunState::Cancelled {
@@ -2060,10 +2076,9 @@ pub async fn transition_goal(
         )
         .bind(&now)
         .bind(goal_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
-    tx.commit().await?;
     Ok(SupervisorGoal {
         run_state: to,
         state_detail: detail.map(str::to_owned),
@@ -2480,6 +2495,22 @@ pub async fn record_receipt(
     generation: i64,
     receipt: &Receipt,
 ) -> Result<Dispatch, SupervisorError> {
+    validate_receipt(receipt)?;
+    let mut tx = pool.begin_write().await?;
+    match apply_receipt(&mut tx, request_id, generation, receipt).await? {
+        AppliedReceipt::Recorded(dispatch) => {
+            tx.commit().await?;
+            Ok(dispatch)
+        }
+        // The older dispatch's evidence is kept; the receipt itself is refused.
+        AppliedReceipt::EvidenceOnly(error) => {
+            tx.commit().await?;
+            Err(error)
+        }
+    }
+}
+
+fn validate_receipt(receipt: &Receipt) -> Result<(), SupervisorError> {
     if let Some((run_id, session)) = receipt.run() {
         require_id("run id", run_id, MAX_ID_CHARS)?;
         require_id("provider session id", session, MAX_ID_CHARS)?;
@@ -2487,9 +2518,28 @@ pub async fn record_receipt(
     if let Receipt::Uncertain { code } = receipt {
         require_id("uncertain code", code, 128)?;
     }
-    let mut tx = pool.begin_write().await?;
-    let dispatch = require_dispatch(&mut tx, request_id).await?;
-    let binding = require_binding(&mut tx, &dispatch.goal_id).await?;
+    Ok(())
+}
+
+/// What [`apply_receipt`] wrote inside the caller's transaction.
+enum AppliedReceipt {
+    /// The receipt is recorded, or was already.
+    Recorded(Dispatch),
+    /// A late start or settle of an older dispatch: only its evidence was written, and the
+    /// receipt itself is refused with this error.
+    EvidenceOnly(SupervisorError),
+}
+
+/// [`record_receipt`]'s checks and writes, inside the caller's transaction. An `Err` wrote
+/// nothing.
+async fn apply_receipt(
+    conn: &mut SqliteConnection,
+    request_id: &str,
+    generation: i64,
+    receipt: &Receipt,
+) -> Result<AppliedReceipt, SupervisorError> {
+    let dispatch = require_dispatch(conn, request_id).await?;
+    let binding = require_binding(conn, &dispatch.goal_id).await?;
     check_generation(dispatch.generation, generation)?;
     check_generation(binding.generation, generation)?;
     let to = receipt.state();
@@ -2510,7 +2560,7 @@ pub async fn record_receipt(
             Receipt::Accepted => true,
         };
         if same {
-            return Ok(dispatch);
+            return Ok(AppliedReceipt::Recorded(dispatch));
         }
     }
     if !receipt.allowed_from().contains(&dispatch.state) {
@@ -2545,7 +2595,7 @@ pub async fn record_receipt(
         .bind(&dispatch.goal_id)
         .bind(generation)
         .bind(dispatch.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
         if newer_transmitted {
             let observed_at = if to == DispatchState::Started {
@@ -2565,14 +2615,13 @@ pub async fn record_receipt(
                 .bind(&now)
                 .bind(&now)
                 .bind(dispatch.id)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await?;
-            tx.commit().await?;
-            return Err(SupervisorError::ReceiptOutOfOrder {
+            return Ok(AppliedReceipt::EvidenceOnly(SupervisorError::ReceiptOutOfOrder {
                 request_id: request_id.to_owned(),
                 from: dispatch.state,
                 to,
-            });
+            }));
         }
         if let Some(bound) = binding.run_id.as_deref() {
             if bound != run_id {
@@ -2613,7 +2662,7 @@ pub async fn record_receipt(
                 .bind(&now)
                 .bind(&now)
                 .bind(updated.id)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await?;
             // This dispatch is the newest claimed one and the binding holds no other run.
             let bound_run = (to == DispatchState::Started).then_some(run_id);
@@ -2626,7 +2675,7 @@ pub async fn record_receipt(
             .bind(&updated.goal_id)
             .bind(generation)
             .bind(run_id)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
             updated.run_id = Some(run_id.clone());
             updated.provider_session_id = Some(provider_session_id.clone());
@@ -2645,7 +2694,7 @@ pub async fn record_receipt(
             .bind(&now)
             .bind(&now)
             .bind(updated.id)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
             updated.accepted_at = Some(now);
         }
@@ -2659,14 +2708,61 @@ pub async fn record_receipt(
             .bind(&now)
             .bind(&now)
             .bind(updated.id)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
             updated.uncertain_code = Some(code.clone());
             updated.uncertain_at = Some(now);
         }
     }
+    Ok(AppliedReceipt::Recorded(updated))
+}
+
+/// Records a causal start in one transaction: accepted (unless already recorded), started
+/// with the run and provider session the target named, and the goal's move from
+/// `dispatching` to `running` at its current revision. A goal that entered an owner hold
+/// after the claim keeps the hold, since the worker runs anyway and the owner decides; the
+/// start is still recorded. Any refusal (a stale generation, a session or run mismatch, a goal
+/// in another state) or store error writes nothing, so a started dispatch never exists
+/// without its goal running or owner-held, and no settle can land between the two.
+pub async fn record_start(
+    pool: &SqlitePool,
+    request_id: &str,
+    generation: i64,
+    run_id: &str,
+    provider_session_id: &str,
+) -> Result<Dispatch, SupervisorError> {
+    let started = Receipt::Started {
+        run_id: run_id.to_owned(),
+        provider_session_id: provider_session_id.to_owned(),
+    };
+    validate_receipt(&started)?;
+    let mut tx = pool.begin_write().await?;
+    let claimed = require_dispatch(&mut tx, request_id).await?;
+    if claimed.state == DispatchState::Claimed {
+        if let AppliedReceipt::EvidenceOnly(error) =
+            apply_receipt(&mut tx, request_id, generation, &Receipt::Accepted).await?
+        {
+            return Err(error);
+        }
+    }
+    let dispatch = match apply_receipt(&mut tx, request_id, generation, &started).await? {
+        AppliedReceipt::Recorded(dispatch) => dispatch,
+        AppliedReceipt::EvidenceOnly(error) => return Err(error),
+    };
+    let goal = require_goal(&mut tx, &dispatch.goal_id).await?;
+    if !goal.run_state.is_owner_hold() {
+        transition_goal_in(
+            &mut tx,
+            &dispatch.goal_id,
+            goal.revision,
+            RunState::Dispatching,
+            RunState::Running,
+            None,
+        )
+        .await?;
+    }
     tx.commit().await?;
-    Ok(updated)
+    Ok(dispatch)
 }
 
 /// Records the provider session of the binding's current generation (first launch). A

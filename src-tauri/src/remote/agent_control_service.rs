@@ -27,6 +27,14 @@ pub(crate) fn note_human_keystrokes(session_id: &str) {
     crate::hub_runtime::note_lane_keystrokes(session_id, now);
 }
 
+/// Raw keys or a paste chunk are about to reach `session_id` outside the per-pane input queue
+/// (a terminal keystroke, a paste, a mirrored or phone terminal). Every raw write path calls
+/// this right before its bytes go out, so no supervisor delivery attributes the turn they
+/// start to itself, however long ago other panes were typed into.
+pub(crate) fn note_raw_write(bus: &events::AgentEventBus, session_id: &str) {
+    bus.note_input(session_id, None);
+}
+
 fn refuse_if_human_typing(session_id: &str) -> Result<(), ScopeError> {
     let Some(typed_at) = reference_chat_runtime().input.last_raw_input_ms(session_id) else {
         return Ok(());
@@ -211,8 +219,10 @@ fn replay_value(replay: events::AgentReplay) -> serde_json::Value {
     }
 }
 
-fn wait_value(hit: WaitHit) -> serde_json::Value {
-    match hit {
+/// A wait's reply. `instance` is the observer epoch its sequences belong to: a caller holding a
+/// sequence of another epoch (this daemon restarted) cannot order the two.
+fn wait_value(hit: WaitHit, instance: &str) -> serde_json::Value {
+    let mut value = match hit {
         WaitHit::Observation(observation) => serde_json::json!({
             "gap": false,
             "observation": observation.sequenced(),
@@ -226,7 +236,9 @@ fn wait_value(hit: WaitHit) -> serde_json::Value {
             "snapshot": snapshot.iter().map(|event| event.sequenced()).collect::<Vec<_>>(),
             "afterSequence": after_sequence,
         }),
-    }
+    };
+    value["instance"] = serde_json::json!(instance);
+    value
 }
 
 /// Run one operation for the machine owner. The owner socket stays authorized.
@@ -339,7 +351,7 @@ async fn dispatch(
             Ok(serde_json::json!({ "session": entry }))
         }
         AgentControlOp::Send { session_id, text, request_id } => {
-            send_text(state, session_id, text, request_id, authorize).await
+            send_text(state, session_id, text, request_id, authorize, None).await
         }
         AgentControlOp::Answer { session_id, prompt_id, screen_revision, answer, request_id } => {
             live(state, &session_id).await?;
@@ -354,8 +366,6 @@ async fn dispatch(
             let target = control_target(state, &session_id);
             let request_id = request_id_or_new(request_id);
             let authorize = mutation_authorize(session_id.clone(), authorize);
-            let bus = Arc::clone(&state.agent_events);
-            let marked = request_id.clone();
             let state = Arc::clone(state);
             let transaction = tokio::spawn(async move {
                 let identity = reference_chat_identity(&state, &target, Some(&agent)).await;
@@ -378,13 +388,15 @@ async fn dispatch(
                 let runtime = reference_chat_runtime();
                 let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
                 let screen = ReferenceGatewayScreenReader { backend: Arc::clone(&state.session_backend) };
-                let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+                let writer = reference_input::ReferenceSessionWriter::new(
+                    state.session_backend.as_ref(),
+                    &state.agent_events,
+                    &request_id,
+                );
                 let clock = reference_input::SystemReferenceClock;
                 runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
             });
-            let result = joined(transaction.await);
-            note_typed(&bus, &session_id, &marked, &result);
-            result
+            joined(transaction.await)
         }
         AgentControlOp::Stop { session_id, request_id } => {
             live(state, &session_id).await?;
@@ -403,10 +415,12 @@ async fn dispatch(
                 authorize: &*authorize,
                 alive: &alive,
             };
-            let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
-            let result = outcome_result(reference_chat_runtime().input.stop(&stop, &writer).await);
-            note_typed(&state.agent_events, &session_id, &request_id, &result);
-            result
+            let writer = reference_input::ReferenceSessionWriter::new(
+                state.session_backend.as_ref(),
+                &state.agent_events,
+                &request_id,
+            );
+            outcome_result(reference_chat_runtime().input.stop(&stop, &writer).await)
         }
         AgentControlOp::Deliver { session_id, text, request_id, observe_ms } => {
             if request_id.trim().is_empty() {
@@ -447,7 +461,7 @@ async fn dispatch(
             )
             .await;
             match hit {
-                Some(hit) => Ok(wait_value(hit)),
+                Some(hit) => Ok(wait_value(hit, state.agent_events.instance())),
                 None => Err(reference_chat_scope(
                     ScopeErrorCode::Timeout,
                     "the pane did not reach that state before the timeout",
@@ -459,13 +473,18 @@ async fn dispatch(
 }
 
 /// Type `text` into `session_id` as one submit: the `Send` operation, and the typing step of a
-/// delivery. Records an input mark for the pane unless nothing was typed.
+/// delivery. Its writer marks the pane's input ledger at each write, under the target's step.
+///
+/// `ready`, given by a delivery, is asked under the step right before the first byte: when the
+/// pane is no longer observed ready the submit is refused untyped (`CONTROL_CONFLICT`), so a
+/// queue wait cannot make a delivery type into a pane that became busy meanwhile.
 pub(crate) async fn send_text(
     state: &Arc<RemoteGatewayState>,
     session_id: String,
     text: String,
     request_id: Option<String>,
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+    ready: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> Result<serde_json::Value, ScopeError> {
     if text.trim().is_empty() || text.contains('\0') {
         return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "text must not be empty or contain NUL"));
@@ -488,9 +507,6 @@ pub(crate) async fn send_text(
     let target = control_target(state, &session_id);
     let request_id = request_id_or_new(request_id);
     let authorize = mutation_authorize(session_id.clone(), authorize);
-    let bus = Arc::clone(&state.agent_events);
-    let marked = request_id.clone();
-    let mark_session = session_id.clone();
     let state = Arc::clone(state);
     let transaction = tokio::spawn(async move {
         let payload = reference_types::ReferenceSubmitPayload {
@@ -510,43 +526,22 @@ pub(crate) async fn send_text(
             last_typed_at_ms: None,
             authorize: &*authorize,
         };
-        let probe = || reference_chat_blocked_prompt(&state, &target, agent.as_deref());
-        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        let probe = || async {
+            if ready.as_ref().is_some_and(|ready| !ready()) {
+                return reference_input::ReferencePromptProbe::Blocked(
+                    "the pane is no longer observed ready".to_string(),
+                );
+            }
+            reference_chat_blocked_prompt(&state, &target, agent.as_deref()).await
+        };
+        let writer = reference_input::ReferenceSessionWriter::new(
+            state.session_backend.as_ref(),
+            &state.agent_events,
+            &request_id,
+        );
         reference_chat_runtime().input.submit_with_probe(&submit, probe, &writer, &clock).await
     });
-    let result = joined(transaction.await);
-    note_typed(&bus, &mark_session, &marked, &result);
-    result
-}
-
-/// Record input that reached, or may have reached, the pane: everything but a refusal that
-/// typed nothing. A delivery reads these marks to tell whether a turn start can only be its own.
-fn note_typed(
-    bus: &events::AgentEventBus,
-    session_id: &str,
-    request_id: &str,
-    result: &Result<serde_json::Value, ScopeError>,
-) {
-    let typed = match result {
-        Ok(_) => true,
-        Err(error) => error.code == ScopeErrorCode::OperationOutcomeUnknown,
-    };
-    if typed {
-        bus.note_input(session_id, Some(request_id));
-    }
-}
-
-/// Milliseconds on the clock raw keystrokes are stamped with.
-pub(crate) fn input_clock_ms() -> u64 {
-    reference_input::SystemReferenceClock.now_ms()
-}
-
-/// Whether a person typed raw keys into `session_id` at or after `since_ms` ([`input_clock_ms`]).
-pub(crate) fn raw_input_since(session_id: &str, since_ms: u64) -> bool {
-    reference_chat_runtime()
-        .input
-        .last_raw_input_ms(session_id)
-        .is_some_and(|typed_at| typed_at >= since_ms)
+    joined(transaction.await)
 }
 
 struct ForwardFailure {

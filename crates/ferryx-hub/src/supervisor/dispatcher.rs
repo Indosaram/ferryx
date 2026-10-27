@@ -16,12 +16,17 @@
 //!    took the bytes, started only from a target-side receipt naming this request id and the
 //!    bound session, settled when the transport reports that run's end, uncertain otherwise.
 //!    Acceptance alone, or activity of another session or request, never starts a run.
+//!    Accepted, started and the goal's move to `running` commit in one transaction
+//!    ([`super::record_start`]); if that fails, the dispatch is held `delivery_uncertain`
+//!    ([`START_NOT_RECORDED`]). Right after the commit a local PTY run is settled from the
+//!    observer's [`IdleLedger`] when its ending idle reading already arrived.
 //!
 //! Every claim gets exactly one confirm call. On a hold before transmission, that call
 //! releases the claim. Otherwise it is the final check before the transmit, and nothing
 //! confirms again after the transmit, except when the transport proves nothing left this hub
 //! or was typed: a missing receipt capability ([`Delivery::Unsupported`], a degraded hold) or
-//! a refusal ([`Delivery::Refused`], an owner hold). That claim is released like a hold before
+//! a refusal whose code proves nothing was typed ([`Delivery::Refused`], an owner hold; see
+//! [`crate::agent_control::PRE_WRITE_REFUSALS`]). That claim is released like a hold before
 //! transmission. A store error after the claim and before the transmit holds the goal
 //! ([`DISPATCH_FAILED`]) and releases the claim the same way, so no row stays `claimed`. A
 //! released claim is never transmitted. A claim left behind by a dispatcher that
@@ -44,10 +49,12 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use super::admission::goal_grant;
-use super::receipts::{PtyWorker, WorkerTransport};
+use super::receipts::{
+    record_pty_settle, IdleLedger, PtySettle, PtyWorker, SettleReport, WorkerTransport,
+};
 use super::{
     attach_session, claim_dispatch, confirm_claim_before_transmit, execution_binding_of, goal_of,
-    identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt,
+    identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt, record_start,
     transition_goal, Dispatch, ExecutionBinding, ExecutionKind, Receipt, RunState,
     SupervisorError, SupervisorGoal,
 };
@@ -80,6 +87,9 @@ pub const SEND_REFUSED: &str = "SEND_REFUSED";
 pub const LANE_PAUSED: &str = "LANE_PAUSED";
 /// A store error after the claim and before the transmit; nothing was sent.
 pub const DISPATCH_FAILED: &str = "DISPATCH_FAILED";
+/// A causal start receipt arrived but its start could not be committed (with the goal's move
+/// to running); the dispatch is uncertain and is not resent.
+pub const START_NOT_RECORDED: &str = "START_NOT_RECORDED";
 
 /// The daemon's dispatcher wake, shared by every in-process admission.
 pub fn dispatch_wake() -> Arc<Notify> {
@@ -155,6 +165,9 @@ pub struct Dispatcher {
     drained: Option<mpsc::UnboundedSender<usize>>,
     /// Told the request id of every settle a transport reported and the store recorded.
     settled: Option<mpsc::UnboundedSender<String>>,
+    /// Idle readings the hub's observer saw on this machine, for runs whose start commits
+    /// after their ending reading arrived.
+    idle: Arc<IdleLedger>,
 }
 
 impl Dispatcher {
@@ -166,14 +179,27 @@ impl Dispatcher {
     ) -> Self {
         Self {
             pool,
-            pty: Arc::new(PtyWorker(control)),
+            pty: Arc::new(PtyWorker::new(control)),
             mhc: None,
             launcher,
             local_host_id: local_host_id.into(),
             rescan: DISPATCH_RESCAN,
             drained: None,
             settled: None,
+            idle: Arc::new(IdleLedger::default()),
         }
+    }
+
+    /// Shares the hub observer's idle readings of this machine's panes (see [`IdleLedger`]).
+    pub fn with_idle_ledger(mut self, idle: Arc<IdleLedger>) -> Self {
+        self.idle = idle;
+        self
+    }
+
+    /// Delivers to terminal agents through `worker` instead of the default [`PtyWorker`].
+    pub fn with_pty_worker(mut self, worker: Arc<dyn WorkerTransport>) -> Self {
+        self.pty = worker;
+        self
     }
 
     /// Delivers to native mhc worker sessions through `worker`. Without one, an mhc binding is
@@ -609,9 +635,11 @@ impl Dispatcher {
     ///   goal degraded with the capability code and releases the claim.
     /// - Nothing typed ([`Delivery::Refused`]) holds the goal for the owner and releases the
     ///   claim; it is never resent on its own.
-    /// - A start receipt naming this request and the bound session records accepted, then
-    ///   started with the target's run id, and the goal runs. The transport's settle notice
-    ///   for that same run records settled later.
+    /// - A start receipt naming this request and the bound session records accepted, started
+    ///   with the target's run id and the goal's move to running in one transaction. If that
+    ///   fails, the dispatch is uncertain ([`START_NOT_RECORDED`]). The settle of that same run
+    ///   comes from the transport's notice, or for a local PTY run from the hub observer
+    ///   (already-seen readings through the [`IdleLedger`]).
     /// - Anything else (no receipt, a receipt for another request or session, an unknown
     ///   outcome) records accepted when the target confirmed it, then uncertain, and holds
     ///   `delivery_uncertain`. It is never resent: that needs
@@ -624,7 +652,7 @@ impl Dispatcher {
         sent: &Dispatch,
         send: &WorkerSend,
         delivery: Delivery,
-        settle: oneshot::Receiver<StartReceipt>,
+        settle: oneshot::Receiver<SettleReport>,
     ) -> Result<DispatchResult, SupervisorError> {
         let host = send.host_id.as_deref().unwrap_or(self.local_host_id.as_str());
         match delivery {
@@ -643,8 +671,16 @@ impl Dispatcher {
                 self.hold_claimed(sent, RunState::AwaitingOwner, detail).await
             }
             Delivery::Started(receipt) if receipt.names(send) => {
-                self.record_started(goal, sent, &receipt).await;
-                self.watch_settle(sent, receipt, settle);
+                if let Err(error) = self.record_started(goal, sent, &receipt).await {
+                    tracing::warn!(%error, request_id = %sent.request_id, run_id = %receipt.run_id, "a causal start was not recorded; the dispatch is held delivery_uncertain");
+                    return Ok(self
+                        .record_uncertain(sent, true, START_NOT_RECORDED.to_owned())
+                        .await);
+                }
+                if send.host_id.is_none() {
+                    self.settle_if_idle_seen(&receipt).await;
+                }
+                self.watch_settle(sent, host.to_owned(), receipt, settle);
                 Ok(DispatchResult::Transmitted {
                     request_id: sent.request_id.clone(),
                     outcome: SendOutcome::Started,
@@ -667,37 +703,23 @@ impl Dispatcher {
         }
     }
 
-    /// A causal start: accepted, then started with the target's run id and session, then the
-    /// goal runs and the lane is projected working. The dispatch turn is recorded once.
-    async fn record_started(&self, goal: &SupervisorGoal, sent: &Dispatch, receipt: &StartReceipt) {
-        if let Err(error) =
-            record_receipt(&self.pool, &sent.request_id, sent.generation, &Receipt::Accepted).await
-        {
-            tracing::warn!(%error, request_id = %sent.request_id, "accepted receipt was not recorded");
-        }
-        let started = Receipt::Started {
-            run_id: receipt.run_id.clone(),
-            provider_session_id: receipt.session_id.clone(),
-        };
-        if let Err(error) =
-            record_receipt(&self.pool, &sent.request_id, sent.generation, &started).await
-        {
-            tracing::warn!(%error, request_id = %sent.request_id, "started receipt was not recorded");
-            return;
-        }
-        if let Err(error) = transition_goal(
+    /// A causal start: accepted, started with the target's run id and session, and the goal's
+    /// move to running, in one transaction ([`record_start`]). Then the lane is projected
+    /// working and the dispatch turn is recorded once. `Err` wrote no start.
+    async fn record_started(
+        &self,
+        goal: &SupervisorGoal,
+        sent: &Dispatch,
+        receipt: &StartReceipt,
+    ) -> Result<(), SupervisorError> {
+        record_start(
             &self.pool,
-            &sent.goal_id,
-            sent.goal_revision,
-            RunState::Dispatching,
-            RunState::Running,
-            None,
+            &sent.request_id,
+            sent.generation,
+            &receipt.run_id,
+            &receipt.session_id,
         )
-        .await
-        {
-            // An owner hold that landed after transmission keeps its state; the worker runs.
-            tracing::debug!(%error, request_id = %sent.request_id, "goal did not move to running");
-        }
+        .await?;
         if let Err(error) = crate::lanes::state::transition(
             &self.pool,
             &goal.lane_key,
@@ -719,6 +741,36 @@ impl Dispatcher {
             .await
             {
                 tracing::warn!(%error, request_id = %sent.request_id, "the dispatch turn was not recorded");
+            }
+        }
+        Ok(())
+    }
+
+    /// Settles a local PTY run whose ending idle reading the hub observer saw before this
+    /// start was committed: the observer found no started run then and publishes no second
+    /// reading of an unchanged pane.
+    async fn settle_if_idle_seen(&self, receipt: &StartReceipt) {
+        let Some((instance, sequence)) = self.idle.idle_after(&receipt.session_id, &receipt.run_id)
+        else {
+            return;
+        };
+        match record_pty_settle(
+            &self.pool,
+            &self.local_host_id,
+            &receipt.session_id,
+            &instance,
+            sequence,
+        )
+        .await
+        {
+            Ok(PtySettle::Settled(dispatch)) => {
+                if let Some(probe) = &self.settled {
+                    let _ = probe.send(dispatch.request_id);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, run_id = %receipt.run_id, "an already observed settle was not recorded");
             }
         }
     }
@@ -755,7 +807,7 @@ impl Dispatcher {
         )
         .await
         {
-            tracing::debug!(%error, request_id = %sent.request_id, "goal did not move to delivery_uncertain");
+            tracing::warn!(%error, request_id = %sent.request_id, "goal did not move to delivery_uncertain");
         }
         DispatchResult::Transmitted {
             request_id: sent.request_id.clone(),
@@ -764,20 +816,38 @@ impl Dispatcher {
     }
 
     /// Records the settle a transport reports for the run it started. A notice naming any
-    /// other run is ignored; a transport that cannot observe the end drops the notice unsent.
+    /// other run is ignored; a transport that leaves the end to another observer drops the
+    /// notice unsent. A run whose end can no longer be observed holds its goal degraded with
+    /// the transport's code, instead of leaving it `running` unseen.
     fn watch_settle(
         &self,
         sent: &Dispatch,
+        host: String,
         started: StartReceipt,
-        settle: oneshot::Receiver<StartReceipt>,
+        settle: oneshot::Receiver<SettleReport>,
     ) {
         let pool = self.pool.clone();
         let request_id = sent.request_id.clone();
+        let goal_id = sent.goal_id.clone();
         let generation = sent.generation;
         let probe = self.settled.clone();
         tokio::spawn(async move {
-            let Ok(ended) = settle.await else {
+            let Ok(report) = settle.await else {
                 return;
+            };
+            let ended = match report {
+                SettleReport::Settled(ended) => ended,
+                SettleReport::Unobserved { run, code, reason } => {
+                    if run != started {
+                        tracing::warn!(request_id = %request_id, run_id = %run.run_id, "an unobserved settle named another run; it was ignored");
+                        return;
+                    }
+                    hold_unobserved(&pool, &goal_id, &request_id, &host, &run, &code, &reason).await;
+                    if let Some(probe) = probe {
+                        let _ = probe.send(request_id);
+                    }
+                    return;
+                }
             };
             if ended != started {
                 tracing::warn!(request_id = %request_id, run_id = %ended.run_id, "a settle named another run; it was ignored");
@@ -798,5 +868,57 @@ impl Dispatcher {
                 }
             }
         });
+    }
+}
+
+/// Holds the goal of a run whose end can no longer be observed: `degraded` with the code,
+/// while that run is still the goal's live run and the goal is still `running`. The dispatch
+/// stays started (in flight), so nothing is sent until the owner decides.
+async fn hold_unobserved(
+    pool: &SqlitePool,
+    goal_id: &str,
+    request_id: &str,
+    host: &str,
+    run: &StartReceipt,
+    code: &str,
+    reason: &str,
+) {
+    let live: Result<Option<(String, Option<String>)>, sqlx::Error> =
+        sqlx::query_as("SELECT state, run_id FROM supervisor_dispatches WHERE request_id = ?")
+            .bind(request_id)
+            .fetch_optional(pool)
+            .await;
+    match live {
+        Ok(Some((state, run_id)))
+            if state == "started" && run_id.as_deref() == Some(run.run_id.as_str()) => {}
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(%error, request_id, "an unobserved run was not checked; its goal is not held");
+            return;
+        }
+    }
+    let goal = match goal_of(pool, goal_id).await {
+        Ok(Some(goal)) if goal.run_state == RunState::Running => goal,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(%error, request_id, "an unobserved run's goal was not read; it is not held");
+            return;
+        }
+    };
+    let detail = format!(
+        "{code}: {reason}; run {} of {request_id} may still be running on host {host}",
+        run.run_id
+    );
+    if let Err(error) = transition_goal(
+        pool,
+        goal_id,
+        goal.revision,
+        RunState::Running,
+        RunState::Degraded,
+        Some(&detail),
+    )
+    .await
+    {
+        tracing::warn!(%error, request_id, "the goal of an unobserved run was not held");
     }
 }

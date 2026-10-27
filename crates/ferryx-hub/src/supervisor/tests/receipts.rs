@@ -2,9 +2,10 @@
 //! receipt naming the dispatch's request and bound session; a missing or foreign receipt stays
 //! uncertain and is never resent; a target that cannot observe holds before sending. Every
 //! wait is on an observed signal with a bounded deadline, never on a fixed sleep.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
@@ -12,17 +13,21 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 use crate::agent_control::{
-    pty_run_id, AgentOp, Delivery, FixedLauncher, ReceiptScript, RecordingControl, StartReceipt,
-    OBSERVER_CAPABILITY_MISSING, RECEIPT_MISMATCH,
+    pty_run_id, AgentControl, AgentOp, Delivery, FixedLauncher, ReceiptScript, RecordingControl,
+    StartReceipt, WorkerSend, LOCAL_HOST_ID, OBSERVER_CAPABILITY_MISSING, RECEIPT_MISMATCH,
 };
 use crate::goals::types::SendOutcome;
 use crate::meta::mhc_stdio::StdioClient;
 use crate::supervisor::admission::{
     submit_work, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
 };
-use crate::supervisor::dispatcher::{DispatchResult, Dispatcher, MHC_WORKER_UNAVAILABLE};
+use crate::supervisor::dispatcher::{
+    DispatchResult, Dispatcher, MHC_WORKER_UNAVAILABLE, START_NOT_RECORDED,
+};
 use crate::supervisor::receipts::{
-    mhc_run_id, record_pty_settle, settle_after_start, MhcWorker, StdioEngine, MHC_PROMPT_QUEUED,
+    mhc_run_id, record_pty_settle, settle_after_start, IdleLedger, MhcWorker, PtySettle,
+    PtyWorker, SettleReport, SettleWatch, StdioEngine, MHC_PROMPT_QUEUED,
+    PAIRED_SETTLE_UNOBSERVED,
 };
 use crate::supervisor::{
     attach_session, bind_project_host, create_project, ensure_identity, execution_binding_of,
@@ -38,6 +43,8 @@ const PANE: &str = "pane-sv-1";
 const MHC_SESSION: &str = "h-worker-1";
 /// Bound on every awaited signal. Reaching it fails the test; it never makes one pass.
 const DEADLINE: Duration = Duration::from_secs(10);
+/// The observer epoch of every run id a [`RecordingControl`] mints.
+const EPOCH: &str = RecordingControl::EPOCH;
 
 async fn owner_pool() -> SqlitePool {
     let pool = crate::storage::memory().await.unwrap();
@@ -136,7 +143,7 @@ async fn a_causal_start_receipt_starts_the_run_it_names() {
             outcome: SendOutcome::Started,
         }]
     );
-    let run = pty_run_id(PANE, 1);
+    let run = pty_run_id(PANE, EPOCH, 1);
     assert_eq!(
         dispatch_row(&pool, &request_id).await,
         ("started".to_owned(), None, Some(run.clone()))
@@ -198,7 +205,7 @@ async fn a_receipt_for_another_request_or_session_never_starts_the_run() {
                 request.to_owned()
             },
             session_id: session.to_owned(),
-            run_id: pty_run_id(session, 7),
+            run_id: pty_run_id(session, EPOCH, 7),
         };
         let control = Arc::new(RecordingControl::scripted(ReceiptScript::Fixed(
             Delivery::Started(receipt),
@@ -249,24 +256,31 @@ async fn a_target_without_a_causal_observer_holds_before_sending() {
 }
 
 #[tokio::test]
-async fn a_paired_host_without_receipts_holds_and_types_nothing() {
+async fn a_failure_code_that_may_follow_a_write_is_uncertain_and_never_released() {
     let pool = owner_pool().await;
     let (goal_id, request_id) = admit(&pool, None, "Create result.txt containing READY.").await;
+    // A paired host's INTERNAL answer can come after it already typed the instruction.
     let control = Arc::new(RecordingControl::scripted(ReceiptScript::Fixed(
-        Delivery::from_error_code(Some(crate::agent_control::PAIRED_HOST_CAPABILITY_UNAVAILABLE)),
+        Delivery::from_error_code(Some("INTERNAL")),
     )));
-    let results = pty_dispatcher(&pool, control.clone()).drain().await;
-    assert!(
-        matches!(
-            &results[..],
-            [DispatchResult::Held { state: RunState::Degraded, detail, .. }]
-                if detail.starts_with(crate::agent_control::PAIRED_HOST_CAPABILITY_UNAVAILABLE)
-        ),
-        "{results:?}"
+    let dispatcher = pty_dispatcher(&pool, control.clone());
+    assert_eq!(
+        dispatcher.drain().await,
+        vec![DispatchResult::Transmitted {
+            request_id: request_id.clone(),
+            outcome: SendOutcome::Uncertain {
+                code: "INTERNAL".into()
+            },
+        }]
     );
-    assert_eq!(dispatch_row(&pool, &request_id).await.0, "released");
-    assert_eq!(run_state(&pool, &goal_id).await, RunState::Degraded);
-    assert!(control.ops().is_empty());
+    assert_eq!(
+        dispatch_row(&pool, &request_id).await,
+        ("uncertain".to_owned(), Some("INTERNAL".to_owned()), None),
+        "the row is not released: bytes may have been typed"
+    );
+    assert_eq!(run_state(&pool, &goal_id).await, RunState::DeliveryUncertain);
+    assert!(dispatcher.drain().await.is_empty());
+    assert_eq!(send_count(&control), 1, "never resent");
 }
 
 #[tokio::test]
@@ -275,20 +289,282 @@ async fn only_a_later_idle_reading_of_the_bound_pane_settles_a_pty_run() {
     let (goal_id, request_id) = admit(&pool, None, "Create result.txt containing READY.").await;
     let control = Arc::new(RecordingControl::observing());
     pty_dispatcher(&pool, control).drain().await;
-    let run = pty_run_id(PANE, 1);
+    let run = pty_run_id(PANE, EPOCH, 1);
     assert_eq!(bound_run(&pool, &goal_id).await, Some(run.clone()));
     // The start reading itself, another host's pane and another pane settle nothing.
-    assert!(record_pty_settle(&pool, HOST, PANE, 1).await.unwrap().is_none());
-    assert!(record_pty_settle(&pool, "host-b", PANE, 9).await.unwrap().is_none());
-    assert!(record_pty_settle(&pool, HOST, "pane-other", 9).await.unwrap().is_none());
+    for (host, pane, sequence) in [(HOST, PANE, 1), ("host-b", PANE, 9), (HOST, "pane-other", 9)] {
+        assert_eq!(
+            record_pty_settle(&pool, host, pane, EPOCH, sequence).await.unwrap(),
+            PtySettle::Ignored
+        );
+    }
+    // A reading of another observer epoch (the daemon restarted) cannot be ordered against
+    // the start: nothing is recorded, restart reconciliation decides.
+    assert_eq!(
+        record_pty_settle(&pool, HOST, PANE, "rc1", 9).await.unwrap(),
+        PtySettle::OtherEpoch {
+            request_id: request_id.clone(),
+            run_id: run.clone()
+        }
+    );
     assert_eq!(dispatch_row(&pool, &request_id).await.0, "started");
 
-    let settled = record_pty_settle(&pool, HOST, PANE, 2).await.unwrap().unwrap();
+    let PtySettle::Settled(settled) = record_pty_settle(&pool, HOST, PANE, EPOCH, 2).await.unwrap()
+    else {
+        panic!("the next idle reading of the run's epoch settles it");
+    };
     assert_eq!(settled.state, DispatchState::Settled);
     assert_eq!(settled.run_id.as_deref(), Some(run.as_str()));
     assert_eq!(bound_run(&pool, &goal_id).await, None, "the live run ended");
     // A second idle reading has no live run to settle.
-    assert!(record_pty_settle(&pool, HOST, PANE, 3).await.unwrap().is_none());
+    assert_eq!(
+        record_pty_settle(&pool, HOST, PANE, EPOCH, 3).await.unwrap(),
+        PtySettle::Ignored
+    );
+}
+
+/// A local target whose pane goes idle again before the dispatcher commits the start. Inside
+/// the delivery it plays the hub observer for that idle reading, in the observer's order: note
+/// the reading in the ledger, then ask the store, which has no started run to settle yet.
+struct IdleBeforeCommit {
+    pool: SqlitePool,
+    idle: Arc<IdleLedger>,
+    observed: Mutex<Option<PtySettle>>,
+}
+
+#[async_trait]
+impl AgentControl for IdleBeforeCommit {
+    async fn execute(&self, _host_id: Option<&str>, _op: AgentOp) -> crate::error::Result<Value> {
+        Ok(json!({"ok": true}))
+    }
+
+    async fn deliver(&self, send: &WorkerSend) -> Delivery {
+        self.idle.note_idle(&send.session_id, EPOCH, 2);
+        let observed = record_pty_settle(&self.pool, HOST, &send.session_id, EPOCH, 2)
+            .await
+            .unwrap();
+        *self.observed.lock().unwrap() = Some(observed);
+        Delivery::Started(StartReceipt {
+            request_id: send.request_id.clone(),
+            session_id: send.session_id.clone(),
+            run_id: pty_run_id(&send.session_id, EPOCH, 1),
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_idle_reading_before_the_start_commits_still_settles_the_run() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = admit(&pool, None, "Create result.txt containing READY.").await;
+    let idle = Arc::new(IdleLedger::default());
+    let control = Arc::new(IdleBeforeCommit {
+        pool: pool.clone(),
+        idle: idle.clone(),
+        observed: Mutex::new(None),
+    });
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+    let dispatcher = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        HOST,
+    )
+    .with_idle_ledger(idle)
+    .with_settle_probe(probe_tx);
+    assert_eq!(
+        dispatcher.drain().await,
+        vec![DispatchResult::Transmitted {
+            request_id: request_id.clone(),
+            outcome: SendOutcome::Started,
+        }]
+    );
+    assert_eq!(
+        control.observed.lock().unwrap().clone(),
+        Some(PtySettle::Ignored),
+        "the observer's own settle came too early to find a started run"
+    );
+    assert_eq!(
+        dispatch_row(&pool, &request_id).await,
+        ("settled".to_owned(), None, Some(pty_run_id(PANE, EPOCH, 1))),
+        "the dispatcher settled it from the ledger right after its commit"
+    );
+    assert_eq!(bound_run(&pool, &goal_id).await, None);
+    assert_eq!(run_state(&pool, &goal_id).await, RunState::Running);
+    assert_eq!(probe_rx.try_recv().ok().as_deref(), Some(request_id.as_str()));
+}
+
+#[tokio::test]
+async fn a_settle_right_after_the_start_never_strands_the_goal_in_dispatching() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = admit(&pool, None, "Create result.txt containing READY.").await;
+    let idle = Arc::new(IdleLedger::default());
+    let dispatcher =
+        pty_dispatcher(&pool, Arc::new(RecordingControl::observing())).with_idle_ledger(idle.clone());
+    dispatcher.drain().await;
+    // The start and the move to running committed together.
+    assert_eq!(run_state(&pool, &goal_id).await, RunState::Running);
+    assert_eq!(dispatch_row(&pool, &request_id).await.0, "started");
+    // The run ends at once: the observer's idle reading arrives after that commit.
+    idle.note_idle(PANE, EPOCH, 2);
+    let PtySettle::Settled(settled) = record_pty_settle(&pool, HOST, PANE, EPOCH, 2).await.unwrap()
+    else {
+        panic!("the idle reading after the start settles the run");
+    };
+    assert_eq!(settled.request_id, request_id);
+    assert_eq!(run_state(&pool, &goal_id).await, RunState::Running);
+    assert_eq!(bound_run(&pool, &goal_id).await, None);
+}
+
+#[tokio::test]
+async fn a_start_that_cannot_commit_with_its_running_goal_writes_no_start_and_is_uncertain() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = admit(&pool, None, "Create result.txt containing READY.").await;
+    // An injected store failure on exactly the goal's move to running.
+    sqlx::query(
+        "CREATE TRIGGER refuse_running BEFORE UPDATE OF run_state ON supervisor_goals
+         WHEN NEW.run_state = 'running'
+         BEGIN SELECT RAISE(ABORT, 'injected store failure'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let control = Arc::new(RecordingControl::observing());
+    let dispatcher = pty_dispatcher(&pool, control.clone());
+    assert_eq!(
+        dispatcher.drain().await,
+        vec![DispatchResult::Transmitted {
+            request_id: request_id.clone(),
+            outcome: SendOutcome::Uncertain {
+                code: START_NOT_RECORDED.into()
+            },
+        }]
+    );
+    assert_eq!(
+        dispatch_row(&pool, &request_id).await,
+        ("uncertain".to_owned(), Some(START_NOT_RECORDED.to_owned()), None),
+        "the start rolled back with the failed move: no run is recorded"
+    );
+    assert_eq!(bound_run(&pool, &goal_id).await, None);
+    assert_eq!(run_state(&pool, &goal_id).await, RunState::DeliveryUncertain);
+    assert!(dispatcher.drain().await.is_empty());
+    assert_eq!(send_count(&control), 1, "never resent");
+}
+
+/// A goal on `HOST` with `PANE` bound, served by a dispatcher on another machine, so `HOST`
+/// is a paired host.
+async fn paired_goal(pool: &SqlitePool) -> (String, String) {
+    let (goal_id, request_id) = admit(pool, None, "Create result.txt containing READY.").await;
+    let binding = execution_binding_of(pool, &goal_id).await.unwrap().unwrap();
+    attach_session(pool, &goal_id, binding.generation, PANE)
+        .await
+        .unwrap();
+    (goal_id, request_id)
+}
+
+fn host_waits(control: &RecordingControl) -> Vec<(Option<String>, String, String, u64)> {
+    control
+        .ops()
+        .into_iter()
+        .filter_map(|(host, op)| match op {
+            AgentOp::Wait {
+                session_id,
+                until,
+                after,
+                ..
+            } => Some((host, session_id, until, after)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_paired_host_run_settles_from_a_wait_on_that_host() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = paired_goal(&pool).await;
+    let control = Arc::new(RecordingControl::observing());
+    // The host's agent-control Wait answers with the pane's next idle reading.
+    *control.result.lock().unwrap() = json!({
+        "gap": false,
+        "instance": EPOCH,
+        "observation": {"sessionId": PANE, "state": "idle", "promptId": null, "sequence": 2},
+        "afterSequence": 2,
+    });
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+    let dispatcher = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        LOCAL_HOST_ID,
+    )
+    .with_settle_probe(probe_tx);
+    assert_eq!(
+        dispatcher.drain().await,
+        vec![DispatchResult::Transmitted {
+            request_id: request_id.clone(),
+            outcome: SendOutcome::Started,
+        }]
+    );
+    let noticed = timeout(DEADLINE, probe_rx.recv()).await.expect("settle probe");
+    assert_eq!(noticed.as_deref(), Some(request_id.as_str()));
+    assert_eq!(
+        dispatch_row(&pool, &request_id).await,
+        ("settled".to_owned(), None, Some(pty_run_id(PANE, EPOCH, 1)))
+    );
+    assert_eq!(bound_run(&pool, &goal_id).await, None);
+    assert_eq!(
+        host_waits(&control),
+        vec![(Some(HOST.to_owned()), PANE.to_owned(), "idle".to_owned(), 1)],
+        "one wait on the host, for an idle reading after the start reading"
+    );
+}
+
+#[tokio::test]
+async fn a_paired_host_run_whose_end_cannot_be_observed_holds_its_goal() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = paired_goal(&pool).await;
+    // The default result is no wait reply at all.
+    let control = Arc::new(RecordingControl::observing());
+    let worker = PtyWorker::new(control.clone()).with_settle_watch(SettleWatch {
+        wait: Duration::from_millis(10),
+        backoff: Duration::ZERO,
+        failures: 3,
+        max: DEADLINE,
+    });
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+    let dispatcher = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        LOCAL_HOST_ID,
+    )
+    .with_pty_worker(Arc::new(worker))
+    .with_settle_probe(probe_tx);
+    assert_eq!(
+        dispatcher.drain().await,
+        vec![DispatchResult::Transmitted {
+            request_id: request_id.clone(),
+            outcome: SendOutcome::Started,
+        }]
+    );
+    let noticed = timeout(DEADLINE, probe_rx.recv()).await.expect("unobserved probe");
+    assert_eq!(noticed.as_deref(), Some(request_id.as_str()));
+    let goal = goal_of(&pool, &goal_id).await.unwrap().unwrap();
+    assert_eq!(goal.run_state, RunState::Degraded);
+    assert!(
+        goal.state_detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with(PAIRED_SETTLE_UNOBSERVED)),
+        "{:?}",
+        goal.state_detail
+    );
+    assert_eq!(
+        dispatch_row(&pool, &request_id).await.0,
+        "started",
+        "the run may still be going: it stays in flight"
+    );
+    assert_eq!(host_waits(&control).len(), 3, "bounded: three failed waits");
+    assert!(dispatcher.drain().await.is_empty());
+    assert_eq!(send_count(&control), 1, "never resent");
 }
 
 #[tokio::test]
@@ -490,5 +766,5 @@ async fn an_mhc_settle_before_the_runs_start_never_ends_it() {
     timeout(DEADLINE, settle_after_start(events, receipt(), notice))
         .await
         .expect("the watcher returns at the settle");
-    assert_eq!(noticed.await.unwrap(), receipt());
+    assert_eq!(noticed.await.unwrap(), SettleReport::Settled(receipt()));
 }

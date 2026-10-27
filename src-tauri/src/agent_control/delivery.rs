@@ -11,10 +11,12 @@
 //! reading proves nothing about this send, so the reading must also carry a screen revision
 //! different from the pre-send one (see [`PreSend`]).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
 use super::events::{self, AgentEventBus, AgentObservation, AgentReplay, WaitHit};
 use super::{AgentControlOp, AgentControlState};
@@ -228,6 +230,55 @@ pub enum DeliveryReport {
         session_id: String,
         code: String,
     },
+    /// Nothing was typed: the pane was not observed ready (idle, with no prompt) before the
+    /// send, so its next turn start could not be attributed to this request.
+    NotReady {
+        request_id: String,
+        session_id: String,
+        code: String,
+    },
+}
+
+/// How long a delivery waits for the bound pane to be observed ready before it types nothing.
+pub const PANE_READY_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether the latest reading of `session_id` is idle with no prompt: no turn is running, so
+/// the pane's next turn start can be attributed to what is typed now. A pane without readings
+/// (a fresh pane still booting) is not ready.
+fn pane_ready(bus: &AgentEventBus, session_id: &str) -> bool {
+    bus.latest(session_id).is_some_and(|observation| {
+        observation.state == AgentControlState::Idle && observation.prompt_id.is_none()
+    })
+}
+
+/// Waits up to `deadline` for `session_id` to be observed ready. It subscribes before it reads
+/// the latest reading, so a reading published in between is never missed.
+async fn wait_until_ready(bus: &AgentEventBus, session_id: &str, deadline: Duration) -> bool {
+    let mut receiver = bus.subscribe();
+    if pane_ready(bus, session_id) {
+        return true;
+    }
+    let until = tokio::time::Instant::now() + deadline;
+    loop {
+        match tokio::time::timeout_at(until, receiver.recv()).await {
+            Err(_) | Ok(Err(broadcast::error::RecvError::Closed)) => {
+                return pane_ready(bus, session_id)
+            }
+            Ok(Ok(observation)) if observation.session_id != session_id => continue,
+            Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+        }
+        if pane_ready(bus, session_id) {
+            return true;
+        }
+    }
+}
+
+fn not_ready(request_id: String, session_id: &str) -> DeliveryReport {
+    DeliveryReport::NotReady {
+        request_id,
+        session_id: session_id.to_string(),
+        code: ferryx_hub::agent_control::PANE_NOT_READY.to_string(),
+    }
 }
 
 /// The start wait a delivery asked for: 0 is the configured default, anything else is clamped
@@ -262,13 +313,24 @@ fn logged_start(bus: &AgentEventBus, session_id: &str, after: u64, pre: &PreSend
 /// Type `text` once into `session_id`, then attribute the pane's next turn start to
 /// `request_id` only when the cause cannot be anything else.
 ///
+/// Nothing is typed unless the pane is observed ready: its latest reading idle with no prompt,
+/// waited for up to [`PANE_READY_WAIT`] (subscribe first) and checked again under the pane's
+/// input step right before the first byte. Otherwise the report is
+/// [`DeliveryReport::NotReady`]. A busy pane's next reading belongs to its running turn and a
+/// fresh pane's to its boot, so neither can carry this request's start.
+///
 /// The observer cursor and the input cursor are both taken BEFORE the send (subscribe before
 /// trigger). A start is a reading of this session newer than that cursor that is Working,
-/// Blocked or carries a prompt (on a pane already busy before the send, with a moved screen,
-/// see [`PreSend`]). It is attributed only when no other input reached this pane since the
-/// cursor: no other request's mark ([`AgentEventBus::foreign_input_since`]) and no raw
-/// keystrokes. Activity of another session, or of this pane caused by someone else, never
-/// starts this request's run. Never retries the send.
+/// Blocked or carries a prompt. It is attributed only when no other input reached this pane
+/// since the cursor ([`AgentEventBus::foreign_input_since`]): every writer marks the ledger
+/// right before its bytes go out, the input queue's writer with its request id (another
+/// request, a phone chat message) and each raw write path without one (a person typing or
+/// pasting). Activity of another session, or of this pane caused by someone else, never starts
+/// this request's run. Its run id names the start reading and this daemon's observer epoch.
+/// Never retries the send.
+///
+/// Known limit: activity the agent starts on its own between the cursor and the Enter (a hook,
+/// a background notification) carries no input mark and is still attributed to this request.
 pub async fn deliver(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
@@ -278,23 +340,47 @@ pub async fn deliver(
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
 ) -> Result<DeliveryReport, ScopeError> {
     let bus = Arc::clone(&state.agent_events);
+    if !wait_until_ready(&bus, session_id, PANE_READY_WAIT).await {
+        return Ok(not_ready(request_id, session_id));
+    }
     let origin = cursor_now(&bus);
     let inputs = bus.input_cursor();
     let pre = PreSend::of(&bus, session_id);
-    let sent_at_ms = agent_control_service::input_clock_ms();
-    agent_control_service::send_text(
+    // Asked again under the pane's input step: input queued ahead of this one may have started
+    // a turn while it waited.
+    let unready = Arc::new(AtomicBool::new(false));
+    let ready: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let bus = Arc::clone(&bus);
+        let session_id = session_id.to_string();
+        let unready = Arc::clone(&unready);
+        Arc::new(move || {
+            let ready = pane_ready(&bus, &session_id);
+            unready.store(!ready, Ordering::SeqCst);
+            ready
+        })
+    };
+    match agent_control_service::send_text(
         state,
         session_id.to_string(),
         text,
         Some(request_id.clone()),
         authorize,
+        Some(ready),
     )
-    .await?;
+    .await
+    {
+        Ok(_) => {}
+        // Refused under the step because the pane was no longer ready: nothing was typed.
+        Err(error)
+            if error.code == ScopeErrorCode::ControlConflict && unready.load(Ordering::SeqCst) =>
+        {
+            return Ok(not_ready(request_id, session_id));
+        }
+        Err(error) => return Err(error),
+    }
 
     let attribute = |observation: &AgentObservation| {
-        let foreign = bus.foreign_input_since(session_id, inputs, &request_id)
-            || agent_control_service::raw_input_since(session_id, sent_at_ms);
-        if foreign {
+        if bus.foreign_input_since(session_id, inputs, &request_id) {
             DeliveryReport::Accepted {
                 request_id: request_id.clone(),
                 session_id: session_id.to_string(),
@@ -304,7 +390,11 @@ pub async fn deliver(
             DeliveryReport::Started {
                 request_id: request_id.clone(),
                 session_id: session_id.to_string(),
-                run_id: ferryx_hub::agent_control::pty_run_id(session_id, observation.sequence),
+                run_id: ferryx_hub::agent_control::pty_run_id(
+                    session_id,
+                    bus.instance(),
+                    observation.sequence,
+                ),
             }
         }
     };
@@ -349,7 +439,9 @@ pub async fn deliver(
 pub const START_RECEIPT_MISSING: &str = "START_RECEIPT_MISSING";
 
 /// The hub's view of one delivery on this machine: a start receipt, a typed send without one,
-/// or the send's own refusal (nothing typed) or unknown outcome.
+/// a pane that was not ready (nothing typed), or the send's own failure. A failure is a
+/// refusal only for a code that proves nothing was typed
+/// ([`ferryx_hub::agent_control::Delivery::from_error_code`]); any other is uncertain.
 pub fn hub_delivery(result: Result<DeliveryReport, ScopeError>) -> ferryx_hub::agent_control::Delivery {
     use ferryx_hub::agent_control::{Delivery, StartReceipt};
     match result {
@@ -366,16 +458,8 @@ pub fn hub_delivery(result: Result<DeliveryReport, ScopeError>) -> ferryx_hub::a
             accepted: true,
             code,
         },
-        Err(error) => {
-            let code = wire_code(error.code);
-            match refusal_outcome(&error) {
-                SendOutcome::Uncertain { .. } => Delivery::Uncertain {
-                    accepted: false,
-                    code,
-                },
-                SendOutcome::Started | SendOutcome::Refused { .. } => Delivery::Refused { code },
-            }
-        }
+        Ok(DeliveryReport::NotReady { code, .. }) => Delivery::from_error_code(Some(code.as_str())),
+        Err(error) => Delivery::from_error_code(Some(wire_code(error.code).as_str())),
     }
 }
 
@@ -405,11 +489,14 @@ mod tests {
     use futures_util::future::BoxFuture;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
+    use tokio::sync::oneshot;
 
     const DEADLINE: Duration = Duration::from_secs(20);
 
     /// One shell pane. Writing a submit's Enter publishes `on_enter` to the observer bus, which
-    /// stands in for the observer seeing the pane react to the send. Every write is recorded.
+    /// stands in for the observer seeing the pane react to the send, unless `skip_enters` says
+    /// to let that many Enters pass silently first. Every write is recorded. When `gate` is
+    /// set, the next write signals its first half and does not complete until the second fires.
     struct Pane {
         session_id: String,
         writes: Mutex<Vec<Vec<u8>>>,
@@ -417,6 +504,8 @@ mod tests {
         fail_writes: AtomicBool,
         bus: OnceLock<Arc<AgentEventBus>>,
         on_enter: Mutex<Vec<ObservationDraft>>,
+        skip_enters: AtomicUsize,
+        gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     }
 
     impl RemoteSessionBackend for Pane {
@@ -479,11 +568,20 @@ mod tests {
                 return Box::pin(async { Err("the write failed".to_string()) });
             }
             self.writes.lock().expect("writes").push(data.to_vec());
-            if data == REFERENCE_SUBMIT_ENTER {
+            if data == REFERENCE_SUBMIT_ENTER && self.skip_enters.load(Ordering::SeqCst) > 0 {
+                self.skip_enters.fetch_sub(1, Ordering::SeqCst);
+            } else if data == REFERENCE_SUBMIT_ENTER {
                 let bus = self.bus.get().expect("bus attached");
                 for draft in self.on_enter.lock().expect("on_enter").drain(..) {
                     bus.publish(draft);
                 }
+            }
+            if let Some((entered, release)) = self.gate.lock().expect("gate").take() {
+                return Box::pin(async move {
+                    let _ = entered.send(());
+                    let _ = release.await;
+                    Ok(())
+                });
             }
             Box::pin(async { Ok(()) })
         }
@@ -512,6 +610,8 @@ mod tests {
             fail_writes: AtomicBool::new(false),
             bus: OnceLock::new(),
             on_enter: Mutex::new(on_enter),
+            skip_enters: AtomicUsize::new(0),
+            gate: Mutex::new(None),
         });
         let state = Arc::new(RemoteGatewayState::new_with_backend(
             Arc::clone(&backend) as Arc<dyn RemoteSessionBackend>,
@@ -741,10 +841,22 @@ mod tests {
         deliver(state, session_id, "do it".into(), request_id.into(), DEADLINE, None).await
     }
 
+    /// The observer saw the pane idle with no prompt: ready for a delivery.
+    fn ready_pane(state: &Arc<RemoteGatewayState>, session_id: &str) {
+        state
+            .agent_events
+            .publish(draft(session_id, AgentControlState::Idle));
+    }
+
+    fn run_id(state: &Arc<RemoteGatewayState>, session_id: &str, sequence: u64) -> String {
+        ferryx_hub::agent_control::pty_run_id(session_id, state.agent_events.instance(), sequence)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_start_caused_only_by_this_delivery_is_its_run() {
         let session_id = "deliver-causal";
         let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        ready_pane(&state, session_id);
         let cursor = cursor_now(&state.agent_events);
 
         let report = deliver_one(&state, session_id, "sv-goal-r1-d1").await.expect("typed");
@@ -755,12 +867,12 @@ mod tests {
             DeliveryReport::Started {
                 request_id: "sv-goal-r1-d1".into(),
                 session_id: session_id.into(),
-                run_id: format!("pty:{session_id}:{}", start.sequence),
+                run_id: run_id(&state, session_id, start.sequence),
             }
         );
         assert_eq!(
-            ferryx_hub::agent_control::pty_run_sequence(&format!("pty:{session_id}:{}", start.sequence), session_id),
-            Some(start.sequence)
+            ferryx_hub::agent_control::pty_run_start(&run_id(&state, session_id, start.sequence), session_id),
+            Some((state.agent_events.instance(), start.sequence))
         );
         assert_one_submit(&backend);
     }
@@ -769,6 +881,7 @@ mod tests {
     async fn a_start_after_other_input_reached_the_pane_is_not_this_deliverys() {
         let session_id = "deliver-foreign";
         let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Idle)]);
+        ready_pane(&state, session_id);
         // Subscribed before the send: when the pane reacts to the Enter, a phone chat message
         // (another request id) is typed into the same pane, then the pane starts working.
         let mut receiver = state.agent_events.subscribe();
@@ -800,6 +913,7 @@ mod tests {
             session_id,
             vec![draft("deliver-other", AgentControlState::Working)],
         );
+        ready_pane(&state, session_id);
 
         assert_eq!(
             deliver_one(&state, session_id, "sv-goal-r1-d2").await.expect("typed"),
@@ -816,11 +930,164 @@ mod tests {
     async fn a_refused_delivery_types_nothing() {
         let session_id = "deliver-human-typing";
         let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        ready_pane(&state, session_id);
         crate::remote::server::agent_control_service::note_human_keystrokes(session_id);
 
         let error = deliver_one(&state, session_id, "sv-goal-r1-d3").await.expect_err("refused");
         assert_eq!(error.code, ScopeErrorCode::ControlConflict);
         assert_eq!(backend.write_attempts.load(Ordering::SeqCst), 0);
+    }
+
+    fn not_ready_report(session_id: &str, request_id: &str) -> DeliveryReport {
+        DeliveryReport::NotReady {
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+            code: ferryx_hub::agent_control::PANE_NOT_READY.into(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_pane_is_never_typed_into() {
+        let session_id = "deliver-busy";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        // The agent is mid-turn: its next reading belongs to that turn, not to this request.
+        let mut busy = draft(session_id, AgentControlState::Working);
+        busy.screen_revision = Some("rev-earlier-turn".into());
+        state.agent_events.publish(busy);
+        let begun = tokio::time::Instant::now();
+
+        assert_eq!(
+            deliver_one(&state, session_id, "sv-goal-r1-d4").await.expect("not an error"),
+            not_ready_report(session_id, "sv-goal-r1-d4")
+        );
+        assert!(begun.elapsed() >= PANE_READY_WAIT, "it waited the bounded time for readiness");
+        assert_eq!(backend.write_attempts.load(Ordering::SeqCst), 0, "nothing was typed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pane_with_no_readings_is_never_typed_into() {
+        let session_id = "deliver-fresh";
+        // A pane launched just now: no reading yet, so a boot-time reading could pass for a start.
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+
+        assert_eq!(
+            deliver_one(&state, session_id, "sv-goal-r1-d5").await.expect("not an error"),
+            not_ready_report(session_id, "sv-goal-r1-d5")
+        );
+        assert_eq!(backend.write_attempts.load(Ordering::SeqCst), 0, "nothing was typed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_pane_that_turns_idle_within_the_wait_is_delivered_to() {
+        let session_id = "deliver-busy-then-idle";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        state
+            .agent_events
+            .publish(draft(session_id, AgentControlState::Working));
+        let mut delivery = Box::pin(deliver_one(&state, session_id, "sv-goal-r1-d6"));
+        // One poll: the delivery is now subscribed and waiting for the pane to be ready.
+        tokio::select! {
+            biased;
+            _ = &mut delivery => panic!("a busy pane is not delivered to at once"),
+            () = std::future::ready(()) => {}
+        }
+        assert_eq!(backend.write_attempts.load(Ordering::SeqCst), 0);
+        ready_pane(&state, session_id);
+
+        let report = delivery.await.expect("typed");
+        let start = state.agent_events.latest(session_id).expect("the start reading");
+        assert_eq!(start.state, AgentControlState::Working);
+        assert_eq!(
+            report,
+            DeliveryReport::Started {
+                request_id: "sv-goal-r1-d6".into(),
+                session_id: session_id.into(),
+                run_id: run_id(&state, session_id, start.sequence),
+            }
+        );
+        assert_one_submit(&backend);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_input_queued_ahead_of_a_delivery_and_typed_after_its_cursor_is_foreign() {
+        let session_id = "deliver-queued-ahead";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        ready_pane(&state, session_id);
+        // The input ahead is a phone chat message: another request id typed through the same
+        // per-pane queue and writer. It holds the pane's step inside its first write until
+        // released, and its Enter publishes nothing; the delivery's Enter publishes Working.
+        backend.skip_enters.store(1, Ordering::SeqCst);
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *backend.gate.lock().expect("gate") = Some((entered_tx, release_rx));
+        let ahead_state = Arc::clone(&state);
+        let ahead = tokio::spawn(async move {
+            agent_control_service::send_text(
+                &ahead_state,
+                "deliver-queued-ahead".into(),
+                "a message from the phone".into(),
+                Some("phone-chat-1".into()),
+                None,
+                None,
+            )
+            .await
+        });
+        entered_rx.await.expect("the input ahead is being typed");
+
+        // One poll: the delivery takes its cursors now and queues behind the input ahead.
+        let mut delivery = Box::pin(deliver_one(&state, session_id, "sv-goal-r1-d7"));
+        tokio::select! {
+            biased;
+            _ = &mut delivery => panic!("the delivery cannot finish while the step is held"),
+            () = std::future::ready(()) => {}
+        }
+        release_tx.send(()).expect("release the input ahead");
+        ahead.await.expect("the input ahead").expect("typed");
+
+        assert_eq!(
+            delivery.await.expect("typed"),
+            DeliveryReport::Accepted {
+                request_id: "sv-goal-r1-d7".into(),
+                session_id: session_id.into(),
+                code: FOREIGN_INPUT.into(),
+            },
+            "the message ahead was typed after the delivery's cursor: the turn may be its"
+        );
+        let writes = backend.writes.lock().expect("writes").clone();
+        assert_eq!(writes.len(), 4, "each submit typed once: {writes:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_keystroke_in_the_pane_then_typing_in_another_pane_is_still_foreign() {
+        let session_id = "deliver-keystroke";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Idle)]);
+        ready_pane(&state, session_id);
+        // Subscribed before the send: when the pane reacts to the Enter, a person types a key
+        // into this pane, then into another pane, then this pane starts working.
+        let mut receiver = state.agent_events.subscribe();
+        let bus = Arc::clone(&state.agent_events);
+        let person = tokio::spawn(async move {
+            let idle = receiver.recv().await.expect("the Idle reading");
+            assert_eq!(idle.session_id, "deliver-keystroke");
+            agent_control_service::note_raw_write(&bus, "deliver-keystroke");
+            for _ in 0..64 {
+                agent_control_service::note_raw_write(&bus, "deliver-keystroke-other");
+            }
+            bus.publish(draft("deliver-keystroke", AgentControlState::Working));
+        });
+
+        let report = deliver_one(&state, session_id, "sv-goal-r1-d8").await.expect("typed");
+        person.await.expect("the person typing");
+        assert_eq!(
+            report,
+            DeliveryReport::Accepted {
+                request_id: "sv-goal-r1-d8".into(),
+                session_id: session_id.into(),
+                code: FOREIGN_INPUT.into(),
+            },
+            "typing elsewhere never erases this pane's keystroke"
+        );
+        assert_one_submit(&backend);
     }
 
     fn scope(code: ScopeErrorCode) -> ScopeError {
@@ -838,19 +1105,19 @@ mod tests {
         let started = DeliveryReport::Started {
             request_id: "sv-1".into(),
             session_id: "pane".into(),
-            run_id: "pty:pane:4".into(),
+            run_id: "pty:pane:e1:4".into(),
         };
         let wire = serde_json::to_value(&started).unwrap();
         assert_eq!(
             wire,
-            serde_json::json!({"stage": "started", "requestId": "sv-1", "sessionId": "pane", "runId": "pty:pane:4"})
+            serde_json::json!({"stage": "started", "requestId": "sv-1", "sessionId": "pane", "runId": "pty:pane:e1:4"})
         );
         assert_eq!(
             hub_delivery_from_reply(&serde_json::json!({ "delivery": wire })),
             Delivery::Started(StartReceipt {
                 request_id: "sv-1".into(),
                 session_id: "pane".into(),
-                run_id: "pty:pane:4".into(),
+                run_id: "pty:pane:e1:4".into(),
             })
         );
         // A typed send without a readable receipt is never a start.
@@ -885,6 +1152,26 @@ mod tests {
             Delivery::Uncertain {
                 accepted: false,
                 code: "OPERATION_OUTCOME_UNKNOWN".into()
+            }
+        );
+        // A pane that was not ready typed nothing: released and held.
+        let not_ready = serde_json::to_value(not_ready_report("pane", "sv-1")).unwrap();
+        assert_eq!(
+            not_ready,
+            serde_json::json!({"stage": "notReady", "requestId": "sv-1", "sessionId": "pane", "code": "PANE_NOT_READY"})
+        );
+        assert_eq!(
+            hub_delivery_from_reply(&serde_json::json!({ "delivery": not_ready })),
+            Delivery::Refused {
+                code: ferryx_hub::agent_control::PANE_NOT_READY.into()
+            }
+        );
+        // A failure that can follow a write is never a refusal.
+        assert_eq!(
+            hub_delivery(Err(scope(ScopeErrorCode::Timeout))),
+            Delivery::Uncertain {
+                accepted: false,
+                code: "TIMEOUT".into()
             }
         );
     }

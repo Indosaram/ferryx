@@ -2140,13 +2140,14 @@ impl DaemonClient {
                             .saturating_add(15_000),
                     )
             },
-            // A delivery waits for the target's submit, then for its turn start, on top of the
-            // paired host's own budget for both.
+            // A delivery waits for the pane to be ready, the target's submit, then its turn
+            // start, on top of the paired host's own budget for all three.
             DaemonRequest::AgentControl {
                 request: crate::agent_control::AgentControlOp::Deliver { observe_ms, .. },
                 ..
             } => {
-                crate::agent_control::delivery::observe_deadline(*observe_ms)
+                crate::agent_control::delivery::PANE_READY_WAIT
+                    + crate::agent_control::delivery::observe_deadline(*observe_ms)
                     + std::time::Duration::from_millis(
                         crate::remote::reference_chat::input::REFERENCE_SUBMIT_DEADLINE_MS,
                     )

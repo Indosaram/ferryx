@@ -108,6 +108,9 @@ pub trait AgentControl: Send + Sync {
 /// Wire code of an unknown send outcome: the bytes may or may not have reached the pane.
 pub const OPERATION_OUTCOME_UNKNOWN: &str = "OPERATION_OUTCOME_UNKNOWN";
 
+/// Host id of this machine, in execution bindings, dispatcher wiring and PTY settles alike.
+pub const LOCAL_HOST_ID: &str = "local";
+
 /// The backend has no observer that can attribute a turn start to one request; nothing was
 /// sent.
 pub const OBSERVER_CAPABILITY_MISSING: &str = "OBSERVER_CAPABILITY_MISSING";
@@ -120,6 +123,22 @@ pub const SEND_FAILED: &str = "SEND_FAILED";
 
 /// A start receipt that names another request or session than the dispatch it answers.
 pub const RECEIPT_MISMATCH: &str = "RECEIPT_MISMATCH";
+
+/// The bound pane was not observed ready (its latest reading idle, with no prompt) before the
+/// send, so a start could not be attributed to it; nothing was typed.
+pub const PANE_NOT_READY: &str = "PANE_NOT_READY";
+
+/// Refusal codes that prove nothing was typed: each is decided before the first byte is
+/// written. Only these release a dispatch; any other failure code may follow a write.
+pub const PRE_WRITE_REFUSALS: &[&str] = &[
+    "CONTROL_CONFLICT",
+    "INVALID_REQUEST",
+    "NOT_FOUND",
+    // Decided before typing: a multi-line message whose paste mode cannot be read, or a
+    // paired host without the capability (forwarded as UNSUPPORTED).
+    "UNSUPPORTED",
+    PANE_NOT_READY,
+];
 
 /// One supervisor dispatch to a bound worker: the stable request id, transmitted once, the
 /// bound provider session and the host mapping it is bound on (`None` is this machine).
@@ -165,7 +184,10 @@ pub enum Delivery {
 impl Delivery {
     /// The delivery a failed transport call reports, from its wire code. An unknown outcome
     /// and a failure without a code are uncertain; a paired host without the receipt
-    /// capability is a capability hold; any other code typed nothing.
+    /// capability, or a target without an observer, is a capability hold; a code that proves
+    /// nothing was typed ([`PRE_WRITE_REFUSALS`]) is a refusal. Every other code (an internal
+    /// error after the host may have executed, a timeout, an unknown code) is uncertain: a
+    /// dispatch is released only when nothing can have been typed.
     pub fn from_error_code(code: Option<&str>) -> Self {
         match code.map(str::trim).filter(|code| !code.is_empty()) {
             None => Delivery::Uncertain {
@@ -176,10 +198,16 @@ impl Delivery {
                 accepted: false,
                 code: OPERATION_OUTCOME_UNKNOWN.to_owned(),
             },
-            Some(PAIRED_HOST_CAPABILITY_UNAVAILABLE) => Delivery::Unsupported {
-                code: PAIRED_HOST_CAPABILITY_UNAVAILABLE.to_owned(),
+            Some(code @ (PAIRED_HOST_CAPABILITY_UNAVAILABLE | crate::goals::loop_driver::OBSERVER_UNAVAILABLE)) => {
+                Delivery::Unsupported {
+                    code: code.to_owned(),
+                }
+            }
+            Some(code) if PRE_WRITE_REFUSALS.contains(&code) => Delivery::Refused {
+                code: code.to_owned(),
             },
-            Some(code) => Delivery::Refused {
+            Some(code) => Delivery::Uncertain {
+                accepted: false,
                 code: code.to_owned(),
             },
         }
@@ -201,20 +229,23 @@ impl Delivery {
     }
 }
 
-/// Run id of a PTY turn: the pane's session and the sequence of the observer reading that
-/// started the turn. The target mints it; the hub reads the sequence back to order a settle.
-pub fn pty_run_id(session_id: &str, sequence: u64) -> String {
-    format!("pty:{session_id}:{sequence}")
+/// Run id of a PTY turn: the pane's session, the observer epoch of the target daemon (its
+/// sequences restart with the daemon) and the sequence of the reading that started the turn.
+/// The target mints it; the hub reads the epoch and sequence back to order a settle.
+pub fn pty_run_id(session_id: &str, instance: &str, sequence: u64) -> String {
+    format!("pty:{session_id}:{instance}:{sequence}")
 }
 
-/// The start sequence of a [`pty_run_id`] minted for `session_id`.
-pub fn pty_run_sequence(run_id: &str, session_id: &str) -> Option<u64> {
+/// The observer epoch and start sequence of a [`pty_run_id`] minted for `session_id`. A
+/// sequence is only comparable with readings of the same epoch.
+pub fn pty_run_start<'a>(run_id: &'a str, session_id: &str) -> Option<(&'a str, u64)> {
     let rest = run_id.strip_prefix("pty:")?;
-    let (session, sequence) = rest.rsplit_once(':')?;
-    if session != session_id {
+    let (rest, sequence) = rest.rsplit_once(':')?;
+    let (session, instance) = rest.rsplit_once(':')?;
+    if session != session_id || instance.is_empty() {
         return None;
     }
-    sequence.parse().ok()
+    Some((instance, sequence.parse().ok()?))
 }
 
 /// Maps a failed send's error text (`"{CODE} {message}"` from the daemon bridge) to an
@@ -273,6 +304,9 @@ impl Default for RecordingControl {
 }
 
 impl RecordingControl {
+    /// The observer epoch of every run id this target mints.
+    pub const EPOCH: &'static str = "rc0";
+
     pub fn ops(&self) -> Vec<(Option<String>, AgentOp)> {
         self.ops.lock().expect("ops").clone()
     }
@@ -335,7 +369,7 @@ impl AgentControl for RecordingControl {
                 Delivery::Started(StartReceipt {
                     request_id: send.request_id.clone(),
                     session_id: send.session_id.clone(),
-                    run_id: pty_run_id(&send.session_id, sequence),
+                    run_id: pty_run_id(&send.session_id, Self::EPOCH, sequence),
                 })
             }
             ReceiptScript::Fixed(delivery) => delivery,
@@ -477,7 +511,7 @@ mod tests {
             Delivery::Started(StartReceipt {
                 request_id: request_id.into(),
                 session_id: session_id.into(),
-                run_id: pty_run_id(session_id, 4),
+                run_id: pty_run_id(session_id, "e1", 4),
             })
         };
         assert_eq!(
@@ -532,13 +566,40 @@ mod tests {
                 code: "CONTROL_CONFLICT".into()
             }
         );
+        assert_eq!(
+            Delivery::from_error_code(Some(crate::goals::loop_driver::OBSERVER_UNAVAILABLE)),
+            Delivery::Unsupported {
+                code: crate::goals::loop_driver::OBSERVER_UNAVAILABLE.into()
+            }
+        );
+        for code in ["INVALID_REQUEST", "NOT_FOUND", "UNSUPPORTED", PANE_NOT_READY] {
+            assert_eq!(
+                Delivery::from_error_code(Some(code)),
+                Delivery::Refused { code: code.into() },
+                "{code} is decided before the first byte"
+            );
+        }
+        // A code that can follow a write is never a refusal: the row is not released.
+        for code in ["INTERNAL", "TIMEOUT", "REQUEST_CONFLICT", "HOST_UNAVAILABLE"] {
+            assert_eq!(
+                Delivery::from_error_code(Some(code)),
+                Delivery::Uncertain {
+                    accepted: false,
+                    code: code.into()
+                },
+                "{code} may follow a write"
+            );
+        }
     }
 
     #[test]
-    fn a_pty_run_id_names_its_session_and_start_reading() {
-        let run = pty_run_id("sess:a", 42);
-        assert_eq!(pty_run_sequence(&run, "sess:a"), Some(42));
-        assert_eq!(pty_run_sequence(&run, "sess"), None);
-        assert_eq!(pty_run_sequence("sv-goal-r1-d1", "sess:a"), None);
+    fn a_pty_run_id_names_its_session_epoch_and_start_reading() {
+        let run = pty_run_id("sess:a", "e7", 42);
+        assert_eq!(run, "pty:sess:a:e7:42");
+        assert_eq!(pty_run_start(&run, "sess:a"), Some(("e7", 42)));
+        assert_eq!(pty_run_start(&run, "sess"), None);
+        assert_eq!(pty_run_start("sv-goal-r1-d1", "sess:a"), None);
+        // A run id without an epoch cannot be ordered against any reading.
+        assert_eq!(pty_run_start("pty:sess:42", "sess"), None);
     }
 }
