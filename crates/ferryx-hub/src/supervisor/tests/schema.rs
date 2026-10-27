@@ -1360,11 +1360,14 @@ async fn a_late_reconcile_of_an_older_dispatch_leaves_the_newer_run_live() {
     .unwrap();
     assert!(live(pool, goal_id).await);
 
-    // The first send did run after all, and its receipts arrive late.
-    for late in [started("run-a", "S1"), settled("run-a", "S1")] {
-        let error = record_receipt(pool, r1, 1, &late).await.unwrap_err();
-        assert_eq!(error.code(), "RECEIPT_OUT_OF_ORDER", "{error}");
-    }
+    // The first send did run after all, and its receipts arrive late. Its start comes through
+    // the dispatcher's atomic start, which keeps the evidence and refuses the start itself.
+    let error = record_start(pool, r1, 1, "run-a", "S1").await.unwrap_err();
+    assert_eq!(error.code(), "RECEIPT_OUT_OF_ORDER", "{error}");
+    let error = record_receipt(pool, r1, 1, &settled("run-a", "S1"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "RECEIPT_OUT_OF_ORDER", "{error}");
     let evidence: (String, Option<String>, Option<String>, Option<String>, Option<String>) =
         sqlx::query_as(
             "SELECT state, run_id, provider_session_id, started_at, settled_at

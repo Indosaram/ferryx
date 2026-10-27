@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,18 @@ struct SessionInputs {
     marks: VecDeque<(u64, Option<String>)>,
     /// Highest mark that fell out of `marks`.
     evicted_through: u64,
+    /// The newest mark of any request, raw keys included. Never evicted.
+    last: Option<LastMark>,
+}
+
+/// When the newest input reached a pane, and how far the observer had got by then.
+#[derive(Clone, Copy)]
+struct LastMark {
+    mark: u64,
+    at: tokio::time::Instant,
+    /// [`AgentEventBus::head`] read right AFTER the mark was issued (`u64::MAX` until then): a
+    /// reading with a higher sequence was allocated after the input went out.
+    head: u64,
 }
 
 /// Retained agent-control observations. Publishing also forwards a slim machine event when the
@@ -195,17 +208,62 @@ impl AgentEventBus {
     /// writer calls it right before its bytes go out: the per-target input queue's writer for
     /// chat, agent-control and phone input, and each raw write path for keystrokes and pastes.
     pub fn note_input(&self, session_id: &str, request_id: Option<&str>) {
-        let mut guard = self.inputs.lock();
-        let ledger = &mut *guard;
-        ledger.issued = ledger.issued.saturating_add(1);
-        let mark = ledger.issued;
-        let session = ledger.sessions.entry(session_id.to_string()).or_default();
-        session.marks.push_back((mark, request_id.map(str::to_string)));
-        while session.marks.len() > INPUT_MARKS_PER_SESSION {
-            if let Some((evicted, _)) = session.marks.pop_front() {
-                session.evicted_through = session.evicted_through.max(evicted);
+        let at = tokio::time::Instant::now();
+        let mark = {
+            let mut guard = self.inputs.lock();
+            let ledger = &mut *guard;
+            ledger.issued = ledger.issued.saturating_add(1);
+            let mark = ledger.issued;
+            let session = ledger.sessions.entry(session_id.to_string()).or_default();
+            session.marks.push_back((mark, request_id.map(str::to_string)));
+            while session.marks.len() > INPUT_MARKS_PER_SESSION {
+                if let Some((evicted, _)) = session.marks.pop_front() {
+                    session.evicted_through = session.evicted_through.max(evicted);
+                }
             }
+            session.last = Some(LastMark {
+                mark,
+                at,
+                head: u64::MAX,
+            });
+            mark
+        };
+        // Read after the mark exists, so a reading allocated before the input went out is never
+        // newer than it. Until this lands the mark counts as unobserved, which is conservative.
+        let head = self.head();
+        let mut ledger = self.inputs.lock();
+        if let Some(last) = ledger
+            .sessions
+            .get_mut(session_id)
+            .and_then(|session| session.last.as_mut())
+            .filter(|last| last.mark == mark)
+        {
+            last.head = head;
         }
+    }
+
+    /// Whether the newest input that reached `session_id` (any request, raw keys included) can
+    /// no longer be starting a turn the observer has not published: a reading with a sequence
+    /// above `reading` was allocated after it, and it is at least `horizon` old. The observer
+    /// publishes a pane's reading only once its output settles and calls a quiet screen idle
+    /// only after its quiet timer, so an idle reading taken earlier may predate the turn the
+    /// input started. A pane no input reached is settled.
+    pub fn input_observed(&self, session_id: &str, reading: u64, horizon: Duration) -> bool {
+        let ledger = self.inputs.lock();
+        let Some(last) = ledger.sessions.get(session_id).and_then(|session| session.last) else {
+            return true;
+        };
+        reading > last.head && last.at.elapsed() >= horizon
+    }
+
+    /// When the newest input that reached `session_id` becomes `horizon` old, if any did.
+    pub fn input_settles_at(&self, session_id: &str, horizon: Duration) -> Option<tokio::time::Instant> {
+        let ledger = self.inputs.lock();
+        ledger
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.last)
+            .map(|last| last.at + horizon)
     }
 
     /// Whether input other than `request_id`'s reached `session_id` after the mark `after`.
@@ -703,5 +761,25 @@ mod tests {
             bus.foreign_input_since("busy", cursor, "mine"),
             "a mark evicted after the cursor can no longer be attributed"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_input_is_observed_only_by_a_later_reading_past_the_horizon() {
+        let bus = AgentEventBus::new(8);
+        let horizon = std::time::Duration::from_secs(3);
+        assert!(bus.input_observed("pane", 0, horizon), "a pane no input reached is settled");
+        assert!(bus.input_settles_at("pane", horizon).is_none());
+
+        let earlier = bus.publish(draft("pane", AgentControlState::Idle));
+        let typed = tokio::time::Instant::now();
+        bus.note_input("pane", Some("theirs"));
+        assert_eq!(bus.input_settles_at("pane", horizon), Some(typed + horizon));
+        assert!(!bus.input_observed("pane", earlier.sequence, horizon), "a reading from before");
+        let later = bus.publish(draft("pane", AgentControlState::Working));
+        assert!(!bus.input_observed("pane", later.sequence, horizon), "within the horizon");
+        tokio::time::advance(horizon).await;
+        assert!(!bus.input_observed("pane", earlier.sequence, horizon), "still from before");
+        assert!(bus.input_observed("pane", later.sequence, horizon));
+        assert!(bus.input_observed("other-pane", 0, horizon), "per pane");
     }
 }

@@ -1201,6 +1201,15 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let mut agents = std::collections::HashMap::new();
         let mut runs = std::collections::HashMap::new();
         let mut worked = std::collections::HashSet::new();
+        // Subscribed above, before this sweep: an idle reading that ended a supervisor run
+        // while no hub generation was listening (a hub stop and start under a running daemon)
+        // still settles it. A reading published after the subscription is also seen by the
+        // loop; a second settle of the same run is a no-op.
+        for latest in watch_bus.snapshot() {
+            if matches!(latest.state, AgentControlState::Idle) && latest.prompt_id.is_none() {
+                settle_pty_run(&watch_hub.pool, &watch_idle, &instance, &latest);
+            }
+        }
         loop {
             match events.recv().await {
                 Ok(observation) => {

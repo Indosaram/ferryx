@@ -463,7 +463,8 @@ pub enum PtySettle {
 /// Records the settle of the live PTY run bound to `session_id` on `host_id`, from an
 /// observer reading of that pane going idle (`instance` is the observer epoch of `sequence`).
 /// Only a reading of the run's epoch newer than the one that started it settles it
-/// ([`pty_run_start`]).
+/// ([`pty_run_start`]). A live run whose id is not a PTY run id is not this observer's to
+/// settle and is ignored.
 pub async fn record_pty_settle(
     pool: &SqlitePool,
     host_id: &str,
@@ -476,7 +477,7 @@ pub async fn record_pty_settle(
            JOIN supervisor_execution_bindings b
              ON b.goal_id = d.goal_id AND b.generation = d.generation
           WHERE b.kind = 'pty' AND b.host_id = ? AND b.provider_session_id = ?
-            AND d.state = 'started' AND d.run_id = b.run_id
+            AND d.state = 'started' AND d.run_id = b.run_id AND d.run_id LIKE 'pty:%'
           ORDER BY d.id DESC LIMIT 1",
     )
     .bind(host_id)

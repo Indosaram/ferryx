@@ -2723,7 +2723,10 @@ async fn apply_receipt(
 /// after the claim keeps the hold, since the worker runs anyway and the owner decides; the
 /// start is still recorded. Any refusal (a stale generation, a session or run mismatch, a goal
 /// in another state) or store error writes nothing, so a started dispatch never exists
-/// without its goal running or owner-held, and no settle can land between the two.
+/// without its goal running or owner-held, and no settle can land between the two. The one
+/// exception is a late start of a dispatch a newer one superseded (`RECEIPT_OUT_OF_ORDER`):
+/// as in [`record_receipt`], its evidence (and its accepted stage) is committed and the start
+/// itself is refused, so no goal moves.
 pub async fn record_start(
     pool: &SqlitePool,
     request_id: &str,
@@ -2747,7 +2750,10 @@ pub async fn record_start(
     }
     let dispatch = match apply_receipt(&mut tx, request_id, generation, &started).await? {
         AppliedReceipt::Recorded(dispatch) => *dispatch,
-        AppliedReceipt::EvidenceOnly(error) => return Err(error),
+        AppliedReceipt::EvidenceOnly(error) => {
+            tx.commit().await?;
+            return Err(error);
+        }
     };
     let goal = require_goal(&mut tx, &dispatch.goal_id).await?;
     if !goal.run_state.is_owner_hold() {

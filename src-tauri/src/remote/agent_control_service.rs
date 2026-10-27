@@ -475,9 +475,10 @@ async fn dispatch(
 /// Type `text` into `session_id` as one submit: the `Send` operation, and the typing step of a
 /// delivery. Its writer marks the pane's input ledger at each write, under the target's step.
 ///
-/// `ready`, given by a delivery, is asked under the step right before the first byte: when the
-/// pane is no longer observed ready the submit is refused untyped (`CONTROL_CONFLICT`), so a
-/// queue wait cannot make a delivery type into a pane that became busy meanwhile.
+/// `ready`, given by a delivery, is asked under the step after the blocked-prompt screen read,
+/// right before the first byte: when the pane is no longer observed ready the submit is refused
+/// untyped (`CONTROL_CONFLICT`), so neither a queue wait nor the screen read can make a
+/// delivery type into a pane that became busy, or took other input, meanwhile.
 pub(crate) async fn send_text(
     state: &Arc<RemoteGatewayState>,
     session_id: String,
@@ -527,12 +528,18 @@ pub(crate) async fn send_text(
             authorize: &*authorize,
         };
         let probe = || async {
+            let seen = reference_chat_blocked_prompt(&state, &target, agent.as_deref()).await;
+            if !matches!(seen, reference_input::ReferencePromptProbe::Clear) {
+                return seen;
+            }
+            // Asked after the awaited screen read, so a reading or an input that arrived during
+            // it is still seen before the first byte.
             if ready.as_ref().is_some_and(|ready| !ready()) {
                 return reference_input::ReferencePromptProbe::Blocked(
                     "the pane is no longer observed ready".to_string(),
                 );
             }
-            reference_chat_blocked_prompt(&state, &target, agent.as_deref()).await
+            seen
         };
         let writer = reference_input::ReferenceSessionWriter::new(
             state.session_backend.as_ref(),

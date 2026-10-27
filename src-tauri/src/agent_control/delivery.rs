@@ -242,33 +242,54 @@ pub enum DeliveryReport {
 /// How long a delivery waits for the bound pane to be observed ready before it types nothing.
 pub const PANE_READY_WAIT: Duration = Duration::from_secs(10);
 
-/// Whether the latest reading of `session_id` is idle with no prompt: no turn is running, so
-/// the pane's next turn start can be attributed to what is typed now. A pane without readings
-/// (a fresh pane still booting) is not ready.
+/// How long an input stays able to start a turn the observer has not published yet: the
+/// observer's trailing debounce plus its quiet timer (`daemon::agent_observer::ObserverTiming`).
+fn input_settle_horizon() -> Duration {
+    let timing = crate::daemon::agent_observer::ObserverTiming::default();
+    timing.debounce + timing.quiet
+}
+
+/// Whether the latest reading of `session_id` is idle with no prompt AND covers the newest
+/// input that reached the pane: no turn is running, so the pane's next turn start can be
+/// attributed to what is typed now. A pane without readings (a fresh pane still booting) is
+/// not ready.
+///
+/// Readings trail the pane by the observer's debounce and quiet timer, so an idle reading
+/// alone can be stale: input of another request (a phone chat message, an agent-control Send,
+/// raw keys) written just before may have started a turn the observer has not published. The
+/// pane counts as ready only when its idle reading was allocated after that input's mark and
+/// the input is older than the observer's settle horizon
+/// ([`AgentEventBus::input_observed`]).
 fn pane_ready(bus: &AgentEventBus, session_id: &str) -> bool {
     bus.latest(session_id).is_some_and(|observation| {
-        observation.state == AgentControlState::Idle && observation.prompt_id.is_none()
+        observation.state == AgentControlState::Idle
+            && observation.prompt_id.is_none()
+            && bus.input_observed(session_id, observation.sequence, input_settle_horizon())
     })
 }
 
 /// Waits up to `deadline` for `session_id` to be observed ready. It subscribes before it reads
-/// the latest reading, so a reading published in between is never missed.
+/// the latest reading, so a reading published in between is never missed, and it also wakes
+/// when the newest input of the pane passes the observer's settle horizon.
 async fn wait_until_ready(bus: &AgentEventBus, session_id: &str, deadline: Duration) -> bool {
     let mut receiver = bus.subscribe();
-    if pane_ready(bus, session_id) {
-        return true;
-    }
     let until = tokio::time::Instant::now() + deadline;
     loop {
-        match tokio::time::timeout_at(until, receiver.recv()).await {
-            Err(_) | Ok(Err(broadcast::error::RecvError::Closed)) => {
-                return pane_ready(bus, session_id)
-            }
-            Ok(Ok(observation)) if observation.session_id != session_id => continue,
-            Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
-        }
         if pane_ready(bus, session_id) {
             return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= until {
+            return false;
+        }
+        let wake = bus
+            .input_settles_at(session_id, input_settle_horizon())
+            .filter(|at| *at > now)
+            .map_or(until, |at| at.min(until));
+        if let Ok(Err(broadcast::error::RecvError::Closed)) =
+            tokio::time::timeout_at(wake, receiver.recv()).await
+        {
+            return pane_ready(bus, session_id);
         }
     }
 }
@@ -314,10 +335,13 @@ fn logged_start(bus: &AgentEventBus, session_id: &str, after: u64, pre: &PreSend
 /// `request_id` only when the cause cannot be anything else.
 ///
 /// Nothing is typed unless the pane is observed ready: its latest reading idle with no prompt,
-/// waited for up to [`PANE_READY_WAIT`] (subscribe first) and checked again under the pane's
-/// input step right before the first byte. Otherwise the report is
-/// [`DeliveryReport::NotReady`]. A busy pane's next reading belongs to its running turn and a
-/// fresh pane's to its boot, so neither can carry this request's start.
+/// newer than the pane's newest input and taken once that input is older than the observer's
+/// settle horizon, waited for up to [`PANE_READY_WAIT`] (subscribe first) and checked again
+/// under the pane's input step after the blocked-prompt probe, right before the first byte.
+/// Otherwise the report is [`DeliveryReport::NotReady`]. A busy pane's next reading belongs to
+/// its running turn, a fresh pane's to its boot, and a pane whose newest input is not yet
+/// covered by an idle reading may be starting that input's turn, so none can carry this
+/// request's start.
 ///
 /// The observer cursor and the input cursor are both taken BEFORE the send (subscribe before
 /// trigger). A start is a reading of this session newer than that cursor that is Working,
@@ -330,7 +354,9 @@ fn logged_start(bus: &AgentEventBus, session_id: &str, after: u64, pre: &PreSend
 /// Never retries the send.
 ///
 /// Known limit: activity the agent starts on its own between the cursor and the Enter (a hook,
-/// a background notification) carries no input mark and is still attributed to this request.
+/// a background notification) carries no input mark and is still attributed to this request;
+/// so is the turn of an earlier input whose agent showed an idle screen after that input and
+/// then stayed silent for the whole settle horizon before it started.
 pub async fn deliver(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
@@ -1009,7 +1035,82 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_input_queued_ahead_of_a_delivery_and_typed_after_its_cursor_is_foreign() {
+    async fn input_of_another_request_with_no_reading_yet_keeps_the_pane_unready() {
+        let session_id = "deliver-stale-ready";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        ready_pane(&state, session_id);
+        // A phone chat message is typed in full; the observer has not published its turn yet
+        // (its Enter publishes nothing), so the latest reading is still the stale Idle.
+        backend.skip_enters.store(1, Ordering::SeqCst);
+        agent_control_service::send_text(
+            &state,
+            session_id.into(),
+            "a message from the phone".into(),
+            Some("phone-chat-1".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("the other message was typed");
+        let begun = tokio::time::Instant::now();
+
+        assert_eq!(
+            deliver_one(&state, session_id, "sv-goal-r1-d9").await.expect("not an error"),
+            not_ready_report(session_id, "sv-goal-r1-d9"),
+            "the stale Idle cannot carry this request's start"
+        );
+        assert!(begun.elapsed() >= PANE_READY_WAIT, "it waited the bounded time for readiness");
+        assert_eq!(
+            backend.writes.lock().expect("writes").len(),
+            2,
+            "only the other message was typed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pane_idle_after_other_input_is_delivered_to_once_the_observer_settles() {
+        let session_id = "deliver-settled-ready";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        ready_pane(&state, session_id);
+        backend.skip_enters.store(1, Ordering::SeqCst);
+        agent_control_service::send_text(
+            &state,
+            session_id.into(),
+            "a message from the phone".into(),
+            Some("phone-chat-2".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("the other message was typed");
+        let settles = state
+            .agent_events
+            .input_settles_at(session_id, input_settle_horizon())
+            .expect("the other message was marked");
+        // The observer reads the pane idle after that message, but within its settle horizon.
+        let mut after = draft(session_id, AgentControlState::Idle);
+        after.screen_revision = Some("rev-after-the-phone-message".into());
+        state.agent_events.publish(after);
+
+        let report = deliver_one(&state, session_id, "sv-goal-r1-d10").await.expect("typed");
+        assert!(
+            tokio::time::Instant::now() >= settles,
+            "nothing is typed before the other message is past the observer's settle horizon"
+        );
+        let start = state.agent_events.latest(session_id).expect("the start reading");
+        assert_eq!(
+            report,
+            DeliveryReport::Started {
+                request_id: "sv-goal-r1-d10".into(),
+                session_id: session_id.into(),
+                run_id: run_id(&state, session_id, start.sequence),
+            }
+        );
+        assert_eq!(backend.writes.lock().expect("writes").len(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_input_queued_ahead_and_typed_after_the_readiness_check_keeps_the_delivery_untyped() {
         let session_id = "deliver-queued-ahead";
         let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
         ready_pane(&state, session_id);
@@ -1020,6 +1121,7 @@ mod tests {
         let (entered_tx, entered_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         *backend.gate.lock().expect("gate") = Some((entered_tx, release_rx));
+        let before = state.agent_events.input_cursor();
         let ahead_state = Arc::clone(&state);
         let ahead = tokio::spawn(async move {
             agent_control_service::send_text(
@@ -1033,28 +1135,37 @@ mod tests {
             .await
         });
         entered_rx.await.expect("the input ahead is being typed");
+        // Marked at the write itself, while its transaction is still running: a mark issued
+        // only after the transaction joins would leave the ledger unchanged here.
+        assert_eq!(state.agent_events.input_cursor(), before + 1, "the first write was marked");
+        // The observer then reads the pane idle again and the first write settles, so the
+        // readiness check before the cursor passes; the Enter ahead is still to come.
+        let mut after = draft(session_id, AgentControlState::Idle);
+        after.screen_revision = Some("rev-composer-filled".into());
+        state.agent_events.publish(after);
+        tokio::time::advance(input_settle_horizon()).await;
 
-        // One poll: the delivery takes its cursors now and queues behind the input ahead.
+        // One poll: the delivery passes its readiness check, takes its cursors now and queues
+        // behind the input ahead.
         let mut delivery = Box::pin(deliver_one(&state, session_id, "sv-goal-r1-d7"));
         tokio::select! {
             biased;
             _ = &mut delivery => panic!("the delivery cannot finish while the step is held"),
             () = std::future::ready(()) => {}
         }
+        let cursor = state.agent_events.input_cursor();
         release_tx.send(()).expect("release the input ahead");
         ahead.await.expect("the input ahead").expect("typed");
+        assert_eq!(state.agent_events.input_cursor(), cursor + 1, "the Enter ahead was marked");
 
         assert_eq!(
             delivery.await.expect("typed"),
-            DeliveryReport::Accepted {
-                request_id: "sv-goal-r1-d7".into(),
-                session_id: session_id.into(),
-                code: FOREIGN_INPUT.into(),
-            },
-            "the message ahead was typed after the delivery's cursor: the turn may be its"
+            not_ready_report(session_id, "sv-goal-r1-d7"),
+            "the Enter ahead reached the pane after the readiness check: under the step the \
+             pane is no longer observed ready, so nothing is typed"
         );
         let writes = backend.writes.lock().expect("writes").clone();
-        assert_eq!(writes.len(), 4, "each submit typed once: {writes:?}");
+        assert_eq!(writes.len(), 2, "only the message ahead was typed: {writes:?}");
     }
 
     #[tokio::test(start_paused = true)]
