@@ -24,17 +24,62 @@ pub const DEFAULT_MHC_BIN: &str = "mhc";
 pub const LAUNCH_ARGS: [&str; 4] = ["--mode", "rpc", "--multi-session", "--no-model-fallback"];
 /// Capabilities the engine must advertise before any session opens: the host baseline the
 /// client relies on, then the plan's supervisor capabilities. `memory_forget` also stands for
-/// `memory_correct`; there is no separate capability to guess.
-pub const REQUIRED_CAPABILITIES: [&str; 8] = [
+/// `memory_correct`; there is no separate capability to guess. `memory_write_deny` alone does
+/// not pin which tools a denied session loses (mhc 8c81d1a09 advertised it before the effect
+/// exclusions existed), so [`MEMORY_WRITE_DENY_EFFECTS_CAPABILITY`] is required as well.
+pub const REQUIRED_CAPABILITIES: [&str; 9] = [
     "multi_session",
     "session_context",
     "durable_session_id",
     "memory_write_deny",
+    MEMORY_WRITE_DENY_EFFECTS_CAPABILITY,
     "tools_exclude",
     "memory_receipts",
     "memory_forget",
     "supervisor_work_tools",
 ];
+/// The engine guarantees that a `memory_write = deny` session never registers the effect set
+/// of mhc `MEMORY_WRITE_DENY_EXCLUDED_TOOL_NAMES` (shells and process steering, `eval`,
+/// `apply_patch`, the LSP/ast-grep writers, `generate_image`, `computer`, the child-session
+/// spawners) nor the `task_*`/`team_*` families (mhc 3584f7d4 semantics). Decision,
+/// convergence and conversation sessions rely on it.
+pub const MEMORY_WRITE_DENY_EFFECTS_CAPABILITY: &str = "memory_write_deny_effects";
+/// Optional: the engine honors `context.effect_tools = "deny"`, withholding that same effect set
+/// (prefix families included) from a session whose memory writes stay allowed. The owner-ingest
+/// session uses it when advertised and [`INGEST_EXCLUDED_TOOLS`] otherwise.
+pub const EFFECT_TOOLS_DENY_CAPABILITY: &str = "effect_tools_deny";
+/// Session context key of [`EFFECT_TOOLS_DENY_CAPABILITY`].
+pub const EFFECT_TOOLS_CONTEXT_KEY: &str = "effect_tools";
+/// mhc `MEMORY_WRITE_DENY_EXCLUDED_TOOL_NAMES` minus the Windows-only `powershell`: the owner
+/// ingest session learns (memory writes allowed) but holds no execution or effect tool. mhc
+/// refuses a non-`mcp_` exclusion that withholds nothing, so the list is platform-exact.
+pub const INGEST_EXCLUDED_TOOLS: [&str; 17] = [
+    "bash",
+    "bash_input",
+    "bash_output",
+    "bash_resize",
+    "kill_bash",
+    "monitor",
+    "eval",
+    "apply_patch",
+    "lsp_rename",
+    "lsp_format",
+    "ast_grep_replace",
+    "generate_image",
+    "computer",
+    "task",
+    "dag",
+    "workflow",
+    "workpool",
+];
+/// Effect tools mhc registers on Windows only.
+pub const WINDOWS_ONLY_EXCLUDED_TOOLS: [&str; 1] = ["powershell"];
+/// Hub env key that turns the engine on. Read from the hub env file only, which every hub
+/// process (daemon, MCP server, CLI) shares; a value in one process's environment is ignored.
+pub const ENABLE_KEY: &str = "FERRYX_HUB_MHC_SUPERVISOR";
+/// Lock file under the hub data directory held by the process that owns the engine, from
+/// before its launch until the owned child is reaped.
+pub const LOCK_FILENAME: &str = "mhc-supervisor.lock";
 /// Client capability that makes the host forward extension RPC events (the work-tool requests).
 pub const CLIENT_CAPABILITIES: [&str; 1] = ["extension_events"];
 /// Tools no decision, convergence, conversation or ingest session may register: terminal
@@ -117,15 +162,29 @@ pub fn is_tool_name(name: &str) -> bool {
 }
 
 impl MhcProfileConfig {
-    /// `None` unless `FERRYX_HUB_MHC_SUPERVISOR` turns the engine on (1/true/yes/on).
-    /// `FERRYX_HUB_MHC_BIN`, `FERRYX_HUB_MHC_PROVIDER` + `FERRYX_HUB_MHC_MODEL`,
+    /// True when the shared hub env (the hub env file entries) turns the engine on
+    /// (1/true/yes/on).
+    pub fn enabled_in(shared: &BTreeMap<String, String>) -> bool {
+        shared.get(ENABLE_KEY).is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    }
+
+    /// `None` unless [`ENABLE_KEY`] in the hub env file turns the engine on, so every hub
+    /// process agrees on whether the supervisor is mhc. `FERRYX_HUB_MHC_BIN`,
+    /// `FERRYX_HUB_MHC_PROVIDER` + `FERRYX_HUB_MHC_MODEL`,
     /// `FERRYX_HUB_MHC_THINKING` and `FERRYX_HUB_MHC_EFFECT_TOOLS` (extra comma-separated names)
-    /// refine it.
+    /// refine it for the owning daemon.
     pub fn from_env() -> Option<Self> {
-        let enabled = env_text("FERRYX_HUB_MHC_SUPERVISOR").is_some_and(|value| {
-            matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-        });
-        if !enabled {
+        if !Self::enabled_in(crate::hub_env::file_env()) {
+            if std::env::var_os(ENABLE_KEY).is_some() {
+                tracing::warn!(
+                    "FERRYX_HUB_MHC_SUPERVISOR is read from the hub env file only; the process environment value was ignored"
+                );
+            }
             return None;
         }
         let mut config = Self::default();
@@ -266,6 +325,28 @@ impl MhcProfile {
         self.state_dir.join("mhc-supervisor.log")
     }
 
+    /// `<data>/mhc-supervisor.lock`, the cross-process engine ownership lock.
+    pub fn lock_path(&self) -> PathBuf {
+        self.state_dir.join(LOCK_FILENAME)
+    }
+
+    /// Takes the exclusive OS lock on [`Self::lock_path`] without waiting. `Ok(None)` while
+    /// another holder (any process, or another handle in this one) owns it.
+    pub fn try_lock(&self) -> std::io::Result<Option<ProfileLock>> {
+        std::fs::create_dir_all(&self.state_dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.lock_path())?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(ProfileLock { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
     /// Profile-local omo config that pins the native memory identity.
     pub fn memory_config_path(&self) -> PathBuf {
         self.cwd.join(".omo").join("omo.jsonc")
@@ -354,24 +435,46 @@ impl MhcProfile {
         self.config.effect_tools.join(",")
     }
 
+    /// The owner-ingest exclusions: the configured effect tools, then
+    /// [`INGEST_EXCLUDED_TOOLS`], then [`WINDOWS_ONLY_EXCLUDED_TOOLS`] on Windows.
+    fn ingest_tools(&self) -> String {
+        let platform: &[&str] = if cfg!(windows) {
+            &WINDOWS_ONLY_EXCLUDED_TOOLS
+        } else {
+            &[]
+        };
+        let mut names = self.config.effect_tools.clone();
+        for name in INGEST_EXCLUDED_TOOLS.iter().chain(platform) {
+            if !names.iter().any(|existing| existing == name) {
+                names.push((*name).to_owned());
+            }
+        }
+        names.join(",")
+    }
+
     /// The session policy of a role.
     pub fn role_spec(&self, role: &SessionRole) -> RoleSpec {
         let mut context = BTreeMap::new();
-        context.insert("tools_exclude".to_owned(), self.effect_tools());
         let (key, name, durable, cancellable) = match role {
-            SessionRole::OwnerIngest => ("owner-ingest".to_owned(), "owner_ingest", true, false),
+            SessionRole::OwnerIngest => {
+                context.insert("tools_exclude".to_owned(), self.ingest_tools());
+                ("owner-ingest".to_owned(), "owner_ingest", true, false)
+            }
             SessionRole::Conversation(scope) => {
                 let scope_key = scope.key();
+                context.insert("tools_exclude".to_owned(), self.effect_tools());
                 context.insert("memory_write".to_owned(), "deny".to_owned());
                 context.insert("supervisor_tools".to_owned(), "work".to_owned());
                 context.insert("ferryx_scope".to_owned(), scope_key.clone());
                 (format!("conversation-{scope_key}"), "conversation", true, false)
             }
             SessionRole::Decision(slot) => {
+                context.insert("tools_exclude".to_owned(), self.effect_tools());
                 context.insert("memory_write".to_owned(), "deny".to_owned());
                 (format!("decision-{slot}"), "decision", true, true)
             }
             SessionRole::Convergence => {
+                context.insert("tools_exclude".to_owned(), self.effect_tools());
                 context.insert("memory_write".to_owned(), "deny".to_owned());
                 ("convergence".to_owned(), "convergence", false, true)
             }
@@ -386,6 +489,26 @@ impl MhcProfile {
         }
     }
 
+    /// The `open_session` context of a role on an engine advertising `capabilities`. With
+    /// [`EFFECT_TOOLS_DENY_CAPABILITY`] the owner-ingest session asks the engine to withhold the
+    /// whole effect set (prefix families included) and names only the configured effect tools;
+    /// otherwise it keeps the explicit [`INGEST_EXCLUDED_TOOLS`] list. Other roles are unchanged.
+    pub fn session_context(
+        &self,
+        spec: &RoleSpec,
+        capabilities: &[String],
+    ) -> BTreeMap<String, String> {
+        let mut context = spec.context.clone();
+        let enforced = capabilities
+            .iter()
+            .any(|name| name == EFFECT_TOOLS_DENY_CAPABILITY);
+        if spec.role == "owner_ingest" && enforced {
+            context.insert(EFFECT_TOOLS_CONTEXT_KEY.to_owned(), "deny".to_owned());
+            context.insert("tools_exclude".to_owned(), self.effect_tools());
+        }
+        context
+    }
+
     /// `open_session` for a role. The engine's mixed wire casing is kept: `retain_on_disconnect`
     /// and `auto_title` are snake_case, the rest camelCase.
     pub fn open_session_command(
@@ -393,6 +516,7 @@ impl MhcProfile {
         spec: &RoleSpec,
         durable_session_id: &str,
         session_path: Option<&str>,
+        capabilities: &[String],
     ) -> Value {
         let mut command = json!({
             "type": "open_session",
@@ -400,7 +524,7 @@ impl MhcProfile {
             "auto_title": false,
             "retain_on_disconnect": false,
             "durableSessionId": durable_session_id,
-            "context": spec.context,
+            "context": self.session_context(spec, capabilities),
         });
         if let Some(path) = session_path {
             command["sessionPath"] = json!(path);
@@ -414,6 +538,25 @@ impl MhcProfile {
         }
         command
     }
+}
+
+/// The exclusive engine ownership lock; released when dropped.
+#[derive(Debug)]
+pub struct ProfileLock {
+    _file: std::fs::File,
+}
+
+/// True while some holder owns `<state_dir>/mhc-supervisor.lock`: a live engine owner exists.
+/// A missing or free lock file is false. The probe takes the lock only for an instant.
+pub fn profile_lock_held(state_dir: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(state_dir.join(LOCK_FILENAME))
+    else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
 /// `{"memory":{"agent":"ferryx-supervisor"}}`: the omo memory component resolves the native
@@ -505,6 +648,12 @@ impl SessionStore {
         self.file.sessions.get(key)
     }
 
+    /// Re-reads the store from disk: another supervisor process may have written it while it
+    /// owned the profile.
+    pub fn reload(&mut self) {
+        *self = Self::load(self.path.clone());
+    }
+
     /// The role key persisted under `durable_session_id`.
     pub fn key_of(&self, durable_session_id: &str) -> Option<&str> {
         self.file
@@ -538,7 +687,8 @@ impl SessionStore {
         self.save()
     }
 
-    /// Writes through a temporary file and a rename, owner-only on unix.
+    /// Writes through a uniquely named temporary file and a rename, owner-only on unix, so two
+    /// writers never share a temporary file.
     fn save(&mut self) -> Result<()> {
         self.file.version = 1;
         if let Some(parent) = self.path.parent() {
@@ -546,14 +696,26 @@ impl SessionStore {
         }
         let text = serde_json::to_string_pretty(&self.file)
             .map_err(|error| crate::error::HubError::message(error.to_string()))?;
-        let temp = self.path.with_extension("json.tmp");
+        let temp = self.path.with_extension(format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::write(&temp, text)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+            if let Err(error) =
+                std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error.into());
+            }
         }
-        std::fs::rename(&temp, &self.path)?;
+        if let Err(error) = std::fs::rename(&temp, &self.path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error.into());
+        }
         Ok(())
     }
 }

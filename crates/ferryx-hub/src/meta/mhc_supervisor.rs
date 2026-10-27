@@ -15,12 +15,17 @@
 //! - Faults are typed and secret-redacted. There is no model fallback: a provider failure is
 //!   reported, never answered by another model, and an engine-side model fallback is refused.
 //! - An in-flight turn is never retransmitted after the engine exits.
+//! - One process owns the profile at a time: the exclusive OS lock `<data>/mhc-supervisor.lock`
+//!   is taken before the launch and released only once the owned child is reaped. A successor
+//!   (a handover's new daemon) waits a bounded time for it, then reports
+//!   [`SupervisorFault::ProfileBusy`] with nothing launched or sent.
 //! - Teardown: the engine lives as long as a hub generation supervises it. When that
 //!   generation ends (hub stop, handover retirement) the engine's stdin is closed, it gets
-//!   [`SHUTDOWN_GRACE`] to exit, then it is killed; no call relaunches it until the next
-//!   generation supervises again. A process that never owned the engine (the MCP server)
+//!   [`SHUTDOWN_GRACE`] to exit, then it is killed and reaped; no call relaunches it until the
+//!   next generation supervises again. A process that never owned the engine (the MCP server)
 //!   reports [`SupervisorFault::NotRunning`] instead of using another model.
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -37,18 +42,28 @@ use tokio::sync::{mpsc, oneshot, watch, OwnedMutexGuard, OwnedSemaphorePermit, S
 
 use super::mhc_fault::{redact, SupervisorFault, TurnContext, TurnFault};
 use super::mhc_profile::{
-    ConversationScope, MhcProfile, PersistedSession, RoleSpec, SessionRole, SessionStore,
-    CLIENT_CAPABILITIES, DECISION_SLOTS,
+    profile_lock_held, ConversationScope, MhcProfile, MhcProfileConfig, PersistedSession,
+    ProfileLock, RoleSpec, SessionRole, SessionStore, CLIENT_CAPABILITIES, DECISION_SLOTS,
 };
 use super::mhc_stdio::{BoxedReader, BoxedWriter, RequestError, StdioClient, WORK_REPLY_REQUEST};
 use crate::error::HubError;
 use crate::lanes::kibitzer::ModelTurn;
 
-/// First relaunch delay after a failed launch; doubled per failure up to [`MAX_BACKOFF`].
+/// First relaunch delay after a failed launch or an early exit; doubled per failure up to
+/// [`MAX_BACKOFF`].
 pub const MIN_BACKOFF: Duration = Duration::from_secs(5);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// How long a stopping engine gets to exit after its stdin closes before it is killed.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// How long a killed engine gets to be reaped before its profile lock is released anyway.
+pub const KILL_WAIT: Duration = Duration::from_secs(5);
+/// An engine that exits sooner than this after its launch counts as a failed launch for the
+/// relaunch backoff; one that ran longer resets the backoff.
+pub const STABLE_UPTIME: Duration = Duration::from_secs(60);
+/// Retry interval while another supervisor holds the profile lock.
+const PROFILE_LOCK_POLL: Duration = Duration::from_millis(250);
+/// Work-tool requests answered at once; further requests wait in the bounded work queue.
+const MAX_WORK_IN_FLIGHT: usize = 8;
 /// [`Inner::run_state`] once the engine is stopped with the hub. `0` is unsupervised use
 /// (tests, a direct start); any other value is the token of the supervising generation.
 const STOPPED: u64 = u64::MAX;
@@ -67,11 +82,14 @@ const DIALOG_METHODS: [&str; 6] = [
 pub type ExitFuture = Pin<Box<dyn Future<Output = Option<bool>> + Send>>;
 
 /// A started engine: its stdout and stdin, and the owned process identity when there is one.
+/// `exited` resolves once the owned process is reaped; sending on (or dropping) `kill` kills
+/// it first.
 pub struct Launched {
     pub reader: BoxedReader,
     pub writer: BoxedWriter,
     pub pid: Option<u32>,
     pub exited: Option<ExitFuture>,
+    pub kill: Option<oneshot::Sender<()>>,
 }
 
 /// Starts the engine. Production spawns the owned child; tests script a stdio peer.
@@ -180,14 +198,28 @@ impl EngineLauncher for ProcessLauncher {
                 tracing::warn!(%error, pid, "mhc supervisor pid was not recorded");
             }
         }
+        let (kill, killed) = oneshot::channel::<()>();
         let exited: ExitFuture = Box::pin(async move {
-            child.wait().await.ok().map(|status| status.success())
+            let waited = tokio::select! {
+                status = child.wait() => Some(status),
+                _ = killed => None,
+            };
+            let status = match waited {
+                Some(status) => status,
+                // Asked to stop, or every handle on the engine is gone: kill, then reap.
+                None => {
+                    let _ = child.kill().await;
+                    child.wait().await
+                }
+            };
+            status.ok().map(|status| status.success())
         });
         Ok(Launched {
             reader: Box::new(stdout),
             writer: Box::new(stdin),
             pid,
             exited: Some(exited),
+            kill: Some(kill),
         })
     }
 }
@@ -251,6 +283,8 @@ fn request_fault(operation: &str, error: RequestError) -> SupervisorFault {
 #[serde(rename_all = "snake_case")]
 pub enum HealthState {
     Stopped,
+    /// Another supervisor still owns the profile lock; the launch waits for it to end.
+    Waiting,
     Ready,
     /// The last launch failed; [`SupervisorHealth::fault`] names why. No automatic action runs.
     Degraded,
@@ -419,9 +453,15 @@ struct Engine {
     info: ProtocolInfo,
     /// Live routing handles of durable roles.
     handles: Mutex<HashMap<String, OpenSession>>,
-    exit_task: Option<tokio::task::JoinHandle<Option<bool>>>,
-    /// Turns true when the owned process exited.
+    /// True when there is an owned process to wait for and kill.
+    owned: bool,
+    /// Kills the owned process; its exit watcher reaps it.
+    kill: Mutex<Option<oneshot::Sender<()>>>,
+    /// Turns true when the owned process was reaped.
     exited: watch::Receiver<bool>,
+    /// The cross-process profile lock, held until the owned process is reaped.
+    lock: Mutex<Option<ProfileLock>>,
+    launched_at: tokio::time::Instant,
 }
 
 impl Engine {
@@ -448,34 +488,72 @@ impl Engine {
 
     /// Closes stdin so the engine's stdio host ends on its own, waits up to `grace` for the
     /// owned process to exit (or, with no owned process, for its stdout to close), then kills
-    /// whatever is left.
+    /// and reaps whatever is left (bounded by [`KILL_WAIT`]). The profile lock is released only
+    /// after that. Calling it again is harmless.
     async fn terminate(&self, grace: Duration) {
         self.client.close();
-        let owned = self.exit_task.is_some();
-        let mut exited = self.exited.clone();
-        let ended = tokio::time::timeout(grace, async {
-            if owned {
-                let _ = exited.wait_for(|done| *done).await;
-            } else {
-                self.client.closed().await;
-            }
-        })
-        .await
-        .is_ok();
-        if !ended {
+        if tokio::time::timeout(grace, self.ended()).await.is_err() {
             tracing::warn!(generation = self.generation, pid = ?self.pid, "mhc supervisor engine did not exit after stdin closed; it is killed");
+            self.kill();
+            if tokio::time::timeout(KILL_WAIT, self.ended()).await.is_err() {
+                tracing::error!(generation = self.generation, pid = ?self.pid, "mhc supervisor engine was not reaped after the kill; its profile lock is released anyway");
+            }
         }
-        if let Some(task) = &self.exit_task {
-            task.abort();
+        drop(
+            self.lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+    }
+
+    /// Resolves once the owned process was reaped, or with none, once its stdout closed.
+    async fn ended(&self) {
+        if self.owned {
+            let mut exited = self.exited.clone();
+            let _ = exited.wait_for(|done| *done).await;
+        } else {
+            self.client.closed().await;
+        }
+    }
+
+    fn kill(&self) {
+        let kill = self
+            .kill
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(kill) = kill {
+            let _ = kill.send(());
         }
     }
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        // Dropping the exit watcher drops the child, which kills it (kill_on_drop).
-        if let Some(task) = &self.exit_task {
-            task.abort();
+        // The last handle went without a terminate: kill the owned process, and keep the
+        // profile lock until it is reaped so no successor launches beside it.
+        let kill = self
+            .kill
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(kill) = kill {
+            let _ = kill.send(());
+        }
+        let lock = self
+            .lock
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let (true, Some(lock)) = (self.owned, lock) {
+            let mut exited = self.exited.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = tokio::time::timeout(KILL_WAIT, exited.wait_for(|done| *done)).await;
+                    drop(lock);
+                });
+            }
         }
     }
 }
@@ -514,6 +592,10 @@ struct Cleanup {
     events: mpsc::UnboundedReceiver<Value>,
     abort: bool,
     close: bool,
+    /// The turn's outcome is unknown (a prompt that may still be accepted late, or one the
+    /// engine queued or handled instead of starting): a durable role forgets its handle and
+    /// the session is closed, so nothing of this turn can reach the role's next turn.
+    reset: bool,
 }
 
 enum Step {
@@ -640,14 +722,26 @@ fn cleanup(
     events: mpsc::UnboundedReceiver<Value>,
     abort: bool,
     close: bool,
+    reset: bool,
 ) -> Option<Cleanup> {
-    (abort || close).then_some(Cleanup {
+    (abort || close || reset).then_some(Cleanup {
         engine,
         handle,
         events,
         abort,
         close,
+        reset,
     })
+}
+
+/// mhc runs a prompt that starts with `/` as a slash command (`/model` would switch the
+/// supervisor's model) instead of a turn. A leading space keeps any text an ordinary turn.
+fn escape_command(message: &str) -> Cow<'_, str> {
+    if message.starts_with('/') {
+        Cow::Owned(format!(" {message}"))
+    } else {
+        Cow::Borrowed(message)
+    }
 }
 
 struct Inner {
@@ -738,13 +832,14 @@ impl Inner {
             engine.terminate(SHUTDOWN_GRACE).await;
             self.note_exit(&engine);
         }
-        drop(state);
+        // Still under the engine lock: a successor launch cannot be overwritten as stopped.
         self.health.send_modify(|health| {
             health.state = HealthState::Stopped;
             health.pid = None;
             health.fault = None;
             health.detail = Some("stopped with the hub".to_owned());
         });
+        drop(state);
         tracing::info!("mhc supervisor engine stopped with the hub");
     }
 
@@ -759,7 +854,7 @@ impl Inner {
     }
 
     /// The current engine, launching it when there is none. Within the backoff window after a
-    /// failed launch the last fault is returned without another launch.
+    /// failed launch or an early exit the last fault is returned without another launch.
     async fn engine(self: &Arc<Self>) -> Result<Arc<Engine>, SupervisorFault> {
         let mut state = self.engine.lock().await;
         if self.is_stopped() {
@@ -776,7 +871,8 @@ impl Inner {
                 return Ok(engine);
             }
             state.current = None;
-            self.note_exit(&engine);
+            engine.terminate(SHUTDOWN_GRACE).await;
+            self.record_exit(&mut state, &engine);
         }
         if let (Some(retry_at), Some(fault)) = (state.retry_at, state.last_fault.clone()) {
             if tokio::time::Instant::now() < retry_at {
@@ -790,7 +886,8 @@ impl Inner {
                 state.current = Some(engine.clone());
                 state.last_fault = None;
                 state.retry_at = None;
-                state.backoff = MIN_BACKOFF;
+                // The backoff resets once this engine has run for STABLE_UPTIME (record_exit),
+                // so an engine that keeps exiting right after its launch still backs off.
                 tracing::info!(generation, pid = ?engine.pid, server_version = ?engine.info.server_version, "mhc supervisor engine is ready");
                 self.health.send_replace(SupervisorHealth {
                     state: HealthState::Ready,
@@ -823,49 +920,103 @@ impl Inner {
     }
 
     async fn launch(self: &Arc<Self>, generation: u64) -> Result<Arc<Engine>, SupervisorFault> {
+        let lock = self.acquire_profile_lock().await?;
+        // Another supervisor process may have written the store while it owned the profile.
+        self.store().reload();
         let Launched {
             reader,
             writer,
             pid,
             exited,
+            kill,
         } = self.launcher.launch(&self.profile).await?;
+        let owned = exited.is_some();
         let (exit_tx, exit_rx) = watch::channel(false);
-        let exit_task = exited.map(|exited| {
+        if let Some(exited) = exited {
             tokio::spawn(async move {
                 let status = exited.await;
+                tracing::info!(?status, "mhc supervisor engine process was reaped");
                 exit_tx.send_replace(true);
-                status
-            })
-        });
+            });
+        }
         let (client, work) =
             StdioClient::start(reader, writer, self.profile.config.timeouts.max_line_bytes);
-        let info = match handshake(&client, &self.profile).await {
-            Ok(info) => info,
+        let checked = handshake(&client, &self.profile).await;
+        let mut engine = Engine {
+            client,
+            generation,
+            pid,
+            info: ProtocolInfo {
+                protocol_version: 0,
+                server_version: None,
+                capabilities: Vec::new(),
+            },
+            handles: Mutex::new(HashMap::new()),
+            owned,
+            kill: Mutex::new(kill),
+            exited: exit_rx,
+            lock: Mutex::new(Some(lock)),
+            launched_at: tokio::time::Instant::now(),
+        };
+        match checked {
+            Ok(info) => engine.info = info,
             Err(fault) => {
-                if let Some(task) = exit_task {
-                    task.abort();
-                }
+                // Nothing was sent past the handshake; the process is ended and reaped before
+                // the profile lock is released.
+                engine.terminate(SHUTDOWN_GRACE).await;
                 if let Some(pid) = pid {
                     self.profile.forget_pid(pid);
                 }
                 return Err(fault);
             }
-        };
-        let engine = Arc::new(Engine {
-            client,
-            generation,
-            pid,
-            info,
-            handles: Mutex::new(HashMap::new()),
-            exit_task,
-            exited: exit_rx,
-        });
+        }
+        let engine = Arc::new(engine);
         tokio::spawn(serve_work(
             Arc::downgrade(self),
             Arc::downgrade(&engine),
             work,
         ));
         Ok(engine)
+    }
+
+    /// Takes the cross-process profile lock, waiting while another supervisor (a handover's
+    /// retiring daemon) still owns the engine profile: at least [`SHUTDOWN_GRACE`] plus the
+    /// abort drain plus [`KILL_WAIT`]. Past that the launch fails as
+    /// [`SupervisorFault::ProfileBusy`] with nothing launched or sent.
+    async fn acquire_profile_lock(&self) -> Result<ProfileLock, SupervisorFault> {
+        let wait = SHUTDOWN_GRACE + self.profile.config.timeouts.drain + KILL_WAIT;
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut waiting = false;
+        loop {
+            match self.profile.try_lock() {
+                Ok(Some(lock)) => return Ok(lock),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(SupervisorFault::launch(&format!(
+                        "the profile lock {} could not be taken: {error}",
+                        self.profile.lock_path().display()
+                    )))
+                }
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(SupervisorFault::profile_busy(&format!(
+                    "another supervisor still owns {} after {}s",
+                    self.profile.lock_path().display(),
+                    wait.as_secs()
+                )));
+            }
+            if !waiting {
+                waiting = true;
+                tracing::info!(lock = %self.profile.lock_path().display(), "another supervisor owns the engine profile; the launch waits for it to end");
+                self.health.send_modify(|health| {
+                    health.state = HealthState::Waiting;
+                    health.pid = None;
+                });
+            }
+            tokio::time::sleep(PROFILE_LOCK_POLL.min(deadline.saturating_duration_since(now)))
+                .await;
+        }
     }
 
     fn note_exit(&self, engine: &Engine) {
@@ -894,9 +1045,33 @@ impl Inner {
             .is_some_and(|current| Arc::ptr_eq(current, engine))
         {
             state.current = None;
+            engine.terminate(SHUTDOWN_GRACE).await;
+            self.record_exit(&mut state, engine);
         }
-        drop(state);
+    }
+
+    /// Notes an engine that exited on its own. One that exited within [`STABLE_UPTIME`] of its
+    /// launch counts as a failed launch: the next launch waits out the backoff, which doubles.
+    /// One that ran longer resets the backoff.
+    fn record_exit(&self, state: &mut EngineState, engine: &Engine) {
         self.note_exit(engine);
+        let uptime = engine.launched_at.elapsed();
+        if uptime >= STABLE_UPTIME {
+            state.backoff = MIN_BACKOFF;
+            return;
+        }
+        let reason = engine
+            .client
+            .gone_reason()
+            .unwrap_or_else(|| "engine transport ended".to_owned());
+        let fault = SupervisorFault::engine_exited(&format!(
+            "the engine exited {}s after its launch: {reason}",
+            uptime.as_secs()
+        ));
+        tracing::warn!(%fault, backoff_secs = state.backoff.as_secs(), "mhc supervisor engine exited early; the relaunch backs off");
+        state.last_fault = Some(fault);
+        state.retry_at = Some(tokio::time::Instant::now() + state.backoff);
+        state.backoff = (state.backoff * 2).min(MAX_BACKOFF);
     }
 
     async fn retry_delay(&self) -> Duration {
@@ -935,9 +1110,12 @@ impl Inner {
                 }
                 present
             });
-        let command = self
-            .profile
-            .open_session_command(spec, &durable_id, resume_path.as_deref());
+        let command = self.profile.open_session_command(
+            spec,
+            &durable_id,
+            resume_path.as_deref(),
+            &engine.info.capabilities,
+        );
         let data = engine
             .client
             .request(command, self.profile.config.timeouts.request)
@@ -956,9 +1134,7 @@ impl Inner {
             .unwrap_or_default()
             .to_owned();
         if returned != durable_id {
-            let _ = engine
-                .client
-                .send(&json!({"type": "close_session", "sessionId": handle}));
+            engine.client.close_session(&handle);
             tracing::warn!(role = %spec.key, "a resumed supervisor session returned another identity; it was refused");
             return Err(SupervisorFault::SessionMismatch {
                 role: spec.key.clone(),
@@ -1049,37 +1225,65 @@ impl Inner {
         };
         let handle = session.handle;
         let close = !spec.durable;
+        // A durable role whose turn outcome is unknown reopens with a fresh handle.
+        let reset = spec.durable;
         let mut events = match engine.client.subscribe(&handle) {
             Ok(events) => events,
             Err(error) => return (Err(request_fault("subscribe", error)), None),
         };
         let client = engine.client.clone();
         let prompt = client.request(
-            json!({"type": "prompt", "sessionId": handle, "message": message}),
+            json!({"type": "prompt", "sessionId": handle, "message": escape_command(message)}),
             self.profile.config.timeouts.request,
         );
         let accepted = tokio::select! {
             accepted = prompt => accepted,
             () = cancel_signal(cancel, epoch, spec.cancellable) => {
-                return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close));
+                return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close, reset));
             }
             () = caller.closed() => {
-                return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close));
+                return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close, reset));
             }
         };
-        if let Err(error) = accepted {
-            let unknown = matches!(
-                &error,
-                RequestError::Refused { code: Some(code), .. }
-                    if code == "unknown_session" || code == "session_closing"
-            );
-            if unknown {
-                engine.forget(&spec.key);
+        let data = match accepted {
+            Ok(data) => data,
+            // No answer in time: the engine may still accept the prompt later, so the outcome
+            // is unknown. The turn is aborted and drained, and the role reopens clean.
+            Err(RequestError::Timeout) => {
+                return (
+                    Err(SupervisorFault::timeout("prompt")),
+                    cleanup(engine, handle, events, true, close, reset),
+                );
             }
-            engine.client.unsubscribe(&handle);
+            Err(error) => {
+                let unknown = matches!(
+                    &error,
+                    RequestError::Refused { code: Some(code), .. }
+                        if code == "unknown_session" || code == "session_closing"
+                );
+                if unknown {
+                    engine.forget(&spec.key);
+                }
+                engine.client.unsubscribe(&handle);
+                return (
+                    Err(request_fault("prompt", error)),
+                    cleanup(engine, handle, events, false, close, false),
+                );
+            }
+        };
+        // Only a started turn produces this prompt's answer. A queued prompt would collect an
+        // earlier turn's events; a handled one (a command) runs no turn at all.
+        let disposition = data
+            .get("disposition")
+            .and_then(Value::as_str)
+            .unwrap_or("unreported");
+        if disposition != "started" {
+            let fault = SupervisorFault::protocol(&format!(
+                "the engine reported the prompt as {disposition}, not started; it was aborted"
+            ));
             return (
-                Err(request_fault("prompt", error)),
-                cleanup(engine, handle, events, false, close),
+                Err(fault),
+                cleanup(engine, handle, events, true, close, reset),
             );
         }
         let deadline = tokio::time::Instant::now() + self.profile.config.timeouts.turn;
@@ -1087,13 +1291,13 @@ impl Inner {
         loop {
             tokio::select! {
                 () = cancel_signal(cancel, epoch, spec.cancellable) => {
-                    return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close));
+                    return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close, false));
                 }
                 () = caller.closed() => {
-                    return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close));
+                    return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close, false));
                 }
                 () = tokio::time::sleep_until(deadline) => {
-                    return (Err(SupervisorFault::timeout("supervisor turn")), cleanup(engine, handle, events, true, close));
+                    return (Err(SupervisorFault::timeout("supervisor turn")), cleanup(engine, handle, events, true, close, false));
                 }
                 event = events.recv() => {
                     let Some(event) = event else {
@@ -1107,7 +1311,7 @@ impl Inner {
                         Step::More => {}
                         Step::Settled(result) => {
                             engine.client.unsubscribe(&handle);
-                            return (result, cleanup(engine, handle, events, false, close));
+                            return (result, cleanup(engine, handle, events, false, close, false));
                         }
                         Step::Closed(reason) => {
                             engine.forget(&spec.key);
@@ -1116,7 +1320,7 @@ impl Inner {
                             return (Err(SupervisorFault::session_closed(&reason)), None);
                         }
                         Step::Refuse(fault) => {
-                            return (Err(fault), cleanup(engine, handle, events, true, close));
+                            return (Err(fault), cleanup(engine, handle, events, true, close, false));
                         }
                     }
                 }
@@ -1125,7 +1329,8 @@ impl Inner {
     }
 
     /// Aborts and drains a turn its caller no longer waits for, then closes a one-shot context.
-    /// A context that does not settle in time is dropped, so its next use resumes cleanly.
+    /// A context that does not settle in time, or whose turn outcome is unknown (`reset`), is
+    /// dropped and closed, so its next use resumes cleanly with a fresh handle.
     async fn finish(&self, spec: &RoleSpec, after: Cleanup) {
         let Cleanup {
             engine,
@@ -1133,12 +1338,13 @@ impl Inner {
             mut events,
             abort,
             close,
+            reset,
         } = after;
-        if abort {
+        let settled = if abort {
             let _ = engine
                 .client
                 .send(&json!({"type": "abort", "sessionId": handle}));
-            let settled = tokio::time::timeout(self.profile.config.timeouts.drain, async {
+            tokio::time::timeout(self.profile.config.timeouts.drain, async {
                 while let Some(event) = events.recv().await {
                     if let Some(reply) = ui_cancellation(&event) {
                         let _ = engine.client.send(&reply);
@@ -1152,19 +1358,17 @@ impl Inner {
                 false
             })
             .await
-            .unwrap_or(false);
-            if !settled && !close {
-                engine.forget(&spec.key);
-                let _ = engine
-                    .client
-                    .send(&json!({"type": "close_session", "sessionId": handle}));
-            }
+            .unwrap_or(false)
+        } else {
+            true
+        };
+        if (reset || !settled) && !close {
+            engine.forget(&spec.key);
+            engine.client.close_session(&handle);
         }
         engine.client.unsubscribe(&handle);
         if close {
-            let _ = engine
-                .client
-                .send(&json!({"type": "close_session", "sessionId": handle}));
+            engine.client.close_session(&handle);
         }
     }
 
@@ -1263,13 +1467,20 @@ async fn handshake(client: &StdioClient, profile: &MhcProfile) -> Result<Protoco
     Ok(info)
 }
 
-async fn serve_work(inner: Weak<Inner>, engine: Weak<Engine>, mut requests: mpsc::UnboundedReceiver<Value>) {
+/// Answers work requests, at most [`MAX_WORK_IN_FLIGHT`] at once; the rest wait in the bounded
+/// work queue.
+async fn serve_work(inner: Weak<Inner>, engine: Weak<Engine>, mut requests: mpsc::Receiver<Value>) {
+    let limit = Arc::new(Semaphore::new(MAX_WORK_IN_FLIGHT));
     while let Some(record) = requests.recv().await {
+        let Ok(permit) = limit.clone().acquire_owned().await else {
+            return;
+        };
         let (Some(inner), Some(engine)) = (inner.upgrade(), engine.upgrade()) else {
             return;
         };
         tokio::spawn(async move {
             inner.answer_work(&engine, record).await;
+            drop(permit);
         });
     }
 }
@@ -1587,6 +1798,10 @@ impl ModelTurn for MhcModel {
     fn owns_deadline(&self) -> bool {
         true
     }
+
+    fn is_supervisor_engine(&self) -> bool {
+        true
+    }
 }
 
 /// [`ModelTurn`] that resolves the process-wide supervisor at call time. A judge built before
@@ -1619,6 +1834,10 @@ impl ModelTurn for InstalledModel {
     fn owns_deadline(&self) -> bool {
         true
     }
+
+    fn is_supervisor_engine(&self) -> bool {
+        true
+    }
 }
 
 static INSTALLED: OnceLock<MhcSupervisor> = OnceLock::new();
@@ -1632,12 +1851,32 @@ pub fn installed() -> Option<MhcSupervisor> {
     INSTALLED.get().cloned()
 }
 
-/// The supervisor judge's model when the mhc supervisor is configured for this hub (installed
-/// here, or `FERRYX_HUB_MHC_SUPERVISOR` on); `None` otherwise. It is then the only model: it
-/// never falls back to the omo app-server.
+/// The supervisor judge's model when the mhc supervisor is configured for this hub; `None`
+/// otherwise. It is then the only model: it never falls back to the omo app-server. Besides an
+/// engine installed in this process, the decision reads only sources every hub process shares
+/// (see [`configured_in`]), never one process's environment, so the MCP server and CLI agree
+/// with the daemon and report [`SupervisorFault::NotRunning`] instead of using the omo model.
 pub fn configured_model() -> Option<Arc<dyn ModelTurn>> {
+    // Tests never read the developer's hub env file or data directory.
     let configured = installed().is_some()
-        || (!cfg!(test) && super::mhc_profile::MhcProfileConfig::from_env().is_some());
+        || (!cfg!(test)
+            && configured_in(
+                crate::hub_env::file_env(),
+                super::supervisor::state_dir_from_home().as_deref(),
+            ));
+    model_when(configured)
+}
+
+/// Whether this hub's supervisor is mhc, from shared sources only:
+/// [`super::mhc_profile::ENABLE_KEY`] in the hub env file entries (`shared_env`), or a live
+/// engine owner holding the profile lock under `state_dir` (covers a daemon that still runs the
+/// engine after the file changed).
+pub fn configured_in(shared_env: &BTreeMap<String, String>, state_dir: Option<&Path>) -> bool {
+    MhcProfileConfig::enabled_in(shared_env) || state_dir.is_some_and(profile_lock_held)
+}
+
+/// The judge model for a hub whose supervisor is (or is not) mhc.
+pub fn model_when(configured: bool) -> Option<Arc<dyn ModelTurn>> {
     configured.then(|| Arc::new(InstalledModel) as Arc<dyn ModelTurn>)
 }
 

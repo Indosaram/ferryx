@@ -1200,10 +1200,10 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     }
     // The retained mhc supervisor engine: one owned `mhc --mode rpc --multi-session` stdio host
     // in `<data>/mhc-supervisor` with role-scoped sessions. Off unless FERRYX_HUB_MHC_SUPERVISOR
-    // turns it on. Hub generations share the one process-wide instance; each generation
-    // supervises it (launch, owned-exit watch, 5s..300s relaunch backoff). Aborting the
-    // generation's tasks (hub stop, handover retirement) closes the engine's stdin and kills
-    // it after a short grace; the next generation's supervise call re-enables it.
+    // in the hub env file turns it on. Hub generations share the one process-wide instance;
+    // each generation supervises it (launch, owned-exit watch, 5s..300s relaunch backoff).
+    // Aborting the generation's tasks (hub stop, handover retirement) closes the engine's stdin
+    // and kills it after a short grace; the next generation's supervise call re-enables it.
     let mhc_supervisor = ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env().map(|config| {
         ferryx_hub::meta::mhc_supervisor::install_with(|| {
             let data_dir = ferryx_hub::meta::supervisor::state_dir_from_home()

@@ -1,7 +1,7 @@
 //! Scripted stdio peer tests of the retained mhc supervisor runtime. The peer is an in-process
 //! duplex harness that answers like `mhc --mode rpc --multi-session`; every wait is on an
 //! observed frame or state change with a bounded deadline, never on a fixed sleep.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -67,6 +67,14 @@ struct Peer {
     next: AtomicU64,
     /// Connections whose stdin the client closed.
     ended: AtomicUsize,
+    /// Connections open now, and the most ever open at once.
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    /// Prompts not acknowledged yet, by routing handle: their response (and turn) is released
+    /// by the next prompt or the close on that handle, as a late acceptance would arrive.
+    late: Mutex<HashMap<String, Value>>,
+    /// Prompt disposition to report instead of `started`.
+    disposition: Mutex<Option<String>>,
     flags: PeerFlags,
 }
 
@@ -84,12 +92,18 @@ impl Peer {
             out: Mutex::new(None),
             next: AtomicU64::new(0),
             ended: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            late: Mutex::new(HashMap::new()),
+            disposition: Mutex::new(None),
             flags: PeerFlags::default(),
         })
     }
 
     async fn serve(self: Arc<Self>, stream: tokio::io::DuplexStream) {
         let connection = self.next.fetch_add(1, Ordering::SeqCst);
+        let now_active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(now_active, Ordering::SeqCst);
         let (read, mut write) = tokio::io::split(stream);
         let (sender, mut lines) = mpsc::unbounded_channel::<String>();
         *self.out.lock().unwrap() = Some((connection, sender));
@@ -108,6 +122,7 @@ impl Peer {
             self.changed.send_modify(|count| *count += 1);
             self.handle(frame);
         }
+        self.active.fetch_sub(1, Ordering::SeqCst);
         let mut out = self.out.lock().unwrap();
         if out.as_ref().is_some_and(|(current, _)| *current == connection) {
             *out = None;
@@ -136,6 +151,28 @@ impl Peer {
         self.emit(json!({"type": "message_end", "sessionId": handle, "message": {
             "role": "assistant", "content": [{"type": "text", "text": text}], "stopReason": "stop"}}));
         self.emit(json!({"type": "agent_settled", "sessionId": handle}));
+    }
+
+    /// Accepts and runs a prompt left unacknowledged on `handle`, answering "late text".
+    fn release_late(&self, handle: &str) {
+        let Some(id) = self.late.lock().unwrap().remove(handle) else {
+            return;
+        };
+        self.emit(json!({"type": "response", "id": id, "command": "prompt", "success": true,
+            "sessionId": handle, "data": {"disposition": "started"}}));
+        self.emit(json!({"type": "agent_start", "sessionId": handle}));
+        self.assistant(handle, "late text");
+    }
+
+    /// Settles the one hung turn with `text`.
+    fn settle_hung(&self, text: &str) {
+        let handle = {
+            let mut hung = self.hung.lock().unwrap();
+            let handle = hung.iter().next().cloned().expect("a hung turn");
+            hung.remove(&handle);
+            handle
+        };
+        self.assistant(&handle, text);
     }
 
     fn handle(&self, frame: Value) {
@@ -207,7 +244,21 @@ impl Peer {
             "prompt" => {
                 let handle = session.clone().expect("a prompt is routed to a session");
                 let message = frame["message"].as_str().unwrap_or_default().to_owned();
-                self.emit(ok(json!({"disposition": "handled"})));
+                self.release_late(&handle);
+                if message.contains("LATE") {
+                    self.late.lock().unwrap().insert(handle, id.clone());
+                    return;
+                }
+                let disposition = self
+                    .disposition
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "started".to_owned());
+                self.emit(ok(json!({"disposition": disposition})));
+                if disposition != "started" {
+                    return;
+                }
                 self.emit(json!({"type": "agent_start", "sessionId": handle}));
                 if message.contains("HANG") {
                     self.hung.lock().unwrap().insert(handle);
@@ -247,6 +298,12 @@ impl Peer {
                 self.emit(ok(json!({"delivered": true})));
                 let handle = session.clone().expect("a work reply is routed to a session");
                 self.assistant(&handle, &frame["data"].to_string());
+            }
+            "close_session" => {
+                let handle = session.clone().expect("a close names a session");
+                self.release_late(&handle);
+                self.emit(ok(Value::Null));
+                self.emit(json!({"type": "session_closed", "sessionId": handle, "reason": "client_closed"}));
             }
             _ => self.emit(ok(Value::Null)),
         }
@@ -320,12 +377,17 @@ struct FakeLauncher {
     peer: Arc<Peer>,
     cwds: Mutex<Vec<PathBuf>>,
     launches: AtomicUsize,
+    /// Every launch fails while set.
+    fail: AtomicBool,
 }
 
 #[async_trait]
 impl EngineLauncher for FakeLauncher {
     async fn launch(&self, profile: &MhcProfile) -> Result<Launched, SupervisorFault> {
         self.launches.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(SupervisorFault::launch("scripted launch failure"));
+        }
         self.cwds.lock().unwrap().push(profile.cwd().to_path_buf());
         let (client, peer) = tokio::io::duplex(1 << 16);
         tokio::spawn(self.peer.clone().serve(peer));
@@ -335,6 +397,7 @@ impl EngineLauncher for FakeLauncher {
             writer: Box::new(write),
             pid: None,
             exited: None,
+            kill: None,
         })
     }
 }
@@ -372,6 +435,7 @@ impl Harness {
             peer: peer.clone(),
             cwds: Mutex::new(Vec::new()),
             launches: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
         });
         Self { dir, peer, launcher }
     }
@@ -389,17 +453,33 @@ impl Harness {
     }
 }
 
-/// A round trip on the live transport: every record the peer emitted before it has been
-/// dispatched once this returns, because the engine's stdout is read in order.
-async fn barrier(supervisor: &MhcSupervisor) {
-    let engine = supervisor
+async fn current_engine(supervisor: &MhcSupervisor) -> Arc<Engine> {
+    supervisor
         .inner
         .engine
         .lock()
         .await
         .current
         .clone()
-        .expect("a live engine");
+        .expect("a live engine")
+}
+
+/// When the next relaunch is allowed, measured from now.
+async fn retry_in(supervisor: &MhcSupervisor) -> Duration {
+    supervisor
+        .inner
+        .engine
+        .lock()
+        .await
+        .retry_at
+        .expect("a relaunch is scheduled")
+        .saturating_duration_since(tokio::time::Instant::now())
+}
+
+/// A round trip on the live transport: every record the peer emitted before it has been
+/// dispatched once this returns, because the engine's stdout is read in order.
+async fn barrier(supervisor: &MhcSupervisor) {
+    let engine = current_engine(supervisor).await;
     engine
         .client
         .request(json!({"type": "get_protocol_info"}), WAIT)
@@ -409,6 +489,19 @@ async fn barrier(supervisor: &MhcSupervisor) {
 
 fn decision_context() -> Value {
     json!({"ferryx_role": "decision", "memory_write": "deny", "tools_exclude": "bash,edit,write"})
+}
+
+/// The owner-ingest exclusions on this platform without the engine-enforced effect deny.
+fn ingest_exclusions() -> String {
+    let mut names = vec![
+        "bash", "edit", "write", "bash_input", "bash_output", "bash_resize", "kill_bash",
+        "monitor", "eval", "apply_patch", "lsp_rename", "lsp_format", "ast_grep_replace",
+        "generate_image", "computer", "task", "dag", "workflow", "workpool",
+    ];
+    if cfg!(windows) {
+        names.push("powershell");
+    }
+    names.join(",")
 }
 
 #[tokio::test]
@@ -698,8 +791,8 @@ async fn a_hung_command_is_bounded_by_its_deadline() {
     assert!(harness.peer.of_type("prompt").is_empty());
 }
 
-#[tokio::test]
-async fn an_engine_exit_mid_turn_is_never_retransmitted() {
+#[tokio::test(start_paused = true)]
+async fn an_engine_exit_mid_turn_is_never_retransmitted_and_an_early_exit_backs_off() {
     let harness = Harness::new("exit", all_capabilities());
     let supervisor = harness.supervisor();
     let running = supervisor.clone();
@@ -715,9 +808,17 @@ async fn an_engine_exit_mid_turn_is_never_retransmitted() {
         .unwrap()
         .unwrap_err();
     assert_eq!(fault.code(), "MHC_ENGINE_EXITED");
+    // The engine exited right after its launch: that counts as a failed launch, so the next
+    // use inside the backoff window gets the exit fault and nothing relaunches.
+    let early = supervisor.decide("too soon").await.unwrap_err();
+    assert_eq!(early.code(), "MHC_ENGINE_EXITED");
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 1);
+    assert_eq!(retry_in(&supervisor).await, MIN_BACKOFF);
+    tokio::time::advance(MIN_BACKOFF).await;
     assert_eq!(supervisor.decide("fresh").await.unwrap(), "answer:fresh");
     assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 2);
     assert_eq!(count(&harness.peer.frames(), "prompt", "HANG"), 1);
+    assert_eq!(count(&harness.peer.frames(), "prompt", "too soon"), 0);
     let opens = harness.peer.of_type("open_session");
     assert_eq!(opens.len(), 2);
     assert_eq!(opens[1]["durableSessionId"], opens[0]["durableSessionId"]);
@@ -801,7 +902,7 @@ async fn owner_ingest_is_serialized_and_idempotent_across_restarts() {
     );
     assert_eq!(
         harness.peer.of_type("open_session")[0]["context"],
-        json!({"ferryx_role": "owner_ingest", "tools_exclude": "bash,edit,write"})
+        json!({"ferryx_role": "owner_ingest", "tools_exclude": ingest_exclusions()})
     );
     drop(supervisor);
     let restarted = harness.supervisor();
@@ -842,6 +943,9 @@ async fn convergence_gets_a_fresh_context_every_time() {
             frames.iter().filter(|frame| frame["type"] == "close_session").count() == 2
         })
         .await;
+    // The engine acknowledges each close; the one-shot routes are not kept afterwards.
+    barrier(&supervisor).await;
+    assert_eq!(current_engine(&supervisor).await.client.closed_routes(), 0);
     let store = SessionStore::load(supervisor.profile().sessions_path());
     assert!(store.get("convergence").is_none());
 }
@@ -925,6 +1029,7 @@ async fn the_judge_keeps_a_supervisor_turn_timeout_typed() {
     // The judge leaves the deadline to the engine client instead of its 30s omo deadline.
     assert!(model.owns_deadline());
     assert!(InstalledModel.owns_deadline());
+    assert!(model.is_supervisor_engine() && InstalledModel.is_supervisor_engine());
     let judge = crate::judge::Judge::bare().with_fallback(Arc::new(model));
     let judged = tokio::time::timeout(
         WAIT,
@@ -969,6 +1074,280 @@ async fn a_process_without_the_engine_reports_not_running_instead_of_another_mod
             Err(crate::goals::GoalError::SupervisorFault(SupervisorFault::NotRunning { .. }))
         ),
         "{judged:?}"
+    );
+}
+
+#[tokio::test]
+async fn whether_the_supervisor_is_mhc_comes_from_shared_sources_only() {
+    let dir = TempDir::new("configured");
+    let none = BTreeMap::new();
+    assert!(!configured_in(&none, None));
+    assert!(!configured_in(&none, Some(dir.path())));
+    let on = BTreeMap::from([("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "on".to_owned())]);
+    assert!(configured_in(&on, None));
+    let off = BTreeMap::from([("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "0".to_owned())]);
+    assert!(!configured_in(&off, None));
+    // A live engine owner holding the profile lock counts even when the file no longer says so.
+    let profile = MhcProfile::resolve(dir.path(), Path::new("/p"), config());
+    let held = profile.try_lock().unwrap().expect("the profile lock is free");
+    assert!(configured_in(&none, Some(dir.path())));
+    drop(held);
+    assert!(!configured_in(&none, Some(dir.path())));
+
+    // A process that does not own the engine (no install here) but whose shared source says
+    // mhc gets the installed-engine model: NotRunning, never an omo UrlModel.
+    assert!(model_when(false).is_none());
+    let model =
+        model_when(configured_in(&on, None)).expect("a configured hub has the engine model");
+    assert!(model.is_supervisor_engine() && model.owns_deadline());
+    let judged = crate::judge::Judge::bare()
+        .with_fallback(model)
+        .structured(crate::judge::Purpose::GapAssess, "question")
+        .await;
+    assert!(
+        matches!(
+            judged,
+            Err(crate::goals::GoalError::SupervisorFault(SupervisorFault::NotRunning { .. }))
+        ),
+        "{judged:?}"
+    );
+}
+
+#[tokio::test]
+async fn ingest_holds_no_effect_tools_and_denied_roles_need_the_effect_capability() {
+    let harness = Harness::new("ingest-scope", all_capabilities());
+    let supervisor = harness.supervisor();
+    supervisor.ingest_owner("slack:C1:1700.9", "Keep PRs small").await.unwrap();
+    let opens = harness.peer.of_type("open_session");
+    // Learning stays allowed (no memory_write key); every effect tool is named explicitly.
+    assert_eq!(
+        opens[0]["context"],
+        json!({"ferryx_role": "owner_ingest", "tools_exclude": ingest_exclusions()})
+    );
+
+    // An engine that enforces the effect deny itself gets the role key instead of the list.
+    let mut capabilities = all_capabilities();
+    capabilities.push("effect_tools_deny".to_owned());
+    let enforced = Harness::new("ingest-enforced", capabilities);
+    let supervisor = enforced.supervisor();
+    supervisor.ingest_owner("slack:C1:1701.0", "Keep PRs small").await.unwrap();
+    supervisor.decide("question").await.unwrap();
+    let opens = enforced.peer.of_type("open_session");
+    assert_eq!(
+        opens[0]["context"],
+        json!({"effect_tools": "deny", "ferryx_role": "owner_ingest", "tools_exclude": "bash,edit,write"})
+    );
+    assert_eq!(opens[1]["context"], decision_context());
+
+    // `memory_write_deny` alone does not pin the effect exclusions of denied sessions.
+    let mut without = all_capabilities();
+    without.retain(|capability| capability != "memory_write_deny_effects");
+    assert_eq!(
+        supervisor.profile().missing_capabilities(&without),
+        ["memory_write_deny_effects"]
+    );
+}
+
+#[tokio::test]
+async fn a_successor_supervisor_launches_only_after_the_first_engine_ended() {
+    let harness = Harness::new("handover", all_capabilities());
+    let first = harness.supervisor();
+    // Loaded before the first supervisor wrote any session identity.
+    let second = harness.supervisor();
+    assert_eq!(first.decide("before handover").await.unwrap(), "answer:before handover");
+    let durable = harness.peer.of_type("open_session")[0]["durableSessionId"].clone();
+
+    let mut health = second.subscribe_health();
+    let successor = second.clone();
+    let started = tokio::spawn(async move { successor.start().await });
+    tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Waiting))
+        .await
+        .expect("the successor waits for the profile")
+        .unwrap();
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 1);
+
+    first.shutdown().await;
+    tokio::time::timeout(WAIT, started)
+        .await
+        .expect("the successor launches once the first engine ended")
+        .unwrap()
+        .unwrap();
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.peer.max_active.load(Ordering::SeqCst), 1, "two engines ran at once");
+    assert_eq!(second.decide("after handover").await.unwrap(), "answer:after handover");
+    let opens = harness.peer.of_type("open_session");
+    assert_eq!(opens.len(), 2);
+    assert_eq!(opens[1]["durableSessionId"], durable);
+    assert!(opens[1].get("sessionPath").is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_profile_another_supervisor_keeps_degrades_as_busy_with_zero_sends() {
+    let harness = Harness::new("busy", all_capabilities());
+    let supervisor = harness.supervisor();
+    let held = supervisor
+        .profile()
+        .try_lock()
+        .unwrap()
+        .expect("the test takes the free profile lock");
+    let started = tokio::time::Instant::now();
+    let fault = supervisor.start().await.unwrap_err();
+    assert_eq!(fault.code(), "MHC_PROFILE_BUSY");
+    let waited = started.elapsed();
+    assert!(waited >= SHUTDOWN_GRACE + config().timeouts.drain, "{waited:?}");
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 0);
+    assert!(harness.peer.frames().is_empty());
+    let health = supervisor.health();
+    assert_eq!(health.state, HealthState::Degraded);
+    assert_eq!(health.fault, Some(fault.clone()));
+    drop(held);
+    assert_eq!(supervisor.decide("inside the backoff").await.unwrap_err(), fault);
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prompt_accepted_late_cannot_answer_the_next_decision() {
+    let harness = Harness::new("late", all_capabilities());
+    let supervisor = harness.supervisor();
+    let fault = supervisor.decide("LATE first").await.unwrap_err();
+    assert_eq!(fault, SupervisorFault::timeout("prompt"));
+    let old = harness.peer.of_type("prompt")[0]["sessionId"].clone();
+    // The outcome is unknown: the turn is aborted and its session closed before reuse.
+    harness
+        .peer
+        .wait_for("the abort and close of the unacknowledged prompt", |frames| {
+            let on_old = |kind: &str| {
+                frames
+                    .iter()
+                    .any(|frame| frame["type"] == kind && frame["sessionId"] == old)
+            };
+            on_old("abort") && on_old("close_session")
+        })
+        .await;
+    assert_eq!(supervisor.decide("next").await.unwrap(), "answer:next");
+    let prompts = harness.peer.of_type("prompt");
+    assert_eq!(prompts.len(), 2);
+    assert_ne!(prompts[1]["sessionId"], old);
+}
+
+#[tokio::test]
+async fn a_prompt_the_engine_did_not_start_is_aborted_as_a_protocol_fault() {
+    for disposition in ["handled", "queued"] {
+        let harness = Harness::new(&format!("disposition-{disposition}"), all_capabilities());
+        *harness.peer.disposition.lock().unwrap() = Some(disposition.to_owned());
+        let supervisor = harness.supervisor();
+        let fault = supervisor.decide("question").await.unwrap_err();
+        assert!(
+            matches!(&fault, SupervisorFault::Protocol { detail } if detail.contains(disposition)),
+            "{fault:?}"
+        );
+        harness
+            .peer
+            .wait_for("the abort of the unstarted prompt", |frames| {
+                frames.iter().any(|frame| frame["type"] == "abort")
+            })
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn concurrent_ingests_of_one_source_send_one_prompt() {
+    let harness = Harness::new("ingest-race", all_capabilities());
+    let supervisor = harness.supervisor();
+    let other = supervisor.clone();
+    let (a, b) = tokio::join!(
+        supervisor.ingest_owner("slack:C1:1700.2", "Prefer small PRs"),
+        other.ingest_owner("slack:C1:1700.2", "Prefer small PRs"),
+    );
+    let outcomes = [a.unwrap(), b.unwrap()];
+    let learned = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, IngestOutcome::Learned { .. }))
+        .count();
+    assert_eq!(learned, 1, "{outcomes:?}");
+    assert!(outcomes.contains(&IngestOutcome::Duplicate), "{outcomes:?}");
+    assert_eq!(harness.peer.of_type("prompt").len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_judge_waits_for_a_supervisor_turn_longer_than_the_omo_deadline() {
+    let harness = Harness::new("judge-long", all_capabilities());
+    let mut config = config();
+    config.timeouts.turn = Duration::from_secs(120);
+    let supervisor = MhcSupervisor::new(harness.profile("/parent", config), harness.launcher.clone());
+    let judge = crate::judge::Judge::bare().with_fallback(Arc::new(supervisor.model()));
+    let started = tokio::time::Instant::now();
+    let judging = tokio::spawn(async move {
+        judge
+            .structured(crate::judge::Purpose::GapAssess, "HANG long decision")
+            .await
+    });
+    harness
+        .peer
+        .wait_for("the long decision", |frames| count(frames, "prompt", "HANG") == 1)
+        .await;
+    // Past the omo judge's 30s deadline, still inside the supervisor turn deadline.
+    tokio::time::advance(Duration::from_secs(45)).await;
+    harness.peer.settle_hung("{\"verdict\":\"slow but valid\"}");
+    let judged = tokio::time::timeout(WAIT, judging)
+        .await
+        .expect("bounded")
+        .unwrap();
+    assert_eq!(judged.unwrap(), "{\"verdict\":\"slow but valid\"}");
+    assert!(started.elapsed() >= Duration::from_secs(45));
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_launches_back_off_5s_doubling_to_300s_and_reset_after_a_stable_engine() {
+    let harness = Harness::new("backoff", all_capabilities());
+    harness.launcher.fail.store(true, Ordering::SeqCst);
+    let supervisor = harness.supervisor();
+    for (attempt, secs) in [5u64, 10, 20, 40, 80, 160, 300, 300].into_iter().enumerate() {
+        let fault = supervisor.start().await.unwrap_err();
+        assert_eq!(fault.code(), "MHC_LAUNCH_FAILED");
+        assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), attempt + 1);
+        let delay = Duration::from_secs(secs);
+        assert_eq!(retry_in(&supervisor).await, delay, "attempt {attempt}");
+        // Nothing relaunches inside the window.
+        tokio::time::advance(delay - Duration::from_millis(1)).await;
+        assert_eq!(supervisor.start().await.unwrap_err(), fault);
+        assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), attempt + 1);
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    harness.launcher.fail.store(false, Ordering::SeqCst);
+    supervisor.start().await.unwrap();
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 9);
+
+    // An engine that ran for STABLE_UPTIME resets the backoff when it exits.
+    tokio::time::advance(STABLE_UPTIME).await;
+    let engine = current_engine(&supervisor).await;
+    harness.peer.disconnect();
+    tokio::time::timeout(WAIT, engine.client.closed())
+        .await
+        .expect("the engine exit is observed");
+    drop(engine);
+    harness.launcher.fail.store(true, Ordering::SeqCst);
+    assert_eq!(supervisor.start().await.unwrap_err().code(), "MHC_LAUNCH_FAILED");
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 10);
+    assert_eq!(retry_in(&supervisor).await, MIN_BACKOFF);
+}
+
+#[tokio::test]
+async fn channel_text_starting_with_a_slash_is_never_an_engine_command() {
+    let harness = Harness::new("slash", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:C9".to_owned(),
+    };
+    let reply = supervisor
+        .converse(&scope, "/model other-provider/other-model")
+        .await
+        .unwrap();
+    assert_eq!(reply, "answer: /model other-provider/other-model");
+    assert_eq!(
+        harness.peer.of_type("prompt")[0]["message"],
+        json!(" /model other-provider/other-model")
     );
 }
 

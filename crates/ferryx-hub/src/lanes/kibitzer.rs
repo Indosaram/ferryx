@@ -207,6 +207,14 @@ pub trait ModelTurn: Send + Sync {
     fn owns_deadline(&self) -> bool {
         false
     }
+
+    /// True only for the retained mhc supervisor engine. The judge then skips the
+    /// typesafe-judge breaker and the omo fallback daily cap (neither is this engine's), does
+    /// not count its calls toward that cap, and applies only an explicitly configured
+    /// supervisor budget, reported as a typed fault.
+    fn is_supervisor_engine(&self) -> bool {
+        false
+    }
 }
 
 const KIBITZER_PROMPT: &str = "Return only JSON with exactly wake (boolean), reason (string), suggested (string), target_lane (string or null). Decide whether the owner needs proactive action. Do not perform actions. Set wake to true only when there is something concrete the owner should act on now (from the open owner items, recent events and lanes); otherwise set wake to false. When wake is true, write suggested as a short Korean message to the owner that names the 1-3 most important concrete things to do now and why each matters.";

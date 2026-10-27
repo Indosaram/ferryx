@@ -46,6 +46,12 @@ pub enum SupervisorFault {
     /// The engine is not running in this process: the hub stopped it, or this process (the
     /// MCP server, a CLI) never owned one. Nothing is launched to answer the call.
     NotRunning { detail: String },
+    /// An explicitly configured supervisor turn budget is spent. There is no budget unless the
+    /// operator configured one; exhaustion is a visible hold, never another model.
+    Budget { detail: String },
+    /// Another supervisor process still owns the engine profile (`<data>/mhc-supervisor.lock`)
+    /// after the bounded wait. Nothing was launched or sent.
+    ProfileBusy { detail: String },
     /// The owner cancelled the decision, or its caller went away.
     Cancelled,
 }
@@ -66,6 +72,8 @@ impl SupervisorFault {
             Self::SessionMismatch { .. } => "MHC_SESSION_MISMATCH",
             Self::Timeout { .. } => "MHC_TIMEOUT",
             Self::NotRunning { .. } => "MHC_NOT_RUNNING",
+            Self::Budget { .. } => "MHC_BUDGET",
+            Self::ProfileBusy { .. } => "MHC_PROFILE_BUSY",
             Self::Cancelled => "MHC_CANCELLED",
         }
     }
@@ -130,6 +138,18 @@ impl SupervisorFault {
         }
     }
 
+    pub fn budget(detail: &str) -> Self {
+        Self::Budget {
+            detail: redact(detail),
+        }
+    }
+
+    pub fn profile_busy(detail: &str) -> Self {
+        Self::ProfileBusy {
+            detail: redact(detail),
+        }
+    }
+
     /// The fault for a turn the engine reported as failed: auth, quota, or a provider failure.
     pub fn from_turn_error(text: &str) -> Self {
         match classify_error_text(text) {
@@ -163,7 +183,9 @@ impl SupervisorFault {
             | Self::Protocol { detail }
             | Self::Launch { detail }
             | Self::EngineExited { detail }
-            | Self::NotRunning { detail } => detail.clone(),
+            | Self::NotRunning { detail }
+            | Self::Budget { detail }
+            | Self::ProfileBusy { detail } => detail.clone(),
             Self::SessionClosed { reason } => format!("session closed: {reason}"),
             Self::SessionMismatch {
                 role,

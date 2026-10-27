@@ -6,7 +6,7 @@
 //! the engine's stdin, so queuing a line (an abort, a cancel) never waits on another caller.
 //! Malformed or oversized lines from the engine are counted and skipped; they never end the
 //! transport or reach a caller.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -19,6 +19,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub const WORK_REQUEST_EVENT: &str = "supervisor.work_request";
 /// Extension request that answers one work request.
 pub const WORK_REPLY_REQUEST: &str = "supervisor.work_reply";
+/// Work-tool requests queued for the supervisor; beyond this a request is dropped and logged
+/// (the reader never blocks on a slow handler).
+pub const WORK_QUEUE: usize = 64;
 
 pub type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 pub type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
@@ -44,7 +47,10 @@ struct Routes {
     sessions: HashMap<String, mpsc::UnboundedSender<Value>>,
     /// Routing handles the engine reported closed, with the reason it gave.
     closed: HashMap<String, String>,
-    work: Option<mpsc::UnboundedSender<Value>>,
+    /// Handles this client asked the engine to close; their `session_closed` is expected and
+    /// not kept in `closed`, so one-shot contexts leave no route behind.
+    closing: HashSet<String>,
+    work: Option<mpsc::Sender<Value>>,
 }
 
 struct Shared {
@@ -100,7 +106,11 @@ impl Shared {
             && value.get("name").and_then(Value::as_str) == Some(WORK_REQUEST_EVENT)
         {
             if let Some(work) = &routes.work {
-                let _ = work.send(value);
+                if work.try_send(value).is_err() {
+                    tracing::warn!(
+                        "a supervisor work request was dropped: the work queue is full or closed"
+                    );
+                }
             }
             return;
         }
@@ -114,7 +124,9 @@ impl Shared {
                 .and_then(Value::as_str)
                 .unwrap_or("unspecified")
                 .to_owned();
-            routes.closed.insert(handle.clone(), reason);
+            if !routes.closing.remove(&handle) {
+                routes.closed.insert(handle.clone(), reason);
+            }
         }
         if let Some(sender) = routes.sessions.get(&handle) {
             let _ = sender.send(value);
@@ -181,8 +193,8 @@ impl StdioClient {
         reader: BoxedReader,
         writer: BoxedWriter,
         max_line_bytes: usize,
-    ) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
-        let (work_tx, work_rx) = mpsc::unbounded_channel();
+    ) -> (Arc<Self>, mpsc::Receiver<Value>) {
+        let (work_tx, work_rx) = mpsc::channel(WORK_QUEUE);
         let (gone, _) = watch::channel(None);
         let shared = Arc::new(Shared {
             routes: Mutex::new(Some(Routes {
@@ -388,5 +400,22 @@ impl StdioClient {
         if let Some(routes) = self.shared.routes().as_mut() {
             routes.closed.remove(handle);
         }
+    }
+
+    /// Asks the engine to close `handle`. Its `session_closed` answer is expected, so it does
+    /// not stay in the closed-route table.
+    pub fn close_session(&self, handle: &str) {
+        if let Some(routes) = self.shared.routes().as_mut() {
+            routes.closing.insert(handle.to_owned());
+        }
+        let _ = self.send(&json!({"type": "close_session", "sessionId": handle}));
+    }
+
+    /// Closed routes still remembered (engine-initiated closes not yet consumed).
+    pub fn closed_routes(&self) -> usize {
+        self.shared
+            .routes()
+            .as_ref()
+            .map_or(0, |routes| routes.closed.len())
     }
 }
