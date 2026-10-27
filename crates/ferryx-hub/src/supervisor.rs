@@ -15,6 +15,15 @@
 //! `REVISION_CONFLICT`. Owner corrections and owner holds (pause, await-owner, cancel) bump the
 //! revision and supersede unsent intents of older revisions, so nothing decided before them
 //! can dispatch.
+//!
+//! Delivery rests on one invariant: per goal and execution generation at most one dispatch is
+//! *in flight* — `claimed`, `accepted`, `started`, or `uncertain` and not yet resolved by the
+//! owner. A claim, a move into `ready` (which would allow a claim) and a released claim's
+//! `dispatching -> ready` reset are refused or skipped while another dispatch is in flight
+//! (`DISPATCH_IN_FLIGHT`); a partial unique index enforces the same invariant in the schema.
+//! Only [`resolve_uncertain_delivery`] releases an uncertain dispatch for a resend; its row and
+//! evidence stay. A claim given back before transmission is `released`: never sent, never in
+//! flight.
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -63,8 +72,8 @@ pub enum SupervisorError {
     },
     #[error("goal {goal_id} has no live run on its current execution generation")]
     NoLiveRun { goal_id: String },
-    #[error("goal {goal_id} has a live run; it resumes to running and takes no new dispatch")]
-    LiveRun { goal_id: String },
+    #[error("goal {goal_id} has dispatch {request_id} in flight; it takes no new dispatch")]
+    DispatchInFlight { goal_id: String, request_id: String },
     #[error("dispatch {request_id} was released before transmission: {why}")]
     ClaimReleased { request_id: String, why: String },
     #[error(
@@ -133,7 +142,7 @@ impl SupervisorError {
             SupervisorError::RevisionConflict { .. } => "REVISION_CONFLICT",
             SupervisorError::StateConflict { .. } => "REVISION_CONFLICT",
             SupervisorError::NoLiveRun { .. } => "NO_LIVE_RUN",
-            SupervisorError::LiveRun { .. } => "LIVE_RUN",
+            SupervisorError::DispatchInFlight { .. } => "DISPATCH_IN_FLIGHT",
             SupervisorError::ClaimReleased { .. } => "SUPERSEDED",
             SupervisorError::RequestBodyChanged { .. } => "REQUEST_CONFLICT",
             SupervisorError::IllegalTransition { .. } => "ILLEGAL_TRANSITION",
@@ -240,11 +249,12 @@ impl RunState {
     /// reaches `completed`; owner holds (`awaiting_owner`, `paused`), `degraded` and `cancelled`
     /// are reachable from every live state. Staying in the same state is not a transition.
     ///
-    /// `running` is listed from `paused`, `degraded` and `delivery_uncertain` because a pause
-    /// never stops a worker and a restart may find one still running; [`transition_goal`]
-    /// additionally requires a live run (a started, unsettled dispatch on the binding's current
-    /// generation, run and session) for every move into `running`. Without one, resuming a
-    /// paused goal goes to `ready`; with one, `ready` is refused and it resumes to `running`.
+    /// `running` is listed from `paused`, `degraded`, `delivery_uncertain` and `ready` because
+    /// a pause never stops a worker and a restart or a late receipt may find one still running;
+    /// [`transition_goal`] additionally requires a live run (a started, unsettled dispatch on
+    /// the binding's current generation, run and session) for every move into `running`, and
+    /// refuses every move into `ready` while any dispatch is in flight. Without a live run,
+    /// resuming a paused goal goes to `ready`; with one, it resumes to `running`.
     pub fn can_transition_to(self, to: RunState) -> bool {
         use RunState::*;
         if self.is_terminal() || self == to {
@@ -262,7 +272,10 @@ impl RunState {
                     | DeliveryUncertain
             ),
             Dispatching => self == Ready,
-            Running => matches!(self, Dispatching | Paused | Degraded | DeliveryUncertain),
+            Running => matches!(
+                self,
+                Dispatching | Paused | Degraded | DeliveryUncertain | Ready
+            ),
             WaitingChildren | WaitingEvent => {
                 matches!(self, Running | Verifying | WaitingChildren | WaitingEvent)
             }
@@ -295,7 +308,8 @@ supervisor_enum!(
 );
 
 supervisor_enum!(
-    /// Life of one dispatch intent. Each receipt is a separate fact.
+    /// Life of one dispatch intent. Each receipt is a separate fact. `released` is a claim
+    /// given back before transmission; `superseded` an intent replaced before it was claimed.
     DispatchState, "dispatch state", {
         Ready => "ready",
         Claimed => "claimed",
@@ -304,6 +318,7 @@ supervisor_enum!(
         Settled => "settled",
         Uncertain => "uncertain",
         Superseded => "superseded",
+        Released => "released",
     }
 );
 
@@ -438,7 +453,24 @@ pub struct Dispatch {
     pub started_at: Option<String>,
     pub settled_at: Option<String>,
     pub uncertain_at: Option<String>,
+    /// When the owner resolved this uncertain delivery, allowing a resend.
+    pub owner_resolved_at: Option<String>,
     pub created_at: String,
+}
+
+impl Dispatch {
+    /// Claimed, accepted, started, or uncertain and not yet resolved by the owner: the
+    /// worker may be busy with it. At most one per goal and generation.
+    pub fn is_in_flight(&self) -> bool {
+        match self.state {
+            DispatchState::Claimed | DispatchState::Accepted | DispatchState::Started => true,
+            DispatchState::Uncertain => self.owner_resolved_at.is_none(),
+            DispatchState::Ready
+            | DispatchState::Settled
+            | DispatchState::Superseded
+            | DispatchState::Released => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,7 +603,8 @@ impl Receipt {
             Receipt::Accepted => &[Claimed],
             // An uncertain dispatch may still be shown to have run (restart reconciliation).
             Receipt::Started { .. } => &[Claimed, Accepted, Uncertain],
-            Receipt::Settled { .. } => &[Started, Uncertain],
+            // A settle may arrive without its start having been observed.
+            Receipt::Settled { .. } => &[Accepted, Started, Uncertain],
             Receipt::Uncertain { .. } => &[Claimed, Accepted],
         }
     }
@@ -813,7 +846,12 @@ async fn require_binding(
 
 const DISPATCH_COLUMNS: &str = "id, goal_id, goal_revision, ordinal, request_id, generation, \
      instruction, state, run_id, provider_session_id, uncertain_code, claimed_at, accepted_at, \
-     started_at, settled_at, uncertain_at, created_at";
+     started_at, settled_at, uncertain_at, owner_resolved_at, created_at";
+
+/// The in-flight predicate over a dispatch aliased `d`; the schema's
+/// `uq_supervisor_dispatches_one_in_flight` index uses the same condition.
+const IN_FLIGHT: &str = "(d.state IN ('claimed','accepted','started') \
+     OR (d.state = 'uncertain' AND d.owner_resolved_at IS NULL))";
 
 #[derive(sqlx::FromRow)]
 struct DispatchRow {
@@ -833,6 +871,7 @@ struct DispatchRow {
     started_at: Option<String>,
     settled_at: Option<String>,
     uncertain_at: Option<String>,
+    owner_resolved_at: Option<String>,
     created_at: String,
 }
 
@@ -854,6 +893,7 @@ fn dispatch_from_row(row: DispatchRow) -> Result<Dispatch, SupervisorError> {
         started_at: row.started_at,
         settled_at: row.settled_at,
         uncertain_at: row.uncertain_at,
+        owner_resolved_at: row.owner_resolved_at,
         created_at: row.created_at,
     })
 }
@@ -925,6 +965,7 @@ async fn insert_dispatch(
         started_at: None,
         settled_at: None,
         uncertain_at: None,
+        owner_resolved_at: None,
         created_at: now.to_owned(),
     })
 }
@@ -1610,11 +1651,46 @@ async fn has_live_run(conn: &mut SqliteConnection, goal_id: &str) -> Result<bool
     .await?)
 }
 
+/// The request id of the goal's dispatch in flight on the binding's current generation, if
+/// any. See [`Dispatch::is_in_flight`].
+async fn in_flight_dispatch(
+    conn: &mut SqliteConnection,
+    goal_id: &str,
+) -> Result<Option<String>, SupervisorError> {
+    let sql = format!(
+        "SELECT d.request_id FROM supervisor_dispatches d
+         JOIN supervisor_execution_bindings b
+           ON b.goal_id = d.goal_id AND b.generation = d.generation
+         WHERE d.goal_id = ? AND {IN_FLIGHT}
+         ORDER BY d.id LIMIT 1"
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(goal_id)
+        .fetch_optional(&mut *conn)
+        .await?)
+}
+
+/// Refuses with `DISPATCH_IN_FLIGHT` while the goal has a dispatch in flight.
+async fn require_nothing_in_flight(
+    conn: &mut SqliteConnection,
+    goal_id: &str,
+) -> Result<(), SupervisorError> {
+    match in_flight_dispatch(conn, goal_id).await? {
+        Some(request_id) => Err(SupervisorError::DispatchInFlight {
+            goal_id: goal_id.to_owned(),
+            request_id,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Compare-and-set of a goal's run state: moves it only when the goal is still at
 /// `expected_revision` and in `expected_state` (otherwise `REVISION_CONFLICT`) and the table
 /// allows the move. `dispatching` is entered only by [`claim_dispatch`]; `running` only with a
-/// live run; `ready` only without one (`LIVE_RUN`), so a busy worker never gets a second
-/// instruction. Entering an owner hold (`paused`, `awaiting_owner`, `cancelled`) bumps the
+/// live run; `ready` only while no dispatch is in flight (`DISPATCH_IN_FLIGHT`), so a busy
+/// worker never gets a second instruction; an unresolved uncertain delivery leaves
+/// `delivery_uncertain` only through [`resolve_uncertain_delivery`] or a live run. Entering an
+/// owner hold (`paused`, `awaiting_owner`, `cancelled`) bumps the
 /// revision and supersedes every unsent intent of an older revision, so a decision made before
 /// the hold can never dispatch; cancelling also cancels pending waits. All in one transaction.
 /// A dispatch already claimed when a hold lands is not superseded here, because it may be in
@@ -1654,10 +1730,8 @@ pub async fn transition_goal(
             goal_id: goal_id.to_owned(),
         });
     }
-    if to == RunState::Ready && has_live_run(&mut tx, goal_id).await? {
-        return Err(SupervisorError::LiveRun {
-            goal_id: goal_id.to_owned(),
-        });
+    if to == RunState::Ready {
+        require_nothing_in_flight(&mut tx, goal_id).await?;
     }
     let revision = if to.is_owner_hold() {
         goal.revision + 1
@@ -1791,7 +1865,8 @@ pub async fn enqueue_dispatch(
     Ok(dispatch)
 }
 
-/// Unsent intents whose goal is `ready` at the intent's revision, oldest first.
+/// Unsent intents whose goal is `ready` at the intent's revision and has no dispatch in flight,
+/// oldest first: exactly the intents [`claim_dispatch`] would accept.
 pub async fn ready_dispatches(
     pool: &SqlitePool,
     limit: u32,
@@ -1802,6 +1877,11 @@ pub async fn ready_dispatches(
             SELECT 1 FROM supervisor_goals g
             WHERE g.goal_id = supervisor_dispatches.goal_id AND g.run_state = 'ready'
               AND g.revision = supervisor_dispatches.goal_revision)
+           AND NOT EXISTS(
+            SELECT 1 FROM supervisor_dispatches d
+            JOIN supervisor_execution_bindings b
+              ON b.goal_id = d.goal_id AND b.generation = d.generation
+            WHERE d.goal_id = supervisor_dispatches.goal_id AND {IN_FLIGHT})
          ORDER BY created_at, id LIMIT ?"
     );
     let rows: Vec<DispatchRow> = sqlx::query_as(&sql)
@@ -1814,8 +1894,9 @@ pub async fn ready_dispatches(
 /// Claims a ready intent for transmission: the intent moves to `claimed` and its goal to
 /// `dispatching` together. Refused unless the goal is `ready` at `expected_revision`, the
 /// intent was written for that revision, and `generation` is the binding's and the intent's
-/// current generation, and while the goal has a live run (`LIVE_RUN`). At most one claimer
-/// wins; the request id is transmitted once, after [`confirm_claim_before_transmit`].
+/// current generation, and while another dispatch of the goal is in flight
+/// (`DISPATCH_IN_FLIGHT`). At most one claimer wins; the request id is transmitted once,
+/// right after [`confirm_claim_before_transmit`].
 pub async fn claim_dispatch(
     pool: &SqlitePool,
     request_id: &str,
@@ -1850,11 +1931,7 @@ pub async fn claim_dispatch(
             why: format!("the goal is {}", goal.run_state),
         });
     }
-    if has_live_run(&mut tx, &goal.goal_id).await? {
-        return Err(SupervisorError::LiveRun {
-            goal_id: goal.goal_id.clone(),
-        });
-    }
+    require_nothing_in_flight(&mut tx, &goal.goal_id).await?;
     let now = now_rfc3339();
     sqlx::query(
         "UPDATE supervisor_dispatches SET state = 'claimed', claimed_at = ?, updated_at = ?
@@ -1885,11 +1962,16 @@ pub async fn claim_dispatch(
 /// The dispatcher's last check, made right before it transmits a claimed dispatch and after
 /// any work it did since claiming. Returns the dispatch when it is still `claimed`, the goal is
 /// still `dispatching` at the dispatch's revision and the binding is still at its generation:
-/// transmit then. Otherwise an owner hold, correction or generation change landed after the
-/// claim; because the caller has not transmitted, the dispatch is released as `superseded` in
-/// the same transaction (a goal left `dispatching` by a correction returns to `ready`) and
-/// `SUPERSEDED` is returned: do not transmit. Bytes already handed to the transport cannot be
-/// recalled; their receipts arrive through [`record_receipt`].
+/// transmit then, immediately, with no other await in between. `Ok` persists nothing, so a
+/// `claimed` row cannot tell whether its bytes left; restart reconciliation therefore treats
+/// every `claimed` dispatch as uncertain ([`reconcile_claims_after_restart`]).
+///
+/// Otherwise an owner hold, correction or generation change landed after the claim; because
+/// the caller has not transmitted, the dispatch is `released` (never sent, not in flight) in
+/// the same transaction and `SUPERSEDED` is returned: do not transmit. A goal still
+/// `dispatching` returns to `ready` only when no other dispatch is in flight. Bytes already
+/// handed to the transport cannot be recalled; their receipts arrive through
+/// [`record_receipt`].
 pub async fn confirm_claim_before_transmit(
     pool: &SqlitePool,
     request_id: &str,
@@ -1924,14 +2006,16 @@ pub async fn confirm_claim_before_transmit(
     };
     let now = now_rfc3339();
     sqlx::query(
-        "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
+        "UPDATE supervisor_dispatches SET state = 'released', updated_at = ?
          WHERE id = ? AND state = 'claimed'",
     )
     .bind(&now)
     .bind(dispatch.id)
     .execute(&mut *tx)
     .await?;
-    if goal.run_state == RunState::Dispatching {
+    if goal.run_state == RunState::Dispatching
+        && in_flight_dispatch(&mut tx, &goal.goal_id).await?.is_none()
+    {
         sqlx::query(
             "UPDATE supervisor_goals SET run_state = 'ready', state_detail = NULL, updated_at = ?
              WHERE goal_id = ? AND run_state = 'dispatching'",
@@ -1948,6 +2032,147 @@ pub async fn confirm_claim_before_transmit(
     })
 }
 
+/// `uncertain_code` of a dispatch that restart reconciliation found still `claimed`.
+pub const CLAIM_UNCONFIRMED_AT_RESTART: &str = "CLAIM_UNCONFIRMED_AT_RESTART";
+
+/// The owner's resolution of an uncertain delivery: every unresolved `uncertain` dispatch of
+/// the goal is marked resolved (row and evidence kept), so it no longer counts as in flight
+/// and a resend may be claimed. From `delivery_uncertain` the goal moves to `ready`; from an
+/// owner hold (`paused`, `awaiting_owner`) it stays held. Compare-and-set on
+/// `expected_revision` and `expected_state`. Refused with `DISPATCH_IN_FLIGHT` while a
+/// dispatch is claimed, accepted or started: those are not uncertain. A real receipt that later
+/// arrives for a resolved dispatch is still recorded ([`record_receipt`]).
+pub async fn resolve_uncertain_delivery(
+    pool: &SqlitePool,
+    goal_id: &str,
+    expected_revision: i64,
+    expected_state: RunState,
+    detail: Option<&str>,
+) -> Result<SupervisorGoal, SupervisorError> {
+    if !matches!(
+        expected_state,
+        RunState::DeliveryUncertain | RunState::Paused | RunState::AwaitingOwner
+    ) {
+        return Err(SupervisorError::Invalid(format!(
+            "an uncertain delivery is resolved from delivery_uncertain or an owner hold, not \
+             {expected_state}"
+        )));
+    }
+    let mut tx = pool.begin_write().await?;
+    let goal = require_goal(&mut tx, goal_id).await?;
+    check_revision(&goal, expected_revision)?;
+    if goal.run_state != expected_state {
+        return Err(SupervisorError::StateConflict {
+            goal_id: goal_id.to_owned(),
+            expected: expected_state,
+            actual: goal.run_state,
+        });
+    }
+    let busy: Option<String> = sqlx::query_scalar(
+        "SELECT d.request_id FROM supervisor_dispatches d
+         JOIN supervisor_execution_bindings b
+           ON b.goal_id = d.goal_id AND b.generation = d.generation
+         WHERE d.goal_id = ? AND d.state IN ('claimed','accepted','started')
+         ORDER BY d.id LIMIT 1",
+    )
+    .bind(goal_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(request_id) = busy {
+        return Err(SupervisorError::DispatchInFlight {
+            goal_id: goal_id.to_owned(),
+            request_id,
+        });
+    }
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE supervisor_dispatches SET owner_resolved_at = ?, updated_at = ?
+         WHERE goal_id = ? AND state = 'uncertain' AND owner_resolved_at IS NULL",
+    )
+    .bind(&now)
+    .bind(&now)
+    .bind(goal_id)
+    .execute(&mut *tx)
+    .await?;
+    let to = if expected_state == RunState::DeliveryUncertain {
+        RunState::Ready
+    } else {
+        expected_state
+    };
+    let moved = sqlx::query(
+        "UPDATE supervisor_goals SET run_state = ?, state_detail = ?, updated_at = ?
+         WHERE goal_id = ? AND revision = ? AND run_state = ?",
+    )
+    .bind(to.as_str())
+    .bind(detail)
+    .bind(&now)
+    .bind(goal_id)
+    .bind(expected_revision)
+    .bind(expected_state.as_str())
+    .execute(&mut *tx)
+    .await?;
+    if moved.rows_affected() != 1 {
+        return Err(SupervisorError::RevisionConflict {
+            goal_id: goal_id.to_owned(),
+            expected: expected_revision,
+            actual: goal.revision,
+        });
+    }
+    tx.commit().await?;
+    Ok(SupervisorGoal {
+        run_state: to,
+        state_detail: detail.map(str::to_owned),
+        updated_at: now,
+        ..goal
+    })
+}
+
+/// Restart reconciliation, run once before any dispatcher starts: a `claimed` row cannot tell
+/// whether its bytes left before the restart, so every one becomes `uncertain` with
+/// [`CLAIM_UNCONFIRMED_AT_RESTART`] (still in flight until the owner resolves it or a real
+/// receipt arrives), and its goal moves from `dispatching` to `delivery_uncertain`. Returns the
+/// dispatches it changed.
+pub async fn reconcile_claims_after_restart(
+    pool: &SqlitePool,
+) -> Result<Vec<Dispatch>, SupervisorError> {
+    let mut tx = pool.begin_write().await?;
+    let sql =
+        format!("SELECT {DISPATCH_COLUMNS} FROM supervisor_dispatches WHERE state = 'claimed'");
+    let rows: Vec<DispatchRow> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
+    let now = now_rfc3339();
+    let mut changed = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut dispatch = dispatch_from_row(row)?;
+        sqlx::query(
+            "UPDATE supervisor_dispatches SET state = 'uncertain', uncertain_code = ?,
+                    uncertain_at = ?, updated_at = ?
+             WHERE id = ? AND state = 'claimed'",
+        )
+        .bind(CLAIM_UNCONFIRMED_AT_RESTART)
+        .bind(&now)
+        .bind(&now)
+        .bind(dispatch.id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE supervisor_goals SET run_state = 'delivery_uncertain', state_detail = ?,
+                    updated_at = ?
+             WHERE goal_id = ? AND run_state = 'dispatching'",
+        )
+        .bind(CLAIM_UNCONFIRMED_AT_RESTART)
+        .bind(&now)
+        .bind(&dispatch.goal_id)
+        .execute(&mut *tx)
+        .await?;
+        dispatch.state = DispatchState::Uncertain;
+        dispatch.uncertain_code = Some(CLAIM_UNCONFIRMED_AT_RESTART.to_owned());
+        dispatch.uncertain_at = Some(now.clone());
+        changed.push(dispatch);
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
 /// Records one delivery receipt for a claimed intent. Accepted, started, settled and
 /// uncertain are separate facts: acceptance never implies a start, and a receipt from a stale
 /// generation is refused. A start or settle must name the binding's current provider session
@@ -1956,12 +2181,15 @@ pub async fn confirm_claim_before_transmit(
 /// happened; its uncertain code and time stay as history. Repeating the receipt already
 /// recorded is a no-op. Goal run-state moves are the caller's, through [`transition_goal`].
 ///
-/// Only the newest claimed dispatch of the goal's generation owns the binding's run: a start
-/// marks it live, a settle ends it (`run_id` back to NULL). A start or settle for an older
-/// dispatch while a newer one was claimed is `RECEIPT_OUT_OF_ORDER`: the older dispatch keeps
-/// its state, and only its evidence (run, session, first observed start/settle time) is
-/// committed, never the binding, so a late reconcile can never take the live-run marker from
-/// the newer run. A start or settle naming a run other than the binding's live one is
+/// Only the newest possibly-transmitted dispatch of the goal's generation owns the binding's
+/// run: a start marks it live, a settle ends it (`run_id` back to NULL). A dispatch counts as
+/// possibly transmitted once claimed, unless it was `released` before transmission. A start or
+/// settle for an older dispatch while a newer one was possibly transmitted is
+/// `RECEIPT_OUT_OF_ORDER`: the older dispatch keeps its state, and only its evidence (run,
+/// session, first observed start/settle time) is committed, never the binding, so a late
+/// receipt can never take the live-run marker from the newer run or put a second dispatch in
+/// flight. With no such newer dispatch, a late start for an owner-resolved uncertain dispatch
+/// makes it the live run. A start or settle naming a run other than the binding's live one is
 /// `RUN_MISMATCH`.
 pub async fn record_receipt(
     pool: &SqlitePool,
@@ -2026,16 +2254,17 @@ pub async fn record_receipt(
                 });
             }
         }
-        let newer_claimed: bool = sqlx::query_scalar(
+        let newer_transmitted: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM supervisor_dispatches
-              WHERE goal_id = ? AND generation = ? AND id > ? AND claimed_at IS NOT NULL)",
+              WHERE goal_id = ? AND generation = ? AND id > ? AND claimed_at IS NOT NULL
+                AND state <> 'released')",
         )
         .bind(&dispatch.goal_id)
         .bind(generation)
         .bind(dispatch.id)
         .fetch_one(&mut *tx)
         .await?;
-        if newer_claimed {
+        if newer_transmitted {
             let observed_at = if to == DispatchState::Started {
                 "started_at"
             } else {

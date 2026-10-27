@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -874,6 +874,17 @@ async fn dispatch_receipts_keep_accepted_started_settled_and_uncertain_apart() {
         attach_session(pool, goal_id, 1, "pane-8").await,
         Err(SupervisorError::Invalid(_))
     ));
+    let early_settle = settled("run-1", "pane-7");
+    assert!(
+        matches!(
+            record_receipt(pool, request_id, 1, &early_settle).await,
+            Err(SupervisorError::ReceiptOutOfOrder {
+                from: DispatchState::Claimed,
+                ..
+            })
+        ),
+        "a claim that was never accepted or started cannot settle"
+    );
 
     let accepted = record_receipt(pool, request_id, 1, &Receipt::Accepted)
         .await
@@ -885,11 +896,6 @@ async fn dispatch_receipts_keep_accepted_started_settled_and_uncertain_apart() {
         .await
         .unwrap();
     assert_eq!(repeated, accepted);
-    let early_settle = settled("run-1", "pane-7");
-    assert!(matches!(
-        record_receipt(pool, request_id, 1, &early_settle).await,
-        Err(SupervisorError::ReceiptOutOfOrder { .. })
-    ));
     let other_session = record_receipt(pool, request_id, 1, &started("run-1", "pane-8"))
         .await
         .unwrap_err();
@@ -1310,12 +1316,22 @@ async fn a_late_reconcile_of_an_older_dispatch_leaves_the_newer_run_live() {
     )
     .await
     .unwrap();
-    transition_goal(
+    let unresolved = transition_goal(
         pool,
         goal_id,
         1,
         RunState::DeliveryUncertain,
         RunState::Ready,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unresolved.code(), "DISPATCH_IN_FLIGHT", "{unresolved}");
+    resolve_uncertain_delivery(
+        pool,
+        goal_id,
+        1,
+        RunState::DeliveryUncertain,
         Some("owner chose to resend"),
     )
     .await
@@ -1410,7 +1426,7 @@ async fn a_live_run_resumes_to_running_and_refuses_ready_and_new_claims() {
     let to_ready = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Ready, None)
         .await
         .unwrap_err();
-    assert_eq!(to_ready.code(), "LIVE_RUN", "{to_ready}");
+    assert_eq!(to_ready.code(), "DISPATCH_IN_FLIGHT", "{to_ready}");
     let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
     assert_eq!((goal.run_state, goal.revision), (RunState::Paused, 2));
     let resumed = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Running, None)
@@ -1418,51 +1434,64 @@ async fn a_live_run_resumes_to_running_and_refuses_ready_and_new_claims() {
         .unwrap();
     assert_eq!((resumed.run_state, resumed.revision), (RunState::Running, 2));
 
-    // A goal that reached ready before its accepted dispatch started takes no new claim.
+    // A late start for an owner-resolved uncertain dispatch, with no newer dispatch sent,
+    // makes it the live run even though the goal is ready: no new claim, resume to running.
     let other = admit(&fixture, "msg-2").await;
     let other_goal = other.goal_id.as_str();
     attach_session(pool, other_goal, 1, "S2").await.unwrap();
     claim_dispatch(pool, &other.dispatch_request_id, 1, 1)
         .await
         .unwrap();
-    record_receipt(pool, &other.dispatch_request_id, 1, &Receipt::Accepted)
-        .await
-        .unwrap();
+    record_receipt(
+        pool,
+        &other.dispatch_request_id,
+        1,
+        &Receipt::Uncertain {
+            code: "SEND_TIMEOUT".into(),
+        },
+    )
+    .await
+    .unwrap();
     transition_goal(
         pool,
         other_goal,
         1,
         RunState::Dispatching,
-        RunState::Degraded,
-        Some("observer lost"),
+        RunState::DeliveryUncertain,
+        Some("SEND_TIMEOUT"),
     )
     .await
     .unwrap();
-    transition_goal(
+    let ready = resolve_uncertain_delivery(
         pool,
         other_goal,
         1,
-        RunState::Degraded,
-        RunState::Ready,
+        RunState::DeliveryUncertain,
         None,
     )
     .await
     .unwrap();
+    assert_eq!((ready.run_state, ready.revision), (RunState::Ready, 1));
     let next = enqueue_dispatch(pool, other_goal, 1, "Next step.")
         .await
         .unwrap();
-    record_receipt(pool, &other.dispatch_request_id, 1, &started("run-c", "S2"))
+    assert_eq!(ready_dispatches(pool, 10).await.unwrap().len(), 1);
+    let late = record_receipt(pool, &other.dispatch_request_id, 1, &started("run-c", "S2"))
         .await
         .unwrap();
+    assert_eq!(late.state, DispatchState::Started);
+    assert!(late.owner_resolved_at.is_some());
+    assert!(live(pool, other_goal).await);
     let busy = claim_dispatch(pool, &next.request_id, 1, 1)
         .await
         .unwrap_err();
-    assert_eq!(busy.code(), "LIVE_RUN", "{busy}");
+    assert_eq!(busy.code(), "DISPATCH_IN_FLIGHT", "{busy}");
     assert_eq!(dispatch_state(pool, &next.request_id).await, "ready");
-    assert_eq!(
-        goal_of(pool, other_goal).await.unwrap().unwrap().run_state,
-        RunState::Ready
-    );
+    assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
+    let running = transition_goal(pool, other_goal, 1, RunState::Ready, RunState::Running, None)
+        .await
+        .unwrap();
+    assert_eq!(running.run_state, RunState::Running);
 }
 
 #[tokio::test]
@@ -1472,11 +1501,8 @@ async fn a_dispatch_claimed_before_an_owner_hold_is_released_before_transmit() {
     let admitted = admit(&fixture, "msg-1").await;
     let goal_id = admitted.goal_id.as_str();
     let r1 = admitted.dispatch_request_id.as_str();
-    let claimed = claim_dispatch(pool, r1, 1, 1).await.unwrap();
-    assert_eq!(
-        confirm_claim_before_transmit(pool, r1).await.unwrap(),
-        claimed
-    );
+    // Claimed, and the owner's hold lands before the dispatcher's last check.
+    claim_dispatch(pool, r1, 1, 1).await.unwrap();
 
     let paused = transition_goal(
         pool,
@@ -1496,7 +1522,7 @@ async fn a_dispatch_claimed_before_an_owner_hold_is_released_before_transmit() {
     );
     let released = confirm_claim_before_transmit(pool, r1).await.unwrap_err();
     assert_eq!(released.code(), "SUPERSEDED", "{released}");
-    assert_eq!(dispatch_state(pool, r1).await, "superseded");
+    assert_eq!(dispatch_state(pool, r1).await, "released");
     let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
     assert_eq!((goal.run_state, goal.revision), (RunState::Paused, 2));
     assert_eq!(
@@ -1509,7 +1535,7 @@ async fn a_dispatch_claimed_before_an_owner_hold_is_released_before_transmit() {
     assert!(matches!(
         record_receipt(pool, r1, 1, &Receipt::Accepted).await,
         Err(SupervisorError::ReceiptOutOfOrder {
-            from: DispatchState::Superseded,
+            from: DispatchState::Released,
             ..
         })
     ));
@@ -1530,10 +1556,14 @@ async fn a_dispatch_claimed_before_an_owner_hold_is_released_before_transmit() {
     let fresh = enqueue_dispatch(pool, corrected_goal, 2, "Corrected instruction.")
         .await
         .unwrap();
-    claim_dispatch(pool, &fresh.request_id, 2, 1).await.unwrap();
-    confirm_claim_before_transmit(pool, &fresh.request_id)
-        .await
-        .unwrap();
+    let claimed = claim_dispatch(pool, &fresh.request_id, 2, 1).await.unwrap();
+    assert_eq!(
+        confirm_claim_before_transmit(pool, &fresh.request_id)
+            .await
+            .unwrap(),
+        claimed,
+        "an unchanged claim is confirmed as is"
+    );
 
     // A generation change during the claim releases it too.
     let rebound = admit(&fixture, "msg-3").await;
@@ -1550,4 +1580,656 @@ async fn a_dispatch_claimed_before_an_owner_hold_is_released_before_transmit() {
     assert_eq!(released.code(), "SUPERSEDED", "{released}");
     let goal = goal_of(pool, rebound_goal).await.unwrap().unwrap();
     assert_eq!((goal.run_state, goal.revision), (RunState::Ready, 1));
+}
+
+/// Review scenario A: an accepted dispatch is in flight, so neither a resume into ready nor a
+/// claim nor a raw write can put a second dispatch on the busy worker.
+#[tokio::test]
+async fn scenario_a_an_accepted_dispatch_blocks_every_path_to_a_second_send() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let r1 = admitted.dispatch_request_id.as_str();
+    attach_session(pool, goal_id, 1, "S1").await.unwrap();
+    claim_dispatch(pool, r1, 1, 1).await.unwrap();
+    confirm_claim_before_transmit(pool, r1).await.unwrap();
+    record_receipt(pool, r1, 1, &Receipt::Accepted)
+        .await
+        .unwrap();
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Dispatching,
+        RunState::Degraded,
+        Some("observer lost"),
+    )
+    .await
+    .unwrap();
+    let to_ready = transition_goal(pool, goal_id, 1, RunState::Degraded, RunState::Ready, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &to_ready,
+            SupervisorError::DispatchInFlight { request_id, .. } if request_id == r1
+        ),
+        "{to_ready}"
+    );
+    let r2 = enqueue_dispatch(pool, goal_id, 1, "Second instruction.")
+        .await
+        .unwrap();
+    assert!(claim_dispatch(pool, &r2.request_id, 1, 1).await.is_err());
+    assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
+    let forced = sqlx::query(
+        "UPDATE supervisor_dispatches SET state = 'claimed', claimed_at = 't' WHERE request_id = ?",
+    )
+    .bind(&r2.request_id)
+    .execute(pool)
+    .await;
+    assert!(
+        forced.is_err(),
+        "the schema refuses a second dispatch in flight"
+    );
+    assert_eq!(dispatch_state(pool, &r2.request_id).await, "ready");
+
+    // The accepted dispatch really starts: it becomes the live run.
+    record_receipt(pool, r1, 1, &started("run-c", "S1"))
+        .await
+        .unwrap();
+    assert!(live(pool, goal_id).await);
+    transition_goal(pool, goal_id, 1, RunState::Degraded, RunState::Running, None)
+        .await
+        .unwrap();
+    record_receipt(pool, r1, 1, &settled("run-c", "S1"))
+        .await
+        .unwrap();
+    transition_goal(pool, goal_id, 1, RunState::Running, RunState::Verifying, None)
+        .await
+        .unwrap();
+    transition_goal(pool, goal_id, 1, RunState::Verifying, RunState::Ready, None)
+        .await
+        .unwrap();
+    claim_dispatch(pool, &r2.request_id, 1, 1).await.unwrap();
+}
+
+/// Review scenario B: a claim left unconfirmed across a pause blocks the resume until the
+/// dispatcher releases it, and a stale confirm never reopens a goal whose newer claim is in
+/// flight.
+#[tokio::test]
+async fn scenario_b_a_stale_confirm_never_reopens_a_goal_with_a_newer_claim() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let r1 = admitted.dispatch_request_id.as_str();
+    claim_dispatch(pool, r1, 1, 1).await.unwrap();
+    transition_goal(pool, goal_id, 1, RunState::Dispatching, RunState::Paused, None)
+        .await
+        .unwrap();
+    let blocked = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Ready, None)
+        .await
+        .unwrap_err();
+    assert_eq!(blocked.code(), "DISPATCH_IN_FLIGHT", "{blocked}");
+    let released = confirm_claim_before_transmit(pool, r1).await.unwrap_err();
+    assert_eq!(released.code(), "SUPERSEDED");
+    assert_eq!(dispatch_state(pool, r1).await, "released");
+    transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Ready, None)
+        .await
+        .unwrap();
+    let r2 = enqueue_dispatch(pool, goal_id, 2, "After the pause.")
+        .await
+        .unwrap();
+    claim_dispatch(pool, &r2.request_id, 2, 1).await.unwrap();
+    confirm_claim_before_transmit(pool, &r2.request_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        confirm_claim_before_transmit(pool, r1)
+            .await
+            .unwrap_err()
+            .code(),
+        "NOT_CLAIMABLE"
+    );
+    let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (RunState::Dispatching, 2));
+    let r3 = enqueue_dispatch(pool, goal_id, 2, "A third instruction.")
+        .await
+        .unwrap();
+    assert!(claim_dispatch(pool, &r3.request_id, 2, 1).await.is_err());
+    assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
+
+    // Across a generation change the old claim is not in flight on the new generation, so a
+    // newer claim can exist when the stale confirm arrives: the goal must stay dispatching.
+    let other = admit(&fixture, "msg-2").await;
+    let other_goal = other.goal_id.as_str();
+    let q1 = other.dispatch_request_id.as_str();
+    claim_dispatch(pool, q1, 1, 1).await.unwrap();
+    advance_generation(pool, other_goal, 1, Some("S9"))
+        .await
+        .unwrap();
+    transition_goal(pool, other_goal, 1, RunState::Dispatching, RunState::Paused, None)
+        .await
+        .unwrap();
+    transition_goal(pool, other_goal, 2, RunState::Paused, RunState::Ready, None)
+        .await
+        .unwrap();
+    let q2 = enqueue_dispatch(pool, other_goal, 2, "On the new session.")
+        .await
+        .unwrap();
+    assert_eq!(q2.generation, 2);
+    claim_dispatch(pool, &q2.request_id, 2, 2).await.unwrap();
+    let stale = confirm_claim_before_transmit(pool, q1).await.unwrap_err();
+    assert_eq!(stale.code(), "SUPERSEDED");
+    let goal = goal_of(pool, other_goal).await.unwrap().unwrap();
+    assert_eq!(
+        goal.run_state,
+        RunState::Dispatching,
+        "the newer claim keeps the goal dispatching"
+    );
+    confirm_claim_before_transmit(pool, &q2.request_id)
+        .await
+        .unwrap();
+}
+
+/// Review scenario C: a resend released before transmission does not fence the original
+/// dispatch, whose late start becomes the live run.
+#[tokio::test]
+async fn scenario_c_a_released_claim_does_not_hide_the_run_that_really_started() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let r1 = admitted.dispatch_request_id.as_str();
+    attach_session(pool, goal_id, 1, "S1").await.unwrap();
+    claim_dispatch(pool, r1, 1, 1).await.unwrap();
+    confirm_claim_before_transmit(pool, r1).await.unwrap();
+    record_receipt(
+        pool,
+        r1,
+        1,
+        &Receipt::Uncertain {
+            code: "SEND_TIMEOUT".into(),
+        },
+    )
+    .await
+    .unwrap();
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Dispatching,
+        RunState::DeliveryUncertain,
+        None,
+    )
+    .await
+    .unwrap();
+    resolve_uncertain_delivery(pool, goal_id, 1, RunState::DeliveryUncertain, None)
+        .await
+        .unwrap();
+    let r2 = enqueue_dispatch(pool, goal_id, 1, "Resend.").await.unwrap();
+    claim_dispatch(pool, &r2.request_id, 1, 1).await.unwrap();
+    transition_goal(pool, goal_id, 1, RunState::Dispatching, RunState::Paused, None)
+        .await
+        .unwrap();
+    let released = confirm_claim_before_transmit(pool, &r2.request_id)
+        .await
+        .unwrap_err();
+    assert_eq!(released.code(), "SUPERSEDED");
+    assert_eq!(dispatch_state(pool, &r2.request_id).await, "released");
+
+    let late = record_receipt(pool, r1, 1, &started("run-a", "S1"))
+        .await
+        .unwrap();
+    assert_eq!(late.state, DispatchState::Started);
+    assert!(live(pool, goal_id).await);
+    let binding = execution_binding_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!(binding.run_id.as_deref(), Some("run-a"));
+    let to_ready = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Ready, None)
+        .await
+        .unwrap_err();
+    assert_eq!(to_ready.code(), "DISPATCH_IN_FLIGHT", "{to_ready}");
+    transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Running, None)
+        .await
+        .unwrap();
+    let r3 = enqueue_dispatch(pool, goal_id, 2, "A third instruction.")
+        .await
+        .unwrap();
+    assert!(claim_dispatch(pool, &r3.request_id, 2, 1).await.is_err());
+    assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_restart_treats_an_unconfirmed_claim_as_uncertain() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let r1 = admitted.dispatch_request_id.as_str();
+    claim_dispatch(pool, r1, 1, 1).await.unwrap();
+
+    let changed = reconcile_claims_after_restart(pool).await.unwrap();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].request_id, r1);
+    assert_eq!(changed[0].state, DispatchState::Uncertain);
+    assert_eq!(
+        changed[0].uncertain_code.as_deref(),
+        Some(CLAIM_UNCONFIRMED_AT_RESTART)
+    );
+    assert!(changed[0].is_in_flight());
+    let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (RunState::DeliveryUncertain, 1));
+    assert!(reconcile_claims_after_restart(pool).await.unwrap().is_empty());
+    assert_eq!(
+        confirm_claim_before_transmit(pool, r1)
+            .await
+            .unwrap_err()
+            .code(),
+        "NOT_CLAIMABLE",
+        "an unconfirmed claim is never transmitted after a restart"
+    );
+    let unresolved = transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::DeliveryUncertain,
+        RunState::Ready,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unresolved.code(), "DISPATCH_IN_FLIGHT");
+
+    let ready = resolve_uncertain_delivery(
+        pool,
+        goal_id,
+        1,
+        RunState::DeliveryUncertain,
+        Some("owner resends"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ready.run_state, RunState::Ready);
+    let resolved: Option<String> = sqlx::query_scalar(
+        "SELECT owner_resolved_at FROM supervisor_dispatches WHERE request_id = ?",
+    )
+    .bind(r1)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert!(resolved.is_some());
+    assert_eq!(dispatch_state(pool, r1).await, "uncertain", "its row is kept");
+    let resend = enqueue_dispatch(pool, goal_id, 1, "Resend.").await.unwrap();
+    claim_dispatch(pool, &resend.request_id, 1, 1).await.unwrap();
+}
+
+/// Exploration bounds: dispatches per goal and steps per ordering.
+const WALK_DISPATCHES: usize = 2;
+const WALK_DEPTH: usize = 8;
+const WALK_SESSION: &str = "S1";
+
+/// One event of the delivery protocol. Indexes name a goal's dispatches in creation order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// Claim the ready intent, writing one first if the goal has none.
+    Claim,
+    /// The dispatcher's last check; on success the dispatch is transmitted at once.
+    Confirm(usize),
+    Accepted(usize),
+    Started(usize),
+    /// A settle; a running goal then moves to verifying.
+    Settled(usize),
+    /// A failed or unobserved send; the goal then moves to delivery_uncertain.
+    Uncertain(usize),
+    Pause,
+    /// Resume to running, else to ready.
+    Resume,
+    /// The owner resolves the uncertain delivery.
+    Resolve,
+    Restart,
+}
+
+/// What the walk observes of one dispatch: state, written for the current revision, run id,
+/// owner-resolved.
+#[derive(Clone, Debug)]
+struct WalkRow {
+    request_id: String,
+    state: String,
+    current: bool,
+    run_id: Option<String>,
+    resolved: bool,
+}
+
+impl WalkRow {
+    fn in_flight(&self) -> bool {
+        matches!(self.state.as_str(), "claimed" | "accepted" | "started")
+            || (self.state == "uncertain" && !self.resolved)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WalkState {
+    run_state: RunState,
+    bound_run: Option<String>,
+    rows: Vec<WalkRow>,
+    /// Dispatches whose bytes left: confirmed and transmitted.
+    transmitted: BTreeSet<usize>,
+}
+
+impl WalkState {
+    /// Everything later steps can depend on; ids and timestamps are left out.
+    fn fingerprint(&self) -> String {
+        let rows: Vec<String> = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                format!(
+                    "{}/{}/{}/{}/{}",
+                    row.state,
+                    row.current,
+                    row.run_id.as_deref().unwrap_or("-"),
+                    row.resolved,
+                    self.transmitted.contains(&index)
+                )
+            })
+            .collect();
+        format!(
+            "{}|{}|{}",
+            self.run_state,
+            self.bound_run.as_deref().unwrap_or("-"),
+            rows.join(",")
+        )
+    }
+
+    fn candidates(&self) -> Vec<Step> {
+        let mut steps = vec![Step::Pause, Step::Resume];
+        if self.rows.len() < WALK_DISPATCHES || self.rows.iter().any(|row| row.state == "ready") {
+            steps.push(Step::Claim);
+        }
+        for (index, row) in self.rows.iter().enumerate() {
+            let sent = self.transmitted.contains(&index);
+            if row.state == "claimed" && !sent {
+                steps.push(Step::Confirm(index));
+            }
+            if sent && row.state != "settled" {
+                steps.extend([
+                    Step::Accepted(index),
+                    Step::Started(index),
+                    Step::Settled(index),
+                    Step::Uncertain(index),
+                ]);
+            }
+        }
+        if self
+            .rows
+            .iter()
+            .any(|row| row.state == "uncertain" && !row.resolved)
+        {
+            steps.push(Step::Resolve);
+        }
+        if self.rows.iter().any(|row| row.state == "claimed") {
+            steps.push(Step::Restart);
+        }
+        steps
+    }
+}
+
+/// True when the store refused the step; a storage error (a tripped constraint) fails the test:
+/// every refusal must come from the protocol, not from the schema catching a bug.
+fn refused<T>(outcome: Result<T, SupervisorError>, path: &[Step]) -> bool {
+    match outcome {
+        Ok(_) => false,
+        Err(error) => {
+            assert_ne!(error.code(), "STORAGE", "{path:?}: {error}");
+            true
+        }
+    }
+}
+
+async fn walk_rows(pool: &SqlitePool, goal_id: &str, revision: i64) -> Vec<WalkRow> {
+    let rows: Vec<(String, String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT request_id, state, goal_revision, run_id, owner_resolved_at
+         FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id",
+    )
+    .bind(goal_id)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    rows.into_iter()
+        .map(
+            |(request_id, state, goal_revision, run_id, resolved)| WalkRow {
+                request_id,
+                state,
+                current: goal_revision == revision,
+                run_id,
+                resolved: resolved.is_some(),
+            },
+        )
+        .collect()
+}
+
+async fn apply_step(
+    pool: &SqlitePool,
+    goal_id: &str,
+    step: Step,
+    transmitted: &mut BTreeSet<usize>,
+    path: &[Step],
+) {
+    let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
+    let rows = walk_rows(pool, goal_id, goal.revision).await;
+    let (rev, state) = (goal.revision, goal.run_state);
+    let run = |index: usize| format!("run-{index}");
+    match step {
+        Step::Claim => {
+            let request_id = match rows.iter().find(|row| row.state == "ready") {
+                Some(row) => Some(row.request_id.clone()),
+                None => enqueue_dispatch(pool, goal_id, rev, "Next step.")
+                    .await
+                    .map(|dispatch| dispatch.request_id)
+                    .map_err(|error| refused::<()>(Err(error), path))
+                    .ok(),
+            };
+            if let Some(request_id) = request_id {
+                refused(claim_dispatch(pool, &request_id, rev, 1).await, path);
+            }
+        }
+        Step::Confirm(index) => {
+            let outcome = confirm_claim_before_transmit(pool, &rows[index].request_id).await;
+            if !refused(outcome, path) {
+                transmitted.insert(index);
+            }
+        }
+        Step::Accepted(index) => {
+            let receipt = Receipt::Accepted;
+            refused(
+                record_receipt(pool, &rows[index].request_id, 1, &receipt).await,
+                path,
+            );
+        }
+        Step::Started(index) => {
+            let receipt = started(&run(index), WALK_SESSION);
+            refused(
+                record_receipt(pool, &rows[index].request_id, 1, &receipt).await,
+                path,
+            );
+        }
+        Step::Settled(index) => {
+            let receipt = settled(&run(index), WALK_SESSION);
+            let outcome = record_receipt(pool, &rows[index].request_id, 1, &receipt).await;
+            if !refused(outcome, path) && state == RunState::Running {
+                let moved = transition_goal(pool, goal_id, rev, state, RunState::Verifying, None);
+                refused(moved.await, path);
+            }
+        }
+        Step::Uncertain(index) => {
+            let receipt = Receipt::Uncertain {
+                code: "SEND_TIMEOUT".into(),
+            };
+            let outcome = record_receipt(pool, &rows[index].request_id, 1, &receipt).await;
+            if !refused(outcome, path)
+                && matches!(state, RunState::Dispatching | RunState::Running)
+            {
+                let to = RunState::DeliveryUncertain;
+                refused(
+                    transition_goal(pool, goal_id, rev, state, to, None).await,
+                    path,
+                );
+            }
+        }
+        Step::Pause => {
+            let outcome = transition_goal(pool, goal_id, rev, state, RunState::Paused, None);
+            refused(outcome.await, path);
+        }
+        Step::Resume => {
+            let running = transition_goal(pool, goal_id, rev, state, RunState::Running, None);
+            if refused(running.await, path)
+                && matches!(
+                    state,
+                    RunState::Paused | RunState::DeliveryUncertain | RunState::Verifying
+                )
+            {
+                let ready = transition_goal(pool, goal_id, rev, state, RunState::Ready, None);
+                refused(ready.await, path);
+            }
+        }
+        Step::Resolve => {
+            let outcome = resolve_uncertain_delivery(pool, goal_id, rev, state, None);
+            refused(outcome.await, path);
+        }
+        Step::Restart => {
+            refused(reconcile_claims_after_restart(pool).await, path);
+        }
+    }
+}
+
+/// The invariant, checked after the last step of an ordering.
+async fn assert_delivery_invariant(
+    pool: &SqlitePool,
+    goal_id: &str,
+    state: &WalkState,
+    path: &[Step],
+) {
+    let in_flight: Vec<usize> = (0..state.rows.len())
+        .filter(|index| state.rows[*index].in_flight())
+        .collect();
+    assert!(in_flight.len() <= 1, "{path:?}: in flight {in_flight:?}");
+    let outstanding: Vec<usize> = state
+        .transmitted
+        .iter()
+        .copied()
+        .filter(|index| {
+            let row = &state.rows[*index];
+            row.state != "settled" && !(row.state == "uncertain" && row.resolved)
+        })
+        .collect();
+    assert!(
+        outstanding.len() <= 1,
+        "{path:?}: transmitted and unsettled {outstanding:?}"
+    );
+    if let Some(index) = in_flight.first() {
+        let claimable = ready_dispatches(pool, 100).await.unwrap();
+        assert!(
+            claimable.iter().all(|dispatch| dispatch.goal_id != goal_id),
+            "{path:?}: claimable while {index} is in flight"
+        );
+        if state.run_state == RunState::Ready {
+            assert_eq!(
+                state.rows[*index].state, "started",
+                "{path:?}: only a late live run may be in flight on a ready goal"
+            );
+        }
+    }
+}
+
+/// Replays `path` on a fresh goal, checks the invariant after its last step, then cancels the
+/// goal so it never shows up among later goals' claimable intents.
+async fn walk(fixture: &Fixture, walk_id: usize, path: &[Step]) -> WalkState {
+    let pool = &fixture.pool;
+    let goal_id = admit(fixture, &format!("walk-{walk_id}")).await.goal_id;
+    attach_session(pool, &goal_id, 1, WALK_SESSION)
+        .await
+        .unwrap();
+    let mut transmitted = BTreeSet::new();
+    for step in path {
+        apply_step(pool, &goal_id, *step, &mut transmitted, path).await;
+    }
+    let goal = goal_of(pool, &goal_id).await.unwrap().unwrap();
+    let binding = execution_binding_of(pool, &goal_id).await.unwrap().unwrap();
+    let state = WalkState {
+        run_state: goal.run_state,
+        bound_run: binding.run_id,
+        rows: walk_rows(pool, &goal_id, goal.revision).await,
+        transmitted,
+    };
+    assert_delivery_invariant(pool, &goal_id, &state, path).await;
+    transition_goal(
+        pool,
+        &goal_id,
+        goal.revision,
+        goal.run_state,
+        RunState::Cancelled,
+        None,
+    )
+    .await
+    .unwrap();
+    state
+}
+
+/// Every ordering of claim, confirm, accepted, started, settled, uncertain, pause, resume,
+/// owner resolution and restart over two dispatches, up to [`WALK_DEPTH`] steps, explored
+/// breadth-first with orderings that reach an already seen state pruned. Deterministic.
+#[tokio::test]
+async fn every_bounded_event_ordering_keeps_at_most_one_dispatch_in_flight() {
+    let fixture = fixture().await;
+    let mut walks = 0;
+    let root = walk(&fixture, walks, &[]).await;
+    let mut seen = HashSet::from([root.fingerprint()]);
+    let mut reached = vec![root.clone()];
+    let mut frontier = vec![(Vec::<Step>::new(), root)];
+    for _ in 0..WALK_DEPTH {
+        let mut next = Vec::new();
+        for (path, state) in &frontier {
+            for step in state.candidates() {
+                walks += 1;
+                let mut child = path.clone();
+                child.push(step);
+                let observed = walk(&fixture, walks, &child).await;
+                if seen.insert(observed.fingerprint()) {
+                    reached.push(observed.clone());
+                    next.push((child, observed));
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    // The exploration reached the orderings the reviews found.
+    let any_row = |wanted: &dyn Fn(&WalkRow) -> bool| {
+        reached
+            .iter()
+            .any(|state| state.rows.iter().any(|row| wanted(row)))
+    };
+    assert!(
+        any_row(&|row: &WalkRow| row.state == "released"),
+        "released claim"
+    );
+    assert!(
+        any_row(&|row: &WalkRow| row.state == "started" && row.resolved),
+        "late live run after an owner resolution"
+    );
+    assert!(
+        any_row(&|row: &WalkRow| {
+            row.state == "uncertain" && row.resolved && row.run_id.is_some()
+        }),
+        "late receipt kept as evidence only"
+    );
+    assert!(
+        reached
+            .iter()
+            .any(|state| state.rows.len() == WALK_DISPATCHES && state.transmitted.len() == 2),
+        "two transmitted dispatches"
+    );
+    assert!(seen.len() > 50, "explored only {} states", seen.len());
 }

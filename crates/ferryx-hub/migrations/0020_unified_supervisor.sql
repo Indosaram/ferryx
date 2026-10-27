@@ -124,6 +124,12 @@ CREATE INDEX IF NOT EXISTS idx_supervisor_execution_session
 -- settle names the run and the provider session that observed it. A dispatch held
 -- `uncertain` may still be resolved to started/settled by a receipt that names its request,
 -- generation and session (restart reconciliation); uncertain_code/uncertain_at stay as history.
+--
+-- In flight: claimed, accepted, started, or uncertain and not yet released by the owner
+-- (owner_resolved_at IS NULL). At most one dispatch per goal and execution generation is in
+-- flight; the partial unique index below enforces it, so a write path that forgets the check
+-- fails on the constraint instead of sending a second instruction to a busy worker.
+-- `released` is a claim given back before transmission: never sent, never in flight.
 CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     goal_id TEXT NOT NULL REFERENCES supervisor_goals(goal_id),
@@ -133,7 +139,7 @@ CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     request_id TEXT NOT NULL UNIQUE CHECK(length(request_id) >= 1),
     generation INTEGER NOT NULL CHECK(generation >= 1),
     instruction TEXT NOT NULL CHECK(length(instruction) >= 1),
-    state TEXT NOT NULL CHECK(state IN ('ready','claimed','accepted','started','settled','uncertain','superseded')),
+    state TEXT NOT NULL CHECK(state IN ('ready','claimed','accepted','started','settled','uncertain','superseded','released')),
     run_id TEXT,
     provider_session_id TEXT,
     uncertain_code TEXT,
@@ -142,17 +148,26 @@ CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     started_at TEXT,
     settled_at TEXT,
     uncertain_at TEXT,
+    -- When the owner resolved this uncertain delivery and allowed a resend.
+    owner_resolved_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(goal_id, goal_revision, ordinal),
     CHECK(state NOT IN ('started','settled') OR (run_id IS NOT NULL AND provider_session_id IS NOT NULL)),
-    CHECK(state <> 'uncertain' OR uncertain_code IS NOT NULL)
+    CHECK(state <> 'uncertain' OR uncertain_code IS NOT NULL),
+    CHECK(owner_resolved_at IS NULL OR uncertain_at IS NOT NULL),
+    CHECK(state NOT IN ('claimed','accepted','started','settled','released') OR claimed_at IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_supervisor_dispatches_ready
     ON supervisor_dispatches(created_at, id) WHERE state = 'ready';
 -- At most one unsent intent per goal: two ready intents would be two launches.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_supervisor_dispatches_one_ready
     ON supervisor_dispatches(goal_id) WHERE state = 'ready';
+-- At most one dispatch in flight per goal and execution generation.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_supervisor_dispatches_one_in_flight
+    ON supervisor_dispatches(goal_id, generation)
+    WHERE state IN ('claimed','accepted','started')
+       OR (state = 'uncertain' AND owner_resolved_at IS NULL);
 CREATE INDEX IF NOT EXISTS idx_supervisor_dispatches_goal ON supervisor_dispatches(goal_id, state);
 
 -- What a goal waits on: a child goal or a named external event. Both ends belong to the same
