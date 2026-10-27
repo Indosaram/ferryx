@@ -1,6 +1,7 @@
 //! The per-session transcript in `messages`, as omo-gateway's multiplexer kept it: every user
 //! message and assistant reply of a Slack or dashboard session, in order. The dashboard's
 //! session view and websocket read it.
+use crate::storage::WriteTx;
 use sqlx::SqlitePool;
 
 use crate::error::Result;
@@ -14,7 +15,7 @@ pub async fn record(
     content: &str,
 ) -> Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let sequence: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages")
         .fetch_one(&mut *tx)
         .await?;

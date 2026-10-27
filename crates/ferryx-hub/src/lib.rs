@@ -36,6 +36,7 @@ pub mod judge;
 pub mod lanes;
 pub mod ledger;
 pub mod lifecycle;
+pub mod mail_brief;
 pub mod mcp;
 pub mod memory;
 pub mod meta;

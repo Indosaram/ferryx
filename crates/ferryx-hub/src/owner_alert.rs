@@ -19,8 +19,8 @@ pub struct PendingAlert {
     pub link: Option<String>,
 }
 
-pub fn alert_line(alert: &PendingAlert) -> String {
-    let label = match alert.source.as_str() {
+pub(crate) fn source_label(source: &str) -> &str {
+    match source {
         "mail" => "메일",
         "kakao" => "카톡",
         "imessage" => "문자",
@@ -29,7 +29,11 @@ pub fn alert_line(alert: &PendingAlert) -> String {
         "github" => "GitHub",
         "cron" => "크론",
         other => other,
-    };
+    }
+}
+
+pub fn alert_line(alert: &PendingAlert) -> String {
+    let label = source_label(&alert.source);
     let who = one_line(alert.author.as_deref().unwrap_or("알 수 없음"), 60);
     let what = alert
         .title
@@ -44,7 +48,20 @@ pub fn alert_line(alert: &PendingAlert) -> String {
     line
 }
 
-fn one_line(text: &str, max_chars: usize) -> String {
+/// The alert line with the mail brief, when there is one, as two short lines under the subject.
+pub fn alert_text(alert: &PendingAlert, brief: Option<&crate::mail_brief::Brief>) -> String {
+    let mut text = alert_line(alert);
+    if let Some(brief) = brief {
+        text.push_str(&format!(
+            "\n내용: {}\n할 일: {}",
+            one_line(&brief.summary, 300),
+            one_line(&brief.action, 160)
+        ));
+    }
+    text
+}
+
+pub(crate) fn one_line(text: &str, max_chars: usize) -> String {
     let flat: String = text
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
@@ -90,7 +107,15 @@ pub async fn sweep(pool: &SqlitePool, owner_session: &str, now: DateTime<Utc>) -
     if alerts.is_empty() {
         return Ok(0);
     }
-    let lines: Vec<String> = alerts.iter().map(alert_line).collect();
+    let mut lines = Vec::with_capacity(alerts.len());
+    for alert in &alerts {
+        let brief = if alert.source == "mail" {
+            crate::mail_brief::for_item(&alert.item_id).await
+        } else {
+            None
+        };
+        lines.push(alert_text(alert, brief.as_ref()));
+    }
     let content = if lines.len() == 1 {
         lines[0].clone()
     } else {
@@ -323,6 +348,27 @@ mod tests {
             .unwrap();
         assert!(text.contains("메일"));
         assert!(text.contains("Quote"));
+    }
+
+    #[test]
+    fn a_mail_brief_adds_content_and_action_lines_under_the_subject() {
+        let alert = PendingAlert {
+            item_id: "mail:t1".into(),
+            source: "mail".into(),
+            author: Some("Ada <ada@x.example>".into()),
+            title: Some("Quote".into()),
+            snippet: "please sign".into(),
+            link: Some("https://mail.example/t1".into()),
+        };
+        let brief = crate::mail_brief::Brief {
+            summary: "견적서에 서명을 요청합니다.".into(),
+            action: "금요일까지 서명해 회신하세요.".into(),
+        };
+        assert_eq!(
+            alert_text(&alert, Some(&brief)),
+            "📬 [메일] Ada <ada@x.example> — Quote\nhttps://mail.example/t1\n내용: 견적서에 서명을 요청합니다.\n할 일: 금요일까지 서명해 회신하세요."
+        );
+        assert_eq!(alert_text(&alert, None), alert_line(&alert));
     }
 
     async fn owner_item(pool: &SqlitePool, id: &str, now: DateTime<Utc>) {

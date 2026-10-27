@@ -198,7 +198,9 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
                 thread_id: None,
                 system_prompt: Some(prompt.to_owned()),
                 // Every turn through this client is a background turn.
-                model: Some(model.map_or_else(crate::model_policy::background_model, str::to_owned)),
+                model: Some(
+                    model.map_or_else(crate::model_policy::background_model, str::to_owned),
+                ),
                 toolsets: (!toolsets.is_empty()).then(|| toolsets.to_vec()),
                 text: prompt.to_owned(),
                 pin_model: true,

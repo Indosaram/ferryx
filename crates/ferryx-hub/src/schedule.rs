@@ -4,6 +4,7 @@
 //! is gone, or after the stale-lease safety net. Retries back off. Delivery targets
 //! come from the job payload (`slack:CHANNEL:THREAD`, `discord:ID`, `origin`).
 //! The scheduler sleeps until the next `next_run_at`; it does not poll.
+use crate::storage::WriteTx;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -303,37 +304,211 @@ pub fn incident_kind(
     }
 }
 
-/// omo-gateway's `needs_owner`: a cron problem becomes an open owner item (`cron:<incident>`),
-/// so the owner alert sweep posts it to the owner's Slack DM and the digest lists it.
+/// The one owner inbox item a failing cron job holds, however often it fails.
+pub(crate) fn cron_owner_item_id(job_id: &str) -> String {
+    format!("cron:job:{job_id}")
+}
+
+/// The latest failure of a job, as its owner inbox item shows it.
+pub(crate) struct CronOwnerItem<'a> {
+    pub job_id: &'a str,
+    /// Keeps the `{job_id}: needs you - ` prefix the digest groups by.
+    pub title: &'a str,
+    /// Snippet and proposed action.
+    pub action: &'a str,
+    pub reason: &'a str,
+    pub lane_key: Option<&'a str>,
+    pub at: &'a str,
+}
+
+/// Upserts the job's single owner item to the latest failure. An item that was not open
+/// reopens with a fresh `decided_at` and loses its alert obligation, so the owner is told
+/// once; an open item keeps both, so repeat failures do not re-alert.
+pub(crate) async fn upsert_cron_owner_item(
+    conn: &mut sqlx::SqliteConnection,
+    item: &CronOwnerItem<'_>,
+) -> Result<()> {
+    let id = cron_owner_item_id(item.job_id);
+    sqlx::query(
+        "DELETE FROM delivery_obligations WHERE id = ?
+           AND NOT EXISTS (SELECT 1 FROM inbox_decisions WHERE item_id = ? AND status = 'open')",
+    )
+    .bind(format!("{}{id}", crate::owner_alert::OBLIGATION_PREFIX))
+    .bind(&id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, snippet = excluded.snippet, received_at = excluded.received_at",
+    )
+    .bind(&id)
+    .bind(&id)
+    .bind(item.job_id)
+    .bind(item.title)
+    .bind(item.action)
+    .bind(item.at)
+    .bind(item.at)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, lane_key, status, decided_at) VALUES(?, 'owner', ?, ?, ?, 'open', ?)
+         ON CONFLICT(item_id) DO UPDATE SET class = 'owner', reason = excluded.reason, proposed_action = excluded.proposed_action,
+           lane_key = COALESCE(excluded.lane_key, inbox_decisions.lane_key),
+           decided_at = CASE WHEN inbox_decisions.status = 'open' THEN inbox_decisions.decided_at ELSE excluded.decided_at END,
+           status = 'open'",
+    )
+    .bind(&id)
+    .bind(item.reason)
+    .bind(item.action)
+    .bind(item.lane_key)
+    .bind(item.at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// A clean run settles the job's owner item and any legacy per-incident items it left.
+pub(crate) async fn close_cron_owner_items(pool: &SqlitePool, job_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE inbox_decisions SET status = 'done'
+          WHERE status = 'open' AND class = 'owner'
+            AND (item_id = ?
+                 OR (item_id LIKE 'cron:%' AND item_id IN (SELECT id FROM inbox_items WHERE source = 'cron' AND author = ?)))",
+    )
+    .bind(cron_owner_item_id(job_id))
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The newest legacy owner item of a job, which its collapsed item inherits.
+#[derive(sqlx::FromRow)]
+struct LegacyOwnerRow {
+    title: Option<String>,
+    snippet: String,
+    received_at: String,
+    reason: String,
+    proposed_action: Option<String>,
+    lane_key: Option<String>,
+    decided_at: String,
+}
+
+/// Collapses the open legacy per-incident/per-problem cron owner items (`cron:<id>`) into one
+/// `cron:job:<job_id>` item per job, marked already alerted, and dismisses the legacy ones.
+/// Idempotent; returns how many legacy decisions were dismissed.
+pub async fn reconcile_cron_owner_items(pool: &SqlitePool) -> Result<u64> {
+    const LEGACY: &str = "d.status = 'open' AND d.class = 'owner' AND i.source = 'cron'
+        AND d.item_id LIKE 'cron:%' AND d.item_id NOT LIKE 'cron:job:%'";
+    let mut tx = pool.begin_write().await?;
+    // Remediation problem items (`cron:<problem id>`) were written without an author; take the
+    // job from the problem row so they collapse with the rest of the job.
+    sqlx::query(
+        "UPDATE inbox_items SET author = (SELECT p.job_id FROM cron_problems p WHERE p.id = inbox_items.source_ref)
+          WHERE source = 'cron' AND (author IS NULL OR author = '') AND id NOT LIKE 'cron:job:%'
+            AND EXISTS (SELECT 1 FROM cron_problems p WHERE p.id = inbox_items.source_ref)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let jobs: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT i.author FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+          WHERE {LEGACY} AND i.author IS NOT NULL AND i.author != ''"
+    ))
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut dismissed = 0_u64;
+    for job_id in jobs {
+        let id = cron_owner_item_id(&job_id);
+        let already_open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inbox_decisions WHERE item_id = ? AND status = 'open'",
+        )
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if already_open == 0 {
+            let newest: LegacyOwnerRow = sqlx::query_as(&format!(
+                "SELECT i.title, i.snippet, i.received_at, d.reason, d.proposed_action, d.lane_key, d.decided_at
+                   FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+                  WHERE {LEGACY} AND i.author = ?
+                  ORDER BY julianday(d.decided_at) DESC, d.item_id DESC LIMIT 1"
+            ))
+            .bind(&job_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?)
+                 ON CONFLICT(id) DO UPDATE SET title = excluded.title, snippet = excluded.snippet, received_at = excluded.received_at",
+            )
+            .bind(&id)
+            .bind(&id)
+            .bind(&job_id)
+            .bind(newest.title)
+            .bind(newest.snippet)
+            .bind(newest.received_at)
+            .bind(now_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, lane_key, status, decided_at) VALUES(?, 'owner', ?, ?, ?, 'open', ?)
+                 ON CONFLICT(item_id) DO UPDATE SET class = 'owner', reason = excluded.reason, proposed_action = excluded.proposed_action,
+                   lane_key = excluded.lane_key, status = 'open', decided_at = excluded.decided_at",
+            )
+            .bind(&id)
+            .bind(newest.reason)
+            .bind(newest.proposed_action)
+            .bind(newest.lane_key)
+            .bind(newest.decided_at)
+            .execute(&mut *tx)
+            .await?;
+            // The backlog was alerted item by item already; the collapsed item is not news.
+            sqlx::query(
+                "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'delivered', 'collapsed legacy cron owner items', ?)
+                 ON CONFLICT(id) DO UPDATE SET state = 'delivered', updated_at = excluded.updated_at",
+            )
+            .bind(format!("{}{id}", crate::owner_alert::OBLIGATION_PREFIX))
+            .bind(now_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+        }
+        let done = sqlx::query(&format!(
+            "UPDATE inbox_decisions SET status = 'dismissed'
+              WHERE item_id IN (SELECT d.item_id FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+                                 WHERE {LEGACY} AND i.author = ?)"
+        ))
+        .bind(&job_id)
+        .execute(&mut *tx)
+        .await?;
+        dismissed += done.rows_affected();
+    }
+    tx.commit().await?;
+    Ok(dismissed)
+}
+
+/// omo-gateway's `needs_owner`: a cron failure refreshes the job's one open owner item
+/// (`cron:job:<job_id>`), so the owner alert sweep posts it once and the digest lists it.
 async fn escalate_incident(
     pool: &SqlitePool,
-    incident: &str,
     job_id: &str,
     kind: &str,
     detail: &str,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let item = format!("cron:{incident}");
     let at = now.to_rfc3339();
     let action = crate::judge::scrub_for_external(detail);
-    let mut tx = pool.begin().await?;
-    sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, ?, ?, ?, ?, 'cron', ?) ON CONFLICT DO NOTHING")
-        .bind(&item)
-        .bind(incident)
-        .bind(job_id)
-        .bind(format!("{job_id}: needs you - {kind}: {action}"))
-        .bind(&action)
-        .bind(&at)
-        .bind(&at)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, status, decided_at) VALUES(?, 'owner', ?, ?, 'open', ?) ON CONFLICT(item_id) DO NOTHING")
-        .bind(&item)
-        .bind(kind)
-        .bind(&action)
-        .bind(&at)
-        .execute(&mut *tx)
-        .await?;
+    let title = format!("{job_id}: needs you - {kind}: {action}");
+    let mut tx = pool.begin_write().await?;
+    upsert_cron_owner_item(
+        &mut tx,
+        &CronOwnerItem {
+            job_id,
+            title: &title,
+            action: &action,
+            reason: kind,
+            lane_key: None,
+            at: &at,
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -748,15 +923,160 @@ pub struct ClaimedJob {
     pub run_id: String,
 }
 
+pub const LEASE_EXPIRED_ERROR: &str = "lease expired before completion";
+/// How often a running batch pushes its leases forward.
+pub const LEASE_RENEW_EVERY: Duration = Duration::from_secs(60);
+
+/// Signal 0 tests existence without delivering a signal. EPERM means the pid exists but
+/// belongs to another user, which is still a live owner.
+pub fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: kill with signal 0 performs only the existence and permission check.
+        let result = unsafe { sys::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(unix)]
+mod sys {
+    unsafe extern "C" {
+        pub fn kill(pid: i32, sig: i32) -> i32;
+    }
+}
+
+fn parse_instant(text: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+/// Fails every `running` row whose lease expired and whose owner `should_reclaim` gives up
+/// on (dead owner, or past `STALE_LEASE`). A daemon that died or handed over mid-batch left
+/// those rows behind with the job's `next_run_at` cleared, so the job never ran again.
+/// The job gets its next FUTURE occurrence: the missed one is never replayed, because a
+/// script may already have had external effects. A disabled job stays disabled and a job
+/// someone rescheduled keeps its newer `next_run_at`. Returns the number of recovered runs.
+pub async fn recover_stale_runs<F>(
+    pool: &SqlitePool,
+    now: DateTime<Utc>,
+    is_alive: F,
+) -> Result<u64>
+where
+    F: Fn(u32) -> bool,
+{
+    let rows: Vec<(String, String, Option<i64>, String)> = sqlx::query_as(
+        "SELECT id, job_id, owner_pid, lease_until FROM cron_runs WHERE status = 'running' AND lease_until IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    let stale: Vec<_> = rows
+        .into_iter()
+        .filter(|(_, _, owner_pid, lease_until)| {
+            let Some(lease) = parse_instant(lease_until) else {
+                return false;
+            };
+            let owner = owner_pid.and_then(|pid| u32::try_from(pid).ok());
+            should_reclaim(owner, lease <= now, now - lease, &is_alive)
+        })
+        .collect();
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    let now_text = now.to_rfc3339();
+    let mut recovered = 0;
+    let mut tx = pool.begin().await?;
+    for (run_id, job_id, _, lease_until) in stale {
+        // Only a row still running on the lease we judged moves; a renewal or a finish that
+        // landed in between wins.
+        let changed = sqlx::query(
+            "UPDATE cron_runs SET status = 'failed', finished_at = ?, error = ? WHERE id = ? AND status = 'running' AND lease_until = ?",
+        )
+        .bind(&now_text)
+        .bind(LEASE_EXPIRED_ERROR)
+        .bind(&run_id)
+        .bind(&lease_until)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            continue;
+        }
+        recovered += 1;
+        tracing::warn!(%job_id, %run_id, "cron run lease expired; marked failed and rescheduled");
+        let job: Option<(String, String)> = sqlx::query_as(
+            "SELECT expression, payload_json FROM scheduled_jobs WHERE id = ? AND enabled = 1 AND next_run_at IS NULL",
+        )
+        .bind(&job_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((expression, payload_json)) = job else {
+            continue;
+        };
+        let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+        let expression = job_expression(&expression, &payload);
+        let next = match next_run_tz(&expression, now, payload_timezone(&payload)) {
+            Ok(next) if next > now => next,
+            Ok(_) | Err(_) => {
+                tracing::warn!(%job_id, "recovered cron job has no future occurrence; left unscheduled");
+                continue;
+            }
+        };
+        sqlx::query(
+            "UPDATE scheduled_jobs SET next_run_at = ?, updated_at = ? WHERE id = ? AND enabled = 1 AND next_run_at IS NULL",
+        )
+        .bind(next.to_rfc3339())
+        .bind(&now_text)
+        .bind(&job_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(recovered)
+}
+
+/// Pushes the lease of every still-running run in `run_ids` to `now + LEASE`.
+pub async fn renew_leases(
+    pool: &SqlitePool,
+    run_ids: &[String],
+    now: DateTime<Utc>,
+) -> Result<u64> {
+    let lease = (now + LEASE).to_rfc3339();
+    let mut renewed = 0;
+    for run_id in run_ids {
+        renewed +=
+            sqlx::query("UPDATE cron_runs SET lease_until = ? WHERE id = ? AND status = 'running'")
+                .bind(&lease)
+                .bind(run_id)
+                .execute(pool)
+                .await?
+                .rows_affected();
+    }
+    Ok(renewed)
+}
+
 /// Claims every due job for `owner_pid`. A job is claimed by one conditional UPDATE that
 /// clears `next_run_at` only while it still holds the occurrence this scheduler read, so two
 /// schedulers on one database (a draining predecessor next to its successor) never both run
 /// the same occurrence: the loser's UPDATE changes no row and it opens no run.
+/// Stale runs a dead or handed-over owner left behind are recovered first.
 pub async fn claim_due(
     pool: &SqlitePool,
     now: DateTime<Utc>,
     owner_pid: u32,
 ) -> Result<Vec<ClaimedJob>> {
+    recover_stale_runs(pool, now, process_alive).await?;
     let now_text = now.to_rfc3339();
     let lease = (now + LEASE).to_rfc3339();
     let rows: Vec<(String, Option<String>)> = sqlx::query_as(
@@ -770,7 +1090,7 @@ pub async fn claim_due(
         let Some(observed) = occurrence.clone() else {
             continue;
         };
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_write().await?;
         let won = sqlx::query(
             "UPDATE scheduled_jobs SET next_run_at = NULL, updated_at = ? WHERE id = ? AND enabled = 1 AND next_run_at = ?",
         )
@@ -863,6 +1183,9 @@ fn increment_repeat_completed(payload: &mut Value) -> (Option<u64>, u64) {
     (times, completed)
 }
 
+/// Finishes a run this scheduler still owns. Returns `Ok(false)` without touching the job
+/// when the run is no longer `running` (stale recovery already failed it): a late finish
+/// from an old owner must not re-enable, reschedule, or relabel anything.
 pub async fn finish_run(
     pool: &SqlitePool,
     job_id: &str,
@@ -871,11 +1194,11 @@ pub async fn finish_run(
     error: Option<&str>,
     output: &str,
     occurrence: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     let now = Utc::now();
     let status = if ok { "succeeded" } else { "failed" };
-    sqlx::query(
-        "UPDATE cron_runs SET status = ?, finished_at = ?, error = ?, output = ? WHERE id = ? AND job_id = ?",
+    let changed = sqlx::query(
+        "UPDATE cron_runs SET status = ?, finished_at = ?, error = ?, output = ? WHERE id = ? AND job_id = ? AND status = 'running'",
     )
     .bind(status)
     .bind(now.to_rfc3339())
@@ -884,15 +1207,20 @@ pub async fn finish_run(
     .bind(run_id)
     .bind(job_id)
     .execute(pool)
-    .await?;
-    let row: Option<(String, i64, String)> = sqlx::query_as(
-        "SELECT expression, consecutive_failures, payload_json FROM scheduled_jobs WHERE id = ?",
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        tracing::warn!(%job_id, %run_id, "cron run was already settled; late finish ignored");
+        return Ok(false);
+    }
+    let row: Option<(String, i64, String, i64)> = sqlx::query_as(
+        "SELECT expression, consecutive_failures, payload_json, enabled FROM scheduled_jobs WHERE id = ?",
     )
     .bind(job_id)
     .fetch_optional(pool)
     .await?;
-    let Some((expression, failures, payload_json)) = row else {
-        return Ok(());
+    let Some((expression, failures, payload_json, job_enabled)) = row else {
+        return Ok(true);
     };
     let mut payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
     let expression = job_expression(&expression, &payload);
@@ -923,7 +1251,18 @@ pub async fn finish_run(
         }
     }
     let limit_reached = should_disable_after(completed, times);
-    let (next, consecutive, enabled) = if expression.starts_with("once:") || limit_reached {
+    let (next, consecutive, enabled) = if job_enabled == 0 {
+        // Disabled while it ran: stays disabled and unscheduled.
+        (
+            None,
+            if ok {
+                0_i64
+            } else {
+                failures.saturating_add(1)
+            },
+            0_i64,
+        )
+    } else if expression.starts_with("once:") || limit_reached {
         (
             None,
             if ok {
@@ -974,10 +1313,10 @@ pub async fn finish_run(
                 .bind(now.to_rfc3339())
                 .execute(pool)
                 .await?;
-            escalate_incident(pool, &incident, job_id, kind, &detail, now).await?;
+            escalate_incident(pool, job_id, kind, &detail, now).await?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1037,12 +1376,29 @@ pub async fn next_wait(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Duration
     )
     .fetch_one(pool)
     .await?;
-    let Some(next) = next else {
+    // A running row becomes reclaimable when its lease expires (dead owner) and, at the
+    // latest, `STALE_LEASE` after that (live owner). The scheduler wakes for that instant so
+    // a database whose only jobs are stuck behind orphan runs is repaired in minutes.
+    let leases: Vec<String> = sqlx::query_scalar(
+        "SELECT lease_until FROM cron_runs WHERE status = 'running' AND lease_until IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    let recovery = leases
+        .iter()
+        .filter_map(|lease| parse_instant(lease))
+        .map(|lease| {
+            if lease > now {
+                lease
+            } else {
+                lease + STALE_LEASE
+            }
+        })
+        .min();
+    let scheduled = next.map(|next| parse_instant(&next).unwrap_or(now));
+    let Some(when) = [scheduled, recovery].into_iter().flatten().min() else {
         return Ok(Duration::from_secs(24 * 60 * 60));
     };
-    let when = DateTime::parse_from_rfc3339(&next)
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or(now);
     let delta = when.signed_duration_since(now);
     if delta <= TimeDelta::zero() {
         return Ok(Duration::ZERO);
@@ -1114,6 +1470,37 @@ pub async fn drive_due_with(
     skills_root: Option<&std::path::Path>,
 ) -> Result<Vec<DueDelivery>> {
     let claimed = claim_due(pool, now, std::process::id()).await?;
+    if claimed.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The batch runs its jobs one after another; meanwhile every still-running run of the
+    // batch has its lease pushed forward, so a long batch never looks stale while alive.
+    let run_ids: Vec<String> = claimed.iter().map(|job| job.run_id.clone()).collect();
+    let batch = run_claimed(pool, claimed, model, skills_root);
+    tokio::pin!(batch);
+    let mut renew = tokio::time::interval_at(
+        tokio::time::Instant::now() + LEASE_RENEW_EVERY,
+        LEASE_RENEW_EVERY,
+    );
+    renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut batch => return result,
+            _ = renew.tick() => {
+                if let Err(error) = renew_leases(pool, &run_ids, Utc::now()).await {
+                    tracing::warn!(%error, "cron lease renewal failed");
+                }
+            }
+        }
+    }
+}
+
+async fn run_claimed(
+    pool: &SqlitePool,
+    claimed: Vec<ClaimedJob>,
+    model: &dyn crate::lanes::kibitzer::ModelTurn,
+    skills_root: Option<&std::path::Path>,
+) -> Result<Vec<DueDelivery>> {
     let mut deliveries = Vec::new();
     for ClaimedJob {
         id: job_id,
@@ -1147,7 +1534,7 @@ pub async fn drive_due_with(
                 crate::cron_exec::commit_monitor(pool, &job_id, hash).await?;
             }
         }
-        finish_run(
+        let owned = finish_run(
             pool,
             &job_id,
             &run_id,
@@ -1157,6 +1544,11 @@ pub async fn drive_due_with(
             occurrence.as_deref(),
         )
         .await?;
+        if !owned {
+            // Stale recovery already failed this run and rescheduled the job; its output
+            // is not delivered and its health is not recorded twice.
+            continue;
+        }
         note_run_health(
             pool,
             &job_id,
@@ -1232,6 +1624,7 @@ pub(crate) async fn note_run_health(
             .bind(job_id)
             .execute(pool)
             .await?;
+        close_cron_owner_items(pool, job_id).await?;
         crate::cron_remediate::reconcile_fixed(pool, job_id).await?;
         return Ok(());
     };
@@ -1844,7 +2237,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(alerts.len(), 1);
-        assert!(alerts[0].item_id.starts_with("cron:"));
+        assert_eq!(alerts[0].item_id, cron_owner_item_id("job"));
         assert_eq!(
             crate::owner_alert::alert_line(&alerts[0]),
             "📬 [크론] job — job: needs you - failed: boom"
@@ -2283,5 +2676,476 @@ mod tests {
         assert!(queued[0].1.contains("cron broken failed: socket refused"));
         let session = crate::chat::session::SessionKey::from_storage_key(&queued[0].0).unwrap();
         assert_eq!(session.channel_id, "CHOME");
+    }
+
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    async fn insert_job(
+        pool: &SqlitePool,
+        id: &str,
+        enabled: i64,
+        next_run_at: Option<DateTime<Utc>>,
+    ) {
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at, delivery_json) VALUES(?, 'every 10m', '{\"command\":\"printf hi\"}', ?, ?, '[]')")
+            .bind(id)
+            .bind(enabled)
+            .bind(next_run_at.map(|t| t.to_rfc3339()))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_running(
+        pool: &SqlitePool,
+        run_id: &str,
+        job_id: &str,
+        owner_pid: i64,
+        lease_until: DateTime<Utc>,
+    ) {
+        sqlx::query("INSERT INTO cron_runs(id, job_id, status, owner_pid, lease_until, started_at) VALUES(?, ?, 'running', ?, ?, ?)")
+            .bind(run_id)
+            .bind(job_id)
+            .bind(owner_pid)
+            .bind(lease_until.to_rfc3339())
+            .bind((lease_until - LEASE).to_rfc3339())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn run_row(pool: &SqlitePool, run_id: &str) -> (String, Option<String>, Option<String>) {
+        sqlx::query_as("SELECT status, finished_at, error FROM cron_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn job_row(pool: &SqlitePool, id: &str) -> (i64, Option<String>) {
+        sqlx::query_as("SELECT enabled, next_run_at FROM scheduled_jobs WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_orphan_run_of_a_dead_owner_is_recovered_without_replaying_the_occurrence() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "omocat", 1, None).await;
+        insert_running(
+            &pool,
+            "orphan",
+            "omocat",
+            69535,
+            now - TimeDelta::minutes(5),
+        )
+        .await;
+        let recovered = recover_stale_runs(&pool, now, |_| false).await.unwrap();
+        assert_eq!(recovered, 1);
+        let (status, finished, error) = run_row(&pool, "orphan").await;
+        assert_eq!(status, "failed");
+        assert_eq!(finished.as_deref(), Some(now.to_rfc3339().as_str()));
+        assert_eq!(error.as_deref(), Some("lease expired before completion"));
+        let (enabled, next) = job_row(&pool, "omocat").await;
+        assert_eq!(enabled, 1);
+        let next = at(&next.expect("the job is rescheduled"));
+        assert!(next > now, "the next run is in the future: {next}");
+        // The missed occurrence is not replayed: nothing is due at `now`.
+        assert!(claim_due(&pool, now, 1).await.unwrap().is_empty());
+        let runs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cron_runs WHERE job_id = 'omocat'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(runs, 1);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_lease_of_a_live_owner_is_not_reclaimed() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "busy", 1, None).await;
+        insert_running(&pool, "fresh", "busy", 4242, now + TimeDelta::minutes(20)).await;
+        insert_job(&pool, "slow", 1, None).await;
+        insert_running(
+            &pool,
+            "expired-live",
+            "slow",
+            4243,
+            now - TimeDelta::minutes(5),
+        )
+        .await;
+        let recovered = recover_stale_runs(&pool, now, |_| true).await.unwrap();
+        assert_eq!(recovered, 0);
+        assert_eq!(run_row(&pool, "fresh").await.0, "running");
+        assert_eq!(run_row(&pool, "expired-live").await.0, "running");
+        assert_eq!(job_row(&pool, "busy").await, (1, None));
+        // Past the stale-lease safety net even a live owner is reclaimed.
+        let later = now + STALE_LEASE;
+        assert_eq!(recover_stale_runs(&pool, later, |_| true).await.unwrap(), 1);
+        assert_eq!(run_row(&pool, "expired-live").await.0, "failed");
+        assert_eq!(run_row(&pool, "fresh").await.0, "running");
+    }
+
+    #[tokio::test]
+    async fn recovery_keeps_a_disabled_job_disabled_and_a_newer_next_run() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        let newer = now + TimeDelta::hours(5);
+        insert_job(&pool, "paused", 0, None).await;
+        insert_running(&pool, "r-paused", "paused", 1, now - TimeDelta::minutes(1)).await;
+        insert_job(&pool, "moved", 1, Some(newer)).await;
+        insert_running(&pool, "r-moved", "moved", 1, now - TimeDelta::minutes(1)).await;
+        assert_eq!(recover_stale_runs(&pool, now, |_| false).await.unwrap(), 2);
+        assert_eq!(job_row(&pool, "paused").await, (0, None));
+        assert_eq!(job_row(&pool, "moved").await, (1, Some(newer.to_rfc3339())));
+        assert_eq!(run_row(&pool, "r-paused").await.0, "failed");
+        assert_eq!(run_row(&pool, "r-moved").await.0, "failed");
+    }
+
+    #[tokio::test]
+    async fn recovery_is_idempotent() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "job", 1, None).await;
+        insert_running(&pool, "orphan", "job", 55197, now - TimeDelta::minutes(1)).await;
+        assert_eq!(recover_stale_runs(&pool, now, |_| false).await.unwrap(), 1);
+        let first = job_row(&pool, "job").await;
+        let later = now + TimeDelta::minutes(1);
+        assert_eq!(
+            recover_stale_runs(&pool, later, |_| false).await.unwrap(),
+            0
+        );
+        assert_eq!(job_row(&pool, "job").await, first);
+        let (_, finished, _) = run_row(&pool, "orphan").await;
+        assert_eq!(finished.as_deref(), Some(now.to_rfc3339().as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_late_finish_after_recovery_changes_nothing() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "job", 1, None).await;
+        insert_running(&pool, "orphan", "job", 60118, now - TimeDelta::minutes(1)).await;
+        assert_eq!(recover_stale_runs(&pool, now, |_| false).await.unwrap(), 1);
+        // The owner disables the job after recovery; the late finish must not re-enable it.
+        sqlx::query("UPDATE scheduled_jobs SET enabled = 0 WHERE id = 'job'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let job_before: (i64, Option<String>, i64, String) = sqlx::query_as(
+            "SELECT enabled, next_run_at, consecutive_failures, payload_json FROM scheduled_jobs WHERE id = 'job'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let run_before = run_row(&pool, "orphan").await;
+        let accepted = finish_run(&pool, "job", "orphan", true, None, "late", None)
+            .await
+            .unwrap();
+        assert!(!accepted);
+        let job_after: (i64, Option<String>, i64, String) = sqlx::query_as(
+            "SELECT enabled, next_run_at, consecutive_failures, payload_json FROM scheduled_jobs WHERE id = 'job'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(job_after, job_before);
+        assert_eq!(run_row(&pool, "orphan").await, run_before);
+        let incidents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_incidents")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(incidents, 0);
+    }
+
+    #[tokio::test]
+    async fn a_job_disabled_while_running_stays_disabled_after_finish() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        insert_job(&pool, "job", 0, None).await;
+        insert_running(&pool, "run", "job", 1, now + LEASE).await;
+        let accepted = finish_run(&pool, "job", "run", true, None, "done", None)
+            .await
+            .unwrap();
+        assert!(accepted);
+        assert_eq!(run_row(&pool, "run").await.0, "succeeded");
+        assert_eq!(job_row(&pool, "job").await, (0, None));
+    }
+
+    #[tokio::test]
+    async fn next_wait_wakes_for_a_stale_run_when_no_job_is_scheduled() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "job", 1, None).await;
+        insert_running(&pool, "orphan", "job", 55197, now - TimeDelta::minutes(10)).await;
+        let wait = next_wait(&pool, now).await.unwrap();
+        assert!(wait < Duration::from_secs(3 * 60 * 60), "{wait:?}");
+        assert!(
+            wait > Duration::ZERO,
+            "a live-owner row must not spin the loop"
+        );
+        // A lease that has not expired yet wakes when it expires.
+        insert_job(&pool, "other", 1, None).await;
+        insert_running(&pool, "fresh", "other", 1, now + TimeDelta::minutes(7)).await;
+        let wait = next_wait(&pool, now).await.unwrap();
+        assert_eq!(wait, Duration::from_secs(7 * 60));
+    }
+
+    #[tokio::test]
+    async fn renewing_leases_extends_only_running_runs_of_the_batch() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "job", 1, None).await;
+        insert_running(&pool, "mine", "job", 1, now + TimeDelta::minutes(1)).await;
+        insert_running(&pool, "other", "job", 2, now + TimeDelta::minutes(1)).await;
+        let renewed = renew_leases(&pool, &["mine".to_owned()], now)
+            .await
+            .unwrap();
+        assert_eq!(renewed, 1);
+        let lease: String =
+            sqlx::query_scalar("SELECT lease_until FROM cron_runs WHERE id = 'mine'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(at(&lease), now + LEASE);
+        let other: String =
+            sqlx::query_scalar("SELECT lease_until FROM cron_runs WHERE id = 'other'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(at(&other), now + TimeDelta::minutes(1));
+    }
+
+    async fn owner_items(pool: &SqlitePool) -> Vec<(String, String, String)> {
+        sqlx::query_as("SELECT item_id, status, decided_at FROM inbox_decisions WHERE item_id LIKE 'cron:%' ORDER BY item_id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn repeat_failures_of_a_job_refresh_one_open_owner_item() {
+        let pool = crate::storage::memory().await.unwrap();
+        let first = Utc::now() - TimeDelta::minutes(10);
+        escalate_incident(&pool, "job", "failed", "boom", first)
+            .await
+            .unwrap();
+        escalate_incident(&pool, "job", "stuck", "again", Utc::now())
+            .await
+            .unwrap();
+        let items = owner_items(&pool).await;
+        assert_eq!(
+            items,
+            vec![(
+                cron_owner_item_id("job"),
+                "open".to_owned(),
+                first.to_rfc3339()
+            )]
+        );
+        let (title, reason): (String, String) = sqlx::query_as(
+            "SELECT i.title, d.reason FROM inbox_items i JOIN inbox_decisions d ON d.item_id = i.id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(title, "job: needs you - stuck: again");
+        assert_eq!(reason, "stuck");
+    }
+
+    #[tokio::test]
+    async fn a_succeeded_run_closes_the_jobs_owner_item() {
+        let pool = crate::storage::memory().await.unwrap();
+        escalate_incident(&pool, "job", "failed", "boom", Utc::now())
+            .await
+            .unwrap();
+        escalate_incident(&pool, "other", "failed", "boom", Utc::now())
+            .await
+            .unwrap();
+        note_run_health(
+            &pool,
+            "job",
+            "r1",
+            "succeeded",
+            "ok",
+            None,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (cron_owner_item_id("job"), "done".to_owned()),
+                (cron_owner_item_id("other"), "open".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_a_close_reopens_the_item_and_clears_its_alert() {
+        let pool = crate::storage::memory().await.unwrap();
+        let obligation = format!(
+            "{}{}",
+            crate::owner_alert::OBLIGATION_PREFIX,
+            cron_owner_item_id("job")
+        );
+        let first = Utc::now() - TimeDelta::minutes(10);
+        escalate_incident(&pool, "job", "failed", "boom", first)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'delivered', 'told', ?)")
+            .bind(&obligation)
+            .bind(now_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        note_run_health(
+            &pool,
+            "job",
+            "r1",
+            "succeeded",
+            "ok",
+            None,
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let later = Utc::now();
+        escalate_incident(&pool, "job", "failed", "boom", later)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner_items(&pool).await,
+            vec![(
+                cron_owner_item_id("job"),
+                "open".to_owned(),
+                later.to_rfc3339()
+            )]
+        );
+        let kept: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM delivery_obligations WHERE id = ?")
+                .bind(&obligation)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kept, 0);
+        let alerts = crate::owner_alert::pending_alerts(&pool, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].item_id, cron_owner_item_id("job"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_collapses_legacy_cron_owner_items_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        for (n, minutes) in [(1, 30_i64), (2, 10), (3, 20)] {
+            let at = (Utc::now() - TimeDelta::minutes(minutes)).to_rfc3339();
+            let id = format!("cron:legacy-{n}");
+            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, 'job', ?, ?, ?, 'cron', ?)")
+                .bind(&id)
+                .bind(&id)
+                .bind(format!("job: needs you - failed: boom {n}"))
+                .bind(format!("boom {n}"))
+                .bind(&at)
+                .bind(&at)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, status, decided_at) VALUES(?, 'owner', 'failed', ?, 'open', ?)")
+                .bind(&id)
+                .bind(format!("boom {n}"))
+                .bind(&at)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(reconcile_cron_owner_items(&pool).await.unwrap(), 3);
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (cron_owner_item_id("job"), "open".to_owned()),
+                ("cron:legacy-1".to_owned(), "dismissed".to_owned()),
+                ("cron:legacy-2".to_owned(), "dismissed".to_owned()),
+                ("cron:legacy-3".to_owned(), "dismissed".to_owned()),
+            ]
+        );
+        let (title, action): (String, String) = sqlx::query_as(
+            "SELECT i.title, d.proposed_action FROM inbox_items i JOIN inbox_decisions d ON d.item_id = i.id WHERE i.id = ?",
+        )
+        .bind(cron_owner_item_id("job"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(title, "job: needs you - failed: boom 2");
+        assert_eq!(action, "boom 2");
+        let obligation: String =
+            sqlx::query_scalar("SELECT state FROM delivery_obligations WHERE id = ?")
+                .bind(format!(
+                    "{}{}",
+                    crate::owner_alert::OBLIGATION_PREFIX,
+                    cron_owner_item_id("job")
+                ))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(obligation, "delivered");
+        assert!(crate::owner_alert::pending_alerts(&pool, Utc::now())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(reconcile_cron_owner_items(&pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_takes_the_job_of_an_authorless_problem_item_from_its_problem_row() {
+        let pool = crate::storage::memory().await.unwrap();
+        let at = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO cron_problems(id, job_id, created_at) VALUES('40', 'job', ?)")
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_items(id, source, source_ref, title, snippet, received_at, raw_hash, collected_at) VALUES('cron:40', 'cron', '40', 'job', 'boom', ?, 'cron', ?)")
+            .bind(&at)
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('cron:40', 'owner', 'failed', 'open', ?)")
+            .bind(&at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(reconcile_cron_owner_items(&pool).await.unwrap(), 1);
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("cron:40".to_owned(), "dismissed".to_owned()),
+                (cron_owner_item_id("job"), "open".to_owned()),
+            ]
+        );
     }
 }

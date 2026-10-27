@@ -1679,6 +1679,38 @@ mod tests {
         assert!(successor.relinquish_transferred_session("not-owned").await.is_err());
     }
 
+    /// 2026-10-27: a predecessor letting go of 14 handed-over quiet shells timed out on 11 of them
+    /// ("Successor reader relinquish was not acknowledged"), 2 s each and one after another, while
+    /// CommitHandoverOk waited behind them, so the GUI got DAEMON_BUSY for about 20 s. A spawned
+    /// session's reader sat in `poll` on a silent PTY with nothing to wake it. The relinquish of an
+    /// exported, silent session must now return Ok, which it does only after the reader joined.
+    #[tokio::test]
+    async fn relinquishing_an_exported_silent_session_wakes_its_polling_reader() {
+        let manager = super::PtyManager::new();
+        let mut cmd = portable_pty::CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"]);
+        let (id, _output) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+        let session = manager.get_session(&id).expect("session registered");
+        let pid = session.pid().expect("child pid");
+        // `sleep 30` writes nothing, so once the reader issued its read it can only be in `poll`.
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while session.reader_phase() != "before-read" {
+            assert!(tokio::time::Instant::now() < deadline, "the reader never issued its first read");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let export = manager.export_session(&id).expect("export pauses the reader");
+        manager
+            .relinquish_transferred_session(&id)
+            .await
+            .expect("the polling reader of a silent session acknowledges the relinquish");
+        assert!(!manager.has_session(&id), "the relinquished session leaves the registry");
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0, "the relinquish must not end the shell");
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        drop(export);
+    }
+
     /// A handover on 2026-09-26 moved 18 of 20 sessions; the two casualties left no trace.
     /// Part of why a failed export is unrecoverable was this ordering: the reader was stopped
     /// BEFORE the export was attempted, so a session whose export failed stayed registered with a

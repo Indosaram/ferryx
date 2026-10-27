@@ -6,6 +6,7 @@
 //! every tracker request mirrors the live sessions into issues of the Sessions team (SES):
 //! one issue per session, its state following the session (question, blocked, working, idle),
 //! sessions gone from a host that answered move to Ended, and a deleted issue stays deleted.
+use crate::storage::WriteTx;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
@@ -487,7 +488,7 @@ fn now_utc() -> String {
 /// omo's `seed::ensure_sessions_team`: the Sessions system team (key SES, or the first free
 /// SES1..SES99) and its states; a user team holding a key is never adopted.
 pub async fn ensure_sessions_team(pool: &SqlitePool) -> Result<String> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let existing: Option<String> = sqlx::query_scalar(SESSIONS_TEAM_SQL)
         .fetch_optional(&mut *tx)
         .await?;
@@ -799,7 +800,7 @@ async fn upsert(
     let id = Uuid::new_v4().to_string();
     let started_at = matches!(state_type.as_str(), "started" | "completed").then(|| now.to_owned());
     let completed_at = (state_type == "completed").then(|| now.to_owned());
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let number: i64 = sqlx::query_scalar(
         "UPDATE tracker_teams SET issue_seq = issue_seq + 1 WHERE id = ? RETURNING issue_seq",
     )

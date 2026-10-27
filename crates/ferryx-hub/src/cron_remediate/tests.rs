@@ -162,7 +162,7 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_one_time_token() {
         .unwrap();
     assert!(!stored.contains(&token));
     let decision: (String, String) =
-        sqlx::query_as("SELECT class, status FROM inbox_decisions WHERE item_id = 'cron:1'")
+        sqlx::query_as("SELECT class, status FROM inbox_decisions WHERE item_id = 'cron:job:job'")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -191,7 +191,7 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_one_time_token() {
     );
     assert!(r.approve_rerun_with_token(id, &token).await.is_err());
     let decision: String =
-        sqlx::query_scalar("SELECT status FROM inbox_decisions WHERE item_id = 'cron:1'")
+        sqlx::query_scalar("SELECT status FROM inbox_decisions WHERE item_id = 'cron:job:job'")
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -211,10 +211,11 @@ async fn login_or_quota_trouble_is_the_owners_with_a_direct_quota_check() {
         message.contains("mahoquot direct result: {\"body\":\"remaining 0\",\"http_status\":200}"),
         "{message}"
     );
-    let title: String = sqlx::query_scalar("SELECT title FROM inbox_items WHERE id = 'cron:1'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let title: String =
+        sqlx::query_scalar("SELECT title FROM inbox_items WHERE id = 'cron:job:job'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(
         title.starts_with("job: needs you - Inspect provider quota"),
         "{title}"
@@ -490,4 +491,37 @@ async fn a_fixed_problem_reopens_when_a_new_run_fails_the_same_way() {
         .unwrap();
     assert_eq!((state.as_str(), run.as_str()), ("open", "r4"));
     assert_eq!(events().await, 2);
+}
+
+#[tokio::test]
+async fn two_problems_of_one_job_share_one_open_owner_item() {
+    let (pool, first) = seeded("job", json!({"command": "true"}), "HTTP 429 quota exceeded").await;
+    sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, run_id, updated_at) VALUES('2', 'job', 'disk full', ?, 'open', 'failed', 'sig2', 'disk full', 'r1', ?)")
+        .bind(now_rfc3339())
+        .bind(now_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fake = Arc::new(Fake::default());
+    let r = remediator(&pool, "needs_owner_login_or_quota", fake.clone());
+    r.on_problem(first, "meta").await.unwrap();
+    let opened: String =
+        sqlx::query_scalar("SELECT decided_at FROM inbox_decisions WHERE item_id = 'cron:job:job'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    r.on_problem(2, "meta").await.unwrap();
+    assert_eq!(status(&pool, 2).await.0, "needs_owner");
+    let decisions: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT item_id, status, decided_at FROM inbox_decisions WHERE item_id LIKE 'cron:%'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        decisions,
+        vec![("cron:job:job".to_owned(), "open".to_owned(), opened)]
+    );
+    // Each escalation still carries its own approval token.
+    assert_eq!(fake.outcomes.lock().unwrap().len(), 2);
 }

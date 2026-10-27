@@ -13,7 +13,9 @@ use sqlx::SqlitePool;
 use super::contract::{self, Contract, Proposal};
 use super::converge::{self, ConvergenceOutcome};
 use super::evidence::{self, EvidenceBundle};
-use super::types::{Decision, GoalError, GoalMode, ProposalState, RequirementStatus, StopReason, TurnOrigin};
+use super::types::{
+    Decision, GoalError, GoalMode, ProposalState, RequirementStatus, StopReason, TurnOrigin,
+};
 use super::{assess, turns};
 use crate::agent_control::AgentControl;
 use crate::judge::Judge;
@@ -57,7 +59,9 @@ static LANE_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mu
     LazyLock::new(Default::default);
 
 fn lane_lock(lane_key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut locks = LANE_LOCKS.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut locks = LANE_LOCKS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     Arc::clone(locks.entry(lane_key.to_owned()).or_default())
 }
 
@@ -66,7 +70,10 @@ fn hub_error(error: impl std::fmt::Display) -> GoalError {
 }
 
 /// The lane's pane and status, or `None` for a lane that no longer exists.
-async fn lane_row(pool: &SqlitePool, lane_key: &str) -> Result<Option<(Option<String>, LaneStatus)>, GoalError> {
+async fn lane_row(
+    pool: &SqlitePool,
+    lane_key: &str,
+) -> Result<Option<(Option<String>, LaneStatus)>, GoalError> {
     let row: Option<(Option<String>, String)> =
         sqlx::query_as("SELECT omo_thread_id, status FROM lanes WHERE key = ?")
             .bind(lane_key)
@@ -80,7 +87,10 @@ async fn lane_row(pool: &SqlitePool, lane_key: &str) -> Result<Option<(Option<St
 }
 
 fn ended(status: LaneStatus) -> bool {
-    matches!(status, LaneStatus::VerifiedDone | LaneStatus::Closed | LaneStatus::Failed)
+    matches!(
+        status,
+        LaneStatus::VerifiedDone | LaneStatus::Closed | LaneStatus::Failed
+    )
 }
 
 /// Records the stop and blocks the lane. Every stop goes through here.
@@ -99,7 +109,9 @@ async fn stop(
                 .map_err(hub_error)?;
         }
         // A lane mid-settlement keeps its status; the recorded stop still holds the loop.
-        status => tracing::info!(lane = %lane_key, ?status, "a stopped goal lane was not moved to blocked"),
+        status => {
+            tracing::info!(lane = %lane_key, ?status, "a stopped goal lane was not moved to blocked")
+        }
     }
     tracing::info!(lane = %lane_key, reason = %reason, "supervisor goal loop stopped the lane");
     Ok(LoopOutcome {
@@ -109,9 +121,15 @@ async fn stop(
 }
 
 /// True when a person spoke to the pane after the proposal was made.
-async fn human_after(pool: &SqlitePool, lane_key: &str, proposal: &Proposal) -> Result<bool, GoalError> {
+async fn human_after(
+    pool: &SqlitePool,
+    lane_key: &str,
+    proposal: &Proposal,
+) -> Result<bool, GoalError> {
     match proposal.at.as_deref() {
-        Some(at) => Ok(turns::latest_human_after(pool, lane_key, at).await?.is_some()),
+        Some(at) => Ok(turns::latest_human_after(pool, lane_key, at)
+            .await?
+            .is_some()),
         None => Ok(false),
     }
 }
@@ -133,23 +151,40 @@ async fn dispatch<C: AgentControl + ?Sized>(
         .await?
         .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))?;
     let Some(proposal) = contract.proposal else {
-        return Err(GoalError::InvalidContract(format!("lane {lane_key} has no proposal to send")));
+        return Err(GoalError::InvalidContract(format!(
+            "lane {lane_key} has no proposal to send"
+        )));
     };
     if human_after(pool, lane_key, &proposal).await? {
         contract::set_proposal_state(pool, lane_key, ProposalState::Superseded, None).await?;
         return Ok(LoopOutcome::new(lane_key));
     }
-    let request_id = proposal
-        .request_id
-        .clone()
-        .unwrap_or_else(|| format!("{}{lane_key}-{}", turns::SUPERVISOR_REQUEST_PREFIX, contract.turns_used));
+    let request_id = proposal.request_id.clone().unwrap_or_else(|| {
+        format!(
+            "{}{lane_key}-{}",
+            turns::SUPERVISOR_REQUEST_PREFIX,
+            contract.turns_used
+        )
+    });
     let outcome = control
-        .send_confirmed(None, session_id, &wrap_instruction(&proposal.text), &request_id)
+        .send_confirmed(
+            None,
+            session_id,
+            &wrap_instruction(&proposal.text),
+            &request_id,
+        )
         .await;
     match outcome {
         super::SendOutcome::Started => {
             contract::set_proposal_state(pool, lane_key, ProposalState::Sent, None).await?;
-            turns::record_turn(pool, lane_key, TurnOrigin::SupervisorProposal, Some(&proposal.text), None).await?;
+            turns::record_turn(
+                pool,
+                lane_key,
+                TurnOrigin::SupervisorProposal,
+                Some(&proposal.text),
+                None,
+            )
+            .await?;
             Ok(LoopOutcome {
                 sent: true,
                 ..LoopOutcome::new(lane_key)
@@ -204,14 +239,20 @@ async fn propose<C: AgentControl + ?Sized>(
         GoalMode::Supervised => ProposalState::AwaitingApproval,
         GoalMode::Full | GoalMode::Off => ProposalState::Pending,
     };
-    contract::set_proposal(pool, lane_key, instruction, gap_ids, initial, Some(&request_id)).await?;
+    contract::set_proposal(
+        pool,
+        lane_key,
+        instruction,
+        gap_ids,
+        initial,
+        Some(&request_id),
+    )
+    .await?;
     match contract.mode {
-        GoalMode::Supervised => {
-            Ok(LoopOutcome {
-                awaiting_approval: true,
-                ..LoopOutcome::new(lane_key)
-            })
-        }
+        GoalMode::Supervised => Ok(LoopOutcome {
+            awaiting_approval: true,
+            ..LoopOutcome::new(lane_key)
+        }),
         GoalMode::Full => dispatch(pool, control, lane_key, session_id).await,
         GoalMode::Off => Ok(LoopOutcome::new(lane_key)),
     }
@@ -238,9 +279,14 @@ async fn finish(
     contract::clear_stop(pool, lane_key).await?;
     contract::clear_proposal(pool, lane_key).await?;
     contract::reset_divergence(pool, lane_key).await?;
-    state::transition(pool, lane_key, LaneStatus::VerifiedDone, Some(GOAL_CONVERGED_REASON))
-        .await
-        .map_err(hub_error)?;
+    state::transition(
+        pool,
+        lane_key,
+        LaneStatus::VerifiedDone,
+        Some(GOAL_CONVERGED_REASON),
+    )
+    .await
+    .map_err(hub_error)?;
     Ok(LoopOutcome::new(lane_key))
 }
 
@@ -277,22 +323,50 @@ async fn decide<C: AgentControl + ?Sized>(
                 .map(|gap| gap.summary.as_str())
                 .collect::<Vec<_>>()
                 .join("; ");
-            stop(pool, lane_key, reason, Some(detail.as_str()).filter(|text| !text.is_empty())).await
+            stop(
+                pool,
+                lane_key,
+                reason,
+                Some(detail.as_str()).filter(|text| !text.is_empty()),
+            )
+            .await
         }
-        Decision::Continue { instruction, gap_ids, .. } => {
+        Decision::Continue {
+            instruction,
+            gap_ids,
+            ..
+        } => {
             contract::reset_divergence(pool, lane_key).await?;
             propose(pool, control, contract, session_id, &instruction, &gap_ids).await
         }
         Decision::Complete => match converge::converge(judge, contract, bundle).await {
-            Err(GoalError::JudgeUnavailable) => stop(pool, lane_key, StopReason::JudgeUnavailable, None).await,
+            Err(GoalError::JudgeUnavailable) => {
+                stop(pool, lane_key, StopReason::JudgeUnavailable, None).await
+            }
             Err(error) => Err(error),
-            Ok(ConvergenceOutcome::Converged { verdicts }) => finish(pool, contract, &verdicts).await,
+            Ok(ConvergenceOutcome::Converged { verdicts }) => {
+                finish(pool, contract, &verdicts).await
+            }
             Ok(ConvergenceOutcome::Diverged { unmet_ids, .. }) => {
                 if contract::note_divergence(pool, lane_key).await? >= DIVERGENCE_STOP_AFTER {
                     let detail = format!("unproven: {}", unmet_ids.join(", "));
-                    return stop(pool, lane_key, StopReason::CompletionEvidenceMissing, Some(&detail)).await;
+                    return stop(
+                        pool,
+                        lane_key,
+                        StopReason::CompletionEvidenceMissing,
+                        Some(&detail),
+                    )
+                    .await;
                 }
-                propose(pool, control, contract, session_id, &verification_instruction(&unmet_ids), &unmet_ids).await
+                propose(
+                    pool,
+                    control,
+                    contract,
+                    session_id,
+                    &verification_instruction(&unmet_ids),
+                    &unmet_ids,
+                )
+                .await
             }
         },
     }
@@ -340,16 +414,20 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
             ProposalState::Uncertain => return Ok(None),
             ProposalState::Pending | ProposalState::AwaitingApproval => {
                 if human_after(pool, lane_key, &proposal).await? {
-                    contract::set_proposal_state(pool, lane_key, ProposalState::Superseded, None).await?;
+                    contract::set_proposal_state(pool, lane_key, ProposalState::Superseded, None)
+                        .await?;
                     superseded = true;
                 } else if proposal.state == ProposalState::AwaitingApproval {
                     return Ok(None);
                 } else {
                     // A pending proposal outside a pass means a pass died mid-dispatch: the
                     // bytes may have reached the pane. Never resend; hand the lane over.
-                    contract::set_proposal_state(pool, lane_key, ProposalState::Uncertain, None).await?;
+                    contract::set_proposal_state(pool, lane_key, ProposalState::Uncertain, None)
+                        .await?;
                     let detail = "interrupted before delivery was confirmed";
-                    return stop(pool, lane_key, StopReason::DeliveryUncertain, Some(detail)).await.map(Some);
+                    return stop(pool, lane_key, StopReason::DeliveryUncertain, Some(detail))
+                        .await
+                        .map(Some);
                 }
             }
             ProposalState::Superseded | ProposalState::Discarded => {}
@@ -380,13 +458,17 @@ pub async fn approve_proposal<C: AgentControl + ?Sized>(
     let contract = contract::contract_of(pool, lane_key)
         .await?
         .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))?;
-    if contract.proposal.as_ref().map(|proposal| proposal.state) != Some(ProposalState::AwaitingApproval) {
+    if contract.proposal.as_ref().map(|proposal| proposal.state)
+        != Some(ProposalState::AwaitingApproval)
+    {
         return Err(GoalError::InvalidContract(format!(
             "lane {lane_key} has no proposal awaiting approval"
         )));
     }
     let Some((Some(session_id), _)) = lane_row(pool, lane_key).await? else {
-        return Err(GoalError::InvalidContract(format!("lane {lane_key} has no pane")));
+        return Err(GoalError::InvalidContract(format!(
+            "lane {lane_key} has no pane"
+        )));
     };
     if let Some(proposal) = contract.proposal.as_ref() {
         if human_after(pool, lane_key, proposal).await? {
@@ -496,28 +578,43 @@ mod tests {
             text: &str,
             request_id: &str,
         ) -> SendOutcome {
-            self.sends
+            self.sends.lock().unwrap().push((
+                session_id.to_owned(),
+                text.to_owned(),
+                request_id.to_owned(),
+            ));
+            self.outcomes
                 .lock()
                 .unwrap()
-                .push((session_id.to_owned(), text.to_owned(), request_id.to_owned()));
-            self.outcomes.lock().unwrap().pop_front().unwrap_or(SendOutcome::Started)
+                .pop_front()
+                .unwrap_or(SendOutcome::Started)
         }
     }
 
     const CONTINUE: &str = r#"{"gaps":[{"id":"g1","kind":"work","requirement_ids":["r1"],"summary":"tests not run"}],"decision":{"decision":"continue","instruction":"run the tests","gap_ids":["g1"],"expected_change":"tests pass","verification":"sig:0"}}"#;
     const COMPLETE: &str = r#"{"gaps":[],"decision":{"decision":"complete"}}"#;
-    const CONVERGED: &str = r#"{"requirements":[{"req_id":"r1","met":true,"evidence_refs":["git:clean"]}]}"#;
+    const CONVERGED: &str =
+        r#"{"requirements":[{"req_id":"r1","met":true,"evidence_refs":["git:clean"]}]}"#;
     const DIVERGED: &str = r#"{"requirements":[{"req_id":"r1","met":false,"evidence_refs":[]}]}"#;
 
     async fn lane_pool(mode: Option<GoalMode>) -> SqlitePool {
         let pool = crate::storage::memory().await.unwrap();
         let cwd = std::env::temp_dir().join(format!("ferryx-goal-loop-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
-        insert_lane(&pool, LANE, "Goal lane", "lead", &cwd.to_string_lossy(), "file marker")
+        insert_lane(
+            &pool,
+            LANE,
+            "Goal lane",
+            "lead",
+            &cwd.to_string_lossy(),
+            "file marker",
+        )
+        .await
+        .unwrap();
+        set_pane(&pool, LANE, "pane-1").await.unwrap();
+        transition(&pool, LANE, LaneStatus::Working, Some("launched"))
             .await
             .unwrap();
-        set_pane(&pool, LANE, "pane-1").await.unwrap();
-        transition(&pool, LANE, LaneStatus::Working, Some("launched")).await.unwrap();
         if let Some(mode) = mode {
             let spec = RequirementSpec {
                 id: "r1".into(),
@@ -530,7 +627,9 @@ mod tests {
     }
 
     fn judge(pool: &SqlitePool, model: &Arc<ScriptedModel>) -> Judge {
-        Judge::bare().with_pool(pool.clone()).with_fallback(model.clone())
+        Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(model.clone())
     }
 
     async fn goal(pool: &SqlitePool) -> Contract {
@@ -563,10 +662,12 @@ mod tests {
         assert_eq!(proposal.text, "run the tests");
         assert_eq!(proposal.request_id.as_deref(), Some("hub-goal-goal-a-1"));
         // Another settle while the proposal waits neither asks the judge nor sends.
-        assert!(on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(model.calls(), 1);
         assert!(control.sends().is_empty());
     }
@@ -592,10 +693,12 @@ mod tests {
         assert_eq!(contract.turns_used, 1);
         assert_eq!(origins(&pool).await, [TurnOrigin::SupervisorProposal]);
         // An Idle with no Working since the send is the same turn: ignored.
-        assert!(on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, false)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(model.calls(), 1);
     }
 
@@ -615,11 +718,16 @@ mod tests {
         assert_eq!(contract.stop_reason, Some(StopReason::DeliveryUncertain));
         assert_eq!(contract.stop_detail.as_deref(), Some("TURN_NOT_OBSERVED"));
         assert_eq!(contract.proposal.unwrap().state, ProposalState::Uncertain);
-        assert_eq!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::Blocked));
-        assert!(on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        assert!(
+            on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(control.sends().len(), 1, "exactly one write");
         assert_eq!(model.calls(), 1);
         assert!(origins(&pool).await.is_empty());
@@ -645,7 +753,10 @@ mod tests {
         .unwrap();
         let outcome = approve_proposal(&pool, &control, LANE).await.unwrap();
         assert!(!outcome.sent);
-        assert_eq!(goal(&pool).await.proposal.unwrap().state, ProposalState::Superseded);
+        assert_eq!(
+            goal(&pool).await.proposal.unwrap().state,
+            ProposalState::Superseded
+        );
         assert!(control.sends().is_empty());
         assert!(approve_proposal(&pool, &control, LANE).await.is_err());
         assert!(control.sends().is_empty());
@@ -705,10 +816,16 @@ mod tests {
         approving.abort();
         assert!(approving.await.unwrap_err().is_cancelled());
         assert_eq!(*parked.sends.lock().unwrap(), 1);
-        assert_eq!(goal(&pool).await.proposal.unwrap().state, ProposalState::Pending);
+        assert_eq!(
+            goal(&pool).await.proposal.unwrap().state,
+            ProposalState::Pending
+        );
 
         let again = approve_proposal(&pool, &control, LANE).await;
-        assert!(matches!(again, Err(GoalError::InvalidContract(_))), "{again:?}");
+        assert!(
+            matches!(again, Err(GoalError::InvalidContract(_))),
+            "{again:?}"
+        );
         assert!(control.sends().is_empty());
 
         let settled = on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
@@ -741,9 +858,15 @@ mod tests {
             code: OBSERVER_UNAVAILABLE.into(),
         }]);
         let result = approve_proposal(&pool, &control, LANE).await;
-        assert!(matches!(result, Err(GoalError::InvalidContract(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(GoalError::InvalidContract(_))),
+            "{result:?}"
+        );
         let contract = goal(&pool).await;
-        assert_eq!(contract.proposal.unwrap().state, ProposalState::AwaitingApproval);
+        assert_eq!(
+            contract.proposal.unwrap().state,
+            ProposalState::AwaitingApproval
+        );
         assert_eq!(contract.stop_reason, None);
         assert_eq!(control.sends().len(), 1);
     }
@@ -764,7 +887,10 @@ mod tests {
         let contract = goal(&pool).await;
         assert_eq!(contract.proposal.unwrap().state, ProposalState::Superseded);
         assert_eq!(contract.stop_reason, None);
-        assert_eq!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::Working));
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Working)
+        );
     }
 
     #[tokio::test]
@@ -786,7 +912,10 @@ mod tests {
         assert_eq!(contract.stop_reason, Some(StopReason::TurnLimit));
         assert_eq!(contract.turns_used, 20);
         assert_eq!(contract.proposal, None);
-        assert_eq!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::Blocked));
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
         assert!(control.sends().is_empty());
     }
 
@@ -800,7 +929,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(outcome.stop_reason, None);
-        assert_eq!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::VerifiedDone));
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::VerifiedDone)
+        );
         let contract = goal(&pool).await;
         assert_eq!(contract.requirements[0].status, RequirementStatus::Met);
         assert_eq!(contract.requirements[0].evidence, ["git:clean"]);
@@ -826,9 +958,18 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(second.stop_reason, Some(StopReason::CompletionEvidenceMissing));
-        assert_eq!(goal(&pool).await.stop_reason, Some(StopReason::CompletionEvidenceMissing));
-        assert_eq!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::Blocked));
+        assert_eq!(
+            second.stop_reason,
+            Some(StopReason::CompletionEvidenceMissing)
+        );
+        assert_eq!(
+            goal(&pool).await.stop_reason,
+            Some(StopReason::CompletionEvidenceMissing)
+        );
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
         assert_eq!(control.sends().len(), 1);
     }
 
@@ -837,19 +978,26 @@ mod tests {
         let pool = lane_pool(None).await;
         let model = ScriptedModel::new(&[CONTINUE]);
         let control = FakeControl::default();
-        assert!(on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            on_turn_settled(&pool, &judge(&pool, &model), &control, LANE, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(model.calls(), 0);
         assert!(control.sends().is_empty());
-        assert_eq!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::Working));
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Working)
+        );
 
         let off = lane_pool(Some(GoalMode::Off)).await;
-        assert!(on_turn_settled(&off, &judge(&off, &model), &control, LANE, true)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            on_turn_settled(&off, &judge(&off, &model), &control, LANE, true)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(model.calls(), 0);
     }
 
@@ -862,7 +1010,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(outcome.stop_reason, Some(StopReason::JudgeUnavailable));
-        assert_eq!(status_of(&pool, LANE).await.unwrap(), Some(LaneStatus::Blocked));
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
         assert!(control.sends().is_empty());
     }
 }

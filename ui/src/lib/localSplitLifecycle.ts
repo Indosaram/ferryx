@@ -14,16 +14,48 @@ import type {
 import { toIpcError } from "./tauri";
 import { registerDurableNativeBinding, subscribeNativeTerminalPresentation } from "./nativeTerminalLifecycle";
 import { switchDebug } from "./switchDebug";
-import { matchesAttachTuple, createAttemptBudget, ATTEMPT_TOTAL_BUDGET_MS, STAGE_CREATE_OR_STATUS_MAX_MS } from "./localSplitContract";
+import { matchesAttachTuple, createAttemptBudget, ATTEMPT_TOTAL_BUDGET_MS, STAGE_ATTACH_OR_LISTENER_MAX_MS, STAGE_CREATE_OR_STATUS_MAX_MS } from "./localSplitContract";
 
 let persistBinding: ((session: LocalSplitSession) => Promise<void>) | undefined;
+let persistBindingWaiters: Array<() => void> = [];
 export function setLocalSplitPersistence(handler: ((session: LocalSplitSession) => Promise<void>) | undefined): void {
   persistBinding = handler;
+  if (!handler) return;
+  const waiters = persistBindingWaiters;
+  persistBindingWaiters = [];
+  for (const wake of waiters) wake();
+}
+
+/**
+ * The app's persistence handler, waiting a bounded time for it to be installed.
+ *
+ * Panes restored at launch attach in the same commit that mounts the app, and React runs a child's
+ * effects before its parent's, so the first attach can ask for persistence before `App` installed
+ * it. Failing that attach outright left the first shell of a relaunch unstarted
+ * (SPAWN_ATTEMPT_TIMEOUT / missingDurablePersistence); the handler arrives within the same commit.
+ */
+async function installedPersistence(): Promise<(session: LocalSplitSession) => Promise<void>> {
+  if (persistBinding) return persistBinding;
+  let wake: () => void = () => {};
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const installed = new Promise<boolean>((resolve) => {
+    wake = () => resolve(true);
+    persistBindingWaiters.push(wake);
+    timer = setTimeout(() => resolve(false), STAGE_ATTACH_OR_LISTENER_MAX_MS);
+  });
+  try {
+    await installed;
+  } finally {
+    clearTimeout(timer);
+    persistBindingWaiters = persistBindingWaiters.filter((waiter) => waiter !== wake);
+  }
+  if (!persistBinding) throw failure("missingDurablePersistence");
+  return persistBinding;
 }
 
 export async function persistNativeBinding(session: TerminalSession): Promise<void> {
-  if (!persistBinding) throw failure("missingDurablePersistence");
-  await persistBinding(session);
+  const persist = await installedPersistence();
+  await persist(session);
 }
 
 export interface LocalSplitIntent {
@@ -127,8 +159,7 @@ export class LocalSplitLifecycle {
   }
 
   private async persist(): Promise<void> {
-    const persist = this.services.persist ?? persistBinding;
-    if (!persist) throw failure("missingDurablePersistence");
+    const persist = this.services.persist ?? await installedPersistence();
     const session = this.services.read();
     if (!session) throw failure("missingPersistenceOwner");
     await persist(session);

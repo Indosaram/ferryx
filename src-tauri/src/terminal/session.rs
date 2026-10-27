@@ -608,8 +608,11 @@ pub struct PtySession {
     relinquish_wake: Option<std::os::unix::net::UnixStream>,
     /// Unix, spawned sessions: the write end of the socketpair the reader polls beside the PTY.
     /// A background job that keeps the slave open means the PTY never reports EOF, so without this
-    /// a reader waiting in `poll` could never observe `request_reader_stop`. Kept apart from
-    /// `relinquish_wake`, whose presence marks an adopted session as relinquishing.
+    /// a reader waiting in `poll` could never observe `request_reader_stop`, and a teardown that
+    /// releases a paused reader of a quiet shell would wait out the whole reader-shutdown bound
+    /// for every session a predecessor hands over. Both callers write the same byte: the reader
+    /// wakes and re-reads its flags. Kept apart from `relinquish_wake`, whose presence marks an
+    /// adopted session as relinquishing.
     #[cfg(unix)]
     reader_wake: Option<std::os::unix::net::UnixStream>,
     /// Unix: the EOF-on-drop switch of this session's [PtyInputWriter]. Cleared before a session
@@ -1274,7 +1277,7 @@ impl PtySession {
         self.pause_requested.store(false, Ordering::Release);
         self.reader_park.1.notify_all();
         #[cfg(unix)]
-        if let Some(wake) = &self.relinquish_wake {
+        if let Some(wake) = self.relinquish_wake.as_ref().or(self.reader_wake.as_ref()) {
             if let Err(error) = std::io::Write::write_all(&mut &*wake, &[1]) {
                 tracing::warn!(%error, "failed to wake relinquished PTY reader");
             }

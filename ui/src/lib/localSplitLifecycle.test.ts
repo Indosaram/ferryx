@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   LocalSplitLifecycle,
+  persistNativeBinding,
+  setLocalSplitPersistence,
   type LocalSplitIntent,
   type LocalSplitSession,
 } from "./localSplitLifecycle";
@@ -427,5 +429,25 @@ describe("durable split races", () => {
     expect(f.create).not.toHaveBeenCalled();
     expect(f.read()).toBeUndefined();
     expect(f.persisted.some((saved) => saved.spawnIntent?.cancelRequested)).toBe(true);
+  });
+});
+
+describe("native binding persistence installed after the first attach", () => {
+  afterEach(() => setLocalSplitPersistence(undefined));
+
+  it("waits for the app to install persistence instead of failing the restored pane", async () => {
+    const saved: string[] = [];
+    const pending = persistNativeBinding({ id: "restored" } as LocalSplitSession);
+    setLocalSplitPersistence(async (session) => { saved.push(session.id); });
+    await expect(pending).resolves.toBeUndefined();
+    expect(saved).toEqual(["restored"]);
+  });
+
+  it("still fails when persistence never arrives", async () => {
+    vi.useFakeTimers();
+    const pending = persistNativeBinding({ id: "orphan" } as LocalSplitSession);
+    const outcome = expect(pending).rejects.toMatchObject({ details: { stage: "missingDurablePersistence" } });
+    await vi.runAllTimersAsync();
+    await outcome;
   });
 });

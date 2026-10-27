@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 
 use super::evidence::is_attested_ref;
 use super::types::{GoalError, GoalMode, ProposalState, RequirementStatus, StopReason};
+use crate::storage::WriteTx;
 use crate::storage::now_rfc3339;
 
 /// A requirement as the owner writes it.
@@ -110,7 +111,7 @@ pub async fn set_contract(
 ) -> Result<Contract, GoalError> {
     validate(requirements, turn_limit)?;
     let now = now_rfc3339();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let written = sqlx::query(
         "INSERT INTO lane_goal(lane_key, mode, turn_limit, updated_at) VALUES(?,?,?,?)
          ON CONFLICT(lane_key) DO UPDATE SET
@@ -317,11 +318,7 @@ pub async fn update_requirement(
     }
 }
 
-async fn require_written(
-    pool: &SqlitePool,
-    lane_key: &str,
-    rows: u64,
-) -> Result<(), GoalError> {
+async fn require_written(pool: &SqlitePool, lane_key: &str, rows: u64) -> Result<(), GoalError> {
     if rows == 0 && revision_of(pool, lane_key).await?.is_none() {
         return Err(GoalError::NoContract(lane_key.to_owned()));
     }
@@ -441,7 +438,11 @@ pub async fn set_proposal_state(
 }
 
 /// Changes how the loop treats the lane's proposals. The requirement set is untouched.
-pub async fn set_mode(pool: &SqlitePool, lane_key: &str, mode: GoalMode) -> Result<Contract, GoalError> {
+pub async fn set_mode(
+    pool: &SqlitePool,
+    lane_key: &str,
+    mode: GoalMode,
+) -> Result<Contract, GoalError> {
     let updated = sqlx::query("UPDATE lane_goal SET mode = ?, updated_at = ? WHERE lane_key = ?")
         .bind(mode.as_str())
         .bind(now_rfc3339())
@@ -513,10 +514,12 @@ pub async fn note_divergence(pool: &SqlitePool, lane_key: &str) -> Result<u32, G
 
 /// Ends a refused-`complete` streak: the lane made any other decision.
 pub async fn reset_divergence(pool: &SqlitePool, lane_key: &str) -> Result<(), GoalError> {
-    sqlx::query("UPDATE lane_goal SET converge_misses = 0 WHERE lane_key = ? AND converge_misses <> 0")
-        .bind(lane_key)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE lane_goal SET converge_misses = 0 WHERE lane_key = ? AND converge_misses <> 0",
+    )
+    .bind(lane_key)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -559,9 +562,15 @@ mod tests {
     #[tokio::test]
     async fn a_contract_round_trips_through_storage() {
         let pool = lane_pool().await;
-        let written = set_contract(&pool, "lane-a", &[spec("r1"), spec("r2")], GoalMode::Full, 7)
-            .await
-            .unwrap();
+        let written = set_contract(
+            &pool,
+            "lane-a",
+            &[spec("r1"), spec("r2")],
+            GoalMode::Full,
+            7,
+        )
+        .await
+        .unwrap();
         let read = contract_of(&pool, "lane-a").await.unwrap().unwrap();
         assert_eq!(written, read);
         assert_eq!(read.mode, GoalMode::Full);
@@ -570,7 +579,11 @@ mod tests {
         assert_eq!(read.revision, 1);
         assert_eq!(read.stop_reason, None);
         assert_eq!(read.proposal, None);
-        let ids: Vec<&str> = read.requirements.iter().map(|item| item.id.as_str()).collect();
+        let ids: Vec<&str> = read
+            .requirements
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
         assert_eq!(ids, ["r1", "r2"]);
         assert!(read
             .requirements
@@ -601,7 +614,11 @@ mod tests {
         assert!(proposal.at.is_some());
         clear_stop(&pool, "lane-a").await.unwrap();
         assert_eq!(
-            contract_of(&pool, "lane-a").await.unwrap().unwrap().stop_reason,
+            contract_of(&pool, "lane-a")
+                .await
+                .unwrap()
+                .unwrap()
+                .stop_reason,
             None
         );
     }
@@ -622,9 +639,15 @@ mod tests {
         set_contract(&pool, "lane-a", &[spec("r1")], GoalMode::Supervised, 20)
             .await
             .unwrap();
-        let replaced = set_contract(&pool, "lane-a", &[spec("r1"), spec("r2")], GoalMode::Supervised, 20)
-            .await
-            .unwrap();
+        let replaced = set_contract(
+            &pool,
+            "lane-a",
+            &[spec("r1"), spec("r2")],
+            GoalMode::Supervised,
+            20,
+        )
+        .await
+        .unwrap();
         assert_eq!(replaced.revision, 2);
         let error = update_requirement(
             &pool,
@@ -665,7 +688,11 @@ mod tests {
             Err(GoalError::TurnLimit { limit: 2 })
         ));
         assert_eq!(
-            contract_of(&pool, "lane-a").await.unwrap().unwrap().turns_used,
+            contract_of(&pool, "lane-a")
+                .await
+                .unwrap()
+                .unwrap()
+                .turns_used,
             2
         );
         assert!(matches!(
@@ -694,18 +721,38 @@ mod tests {
     #[tokio::test]
     async fn all_met_needs_every_requirement_met_or_waived() {
         let pool = lane_pool().await;
-        let contract = set_contract(&pool, "lane-a", &[spec("r1"), spec("r2")], GoalMode::Supervised, 20)
-            .await
-            .unwrap();
+        let contract = set_contract(
+            &pool,
+            "lane-a",
+            &[spec("r1"), spec("r2")],
+            GoalMode::Supervised,
+            20,
+        )
+        .await
+        .unwrap();
         let revision = contract.revision;
-        update_requirement(&pool, "lane-a", "r1", RequirementStatus::Met, &["sig:0".to_owned()], revision)
-            .await
-            .unwrap();
+        update_requirement(
+            &pool,
+            "lane-a",
+            "r1",
+            RequirementStatus::Met,
+            &["sig:0".to_owned()],
+            revision,
+        )
+        .await
+        .unwrap();
         let partial = contract_of(&pool, "lane-a").await.unwrap().unwrap();
         assert!(!all_met(&partial), "r2 is still pending");
-        update_requirement(&pool, "lane-a", "r2", RequirementStatus::Met, &["git:clean".to_owned()], revision)
-            .await
-            .unwrap();
+        update_requirement(
+            &pool,
+            "lane-a",
+            "r2",
+            RequirementStatus::Met,
+            &["git:clean".to_owned()],
+            revision,
+        )
+        .await
+        .unwrap();
         let done = contract_of(&pool, "lane-a").await.unwrap().unwrap();
         assert!(all_met(&done));
         assert_eq!(done.requirements[0].evidence, ["sig:0"]);
@@ -723,9 +770,16 @@ mod tests {
         set_contract(&pool, "lane-a", &[spec("r1")], GoalMode::Full, 20)
             .await
             .unwrap();
-        set_proposal(&pool, "lane-a", "do it", &["g1".to_owned()], ProposalState::Sent, Some("hub-goal-lane-a-1"))
-            .await
-            .unwrap();
+        set_proposal(
+            &pool,
+            "lane-a",
+            "do it",
+            &["g1".to_owned()],
+            ProposalState::Sent,
+            Some("hub-goal-lane-a-1"),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             set_contract(&pool, "lane-a", &[spec("r2")], GoalMode::Full, 20).await,
             Err(GoalError::TurnInFlight(_))
@@ -738,9 +792,11 @@ mod tests {
         )
         .await
         .unwrap());
-        assert!(set_proposal_state(&pool, "lane-a", ProposalState::Discarded, None)
-            .await
-            .unwrap());
+        assert!(
+            set_proposal_state(&pool, "lane-a", ProposalState::Discarded, None)
+                .await
+                .unwrap()
+        );
         let replaced = set_contract(&pool, "lane-a", &[spec("r2")], GoalMode::Full, 20)
             .await
             .unwrap();
@@ -754,15 +810,29 @@ mod tests {
         set_contract(&pool, "lane-a", &[spec("r1")], GoalMode::Full, 20)
             .await
             .unwrap();
-        set_proposal(&pool, "lane-a", "do it", &["g1".to_owned()], ProposalState::Pending, Some("hub-goal-lane-a-1"))
-            .await
-            .unwrap();
-        assert!(set_proposal_state(&pool, "lane-a", ProposalState::Uncertain, None)
-            .await
-            .unwrap());
-        record_stop(&pool, "lane-a", StopReason::DeliveryUncertain, Some("SEND_TIMEOUT"))
-            .await
-            .unwrap();
+        set_proposal(
+            &pool,
+            "lane-a",
+            "do it",
+            &["g1".to_owned()],
+            ProposalState::Pending,
+            Some("hub-goal-lane-a-1"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            set_proposal_state(&pool, "lane-a", ProposalState::Uncertain, None)
+                .await
+                .unwrap()
+        );
+        record_stop(
+            &pool,
+            "lane-a",
+            StopReason::DeliveryUncertain,
+            Some("SEND_TIMEOUT"),
+        )
+        .await
+        .unwrap();
         let replaced = set_contract(&pool, "lane-a", &[spec("r2")], GoalMode::Full, 20)
             .await
             .unwrap();

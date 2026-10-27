@@ -86,7 +86,15 @@ pub async fn record_turn(
     text: Option<&str>,
     screen_revision: Option<&str>,
 ) -> Result<Turn, GoalError> {
-    record_turn_at(pool, lane_key, origin, text, screen_revision, &now_rfc3339()).await
+    record_turn_at(
+        pool,
+        lane_key,
+        origin,
+        text,
+        screen_revision,
+        &now_rfc3339(),
+    )
+    .await
 }
 
 pub(crate) async fn record_turn_at(
@@ -169,14 +177,14 @@ pub async fn turns_of(pool: &SqlitePool, lane_key: &str) -> Result<Vec<Turn>, Go
     rows.into_iter()
         .map(
             |(seq, origin, text_excerpt, screen_revision, at)| -> Result<Turn, GoalError> {
-            Ok(Turn {
-                lane_key: lane_key.to_owned(),
-                seq,
-                origin: origin.parse::<TurnOrigin>()?,
-                text_excerpt,
-                screen_revision,
-                at,
-            })
+                Ok(Turn {
+                    lane_key: lane_key.to_owned(),
+                    seq,
+                    origin: origin.parse::<TurnOrigin>()?,
+                    text_excerpt,
+                    screen_revision,
+                    at,
+                })
             },
         )
         .collect()
@@ -295,10 +303,12 @@ mod tests {
             .unwrap();
         assert_eq!(sent.origin, TurnOrigin::SupervisorProposal);
         assert_eq!(sent.text_excerpt.as_deref(), Some("run the tests"));
-        assert!(record_send_turn(&pool, "pane-1", Some("hub-auto-prompt-3"), "1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            record_send_turn(&pool, "pane-1", Some("hub-auto-prompt-3"), "1")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(record_send_turn(&pool, "pane-1", None, "1")
             .await
             .unwrap()
@@ -325,15 +335,25 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(sent.seq, 1);
-        let typed = record_keystroke_turn(&pool, "pane-1").await.unwrap().unwrap();
+        let typed = record_keystroke_turn(&pool, "pane-1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(typed.seq, 2);
         assert_eq!(typed.text_excerpt, None);
-        assert!(record_keystroke_turn(&pool, "not-a-lane").await.unwrap().is_none());
+        assert!(record_keystroke_turn(&pool, "not-a-lane")
+            .await
+            .unwrap()
+            .is_none());
         let rows = turn_rows(&pool).await;
         assert_eq!(
             rows,
             vec![
-                (1, "supervisor_proposal".to_owned(), Some("run the tests".to_owned())),
+                (
+                    1,
+                    "supervisor_proposal".to_owned(),
+                    Some("run the tests".to_owned())
+                ),
                 (2, "human_correction".to_owned(), None),
             ]
         );
@@ -342,30 +362,57 @@ mod tests {
     #[tokio::test]
     async fn the_latest_human_turn_after_a_time_is_found() {
         let pool = lane_pool().await;
-        record_turn_at(&pool, "ledger", TurnOrigin::HumanCorrection, Some("first"), None, "2026-10-24T10:00:00+00:00")
-            .await
-            .unwrap();
-        record_turn_at(&pool, "ledger", TurnOrigin::SupervisorProposal, Some("next"), None, "2026-10-24T10:05:00+00:00")
-            .await
-            .unwrap();
-        assert!(latest_human_after(&pool, "ledger", "2026-10-24T10:01:00+00:00")
-            .await
-            .unwrap()
-            .is_none());
-        record_turn_at(&pool, "ledger", TurnOrigin::HumanCorrection, None, None, "2026-10-24T10:06:00Z")
-            .await
-            .unwrap();
+        record_turn_at(
+            &pool,
+            "ledger",
+            TurnOrigin::HumanCorrection,
+            Some("first"),
+            None,
+            "2026-10-24T10:00:00+00:00",
+        )
+        .await
+        .unwrap();
+        record_turn_at(
+            &pool,
+            "ledger",
+            TurnOrigin::SupervisorProposal,
+            Some("next"),
+            None,
+            "2026-10-24T10:05:00+00:00",
+        )
+        .await
+        .unwrap();
+        assert!(
+            latest_human_after(&pool, "ledger", "2026-10-24T10:01:00+00:00")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        record_turn_at(
+            &pool,
+            "ledger",
+            TurnOrigin::HumanCorrection,
+            None,
+            None,
+            "2026-10-24T10:06:00Z",
+        )
+        .await
+        .unwrap();
         let found = latest_human_after(&pool, "ledger", "2026-10-24T10:01:00+00:00")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(found.seq, 3);
         assert_eq!(found.text_excerpt, None);
-        assert!(latest_human_after(&pool, "ledger", "2026-10-24T10:06:00+00:00")
+        assert!(
+            latest_human_after(&pool, "ledger", "2026-10-24T10:06:00+00:00")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(latest_human_after(&pool, "ledger", "yesterday")
             .await
-            .unwrap()
-            .is_none());
-        assert!(latest_human_after(&pool, "ledger", "yesterday").await.is_err());
+            .is_err());
     }
 
     #[tokio::test]
@@ -377,9 +424,11 @@ mod tests {
             .execute(&pool)
             .await
             .is_err());
-        assert!(sqlx::query("INSERT INTO lane_turns(lane_key, seq, origin, at) VALUES('ledger', 1, 'robot', 'now')")
-            .execute(&pool)
-            .await
-            .is_err());
+        assert!(sqlx::query(
+            "INSERT INTO lane_turns(lane_key, seq, origin, at) VALUES('ledger', 1, 'robot', 'now')"
+        )
+        .execute(&pool)
+        .await
+        .is_err());
     }
 }

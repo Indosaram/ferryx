@@ -50,6 +50,10 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         )
         .route("/api/cron/jobs/{id}/trigger", post(trigger_cron))
         .route("/api/cron/jobs/{id}/pause", post(api::pause_cron_job))
+        .route(
+            "/api/cron/jobs/{id}/model",
+            axum::routing::put(api::set_cron_job_model),
+        )
         .route("/api/cron/jobs/{id}/resume", post(api::resume_cron_job))
         .route("/api/cron/runs", get(api::list_cron_runs))
         .route("/api/approvals/pending", get(api::pending_approvals))

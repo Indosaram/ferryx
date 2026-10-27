@@ -1319,7 +1319,14 @@ pub mod mock {
                                     }
                                 }
                                 if script.silent_first_turn
-                                    && log.frames.lock().unwrap().iter().filter(|f| f["method"] == "turn/start").count() == 1
+                                    && log
+                                        .frames
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .filter(|f| f["method"] == "turn/start")
+                                        .count()
+                                        == 1
                                 {
                                     ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))).await.unwrap();
                                     ws.send(out(json!({"jsonrpc":"2.0","method":"item/started","params":{"threadId":thread,"turnId":"turn-1","item":{"id":"tool-silent","type":"commandExecution"}}}))).await.unwrap();
@@ -1617,11 +1624,17 @@ mod tests {
             .filter_map(|frame| frame["method"].as_str())
             .collect();
         assert_eq!(
-            methods.iter().filter(|method| **method == "thread/resume").count(),
+            methods
+                .iter()
+                .filter(|method| **method == "thread/resume")
+                .count(),
             1
         );
         assert_eq!(
-            methods.iter().filter(|method| **method == "thread/start").count(),
+            methods
+                .iter()
+                .filter(|method| **method == "thread/start")
+                .count(),
             1
         );
         let starts: Vec<&Value> = frames
@@ -1661,8 +1674,16 @@ mod tests {
             .filter(|frame| frame["method"] == "turn/start")
             .collect();
         assert_eq!(starts.len(), 2);
-        assert_eq!(starts[1].pointer("/params/input/0/text").and_then(Value::as_str), Some(FINAL_ANSWER_PROMPT));
-        let resumes = frames.iter().filter(|frame| frame["method"] == "thread/resume").count();
+        assert_eq!(
+            starts[1]
+                .pointer("/params/input/0/text")
+                .and_then(Value::as_str),
+            Some(FINAL_ANSWER_PROMPT)
+        );
+        let resumes = frames
+            .iter()
+            .filter(|frame| frame["method"] == "thread/resume")
+            .count();
         assert_eq!(resumes, 1, "the follow-up resumes the same thread");
     }
 
@@ -1817,7 +1838,9 @@ mod tests {
         assert!(is_model_switch_rejection(&Err(HubError::message(
             "turn/start failed: Model \"x\" cannot switch: target context window 400000 tokens is 12 tokens short"
         ))));
-        assert!(!is_model_switch_rejection(&Err(HubError::message("model not found"))));
+        assert!(!is_model_switch_rejection(&Err(HubError::message(
+            "model not found"
+        ))));
         assert_eq!(final_reply(&outcome("", 1, 2)).unwrap(), None);
         assert!(final_reply(&outcome("", 0, 0)).is_err());
         assert_eq!(filter_reasoning("<think>x</think> answer"), "answer");

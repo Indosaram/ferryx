@@ -47,6 +47,9 @@ pub async fn commit_with_rules(
     let mut drops = Vec::new();
     for item in items {
         if let Some(rule) = rules.drop_reason(item) {
+            if rule == "kakao_owner_author" {
+                close_answered_thread(pool, item).await?;
+            }
             if rule != "empty" {
                 drops.push((item.source, rule));
             }
@@ -121,6 +124,29 @@ pub async fn commit_with_rules(
         crate::inbox_prefilter::record_drops(pool, &drops).await;
     }
     Ok(copied)
+}
+
+/// The owner answered in a Kakao room: every open owner item of that room up to his message is
+/// done. His own message is still not stored.
+async fn close_answered_thread(pool: &SqlitePool, item: &SourceItem) -> Result<()> {
+    let Some(thread_ref) = item.thread_ref.as_deref() else {
+        return Ok(());
+    };
+    let closed = sqlx::query(
+        "UPDATE inbox_decisions SET status = 'done'
+         WHERE status = 'open' AND class = 'owner' AND item_id IN (
+             SELECT id FROM inbox_items
+             WHERE source = 'kakao' AND thread_ref = ? AND julianday(received_at) <= julianday(?))",
+    )
+    .bind(thread_ref)
+    .bind(item.received_at.to_rfc3339())
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if closed > 0 {
+        tracing::info!(thread = %thread_ref, closed, "owner replied in a kakao room; closing its owner items");
+    }
+    Ok(())
 }
 
 /// omo `direct_class`, applied at commit: ordinary notification mail is `fyi` with no judge
@@ -833,13 +859,15 @@ mod tests {
         assert!(!GITHUB_NOTIFY_REASONS.contains(&"author"));
         let prs = json!({"data": {"search": {"nodes": []}}});
         let base = github_diff(None, &json!([]), &prs).unwrap();
-        let note = |id: &str, reason: &str| json!({
-            "id": id,
-            "updated_at": "2026-10-16T00:00:00Z",
-            "reason": reason,
-            "repository": {"full_name": "o/r"},
-            "subject": {"title": "t", "url": "https://api.github.com/repos/o/r/pulls/7"}
-        });
+        let note = |id: &str, reason: &str| {
+            json!({
+                "id": id,
+                "updated_at": "2026-10-16T00:00:00Z",
+                "reason": reason,
+                "repository": {"full_name": "o/r"},
+                "subject": {"title": "t", "url": "https://api.github.com/repos/o/r/pulls/7"}
+            })
+        };
         let notes = json!([note("a1", "author"), note("m1", "mention")]);
         let next = github_diff(Some(&base.cursor), &notes, &prs).unwrap();
         assert_eq!(next.items.len(), 1);
@@ -1011,5 +1039,66 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(waiting, 0, "escalated mail stays pending for the judge");
+    }
+
+    #[tokio::test]
+    async fn an_owner_kakao_reply_closes_only_that_rooms_earlier_owner_items() {
+        let pool = crate::storage::memory().await.unwrap();
+        let rules = crate::inbox_prefilter::PrefilterRules::default();
+        let at = |minute: i64| {
+            DateTime::parse_from_rfc3339("2026-10-23T05:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+                + chrono::Duration::minutes(minute)
+        };
+        let mut asked = source_item("kakao", "1", "긴급");
+        asked.room_type = Some("DirectChat".into());
+        let mut other = source_item("kakao", "2", "청약서 보낼까");
+        other.room_type = Some("DirectChat".into());
+        other.thread_ref = Some("other-room".into());
+        let mut later = source_item("kakao", "3", "또 하나");
+        later.room_type = Some("DirectChat".into());
+        later.received_at = at(20);
+        assert_eq!(
+            commit_with_rules(&pool, &[asked, other, later], &rules)
+                .await
+                .unwrap(),
+            3
+        );
+        for id in ["kakao:1", "kakao:2", "kakao:3"] {
+            crate::inbox::decide(
+                &pool,
+                id,
+                crate::inbox::Class::Owner,
+                "owner_must_act",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let mut reply = source_item("kakao", "4", "지금 갈게");
+        reply.room_type = Some("DirectChat".into());
+        reply.author = Some("윤인도".into());
+        reply.received_at = at(10);
+        assert_eq!(commit_with_rules(&pool, &[reply], &rules).await.unwrap(), 0);
+        let statuses: Vec<(String, String)> =
+            sqlx::query_as("SELECT item_id, status FROM inbox_decisions ORDER BY item_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            statuses,
+            vec![
+                ("kakao:1".to_owned(), "done".to_owned()),
+                ("kakao:2".to_owned(), "open".to_owned()),
+                ("kakao:3".to_owned(), "open".to_owned()),
+            ]
+        );
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM inbox_items WHERE id = 'kakao:4'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, 0, "the owner's own message is not stored");
     }
 }

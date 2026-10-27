@@ -17,6 +17,114 @@ use crate::lanes::kibitzer::ModelTurn;
 use crate::schedule::script_from_payload;
 
 pub const OMO_APP_SERVER: &str = "ws://127.0.0.1:19742";
+
+/// Payload key holding the model the owner picked for one job. It is separate from the
+/// imported omo `model` key, which stays ignored so stored data cannot move a job off the
+/// background model by accident.
+pub const MODEL_OVERRIDE_KEY: &str = "model_override";
+
+/// Environment variable carrying the job's model to its script and monitor script.
+pub const CRON_MODEL_ENV: &str = "FERRYX_CRON_MODEL";
+
+/// A model id the hub accepts for a job: `provider/model`, no whitespace.
+pub fn validate_model_id(model: &str) -> Result<String> {
+    let model = model.trim();
+    let valid = model
+        .split_once('/')
+        .is_some_and(|(provider, id)| !provider.is_empty() && !id.is_empty())
+        && !model.chars().any(char::is_whitespace);
+    if valid {
+        Ok(model.to_owned())
+    } else {
+        Err(HubError::message(format!(
+            "cron model must look like provider/model, got {model:?}"
+        )))
+    }
+}
+
+/// The job's own model when it set a valid `model_override`.
+pub fn model_override(payload: &Value) -> Option<String> {
+    payload
+        .get(MODEL_OVERRIDE_KEY)
+        .and_then(Value::as_str)
+        .and_then(|model| validate_model_id(model).ok())
+}
+
+/// The model a job runs on: its `model_override`, else the background model.
+pub fn job_model(payload: &Value) -> String {
+    model_override(payload).unwrap_or_else(crate::model_policy::background_model)
+}
+
+/// One job and the model it runs on, for `ferryx hub cron list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobModel {
+    pub id: String,
+    pub enabled: bool,
+    pub model: String,
+    /// True when the job set its own `model_override`.
+    pub overridden: bool,
+}
+
+pub async fn job_models(pool: &sqlx::SqlitePool) -> Result<Vec<JobModel>> {
+    let rows: Vec<(String, i64, String)> =
+        sqlx::query_as("SELECT id, enabled, payload_json FROM scheduled_jobs ORDER BY id")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, enabled, payload_json)| {
+            let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+            JobModel {
+                id,
+                enabled: enabled == 1,
+                model: job_model(&payload),
+                overridden: model_override(&payload).is_some(),
+            }
+        })
+        .collect())
+}
+
+/// Sets (`Some`) or clears (`None`) a job's `model_override`. Returns the model the job
+/// now runs on, or `None` when no such job exists.
+pub async fn set_model_override(
+    pool: &sqlx::SqlitePool,
+    job_id: &str,
+    model: Option<&str>,
+) -> Result<Option<String>> {
+    let model = model.map(validate_model_id).transpose()?;
+    let mut tx = pool.begin().await?;
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = ?")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let mut payload: Value = serde_json::from_str(&stored)
+        .map_err(|error| HubError::message(format!("cron job {job_id} payload: {error}")))?;
+    let Some(object) = payload.as_object_mut() else {
+        return Err(HubError::message(format!(
+            "cron job {job_id} payload is not an object"
+        )));
+    };
+    match &model {
+        Some(model) => {
+            object.insert(MODEL_OVERRIDE_KEY.to_owned(), Value::String(model.clone()));
+        }
+        None => {
+            object.remove(MODEL_OVERRIDE_KEY);
+        }
+    }
+    sqlx::query("UPDATE scheduled_jobs SET payload_json = ?, updated_at = ? WHERE id = ?")
+        .bind(payload.to_string())
+        .bind(crate::storage::now_rfc3339())
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(job_model(&payload)))
+}
 pub const CRON_HINT: &str = "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Your final response will be automatically delivered to the user — do NOT use send_message or try to deliver the output yourself. Just produce your report/output as your final response and the system handles the rest. SILENT: If there is genuinely nothing new to report, respond with exactly \"[SILENT]\" (nothing else) to suppress delivery. Never combine [SILENT] with content — either report your findings normally, or say [SILENT] and nothing more.]\n\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,9 +265,18 @@ pub async fn run_payload(
         )));
     }
     let cwd = script_working_directory(pool).await;
+    let model_id = job_model(payload);
     let script = script_from_payload(payload);
     let script_output = if let Some(script) = script.as_deref() {
-        Some(run_script(script, timeout_secs(payload), cwd.as_deref()).await?)
+        Some(
+            run_script(
+                script,
+                timeout_secs(payload),
+                cwd.as_deref(),
+                Some(&model_id),
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -202,7 +319,7 @@ pub async fn run_payload(
             monitor_hash: None,
         });
     }
-    let monitor_hash = match monitor_hash(pool, job_id, payload, cwd.as_deref()).await? {
+    let monitor_hash = match monitor_hash(pool, job_id, payload, cwd.as_deref(), &model_id).await? {
         Monitor::Same => {
             return Ok(Executed {
                 output: String::new(),
@@ -256,8 +373,8 @@ pub async fn run_payload(
         task.push('\n');
         task.push_str(&context);
     }
-    // An agent cron turn runs on the background model; a payload `model` does not change it.
-    let model_id = crate::model_policy::background_model();
+    // An agent cron turn runs on the job's `model_override` or the background model; the
+    // imported payload `model` does not change it.
     let toolsets = payload
         .get("enabled_toolsets")
         .and_then(Value::as_array)
@@ -341,12 +458,13 @@ async fn monitor_hash(
     job_id: &str,
     payload: &Value,
     cwd: Option<&Path>,
+    model: &str,
 ) -> Result<Monitor> {
     let script = payload.get("monitor_script").and_then(Value::as_str);
     let Some(script) = script else {
         return Ok(Monitor::Absent);
     };
-    let output = run_script(script, timeout_secs(payload), cwd).await?;
+    let output = run_script(script, timeout_secs(payload), cwd, Some(model)).await?;
     let hash = format!("{:x}", Sha256::digest(output.as_bytes()));
     let previous: Option<String> =
         sqlx::query_scalar("SELECT last_hash FROM cron_monitor_states WHERE job_id = ?")
@@ -398,9 +516,17 @@ async fn script_working_directory(pool: &sqlx::SqlitePool) -> Option<std::path::
         .map(std::path::PathBuf::from)
 }
 
-async fn run_script(script: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<String> {
+async fn run_script(
+    script: &str,
+    timeout_secs: u64,
+    cwd: Option<&Path>,
+    model: Option<&str>,
+) -> Result<String> {
     let mut command = crate::child_env::command("sh");
     command.arg("-c").arg(script);
+    if let Some(model) = model {
+        command.env(CRON_MODEL_ENV, model);
+    }
     if let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty()) {
         command.current_dir(cwd);
     }
@@ -463,6 +589,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_job_model_is_its_valid_override_else_the_background_model() {
+        let background = crate::model_policy::background_model();
+        assert_eq!(job_model(&serde_json::json!({"script": "x"})), background);
+        assert_eq!(
+            job_model(&serde_json::json!({"model": "mahoquot/gemini-3.8-flash-high"})),
+            background
+        );
+        assert_eq!(
+            job_model(&serde_json::json!({"model_override": " mahoquot/claude-sonnet-5-5 "})),
+            "mahoquot/claude-sonnet-5-5"
+        );
+        assert_eq!(
+            job_model(&serde_json::json!({"model_override": "sonnet"})),
+            background
+        );
+        assert!(validate_model_id("a b/c").is_err());
+        assert!(validate_model_id("/c").is_err());
+        assert!(validate_model_id("mahoquot/").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_script_and_its_monitor_see_the_job_model() {
+        let pool = crate::storage::memory().await.unwrap();
+        let background = crate::model_policy::background_model();
+        let plain = run_payload(
+            &pool,
+            "plain",
+            &serde_json::json!({"no_agent": true, "script": "printf %s \"$FERRYX_CRON_MODEL\""}),
+            &StaticModel(String::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain.output, background);
+        let chosen = run_payload(
+            &pool,
+            "chosen",
+            &serde_json::json!({
+                "no_agent": true,
+                "model_override": "cb/deepseek-v4.1-flash",
+                "script": "printf %s \"$FERRYX_CRON_MODEL\""
+            }),
+            &StaticModel(String::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(chosen.output, "cb/deepseek-v4.1-flash");
+    }
+
+    #[tokio::test]
+    async fn the_model_override_is_set_and_cleared_without_touching_other_keys() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, created_at, updated_at) VALUES('j', '0 * * * *', ?, 1, 'now', 'now')")
+            .bind(r#"{"script":"true","model":"mahoquot/gpt-6-luna","last_status":"succeeded"}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stored = |pool: sqlx::SqlitePool| async move {
+            let json: String =
+                sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = 'j'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            serde_json::from_str::<Value>(&json).unwrap()
+        };
+        assert_eq!(
+            set_model_override(&pool, "j", Some("mahoquot/claude-sonnet-5-5"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("mahoquot/claude-sonnet-5-5")
+        );
+        let payload = stored(pool.clone()).await;
+        assert_eq!(payload["model_override"], "mahoquot/claude-sonnet-5-5");
+        assert_eq!(payload["last_status"], "succeeded");
+        assert_eq!(payload["script"], "true");
+        assert!(set_model_override(&pool, "j", Some("sonnet"))
+            .await
+            .is_err());
+        assert_eq!(
+            set_model_override(&pool, "j", None).await.unwrap(),
+            Some(crate::model_policy::background_model())
+        );
+        assert!(stored(pool.clone()).await.get("model_override").is_none());
+        assert_eq!(
+            set_model_override(&pool, "missing", None).await.unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn a_script_without_a_timeout_gets_five_minutes() {
         assert_eq!(timeout_secs(&serde_json::json!({"script": "x"})), 300);
         assert_eq!(timeout_secs(&serde_json::json!({"timeout_secs": 30})), 30);
@@ -489,11 +707,15 @@ mod tests {
             "echo 'alerts: bun: command not found: zele'; exit 0",
             10,
             None,
+            None,
         )
         .await
         .unwrap_err();
         assert!(error.to_string().contains("missing command"), "{error}");
-        assert_eq!(run_script("printf fine", 10, None).await.unwrap(), "fine");
+        assert_eq!(
+            run_script("printf fine", 10, None, None).await.unwrap(),
+            "fine"
+        );
     }
 
     #[test]
@@ -750,6 +972,22 @@ mod tests {
         assert_eq!(model_id, crate::model_policy::background_model());
         assert_ne!(model_id, "mahoquot/gemini-3.8-flash-high");
         assert_eq!(toolsets, vec!["terminal", "browser", "file"]);
+        let chosen = run_payload(
+            &pool,
+            "vpn-mall",
+            &serde_json::json!({
+                "script": "printf rows=3",
+                "prompt": "publish",
+                "model": "mahoquot/gemini-3.8-flash-high",
+                "model_override": "mahoquot/claude-sonnet-5-5"
+            }),
+            &routed,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(chosen.output, "report");
+        assert_eq!(routed.0.lock().unwrap().0, "mahoquot/claude-sonnet-5-5");
         let timed = run_payload(
             &pool,
             "slow",
@@ -793,7 +1031,7 @@ mod tests {
             .await
             .unwrap();
         assert!(first.deliver);
-        assert!(first.output.contains("Owner tasks"));
+        assert!(first.output.contains("## 대표 확인 필요 — 1곳, 1건"));
         assert!(first.output.contains("Sign"));
         assert!(first
             .output

@@ -72,6 +72,22 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Every hub transaction writes, and most read first (next sequence number, existing row).
+/// A deferred `BEGIN` takes its read snapshot first and fails with SQLITE_BUSY_SNAPSHOT
+/// (code 517, "database is locked") when another connection commits before its first write;
+/// `busy_timeout` never retries that. `BEGIN IMMEDIATE` takes the write lock up front, so a
+/// second writer waits on `BUSY_TIMEOUT` instead (2026-10-27: Slack transcript rows and the
+/// owner-inbox reconciliation were dropped this way).
+pub(crate) trait WriteTx {
+    async fn begin_write(&self) -> sqlx::Result<sqlx::Transaction<'static, sqlx::Sqlite>>;
+}
+
+impl WriteTx for SqlitePool {
+    async fn begin_write(&self) -> sqlx::Result<sqlx::Transaction<'static, sqlx::Sqlite>> {
+        self.begin_with("BEGIN IMMEDIATE").await
+    }
+}
+
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -96,6 +112,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(timeout, BUSY_TIMEOUT.as_millis() as i64);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A read-then-write transaction must not fail when another connection commits between
+    /// its read and its write: with a deferred BEGIN this returned code 517 in production.
+    #[tokio::test]
+    async fn a_write_transaction_survives_a_commit_between_its_read_and_its_write() {
+        let dir = std::env::temp_dir().join(format!("ferryx-hub-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = connect(&dir.join("hub.sqlite")).await.unwrap();
+        sqlx::query("CREATE TABLE t (n INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut deferred = pool.begin().await.unwrap();
+        let _: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&mut *deferred)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stale = sqlx::query("INSERT INTO t VALUES (2)")
+            .execute(&mut *deferred)
+            .await
+            .unwrap_err();
+        assert!(stale.to_string().contains("517"), "{stale}");
+        drop(deferred);
+
+        let mut tx = pool.begin_write().await.unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let other = tokio::spawn({
+            let pool = pool.clone();
+            async move { sqlx::query("INSERT INTO t VALUES (3)").execute(&pool).await }
+        });
+        sqlx::query("INSERT INTO t VALUES (4)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        other.await.unwrap().unwrap();
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before + 2);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

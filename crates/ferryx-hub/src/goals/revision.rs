@@ -9,6 +9,7 @@ use sqlx::SqlitePool;
 
 use super::contract::{contract_of, Contract, RequirementSpec};
 use super::types::GoalError;
+use crate::storage::WriteTx;
 use crate::storage::now_rfc3339;
 
 /// Shortest trimmed quote a revision may cite.
@@ -118,9 +119,8 @@ async fn owner_texts(pool: &SqlitePool, lane_key: &str) -> Result<Vec<String>, G
 fn parse_row(
     (id, lane_key, change_json, instruction_quote, state, created_at): RevisionRow,
 ) -> Result<PendingRevision, GoalError> {
-    let stored: StoredChange = serde_json::from_str(&change_json).map_err(|error| {
-        GoalError::InvalidContract(format!("stored revision {id}: {error}"))
-    })?;
+    let stored: StoredChange = serde_json::from_str(&change_json)
+        .map_err(|error| GoalError::InvalidContract(format!("stored revision {id}: {error}")))?;
     Ok(PendingRevision {
         id,
         lane_key,
@@ -157,8 +157,9 @@ pub async fn propose(
     {
         return Err(GoalError::QuoteNotFound);
     }
-    let contract =
-        contract_of(pool, lane_key).await?.ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))?;
+    let contract = contract_of(pool, lane_key)
+        .await?
+        .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))?;
     let change_json = serde_json::to_string(&StoredChange {
         base_revision: contract.revision,
         change: change.clone(),
@@ -214,7 +215,7 @@ pub async fn accept(pool: &SqlitePool, id: i64) -> Result<Contract, GoalError> {
     let revision = proposed(pool, id).await?;
     let lane_key = revision.lane_key.as_str();
     let now = now_rfc3339();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let bumped = sqlx::query(
         "UPDATE lane_goal SET revision = revision + 1, updated_at = ? WHERE lane_key = ? AND revision = ?",
     )
@@ -333,10 +334,12 @@ pub async fn accept(pool: &SqlitePool, id: i64) -> Result<Contract, GoalError> {
             }
         }
     }
-    sqlx::query("UPDATE lane_goal_revisions SET state = 'accepted' WHERE id = ? AND state = 'proposed'")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE lane_goal_revisions SET state = 'accepted' WHERE id = ? AND state = 'proposed'",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     contract_of(pool, lane_key)
         .await?
@@ -346,10 +349,12 @@ pub async fn accept(pool: &SqlitePool, id: i64) -> Result<Contract, GoalError> {
 /// Marks a proposed revision rejected. The contract is untouched.
 pub async fn reject(pool: &SqlitePool, id: i64) -> Result<(), GoalError> {
     proposed(pool, id).await?;
-    sqlx::query("UPDATE lane_goal_revisions SET state = 'rejected' WHERE id = ? AND state = 'proposed'")
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE lane_goal_revisions SET state = 'rejected' WHERE id = ? AND state = 'proposed'",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -409,9 +414,15 @@ mod tests {
         insert_lane(&pool, "rev", TITLE, "lead", "/tmp", "file marker")
             .await
             .unwrap();
-        set_contract(&pool, "rev", &[spec("r1", "a dark mode toggle exists")], GoalMode::Supervised, 20)
-            .await
-            .unwrap();
+        set_contract(
+            &pool,
+            "rev",
+            &[spec("r1", "a dark mode toggle exists")],
+            GoalMode::Supervised,
+            20,
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO lane_owner_replies(message_id, lane_key, author_id, text, created_at)
              VALUES('m1','rev','U1',?,'2026-10-24T10:00:00+00:00')",
@@ -420,12 +431,26 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        record_turn_at(&pool, "rev", TurnOrigin::HumanCorrection, Some(CORRECTION), None, "2026-10-24T10:01:00+00:00")
-            .await
-            .unwrap();
-        record_turn_at(&pool, "rev", TurnOrigin::SupervisorProposal, Some(SUPERVISOR), None, "2026-10-24T10:02:00+00:00")
-            .await
-            .unwrap();
+        record_turn_at(
+            &pool,
+            "rev",
+            TurnOrigin::HumanCorrection,
+            Some(CORRECTION),
+            None,
+            "2026-10-24T10:01:00+00:00",
+        )
+        .await
+        .unwrap();
+        record_turn_at(
+            &pool,
+            "rev",
+            TurnOrigin::SupervisorProposal,
+            Some(SUPERVISOR),
+            None,
+            "2026-10-24T10:02:00+00:00",
+        )
+        .await
+        .unwrap();
         pool
     }
 
@@ -462,9 +487,11 @@ mod tests {
     #[tokio::test]
     async fn an_exact_lane_goal_quote_is_proposed() {
         let pool = lane_pool().await;
-        assert!(propose(&pool, "rev", &add_r2(), "dark mode toggle to the settings")
-            .await
-            .is_ok());
+        assert!(
+            propose(&pool, "rev", &add_r2(), "dark mode toggle to the settings")
+                .await
+                .is_ok()
+        );
         sqlx::query("INSERT INTO external_sessions(lane_key, goal, send_key) VALUES('rev', 'ship the theme picker to beta users', 'k')")
             .execute(&pool)
             .await
@@ -479,7 +506,13 @@ mod tests {
     async fn a_supervisor_turn_quote_is_refused() {
         let pool = lane_pool().await;
         assert!(matches!(
-            propose(&pool, "rev", &add_r2(), "an accessibility audit of every page").await,
+            propose(
+                &pool,
+                "rev",
+                &add_r2(),
+                "an accessibility audit of every page"
+            )
+            .await,
             Err(GoalError::QuoteNotFound)
         ));
         assert!(list_pending(&pool, "rev").await.unwrap().is_empty());
@@ -514,13 +547,21 @@ mod tests {
             .unwrap();
         let contract = accept(&pool, added.id).await.unwrap();
         assert_eq!(contract.revision, 2);
-        let ids: Vec<&str> = contract.requirements.iter().map(|item| item.id.as_str()).collect();
+        let ids: Vec<&str> = contract
+            .requirements
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
         assert_eq!(ids, ["r1", "r2"]);
         assert_eq!(state_of(&pool, added.id).await, "accepted");
         assert!(list_pending(&pool, "rev").await.unwrap().is_empty());
 
-        let waive = RevisionChange::Waive { req_id: "r1".into() };
-        let waived = propose(&pool, "rev", &waive, "keep the default theme light").await.unwrap();
+        let waive = RevisionChange::Waive {
+            req_id: "r1".into(),
+        };
+        let waived = propose(&pool, "rev", &waive, "keep the default theme light")
+            .await
+            .unwrap();
         let contract = accept(&pool, waived.id).await.unwrap();
         assert_eq!(contract.revision, 3);
         assert_eq!(contract.requirements[0].status, RequirementStatus::Waived);
@@ -528,15 +569,22 @@ mod tests {
         let modify = RevisionChange::Modify {
             requirement: spec("r2", "the toggle persists across app restarts"),
         };
-        let modified = propose(&pool, "rev", &modify, "persists across restarts").await.unwrap();
+        let modified = propose(&pool, "rev", &modify, "persists across restarts")
+            .await
+            .unwrap();
         let contract = accept(&pool, modified.id).await.unwrap();
         assert_eq!(contract.revision, 4);
-        assert_eq!(contract.requirements[1].text, "the toggle persists across app restarts");
+        assert_eq!(
+            contract.requirements[1].text,
+            "the toggle persists across app restarts"
+        );
 
         let replace = RevisionChange::Replace {
             requirements: vec![spec("r9", "the theme picker ships")],
         };
-        let replaced = propose(&pool, "rev", &replace, "dark mode toggle").await.unwrap();
+        let replaced = propose(&pool, "rev", &replace, "dark mode toggle")
+            .await
+            .unwrap();
         let contract = accept(&pool, replaced.id).await.unwrap();
         assert_eq!(contract.revision, 5);
         assert_eq!(contract.requirements.len(), 1);
@@ -550,9 +598,15 @@ mod tests {
         let revision = propose(&pool, "rev", &add_r2(), "make sure the toggle persists")
             .await
             .unwrap();
-        set_contract(&pool, "rev", &[spec("r1", "a dark mode toggle exists")], GoalMode::Supervised, 20)
-            .await
-            .unwrap();
+        set_contract(
+            &pool,
+            "rev",
+            &[spec("r1", "a dark mode toggle exists")],
+            GoalMode::Supervised,
+            20,
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             accept(&pool, revision.id).await,
             Err(GoalError::RevisionChanged {

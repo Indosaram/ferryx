@@ -189,7 +189,7 @@ pub trait ModelTurn: Send + Sync {
     }
 }
 
-const KIBITZER_PROMPT: &str = "Return only JSON with exactly wake (boolean), reason (string), suggested (string), target_lane (string or null). Decide whether the owner needs proactive action. Do not perform actions.";
+const KIBITZER_PROMPT: &str = "Return only JSON with exactly wake (boolean), reason (string), suggested (string), target_lane (string or null). Decide whether the owner needs proactive action. Do not perform actions. Set wake to true only when there is something concrete the owner should act on now (from the open owner items, recent events and lanes); otherwise set wake to false. When wake is true, write suggested as a short Korean message to the owner that names the 1-3 most important concrete things to do now and why each matters.";
 
 /// Consumes one armed generation. A judge or model failure puts the generation back.
 /// A hold, or a decision whose `wake` is false, stays consumed.
@@ -352,10 +352,19 @@ async fn state_document(pool: &SqlitePool, lead: &str) -> Result<String> {
     .bind(lead)
     .fetch_all(pool)
     .await?;
+    let owner_items: Vec<OwnerItemRow> = sqlx::query_as(
+        "SELECT i.source, COALESCE(i.thread_ref, i.title, i.id), i.title, i.author, i.snippet, i.received_at
+         FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+         WHERE d.class = 'owner' AND d.status = 'open'
+         ORDER BY i.received_at DESC, i.id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
     let mut document = String::from("Open lanes:\n");
     for (key, status, title) in lanes {
         document.push_str(&format!("{key} {status}: {title}\n"));
     }
+    document.push_str(&owner_items_section(&owner_items));
     document.push_str("Recent events:\n");
     for (kind, body) in events.into_iter().rev() {
         document.push_str(&format!("{kind}: {body}\n"));
@@ -382,6 +391,52 @@ async fn state_document(pool: &SqlitePool, lead: &str) -> Result<String> {
         document.push_str(&format!("{role}: {content}\n"));
     }
     Ok(document)
+}
+
+/// (source, conversation, title, author, snippet, received_at) of one open owner item.
+type OwnerItemRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
+
+/// Open owner inbox items grouped per conversation, newest first. `rows` arrive newest first.
+fn owner_items_section(rows: &[OwnerItemRow]) -> String {
+    // (source, conversation) -> (newest row index, count), in newest-first order.
+    let mut groups: Vec<((&str, &str), usize, usize)> = Vec::new();
+    for (index, (source, conversation, ..)) in rows.iter().enumerate() {
+        let key = (source.as_str(), conversation.as_str());
+        match groups.iter_mut().find(|(group, _, _)| *group == key) {
+            Some((_, _, count)) => *count += 1,
+            None => groups.push((key, index, 1)),
+        }
+    }
+    let mut section = format!(
+        "Open owner items:\nTotal open owner items: {}\n",
+        rows.len()
+    );
+    for ((source, _), newest, count) in groups.into_iter().take(15) {
+        let (_, _, title, author, snippet, received_at) = &rows[newest];
+        let name = title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .or(author.as_deref())
+            .unwrap_or("-");
+        let line: String = snippet
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(120)
+            .collect();
+        section.push_str(&format!(
+            "[{source}] {name} x{count} latest {received_at}: {line}\n"
+        ));
+    }
+    section
 }
 
 #[cfg(test)]
@@ -432,12 +487,23 @@ mod tests {
     struct Scripted {
         text: String,
         fail: bool,
+        expect: &'static [&'static str],
+        reject: &'static [&'static str],
     }
 
     #[async_trait]
     impl ModelTurn for Scripted {
         async fn complete(&self, prompt: &str) -> Result<String> {
             assert!(prompt.contains("Open lanes"));
+            for needle in self.expect {
+                assert!(
+                    prompt.contains(needle),
+                    "prompt lacks {needle:?}:\n{prompt}"
+                );
+            }
+            for needle in self.reject {
+                assert!(!prompt.contains(needle), "prompt has {needle:?}:\n{prompt}");
+            }
             if self.fail {
                 return Err(HubError::message("model down"));
             }
@@ -463,6 +529,8 @@ mod tests {
         let model = Scripted {
             text: r#"{"wake":true,"reason":"ask","suggested":"ping","target_lane":null}"#.into(),
             fail: false,
+            expect: &[],
+            reject: &[],
         };
         assert!(evaluate_at(&pool, "meta", &judge, &model, now)
             .await
@@ -485,6 +553,8 @@ mod tests {
         let failing = Scripted {
             text: String::new(),
             fail: true,
+            expect: &[],
+            reject: &[],
         };
         assert!(!evaluate_at(&pool, "meta", &judge, &failing, now)
             .await
@@ -495,5 +565,79 @@ mod tests {
                 .await
                 .unwrap();
         assert!(generation > consumed);
+    }
+
+    #[tokio::test]
+    async fn the_state_document_groups_open_owner_items_and_skips_dismissed_ones() {
+        let pool = crate::storage::memory().await.unwrap();
+        ensure_schema(&pool).await.unwrap();
+        ensure_lead(&pool, "meta").await.unwrap();
+        for (id, thread, title, snippet, received, status) in [
+            (
+                "o1",
+                "t1",
+                "Contract",
+                "first draft",
+                "2026-10-21T01:00:00Z",
+                "open",
+            ),
+            (
+                "o2",
+                "t1",
+                "Contract",
+                "please\nsign today",
+                "2026-10-21T01:30:00Z",
+                "open",
+            ),
+            (
+                "o3",
+                "t2",
+                "Old invoice",
+                "already handled",
+                "2026-10-21T01:40:00Z",
+                "dismissed",
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO inbox_items(id, source, source_ref, thread_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'mail', ?, ?, 'boss', ?, ?, ?, 'h', ?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(thread)
+            .bind(title)
+            .bind(snippet)
+            .bind(received)
+            .bind(received)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'owner', 'needs you', ?, ?)",
+            )
+            .bind(id)
+            .bind(status)
+            .bind(received)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let now = DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let model = Scripted {
+            text: r#"{"wake":true,"reason":"sign","suggested":"sign the contract","target_lane":null}"#.into(),
+            fail: false,
+            expect: &[
+                "Open owner items:",
+                "Total open owner items: 2",
+                "[mail] Contract x2 latest 2026-10-21T01:30:00Z: please sign today",
+            ],
+            reject: &["Old invoice", "already handled"],
+        };
+        assert!(
+            evaluate_at(&pool, "meta", &Judge::forced("wake"), &model, now)
+                .await
+                .unwrap()
+        );
     }
 }

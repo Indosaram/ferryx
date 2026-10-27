@@ -8277,17 +8277,23 @@ impl DaemonServer {
     /// daemon's registry entries without touching the child (the reader stays parked and is
     /// released, the master fd copy is closed). Only the retained SSH/paired sessions remain, so
     /// Draining counts nothing but this daemon's own sessions.
+    ///
+    /// The sessions are let go together: this runs before CommitHandoverOk is answered, and the
+    /// successor and every GUI wait on that answer, so one slow reader must bound the whole
+    /// release once instead of once per session.
     async fn release_transferred_locals(&self) {
-        for session_id in self.handover_manager.transferred_locals() {
-            if self.terminal_service.get_session(&session_id).is_none() {
-                continue;
-            }
-            if let Err(error) = self
-                .terminal_service
-                .pty_manager()
-                .relinquish_transferred_session(&session_id)
-                .await
-            {
+        let pty = self.terminal_service.pty_manager();
+        let releases = self
+            .handover_manager
+            .transferred_locals()
+            .into_iter()
+            .filter(|session_id| self.terminal_service.get_session(session_id).is_some())
+            .map(|session_id| async move {
+                let result = pty.relinquish_transferred_session(&session_id).await;
+                (session_id, result)
+            });
+        for (session_id, result) in futures_util::future::join_all(releases).await {
+            if let Err(error) = result {
                 tracing::warn!(%session_id, %error, "Could not drop the transferred session entry");
             }
             self.session_service.session_metadata.write().remove(&session_id);

@@ -190,9 +190,9 @@ pub async fn session_paused(pool: &SqlitePool, session_id: &str) -> Result<bool>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::goals::types::GoalMode;
     use crate::lanes::pause::pause;
     use crate::lanes::state::{insert_lane, set_pane, transition, LaneStatus};
-    use crate::goals::types::GoalMode;
 
     #[tokio::test]
     async fn live_lanes_carry_their_pane_goal_and_pause() {
@@ -287,14 +287,24 @@ mod tests {
         let goal = lanes.iter().find(|lane| lane.key == "goal").unwrap();
         let plain = lanes.iter().find(|lane| lane.key == "plain").unwrap();
         assert!(plain.goal_contract.is_none());
-        assert!(!serde_json::to_value(plain).unwrap().as_object().unwrap().contains_key("goalContract"));
+        assert!(!serde_json::to_value(plain)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("goalContract"));
         let view = goal.goal_contract.as_ref().unwrap();
         assert_eq!(view.turn_limit, 5);
         assert_eq!(view.requirements[0].id, "r1");
         let json = serde_json::to_value(goal).unwrap();
         assert_eq!(json["goalContract"]["mode"], "supervised");
-        assert_eq!(json["goalContract"]["requirements"][0]["evidenceRefs"], serde_json::json!([]));
-        assert_eq!(json["goalContract"]["pendingRevisions"], serde_json::json!([]));
+        assert_eq!(
+            json["goalContract"]["requirements"][0]["evidenceRefs"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json["goalContract"]["pendingRevisions"],
+            serde_json::json!([])
+        );
     }
 
     #[tokio::test]
