@@ -200,6 +200,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             };
         }
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
+        Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
@@ -207,6 +208,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
+            eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear>");
             return 2;
         }
     }
@@ -292,6 +294,85 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             Err(error) => {
                 eprintln!("migrate: {error}");
                 1
+            }
+        }
+    })
+}
+
+/// `ferryx hub cron list` prints each job with the model it runs on; `ferryx hub cron model
+/// <id> <provider/model>` pins one job to a model and `--clear` returns it to the background
+/// model. Edits go to the hub database directly, so the daemon does not need a restart: the
+/// scheduler reads the payload at every run.
+fn hub_cron_cli(args: &[String]) -> i32 {
+    const USAGE: &str =
+        "usage: ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear>";
+    enum Op {
+        List,
+        Model(String, Option<String>),
+    }
+    let op = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["list"] => Op::List,
+        ["model", id, "--clear"] => Op::Model((*id).to_owned(), None),
+        ["model", id, model] if !model.starts_with('-') => {
+            Op::Model((*id).to_owned(), Some((*model).to_owned()))
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            return 2;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    runtime.block_on(async move {
+        let config = HubConfig::load().unwrap_or_default();
+        let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+        if !path.exists() {
+            eprintln!("hub database not found at {}", path.display());
+            return 1;
+        }
+        let pool = match ferryx_hub::storage::connect(&path).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                eprintln!("hub database: {error}");
+                return 1;
+            }
+        };
+        match op {
+            Op::List => {
+                let jobs = match ferryx_hub::cron_exec::job_models(&pool).await {
+                    Ok(jobs) => jobs,
+                    Err(error) => {
+                        eprintln!("cron list: {error}");
+                        return 1;
+                    }
+                };
+                for job in jobs {
+                    let state = if job.enabled { "enabled" } else { "disabled" };
+                    let source = if job.overridden { "job" } else { "default" };
+                    println!("{}\t{state}\t{}\t{source}", job.id, job.model);
+                }
+                0
+            }
+            Op::Model(id, model) => {
+                match ferryx_hub::cron_exec::set_model_override(&pool, &id, model.as_deref()).await {
+                    Ok(Some(now)) => {
+                        println!("{id} {now}");
+                        0
+                    }
+                    Ok(None) => {
+                        eprintln!("cron job {id} not found");
+                        1
+                    }
+                    Err(error) => {
+                        eprintln!("cron model: {error}");
+                        2
+                    }
+                }
             }
         }
     })

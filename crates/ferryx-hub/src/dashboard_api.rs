@@ -646,10 +646,14 @@ fn job_view(row: JobRow) -> Value {
         Ok(payload) => (payload, Value::Null),
         Err(error) => (Value::Null, Value::String(error.to_string())),
     };
+    let model = crate::cron_exec::job_model(&payload);
+    let model_override = crate::cron_exec::model_override(&payload);
     json!({
         "id": id,
         "session_key": session_key,
         "expression": expression,
+        "model": model,
+        "model_override": model_override,
         "payload": payload,
         "enabled": enabled == 1,
         "next_run_at": next,
@@ -725,6 +729,7 @@ pub async fn create_cron_job(
     if input.payload.is_null() {
         return Err(ApiError::bad_request("payload is required"));
     }
+    check_model_override(&input.payload)?;
     let id = input
         .id
         .map(|id| id.trim().to_owned())
@@ -828,6 +833,7 @@ pub async fn update_cron_job(
     let payload = match input.payload {
         Some(mut payload) => {
             preserve_scheduler_state(&old_payload, &mut payload);
+            keep_model_override(&old_payload, &mut payload);
             payload
         }
         None if old_payload.is_null() => {
@@ -837,6 +843,7 @@ pub async fn update_cron_job(
         }
         None => old_payload,
     };
+    check_model_override(&payload)?;
     let session_key = match input.session_key {
         Some(key) if key.trim().is_empty() => None,
         Some(key) => Some(key),
@@ -866,6 +873,63 @@ pub async fn update_cron_job(
     .execute(&state.pool)
     .await?;
     crate::schedule::poke_scheduler();
+    let row = fetch_job(&state.pool, &id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("cron job"))?;
+    Ok(Json(job_view(row)))
+}
+
+/// A payload edit that does not mention `model_override` keeps the job's model; an explicit
+/// null clears it.
+fn keep_model_override(existing: &Value, updated: &mut Value) {
+    let key = crate::cron_exec::MODEL_OVERRIDE_KEY;
+    let (Some(old), Some(new)) = (existing.as_object(), updated.as_object_mut()) else {
+        return;
+    };
+    match new.get(key) {
+        Some(Value::Null) => {
+            new.remove(key);
+        }
+        Some(_) => {}
+        None => {
+            if let Some(model) = old.get(key) {
+                new.insert(key.to_owned(), model.clone());
+            }
+        }
+    }
+}
+
+/// A stored `model_override` must be a `provider/model` string; a bad one is rejected
+/// instead of silently running the job on the background model.
+fn check_model_override(payload: &Value) -> ApiResult<()> {
+    match payload.get(crate::cron_exec::MODEL_OVERRIDE_KEY) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(model)) => crate::cron_exec::validate_model_id(model)
+            .map(|_| ())
+            .map_err(|error| ApiError::bad_request(error.to_string())),
+        Some(_) => Err(ApiError::bad_request(
+            "model_override must be a provider/model string",
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CronModelInput {
+    /// `provider/model`, or null / empty to go back to the background model.
+    model: Option<String>,
+}
+
+/// `PUT /api/cron/jobs/{id}/model`: sets or clears the job's own model.
+pub async fn set_cron_job_model(
+    State(state): State<HttpState>,
+    UrlPath(id): UrlPath<String>,
+    Json(input): Json<CronModelInput>,
+) -> ApiResult<Json<Value>> {
+    let model = input.model.filter(|model| !model.trim().is_empty());
+    crate::cron_exec::set_model_override(&state.pool, &id, model.as_deref())
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("cron job"))?;
     let row = fetch_job(&state.pool, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("cron job"))?;
@@ -1670,6 +1734,69 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(delivery, "[]", "delivery follows the new payload");
+
+        assert_eq!(updated["model"], crate::model_policy::background_model());
+        assert!(updated["model_override"].is_null());
+        let (status, chosen) = call(
+            &app,
+            "PUT",
+            "/api/cron/jobs/daily/model",
+            Some(json!({"model": "mahoquot/claude-sonnet-5-5"})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{chosen}");
+        assert_eq!(chosen["model"], "mahoquot/claude-sonnet-5-5");
+        assert_eq!(chosen["model_override"], "mahoquot/claude-sonnet-5-5");
+        let (status, _) = call(
+            &app,
+            "PUT",
+            "/api/cron/jobs/daily/model",
+            Some(json!({"model": "sonnet"})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call(
+            &app,
+            "PUT",
+            "/api/cron/jobs/missing/model",
+            Some(json!({"model": null})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, edited) = call(
+            &app,
+            "PUT",
+            "/api/cron/jobs/daily",
+            Some(json!({"payload": {"command": "echo hi"}})),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            edited["model_override"], "mahoquot/claude-sonnet-5-5",
+            "a payload edit keeps the job model"
+        );
+        let (status, _) = call(
+            &app,
+            "PUT",
+            "/api/cron/jobs/daily",
+            Some(json!({"payload": {"command": "echo hi", "model_override": 7}})),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, cleared) = call(
+            &app,
+            "PUT",
+            "/api/cron/jobs/daily/model",
+            Some(json!({"model": ""})),
+            &[],
+        )
+        .await;
+        assert!(cleared["model_override"].is_null());
+        assert_eq!(cleared["model"], crate::model_policy::background_model());
 
         let (_, paused) = call(&app, "POST", "/api/cron/jobs/daily/pause", None, &[]).await;
         assert_eq!(paused["enabled"], false);
