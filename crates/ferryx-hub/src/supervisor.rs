@@ -2278,6 +2278,48 @@ pub async fn transition_goal(
     Ok(goal)
 }
 
+/// Holds a goal `degraded` with `detail` only while `run_id` is still the live run of the
+/// started dispatch `request_id` and the goal is still `running`, checked and moved in one
+/// write transaction so a settle or owner action committed meanwhile is never overwritten.
+/// Returns whether the goal was held; nothing is written otherwise.
+pub async fn hold_live_run(
+    pool: &SqlitePool,
+    goal_id: &str,
+    request_id: &str,
+    run_id: &str,
+    detail: &str,
+) -> Result<bool, SupervisorError> {
+    let mut tx = pool.begin_write().await?;
+    let live: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT state, run_id FROM supervisor_dispatches WHERE request_id = ?")
+            .bind(request_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let is_live = matches!(
+        &live,
+        Some((state, live_run)) if state == "started" && live_run.as_deref() == Some(run_id)
+    );
+    if !is_live {
+        return Ok(false);
+    }
+    let goal = require_goal(&mut tx, goal_id).await?;
+    if goal.run_state != RunState::Running {
+        return Ok(false);
+    }
+    transition_goal_in(
+        &mut tx,
+        goal_id,
+        goal.revision,
+        RunState::Running,
+        RunState::Degraded,
+        Some(detail),
+    )
+    .await?;
+    tx.commit().await?;
+    wakes::poke();
+    Ok(true)
+}
+
 /// [`transition_goal`]'s checks and writes, inside the caller's transaction. Nothing is
 /// written when it refuses.
 async fn transition_goal_in(

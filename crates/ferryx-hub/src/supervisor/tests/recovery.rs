@@ -24,7 +24,9 @@ use crate::supervisor::receipts::{
     record_pty_settle, record_pty_settle_across_restart, PtySettle, SettleWatch,
     PAIRED_SETTLE_UNOBSERVED,
 };
-use crate::supervisor::wakes::{report, Deferral, StateHandler, WakeAck, WakeHandler, WakeJudge, WakeScheduler, WakeTurn};
+use crate::supervisor::wakes::{
+    report, Deferral, StateHandler, WakeAck, WakeHandler, WakeJudge, WakeScheduler, WakeTurn,
+};
 use crate::supervisor::{
     advance_generation, bind_project_host, claim_dispatch, confirm_claim_before_transmit,
     create_project, ensure_identity, execution_binding_of, goal_of, reconcile_claims_after_restart,
@@ -46,9 +48,10 @@ const NEW_EPOCH: &str = "rc-restarted";
 async fn owner_pool() -> SqlitePool {
     let pool = crate::storage::memory().await.unwrap();
     let identity = ensure_identity(&pool, OWNER).await.unwrap();
-    let project = create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/example/ferryx")
-        .await
-        .unwrap();
+    let project =
+        create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/example/ferryx")
+            .await
+            .unwrap();
     bind_project_host(&pool, &project.project_id, HOST, &format!("{REPO}/.git"))
         .await
         .unwrap();
@@ -206,9 +209,16 @@ async fn a_crash_after_send_before_the_start_receipt_is_uncertain_and_a_late_sta
     let started = Receipt::Started { run_id: run.clone(), provider_session_id: PANE.into() };
     record_receipt(&pool, &request_id, generation, &started).await.unwrap();
     let goal = goal_of(&pool, &goal_id).await.unwrap().unwrap();
-    transition_goal(&pool, &goal_id, goal.revision, RunState::DeliveryUncertain, RunState::Running, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal_id,
+        goal.revision,
+        RunState::DeliveryUncertain,
+        RunState::Running,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(execution_binding_of(&pool, &goal_id).await.unwrap().unwrap().run_id, Some(run));
 }
 
@@ -239,7 +249,8 @@ async fn a_crash_after_start_keeps_the_run_and_the_new_daemon_settles_it() {
     let control = Arc::new(RecordingControl::observing());
     assert_eq!(restart(&pool, control.clone()).await, 1);
     let run = pty_run_id(PANE, OLD_EPOCH, 1);
-    assert_eq!(execution_binding_of(&pool, &goal_id).await.unwrap().unwrap().run_id, Some(run.clone()));
+    let binding = execution_binding_of(&pool, &goal_id).await.unwrap().unwrap();
+    assert_eq!(binding.run_id, Some(run.clone()));
 
     // The daemon restarted while the worker ran: the run is reattached, not resent.
     assert_eq!(restart(&pool, control.clone()).await, 0);
@@ -274,7 +285,8 @@ async fn a_crash_after_settle_resumes_the_goal_from_the_durable_cursor_without_r
     let (goal_id, request_id) = admit(&pool).await;
     let control = Arc::new(RecordingControl::observing());
     assert_eq!(restart(&pool, control.clone()).await, 1);
-    let PtySettle::Settled(_) = record_pty_settle(&pool, HOST, PANE, OLD_EPOCH, 2).await.unwrap() else {
+    let settled = record_pty_settle(&pool, HOST, PANE, OLD_EPOCH, 2).await.unwrap();
+    let PtySettle::Settled(_) = settled else {
         panic!("the run settles");
     };
     // Crash before any scheduler applied the settle.
@@ -307,7 +319,8 @@ async fn a_predecessor_completion_after_a_new_generation_is_ignored() {
     fresh_tick(&pool).await;
     assert_eq!(goal_state(&pool, &goal_id).await.0, RunState::Running, "no completion from it");
     let settled_wakes: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM supervisor_pending_wakes WHERE goal_id = ? AND cause = 'turn_settled'",
+        "SELECT COUNT(*) FROM supervisor_pending_wakes
+         WHERE goal_id = ? AND cause = 'turn_settled'",
     )
     .bind(&goal_id)
     .fetch_one(&pool)
@@ -342,7 +355,8 @@ impl WakeHandler for Counting {
 async fn a_degraded_goal_gets_no_model_call_over_an_hour_of_reports() {
     let pool = owner_pool().await;
     let (goal_id, _) = admit(&pool).await;
-    transition_goal(&pool, &goal_id, 1, RunState::Ready, RunState::Degraded, Some("MHC_CAPABILITY_MISSING"))
+    let degraded = Some("MHC_CAPABILITY_MISSING");
+    transition_goal(&pool, &goal_id, 1, RunState::Ready, RunState::Degraded, degraded)
         .await
         .unwrap();
     let start = Utc::now();
@@ -401,7 +415,8 @@ async fn a_goal_stranded_dispatching_with_nothing_in_flight_is_repaired_to_ready
         .execute(&pool)
         .await
         .unwrap();
-    let next = crate::supervisor::enqueue_dispatch(&pool, &goal_id, revision, "Create result.txt again.")
+    let again = "Create result.txt again.";
+    let next = crate::supervisor::enqueue_dispatch(&pool, &goal_id, revision, again)
         .await
         .unwrap();
     reconcile_claims_after_restart(&pool).await.unwrap();
@@ -440,7 +455,8 @@ async fn the_restart_census_holds_a_local_run_whose_pane_is_gone_and_never_resen
     let (goal_id, request_id) = started_run(&pool, HOST).await;
     // The new daemon lists only another pane.
     let control = Arc::new(RecordingControl::observing());
-    *control.result.lock().unwrap() = serde_json::json!({"sessions": [{"sessionId": "pane-other"}]});
+    *control.result.lock().unwrap() =
+        serde_json::json!({"sessions": [{"sessionId": "pane-other"}]});
     let census = dispatcher(&pool, control.clone()).census_started_runs().await;
     assert_eq!(census, 1);
     let (state, detail) = goal_state(&pool, &goal_id).await;

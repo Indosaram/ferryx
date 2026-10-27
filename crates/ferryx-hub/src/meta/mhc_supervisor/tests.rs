@@ -1752,29 +1752,23 @@ impl EngineLauncher for OwnedLauncher {
 }
 
 /// Todo 12: a hub generation abort and an engine restart end only the recorded owned engine
-/// children (each one's own kill switch), and the pid record is cleared. The runtime holds no
-/// handle on worker panes at all; the pane census and pane launcher beside it record no
-/// mutation. Paused time: the shutdown grace passes virtually, never by a sleep.
+/// children (each one's own kill switch), and the pid record is cleared. Paused time: the
+/// shutdown grace passes virtually, never by a sleep.
+///
+/// Worker PTYs are out of this runtime's reach by construction: [`MhcSupervisor::new`] takes
+/// only the profile and an [`EngineLauncher`], never an agent control or pane launcher, so
+/// the only processes it can end are the children its launcher reported. That worker panes
+/// survive a hub generation restart against a real daemon is checked by the QA runner's
+/// `recovery` and `capabilities` scenarios (pane census before and after each `hub stop`/
+/// `hub start`), not here.
 #[tokio::test(start_paused = true)]
 async fn a_generation_abort_and_engine_restart_end_only_the_owned_engine_child() {
-    use crate::agent_control::{AgentControl, AgentOp, FixedLauncher, RecordingControl};
     let harness = Harness::new("owned-only", all_capabilities());
     let launcher = Arc::new(OwnedLauncher {
         peer: harness.peer.clone(),
         children: Mutex::new(Vec::new()),
     });
     let supervisor = MhcSupervisor::new(harness.profile("/parent", config()), launcher.clone());
-    // The worker panes as the hub sees them: a pane census and a pane launcher.
-    let panes = Arc::new(RecordingControl::default());
-    *panes.result.lock().unwrap() = json!({"sessions": [{"sessionId": "pane-a"}, {"sessionId": "pane-b"}]});
-    let pane_launcher = Arc::new(FixedLauncher::new("pane-new"));
-    let census = |panes: &RecordingControl| {
-        let panes = panes.result.lock().unwrap().clone();
-        panes["sessions"].clone()
-    };
-    let before = census(&panes);
-    let listed = panes.execute(None, AgentOp::List).await.unwrap();
-    assert_eq!(listed["sessions"], before);
 
     let mut health = supervisor.subscribe_health();
     let generation = tokio::spawn(supervisor.clone().supervise());
@@ -1803,12 +1797,4 @@ async fn a_generation_abort_and_engine_restart_end_only_the_owned_engine_child()
     );
     assert!(supervisor.health().pid.is_none());
     assert!(supervisor.profile().owned_pid().is_none(), "no owned pid record is left");
-    // Nothing reached the worker panes: no stop, close, send or launch, and the census holds.
-    assert!(
-        panes.ops().iter().all(|(_, op)| !op.is_mutation()),
-        "{:?}",
-        panes.ops()
-    );
-    assert!(pane_launcher.launched.lock().unwrap().is_empty());
-    assert_eq!(census(&panes), before);
 }

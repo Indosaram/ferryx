@@ -15,7 +15,7 @@ import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync,
 import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HarnessError, isInside, POSIX, waitForPath } from './harness.mjs';
+import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -817,14 +817,46 @@ async function supervisedHub(ctx, { workspaceId, extraEnv = {}, label }) {
     return body;
   };
   const hub = await openHubReader(dbPath);
+  // Pane census through the product CLI. A failed list is never an empty census: `ok` must be
+  // true and `sessions` an array, or the census step fails the scenario.
   const panes = async (step) => {
     const listed = await ctx.cli(['agents', 'list'], { label: `${label}-panes-${step}`, env });
-    const ids = (listed.json?.sessions ?? []).map((session) => session.sessionId).filter(Boolean).sort();
-    ctx.evidence.appendJsonl('pty-census.jsonl', { step, ok: listed.json?.ok ?? null, ids, at: new Date().toISOString() });
+    const ok = listed.code === 0 && listed.json?.ok === true && Array.isArray(listed.json?.sessions);
+    const ids = ok ? listed.json.sessions.map((session) => session.sessionId).filter(Boolean).sort() : [];
+    ctx.evidence.appendJsonl('pty-census.jsonl', { step, ok, code: listed.code, ids, at: new Date().toISOString() });
+    ctx.assert(`pty-census-listed-${step}`, ok, { code: listed.code, json: listed.json, stderr: listed.stderr });
     return ids;
   };
-  return { data, dbPath, env, daemon, hub, submit, panes, workerLogs };
+  // Child census: the daemon and every fixture worker (one per pane, pid from its own log),
+  // each with its start stamp, so a restarted or replaced process is told from a survivor.
+  const children = async (step) => {
+    const probe = async (pid) => {
+      const seen = await probeProcess(pid);
+      return { pid, state: seen.state, startStamp: seen.startStamp ?? null };
+    };
+    const workers = [];
+    for (const worker of readWorkerLogs(workerLogs)) {
+      const pid = worker.entries.find((entry) => entry.kind === 'ready')?.pid ?? null;
+      if (pid) workers.push({ sessionId: worker.sessionId, ...(await probe(pid)) });
+    }
+    const record = { step, daemon: await probe(daemon.pid), workers, at: new Date().toISOString() };
+    ctx.evidence.appendJsonl('child-census.jsonl', record);
+    return record;
+  };
+  return { data, dbPath, env, daemon, hub, submit, panes, children, workerLogs };
 }
+
+/** Every process of `before` is alive in `after` with the same start stamp. */
+const survived = (before, after) => {
+  const same = (a, b) => b?.state === 'alive' && a.state === 'alive' && a.startStamp !== null && b.startStamp === a.startStamp;
+  return same(before.daemon, after.daemon)
+    && before.workers.every((worker) => same(worker, after.workers.find((later) => later.pid === worker.pid)));
+};
+
+/** Session ids of every started (or held-started) dispatch, which must each be a live pane. */
+const startedSessions = (hub) => hub.all(
+  "SELECT DISTINCT provider_session_id AS id FROM supervisor_dispatches WHERE state = 'started' AND provider_session_id IS NOT NULL",
+).map((row) => row.id).sort();
 
 const hubControl = async (ctx, env, op, step) => {
   const result = await ctx.cli(['hub', op], { label: `hub-${op}-${step}`, env });
@@ -852,9 +884,19 @@ async function runRecovery(ctx) {
   transcript.goals = {};
   const census = [];
   const take = async (step) => { const ids = await h.panes(step); census.push({ step, ids }); return ids; };
+  // One hub-generation restart: stop and start must each succeed, and the daemon and every
+  // fixture worker must be the same processes (pid and start stamp) afterwards.
+  const restartHub = async (step) => {
+    const before = await h.children(`${step}-before`);
+    ctx.assert(`hub-stopped-${step}`, await hubControl(ctx, env, 'stop', step), {});
+    ctx.assert(`hub-started-${step}`, await hubControl(ctx, env, 'start', step), {});
+    const after = await h.children(`${step}-after`);
+    ctx.assert(`children-survived-${step}`, survived(before, after), { before, after });
+  };
   try {
     // Boundary 1: before send. The hub is stopped, so the admission commits a ready intent that
     // no dispatcher can claim; after the restart it runs exactly once.
+    const childrenFirst = await h.children('before-send-before');
     ctx.assert('hub-stopped-before-send', await hubControl(ctx, env, 'stop', 'before-send'), {});
     const marker1 = `QA_RECOVERY_BEFORE_SEND_${ctx.runId}`;
     const first = await h.submit('before-send', `qa-recovery-1-${ctx.runId}`, `Create result.txt containing READY. ${marker1}`);
@@ -866,6 +908,8 @@ async function runRecovery(ctx) {
     transcript('before-send', 'stopped');
     const panesBefore = await take('before-send-restart');
     ctx.assert('hub-restarted-before-send', await hubControl(ctx, env, 'start', 'before-send'), {});
+    const childrenFirstAfter = await h.children('before-send-after');
+    ctx.assert('children-survived-before-send', survived(childrenFirst, childrenFirstAfter), { before: childrenFirst, after: childrenFirstAfter });
     const ran1 = await waitForChange(ctx, 'before-send dispatch after restart', hubDir, () => {
       const rows = goalRows(hub, goal1);
       return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
@@ -889,8 +933,7 @@ async function runRecovery(ctx) {
     const typedState = typed.dispatches[0]?.state;
     ctx.assert('after-send-instruction-typed-while-claimed', typed.dispatches.length === 1 && ['claimed', 'accepted'].includes(typedState), typed);
     const panesMid = await take('after-send-restart');
-    await hubControl(ctx, env, 'stop', 'after-send');
-    await hubControl(ctx, env, 'start', 'after-send');
+    await restartHub('after-send');
     const held = await waitForChange(ctx, 'after-send reconciliation', hubDir, () => {
       const rows = goalRows(hub, goal2);
       return { done: rows.goal?.run_state === 'delivery_uncertain', ...rows };
@@ -913,12 +956,20 @@ async function runRecovery(ctx) {
     transcript('after-start', 'started');
     ctx.assert('after-start-run-started', started.goal?.run_state === 'running' && started.dispatches[0]?.state === 'started', started);
     const panesLate = await take('after-start-restart');
-    await hubControl(ctx, env, 'stop', 'after-start');
-    await hubControl(ctx, env, 'start', 'after-start');
-    // A live pane's run is left to the observer by the restart census, which writes nothing, so
-    // there is no commit to wait on. The state is read once the hub reports healthy and read again
-    // after the final pane census below (a later point than the census of this generation).
-    await ctx.cli(['hub', 'status', '--check'], { label: 'hub-status-after-start', env });
+    await restartHub('after-start');
+    const status = await ctx.cli(['hub', 'status', '--check'], { label: 'hub-status-after-start', env });
+    ctx.assert('hub-healthy-after-start-restart', status.code === 0, { code: status.code, stdout: status.stdout, stderr: status.stderr });
+    // A live pane's run is left to the observer by the restart census, which writes nothing.
+    // The new dispatcher runs its census before its first drain, so a sentinel goal submitted
+    // now reaching `started` proves this generation's census already ran; goal3 is read after.
+    const markerS = `QA_RECOVERY_SENTINEL_${ctx.runId}`;
+    const sentinel = await h.submit('sentinel', `qa-recovery-s-${ctx.runId}`, `Create result.txt containing READY. ${markerS}`);
+    const goalS = sentinel?.receipt?.goal_id ?? null;
+    const sentinelRan = await waitForChange(ctx, 'sentinel dispatch after the after-start restart', hubDir, () => {
+      const rows = goalRows(hub, goalS ?? '');
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000);
+    ctx.assert('census-ran-sentinel-started', sentinel?.outcome === 'admitted' && sentinelRan.dispatches[0]?.state === 'started', sentinelRan);
     const after = goalRows(hub, goal3);
     transcript('after-start', 'restarted');
     ctx.assert('after-start-reattached-not-resent', after.goal?.run_state === 'running' && after.dispatches.length === 1
@@ -932,8 +983,12 @@ async function runRecovery(ctx) {
     ctx.assert('after-start-still-running-at-end', settledLate.goal?.run_state === 'running' && settledLate.dispatches.length === 1
       && settledLate.dispatches[0].state === 'started' && inputsWith(workerLogs, marker3).length === 1, settledLate);
     const goals = hub.count('SELECT COUNT(*) AS n FROM supervisor_goals');
-    ctx.assert('no-goal-lost', goals === 3 && [goal1, goal2, goal3].every((goal) => goal && hub.one('SELECT goal_id FROM supervisor_goals WHERE goal_id = ?', goal)), { goals });
-    ctx.assert('pty-census-unchanged-across-restarts', census.every(({ ids }) => ids.every((id) => final.includes(id))) && final.length >= 3, { census, final });
+    ctx.assert('no-goal-lost', goals === 4 && [goal1, goal2, goal3, goalS].every((goal) => goal && hub.one('SELECT goal_id FROM supervisor_goals WHERE goal_id = ?', goal)), { goals });
+    // Falsifiable census: every pane seen before any restart is still listed, and every started
+    // dispatch's pane (the runs the restarts must not lose) is a live pane at the end.
+    const liveRuns = startedSessions(hub);
+    ctx.assert('pty-census-unchanged-across-restarts', census.every(({ ids }) => ids.every((id) => final.includes(id)))
+      && liveRuns.length >= 2 && liveRuns.every((id) => final.includes(id)), { census, final, liveRuns });
     const allInputs = readWorkerLogs(workerLogs).flatMap((worker) => worker.entries.filter((entry) => entry.kind === 'input' && entry.text.includes('QA_RECOVERY_')).map((entry) => entry.text));
     ctx.assert('no-instruction-typed-twice', new Set(allInputs).size === allInputs.length, { allInputs });
   } finally {
@@ -1014,11 +1069,34 @@ async function runCapabilities(ctx) {
     writeFileSync(dropFile, mhc.DROPPED_CAPABILITY);
     note(`engine wrapper now drops ${mhc.DROPPED_CAPABILITY}; restarting the hub generation only`);
     const providerBefore = stub.requests.length;
-    await hubControl(ctx, engineEnv, 'stop', 'capability');
-    await hubControl(ctx, engineEnv, 'start', 'capability');
+    // Child census around the hub-generation restart: the owned engine (profile pid record
+    // `<pid> <hub pid>`) is replaced, while the daemon and every worker are the same processes.
+    const pidFile = join(mhc.engineStateDir(ctx), 'mhc-supervisor.pid');
+    const enginePid = () => {
+      try {
+        const [pid, owner] = readFileSync(pidFile, 'utf8').trim().split(/\s+/).map(Number);
+        return owner === h.daemon.pid ? pid : null;
+      } catch { return null; }
+    };
+    const oldEngine = enginePid();
+    const oldProbe = oldEngine ? await probeProcess(oldEngine) : null;
+    const childrenBefore = await h.children('capability-before');
+    ctx.assert('hub-stopped-capability', await hubControl(ctx, engineEnv, 'stop', 'capability'), {});
+    ctx.assert('hub-started-capability', await hubControl(ctx, engineEnv, 'start', 'capability'), {});
     const degraded = await mhc.awaitEngine(ctx, engineEnv, 'degraded', (json) => json?.engine?.state === 'degraded', 120_000);
     ctx.assert('missing-capability-is-degraded', degraded?.engine?.faultCode === 'MHC_CAPABILITY_MISSING'
       && JSON.stringify(degraded?.engine?.fault?.missing) === JSON.stringify([mhc.DROPPED_CAPABILITY]), degraded?.engine ?? null);
+    // The refused engine is ended and its pid record forgotten (MhcSupervisor::launch), so a
+    // degraded generation leaves no owned engine child at all.
+    const oldAfter = oldEngine ? await probeProcess(oldEngine) : null;
+    const degradedEngine = enginePid();
+    const childrenAfter = await h.children('capability-after');
+    const ended = (before, after) => Boolean(before) && before.state === 'alive'
+      && (after.state === 'gone' || after.state === 'zombie' || after.startStamp !== before.startStamp);
+    const degradedCensus = { pidFile, oldEngine, oldProbe, oldAfter, degradedEngine, childrenBefore, childrenAfter };
+    ctx.evidence.writeJson('capabilities/engine-census-degraded.json', degradedCensus);
+    ctx.assert('engine-child-ended-workers-kept', ended(oldProbe, oldAfter) && degradedEngine === null
+      && survived(childrenBefore, childrenAfter), degradedCensus);
     const refused = await mhc.engineAssess(ctx, engineEnv, 'degraded-refused', 'Assess again.');
     const seen = mhc.readFrames(frames);
     ctx.assert('degraded-engine-got-zero-sends', refused.json?.code === 'MHC_CAPABILITY_MISSING' && stub.requests.length === providerBefore
@@ -1026,8 +1104,27 @@ async function runCapabilities(ctx) {
     ctx.assert('no-fallback-canary-requests', stub.requests.every((entry) => entry.model !== mhc.CANARY_MODEL), { requests: stub.requests.length });
     const panesAfter = await h.panes('after-faults');
     const rows = goalRows(h.hub, goalId);
-    ctx.assert('worker-panes-preserved', panesBefore.every((id) => panesAfter.includes(id)) && inputsWith(h.workerLogs, marker).length === 1
-      && rows.dispatches.length === 1, { panesBefore, panesAfter, rows });
+    const started = startedSessions(h.hub);
+    ctx.assert('worker-panes-preserved', panesBefore.length >= 1 && panesBefore.every((id) => panesAfter.includes(id))
+      && started.length >= 1 && started.every((id) => panesAfter.includes(id))
+      && inputsWith(h.workerLogs, marker).length === 1 && rows.dispatches.length === 1, { panesBefore, panesAfter, started, rows });
+
+    // Recovery from degraded: the filter is cleared and only the hub generation restarts once
+    // more. A new owned engine child exists; the daemon and every worker are unchanged.
+    writeFileSync(dropFile, '');
+    const childrenRecover = await h.children('recover-before');
+    ctx.assert('hub-stopped-recover', await hubControl(ctx, engineEnv, 'stop', 'recover'), {});
+    ctx.assert('hub-started-recover', await hubControl(ctx, engineEnv, 'start', 'recover'), {});
+    const recovered = await mhc.awaitEngine(ctx, engineEnv, 'recovered', (json) => json?.engine?.state === 'ready', 120_000);
+    const newEngine = enginePid();
+    const newProbe = newEngine ? await probeProcess(newEngine) : null;
+    const childrenRecovered = await h.children('recover-after');
+    const recoverCensus = { oldEngine, newEngine, newProbe, reported: recovered?.engine?.pid ?? null, childrenRecover, childrenRecovered };
+    ctx.evidence.writeJson('capabilities/engine-census-recovered.json', recoverCensus);
+    ctx.assert('engine-child-replaced-workers-kept', newEngine !== null && newEngine !== oldEngine && newProbe?.state === 'alive'
+      && recovered?.engine?.pid === newEngine && survived(childrenRecover, childrenRecovered), recoverCensus);
+    const panesRecovered = await h.panes('recovered');
+    ctx.assert('worker-panes-preserved-after-recovery', started.every((id) => panesRecovered.includes(id)), { started, panesRecovered });
   } finally {
     await stub.close();
     ctx.evidence.writeText('task-12-capabilities.log', `${log.join('\n')}\n`);
@@ -1079,8 +1176,11 @@ export const SCENARIOS = Object.freeze({
     deadlineMs: 10 * 60_000,
     requiredAssertions: [
       'setup-created-identity-project-and-host', 'workspace-registered', 'hub-stopped-before-send', 'before-send-admitted-while-stopped',
-      'before-send-runs-once-after-restart', 'after-send-instruction-typed-while-claimed', 'after-send-held-uncertain-not-resent',
-      'after-start-run-started', 'after-start-reattached-not-resent', 'after-start-still-running-at-end', 'no-goal-lost',
+      'hub-restarted-before-send', 'children-survived-before-send', 'before-send-runs-once-after-restart',
+      'after-send-instruction-typed-while-claimed', 'hub-stopped-after-send', 'hub-started-after-send', 'children-survived-after-send',
+      'after-send-held-uncertain-not-resent', 'after-start-run-started', 'hub-stopped-after-start', 'hub-started-after-start',
+      'children-survived-after-start', 'hub-healthy-after-start-restart', 'census-ran-sentinel-started',
+      'after-start-reattached-not-resent', 'after-start-still-running-at-end', 'no-goal-lost', 'pty-census-listed-final',
       'pty-census-unchanged-across-restarts', 'no-instruction-typed-twice',
     ],
     run: runRecovery,
@@ -1094,7 +1194,11 @@ export const SCENARIOS = Object.freeze({
     deadlineMs: 10 * 60_000,
     requiredAssertions: [
       'engine-ready', 'worker-pane-started', 'auth-fault-is-typed', 'quota-fault-is-typed', 'provider-fault-is-typed',
-      'missing-capability-is-degraded', 'degraded-engine-got-zero-sends', 'no-fallback-canary-requests', 'worker-panes-preserved',
+      'hub-stopped-capability', 'hub-started-capability', 'engine-child-ended-workers-kept',
+      'missing-capability-is-degraded', 'degraded-engine-got-zero-sends', 'no-fallback-canary-requests',
+      'pty-census-listed-before-faults', 'pty-census-listed-after-faults', 'worker-panes-preserved',
+      'hub-stopped-recover', 'hub-started-recover', 'engine-child-replaced-workers-kept', 'pty-census-listed-recovered',
+      'worker-panes-preserved-after-recovery',
     ],
     run: runCapabilities,
   }),

@@ -55,7 +55,8 @@ use super::receipts::{
 };
 use super::{
     attach_session, claim_dispatch, confirm_claim_before_transmit, execution_binding_of, goal_of,
-    identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt, record_start,
+    hold_live_run, identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt,
+    record_start,
     transition_goal, Dispatch, DispatchRow, ExecutionBinding, ExecutionKind, Receipt, RunState,
     SupervisorError, SupervisorGoal, DISPATCH_COLUMNS,
 };
@@ -76,6 +77,11 @@ const DRAIN_LIMIT: u32 = 256;
 /// (doubled after each failure: at most 0.25 + 0.5 + 1 + 2 + 4 seconds in all).
 const RECONCILE_ATTEMPTS: u32 = 6;
 const RECONCILE_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Attempts at listing this machine's panes for the restart census, and the first retry delay
+/// (doubled after each failure: at most 0.25 + 0.5 seconds in all).
+const PANE_LIST_ATTEMPTS: u32 = 3;
+const PANE_LIST_BACKOFF: Duration = Duration::from_millis(250);
 
 /// Hold codes (`state_detail` prefixes) the dispatcher writes.
 pub use super::receipts::MHC_WORKER_UNAVAILABLE;
@@ -413,23 +419,40 @@ impl Dispatcher {
         handled
     }
 
-    /// Session ids of this machine's live panes, or `None` when they cannot be read.
+    /// Session ids of this machine's live panes, or `None` when they cannot be read after
+    /// [`PANE_LIST_ATTEMPTS`] bounded tries.
     async fn local_panes(&self) -> Option<Vec<String>> {
-        match self.control.execute(None, AgentOp::List).await {
-            Ok(listed) => listed.get("sessions").and_then(|sessions| sessions.as_array()).map(
-                |sessions| {
-                    sessions
-                        .iter()
-                        .filter_map(|session| session.get("sessionId").and_then(|id| id.as_str()))
-                        .map(str::to_owned)
-                        .collect()
+        let mut backoff = PANE_LIST_BACKOFF;
+        for attempt in 1..=PANE_LIST_ATTEMPTS {
+            let failure = match self.control.execute(None, AgentOp::List).await {
+                Ok(listed) => match listed.get("sessions").and_then(serde_json::Value::as_array) {
+                    Some(sessions) => {
+                        return Some(
+                            sessions
+                                .iter()
+                                .filter_map(|session| {
+                                    session.get("sessionId").and_then(|id| id.as_str())
+                                })
+                                .map(str::to_owned)
+                                .collect(),
+                        )
+                    }
+                    None => "the list reply has no sessions".to_owned(),
                 },
-            ),
-            Err(error) => {
-                tracing::warn!(%error, "local panes were not listed at start; no local run is held");
-                None
+                Err(error) => error.to_string(),
+            };
+            if attempt == PANE_LIST_ATTEMPTS {
+                tracing::warn!(
+                    %failure,
+                    attempt,
+                    "local panes were not listed at start; no local run is held"
+                );
+                break;
             }
+            tokio::time::sleep(backoff).await;
+            backoff = backoff.saturating_mul(2);
         }
+        None
     }
 
     async fn dispatch_one(&self, dispatch: &Dispatch) -> Result<DispatchResult, SupervisorError> {
@@ -1014,42 +1037,11 @@ async fn hold_unobserved(
     code: &str,
     reason: &str,
 ) {
-    let live: Result<Option<(String, Option<String>)>, sqlx::Error> =
-        sqlx::query_as("SELECT state, run_id FROM supervisor_dispatches WHERE request_id = ?")
-            .bind(request_id)
-            .fetch_optional(pool)
-            .await;
-    match live {
-        Ok(Some((state, run_id)))
-            if state == "started" && run_id.as_deref() == Some(run.run_id.as_str()) => {}
-        Ok(_) => return,
-        Err(error) => {
-            tracing::warn!(%error, request_id, "an unobserved run was not checked; its goal is not held");
-            return;
-        }
-    }
-    let goal = match goal_of(pool, goal_id).await {
-        Ok(Some(goal)) if goal.run_state == RunState::Running => goal,
-        Ok(_) => return,
-        Err(error) => {
-            tracing::warn!(%error, request_id, "an unobserved run's goal was not read; it is not held");
-            return;
-        }
-    };
     let detail = format!(
         "{code}: {reason}; run {} of {request_id} may still be running on host {host}",
         run.run_id
     );
-    if let Err(error) = transition_goal(
-        pool,
-        goal_id,
-        goal.revision,
-        RunState::Running,
-        RunState::Degraded,
-        Some(&detail),
-    )
-    .await
-    {
+    if let Err(error) = hold_live_run(pool, goal_id, request_id, &run.run_id, &detail).await {
         tracing::warn!(%error, request_id, "the goal of an unobserved run was not held");
     }
 }
