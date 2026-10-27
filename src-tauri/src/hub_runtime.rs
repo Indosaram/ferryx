@@ -810,17 +810,14 @@ pub async fn supervisor_goal(
             return Err(SupervisorGoalError::NotFound(format!("lane not found: {lane_key}")));
         }
         // A supervisor goal's lane changes only through the supervisor (which bumps the goal
-        // revision), like `lane.drive`: the legacy set, mode and approve paths are refused.
-        if action.mutates()
-            && ferryx_hub::supervisor::supervisor_owns_lane(pool, lane_key)
-                .await
-                .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?
-        {
-            return Err(SupervisorGoalError::Conflict(format!(
-                "{}: lane {lane_key} belongs to a supervisor goal; change it through the supervisor",
-                ferryx_hub::supervisor::SUPERVISOR_OWNED
-            )));
-        }
+        // revision), like `lane.drive`: the legacy set, mode, approve and discard paths are
+        // refused with SUPERVISOR_OWNED.
+        ferryx_hub::supervisor::refuse_legacy_goal_action(pool, lane_key, action.mutates())
+            .await
+            .map_err(|error| match error {
+                ferryx_hub::supervisor::SupervisorError::Sql(error) => SupervisorGoalError::Storage(error.to_string()),
+                refused => SupervisorGoalError::Conflict(refused.to_string()),
+            })?;
     }
     let mutates = action.mutates();
     let mut changed = json!({});

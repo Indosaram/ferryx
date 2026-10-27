@@ -8,13 +8,16 @@
 //! told), keeps the branch, and reports a branch that holds unmerged work. Reopening the lane
 //! restores the worktree from its branch. Each step re-checks the tree's state, so a close
 //! interrupted halfway resumes where it stopped.
+//!
+//! Git runs with `LC_ALL=C`, so the probe's "not a git repository" match does not depend on
+//! the host's language. Stored and launched paths never carry the Windows verbatim prefix.
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
 use super::state::{transition, LaneStatus};
 use crate::error::{HubError, Result};
-use crate::storage::now_rfc3339;
+use crate::storage::{now_rfc3339, WriteTx};
 
 pub fn auto_enabled() -> bool {
     crate::hub_env::var("OMON_LANE_AUTO_WORKTREE").map_or(true, |value| {
@@ -32,6 +35,9 @@ async fn git_raw(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
             .arg("-C")
             .arg(repo)
             .args(args)
+            // Messages in English whatever the host's locale: the probe matches them.
+            .env("LC_ALL", "C")
+            .env_remove("LANGUAGE")
             .kill_on_drop(true)
             .output(),
     )
@@ -55,11 +61,80 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
 async fn canonical(path: &str) -> Result<PathBuf> {
     tokio::fs::canonicalize(path)
         .await
+        .map(without_verbatim_prefix)
         .map_err(|error| HubError::message(format!("{path}: {error}")))
+}
+
+/// `canonicalize` returns a verbatim path on Windows (`\\?\C:\...`, `\\?\UNC\host\share\...`),
+/// which git and many shells reject as a working directory. This is its plain form, as the
+/// `dunce` crate and the desktop's `worktree::git::strip_verbatim_prefix` produce. Any other
+/// path is returned unchanged.
+pub(crate) fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
+/// Deletes a lane branch this attempt created, if it exists. Best effort: a failure is logged.
+async fn discard_branch(repo: &Path, branch: &str) {
+    let reference = format!("refs/heads/{branch}");
+    let exists = git_raw(repo, &["rev-parse", "--verify", "--quiet", &reference])
+        .await
+        .is_ok_and(|output| output.status.success());
+    if exists {
+        if let Err(error) = git(repo, &["branch", "-D", branch]).await {
+            tracing::warn!(%error, branch, "an unrecorded lane branch was not deleted");
+        }
+    }
+}
+
+/// Records a created worktree and points the lane at it, in one transaction.
+async fn record(
+    pool: &SqlitePool,
+    key: &str,
+    target: &str,
+    top: &Path,
+    branch: &str,
+    start: &str,
+    origin_cwd: &str,
+) -> Result<String> {
+    let path = canonical(target).await?.to_string_lossy().into_owned();
+    let repo = top.to_string_lossy().into_owned();
+    let mut tx = pool.begin_write().await?;
+    sqlx::query(
+        "INSERT INTO lane_owned_worktrees(lane_key, path, state, repo, branch, start_commit, origin_cwd)
+         VALUES (?, ?, 'registered', ?, ?, ?, ?)",
+    )
+    .bind(key)
+    .bind(&path)
+    .bind(&repo)
+    .bind(branch)
+    .bind(start)
+    .bind(origin_cwd)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE lanes SET cwd = ?, updated_at = ? WHERE key = ?")
+        .bind(&path)
+        .bind(now_rfc3339())
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(path)
 }
 
 /// Creates the lane's worktree when its cwd qualifies and points the lane at it.
 /// Returns the new cwd, or None when the lane keeps its own cwd.
+///
+/// A tree and branch that were created but could not be recorded are removed again, so a
+/// later attempt does not fail on an existing `lane/<key>` branch.
 pub async fn create(pool: &SqlitePool, key: &str, cwd: &str) -> Result<Option<String>> {
     if !auto_enabled() {
         return Ok(None);
@@ -74,6 +149,13 @@ pub async fn create(pool: &SqlitePool, key: &str, cwd: &str) -> Result<Option<St
         return Ok(None);
     }
     let dir = Path::new(cwd);
+    // A missing directory (or a file) keeps its cwd, as git's "cannot change to" did.
+    if !tokio::fs::metadata(dir)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Ok(None);
+    }
     let probe = git_raw(
         dir,
         &[
@@ -134,29 +216,39 @@ pub async fn create(pool: &SqlitePool, key: &str, cwd: &str) -> Result<Option<St
     let path = lanes_dir.join(key);
     let branch = format!("lane/{key}");
     let target = path.to_string_lossy().into_owned();
-    git(&top, &["worktree", "add", "-b", &branch, &target, "HEAD"]).await?;
-    let path = canonical(&target).await?.to_string_lossy().into_owned();
-    let repo = top.to_string_lossy().into_owned();
-    sqlx::query(
-        "INSERT INTO lane_owned_worktrees(lane_key, path, state, repo, branch, start_commit, origin_cwd)
-         VALUES (?, ?, 'registered', ?, ?, ?, ?)",
-    )
-    .bind(key)
-    .bind(&path)
-    .bind(&repo)
-    .bind(&branch)
-    .bind(&start)
-    .bind(cwd)
-    .execute(pool)
-    .await?;
-    sqlx::query("UPDATE lanes SET cwd = ?, updated_at = ? WHERE key = ?")
-        .bind(&path)
-        .bind(now_rfc3339())
-        .bind(key)
-        .execute(pool)
-        .await?;
-    tracing::info!(key, path = %path, "auto worktree created");
-    Ok(Some(path))
+    let reference = format!("refs/heads/{branch}");
+    let branch_existed = git_raw(&top, &["rev-parse", "--verify", "--quiet", &reference])
+        .await?
+        .status
+        .success();
+    if let Err(error) = git(&top, &["worktree", "add", "-b", &branch, &target, "HEAD"]).await {
+        // `worktree add -b` creates the branch before it checks the tree out; one it made and
+        // left behind would make every later attempt fail with "already exists".
+        if !branch_existed {
+            discard_branch(&top, &branch).await;
+        }
+        return Err(error);
+    }
+    match record(pool, key, &target, &top, &branch, &start, cwd).await {
+        Ok(path) => {
+            tracing::info!(key, path = %path, "auto worktree created");
+            Ok(Some(path))
+        }
+        Err(error) => {
+            // Unrecorded, the tree and its branch would block every later attempt. Nothing
+            // has run in them yet, so both are removed.
+            if let Err(remove) = git(&top, &["worktree", "remove", "--force", &target]).await {
+                tracing::warn!(
+                    error = %remove,
+                    key,
+                    target = %target,
+                    "an unrecorded lane worktree was not removed"
+                );
+            }
+            discard_branch(&top, &branch).await;
+            Err(error)
+        }
+    }
 }
 
 type OwnedTree = (String, String, String, String, Option<String>);

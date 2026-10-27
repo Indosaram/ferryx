@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use crate::error::HubError;
 use crate::goals::contract::{self, RequirementSpec};
-use crate::goals::types::{GoalError, GoalMode};
+use crate::goals::types::{GoalError, GoalMode, ProposalState};
 use crate::storage::{now_rfc3339, WriteTx};
 
 /// Native mhc memory name of the supervisor. It is never a machine or chat-thread id.
@@ -45,6 +45,11 @@ pub const DEFAULT_TURN_LIMIT: u32 = 20;
 
 /// Lane-key prefix of a lane created by admission.
 pub const LANE_KEY_PREFIX: &str = "sv-";
+
+/// Source message id prefix of an explicit legacy-lane adoption: `adopt:<legacy lane key>`.
+/// Reserved for adoption ([`AdmitTerms::adopts_lane`]), so the admitted request row also marks
+/// the legacy lane as owned by the supervisor ([`supervisor_owns_lane`]).
+pub const ADOPT_MESSAGE_PREFIX: &str = "adopt:";
 
 /// `lanes.done_signals` of an admitted lane: completion is the goal contract, not a marker.
 const LANE_DONE_SIGNALS: &str = "goal contract";
@@ -129,6 +134,17 @@ pub enum SupervisorError {
     Invalid(String),
     #[error("unknown {kind}: {value}")]
     Unknown { kind: &'static str, value: String },
+    /// A legacy lane API (goal set, mode, approve, discard, `lane.drive`) aimed at a lane the
+    /// supervisor owns.
+    #[error(
+        "SUPERVISOR_OWNED: lane {lane_key} belongs to a supervisor goal; change it through the supervisor"
+    )]
+    SupervisorOwned { lane_key: String },
+    /// An adoption whose legacy lane the legacy path still drives at commit.
+    #[error(
+        "legacy lane {lane_key} is still live ({why}); end it or let its legacy goal loop stop before adopting it"
+    )]
+    LegacyLaneLive { lane_key: String, why: String },
     #[error(transparent)]
     Goal(#[from] GoalError),
     #[error(transparent)]
@@ -156,6 +172,8 @@ impl SupervisorError {
             SupervisorError::NotFound { .. } => "NOT_FOUND",
             SupervisorError::CrossOwner(_) => "CROSS_OWNER",
             SupervisorError::SelfWait(_) | SupervisorError::WaitCycle { .. } => "WAIT_CYCLE",
+            SupervisorError::SupervisorOwned { .. } => SUPERVISOR_OWNED,
+            SupervisorError::LegacyLaneLive { .. } => admission::LEGACY_LANE_LIVE,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
             | SupervisorError::Goal(_) => "INVALID_REQUEST",
@@ -549,6 +567,21 @@ impl AdmitRequest {
         contract::validate(&self.requirements, self.turn_limit)?;
         Ok(())
     }
+}
+
+/// Conditions of one admission that are checked and applied inside its write transaction, so
+/// no other writer, dispatcher or restart ever sees the goal before they hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdmitTerms {
+    /// Commit the goal directly on owner hold: `awaiting_owner` with this `state_detail` and
+    /// its initial intent superseded (revision 2, as a hold after admission would leave it).
+    /// The goal is never `ready`, so nothing can claim it and the reason is never replaced.
+    pub owner_hold: Option<String>,
+    /// The legacy lane this admission adopts. The request's source message id must be
+    /// `adopt:<lane>` ([`ADOPT_MESSAGE_PREFIX`]). Refused with `LEGACY_LANE_LIVE` when, inside
+    /// the transaction, the legacy lane still has a worker attached (and has not ended) or a
+    /// legacy goal turn in flight.
+    pub adopts_lane: Option<String>,
 }
 
 /// What admission persisted. A replay of the same source message returns the same receipt.
@@ -1491,6 +1524,41 @@ pub async fn replayed_admission(
     .map(Some)
 }
 
+/// Why a legacy lane is still driven by the legacy path, or `None`: a worker attached to a
+/// lane that has not ended, or a legacy goal turn in flight. `NOT_FOUND` for an unknown lane.
+async fn legacy_lane_live(
+    conn: &mut SqliteConnection,
+    lane_key: &str,
+) -> Result<Option<String>, SupervisorError> {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT l.status, l.omo_thread_id, g.proposal_state
+         FROM lanes l LEFT JOIN lane_goal g ON g.lane_key = l.key WHERE l.key = ?",
+    )
+    .bind(lane_key)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((status, pane, proposal_state)) = row else {
+        return Err(SupervisorError::NotFound {
+            kind: "lane",
+            id: lane_key.to_owned(),
+        });
+    };
+    let ended = matches!(status.as_str(), "verified_done" | "closed" | "failed");
+    let attached = !ended && pane.as_deref().is_some_and(|pane| !pane.is_empty());
+    let turn_in_flight = proposal_state.as_deref() == Some(ProposalState::Sent.as_str());
+    if !attached && !turn_in_flight {
+        return Ok(None);
+    }
+    let mut why = status;
+    if attached {
+        why.push_str(", worker attached");
+    }
+    if turn_in_flight {
+        why.push_str(", legacy turn in flight");
+    }
+    Ok(Some(why))
+}
+
 /// Admits one owner request in a single write transaction: the lane, its goal contract, the
 /// supervisor goal (`ready`), the typed execution binding, the request dedupe row and the
 /// initial ready dispatch intent. Nothing is visible until commit; a failure leaves none of
@@ -1503,7 +1571,34 @@ pub async fn admit_request(
     pool: &SqlitePool,
     request: &AdmitRequest,
 ) -> Result<Admission, SupervisorError> {
+    admit_request_with(pool, request, &AdmitTerms::default()).await
+}
+
+/// [`admit_request`] with [`AdmitTerms`] checked and applied in the same transaction: an
+/// owner hold commits the goal as `awaiting_owner`, and an adoption re-checks its legacy lane
+/// before anything is written. A replay returns the original receipt before either applies.
+pub async fn admit_request_with(
+    pool: &SqlitePool,
+    request: &AdmitRequest,
+    terms: &AdmitTerms,
+) -> Result<Admission, SupervisorError> {
     request.validate()?;
+    match &terms.adopts_lane {
+        Some(lane) if request.source_message_id != format!("{ADOPT_MESSAGE_PREFIX}{lane}") => {
+            return Err(SupervisorError::Invalid(format!(
+                "an adoption of lane {lane} must use source message id {ADOPT_MESSAGE_PREFIX}{lane}"
+            )))
+        }
+        None if request.source_message_id.starts_with(ADOPT_MESSAGE_PREFIX) => {
+            return Err(SupervisorError::Invalid(format!(
+                "source message ids starting with {ADOPT_MESSAGE_PREFIX} are reserved for adoption"
+            )))
+        }
+        _ => {}
+    }
+    if let Some(detail) = &terms.owner_hold {
+        require_text("owner hold detail", detail, MAX_BODY_CHARS)?;
+    }
     let body_sha256 = sha256_hex(&request.body);
     let operation_grant = serde_json::to_string(&request.operation_grant)
         .map_err(|error| SupervisorError::Invalid(format!("operation grant: {error}")))?;
@@ -1569,6 +1664,16 @@ pub async fn admit_request(
                 )))
             }
             Some(_) => {}
+        }
+    }
+    // Checked under the write lock, so a legacy launch cannot slip in between the check and
+    // the commit.
+    if let Some(legacy) = &terms.adopts_lane {
+        if let Some(why) = legacy_lane_live(&mut tx, legacy).await? {
+            return Err(SupervisorError::LegacyLaneLive {
+                lane_key: legacy.clone(),
+                why,
+            });
         }
     }
 
@@ -1656,6 +1761,27 @@ pub async fn admit_request(
     .execute(&mut *tx)
     .await?;
     let dispatch = insert_dispatch(&mut tx, &goal_id, 1, 1, &request.instruction, &now).await?;
+    if let Some(detail) = &terms.owner_hold {
+        // The same end state as an owner hold right after admission, without the window.
+        sqlx::query(
+            "UPDATE supervisor_goals SET run_state = ?, state_detail = ?, revision = 2, updated_at = ?
+             WHERE goal_id = ?",
+        )
+        .bind(RunState::AwaitingOwner.as_str())
+        .bind(detail)
+        .bind(&now)
+        .bind(&goal_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
+             WHERE goal_id = ? AND state = 'ready'",
+        )
+        .bind(&now)
+        .bind(&goal_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(Admission {
         receipt: AdmissionReceipt {
@@ -2756,14 +2882,36 @@ pub async fn consume_wake(pool: &SqlitePool, wake_id: i64) -> Result<bool, Super
 /// that belongs to a supervisor goal.
 pub const SUPERVISOR_OWNED: &str = "SUPERVISOR_OWNED";
 
-/// True when a supervisor goal owns the lane. Its worker is started only by the hub's
-/// supervisor dispatcher, and its requirements, mode and budget change only through the
-/// supervisor (which bumps the goal revision), never through the legacy lane APIs.
+/// True when the supervisor owns the lane: a supervisor goal's own lane, whose worker is
+/// started only by the hub's supervisor dispatcher and whose requirements, mode and budget
+/// change only through the supervisor (which bumps the goal revision), or a legacy lane an
+/// admitted `adopt:<lane>` request took over, whose work continues in the adopting goal.
+/// Neither is driven or changed through the legacy lane APIs.
 pub async fn supervisor_owns_lane(pool: &SqlitePool, lane_key: &str) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)")
-        .bind(lane_key)
-        .fetch_one(pool)
-        .await
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)
+             OR EXISTS(SELECT 1 FROM supervisor_requests WHERE source_message_id = ?)",
+    )
+    .bind(lane_key)
+    .bind(format!("{ADOPT_MESSAGE_PREFIX}{lane_key}"))
+    .fetch_one(pool)
+    .await
+}
+
+/// The legacy lane-goal fence of the desktop and daemon path (`supervisor_goal`): a legacy
+/// action that changes a lane the supervisor owns ([`supervisor_owns_lane`]) is refused with
+/// `SUPERVISOR_OWNED`. `mutates` is false only for a read (show), which is always allowed.
+pub async fn refuse_legacy_goal_action(
+    pool: &SqlitePool,
+    lane_key: &str,
+    mutates: bool,
+) -> Result<(), SupervisorError> {
+    if mutates && supervisor_owns_lane(pool, lane_key).await? {
+        return Err(SupervisorError::SupervisorOwned {
+            lane_key: lane_key.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

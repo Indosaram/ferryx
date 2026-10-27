@@ -14,9 +14,11 @@
 //! else is resolved, so it returns the existing goal even when the owner's projects or hosts
 //! changed since.
 //!
-//! Admission is the store's single transaction ([`admit_request`]). The acknowledgment is
-//! built only after commit, from the persisted goal, so a model can never claim that work was
-//! registered. Nothing here transmits to a worker: the daemon's [`super::dispatcher`] starts
+//! Admission is the store's single transaction ([`admit_request_with`]). A goal held for the
+//! owner is committed directly as `awaiting_owner`, and an adoption's legacy-lane liveness is
+//! checked inside that transaction. The acknowledgment is built only after commit, from the
+//! persisted goal, so a model can never claim that work was registered. Nothing here
+//! transmits to a worker: the daemon's [`super::dispatcher`] starts
 //! committed ready intents. An admission made inside the daemon wakes it with
 //! [`super::dispatcher::poke`]. One made in another process (`ferryx-cli mcp`) is picked up
 //! from the durable ready intent by the dispatcher's rescan.
@@ -27,12 +29,12 @@ use sqlx::SqlitePool;
 
 use super::dispatcher::{OWNER_APPROVAL_REQUIRED, TURN_LIMIT};
 use super::{
-    admit_request, goal_of, identity_of, replayed_admission, transition_goal, AdmissionReceipt,
-    AdmitRequest, ChannelProvider, ExecutionKind, ExecutionTarget, RunState, SupervisorError,
-    SupervisorIdentity, DEFAULT_TURN_LIMIT, LANE_KEY_PREFIX,
+    admit_request_with, goal_of, identity_of, replayed_admission, AdmissionReceipt, AdmitRequest,
+    AdmitTerms, ChannelProvider, ExecutionKind, ExecutionTarget, RunState, SupervisorError,
+    SupervisorIdentity, ADOPT_MESSAGE_PREFIX, DEFAULT_TURN_LIMIT, LANE_KEY_PREFIX,
 };
 use crate::goals::contract::{contract_of, RequirementSpec};
-use crate::goals::types::{GoalError, GoalMode, ProposalState};
+use crate::goals::types::{GoalError, GoalMode};
 
 /// `state_detail` prefix of a goal admitted on hold because its scope needs the owner.
 pub const SCOPE_NEEDS_OWNER: &str = "SCOPE_NEEDS_OWNER";
@@ -192,7 +194,7 @@ pub enum AdmissionError {
     /// The sender is not the supervisor's owner (HTTP 403).
     #[error("{0}")]
     Unauthorized(String),
-    /// Refused with a typed code, e.g. [`LEGACY_LANE_LIVE`]. Nothing was persisted.
+    /// Refused with a typed code, e.g. [`LEGACY_GOAL_OFF`]. Nothing was persisted.
     #[error("{message}")]
     Refused { code: &'static str, message: String },
     #[error(transparent)]
@@ -360,7 +362,7 @@ pub async fn submit_work(
         message_id: actor.source_message_id.clone(),
         body: &actor.source_body,
     };
-    admit_scoped(pool, &identity, actor, &source, work, None).await
+    admit_scoped(pool, &identity, actor, &source, work, None, None).await
 }
 
 /// Explicitly adopts one legacy lane as a new supervisor goal. The legacy lane itself is left
@@ -371,7 +373,10 @@ pub async fn submit_work(
 /// [`OWNER_APPROVAL_REQUIRED`]) and an `off` one is refused ([`LEGACY_GOAL_OFF`]). The budget
 /// is what the legacy goal had left, at most [`DEFAULT_TURN_LIMIT`], unless the owner chose a
 /// turn limit. A lane the legacy path still drives (a worker attached, or a legacy turn in
-/// flight) is refused ([`LEGACY_LANE_LIVE`]): adopting it would start a second worker.
+/// flight) is refused ([`LEGACY_LANE_LIVE`]): adopting it would start a second worker. That
+/// check runs inside the admission transaction, so a legacy launch cannot slip in before the
+/// commit. Once adopted, the legacy lane is fenced from the legacy lane APIs
+/// ([`super::supervisor_owns_lane`]).
 pub async fn adopt_work(
     pool: &SqlitePool,
     actor: &ActorContext,
@@ -393,19 +398,19 @@ pub async fn adopt_work(
         ))
         .into());
     }
-    let lane: Option<(String, String, String, Option<String>)> =
-        sqlx::query_as("SELECT title, cwd, status, omo_thread_id FROM lanes WHERE key = ?")
+    let lane: Option<(String, String)> =
+        sqlx::query_as("SELECT title, cwd FROM lanes WHERE key = ?")
             .bind(lane_key)
             .fetch_optional(pool)
             .await?;
-    let Some((title, cwd, status, pane)) = lane else {
+    let Some((title, cwd)) = lane else {
         return Err(SupervisorError::NotFound {
             kind: "lane",
             id: lane_key.to_owned(),
         }
         .into());
     };
-    let message_id = format!("adopt:{lane_key}");
+    let message_id = format!("{ADOPT_MESSAGE_PREFIX}{lane_key}");
     let earlier: Option<String> = sqlx::query_scalar(
         "SELECT source_adapter FROM supervisor_requests WHERE source_message_id = ? LIMIT 1",
     )
@@ -428,22 +433,6 @@ pub async fn adopt_work(
     }
 
     let contract = contract_of(pool, lane_key).await?;
-    let ended = matches!(status.as_str(), "verified_done" | "closed" | "failed");
-    let attached = pane.as_deref().is_some_and(|pane| !pane.is_empty());
-    let turn_in_flight = contract
-        .as_ref()
-        .and_then(|contract| contract.proposal.as_ref())
-        .is_some_and(|proposal| proposal.state == ProposalState::Sent);
-    if (attached && !ended) || turn_in_flight {
-        return Err(AdmissionError::Refused {
-            code: LEGACY_LANE_LIVE,
-            message: format!(
-                "legacy lane {lane_key} is still live ({status}{}{}); end it or let its legacy goal loop stop before adopting it",
-                if attached { ", worker attached" } else { "" },
-                if turn_in_flight { ", legacy turn in flight" } else { "" },
-            ),
-        });
-    }
     let mut owner_hold = None;
     let mut turn_limit = None;
     if let Some(contract) = &contract {
@@ -503,7 +492,7 @@ pub async fn adopt_work(
         operations: OperationClass::BASELINE.to_vec(),
         turn_limit,
     };
-    admit_scoped(pool, &identity, actor, &source, &work, owner_hold).await
+    admit_scoped(pool, &identity, actor, &source, &work, owner_hold, Some(lane_key)).await
 }
 
 /// The goal an earlier admission of this source message created. Checked before any scope is
@@ -530,7 +519,8 @@ async fn replay(
 }
 
 /// `owner_hold` is a `state_detail` reason that holds the goal for the owner whatever its
-/// scope (an adopted supervised lane).
+/// scope (an adopted supervised lane). `adopts_lane` names the legacy lane an adoption takes
+/// over; its liveness is re-checked inside the admission transaction.
 async fn admit_scoped(
     pool: &SqlitePool,
     identity: &SupervisorIdentity,
@@ -538,6 +528,7 @@ async fn admit_scoped(
     source: &Source<'_>,
     work: &SubmitWork,
     owner_hold: Option<String>,
+    adopts_lane: Option<&str>,
 ) -> Result<SubmitOutcome, AdmissionError> {
     if let Some(outcome) = replay(pool, identity, source).await? {
         return Ok(outcome);
@@ -580,30 +571,19 @@ async fn admit_scoped(
         turn_limit: scope.turn_limit,
         operation_grant: scope.grant.clone(),
     };
-    let admission = admit_request(pool, &request).await?;
+    // A held goal is committed directly as `awaiting_owner`: it is never `ready`, so neither
+    // the dispatcher's rescan nor a crash can replace its reason with a generic one.
+    let terms = AdmitTerms {
+        owner_hold: (!holds.is_empty()).then(|| holds.join("; ")),
+        adopts_lane: adopts_lane.map(str::to_owned),
+    };
+    let admission = admit_request_with(pool, &request, &terms).await?;
     if admission.duplicate {
         // Admitted concurrently between the replay check and this transaction.
         return admitted(pool, admission.receipt, true).await;
     }
-    if holds.is_empty() {
+    if terms.owner_hold.is_none() {
         super::dispatcher::poke();
-    } else {
-        let detail = holds.join("; ");
-        match transition_goal(
-            pool,
-            &admission.receipt.goal_id,
-            admission.receipt.revision,
-            RunState::Ready,
-            RunState::AwaitingOwner,
-            Some(&detail),
-        )
-        .await
-        {
-            Ok(_) => {}
-            // The dispatcher refuses a supervised goal the same way and may have held it first.
-            Err(SupervisorError::RevisionConflict { .. } | SupervisorError::StateConflict { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
     }
     admitted(pool, admission.receipt, false).await
 }
