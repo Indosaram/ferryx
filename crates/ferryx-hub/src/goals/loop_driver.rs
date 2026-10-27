@@ -141,6 +141,12 @@ pub fn wrap_instruction(instruction: &str) -> String {
 
 /// Sends the lane's persisted proposal once and records what happened. Shared by full mode
 /// and by an owner approving a supervised proposal.
+///
+/// The proposal is already committed `pending`, which an adoption refuses under its write
+/// lock ([`crate::supervisor::admit_request_with`]). So the ownership re-check right before
+/// the send either sees an adoption that committed earlier (during the judge call, say) or
+/// none can commit until the turn is settled: a lane the supervisor owns, or one that ended,
+/// is never sent to; its proposal is superseded instead.
 async fn dispatch<C: AgentControl + ?Sized>(
     pool: &SqlitePool,
     control: &C,
@@ -166,6 +172,18 @@ async fn dispatch<C: AgentControl + ?Sized>(
             contract.turns_used
         )
     });
+    let live = matches!(lane_row(pool, lane_key).await?, Some((_, status)) if !ended(status));
+    if !live || crate::supervisor::supervisor_owns_lane(pool, lane_key).await? {
+        contract::set_proposal_state(
+            pool,
+            lane_key,
+            ProposalState::Superseded,
+            Some(&[ProposalState::Pending]),
+        )
+        .await?;
+        tracing::info!(lane = %lane_key, "the lane ended or was adopted before the supervisor proposal was sent; nothing was sent");
+        return Ok(LoopOutcome::new(lane_key));
+    }
     let outcome = control
         .send_confirmed(
             None,

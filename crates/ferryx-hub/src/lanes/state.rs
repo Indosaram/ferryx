@@ -164,7 +164,18 @@ pub async fn reopen_unless_supervised(
     key: &str,
     reason: Option<&str>,
 ) -> Result<bool, LaneTransitionError> {
-    apply_transition(pool, key, LaneStatus::Working, reason, true).await
+    transition_unless_supervised(pool, key, LaneStatus::Working, reason).await
+}
+
+/// [`transition`] whose UPDATE also refuses a lane the supervisor owns, as
+/// [`reopen_unless_supervised`] does: false when it was refused and nothing changed.
+pub async fn transition_unless_supervised(
+    pool: &SqlitePool,
+    key: &str,
+    to: LaneStatus,
+    reason: Option<&str>,
+) -> Result<bool, LaneTransitionError> {
+    apply_transition(pool, key, to, reason, true).await
 }
 
 /// False only when `fence_supervisor` refused a lane the supervisor owns.

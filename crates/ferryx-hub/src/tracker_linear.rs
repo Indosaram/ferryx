@@ -1132,10 +1132,27 @@ async fn lane_action(
             "close" => crate::lanes::state::LaneStatus::Closed,
             _ => crate::lanes::state::LaneStatus::Working,
         };
-        if let Err(error) =
-            crate::lanes::state::transition(&pool, &lane_key, target, reason.as_deref()).await
+        // A lane the supervisor owns changes only through the supervisor, as in patch_issue;
+        // the UPDATE itself refuses it, also when it was adopted a moment ago.
+        match crate::lanes::state::transition_unless_supervised(
+            &pool,
+            &lane_key,
+            target,
+            reason.as_deref(),
+        )
+        .await
         {
-            return fail(StatusCode::CONFLICT, error.to_string());
+            Ok(true) => {}
+            Ok(false) => {
+                return fail(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "{}: lane {lane_key} belongs to a supervisor goal; act on it through the supervisor",
+                        crate::supervisor::SUPERVISOR_OWNED
+                    ),
+                )
+            }
+            Err(error) => return fail(StatusCode::CONFLICT, error.to_string()),
         }
         let kind = if action == "object" {
             "blocked"

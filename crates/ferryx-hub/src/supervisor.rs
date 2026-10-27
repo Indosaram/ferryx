@@ -140,11 +140,16 @@ pub enum SupervisorError {
         "SUPERVISOR_OWNED: lane {lane_key} belongs to a supervisor goal; change it through the supervisor"
     )]
     SupervisorOwned { lane_key: String },
-    /// An adoption whose legacy lane the legacy path still drives at commit, or whose legacy
-    /// goal became stricter (off, or supervised under a `full` adoption) or changed its
-    /// adopted terms after the adoption read it.
+    /// An adoption whose legacy lane the legacy path still drives at commit: a worker attached
+    /// to a lane that has not ended, a legacy goal turn pending or in flight, or a lane close
+    /// removing its worktree.
     #[error("legacy lane {lane_key} cannot be adopted now: {why}")]
     LegacyLaneLive { lane_key: String, why: String },
+    /// An adoption whose legacy goal became stricter (off, or supervised under a `full`
+    /// adoption) or changed its adopted terms after the adoption read it. Adopting again takes
+    /// the current terms.
+    #[error("legacy lane {lane_key} changed while its adoption was prepared: {why}")]
+    LegacyTermsChanged { lane_key: String, why: String },
     #[error(transparent)]
     Goal(#[from] GoalError),
     #[error(transparent)]
@@ -174,6 +179,7 @@ impl SupervisorError {
             SupervisorError::SelfWait(_) | SupervisorError::WaitCycle { .. } => "WAIT_CYCLE",
             SupervisorError::SupervisorOwned { .. } => SUPERVISOR_OWNED,
             SupervisorError::LegacyLaneLive { .. } => admission::LEGACY_LANE_LIVE,
+            SupervisorError::LegacyTermsChanged { .. } => admission::LEGACY_TERMS_CHANGED,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
             | SupervisorError::Goal(_) => "INVALID_REQUEST",
@@ -582,13 +588,15 @@ pub struct AdmitTerms {
     /// `adopt:<lane>` admission from any adapter answers as the replay (or refuses a different
     /// owner or body), checked under the write lock. Refused with `LEGACY_LANE_LIVE` when,
     /// inside the transaction, the legacy lane still has a worker attached (and has not ended)
-    /// or a legacy goal turn in flight, or its legacy goal is now stricter than the request's
-    /// mode.
+    /// or a legacy goal turn pending or in flight, or a lane close is removing its worktree,
+    /// and with `LEGACY_TERMS_CHANGED` when its legacy goal is now stricter than the request's
+    /// mode. Requires [`AdmitTerms::legacy_goal_read`].
     pub adopts_lane: Option<String>,
-    /// The legacy goal as the adoption read it ([`LegacyGoalRead`]). When set, an adoption
-    /// whose legacy goal changed since (requirements or turn limit replaced, a turn counted,
-    /// a goal created or removed) is refused with `LEGACY_LANE_LIVE` under the write lock, so
-    /// the adopted terms are never stale.
+    /// The legacy goal as the adoption read it ([`LegacyGoalRead`]); required with
+    /// `adopts_lane` and refused without it. An adoption whose legacy goal changed since
+    /// (requirements or turn limit replaced, a turn counted, a goal created or removed) is
+    /// refused with `LEGACY_TERMS_CHANGED` under the write lock, so the adopted terms are
+    /// never stale.
     pub legacy_goal_read: Option<LegacyGoalRead>,
 }
 
@@ -1554,10 +1562,16 @@ pub async fn replayed_admission(
 /// Status, attached pane, legacy proposal state and legacy goal mode of a legacy lane.
 type LegacyLaneRow = (String, Option<String>, Option<String>, Option<String>);
 
-/// Why a legacy lane cannot be adopted at `admitted_mode` now, or `None`: a worker attached to
-/// a lane that has not ended, a legacy goal turn in flight, or a legacy goal that became
-/// stricter after the adoption read it (now `off`, or `supervised` under a `full` adoption).
-/// `NOT_FOUND` for an unknown lane.
+/// Refuses a legacy lane that cannot be adopted at `admitted_mode` now. `LEGACY_LANE_LIVE`: a
+/// worker attached to a lane that has not ended, a legacy goal turn `pending` (committed by a
+/// loop pass or an approval before its send) or `sent`, or a lane close removing its worktree.
+/// `LEGACY_TERMS_CHANGED`: a legacy goal that became stricter after the adoption read it (now
+/// `off`, or `supervised` under a `full` adoption). `NOT_FOUND` for an unknown lane.
+///
+/// Runs under the admission's write lock. The legacy goal loop re-checks ownership after it
+/// commits a proposal `pending` and before it sends, and a lane close claims each worktree
+/// `removing` in a statement that refuses an adopted lane, so of a racing adoption and either
+/// one exactly one wins.
 ///
 /// The adopted requirements and budget are re-checked by the caller against
 /// [`AdmitTerms::legacy_goal_read`].
@@ -1565,7 +1579,7 @@ async fn legacy_lane_live(
     conn: &mut SqliteConnection,
     lane_key: &str,
     admitted_mode: GoalMode,
-) -> Result<Option<String>, SupervisorError> {
+) -> Result<(), SupervisorError> {
     let row: Option<LegacyLaneRow> = sqlx::query_as(
         "SELECT l.status, l.omo_thread_id, g.proposal_state, g.mode
          FROM lanes l LEFT JOIN lane_goal g ON g.lane_key = l.key WHERE l.key = ?",
@@ -1586,15 +1600,26 @@ async fn legacy_lane_live(
     };
     if stricter {
         let mode = legacy_mode.unwrap_or_default();
-        return Ok(Some(format!(
-            "its legacy goal changed to {mode} while the adoption was prepared; adopt it again to take its current terms"
-        )));
+        return Err(SupervisorError::LegacyTermsChanged {
+            lane_key: lane_key.to_owned(),
+            why: format!(
+                "its legacy goal changed to {mode}; adopt it again to take its current terms"
+            ),
+        });
     }
     let ended = matches!(status.as_str(), "verified_done" | "closed" | "failed");
     let attached = !ended && pane.as_deref().is_some_and(|pane| !pane.is_empty());
-    let turn_in_flight = proposal_state.as_deref() == Some(ProposalState::Sent.as_str());
-    if !attached && !turn_in_flight {
-        return Ok(None);
+    let turn_in_flight = [ProposalState::Pending, ProposalState::Sent]
+        .iter()
+        .any(|state| proposal_state.as_deref() == Some(state.as_str()));
+    let closing: Option<String> = sqlx::query_scalar(
+        "SELECT path FROM lane_owned_worktrees WHERE lane_key = ? AND state = 'removing' LIMIT 1",
+    )
+    .bind(lane_key)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if !attached && !turn_in_flight && closing.is_none() {
+        return Ok(());
     }
     let mut why = status;
     if attached {
@@ -1603,8 +1628,16 @@ async fn legacy_lane_live(
     if turn_in_flight {
         why.push_str(", legacy turn in flight");
     }
-    why.push_str("; end it or let its legacy goal loop stop before adopting it");
-    Ok(Some(why))
+    if let Some(path) = closing {
+        why.push_str(&format!(", worktree {path} being removed by a lane close"));
+    }
+    why.push_str(
+        "; end it, let its legacy goal loop stop and let a close finish or fail before adopting it",
+    );
+    Err(SupervisorError::LegacyLaneLive {
+        lane_key: lane_key.to_owned(),
+        why,
+    })
 }
 
 /// Admits one owner request in a single write transaction: the lane, its goal contract, the
@@ -1641,6 +1674,11 @@ pub async fn admit_request_with(
         None if request.source_message_id.starts_with(ADOPT_MESSAGE_PREFIX) => {
             return Err(SupervisorError::Invalid(format!(
                 "source message ids starting with {ADOPT_MESSAGE_PREFIX} are reserved for adoption"
+            )))
+        }
+        Some(lane) if terms.legacy_goal_read.is_none() => {
+            return Err(SupervisorError::Invalid(format!(
+                "an adoption of lane {lane} must carry the legacy goal it read"
             )))
         }
         _ => {}
@@ -1728,12 +1766,7 @@ pub async fn admit_request_with(
     // [`attach_legacy_pane`], which refuses a lane this admission adopted, so SQLite's write
     // serialization lets exactly one of the two commit.
     if let Some(legacy) = &terms.adopts_lane {
-        if let Some(why) = legacy_lane_live(&mut tx, legacy, request.mode).await? {
-            return Err(SupervisorError::LegacyLaneLive {
-                lane_key: legacy.clone(),
-                why,
-            });
-        }
+        legacy_lane_live(&mut tx, legacy, request.mode).await?;
         if let Some(read) = terms.legacy_goal_read {
             let now: Option<(i64, i64)> =
                 sqlx::query_as("SELECT revision, turns_used FROM lane_goal WHERE lane_key = ?")
@@ -1741,9 +1774,9 @@ pub async fn admit_request_with(
                     .fetch_optional(&mut *tx)
                     .await?;
             if now != read.map(|(revision, used)| (revision, i64::from(used))) {
-                return Err(SupervisorError::LegacyLaneLive {
+                return Err(SupervisorError::LegacyTermsChanged {
                     lane_key: legacy.clone(),
-                    why: "its legacy goal's requirements, turn limit or turns used changed while the adoption was prepared; adopt it again to take its current terms".into(),
+                    why: "its legacy goal's requirements, turn limit or turns used changed; adopt it again to take its current terms".into(),
                 });
             }
         }
@@ -2952,8 +2985,9 @@ pub async fn consume_wake(pool: &SqlitePool, wake_id: i64) -> Result<bool, Super
 
 /// Refusal code of a legacy lane API (`lane.drive`, `lane.transition`, `lane.pause`,
 /// `lane.resume`, goal set, mode, approve, discard, revision accept and reject, a tracker
-/// move, and the legacy runner's pane attach) aimed at a lane that belongs to a supervisor
-/// goal. An owner reply in such a lane's thread is not refused but left to normal routing.
+/// move or lane action, a lane close's worktree removal, and the legacy runner's pane attach)
+/// aimed at a lane that belongs to a supervisor goal. An owner reply in such a lane's thread
+/// is not refused but left to normal routing.
 pub const SUPERVISOR_OWNED: &str = "SUPERVISOR_OWNED";
 
 /// True when the supervisor owns the lane: a supervisor goal's own lane, whose worker is

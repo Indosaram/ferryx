@@ -148,7 +148,14 @@ async fn apply(
         if crate::supervisor::supervisor_owns_lane(pool, key).await? {
             return Ok(false);
         }
-        super::worktree::close(pool, key, None).await?;
+        // The close claims each tree in a statement that refuses an adopted lane, so an
+        // adoption that committed after this check keeps the worktree and lands here too.
+        if let Err(error) = super::worktree::close(pool, key, None).await {
+            if crate::supervisor::supervisor_owns_lane(pool, key).await? {
+                return Ok(false);
+            }
+            return Err(error);
+        }
     }
     if matches!(status, "closed" | "failed" | "verified_done") {
         // The reopen refuses an adopted lane in the same statement, so an adoption that

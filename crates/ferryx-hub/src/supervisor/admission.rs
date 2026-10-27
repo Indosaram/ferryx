@@ -30,18 +30,21 @@ use sqlx::SqlitePool;
 use super::dispatcher::{OWNER_APPROVAL_REQUIRED, TURN_LIMIT};
 use super::{
     admit_request_with, goal_of, identity_of, replayed_admission, AdmissionReceipt, AdmitRequest,
-    AdmitTerms, ChannelProvider, ExecutionKind, ExecutionTarget, RunState, SupervisorError,
-    LegacyGoalRead, SupervisorIdentity, ADOPT_MESSAGE_PREFIX, DEFAULT_TURN_LIMIT,
-    LANE_KEY_PREFIX,
+    AdmitTerms, ChannelProvider, ExecutionKind, ExecutionTarget, LegacyGoalRead, RunState,
+    SupervisorError, SupervisorIdentity, ADOPT_MESSAGE_PREFIX, DEFAULT_TURN_LIMIT, LANE_KEY_PREFIX,
 };
 use crate::goals::contract::{contract_of, RequirementSpec};
 use crate::goals::types::{GoalError, GoalMode};
 
 /// `state_detail` prefix of a goal admitted on hold because its scope needs the owner.
 pub const SCOPE_NEEDS_OWNER: &str = "SCOPE_NEEDS_OWNER";
-/// Adoption refused at commit: the legacy lane still has a worker attached or a legacy turn in
-/// flight, or its legacy goal became stricter after the adoption read it.
+/// Adoption refused at commit: the legacy lane still has a worker attached, a legacy turn
+/// pending or in flight, or a lane close removing its worktree. The legacy lane must stop
+/// first.
 pub const LEGACY_LANE_LIVE: &str = "LEGACY_LANE_LIVE";
+/// Adoption refused at commit: the legacy goal became stricter or changed its requirements,
+/// turn limit or turns used after the adoption read it. Adopting again takes the current terms.
+pub const LEGACY_TERMS_CHANGED: &str = "LEGACY_TERMS_CHANGED";
 /// Adoption refused: the legacy lane's goal loop is off, so it carries no autonomy to keep.
 pub const LEGACY_GOAL_OFF: &str = "LEGACY_GOAL_OFF";
 
@@ -374,17 +377,19 @@ pub async fn submit_work(
 /// `full`, a `supervised` one is admitted on hold (`awaiting_owner`,
 /// [`OWNER_APPROVAL_REQUIRED`]) and an `off` one is refused ([`LEGACY_GOAL_OFF`]). The budget
 /// is what the legacy goal had left, at most [`DEFAULT_TURN_LIMIT`], unless the owner chose a
-/// turn limit. A lane the legacy path still drives (a worker attached, or a legacy turn in
-/// flight) is refused ([`LEGACY_LANE_LIVE`]): adopting it would start a second worker. That
-/// check runs under the admission's write lock, together with a re-check that the legacy goal
-/// did not become stricter or change its adopted terms since it was read here
-/// ([`AdmitTerms::legacy_goal_read`]), and the legacy runner attaches a launched pane only in
-/// a statement that refuses an adopted lane ([`super::attach_legacy_pane`]), so of a racing
-/// adoption and legacy launch exactly one commits. A second adoption, from any adapter,
-/// returns the first one's goal, also when both race. Once adopted, the legacy lane is fenced
-/// from the legacy lane APIs ([`super::supervisor_owns_lane`]), and the legacy paths that
-/// reopen an ended lane and send to its pane (owner replies, tracker moves) refuse it in the
-/// reopen statement itself ([`crate::lanes::state::reopen_unless_supervised`]).
+/// turn limit. A lane the legacy path still drives (a worker attached, a legacy turn pending
+/// or in flight, or a close removing its worktree) is refused ([`LEGACY_LANE_LIVE`]): adopting
+/// it would start a second worker or lose its working directory. That check runs under the
+/// admission's write lock, together with a re-check that the legacy goal did not become
+/// stricter or change its adopted terms since it was read here ([`LEGACY_TERMS_CHANGED`],
+/// [`AdmitTerms::legacy_goal_read`]). The legacy runner attaches a launched pane, the legacy
+/// goal loop sends a committed proposal and a lane close removes a worktree only after a
+/// check that refuses an adopted lane ([`super::attach_legacy_pane`]), so of a racing
+/// adoption and any of them exactly one wins. A second adoption, from any adapter, returns the
+/// first one's goal, also when both race. Once adopted, the legacy lane is fenced from the
+/// legacy lane APIs ([`super::supervisor_owns_lane`]), and the legacy paths that reopen an
+/// ended lane and send to its pane (owner replies, tracker moves) refuse it in the reopen
+/// statement itself ([`crate::lanes::state::reopen_unless_supervised`]).
 pub async fn adopt_work(
     pool: &SqlitePool,
     actor: &ActorContext,

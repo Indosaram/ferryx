@@ -121,6 +121,12 @@ async fn a_dirty_worktree_refuses_to_close_and_the_lead_is_told() {
     verified(&pool, "gate").await;
     assert!(close(&pool, "gate", None).await.is_err());
     assert!(path.join("a.txt").exists(), "the owner's edit stays");
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM lane_owned_worktrees WHERE lane_key = 'gate'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "registered", "a refused removal releases its claim");
     let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'gate'")
         .fetch_one(&pool)
         .await

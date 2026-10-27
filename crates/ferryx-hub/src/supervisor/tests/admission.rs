@@ -18,13 +18,14 @@ use crate::agent_control::{AgentControl, AgentOp, FixedLauncher, RecordingContro
 use crate::goals::contract::{
     contract_of, set_contract, set_mode, set_proposal_state, RequirementSpec,
 };
-use crate::goals::loop_driver::approve_proposal;
+use crate::goals::loop_driver::{approve_proposal, on_turn_settled, LoopOutcome};
 use crate::goals::types::{GoalMode, ProposalState, SendOutcome, TurnOrigin};
+use crate::lanes::kibitzer::ModelTurn;
 use crate::lanes::state::{set_pane, transition, LaneStatus};
 use crate::supervisor::admission::{
     adopt_work, handle_message, is_ordinary_question, submit_work, ActorContext, AdmittedWork,
     AdoptWork, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork, LEGACY_GOAL_OFF,
-    LEGACY_LANE_LIVE, SCOPE_NEEDS_OWNER,
+    LEGACY_LANE_LIVE, LEGACY_TERMS_CHANGED, SCOPE_NEEDS_OWNER,
 };
 use crate::supervisor::dispatcher::{
     DispatchResult, Dispatcher, DISPATCH_FAILED, GRANT_REVOKED, OWNER_APPROVAL_REQUIRED,
@@ -33,8 +34,8 @@ use crate::supervisor::{
     admit_request, admit_request_with, bind_project_host, claim_dispatch, create_project,
     ensure_identity, execution_binding_of, goal_of, identity_of, ready_dispatches,
     refuse_legacy_goal_action, supervisor_owns_lane, transition_goal, AdmitRequest, AdmitTerms,
-    ChannelProvider, ExecutionKind, ExecutionTarget, RunState, CLAIM_UNCONFIRMED_AT_RESTART,
-    DEFAULT_TURN_LIMIT, SUPERVISOR_OWNED,
+    ChannelProvider, ExecutionKind, ExecutionTarget, LegacyGoalRead, RunState,
+    CLAIM_UNCONFIRMED_AT_RESTART, DEFAULT_TURN_LIMIT, SUPERVISOR_OWNED,
 };
 
 const OWNER: &str = "slack:T1:U-owner";
@@ -183,6 +184,12 @@ fn adopt_of(lane_key: &str) -> AdoptWork {
         host_id: None,
         requirements: Vec::new(),
     }
+}
+
+/// What `adopt_work` reads of a legacy lane's goal, for an adoption built by hand.
+async fn goal_read(pool: &SqlitePool, lane_key: &str) -> Option<LegacyGoalRead> {
+    let contract = contract_of(pool, lane_key).await.unwrap();
+    Some(contract.map(|contract| (contract.revision, contract.turns_used)))
 }
 
 fn dispatcher(
@@ -1167,7 +1174,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
     let adopts = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("busy".into()),
-        legacy_goal_read: None,
+        legacy_goal_read: goal_read(&pool, "busy").await,
     };
     // The store itself refuses while the legacy worker is attached, under its write lock. The
     // other order, an adoption committing during a legacy launch, is refused by the legacy
@@ -1183,9 +1190,16 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
     let elsewhere = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("ledger".into()),
-        legacy_goal_read: None,
+        legacy_goal_read: Some(None),
     };
     let error = admit_request_with(&pool, &request, &elsewhere).await.unwrap_err();
+    assert_eq!(error.code(), "INVALID_REQUEST", "{error}");
+    // An adoption always carries the legacy goal it read; without it nothing is re-checked.
+    let unread = AdmitTerms {
+        legacy_goal_read: None,
+        ..adopts.clone()
+    };
+    let error = admit_request_with(&pool, &request, &unread).await.unwrap_err();
     assert_eq!(error.code(), "INVALID_REQUEST", "{error}");
     assert!(!supervisor_owns_lane(&pool, "busy").await.unwrap());
 
@@ -1199,7 +1213,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
     let held = AdmitTerms {
         owner_hold: Some(detail.clone()),
         adopts_lane: Some("busy".into()),
-        legacy_goal_read: None,
+        legacy_goal_read: goal_read(&pool, "busy").await,
     };
     let admission = admit_request_with(&pool, &request, &held).await.unwrap();
     assert!(!admission.duplicate);
@@ -1251,7 +1265,7 @@ async fn two_adapters_adopting_one_lane_admit_one_goal() {
     let adopts = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("nightly".into()),
-        legacy_goal_read: None,
+        legacy_goal_read: goal_read(&pool, "nightly").await,
     };
     // Both adoptions reach the store as first ones, as when Slack and the desktop both pass
     // adopt_work's lookup before either commits.
@@ -1286,15 +1300,15 @@ async fn an_adoption_that_finds_the_legacy_goal_turned_off_is_refused_at_commit(
     let adopts = AdmitTerms {
         owner_hold: None,
         adopts_lane: Some("nightly".into()),
-        legacy_goal_read: None,
+        legacy_goal_read: goal_read(&pool, "nightly").await,
     };
     // The owner narrowed the legacy goal after adopt_work read it as full.
     set_mode(&pool, "nightly", GoalMode::Supervised).await.unwrap();
     let error = admit_request_with(&pool, &request, &adopts).await.unwrap_err();
-    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    assert_eq!(error.code(), LEGACY_TERMS_CHANGED, "{error}");
     set_mode(&pool, "nightly", GoalMode::Off).await.unwrap();
     let error = admit_request_with(&pool, &request, &adopts).await.unwrap_err();
-    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    assert_eq!(error.code(), LEGACY_TERMS_CHANGED, "{error}");
     for table in ["supervisor_goals", "supervisor_requests", "supervisor_dispatches"] {
         assert_eq!(count(&pool, &format!("SELECT COUNT(*) FROM {table}")).await, 0, "{table}");
     }
@@ -1307,7 +1321,7 @@ async fn an_adoption_that_finds_the_legacy_goal_turned_off_is_refused_at_commit(
     let terms = AdmitTerms {
         owner_hold: Some(format!("{OWNER_APPROVAL_REQUIRED}: the owner decides first")),
         adopts_lane: Some("nightly".into()),
-        legacy_goal_read: None,
+        legacy_goal_read: goal_read(&pool, "nightly").await,
     };
     assert!(!admit_request_with(&pool, &held, &terms).await.unwrap().duplicate);
 }
@@ -1533,11 +1547,10 @@ async fn an_adoption_that_finds_the_legacy_terms_changed_is_refused_at_commit() 
     legacy_lane(&pool, "nightly", GoalMode::Full, 5).await;
     let request = adoption_request(&pool, "nightly", ChannelProvider::Slack).await;
     let read_now = || async {
-        let contract = contract_of(&pool, "nightly").await.unwrap();
         AdmitTerms {
             owner_hold: None,
             adopts_lane: Some("nightly".into()),
-            legacy_goal_read: Some(contract.map(|contract| (contract.revision, contract.turns_used))),
+            legacy_goal_read: goal_read(&pool, "nightly").await,
         }
     };
 
@@ -1552,7 +1565,7 @@ async fn an_adoption_that_finds_the_legacy_terms_changed_is_refused_at_commit() 
         .await
         .unwrap();
     let error = admit_request_with(&pool, &request, &read).await.unwrap_err();
-    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    assert_eq!(error.code(), LEGACY_TERMS_CHANGED, "{error}");
     // A legacy turn counted since the read is a change too.
     let read = read_now().await;
     sqlx::query("UPDATE lane_goal SET turns_used = turns_used + 1 WHERE lane_key = 'nightly'")
@@ -1560,14 +1573,14 @@ async fn an_adoption_that_finds_the_legacy_terms_changed_is_refused_at_commit() 
         .await
         .unwrap();
     let error = admit_request_with(&pool, &request, &read).await.unwrap_err();
-    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    assert_eq!(error.code(), LEGACY_TERMS_CHANGED, "{error}");
     // So is a legacy goal the lane did not have when it was read.
     let without = AdmitTerms {
         legacy_goal_read: Some(None),
         ..read
     };
     let error = admit_request_with(&pool, &request, &without).await.unwrap_err();
-    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    assert_eq!(error.code(), LEGACY_TERMS_CHANGED, "{error}");
     for table in ["supervisor_goals", "supervisor_requests", "supervisor_dispatches"] {
         assert_eq!(count(&pool, &format!("SELECT COUNT(*) FROM {table}")).await, 0, "{table}");
     }
@@ -1576,4 +1589,499 @@ async fn an_adoption_that_finds_the_legacy_terms_changed_is_refused_at_commit() 
     let current = read_now().await;
     assert!(!admit_request_with(&pool, &request, &current).await.unwrap().duplicate);
     assert!(supervisor_owns_lane(&pool, "nightly").await.unwrap());
+}
+
+/// A legacy lane `key` its legacy goal loop drives: a `mode` goal with ten turns, the legacy
+/// pane attached, working.
+async fn driven_legacy_lane(pool: &SqlitePool, key: &str, mode: GoalMode) {
+    legacy_lane(pool, key, mode, 10).await;
+    set_pane(pool, key, "pane-legacy").await.unwrap();
+    transition(pool, key, LaneStatus::Working, Some("launched"))
+        .await
+        .unwrap();
+}
+
+/// A valid `continue` assessment of a [`legacy_lane`] goal.
+fn legacy_continue(lane_key: &str) -> String {
+    json!({
+        "gaps": [{
+            "id": "g1",
+            "kind": "work",
+            "requirement_ids": [format!("r-{lane_key}")],
+            "summary": "tests not run"
+        }],
+        "decision": {
+            "decision": "continue",
+            "instruction": "run the tests",
+            "gap_ids": ["g1"],
+            "expected_change": "tests pass",
+            "verification": "sig:0"
+        }
+    })
+    .to_string()
+}
+
+/// The legacy goal loop's judge model. With `before_adopting`, its first answer comes only
+/// after that statement ran on the legacy lane and the owner adopted the lane: the adoption
+/// commits after the loop pass checked ownership and before it proposes and sends.
+struct LegacyJudge {
+    pool: SqlitePool,
+    lane_key: &'static str,
+    before_adopting: Option<&'static str>,
+    adopted: Mutex<bool>,
+}
+
+#[async_trait]
+impl ModelTurn for LegacyJudge {
+    async fn complete(&self, _prompt: &str) -> crate::error::Result<String> {
+        let adopt = self
+            .before_adopting
+            .filter(|_| !*self.adopted.lock().unwrap());
+        if let Some(sql) = adopt {
+            sqlx::query(sql)
+                .bind(self.lane_key)
+                .execute(&self.pool)
+                .await?;
+            adopt_work(
+                &self.pool,
+                &actor("m-judge", "adopt it"),
+                &adopt_of(self.lane_key),
+            )
+            .await
+            .unwrap();
+            *self.adopted.lock().unwrap() = true;
+        }
+        Ok(legacy_continue(self.lane_key))
+    }
+}
+
+fn legacy_judge(
+    pool: &SqlitePool,
+    lane_key: &'static str,
+    before_adopting: Option<&'static str>,
+) -> crate::judge::Judge {
+    crate::judge::Judge::bare()
+        .with_pool(pool.clone())
+        .with_fallback(Arc::new(LegacyJudge {
+            pool: pool.clone(),
+            lane_key,
+            before_adopting,
+            adopted: Mutex::new(false),
+        }))
+}
+
+/// A legacy goal pass checks ownership, then waits on its judge. Meanwhile the lane is ended
+/// (a tracker cancel, a forced close) or loses its pane, and the owner adopts it. The pass
+/// then proposes, and its send re-checks ownership after the proposal is committed `pending`:
+/// nothing reaches the legacy pane, and the adopting goals are the only workers.
+#[tokio::test]
+async fn a_legacy_goal_pass_never_sends_to_a_lane_adopted_during_its_judge_call() {
+    let pool = owner_pool().await;
+    let legacy = RecordingControl::default();
+    for (lane_key, before_adopting) in [
+        (
+            "nightly",
+            "UPDATE lanes SET status = 'failed' WHERE key = ?",
+        ),
+        // Not ended, only detached: the ownership re-check alone refuses the send.
+        (
+            "detached",
+            "UPDATE lanes SET omo_thread_id = NULL WHERE key = ?",
+        ),
+    ] {
+        driven_legacy_lane(&pool, lane_key, GoalMode::Full).await;
+        let judge = legacy_judge(&pool, lane_key, Some(before_adopting));
+        let settled = timeout(
+            DEADLINE,
+            on_turn_settled(&pool, &judge, &legacy, lane_key, true),
+        )
+        .await
+        .expect("the loop pass finishes")
+        .unwrap();
+        assert_eq!(
+            settled,
+            Some(LoopOutcome {
+                lane_key: lane_key.to_owned(),
+                stop_reason: None,
+                awaiting_approval: false,
+                sent: false,
+            }),
+            "{lane_key}"
+        );
+        assert!(supervisor_owns_lane(&pool, lane_key).await.unwrap());
+        assert_eq!(
+            lane_goal_snapshot(&pool, lane_key).await.3.as_deref(),
+            Some(ProposalState::Superseded.as_str()),
+            "{lane_key}: the proposal is superseded, never sent"
+        );
+    }
+    assert!(sends(&legacy).is_empty(), "nothing reached a legacy pane");
+
+    let worker = Arc::new(RecordingControl::default());
+    let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
+    assert_eq!(dispatcher.drain().await.len(), 2);
+    let panes: Vec<String> = sends(&worker)
+        .into_iter()
+        .map(|(_, pane, _)| pane)
+        .collect();
+    assert_eq!(panes, [PANE, PANE]);
+    assert!(sends(&legacy).is_empty());
+}
+
+/// An approval whose caller checked ownership before the adoption committed: the claim
+/// commits the proposal `pending`, and the send's re-check sends nothing.
+#[tokio::test]
+async fn an_approval_racing_an_adoption_sends_nothing_to_the_legacy_pane() {
+    let pool = owner_pool().await;
+    driven_legacy_lane(&pool, "ledger", GoalMode::Supervised).await;
+    sqlx::query(
+        "UPDATE lane_goal SET proposal_state = 'awaiting_approval', proposal_text = 'Run the verifier.',
+                proposal_gap_ids = '[]', proposal_at = ? WHERE lane_key = 'ledger'",
+    )
+    .bind(crate::storage::now_rfc3339())
+    .execute(&pool)
+    .await
+    .unwrap();
+    // A proposal awaiting approval is not in flight, so once the lane ends the adoption commits.
+    sqlx::query("UPDATE lanes SET status = 'failed' WHERE key = 'ledger'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    adopt_work(
+        &pool,
+        &actor("m-ledger", "adopt ledger"),
+        &adopt_of("ledger"),
+    )
+    .await
+    .unwrap();
+    assert!(supervisor_owns_lane(&pool, "ledger").await.unwrap());
+
+    let legacy = RecordingControl::default();
+    let outcome = timeout(DEADLINE, approve_proposal(&pool, &legacy, "ledger"))
+        .await
+        .expect("the approval finishes")
+        .unwrap();
+    assert!(!outcome.sent);
+    assert!(legacy.ops().is_empty(), "nothing reached the legacy pane");
+    assert_eq!(
+        lane_goal_snapshot(&pool, "ledger").await.3.as_deref(),
+        Some(ProposalState::Superseded.as_str())
+    );
+}
+
+/// Tries to adopt the legacy lane from inside the legacy goal loop's send, after the pass
+/// committed its proposal `pending` and re-checked ownership. The lane is ended first, so only
+/// the pending turn stands between the adoption and a second worker. Records the refusal's
+/// code, then sends.
+struct AdoptOnSend {
+    pool: SqlitePool,
+    inner: RecordingControl,
+    refusal: Mutex<Option<&'static str>>,
+}
+
+#[async_trait]
+impl AgentControl for AdoptOnSend {
+    async fn execute(&self, host_id: Option<&str>, op: AgentOp) -> crate::error::Result<Value> {
+        self.inner.execute(host_id, op).await
+    }
+
+    async fn send_confirmed(
+        &self,
+        host_id: Option<&str>,
+        session_id: &str,
+        text: &str,
+        request_id: &str,
+    ) -> SendOutcome {
+        sqlx::query("UPDATE lanes SET status = 'failed' WHERE key = 'nightly'")
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        let refused = adopt_work(
+            &self.pool,
+            &actor("m-send", "adopt it"),
+            &adopt_of("nightly"),
+        )
+        .await
+        .expect_err("a pending legacy turn refuses the adoption");
+        *self.refusal.lock().unwrap() = Some(refused.code());
+        self.inner
+            .send_confirmed(host_id, session_id, text, request_id)
+            .await
+    }
+}
+
+/// The other order of the goal-loop race: the legacy pass commits its proposal `pending`
+/// first, so the adoption is refused with `LEGACY_LANE_LIVE` and the pass sends its one turn.
+#[tokio::test]
+async fn a_pending_legacy_turn_refuses_an_adoption_that_comes_after_it() {
+    let pool = owner_pool().await;
+    driven_legacy_lane(&pool, "nightly", GoalMode::Full).await;
+    let control = AdoptOnSend {
+        pool: pool.clone(),
+        inner: RecordingControl::default(),
+        refusal: Mutex::new(None),
+    };
+    let judge = legacy_judge(&pool, "nightly", None);
+    let settled = timeout(
+        DEADLINE,
+        on_turn_settled(&pool, &judge, &control, "nightly", true),
+    )
+    .await
+    .expect("the loop pass finishes")
+    .unwrap()
+    .expect("the pass changed the lane");
+    assert!(
+        settled.sent,
+        "the legacy pass won the race and sent its one turn"
+    );
+    let refusal = *control.refusal.lock().unwrap();
+    assert_eq!(refusal, Some(LEGACY_LANE_LIVE));
+    let sent = sends(&control.inner);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1, "pane-legacy");
+    // The sent turn refuses it too, and nothing was admitted.
+    let error = adopt_work(&pool, &actor("m-after", "adopt it"), &adopt_of("nightly"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    assert!(!supervisor_owns_lane(&pool, "nightly").await.unwrap());
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM supervisor_goals").await,
+        0
+    );
+}
+
+/// An owner reply whose lane is adopted between intercept's lookup and its apply. Simulated
+/// by hiding a committed adoption's `adopt:` row from the lookup and restoring it when the
+/// reply is claimed, which is what the apply then sees. Nothing is reopened, closed or sent,
+/// the claim is forgotten, and the reply (and a redelivery) takes normal routing.
+#[tokio::test]
+async fn an_owner_reply_racing_an_adoption_is_left_to_normal_routing() {
+    use crate::lanes::owner_replies::{intercept, OwnerReply};
+
+    let pool = owner_pool().await;
+    let lanes = [
+        ("nightly", "1.1", "failed"),
+        ("shipped", "2.2", "verified_done"),
+    ];
+    for (lane_key, thread_ts, status) in lanes {
+        driven_legacy_lane(&pool, lane_key, GoalMode::Full).await;
+        sqlx::query("UPDATE lanes SET status = ?, thread_channel_id = ? WHERE key = ?")
+            .bind(status)
+            .bind(format!("slack:C1:{thread_ts}"))
+            .bind(lane_key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        adopt_work(&pool, &actor(lane_key, "adopt it"), &adopt_of(lane_key))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE supervisor_requests SET source_message_id = 'hidden:' || ?
+             WHERE source_message_id = 'adopt:' || ?",
+        )
+        .bind(lane_key)
+        .bind(lane_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(!supervisor_owns_lane(&pool, lane_key).await.unwrap());
+    }
+    sqlx::query(
+        "CREATE TRIGGER adoption_after_lookup AFTER INSERT ON lane_owner_replies BEGIN
+           UPDATE supervisor_requests SET source_message_id = 'adopt:' || NEW.lane_key
+            WHERE source_message_id = 'hidden:' || NEW.lane_key;
+         END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let legacy = RecordingControl::default();
+    for (lane_key, thread_ts, status) in lanes {
+        let reply = OwnerReply {
+            channel: "C1",
+            thread_ts,
+            author: "UOWNER",
+            owner: "UOWNER",
+            message_id: lane_key,
+            text: "keep going",
+        };
+        for attempt in ["first", "redelivered"] {
+            let consumed = intercept(&pool, &legacy, &reply).await.unwrap();
+            assert!(
+                !consumed,
+                "{lane_key} {attempt}: the reply is left to normal routing"
+            );
+        }
+        assert!(supervisor_owns_lane(&pool, lane_key).await.unwrap());
+        let lane: (String, Option<String>) =
+            sqlx::query_as("SELECT status, omo_thread_id FROM lanes WHERE key = ?")
+                .bind(lane_key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            lane,
+            (status.to_owned(), Some("pane-legacy".to_owned())),
+            "{lane_key}: neither reopened nor closed"
+        );
+    }
+    assert!(legacy.ops().is_empty(), "nothing reached a legacy pane");
+    assert_eq!(
+        count(&pool, "SELECT COUNT(*) FROM lane_owner_replies").await,
+        0,
+        "the claims are forgotten"
+    );
+}
+
+/// A lane close never removes the worktree an adopted lane hands its supervisor goal: a close
+/// in progress refuses the adoption, a close whose caller checked ownership before the
+/// adoption committed is refused by its own claim, and the tracker's close and cancel moves
+/// and lane actions are refused with `SUPERVISOR_OWNED`. The tree stays registered on disk.
+#[tokio::test]
+async fn an_adopted_lanes_worktree_is_never_removed_by_a_legacy_close() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    crate::lanes::worktree::isolate_test_env();
+    let (base, root) = git_repo("adopted-close");
+    let pool = owner_pool().await;
+    legacy_lane(&pool, "nightly", GoalMode::Full, 10).await;
+    let tree = crate::lanes::worktree::create(&pool, "nightly", &root.to_string_lossy())
+        .await
+        .unwrap()
+        .expect("a lane at a repository root gets its own worktree");
+    sqlx::query("UPDATE lanes SET status = 'verified_done' WHERE key = 'nightly'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tree_state = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM lane_owned_worktrees WHERE lane_key = 'nightly'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    // A close that claimed the tree first refuses the adoption until it finishes or fails.
+    sqlx::query("UPDATE lane_owned_worktrees SET state = 'removing' WHERE lane_key = 'nightly'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = adopt_work(&pool, &actor("m-1", "adopt it"), &adopt_of("nightly"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    assert!(!supervisor_owns_lane(&pool, "nightly").await.unwrap());
+    sqlx::query("UPDATE lane_owned_worktrees SET state = 'registered' WHERE lane_key = 'nightly'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    adopt_work(&pool, &actor("m-2", "adopt it"), &adopt_of("nightly"))
+        .await
+        .unwrap();
+    assert!(supervisor_owns_lane(&pool, "nightly").await.unwrap());
+
+    // A close whose caller checked ownership before the adoption committed: its claim refuses.
+    let refused = crate::lanes::worktree::close(&pool, "nightly", None)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains(SUPERVISOR_OWNED), "{refused}");
+    assert!(Path::new(&tree).is_dir());
+    assert_eq!(tree_state().await, "registered");
+
+    for sql in [
+        "INSERT INTO tracker_users(id, name, display_name, avatar_color, kind, is_me, created_at)
+         VALUES('u1', 'ada', 'Ada', '#000', 'human', 1, '2020-01-01T00:00:00Z')",
+        "INSERT INTO tracker_teams(id, key, name, icon, color, created_at)
+         VALUES('t1', 'AGT', 'Agents', 'bot', '#fff', '2020-01-01T00:00:00Z')",
+        "INSERT INTO tracker_states(id, team_id, name, type, color)
+         VALUES('s-todo', 't1', 'Todo', 'unstarted', '#fff')",
+        "INSERT INTO tracker_states(id, team_id, name, type, color)
+         VALUES('s-done', 't1', 'Done', 'completed', '#fff')",
+        "INSERT INTO tracker_states(id, team_id, name, type, color)
+         VALUES('s-canceled', 't1', 'Canceled', 'canceled', '#fff')",
+        "INSERT INTO tracker_issues(id, team_id, number, identifier, title, state_id, priority,
+                sort_order, lane_key, creator_id, created_at, updated_at)
+         VALUES('i1', 't1', 1, 'AGT-1', 'Nightly', 's-todo', 0, 0, 'nightly', 'u1', '2020', '2020')",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let router = crate::tracker_linear::router().with_state(pool.clone());
+    let calls = [
+        (
+            "PATCH",
+            "/issues/i1",
+            json!({"state_id": "s-done", "force_note": "done"}),
+        ),
+        ("PATCH", "/issues/i1", json!({"state_id": "s-canceled"})),
+        (
+            "POST",
+            "/issues/i1/lane-action",
+            json!({"action": "close", "force": true}),
+        ),
+        (
+            "POST",
+            "/issues/i1/lane-action",
+            json!({"action": "reopen"}),
+        ),
+        (
+            "POST",
+            "/issues/i1/lane-action",
+            json!({"action": "send", "note": "go on"}),
+        ),
+        (
+            "POST",
+            "/issues/i1/lane-action",
+            json!({"action": "object", "note": "wait"}),
+        ),
+    ];
+    for (method, uri, body) in calls {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let text = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&text);
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{method} {uri} {body}: {text}"
+        );
+        assert!(
+            text.contains(SUPERVISOR_OWNED),
+            "{method} {uri} {body}: {text}"
+        );
+    }
+    let (status, state_id): (String, String) = sqlx::query_as(
+        "SELECT l.status, i.state_id FROM lanes l JOIN tracker_issues i ON i.lane_key = l.key
+         WHERE l.key = 'nightly'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (status.as_str(), state_id.as_str()),
+        ("verified_done", "s-todo")
+    );
+    assert!(
+        Path::new(&tree).is_dir(),
+        "the adopted lane's worktree is intact"
+    );
+    assert_eq!(tree_state().await, "registered");
+    let _ = std::fs::remove_dir_all(&base);
 }

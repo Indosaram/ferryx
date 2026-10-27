@@ -830,7 +830,9 @@ async fn apply_goal_action(
     // A revision names its lane only through the store; it is fenced like the lane actions,
     // so a legacy revision proposed before an adoption is not applied after it.
     let revision_lane = match &action {
-        Action::AcceptRevision { id } | Action::RejectRevision { id } => revision::lane_of(pool, *id).await?,
+        Action::AcceptRevision { id } | Action::RejectRevision { id } => {
+            revision::lane_of(pool, *id).await?
+        }
         _ => None,
     };
     if let Some(lane_key) = action.lane_key().or(revision_lane.as_deref()) {
@@ -1867,15 +1869,23 @@ mod tests {
         .await
         .unwrap();
         let base = contract_of(&pool, &lane).await.unwrap().unwrap().revision;
-        for action in [Action::AcceptRevision { id: proposed.id }, Action::RejectRevision { id: proposed.id }] {
-            let refused = apply_goal_action(&pool, &control, action).await.unwrap_err();
+        for action in [
+            Action::AcceptRevision { id: proposed.id },
+            Action::RejectRevision { id: proposed.id },
+        ] {
+            let refused = apply_goal_action(&pool, &control, action)
+                .await
+                .unwrap_err();
             assert!(
                 matches!(&refused, SupervisorGoalError::Conflict(message) if message.starts_with("SUPERVISOR_OWNED")),
                 "{refused}"
             );
         }
         assert_eq!(revision::list_pending(&pool, &lane).await.unwrap().len(), 1);
-        assert_eq!(contract_of(&pool, &lane).await.unwrap().unwrap().revision, base);
+        assert_eq!(
+            contract_of(&pool, &lane).await.unwrap().unwrap().revision,
+            base
+        );
         assert!(control.ops().is_empty());
     }
 

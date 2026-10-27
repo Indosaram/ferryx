@@ -316,6 +316,29 @@ async fn set_state(pool: &SqlitePool, key: &str, path: &str, state: &str) -> Res
     Ok(())
 }
 
+/// Marks the tree `removing` before a close removes it, in one statement that refuses a lane
+/// the supervisor owns ([`crate::supervisor::supervisor_owns_lane`]) and a tree a supervisor
+/// goal's lane runs in: false when it was refused and nothing changed. An adoption refuses,
+/// under its write lock, a lane with a tree `removing`, so of a racing adoption and close
+/// exactly one goes ahead and an adopted lane's working directory is never removed.
+async fn claim_removal(pool: &SqlitePool, key: &str, path: &str) -> Result<bool> {
+    let claimed = sqlx::query(
+        "UPDATE lane_owned_worktrees SET state = 'removing' WHERE lane_key = ? AND path = ?
+           AND NOT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)
+           AND NOT EXISTS(SELECT 1 FROM supervisor_requests WHERE source_message_id = ?)
+           AND NOT EXISTS(SELECT 1 FROM supervisor_goals g JOIN lanes l ON l.key = g.lane_key
+                          WHERE l.cwd = ?)",
+    )
+    .bind(key)
+    .bind(path)
+    .bind(key)
+    .bind(format!("{}{key}", crate::supervisor::ADOPT_MESSAGE_PREFIX))
+    .bind(path)
+    .execute(pool)
+    .await?;
+    Ok(claimed.rows_affected() == 1)
+}
+
 async fn registered(repo: &Path, path: &str) -> Result<bool> {
     let list = git(repo, &["worktree", "list", "--porcelain"]).await?;
     Ok(list
@@ -394,6 +417,10 @@ async fn lane_event(pool: &SqlitePool, key: &str, kind: &str, body: &str) -> Res
 /// Closes a lane as omo's close intent does: remove its worktrees, report unmerged work,
 /// then move it to closed. `reason` is the transition reason (`forced: …` for a lane that
 /// is not verified). A failure leaves the lane in its status and tells the lead.
+///
+/// A tree is removed only after [`claim_removal`], so a lane the supervisor owns (adopted
+/// after the caller's own check, say) keeps its worktree and the close fails with
+/// `SUPERVISOR_OWNED`. A removal that fails (a dirty tree) releases the claim.
 pub async fn close(pool: &SqlitePool, key: &str, reason: Option<&str>) -> Result<()> {
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
         .bind(key)
@@ -416,11 +443,26 @@ pub async fn close(pool: &SqlitePool, key: &str, reason: Option<&str>) -> Result
         for (path, state, repo, branch, start) in owned(pool, key).await? {
             let repo = PathBuf::from(repo);
             if state != "removed" {
-                set_state(pool, key, &path, "removing").await?;
-                let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
-                if exists || registered(&repo, &path).await? {
-                    // No --force: a dirty tree refuses, and the owner's work stays put.
-                    git(&repo, &["worktree", "remove", &path]).await?;
+                if !claim_removal(pool, key, &path).await? {
+                    return Err(HubError::message(format!(
+                        "{}: lane {key} belongs to a supervisor goal; its worktree {path} was not removed",
+                        crate::supervisor::SUPERVISOR_OWNED
+                    )));
+                }
+                let removed: Result<()> = async {
+                    let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+                    if exists || registered(&repo, &path).await? {
+                        // No --force: a dirty tree refuses, and the owner's work stays put.
+                        git(&repo, &["worktree", "remove", &path]).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = removed {
+                    // The tree is still in place: release the claim, so it does not block an
+                    // adoption that would continue the work in it.
+                    set_state(pool, key, &path, "registered").await?;
+                    return Err(error);
                 }
                 set_state(pool, key, &path, "removed").await?;
             }
