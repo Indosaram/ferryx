@@ -466,7 +466,10 @@ const TURN_RULES: &str = "[ferryx-turn-rules v1] Binding rules for every reply i
 /// The developer instructions a session's thread starts with: its persona prompt plus the
 /// binding reply rules.
 fn with_turn_rules(system_prompt: Option<&str>) -> String {
-    match system_prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+    match system_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
         Some(prompt) if prompt.contains(TURN_RULES_MARKER) => prompt.to_owned(),
         Some(prompt) => format!("{prompt}\n\n{TURN_RULES}"),
         None => TURN_RULES.to_owned(),
@@ -614,8 +617,8 @@ pub async fn run_session_turn(
         request.text = format!("{}\n{}", briefings.text, request.text);
     }
     // A thread started before the rules existed never saw them in its developer instructions.
-    let rules_known = state.metadata.get("turn_rules").and_then(Value::as_str)
-        == Some(TURN_RULES_MARKER);
+    let rules_known =
+        state.metadata.get("turn_rules").and_then(Value::as_str) == Some(TURN_RULES_MARKER);
     if request.thread_id.is_some() && !rules_known {
         request.text = format!("{TURN_RULES}\n\n{}", request.text);
     }
@@ -1214,7 +1217,9 @@ mod tests {
         );
         assert_eq!(outgoing_text("Ask me anything."), "Ask me anything.");
         assert_eq!(
-            outgoing_text("**Ask:** 저장 — **For you:** 15장 저장했어요. **Now:** 완료. **Next:** 없음."),
+            outgoing_text(
+                "**Ask:** 저장 — **For you:** 15장 저장했어요. **Now:** 완료. **Next:** 없음."
+            ),
             "15장 저장했어요."
         );
     }

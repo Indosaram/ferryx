@@ -700,7 +700,11 @@ mod tests {
         assert_eq!(reason, "duplicate");
 
         let other = again + chrono::Duration::minutes(5);
-        insert("KAIT document request", other - chrono::Duration::minutes(1)).await;
+        insert(
+            "KAIT document request",
+            other - chrono::Duration::minutes(1),
+        )
+        .await;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let record = seen.clone();
         let different = dispatch_tick(&pool, &judge, other, move |_, text| {
