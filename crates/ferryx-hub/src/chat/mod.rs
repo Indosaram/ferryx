@@ -19,6 +19,8 @@ pub mod slack_backfill;
 #[cfg(feature = "hub-slack")]
 pub mod slack_ingress;
 #[cfg(feature = "hub-slack")]
+pub mod slack_supervisor;
+#[cfg(feature = "hub-slack")]
 pub mod slack_turn;
 #[cfg(feature = "hub-slack")]
 pub mod slack_web;

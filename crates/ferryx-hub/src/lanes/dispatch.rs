@@ -149,13 +149,28 @@ where
                 CronDisposition::Continue => {}
             }
         }
+        let parsed_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+            .map(|at| at.with_timezone(&chrono::Utc))
+            .unwrap_or(now);
+        // A supervisor-owned lane reports to its goal's wake service, never to a second lead.
+        // A failed hand-over stays queued without blocking other events.
+        match hand_to_supervisor(pool, id, lane_key.as_deref(), parsed_at, &stamp).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    event_id = id,
+                    %error,
+                    "supervisor wake was not queued; event remains queued"
+                );
+                continue;
+            }
+        }
         let Ok(lead_key) = SessionKey::from_storage_key(&lead) else {
             misrouted.push(id);
             continue;
         };
-        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
-            .map(|at| at.with_timezone(&chrono::Utc))
-            .unwrap_or(now);
+        let created_at = parsed_at;
         let event = QueuedEvent {
             id,
             lane_key,
@@ -362,6 +377,42 @@ async fn receipt(pool: &SqlitePool, ids: &[i64], stamp: &str, reason: &str) -> R
         .await?;
     }
     Ok(())
+}
+
+/// Delivery reason of a lane event handed to its supervisor goal's wake service.
+pub const SUPERVISOR_WAKE: &str = "supervisor_wake";
+
+/// The supervisor goal that owns `lane_key`, if any.
+async fn supervisor_goal_of_lane(pool: &SqlitePool, lane_key: &str) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT goal_id FROM supervisor_goals WHERE lane_key = ? LIMIT 1")
+            .bind(lane_key)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+/// A report from a lane a supervisor goal owns goes to that goal's wake service
+/// ([`crate::supervisor::wakes::report`]) instead of a lead turn: one goal/wake path, batched
+/// by the same 30s policy. The wake is keyed by the lane event id, so a re-run of this tick
+/// after a crash before the receipt is the same wake. True when the event was handed over.
+async fn hand_to_supervisor(
+    pool: &SqlitePool,
+    id: i64,
+    lane_key: Option<&str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    stamp: &str,
+) -> Result<bool> {
+    let Some(lane_key) = lane_key else {
+        return Ok(false);
+    };
+    let Some(goal_id) = supervisor_goal_of_lane(pool, lane_key).await? else {
+        return Ok(false);
+    };
+    crate::supervisor::wakes::report(pool, &goal_id, &format!("lane_event:{id}"), created_at)
+        .await?;
+    receipt(pool, &[id], stamp, SUPERVISOR_WAKE).await?;
+    Ok(true)
 }
 
 /// What a `cron_problem` event does inside one tick. `Ok(true)` from the remediator is a
@@ -745,5 +796,110 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after, 1, "past the window the alert is admitted again");
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_lane_report_becomes_a_goal_wake_not_a_lead_turn() {
+        use crate::supervisor::admission::{
+            submit_work, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
+        };
+        use crate::supervisor::{
+            bind_project_host, create_project, ensure_identity, pending_wakes, ChannelProvider,
+            WakeCause,
+        };
+        let pool = crate::storage::memory().await.unwrap();
+        let owner = "slack:T1:U-owner";
+        let identity = ensure_identity(&pool, owner).await.unwrap();
+        let project = create_project(
+            &pool,
+            &identity.supervisor_id,
+            "ferryx",
+            "github.com/x/ferryx",
+        )
+        .await
+        .unwrap();
+        bind_project_host(&pool, &project.project_id, "host-a", "/home/o/ferryx/.git")
+            .await
+            .unwrap();
+        let actor = ActorContext {
+            principal: owner.into(),
+            source_adapter: ChannelProvider::Slack,
+            source_message_id: "D1/1.1".into(),
+            source_body: "Create result.txt containing READY.".into(),
+            channel_binding_id: None,
+            choices: OwnerChoices::default(),
+        };
+        let work = SubmitWork {
+            project_id: None,
+            host_id: None,
+            kind: None,
+            title: "Write result.txt".into(),
+            instruction: "Create result.txt containing READY.".into(),
+            requirements: vec![crate::goals::contract::RequirementSpec {
+                id: "r1".into(),
+                text: "result.txt contains READY".into(),
+                verifier: "verify.sh exits 0".into(),
+            }],
+            cwd: None,
+            operations: OperationClass::BASELINE.to_vec(),
+            turn_limit: None,
+        };
+        let SubmitOutcome::Admitted(admitted) = submit_work(&pool, &actor, &work).await.unwrap()
+        else {
+            panic!("expected an admitted goal");
+        };
+        let goal_id = admitted.receipt.goal_id.clone();
+        let lane_key = admitted.receipt.lane_key.clone();
+        let lead = SessionKey::new("slack", None::<String>, "D1", None::<String>, "U-owner")
+            .with_bot_id("UBOT")
+            .storage_key();
+        let old = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at)
+             VALUES(?, ?, 'done_claimed', 'finished', ?) RETURNING id",
+        )
+        .bind(&lane_key)
+        .bind(&lead)
+        .bind(old.to_rfc3339())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let judge = crate::judge::Judge::forced("yes");
+        let turns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = turns.clone();
+        let admitted_turns = dispatch_tick(&pool, &judge, chrono::Utc::now(), move |_, _| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { true }
+        })
+        .await
+        .unwrap();
+        assert_eq!(admitted_turns, 0, "no lead turn for a supervisor-owned lane");
+        assert_eq!(turns.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT delivery_reason FROM lane_events WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reason.as_deref(), Some(SUPERVISOR_WAKE));
+        let due = chrono::Utc::now() + chrono::Duration::hours(1);
+        let wakes = pending_wakes(&pool, due, 10).await.unwrap();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert_eq!(wakes[0].goal_id, goal_id);
+        assert_eq!(wakes[0].cause, WakeCause::Report);
+        assert_eq!(wakes[0].event_id, format!("lane_event:{id}"));
+
+        // A replay of the same event (a crash before the receipt) is the same wake.
+        sqlx::query(
+            "UPDATE lane_events SET delivered_at = NULL, delivery_reason = NULL WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        dispatch_tick(&pool, &judge, chrono::Utc::now(), |_, _| async { true })
+            .await
+            .unwrap();
+        assert_eq!(pending_wakes(&pool, due, 10).await.unwrap().len(), 1);
     }
 }

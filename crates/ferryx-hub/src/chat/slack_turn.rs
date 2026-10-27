@@ -377,7 +377,7 @@ async fn first_delivery_persisted(pool: &SqlitePool, channel: &str, ts: &str) ->
     })
 }
 
-fn session_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn session_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
         .get_or_init(Default::default)
@@ -498,7 +498,7 @@ fn strip_handoff_block(text: &str) -> String {
         .join("\n\n")
 }
 
-async fn post(channel: &str, thread: Option<&str>, text: &str) {
+pub(crate) async fn post(channel: &str, thread: Option<&str>, text: &str) {
     let text = outgoing_text(text);
     if text.is_empty() || omo_client::is_explicit_silence(&text) {
         return;
@@ -510,7 +510,7 @@ async fn post(channel: &str, thread: Option<&str>, text: &str) {
     }
 }
 
-async fn react(channel: &str, ts: &str, name: &str, add: bool) {
+pub(crate) async fn react(channel: &str, ts: &str, name: &str, add: bool) {
     let method = if add {
         "reactions.add"
     } else {
@@ -904,19 +904,35 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
         admitted.key.thread_id.clone().unwrap_or_default(),
         admitted.message_ts.clone(),
     );
-    Box::pin(run_session_turn(
-        config,
-        pool,
-        SessionTurn {
-            key: admitted.key,
-            reply_channel: Some(admitted.channel),
-            reply_thread: admitted.reply_thread,
-            status_ts: Some(admitted.message_ts),
-            text,
-            background: false,
-        },
-    ))
-    .await;
+    // The owner's DM and the channels/threads the owner bound to the supervisor are the
+    // supervisor's conversation; every other message keeps the omo app-server turn.
+    let supervised = match super::slack_supervisor::conversation() {
+        Some(conversation) => Box::pin(super::slack_supervisor::try_handle(
+            config,
+            pool,
+            &admitted,
+            &text,
+            conversation.as_ref(),
+        ))
+        .await
+        .is_some(),
+        None => false,
+    };
+    if !supervised {
+        Box::pin(run_session_turn(
+            config,
+            pool,
+            SessionTurn {
+                key: admitted.key,
+                reply_channel: Some(admitted.channel),
+                reply_thread: admitted.reply_thread,
+                status_ts: Some(admitted.message_ts),
+                text,
+                background: false,
+            },
+        ))
+        .await;
+    }
     let (bot, channel, thread, ts) = cursor;
     if !bot.is_empty() {
         // A top-level message that roots its own thread is read back from channel history.
