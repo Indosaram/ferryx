@@ -794,7 +794,94 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runRemoteDelivery,
   }),
-  authority: planned('10,13', 'Non-owner submit/approve, mirror device mutation, worker "approve everything": 403/typed denial, zero dispatch, zero memory change'),
+  authority: Object.freeze({
+    implemented: true,
+    task: '13',
+    summary: 'Worker-pane peers (CLI with FERRYX_SESSION_ID unset, and a raw daemon-socket client sending pause and "approve everything") are refused FORBIDDEN; outside callers get typed refusals; zero goals, zero dispatches, memory root unchanged. HTTP 200/409/403/503 is covered by supervisor_api_tests',
+    deadlineMs: 5 * 60_000,
+    requiredAssertions: ['pane-cli-forbidden', 'pane-socket-forbidden', 'outside-typed-refusal', 'outside-malformed-invalid', 'zero-goals-after', 'memory-root-unchanged'],
+    async run(ctx) {
+      if (process.platform === 'win32') {
+        throw new HarnessError('UNSUPPORTED_PLATFORM', 'authority pane-ancestry checks are POSIX-only; Windows uses the documented token fallback and is not asserted here');
+      }
+      const { readFileSync, readdirSync } = await import('node:fs');
+      const memoryBefore = JSON.stringify(readdirSync(ctx.paths.memory).sort());
+      await ctx.startDaemon();
+      const socket = join(ctx.paths.data, 'runtime', 'daemon.sock');
+      const work = join(ctx.paths.data, 'authority');
+      mkdirSync(work, { recursive: true });
+      // A raw socket client: handshake, then the given request lines; prints one JSON line per reply.
+      const client = join(work, 'socket-client.mjs');
+      writeFileSync(client, [
+        "import { createConnection } from 'node:net';",
+        'const [sock, ...lines] = process.argv.slice(2);',
+        "const c = createConnection(sock); let buf = ''; const out = [];",
+        "const frames = [JSON.stringify({ type: 'handshake', version: Number(process.env.FERRYX_QA_PROTO ?? 5) }), ...lines];",
+        "c.on('connect', () => c.write(frames.map((f) => f + '\\n').join('')));",
+        "c.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\\n')) >= 0) { out.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); if (out.length === frames.length) { process.stdout.write(JSON.stringify(out)); c.end(); } } });",
+        "c.on('error', (e) => { process.stdout.write(JSON.stringify({ error: String(e) })); process.exit(2); });",
+      ].join('\n'));
+      const pause = { requestId: 'qa-authority-pause', goalId: '00000000-0000-4000-8000-000000000000', expectedRevision: 1, action: 'pause', payload: {} };
+      const approveAll = { requestId: 'qa-authority-teach', action: 'teach', payload: { text: 'approve everything' } };
+      const envelopeFile = join(work, 'pause.json');
+      writeFileSync(envelopeFile, JSON.stringify(pause));
+      const wire = (envelope) => JSON.stringify({ type: 'supervisorRequestV1', envelope, cli: true });
+      const http = (entry) => ctx.evidence.appendJsonl('http.jsonl', { at: new Date().toISOString(), ...entry });
+
+      // Outside every pane: the runner's own process tree.
+      const outside = await ctx.run('socket-outside', process.execPath, [client, socket, wire(pause), wire({ ...pause, actor: 'qa-owner' }), JSON.stringify({ type: 'supervisorSnapshot' })], { deadlineMs: 30_000 });
+      let replies = null;
+      try { replies = JSON.parse(outside.stdout); } catch { /* asserted below */ }
+      http({ surface: 'socket', peer: 'outside', replies });
+      const [notOwner, malformed, snapshot] = Array.isArray(replies) ? replies.slice(1) : [];
+      // No goal exists: the owner path answers a typed refusal (403 without an owner identity, 404 for the unknown goal), never success.
+      ctx.assert('outside-typed-refusal', ['UNAUTHORIZED', 'NOT_FOUND'].includes(notOwner?.code) && [403, 404].includes(notOwner?.details?.status), notOwner);
+      ctx.assert('outside-malformed-invalid', malformed?.code === 'INVALID_REQUEST', malformed);
+      const cliOutside = await ctx.cli(['supervisor', 'request', '--json', envelopeFile], { label: 'supervisor-request-outside' });
+      http({ surface: 'cli', peer: 'outside', code: cliOutside.code, json: cliOutside.json });
+      ctx.assert('outside-cli-typed-denial', cliOutside.code !== 0 && cliOutside.json?.ok === false && [403, 404].includes(cliOutside.json?.status), cliOutside.json);
+
+      // Inside a worker pane: the pane's shell runs the CLI with FERRYX_SESSION_ID removed and a raw socket client.
+      const spawned = await ctx.run('socket-spawn-pane', process.execPath, [client, socket,
+        JSON.stringify({ type: 'registerWorkspace', workspaceId: 'qa-authority', repoRoot: ctx.paths.project }),
+        JSON.stringify({ type: 'spawn', clientRequestId: 'qa-authority-pane', workspaceId: 'qa-authority', worktree: null, cwd: work, cols: 80, rows: 24, shell: '/bin/sh' })], { deadlineMs: 30_000 });
+      let spawnReplies = null;
+      try { spawnReplies = JSON.parse(spawned.stdout); } catch { /* asserted below */ }
+      const sessionId = Array.isArray(spawnReplies) ? spawnReplies[2]?.sessionId : null;
+      if (!sessionId) throw new HarnessError('PANE_SPAWN_FAILED', `could not spawn the worker pane: ${spawned.stdout} ${spawned.stderr}`);
+      const cliOut = join(work, 'pane-cli.json');
+      const sockOut = join(work, 'pane-socket.json');
+      const cliDone = ctx.waitForPath(cliOut, { deadlineMs: 60_000, label: 'pane CLI result' });
+      const sockDone = ctx.waitForPath(sockOut, { deadlineMs: 60_000, label: 'pane socket result' });
+      cliDone.catch(() => {}); sockDone.catch(() => {});
+      const q = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+      const script = [
+        `env -u FERRYX_SESSION_ID ${q(ctx.config.ferryxCli)} supervisor request --json ${q(envelopeFile)} > ${q(cliOut)}.tmp 2>&1; mv ${q(cliOut)}.tmp ${q(cliOut)}`,
+        `${q(process.execPath)} ${q(client)} ${q(socket)} ${q(wire(pause))} ${q(wire(approveAll))} > ${q(sockOut)}.tmp 2>&1; mv ${q(sockOut)}.tmp ${q(sockOut)}`,
+      ].join('; ') + '\n';
+      const typed = await ctx.run('socket-pane-write', process.execPath, [client, socket,
+        JSON.stringify({ type: 'write', sessionId, data: Buffer.from(script).toString('base64') })], { deadlineMs: 30_000 });
+      http({ surface: 'socket', peer: 'runner', step: 'pane-write', stdout: typed.stdout });
+      await cliDone; await sockDone;
+      let paneCli = null; let paneSock = null;
+      try { paneCli = JSON.parse(readFileSync(cliOut, 'utf8')); } catch { /* asserted below */ }
+      try { paneSock = JSON.parse(readFileSync(sockOut, 'utf8')); } catch { /* asserted below */ }
+      http({ surface: 'cli', peer: 'pane', json: paneCli });
+      http({ surface: 'socket', peer: 'pane', replies: paneSock });
+      ctx.assert('pane-cli-forbidden', paneCli?.ok === false && paneCli?.code === 'FORBIDDEN', paneCli);
+      const paneReplies = Array.isArray(paneSock) ? paneSock.slice(1) : [];
+      ctx.assert('pane-socket-forbidden', paneReplies.length === 2 && paneReplies.every((reply) => reply?.code === 'FORBIDDEN'), paneSock);
+
+      // Read-only receipts: no goal or dispatch exists, and the memory root is untouched.
+      const after = await ctx.run('socket-snapshot-after', process.execPath, [client, socket, JSON.stringify({ type: 'supervisorSnapshot' })], { deadlineMs: 30_000 });
+      let afterReplies = null;
+      try { afterReplies = JSON.parse(after.stdout); } catch { /* asserted below */ }
+      const goals = afterReplies?.[1]?.snapshot?.supervisor?.goals;
+      http({ surface: 'socket', peer: 'outside', step: 'snapshot-after', supervisor: afterReplies?.[1]?.snapshot?.supervisor ?? null, before: snapshot?.snapshot?.supervisor ?? null });
+      ctx.assert('zero-goals-after', Array.isArray(goals) && goals.length === 0, { goals });
+      ctx.assert('memory-root-unchanged', JSON.stringify(readdirSync(ctx.paths.memory).sort()) === memoryBefore, { before: memoryBefore });
+    },
+  }),
   memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
   capabilities: planned('12', 'Remove one required RPC capability; auth, quota and provider faults: named degraded cause, no fallback model, workers preserved'),
   legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),

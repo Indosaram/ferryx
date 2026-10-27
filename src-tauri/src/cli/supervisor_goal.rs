@@ -263,7 +263,7 @@ fn run_setup_cli(args: &[String]) -> i32 {
 }
 
 /// How long one goal action may take: an approve waits for the pane to start the turn.
-const GOAL_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+pub(crate) const GOAL_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn take_values(args: &mut Vec<String>, name: &str) -> Result<Vec<String>, UsageError> {
     let mut values = Vec::new();
@@ -478,6 +478,9 @@ pub fn run_supervisor_cli(args: &[String]) -> i32 {
     if matches!(args.get(2).map(String::as_str), Some("submit" | "dispatch")) {
         return super::supervisor_dispatch::run_dispatch_cli(args);
     }
+    if args.get(2).map(String::as_str) == Some("request") {
+        return super::supervisor_request::run_request_cli(args);
+    }
     let (value, code) = match parse_supervisor_cli(args) {
         Err(UsageError(message)) => {
             let (value, _) = failure("INVALID_REQUEST", &message);
@@ -502,6 +505,60 @@ pub fn run_supervisor_cli(args: &[String]) -> i32 {
     };
     println!("{value}");
     code
+}
+
+/// One request to the running daemon after a handshake and a `capability` check, for the
+/// `supervisor request` subcommand. A lost answer to a mutation is OPERATION_OUTCOME_UNKNOWN
+/// and is never sent again.
+pub(crate) async fn exchange_once(
+    capability: &str,
+    request: DaemonRequest,
+    mutates: bool,
+) -> Result<DaemonResponse, (Value, i32)> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let stream = connect_daemon().await?;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+    async fn send<R, W>(reader: &mut BufReader<R>, writer: &mut W, request: &DaemonRequest) -> Result<DaemonResponse, String>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut line = serde_json::to_string(request).map_err(|error| error.to_string())?;
+        line.push('\n');
+        writer.write_all(line.as_bytes()).await.map_err(|error| error.to_string())?;
+        writer.flush().await.map_err(|error| error.to_string())?;
+        let mut response = String::new();
+        if reader.read_line(&mut response).await.map_err(|error| error.to_string())? == 0 {
+            return Err("the daemon closed the connection".into());
+        }
+        serde_json::from_str(response.trim()).map_err(|error| format!("unreadable daemon response: {error}"))
+    }
+    let handshake = DaemonRequest::Handshake {
+        version: DAEMON_PROTOCOL_VERSION,
+        token: crate::daemon::client::read_transport_token(),
+    };
+    match send(&mut reader, &mut write_half, &handshake).await {
+        Ok(DaemonResponse::HandshakeOk { .. }) => {}
+        Ok(DaemonResponse::ProtocolMismatch { .. }) => {
+            return Err(failure("UNSUPPORTED", "the daemon speaks another protocol version"))
+        }
+        Ok(other) => return Err(failure("UNSUPPORTED", &format!("unexpected handshake response: {other:?}"))),
+        Err(message) => return Err(failure("INTERNAL", &message)),
+    }
+    match send(&mut reader, &mut write_half, &DaemonRequest::GetCapabilities).await {
+        Ok(DaemonResponse::CapabilitiesOk { capabilities }) if capabilities.iter().any(|known| known == capability) => {}
+        Ok(DaemonResponse::CapabilitiesOk { .. }) => {
+            return Err(failure("UNSUPPORTED", &format!("this daemon does not advertise {capability}")))
+        }
+        Ok(other) => return Err(failure("INTERNAL", &format!("unexpected capabilities response: {other:?}"))),
+        Err(message) => return Err(failure("INTERNAL", &message)),
+    }
+    match send(&mut reader, &mut write_half, &request).await {
+        Ok(response) => Ok(response),
+        Err(message) if mutates => Err(failure("OPERATION_OUTCOME_UNKNOWN", &message)),
+        Err(message) => Err(failure("INTERNAL", &message)),
+    }
 }
 
 #[cfg(test)]

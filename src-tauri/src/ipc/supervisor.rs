@@ -70,6 +70,33 @@ pub async fn cmd_supervisor_goal(
     goal_from(daemon_client.send_request(DaemonRequest::SupervisorGoal { request }).await?)
 }
 
+fn receipt_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorRequestV1Ok { receipt } => Ok(receipt),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor request response")),
+    }
+}
+
+/// One unified supervisor request envelope; the daemon derives the actor.
+#[tauri::command]
+pub async fn cmd_supervisor_request(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    envelope: serde_json::Value,
+) -> Result<serde_json::Value, IpcError> {
+    receipt_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorRequestV1 { envelope, cli: false })
+            .await?,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +127,19 @@ mod tests {
         let request: SupervisorGoalAction =
             serde_json::from_value(serde_json::json!({"action": "approve", "laneKey": "ledger"})).unwrap();
         assert_eq!(request, SupervisorGoalAction::Approve { lane_key: "ledger".into() });
+    }
+
+    #[test]
+    fn a_supervisor_request_reply_carries_the_receipt_and_a_refusal_keeps_its_details() {
+        let ok = DaemonResponse::SupervisorRequestV1Ok { receipt: serde_json::json!({"goalId": "g", "revision": 2}) };
+        assert_eq!(receipt_from(ok).unwrap()["revision"], 2);
+        let stale = DaemonResponse::Error {
+            message: "goal g revision changed".into(),
+            code: Some("REVISION_CONFLICT".into()),
+            details: Some(serde_json::json!({"code": "REVISION_CONFLICT", "status": 409})),
+        };
+        let error = receipt_from(stale).unwrap_err();
+        assert_ne!(error.code, IpcErrorCode::DaemonUpgradeRequired);
+        assert_eq!(error.details.unwrap()["status"], 409);
     }
 }

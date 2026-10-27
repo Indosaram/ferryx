@@ -6,9 +6,11 @@
 //! `setup` covers installation set-up ([`super::provision_owner`]).
 //! `bound_session` covers an owner-chosen existing pane bound at admission and the read-only
 //! dispatch status reader.
+//! `request` covers the shared request service behind every adapter (todo 13).
 mod admission;
 mod bound_session;
 mod receipts;
+mod request;
 mod schema;
 mod setup;
 mod wakes;

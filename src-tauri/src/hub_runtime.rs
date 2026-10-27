@@ -598,7 +598,13 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         .take(SUPERVISOR_ACTIONS_MAX)
         .collect();
     let Some((hub, running)) = SUPERVISOR_VIEW.get() else {
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions });
+        #[cfg(test)]
+        let test_hub = state.supervisor_test_hub.read().clone();
+        #[cfg(test)]
+        if let Some((pool, _)) = test_hub {
+            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+        }
+        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -610,6 +616,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         "lanes": lanes.unwrap_or_default(),
         "watched": watched.unwrap_or_default(),
         "actions": actions,
+        "supervisor": unified_snapshot(&hub.pool).await,
     })
 }
 
@@ -803,6 +810,29 @@ impl SupervisorEngineError {
     }
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorRequestV1`.
+pub const SUPERVISOR_REQUEST_CAPABILITY: &str = "supervisorRequestV1";
+
+/// Who a supervisor request reaches the shared service as. `Desktop` is the owner's own
+/// desktop or CLI over the owner socket; `Remote` a paired device the gateway authorized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorCaller {
+    Desktop,
+    Cli,
+    Remote { device_id: String },
+}
+
+impl SupervisorCaller {
+    fn adapter(&self) -> ferryx_hub::supervisor::ChannelProvider {
+        use ferryx_hub::supervisor::ChannelProvider;
+        match self {
+            Self::Desktop => ChannelProvider::Desktop,
+            Self::Cli => ChannelProvider::Cli,
+            Self::Remote { .. } => ChannelProvider::Phone,
+        }
+    }
+}
+
 impl From<ferryx_hub::goals::GoalError> for SupervisorEngineError {
     fn from(error: ferryx_hub::goals::GoalError) -> Self {
         match error {
@@ -888,6 +918,113 @@ pub async fn supervisor_engine(
         fields.insert("supervisorIdentities".into(), identities);
     }
     Ok(view)
+}
+
+/// The hub pool and its owner principal for the shared supervisor service, or
+/// SUPERVISOR_UNAVAILABLE (503) when this daemon has no open hub. The owner is the
+/// installation's one supervisor identity: callers here are the owner's own processes or
+/// devices the gateway already authorized, never a body-supplied actor.
+async fn supervisor_service(
+    state: &RemoteGatewayState,
+) -> Result<(ferryx_hub::goals::SqlitePool, Option<String>, Option<Arc<dyn AgentControl>>), ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    #[cfg(test)]
+    let test_hub = state.supervisor_test_hub.read().clone();
+    #[cfg(test)]
+    if let Some((pool, owner)) = test_hub {
+        return Ok((pool, Some(owner), None));
+    }
+    let _ = state;
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return Err(RequestFailure::new(
+            "SUPERVISOR_UNAVAILABLE",
+            "the supervisor hub is not open in this daemon",
+        ));
+    };
+    let owner = ferryx_hub::supervisor::admission::installation_owner(&hub.pool).await.ok();
+    Ok((hub.pool.clone(), owner, Some(Arc::clone(&hub.control))))
+}
+
+/// Serves one supervisor request envelope through the hub's shared service, the same one MCP
+/// `supervisor.request` uses. A mutation tells the Supervisor views to refetch.
+pub async fn supervisor_request(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+    envelope: Value,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    // A malformed envelope is refused before the hub is even consulted.
+    request::parse_envelope(envelope.clone())?;
+    let (pool, owner, control) = supervisor_service(state).await?;
+    let owner = owner.ok_or_else(|| {
+        RequestFailure::new("UNAUTHORIZED", "this installation has no single supervisor owner")
+    })?;
+    let context = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control,
+        memory: ferryx_hub::meta::mhc_supervisor::installed(),
+    };
+    let answer = request::handle(&pool, &context, envelope).await?;
+    let mut payload = json!({ "supervisorRequest": answer.get("action").cloned().unwrap_or(Value::Null) });
+    if let (Some(fields), Some(goal)) = (payload.as_object_mut(), answer.get("goalId")) {
+        fields.insert("goalId".into(), goal.clone());
+    }
+    if let SupervisorCaller::Remote { device_id } = &caller {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("by".into(), json!(format!("remote:{device_id}")));
+        }
+    }
+    crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    Ok(answer)
+}
+
+/// The owner-message provenance of one project after a cursor.
+pub async fn supervisor_conversation(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+    project_id: &str,
+    after: i64,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    let (pool, owner, _) = supervisor_service(state).await?;
+    let owner = owner.ok_or_else(|| {
+        RequestFailure::new("UNAUTHORIZED", "this installation has no single supervisor owner")
+    })?;
+    let context = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control: None,
+        memory: None,
+    };
+    request::conversation(&pool, &context, project_id, after).await
+}
+
+/// Memory receipts: unavailable until the hub reaches native receipt RPCs (todo 15). The hub
+/// state is still checked first, so a closed hub stays SUPERVISOR_UNAVAILABLE.
+pub async fn supervisor_memory(
+    state: &RemoteGatewayState,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    supervisor_service(state).await?;
+    Err(ferryx_hub::supervisor::request::memory_receipts_unavailable())
+}
+
+/// The unified supervisor's part of the snapshot: identity, engine health and every goal's
+/// run state, wait reason, next trigger and revision. Additive to the legacy lane view.
+async fn unified_snapshot(pool: &ferryx_hub::goals::SqlitePool) -> Value {
+    let mut unified = match ferryx_hub::supervisor::request::snapshot(pool).await {
+        Ok(value) => value,
+        Err(error) => json!({ "identity": null, "goals": [], "error": error.to_json() }),
+    };
+    let health = ferryx_hub::meta::mhc_supervisor::installed()
+        .map(|engine| serde_json::to_value(engine.health()).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+    if let Some(fields) = unified.as_object_mut() {
+        fields.insert("health".into(), health);
+    }
+    unified
 }
 
 /// Why a goal action was refused. Each maps to one wire code the CLI turns into an exit code.

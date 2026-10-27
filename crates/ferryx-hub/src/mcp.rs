@@ -13,7 +13,8 @@ use crate::cron::{self, CronJob, CronTarget};
 use crate::error::Result;
 use crate::lanes::runner::LaneRunner;
 use crate::lanes::state::{self, transition, LaneStatus};
-use crate::supervisor::admission::{self, ActorContext, AdoptWork, OwnerChoices, SubmitWork};
+use crate::supervisor::admission;
+use crate::supervisor::request;
 use crate::supervisor::ChannelProvider;
 use crate::tracker::Tracker;
 
@@ -209,7 +210,7 @@ pub(crate) fn tool_list() -> Vec<Value> {
             schema(
                 json!({"requestId": request_id, "projectId": {"type": "string"},
                 "goalId": {"type": "string"}, "expectedRevision": {"type": "integer"},
-                "action": {"type": "string", "enum": ["submit", "message", "adopt", "correct", "pause", "resume", "cancel", "approve", "teach", "forget"]},
+                "action": {"type": "string", "enum": ["submit", "message", "adopt", "correct", "pause", "resume", "cancel", "approve", "teach", "forget", "depend"]},
                 "payload": {"type": "object"}}),
                 &["requestId", "action", "payload"],
             ),
@@ -678,116 +679,31 @@ async fn refuse_supervisor_owned(
     Ok(())
 }
 
-/// The `supervisor.request` envelope. Actor, host grant and channel are server-derived; the
-/// caller's fields only describe the work.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct SupervisorRequest {
-    request_id: String,
-    #[serde(default)]
-    project_id: Option<String>,
-    #[serde(default)]
-    goal_id: Option<String>,
-    #[serde(default)]
-    expected_revision: Option<i64>,
-    action: String,
-    payload: Value,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SubmitPayload {
-    request: String,
-    work: SubmitWork,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MessagePayload {
-    text: String,
-    #[serde(default)]
-    work: Option<SubmitWork>,
-}
-
-fn invalid(message: impl std::fmt::Display) -> String {
-    format!("INVALID_REQUEST: {message}")
-}
-
-/// Fills a work proposal's project from the envelope; a contradiction is refused.
-fn with_project(
-    proposed: &mut Option<String>,
-    envelope: Option<&str>,
-) -> std::result::Result<(), String> {
-    match (proposed.as_deref(), envelope) {
-        (Some(work), Some(envelope)) if work != envelope => Err(invalid(format!(
-            "projectId {envelope} contradicts the work's projectId {work}"
-        ))),
-        (None, Some(envelope)) => {
-            *proposed = Some(envelope.to_owned());
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Serves `supervisor.request`. It only admits: nothing is transmitted from this process,
-/// which has no turn observer. The daemon's dispatcher picks the committed ready intent up.
+/// Serves `supervisor.request` through the shared supervisor request service. The caller is
+/// the installation owner by construction (`ferryx-cli mcp` runs as the owner's own process).
+/// This process has no turn observer and transmits nothing: an admission or correction is
+/// picked up from its durable ready intent by the daemon's dispatcher, and a cancel reports
+/// that the worker stop was not available here.
 async fn supervisor_request(
     context: &McpContext,
     args: &Value,
 ) -> std::result::Result<Value, String> {
-    let request: SupervisorRequest =
-        serde_json::from_value(args.clone()).map_err(invalid)?;
-    if request.goal_id.is_some() || request.expected_revision.is_some() {
-        return Err(invalid(format!(
-            "{} does not take goalId or expectedRevision",
-            request.action
-        )));
-    }
+    let fail = |failure: request::RequestFailure| format!("{}: {}", failure.code, failure.message);
+    // A malformed envelope is refused before the owner is even looked up.
+    request::parse_envelope(args.clone()).map_err(fail)?;
     let owner = admission::installation_owner(&context.pool)
         .await
         .map_err(|error| format!("{}: {error}", error.code()))?;
-    let actor = |source_body: String| ActorContext {
-        principal: owner.clone(),
-        source_adapter: ChannelProvider::Mcp,
-        source_message_id: request.request_id.clone(),
-        source_body,
+    let request_context = request::RequestContext {
+        principal: owner,
+        adapter: ChannelProvider::Mcp,
         channel_binding_id: None,
-        choices: OwnerChoices::default(),
+        control: None,
+        memory: None,
     };
-    let outcome = match request.action.as_str() {
-        "submit" => {
-            let mut payload: SubmitPayload =
-                serde_json::from_value(request.payload.clone()).map_err(invalid)?;
-            with_project(&mut payload.work.project_id, request.project_id.as_deref())?;
-            admission::submit_work(&context.pool, &actor(payload.request), &payload.work).await
-        }
-        "message" => {
-            let mut payload: MessagePayload =
-                serde_json::from_value(request.payload.clone()).map_err(invalid)?;
-            if let Some(work) = payload.work.as_mut() {
-                with_project(&mut work.project_id, request.project_id.as_deref())?;
-            }
-            admission::handle_message(&context.pool, &actor(payload.text), payload.work.as_ref())
-                .await
-        }
-        "adopt" => {
-            let mut payload: AdoptWork =
-                serde_json::from_value(request.payload.clone()).map_err(invalid)?;
-            with_project(&mut payload.project_id, request.project_id.as_deref())?;
-            let body = format!("adopt {}", payload.lane_key);
-            admission::adopt_work(&context.pool, &actor(body), &payload).await
-        }
-        "correct" | "pause" | "resume" | "cancel" | "approve" | "teach" | "forget" => {
-            return Err(format!(
-                "UNSUPPORTED_ACTION: {} is not served by supervisor.request yet",
-                request.action
-            ))
-        }
-        other => return Err(invalid(format!("unknown action {other}"))),
-    }
-    .map_err(|error| format!("{}: {error}", error.code()))?;
-    serde_json::to_value(&outcome).map_err(|error| error.to_string())
+    request::handle(&context.pool, &request_context, args.clone())
+        .await
+        .map_err(fail)
 }
 
 #[cfg(test)]

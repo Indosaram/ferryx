@@ -50,6 +50,8 @@ pub mod supervisor_linux;
 // control channel is used, and the owner is never ended without the user's exact-count consent.
 pub mod update_pending;
 pub mod workspace_service;
+// Todo 13: refuse supervisor mutations from processes inside worker panes.
+pub mod supervisor_peer;
 #[cfg(test)]
 pub mod recovery_consistency_tests;
 

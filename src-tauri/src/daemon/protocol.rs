@@ -863,6 +863,16 @@ pub enum DaemonRequest {
     SupervisorEngine {
         request: SupervisorEngineAction,
     },
+    /// One unified supervisor request envelope `{requestId, projectId?, goalId?,
+    /// expectedRevision?, action, payload}`, served by the hub's shared request service.
+    /// Gated by `supervisorRequestV1`. The actor is server-derived; `cli` only says whether
+    /// the owner's CLI or desktop sent it.
+    #[serde(rename = "supervisorRequestV1", rename_all = "camelCase")]
+    SupervisorRequestV1 {
+        envelope: serde_json::Value,
+        #[serde(default)]
+        cli: bool,
+    },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
     PairedHostList,
@@ -1357,6 +1367,11 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     SupervisorEngineOk {
         snapshot: serde_json::Value,
+    },
+    /// The shared service's receipt for a `SupervisorRequestV1`.
+    #[serde(rename = "supervisorRequestV1Ok", rename_all = "camelCase")]
+    SupervisorRequestV1Ok {
+        receipt: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
     AttachOk {
@@ -2070,6 +2085,35 @@ mod tests {
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorEngineOk""#), "{text}");
         assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorEngineOk { .. }));
+    }
+
+    #[test]
+    fn the_supervisor_request_envelope_round_trips_on_the_daemon_wire() {
+        let envelope = serde_json::json!({"requestId": "r1", "goalId": "g1", "expectedRevision": 3,
+            "action": "pause", "payload": {"reason": "lunch"}});
+        let request = DaemonRequest::SupervisorRequestV1 { envelope: envelope.clone(), cli: true };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire, serde_json::json!({"type": "supervisorRequestV1", "envelope": envelope, "cli": true}));
+        match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
+            DaemonRequest::SupervisorRequestV1 { envelope: decoded, cli } => {
+                assert_eq!(decoded, envelope);
+                assert!(cli);
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        // `cli` defaults to the desktop.
+        let desktop: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorRequestV1", "envelope": {"requestId": "r", "action": "message", "payload": {"text": "hi"}}}
+        ))
+        .unwrap();
+        assert!(matches!(desktop, DaemonRequest::SupervisorRequestV1 { cli: false, .. }));
+        let ok = DaemonResponse::SupervisorRequestV1Ok { receipt: serde_json::json!({"goalId": "g1", "revision": 4}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorRequestV1Ok""#), "{text}");
+        assert!(matches!(
+            serde_json::from_str::<DaemonResponse>(&text).unwrap(),
+            DaemonResponse::SupervisorRequestV1Ok { receipt } if receipt["revision"] == 4
+        ));
     }
 
     #[test]
