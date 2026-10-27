@@ -36,6 +36,7 @@ cargo test "${mode_flags[@]}" --manifest-path src-tauri/Cargo.toml \
   --test native_terminal_input_boundary_contract \
   --test native_terminal_surface_host_contract \
   --test native_terminal_wayland_subsurface_contract \
+  --test platform_build_contract \
   --test rorca_native_contract \
   --test session_persistence_integration \
   --test updater_config_contract \
