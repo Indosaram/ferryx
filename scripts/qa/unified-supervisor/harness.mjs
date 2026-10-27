@@ -13,6 +13,9 @@
 // else is reported (mismatch / argv-changed / unverifiable) and never
 // signalled; only a provably different process (unequal start stamps, or no
 // recorded stamp and a start time outside the spawn window) is released.
+// A child that exits before its start stamp can be read (a fast command against
+// a slow probe) is ledgered as exited-before-stamp from its own exit event, and
+// --cleanup releases such a record without signalling whatever holds the pid now.
 // One run at a time per dataRoot: an exclusive run lock under
 // <dataRoot>/.qa-unified-supervisor refuses a concurrent run (RUN_LOCKED).
 import { spawn } from 'node:child_process';
@@ -53,6 +56,15 @@ const LINE_CAP = 64 * 1024;
 const OUTPUT_CAP_BYTES = 4 * 1024 * 1024;
 const LINEAGE_SLACK_MS = 5_000;
 export const MAX_SOCKET_PATH_BYTES = 100;
+// Windows: the daemon has no AF_UNIX socket and no named pipe; it publishes its
+// loopback TCP port in <runtime>\daemon.port (src-tauri/src/daemon/server.rs,
+// get_socket_path under cfg(not(unix))). The binding limit there is MAX_PATH
+// (260 UTF-16 units including the NUL) for tools without long-path support;
+// 200 leaves headroom for the daemon's other runtime and data files.
+export const MAX_WIN32_ENDPOINT_PATH_CHARS = 200;
+// Opt-in control channel: with UNIFIED_SUPERVISOR_CONTROL=stdin each stdin line
+// "interrupt" counts as one SIGINT (Windows cannot deliver SIGINT to a child).
+export const CONTROL_ENV = 'UNIFIED_SUPERVISOR_CONTROL';
 export const RUN_ID_MAX = 24;
 const RUN_ID_PATTERN = /^qa-[a-z0-9]+-[a-z0-9]+-\d+$/;
 export const DEFAULT_SCENARIO_DEADLINE_MS = 15 * 60_000;
@@ -321,6 +333,11 @@ export function loadConfig(path, context = {}) {
     if (bytes > MAX_SOCKET_PATH_BYTES) {
       throw new HarnessError('CONFIG_INVALID', `dataRoot is too long: the isolated daemon socket path would be ${bytes} bytes (limit ${MAX_SOCKET_PATH_BYTES}); choose a shorter dataRoot`);
     }
+  } else {
+    const endpoint = join(config.dataRoot, 'runs', 'q'.repeat(RUN_ID_MAX), 'runtime', 'daemon.port');
+    if (endpoint.length > MAX_WIN32_ENDPOINT_PATH_CHARS) {
+      throw new HarnessError('CONFIG_INVALID', `dataRoot is too long: the isolated daemon endpoint path (runtime\\daemon.port; the Windows daemon publishes a loopback port, not a socket) would be ${endpoint.length} characters (limit ${MAX_WIN32_ENDPOINT_PATH_CHARS}, headroom under MAX_PATH 260); choose a shorter dataRoot`);
+    }
   }
   for (const key of ['dataRoot', 'memoryRoot']) {
     if (!existsSync(config[key])) continue;
@@ -417,16 +434,21 @@ export class Ledger {
   }
 
   // Open spawn/path records, with the start stamp (and the interpreter-resolved
-  // argv observed at spawn) appended after spawn merged in.
+  // argv observed at spawn) appended after spawn merged in. A spawn that has no
+  // stamp but an exited-before-stamp record carries exitedBeforeStamp: true.
   open() {
     const { records } = this.read();
     const closed = new Set(records.filter((r) => r.type === 'released' || r.type === 'path-released').map((r) => r.key));
     const stamps = new Map(records.filter((r) => r.type === 'stamp' && r.startStamp).map((r) => [r.key, r]));
+    const exitedEarly = new Map(records.filter((r) => r.type === 'exited-before-stamp').map((r) => [r.key, r]));
     return records
       .filter((r) => (r.type === 'spawn' || r.type === 'path') && !closed.has(r.key))
       .map((r) => {
         const s = r.type === 'spawn' && !r.startStamp ? stamps.get(r.key) : null;
-        if (!s) return r;
+        if (!s) {
+          const early = r.type === 'spawn' && !r.startStamp ? exitedEarly.get(r.key) : null;
+          return early ? { ...r, exitedBeforeStamp: true, exitBeforeStamp: early.exit ?? null } : r;
+        }
         return { ...r, startStamp: s.startStamp, observedArgv: r.observedArgv ?? s.observedArgv ?? null, observedCommand: r.observedCommand ?? s.observedCommand ?? null };
       });
   }
@@ -893,14 +915,18 @@ export class Owned {
   }
 
   // `env` is mandatory: callers choose productEnv() or an explicit inheritance.
-  async #spawn(id, executable, args, { cwd, env, graceMs = 3_000, stdin = 'ignore', onLine } = {}) {
+  // `detached` only changes Windows: there a non-detached child sits in libuv's
+  // kill-on-close job object and dies with the runner; POSIX children always get
+  // their own process group.
+  async #spawn(id, executable, args, { cwd, env, graceMs = 3_000, stdin = 'ignore', onLine, detached = false } = {}) {
     if (!isAbsolute(executable)) throw new HarnessError('SPAWN_FAILED', `${id}: executable must be absolute, got ${executable}`);
     if (!env || typeof env !== 'object') throw new HarnessError('SPAWN_FAILED', `${id}: an explicit env is required`);
     const key = `${this.runId}/proc/${safeName(id)}#${++this.counter}`;
     const spawnedAtMs = Date.now();
+    const ownGroup = POSIX || detached === true;
     let child;
     try {
-      child = spawn(executable, args, { cwd, env, detached: POSIX, stdio: [stdin, 'pipe', 'pipe'], windowsHide: true });
+      child = spawn(executable, args, { cwd, env, detached: ownGroup, stdio: [stdin, 'pipe', 'pipe'], windowsHide: true });
     } catch (error) {
       throw new HarnessError('SPAWN_FAILED', `${id}: ${error?.message ?? error}`);
     }
@@ -926,7 +952,7 @@ export class Owned {
     // Owned from this instant: teardown sees the handle even while the probe below runs.
     handle.record = {
       type: 'spawn', key, runId: this.runId, id, pid: child.pid, executable, args: [...args], cwd: cwd ?? process.cwd(),
-      detached: POSIX, graceMs, spawnedAtMs, startStamp: null, runnerPid: process.pid, runnerStartStamp: this.runnerStamp,
+      detached: ownGroup, graceMs, spawnedAtMs, startStamp: null, runnerPid: process.pid, runnerStartStamp: this.runnerStamp,
     };
     this.handles.push(handle);
     this.ledger.append(handle.record);
@@ -945,6 +971,18 @@ export class Owned {
         handle.record.observedArgv = stampRecord.observedArgv ?? null;
         handle.record.observedCommand = stampRecord.observedCommand ?? null;
       }
+      this.ledger.append(stampRecord);
+      this.evidence.appendJsonl('owned.jsonl', stampRecord);
+    } else {
+      // No stamp: a fast command can exit before a slow probe (CIM on Windows, ps
+      // on darwin) reads it. Only this child's own exit event proves that; then
+      // the ledger says exited-before-stamp. Anything else is ledgered as a failed
+      // stamp, never left silently unstamped.
+      const exit = probe.state === 'gone' ? await withDeadline(handle.exited, MEMBER_GONE_MS, () => null) : null;
+      const stampRecord = exit
+        ? { type: 'exited-before-stamp', key, startStamp: null, probe: probe.state, exit: { code: exit.code, signal: exit.signal, at: exit.at } }
+        : { type: 'stamp-failed', key, startStamp: null, probe: probe.state, reason: probe.reason ?? null };
+      if (exit) handle.record.exitedBeforeStamp = true;
       this.ledger.append(stampRecord);
       this.evidence.appendJsonl('owned.jsonl', stampRecord);
     }
@@ -1139,6 +1177,15 @@ export async function reclaimProcess(record, { ledger, forceOwner = false }) {
       return entry;
     }
   }
+  if (record.exitedBeforeStamp) {
+    // The owning runner saw this pid exit through its own child handle before a
+    // start stamp could be read: whatever holds the pid now is another process.
+    entry.status = 'already-gone';
+    entry.identity = { verdict: 'gone', reason: 'exited-before-stamp (observed by the owning runner\'s child handle)' };
+    entry.ok = true;
+    ledger.append({ type: 'released', key: record.key, reason: 'cleanup:exited-before-stamp' });
+    return entry;
+  }
   const probe = await probeProcess(record.pid);
   entry.identity = identityVerdict(record, probe);
   if (entry.identity.verdict === 'gone' || entry.identity.verdict === 'mismatch') {
@@ -1205,6 +1252,7 @@ export async function preflightOwnedState(configInfo) {
   const ledger = Ledger.forDataRoot(configInfo.config.dataRoot);
   const stale = [];
   for (const record of ledger.open().filter((r) => r.type === 'spawn')) {
+    if (record.exitedBeforeStamp) continue;
     if (record.runnerPid) {
       const runner = identityVerdict({ pid: record.runnerPid, startStamp: record.runnerStartStamp ?? null }, await probeProcess(record.runnerPid));
       if (runner.verdict === 'match') continue;
@@ -1546,11 +1594,15 @@ function makeContext({ name, runId, configInfo, evidence, journal, owned, signal
       const runtimeDir = join(dataRoot.path, 'runtime');
       mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
       let readiness = null;
+      const endpoint = join(runtimeDir, POSIX ? 'daemon.sock' : 'daemon.port');
+      if (POSIX ? Buffer.byteLength(endpoint) > MAX_SOCKET_PATH_BYTES : endpoint.length > MAX_WIN32_ENDPOINT_PATH_CHARS) {
+        throw new HarnessError('CONFIG_INVALID', POSIX
+          ? `daemon socket path ${endpoint} exceeds ${MAX_SOCKET_PATH_BYTES} bytes`
+          : `daemon endpoint path ${endpoint} exceeds ${MAX_WIN32_ENDPOINT_PATH_CHARS} characters`);
+      }
       if (!ready) {
         if (!POSIX) throw new HarnessError('DAEMON_READINESS_UNDEFINED', 'Windows daemon readiness needs a scenario-supplied ready(ctx, handle) barrier');
-        const socket = join(runtimeDir, 'daemon.sock');
-        if (Buffer.byteLength(socket) > MAX_SOCKET_PATH_BYTES) throw new HarnessError('CONFIG_INVALID', `daemon socket path ${socket} exceeds ${MAX_SOCKET_PATH_BYTES} bytes`);
-        readiness = waitForPath(socket, { deadlineMs, signal, label: 'daemon socket' });
+        readiness = waitForPath(endpoint, { deadlineMs, signal, label: 'daemon socket' });
         readiness.catch(() => { /* raced below */ });
       }
       const cursor = journal.cursor();

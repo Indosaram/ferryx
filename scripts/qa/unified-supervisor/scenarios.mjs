@@ -39,9 +39,9 @@ export const SCENARIOS = Object.freeze({
   usage: planned('15', 'Replay the same reports before/after the scheduling change: no idle calls, stable prefix hash, every call has a cause'),
 });
 
-async function startSleeper(ctx, id, flags, graceMs, { extraEnv = {}, onLine } = {}) {
+async function startSleeper(ctx, id, flags, graceMs, { extraEnv = {}, onLine, detached = false } = {}) {
   const cursor = ctx.journal.cursor();
-  const handle = await ctx.spawn(id, process.execPath, [SLEEPER, ...flags], { graceMs, env: ctx.productEnv(extraEnv), onLine });
+  const handle = await ctx.spawn(id, process.execPath, [SLEEPER, ...flags], { graceMs, env: ctx.productEnv(extraEnv), onLine, detached });
   const ready = await ctx.waitFor(`${id} ready line`, (e) => e.source === id && e.kind === 'stdout' && e.json?.ready === true, { after: cursor, deadlineMs: 20_000 });
   return { handle, ready: ready.json };
 }
@@ -123,9 +123,11 @@ export const SELF_TEST_SCENARIOS = Object.freeze({
   // Waits until the self-test parent SIGKILLs this runner, leaving orphans for
   // --cleanup to reclaim by recorded identity: a sleeper and (POSIX) a #! script
   // whose kernel argv starts with the interpreter rather than the launched path.
+  // The sleeper is detached: on Windows a non-detached child is in libuv's
+  // kill-on-close job and would die with the runner instead of being orphaned.
   '__selftest-orphan': selfTest('leave a ledgered orphan when the runner is SIGKILLed', 180_000, {
     async run(ctx) {
-      const { ready } = await startSleeper(ctx, 'sleeper', [], 3_000);
+      const { ready } = await startSleeper(ctx, 'sleeper', [], 3_000, { detached: true });
       let scriptPid = null;
       if (process.platform !== 'win32') {
         const script = join(ctx.paths.data, 'worker.sh');
@@ -154,13 +156,18 @@ export const SELF_TEST_SCENARIOS = Object.freeze({
     requiredAssertions: ['first-required', 'second-required'],
     async run(ctx) { ctx.assert('first-required', true); },
   }),
-  // An assertion that arrives after the scenario settled (during teardown).
+  // An assertion that arrives after the scenario settled (during teardown). Two
+  // triggers: the ignoredSignal line (POSIX only; Windows never delivers SIGTERM)
+  // and the sleeper's exit event, which can only happen during teardown.
   '__selftest-late-assertion': selfTest('records an assertion during teardown', 60_000, {
     async run(ctx) {
-      const onLine = (_kind, _line, json) => {
-        if (!json?.ignoredSignal) return;
+      const lateAssert = () => {
         try { ctx.assert('late-assertion-after-settle', false); } catch { /* LATE_ASSERTION is the expected refusal */ }
       };
+      const onLine = (_kind, _line, json) => { if (json?.ignoredSignal) lateAssert(); };
+      const cursor = ctx.journal.cursor();
+      ctx.waitFor('sleeper exit during teardown', (e) => e.source === 'sleeper' && e.kind === 'exit', { after: cursor, deadlineMs: 60_000 })
+        .then(lateAssert, () => { /* aborted or never exited: the run already fails another way */ });
       await startSleeper(ctx, 'sleeper', ['--ignore-sigterm'], 2_000, { onLine });
       ctx.assert('sleeper-ready', true);
     },

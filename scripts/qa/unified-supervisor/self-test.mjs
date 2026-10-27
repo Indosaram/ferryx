@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, st
 import { homedir, tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import {
-  collectReceipts, errorInfo, EXIT, Evidence, identityVerdict, isSha256, Journal, Ledger, Owned, PLATFORM, POSIX, probeProcess,
+  collectReceipts, CONTROL_ENV, errorInfo, EXIT, Evidence, identityVerdict, isSha256, Journal, Ledger, Owned, PLATFORM, POSIX, probeProcess,
   reapMember, sameStartStamp, SCHEMA, sha256, withDeadline,
 } from './harness.mjs';
 import { SCENARIOS, SLEEPER } from './scenarios.mjs';
@@ -43,6 +43,16 @@ function signalChild(handle, signal, { group = false } = {}) {
     if (group && POSIX) process.kill(-handle.pid, signal);
     else handle.child.kill(signal);
   } catch { /* exited between the check and the signal */ }
+}
+
+// Interrupt one owned child runner. POSIX: SIGINT to its pid or (group) its
+// whole process group. Windows cannot deliver SIGINT to a child
+// (child.kill('SIGINT') is TerminateProcess), so the runner's stdin control
+// channel carries the interrupt there; the child must run with control: true.
+function interruptChild(handle, { group = false } = {}) {
+  if (handle.exitInfo) return;
+  if (POSIX) { signalChild(handle, 'SIGINT', { group }); return; }
+  try { handle.child.stdin?.write('interrupt\n'); } catch { /* exited between the check and the write */ }
 }
 
 function scanForPlants(root, plants) {
@@ -101,7 +111,9 @@ function makeFixture(evidence, nonce) {
     ['config-production-data-root', write('config.production-data-root.json', { ...good, dataRoot: join(homedir(), '.ferryx') }), 'PRODUCTION_PATH_REFUSED'],
     ['config-home-memory-root', write('config.home-memory-root.json', { ...good, memoryRoot: homedir() }), 'PRODUCTION_PATH_REFUSED'],
     ['config-hub-sqlite', write('config.hub-sqlite.json', { ...good, projectRoot: join(stateRoot, 'hub', 'hub.sqlite') }), 'PRODUCTION_PATH_REFUSED'],
-    ['config-socket-too-long', write('config.socket-too-long.json', { ...good, dataRoot: join(stateRoot, 'd'.repeat(90)) }), 'CONFIG_INVALID', 'daemon socket'],
+    // POSIX: the daemon socket's sun_path limit. Windows: the daemon.port endpoint under the MAX_PATH budget.
+    ['config-socket-too-long', write('config.socket-too-long.json', { ...good, dataRoot: POSIX ? join(stateRoot, 'd'.repeat(90)) : join(stateRoot, 'd'.repeat(100), 'd'.repeat(100)) }),
+      'CONFIG_INVALID', POSIX ? 'daemon socket' : 'daemon endpoint'],
     ['config-foreign-data-root', write('config.foreign-data-root.json', { ...good, dataRoot: foreignRoot }), 'FOREIGN_STATE_ROOT'],
   ];
   const uid = process.getuid?.();
@@ -128,10 +140,13 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
     evidence.log(`check ${name} ${entry.ok ? 'ok' : 'FAILED'}`);
     return entry.ok;
   };
-  const runChild = async (label, args, { env = {}, onArmed } = {}) => {
+  const runChild = async (label, args, { env = {}, onArmed, control = false } = {}) => {
     const id = `child-${label}`;
     const cursor = journal.cursor();
-    const handle = await owned.spawn(id, process.execPath, [script, ...args], { env: { ...process.env, [NONCE_ENV]: nonce, ...env }, graceMs: 20_000, cwd: repoRoot });
+    const childEnv = { ...process.env, [NONCE_ENV]: nonce, ...env };
+    if (control) childEnv[CONTROL_ENV] = 'stdin'; else delete childEnv[CONTROL_ENV];
+    const handle = await owned.spawn(id, process.execPath, [script, ...args], { env: childEnv, graceMs: 20_000, cwd: repoRoot, stdin: control ? 'pipe' : 'ignore' });
+    handle.child.stdin?.on('error', () => { /* the exit event decides */ });
     let armed = null;
     if (onArmed) {
       const event = await journal.waitFor(`${label} armed marker`, (e) => e.source === id && e.kind === 'stdout' && e.json?.selftest === 'armed', { after: cursor, deadlineMs: ARM_DEADLINE_MS, signal: interrupts.signal });
@@ -305,16 +320,17 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
     await step('interrupt', async () => {
       const dir = childDir('interrupt');
       const result = await runChild('interrupt', scenarioArgs('__selftest-hang', dir), {
+        control: !POSIX,
         env: { UNIFIED_SUPERVISOR_SELFTEST_SLEEPER_IGNORE_TERM: '1', UNIFIED_SUPERVISOR_SELFTEST_HANG_MS: '120000' },
         onArmed: async (_armed, handle, cursor) => {
           const cleaning = journal.waitFor('interrupt child cleanup phase', (e) => e.source === handle.id && e.json?.unifiedSupervisor?.phase === 'cleanup',
             { after: cursor, deadlineMs: ARM_DEADLINE_MS, signal: interrupts.signal });
           cleaning.catch(() => { /* awaited below */ });
-          signalChild(handle, 'SIGINT');
+          interruptChild(handle);
           await cleaning;
-          // Ctrl-C again, to the whole process group, while teardown is under way.
-          signalChild(handle, 'SIGINT', { group: true });
-          signalChild(handle, 'SIGINT', { group: true });
+          // Ctrl-C again (POSIX: to the whole process group) while teardown is under way.
+          interruptChild(handle, { group: true });
+          interruptChild(handle, { group: true });
         },
       });
       const { assertions, cleanup } = readChild(dir);
@@ -398,8 +414,11 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
         // Verified identity, but its owning runner (this self-test parent) is alive.
         liveOwner: { ...base, key: `forged-${runId}/proc/liveowner#5`, id: 'forged-liveowner', args: [SLEEPER], startStamp: realStamp, spawnedAtMs: foreign.record.spawnedAtMs,
           runnerPid: process.pid, runnerStartStamp: owned.runnerStamp },
+        // Its owning runner saw this pid exit before a stamp could be read; the live process now at that pid is another one.
+        exitedEarly: { ...base, key: `forged-${runId}/proc/exitedearly#6`, id: 'forged-exitedearly', args: [SLEEPER], startStamp: null, spawnedAtMs: foreign.record.spawnedAtMs },
       };
       for (const value of Object.values(forged)) fx.ledger.append(value);
+      fx.ledger.append({ type: 'exited-before-stamp', key: forged.exitedEarly.key, startStamp: null, probe: 'gone', exit: { code: 0, signal: null, at: new Date().toISOString() } });
       const decoyBase = join(fx.stateRoot, 'decoy');
       const decoy = { type: 'path', key: 'forged-decoy/path/data', runId: 'qa-decoy-x-1', label: 'decoy', base: decoyBase, path: join(decoyBase, 'runs', 'qa-decoy-x-1') };
       mkdirSync(decoy.path, { recursive: true });
@@ -408,7 +427,8 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
 
       const staleDir = childDir('stale-preflight');
       const stale = await runChild('stale-preflight', scenarioArgs('__selftest-no-assertions', staleDir));
-      check('stale-owned-state-refused-before-run', stale.code === EXIT.USAGE && stale.lines.join('\n').includes('STALE_OWNED_STATE') && !existsSync(staleDir), { code: stale.code });
+      check('stale-owned-state-refused-before-run', stale.code === EXIT.USAGE && stale.lines.join('\n').includes('STALE_OWNED_STATE') && !existsSync(staleDir)
+        && !stale.lines.join('\n').includes(forged.exitedEarly.key), { code: stale.code });
 
       for (const locked of fx.lockedDirs) { try { chmodSync(locked, 0o700); } catch { /* already removed */ } }
       const firstDir = childDir('cleanup-1');
@@ -434,6 +454,9 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
       check('cleanup-never-signals-without-both-start-stamps', recentEntry?.status === 'unverifiable' && recentEntry.killed === false && recentEntry.ok === false, { recentEntry });
       check('cleanup-releases-pid-started-outside-spawn-window', oldEntry?.status === 'identity-mismatch' && oldEntry.killed === false, { oldEntry });
       check('cleanup-respects-live-owner-runner', ownerEntry?.status === 'owner-runner-alive' && ownerEntry.killed === false && ownerEntry.ok === false, { ownerEntry });
+      const earlyEntry = entryFor(forged.exitedEarly.key);
+      check('cleanup-releases-exited-before-stamp-record-untouched', earlyEntry?.status === 'already-gone' && earlyEntry.killed === false
+        && (earlyEntry.signals?.length ?? 1) === 0 && earlyEntry.ok === true && foreign.exitInfo === null, { earlyEntry });
       check('foreign-process-survives-cleanup', foreign.exitInfo === null && identityVerdict(foreign.record, await probeProcess(foreign.pid)).verdict === 'match', null);
       const decoyEntry = entryFor(decoy.key);
       const pathEntries = (report?.entries ?? []).filter((entry) => entry.kind === 'path' && entry.key !== decoy.key);
@@ -476,11 +499,15 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
     await step('ledger-audit', async () => {
       const { records, invalidLines } = fx.ledger.read();
       const open = fx.ledger.open();
-      const stamped = new Set(records.filter((r) => r.type === 'stamp').map((r) => r.key));
+      const stamped = new Set(records.filter((r) => r.type === 'stamp' && r.startStamp).map((r) => r.key));
+      // A spawn without a stamp is honest only when its own exit event was ledgered before the probe could read it.
+      const exitedEarly = new Set(records.filter((r) => r.type === 'exited-before-stamp' && r.exit && (r.exit.code !== null || r.exit.signal !== null)).map((r) => r.key));
       const spawns = records.filter((r) => r.type === 'spawn' && !String(r.key).startsWith('forged-'));
+      const unstamped = spawns.filter((r) => !stamped.has(r.key) && !exitedEarly.has(r.key));
       check('fixture-ledger-fully-released', invalidLines === 0 && open.length === 0, { invalidLines, open });
-      check('every-spawn-recorded-before-probe-then-stamped', spawns.length > 0 && spawns.every((r) => r.startStamp === null && stamped.has(r.key)),
-        { spawns: spawns.length, unstamped: spawns.filter((r) => !stamped.has(r.key)).map((r) => r.key) });
+      check('every-spawn-recorded-before-probe-then-stamped', spawns.length > 0 && spawns.some((r) => stamped.has(r.key))
+        && spawns.every((r) => r.startStamp === null) && unstamped.length === 0,
+      { spawns: spawns.length, unstamped: unstamped.map((r) => r.key), exitedBeforeStamp: spawns.filter((r) => exitedEarly.has(r.key)).map((r) => r.key) });
     }, { sweep: false });
   } catch (error) {
     if (error?.code !== 'INTERRUPTED') check('self-test-completed', false, errorInfo(error));

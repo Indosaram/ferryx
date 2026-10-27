@@ -22,13 +22,16 @@
 // (STALE_OWNED_STATE: run --cleanup first); a second concurrent run on the same
 // dataRoot is refused (RUN_LOCKED); every spawned process is recorded
 // and torn down by recorded identity; cleanup.json is written on interrupts and
-// on uncaught faults. Config fields: see unified-supervisor/config.schema.json.
+// on uncaught faults. Interrupts: SIGINT/SIGTERM/SIGHUP (and Ctrl-Break, SIGBREAK,
+// on Windows); with UNIFIED_SUPERVISOR_CONTROL=stdin each stdin line "interrupt"
+// counts as one SIGINT, which is how a supervising process interrupts a run on
+// Windows. Config fields: see unified-supervisor/config.schema.json.
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  acquireRunLock, aggregateExit, cleanupMode, collectReceipts, errorInfo, EXIT, Evidence, exitCodeForError, finalExitCode, HarnessError,
-  isInside, loadConfig, preflightOwnedState, probeProcess, redact, redactValue, releaseRunLock, runScenario, SCHEMA, withDeadline,
+  acquireRunLock, aggregateExit, cleanupMode, collectReceipts, CONTROL_ENV, errorInfo, EXIT, Evidence, exitCodeForError, finalExitCode, HarnessError,
+  isInside, loadConfig, PLATFORM, preflightOwnedState, probeProcess, redact, redactValue, releaseRunLock, runScenario, SCHEMA, withDeadline,
 } from './unified-supervisor/harness.mjs';
 import { resolveScenario, SCENARIOS } from './unified-supervisor/scenarios.mjs';
 import { NONCE_ENV, NONCE_FILE, selfTest } from './unified-supervisor/self-test.mjs';
@@ -99,15 +102,33 @@ function assertSelfTestChild(opts) {
 function installProcessHandlers() {
   const controller = new AbortController();
   const state = { signal: controller.signal, count: 0, duringCleanup: 0, phase: 'run', received: [], faults: [], faultListeners: new Set() };
-  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  const interrupt = (name) => {
+    state.count += 1;
+    state.received.push({ signal: name, phase: state.phase, at: new Date().toISOString() });
+    if (state.phase === 'cleanup') state.duringCleanup += 1;
+    if (!controller.signal.aborted) controller.abort(new HarnessError('INTERRUPTED', `received ${name}`));
+  };
+  for (const name of ['SIGINT', 'SIGTERM', 'SIGHUP', ...(PLATFORM === 'win32' ? ['SIGBREAK'] : [])]) {
     try {
-      process.on(name, () => {
-        state.count += 1;
-        state.received.push({ signal: name, phase: state.phase, at: new Date().toISOString() });
-        if (state.phase === 'cleanup') state.duringCleanup += 1;
-        if (!controller.signal.aborted) controller.abort(new HarnessError('INTERRUPTED', `received ${name}`));
-      });
+      process.on(name, () => interrupt(name));
     } catch { /* signal unsupported on this platform */ }
+  }
+  // Opt-in control channel. On Windows a parent cannot deliver SIGINT to a child
+  // (child.kill('SIGINT') is TerminateProcess), so a supervising process writes
+  // "interrupt" lines instead; each one is handled exactly like SIGINT.
+  if (process.env[CONTROL_ENV] === 'stdin') {
+    let buffer = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      buffer += chunk;
+      for (let index = buffer.indexOf('\n'); index >= 0; index = buffer.indexOf('\n')) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (line === 'interrupt') interrupt('control:interrupt');
+      }
+      if (buffer.length > 4096) buffer = '';
+    });
+    process.stdin.on('error', () => { /* the channel is optional; signals still work */ });
   }
   // A fault aborts the active run as HARNESS_ERROR; teardown still runs and cleanup.json records it.
   const onFault = (kind) => (reason) => {
