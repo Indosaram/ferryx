@@ -452,7 +452,7 @@ impl IdleLedger {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtySettle {
     /// The reading ended the live run: its settled dispatch.
-    Settled(Dispatch),
+    Settled(Box<Dispatch>),
     /// No started run is bound to the pane, or the reading is not newer than its start.
     Ignored,
     /// The live run started under another observer epoch (the daemon restarted since), so the
@@ -501,5 +501,5 @@ pub async fn record_pty_settle(
     };
     record_receipt(pool, &request_id, generation, &settled)
         .await
-        .map(PtySettle::Settled)
+        .map(|dispatch| PtySettle::Settled(Box::new(dispatch)))
 }

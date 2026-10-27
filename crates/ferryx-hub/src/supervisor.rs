@@ -2500,7 +2500,7 @@ pub async fn record_receipt(
     match apply_receipt(&mut tx, request_id, generation, receipt).await? {
         AppliedReceipt::Recorded(dispatch) => {
             tx.commit().await?;
-            Ok(dispatch)
+            Ok(*dispatch)
         }
         // The older dispatch's evidence is kept; the receipt itself is refused.
         AppliedReceipt::EvidenceOnly(error) => {
@@ -2524,7 +2524,7 @@ fn validate_receipt(receipt: &Receipt) -> Result<(), SupervisorError> {
 /// What [`apply_receipt`] wrote inside the caller's transaction.
 enum AppliedReceipt {
     /// The receipt is recorded, or was already.
-    Recorded(Dispatch),
+    Recorded(Box<Dispatch>),
     /// A late start or settle of an older dispatch: only its evidence was written, and the
     /// receipt itself is refused with this error.
     EvidenceOnly(SupervisorError),
@@ -2560,7 +2560,7 @@ async fn apply_receipt(
             Receipt::Accepted => true,
         };
         if same {
-            return Ok(AppliedReceipt::Recorded(dispatch));
+            return Ok(AppliedReceipt::Recorded(Box::new(dispatch)));
         }
     }
     if !receipt.allowed_from().contains(&dispatch.state) {
@@ -2714,7 +2714,7 @@ async fn apply_receipt(
             updated.uncertain_at = Some(now);
         }
     }
-    Ok(AppliedReceipt::Recorded(updated))
+    Ok(AppliedReceipt::Recorded(Box::new(updated)))
 }
 
 /// Records a causal start in one transaction: accepted (unless already recorded), started
@@ -2746,7 +2746,7 @@ pub async fn record_start(
         }
     }
     let dispatch = match apply_receipt(&mut tx, request_id, generation, &started).await? {
-        AppliedReceipt::Recorded(dispatch) => dispatch,
+        AppliedReceipt::Recorded(dispatch) => *dispatch,
         AppliedReceipt::EvidenceOnly(error) => return Err(error),
     };
     let goal = require_goal(&mut tx, &dispatch.goal_id).await?;
