@@ -366,12 +366,14 @@ impl Dispatcher {
             let Ok(dispatch) = super::dispatch_from_row(row) else {
                 continue;
             };
-            let (Some(run_id), Some(session_id)) =
-                (dispatch.run_id.clone(), dispatch.provider_session_id.clone())
-            else {
+            let (Some(run_id), Some(session_id)) = (
+                dispatch.run_id.clone(),
+                dispatch.provider_session_id.clone(),
+            ) else {
                 continue;
             };
-            let Ok(Some(binding)) = execution_binding_of(&self.pool, &dispatch.goal_id).await else {
+            let Ok(Some(binding)) = execution_binding_of(&self.pool, &dispatch.goal_id).await
+            else {
                 continue;
             };
             let run = StartReceipt {
@@ -401,9 +403,8 @@ impl Dispatcher {
             if panes.iter().any(|pane| pane == &session_id) {
                 continue;
             }
-            let reason = format!(
-                "pane {session_id} is not a live session of this daemon after the restart"
-            );
+            let reason =
+                format!("pane {session_id} is not a live session of this daemon after the restart");
             hold_unobserved(
                 &self.pool,
                 &dispatch.goal_id,
