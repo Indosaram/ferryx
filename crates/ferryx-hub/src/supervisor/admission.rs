@@ -3,9 +3,16 @@
 //!
 //! The actor ([`ActorContext`]) comes from the authenticated adapter and never from model
 //! arguments. The model's [`SubmitWork`] proposal is untrusted. It may narrow the work or pick
-//! among the owner's own projects and hosts, but it can never widen the grant. Operations
-//! beyond [`OperationClass::BASELINE`] need an explicit owner choice, and asking for more holds
-//! the goal in `awaiting_owner` instead of inventing permission.
+//! among the owner's own projects and hosts, but it can never widen the grant. The grant is
+//! what the request declares, limited to [`OperationClass::BASELINE`] plus the owner's explicit
+//! choices: an operation the request did not declare is never granted (an empty declaration is
+//! read-only), and a declared operation outside that set holds the goal in `awaiting_owner`
+//! instead of inventing permission. The grant is persisted with the goal
+//! (`supervisor_goals.operation_grant`) and read back from there.
+//!
+//! A replay of an admitted source message is answered from its dedupe row before anything
+//! else is resolved, so it returns the existing goal even when the owner's projects or hosts
+//! changed since.
 //!
 //! Admission is the store's single transaction ([`admit_request`]). The acknowledgment is
 //! built only after commit, from the persisted goal, so a model can never claim that work was
@@ -18,16 +25,21 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+use super::dispatcher::{OWNER_APPROVAL_REQUIRED, TURN_LIMIT};
 use super::{
-    admit_request, goal_of, identity_of, transition_goal, AdmissionReceipt, AdmitRequest,
-    ChannelProvider, ExecutionKind, ExecutionTarget, RunState, SupervisorError,
+    admit_request, goal_of, identity_of, replayed_admission, transition_goal, AdmissionReceipt,
+    AdmitRequest, ChannelProvider, ExecutionKind, ExecutionTarget, RunState, SupervisorError,
     SupervisorIdentity, DEFAULT_TURN_LIMIT, LANE_KEY_PREFIX,
 };
 use crate::goals::contract::{contract_of, RequirementSpec};
-use crate::goals::types::{GoalError, GoalMode};
+use crate::goals::types::{GoalError, GoalMode, ProposalState};
 
 /// `state_detail` prefix of a goal admitted on hold because its scope needs the owner.
 pub const SCOPE_NEEDS_OWNER: &str = "SCOPE_NEEDS_OWNER";
+/// Adoption refused: the legacy lane still has a worker attached or a legacy turn in flight.
+pub const LEGACY_LANE_LIVE: &str = "LEGACY_LANE_LIVE";
+/// Adoption refused: the legacy lane's goal loop is off, so it carries no autonomy to keep.
+pub const LEGACY_GOAL_OFF: &str = "LEGACY_GOAL_OFF";
 
 /// What a worker may do under a grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -117,7 +129,9 @@ pub struct SubmitWork {
     pub requirements: Vec<RequirementSpec>,
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Operations the work needs. Anything outside the grant holds the goal for the owner.
+    /// Operations the work needs. Only these can be granted, so an empty list is a read-only
+    /// request (no edit, test or commit). One outside the baseline and the owner's choices
+    /// holds the goal for the owner.
     #[serde(default)]
     pub operations: Vec<OperationClass>,
     /// May lower the continuation budget, never raise it.
@@ -153,8 +167,9 @@ pub struct AdmittedWork {
     pub mode: GoalMode,
     pub turn_limit: u32,
     pub turns_remaining: u32,
-    /// The operations granted by this admission. Unknown (`None`) on a replay.
-    pub grant: Option<Vec<OperationClass>>,
+    /// The operations the goal was granted, read back from the persisted goal (also on a
+    /// replay).
+    pub grant: Vec<OperationClass>,
     /// Generated from the persisted rows, never from model text.
     pub acknowledgment: String,
 }
@@ -162,7 +177,7 @@ pub struct AdmittedWork {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum SubmitOutcome {
-    /// Persisted and `ready`: the daemon dispatcher starts it with full continuation.
+    /// Persisted and `ready`: the daemon dispatcher starts its first turn.
     Admitted(Box<AdmittedWork>),
     /// Persisted on hold: its scope needs the owner, and nothing is sent to a worker.
     AwaitingOwner(Box<AdmittedWork>),
@@ -177,6 +192,9 @@ pub enum AdmissionError {
     /// The sender is not the supervisor's owner (HTTP 403).
     #[error("{0}")]
     Unauthorized(String),
+    /// Refused with a typed code, e.g. [`LEGACY_LANE_LIVE`]. Nothing was persisted.
+    #[error("{message}")]
+    Refused { code: &'static str, message: String },
     #[error(transparent)]
     Store(#[from] SupervisorError),
 }
@@ -185,6 +203,7 @@ impl AdmissionError {
     pub fn code(&self) -> &'static str {
         match self {
             AdmissionError::Unauthorized(_) => "UNAUTHORIZED",
+            AdmissionError::Refused { code, .. } => *code,
             AdmissionError::Store(error) => error.code(),
         }
     }
@@ -216,8 +235,9 @@ struct Scope {
     kind: ExecutionKind,
     cwd: String,
     turn_limit: u32,
+    /// What the request declared, limited to the baseline and the owner's choices.
     grant: Vec<OperationClass>,
-    /// Why the owner must decide before anything dispatches. Empty means full continuation.
+    /// Why the owner must decide before anything dispatches. Empty means no scope hold.
     holds: Vec<String>,
 }
 
@@ -269,6 +289,10 @@ async fn authenticate(
 /// True for a single-sentence question such as "What can you do?". A polite request phrased
 /// as a question ("Can you fix the build?") is not one, and neither is a question followed
 /// by an instruction.
+///
+/// Defense in depth only, behind the model's typed `submit_work` call: the heuristic is
+/// English-only, so a question in another language relies on the model not submitting it. It
+/// fails safe: a false positive drops a request as conversation and never launches anything.
 pub fn is_ordinary_question(body: &str) -> bool {
     let text = body.trim();
     let Some(question) = text.strip_suffix('?') else {
@@ -315,11 +339,11 @@ pub async fn handle_message(
 }
 
 /// Admits one owner execution request. A natural-language request within the baseline grant
-/// becomes a `ready` goal with full continuation (turn budget [`DEFAULT_TURN_LIMIT`] unless the
-/// owner chose another). A request whose scope exceeds the grant is persisted on hold in
-/// `awaiting_owner`. An ordinary question, or a scope the owner must pick first, persists
-/// nothing. A replay of the same source message returns the same goal, and a changed body is
-/// `REQUEST_CONFLICT`, never a second launch.
+/// becomes a `ready` goal in `full` mode (turn budget [`DEFAULT_TURN_LIMIT`] unless the owner
+/// chose another), granted only the operations it declared. A request whose scope exceeds the
+/// grant is persisted on hold in `awaiting_owner`. An ordinary question, or a scope the owner
+/// must pick first, persists nothing. A replay of the same source message returns the same
+/// goal, and a changed body is `REQUEST_CONFLICT`, never a second launch.
 pub async fn submit_work(
     pool: &SqlitePool,
     actor: &ActorContext,
@@ -336,11 +360,18 @@ pub async fn submit_work(
         message_id: actor.source_message_id.clone(),
         body: &actor.source_body,
     };
-    admit_scoped(pool, &identity, actor, &source, work).await
+    admit_scoped(pool, &identity, actor, &source, work, None).await
 }
 
 /// Explicitly adopts one legacy lane as a new supervisor goal. The legacy lane itself is left
 /// as history. A lane is adopted once, whichever adapter asks again.
+///
+/// Adoption keeps the legacy contract's terms and never widens them: a `full` legacy goal stays
+/// `full`, a `supervised` one is admitted on hold (`awaiting_owner`,
+/// [`OWNER_APPROVAL_REQUIRED`]) and an `off` one is refused ([`LEGACY_GOAL_OFF`]). The budget
+/// is what the legacy goal had left, at most [`DEFAULT_TURN_LIMIT`], unless the owner chose a
+/// turn limit. A lane the legacy path still drives (a worker attached, or a legacy turn in
+/// flight) is refused ([`LEGACY_LANE_LIVE`]): adopting it would start a second worker.
 pub async fn adopt_work(
     pool: &SqlitePool,
     actor: &ActorContext,
@@ -362,12 +393,12 @@ pub async fn adopt_work(
         ))
         .into());
     }
-    let lane: Option<(String, String)> =
-        sqlx::query_as("SELECT title, cwd FROM lanes WHERE key = ?")
+    let lane: Option<(String, String, String, Option<String>)> =
+        sqlx::query_as("SELECT title, cwd, status, omo_thread_id FROM lanes WHERE key = ?")
             .bind(lane_key)
             .fetch_optional(pool)
             .await?;
-    let Some((title, cwd)) = lane else {
+    let Some((title, cwd, status, pane)) = lane else {
         return Err(SupervisorError::NotFound {
             kind: "lane",
             id: lane_key.to_owned(),
@@ -385,19 +416,79 @@ pub async fn adopt_work(
         Some(adapter) => adapter.parse::<ChannelProvider>()?,
         None => actor.source_adapter,
     };
-    let requirements = match contract_of(pool, lane_key).await? {
+    let body = format!("Adopt legacy lane {lane_key}: {title}");
+    let source = Source {
+        adapter,
+        message_id,
+        body: &body,
+    };
+    // An adopted lane returns its goal, whatever the legacy lane did since.
+    if let Some(outcome) = replay(pool, &identity, &source).await? {
+        return Ok(outcome);
+    }
+
+    let contract = contract_of(pool, lane_key).await?;
+    let ended = matches!(status.as_str(), "verified_done" | "closed" | "failed");
+    let attached = pane.as_deref().is_some_and(|pane| !pane.is_empty());
+    let turn_in_flight = contract
+        .as_ref()
+        .and_then(|contract| contract.proposal.as_ref())
+        .is_some_and(|proposal| proposal.state == ProposalState::Sent);
+    if (attached && !ended) || turn_in_flight {
+        return Err(AdmissionError::Refused {
+            code: LEGACY_LANE_LIVE,
+            message: format!(
+                "legacy lane {lane_key} is still live ({status}{}{}); end it or let its legacy goal loop stop before adopting it",
+                if attached { ", worker attached" } else { "" },
+                if turn_in_flight { ", legacy turn in flight" } else { "" },
+            ),
+        });
+    }
+    let mut owner_hold = None;
+    let mut turn_limit = None;
+    if let Some(contract) = &contract {
+        match contract.mode {
+            GoalMode::Off => {
+                return Err(AdmissionError::Refused {
+                    code: LEGACY_GOAL_OFF,
+                    message: format!(
+                        "legacy lane {lane_key} has its goal loop off; submit the work as a new request instead"
+                    ),
+                })
+            }
+            GoalMode::Supervised => {
+                owner_hold = Some(format!(
+                    "{OWNER_APPROVAL_REQUIRED}: legacy lane {lane_key} was supervised; the owner decides before it continues"
+                ));
+            }
+            GoalMode::Full => {}
+        }
+        if actor.choices.turn_limit.is_none() {
+            let remaining = contract.turn_limit.saturating_sub(contract.turns_used);
+            if remaining == 0 {
+                return Err(AdmissionError::Refused {
+                    code: TURN_LIMIT,
+                    message: format!(
+                        "legacy lane {lane_key} used all {} of its turns; choose a turn limit to adopt it",
+                        contract.turn_limit
+                    ),
+                });
+            }
+            turn_limit = Some(remaining.min(DEFAULT_TURN_LIMIT));
+        }
+    }
+    let requirements = match &contract {
         Some(contract) if !contract.requirements.is_empty() => contract
             .requirements
-            .into_iter()
+            .iter()
             .map(|requirement| RequirementSpec {
-                id: requirement.id,
-                text: requirement.text,
-                verifier: requirement.verifier,
+                id: requirement.id.clone(),
+                text: requirement.text.clone(),
+                verifier: requirement.verifier.clone(),
             })
             .collect(),
         _ => adopt.requirements.clone(),
     };
-    let body = format!("Adopt legacy lane {lane_key}: {title}");
     let work = SubmitWork {
         project_id: adopt.project_id.clone(),
         host_id: adopt.host_id.clone(),
@@ -408,24 +499,49 @@ pub async fn adopt_work(
         title,
         requirements,
         cwd: Some(cwd),
-        operations: Vec::new(),
-        turn_limit: None,
+        // A legacy lane worked under the baseline (edit, test, commit) and nothing wider.
+        operations: OperationClass::BASELINE.to_vec(),
+        turn_limit,
     };
-    let source = Source {
-        adapter,
-        message_id,
-        body: &body,
-    };
-    admit_scoped(pool, &identity, actor, &source, &work).await
+    admit_scoped(pool, &identity, actor, &source, &work, owner_hold).await
 }
 
+/// The goal an earlier admission of this source message created. Checked before any scope is
+/// resolved, so a same-body replay returns it whatever the current projects and hosts are; a
+/// changed body is `REQUEST_CONFLICT`.
+async fn replay(
+    pool: &SqlitePool,
+    identity: &SupervisorIdentity,
+    source: &Source<'_>,
+) -> Result<Option<SubmitOutcome>, AdmissionError> {
+    let receipt = replayed_admission(
+        pool,
+        &identity.supervisor_id,
+        &identity.owner_principal,
+        source.adapter,
+        &source.message_id,
+        source.body,
+    )
+    .await?;
+    match receipt {
+        Some(receipt) => Ok(Some(admitted(pool, receipt, true).await?)),
+        None => Ok(None),
+    }
+}
+
+/// `owner_hold` is a `state_detail` reason that holds the goal for the owner whatever its
+/// scope (an adopted supervised lane).
 async fn admit_scoped(
     pool: &SqlitePool,
     identity: &SupervisorIdentity,
     actor: &ActorContext,
     source: &Source<'_>,
     work: &SubmitWork,
+    owner_hold: Option<String>,
 ) -> Result<SubmitOutcome, AdmissionError> {
+    if let Some(outcome) = replay(pool, identity, source).await? {
+        return Ok(outcome);
+    }
     let scope = match resolve_scope(pool, identity, actor, work).await? {
         Resolved::Scope(scope) => scope,
         Resolved::NeedsChoice { missing, detail } => {
@@ -435,7 +551,11 @@ async fn admit_scoped(
             })
         }
     };
-    let mode = if scope.holds.is_empty() {
+    let mut holds: Vec<String> = owner_hold.into_iter().collect();
+    if !scope.holds.is_empty() {
+        holds.push(format!("{SCOPE_NEEDS_OWNER}: {}", scope.holds.join("; ")));
+    }
+    let mode = if holds.is_empty() {
         GoalMode::Full
     } else {
         GoalMode::Supervised
@@ -458,15 +578,17 @@ async fn admit_scoped(
         requirements: work.requirements.clone(),
         mode,
         turn_limit: scope.turn_limit,
+        operation_grant: scope.grant.clone(),
     };
     let admission = admit_request(pool, &request).await?;
     if admission.duplicate {
-        return admitted(pool, admission.receipt, true, None).await;
+        // Admitted concurrently between the replay check and this transaction.
+        return admitted(pool, admission.receipt, true).await;
     }
-    if scope.holds.is_empty() {
+    if holds.is_empty() {
         super::dispatcher::poke();
     } else {
-        let detail = format!("{SCOPE_NEEDS_OWNER}: {}", scope.holds.join("; "));
+        let detail = holds.join("; ");
         match transition_goal(
             pool,
             &admission.receipt.goal_id,
@@ -483,7 +605,32 @@ async fn admit_scoped(
             Err(error) => return Err(error.into()),
         }
     }
-    admitted(pool, admission.receipt, false, Some(scope.grant)).await
+    admitted(pool, admission.receipt, false).await
+}
+
+/// The operations a goal was granted at admission, read from
+/// `supervisor_goals.operation_grant`. `NOT_FOUND` for an unknown goal, `INVALID_REQUEST` for
+/// a grant that does not parse.
+pub async fn goal_grant(
+    pool: &SqlitePool,
+    goal_id: &str,
+) -> Result<Vec<OperationClass>, SupervisorError> {
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT operation_grant FROM supervisor_goals WHERE goal_id = ?")
+            .bind(goal_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(stored) = stored else {
+        return Err(SupervisorError::NotFound {
+            kind: "goal",
+            id: goal_id.to_owned(),
+        });
+    };
+    serde_json::from_str(&stored).map_err(|error| {
+        SupervisorError::Invalid(format!(
+            "goal {goal_id} has an unreadable operation grant: {error}"
+        ))
+    })
 }
 
 /// Reads the committed goal back and builds the outcome and its acknowledgment from it.
@@ -491,7 +638,6 @@ async fn admitted(
     pool: &SqlitePool,
     receipt: AdmissionReceipt,
     duplicate: bool,
-    grant: Option<Vec<OperationClass>>,
 ) -> Result<SubmitOutcome, AdmissionError> {
     let goal = goal_of(pool, &receipt.goal_id)
         .await?
@@ -499,6 +645,7 @@ async fn admitted(
             kind: "goal",
             id: receipt.goal_id.clone(),
         })?;
+    let grant = goal_grant(pool, &goal.goal_id).await?;
     let (mode, turn_limit, turns_used): (String, i64, i64) =
         sqlx::query_as("SELECT mode, turn_limit, turns_used FROM lane_goal WHERE lane_key = ?")
             .bind(&goal.lane_key)
@@ -516,8 +663,10 @@ async fn admitted(
             goal.revision,
             goal.state_detail.as_deref().unwrap_or("its scope needs confirmation"),
         ),
+        // Continuation after the first turn is not wired yet, so the acknowledgment promises
+        // only the first turn.
         RunState::Ready => format!(
-            "Goal {} is registered (lane {}, revision {}). Its first instruction {} is queued for the hub dispatcher, and it continues on its own for up to {} of {} turns.",
+            "Goal {} is registered (lane {}, revision {}). Its first instruction {} is queued for the hub dispatcher, which starts the worker. Turn budget: {} of {} turns remain. Later turns are not started automatically yet.",
             goal.goal_id,
             goal.lane_key,
             goal.revision,
@@ -697,15 +846,17 @@ async fn resolve_scope(
         );
     }
 
-    let mut grant: BTreeSet<OperationClass> = OperationClass::BASELINE.iter().copied().collect();
-    grant.extend(choices.operations.iter().copied());
-    let beyond: BTreeSet<OperationClass> = work
-        .operations
+    // The request's own declaration bounds the grant: an operation it did not declare is never
+    // granted, so an empty declaration is read-only. A declared operation beyond the baseline
+    // and the owner's explicit choices is a hold, never a grant.
+    let permitted: BTreeSet<OperationClass> = OperationClass::BASELINE
         .iter()
+        .chain(choices.operations.iter())
         .copied()
-        .filter(|operation| !grant.contains(operation))
         .collect();
-    for operation in beyond {
+    let declared: BTreeSet<OperationClass> = work.operations.iter().copied().collect();
+    let grant: Vec<OperationClass> = declared.intersection(&permitted).copied().collect();
+    for operation in declared.difference(&permitted) {
         holds.push(format!(
             "{} needs the owner's explicit approval",
             operation.as_str()
@@ -723,7 +874,7 @@ async fn resolve_scope(
         kind,
         cwd,
         turn_limit,
-        grant: grant.into_iter().collect(),
+        grant,
         holds,
     }))
 }
@@ -749,8 +900,10 @@ fn within(root: &str, path: &str) -> bool {
 }
 
 /// The first worker instruction: the proposal, the owner's verbatim request, the grant and the
-/// contract. The grant line names what needs the owner, so a worker never reads permission
-/// into the model's wording.
+/// contract. The grant line lists only what the request declared and was granted and names
+/// what needs the owner, so a worker never reads permission into the model's wording. The
+/// dispatcher starts the worker in a task-owned worktree when the scope path is the
+/// repository root, so the scope line names the checkout, not the exact directory.
 fn worker_instruction(work: &SubmitWork, source_body: &str, scope: &Scope) -> String {
     let allowed: Vec<&str> = scope.grant.iter().map(|operation| operation.as_str()).collect();
     let withheld: Vec<&str> = OperationClass::ALL
@@ -758,13 +911,18 @@ fn worker_instruction(work: &SubmitWork, source_body: &str, scope: &Scope) -> St
         .filter(|operation| !scope.grant.contains(operation))
         .map(|operation| operation.as_str())
         .collect();
+    let allowed = if allowed.is_empty() {
+        "none; this request is read-only: inspect and report, and change no files".to_owned()
+    } else {
+        allowed.join(", ")
+    };
     let mut text = format!(
-        "{}\n\nOwner request (verbatim):\n{}\n\nScope: work in {} on host {}. Allowed operations: {}.",
+        "{}\n\nOwner request (verbatim):\n{}\n\nScope: {} on host {}. You start in a task-owned worktree of it when that path is the repository root, otherwise in that path; work only inside your starting directory. Allowed operations: {}.",
         work.instruction.trim(),
         source_body.trim(),
         scope.cwd,
         scope.host_id,
-        allowed.join(", "),
+        allowed,
     );
     if !withheld.is_empty() {
         text.push_str(&format!(

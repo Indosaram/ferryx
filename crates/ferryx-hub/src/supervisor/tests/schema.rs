@@ -141,6 +141,7 @@ fn request(fixture: &Fixture, message_id: &str, body: &str) -> AdmitRequest {
         }],
         mode: GoalMode::Full,
         turn_limit: DEFAULT_TURN_LIMIT,
+        operation_grant: Vec::new(),
     }
 }
 

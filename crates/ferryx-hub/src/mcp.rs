@@ -205,7 +205,7 @@ pub(crate) fn tool_list() -> Vec<Value> {
         ),
         (
             "supervisor.request",
-            "Send owner work to the unified supervisor (owner meta-agent channel only). action=submit with payload {request: the owner's exact words, work: {title, instruction, requirements, projectId?, hostId?, kind?, cwd?, operations?, turnLimit?}} admits one goal in a single transaction and returns the persisted receipt; the hub daemon then starts the worker. Only an outcome of admitted or awaiting_owner means work is registered. action=message with payload {text, work?} is conversation unless work is attached. action=adopt with payload {laneKey, projectId?, hostId?, requirements?} adopts one legacy lane explicitly. Operations beyond edit, test and commit hold the goal for the owner.",
+            "Send owner work to the unified supervisor (owner meta-agent channel only). action=submit with payload {request: the owner's exact words, work: {title, instruction, requirements, projectId?, hostId?, kind?, cwd?, operations?, turnLimit?}} admits one goal in a single transaction and returns the persisted receipt; the hub daemon then starts the worker. Only an outcome of admitted or awaiting_owner means work is registered. action=message with payload {text, work?} is conversation unless work is attached. action=adopt with payload {laneKey, projectId?, hostId?, requirements?} adopts one legacy lane explicitly, keeping its mode and remaining budget. operations lists what the work needs (edit, test, commit, push, publish, spend, destructive): only declared operations are granted, so omitting it makes the request read-only, and anything beyond edit, test and commit holds the goal for the owner.",
             schema(
                 json!({"requestId": request_id, "projectId": {"type": "string"},
                 "goalId": {"type": "string"}, "expectedRevision": {"type": "integer"},
@@ -460,18 +460,7 @@ async fn call_tool(
             let key = required(args, "key")?;
             // An admitted goal's lane is driven only by the hub's supervisor dispatcher; a
             // legacy drive would launch a second worker.
-            let supervised: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)",
-            )
-            .bind(&key)
-            .fetch_one(&context.pool)
-            .await
-            .map_err(|error| error.to_string())?;
-            if supervised {
-                return Err(format!(
-                    "SUPERVISOR_OWNED: lane {key} belongs to a supervisor goal; the hub dispatcher drives it"
-                ));
-            }
+            refuse_supervisor_owned(context, &key, "the hub dispatcher drives it").await?;
             let runner = LaneRunner {
                 pool: context.pool.clone(),
                 control: Arc::clone(&context.control),
@@ -498,6 +487,9 @@ async fn call_tool(
         // existing contract is never overwritten here: changes go through the revision guard.
         "lane_goal_set" => {
             let key = required(args, "key")?;
+            // A supervisor goal's requirements, mode and budget change only through the
+            // supervisor, which bumps the goal revision.
+            refuse_supervisor_owned(context, &key, "change its goal through the supervisor").await?;
             let requirements: Vec<crate::goals::contract::RequirementSpec> =
                 serde_json::from_value(args.get("requirements").cloned().unwrap_or(Value::Null))
                     .map_err(|error| format!("requirements: {error}"))?;
@@ -557,6 +549,7 @@ async fn call_tool(
         }
         "lane_goal_approve" => {
             let key = required(args, "key")?;
+            refuse_supervisor_owned(context, &key, "the hub dispatcher sends its turns").await?;
             let outcome = crate::goals::r#loop::approve_proposal(
                 &context.pool,
                 context.control.as_ref(),
@@ -659,6 +652,24 @@ fn required(args: &Value, key: &str) -> std::result::Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("missing {key}"))
+}
+
+/// Refuses a legacy lane API aimed at a supervisor goal's lane (`SUPERVISOR_OWNED`).
+async fn refuse_supervisor_owned(
+    context: &McpContext,
+    key: &str,
+    why: &str,
+) -> std::result::Result<(), String> {
+    let owned = crate::supervisor::supervisor_owns_lane(&context.pool, key)
+        .await
+        .map_err(|error| error.to_string())?;
+    if owned {
+        return Err(format!(
+            "{}: lane {key} belongs to a supervisor goal; {why}",
+            crate::supervisor::SUPERVISOR_OWNED
+        ));
+    }
+    Ok(())
 }
 
 /// The `supervisor.request` envelope. Actor, host grant and channel are server-derived; the
@@ -1027,6 +1038,33 @@ mod tests {
 
         let drive = dispatch(&context, &call("lane.drive", json!({"key": lane_key}))).await;
         assert!(drive.to_string().contains("SUPERVISOR_OWNED"), "{drive}");
+        // The legacy goal APIs are fenced the same way: no requirement, mode or approval
+        // change bypasses the supervisor's revision.
+        let set = dispatch(
+            &context,
+            &call(
+                "lane_goal_set",
+                json!({"key": lane_key, "mode": "supervised", "instruction_quote": "Ship it.",
+                    "requirements": [{"id": "r2", "text": "other", "verifier": "true"}]}),
+            ),
+        )
+        .await;
+        assert!(set.to_string().contains("SUPERVISOR_OWNED"), "{set}");
+        let approve = dispatch(&context, &call("lane_goal_approve", json!({"key": lane_key}))).await;
+        assert!(approve.to_string().contains("SUPERVISOR_OWNED"), "{approve}");
+        let mode: String = sqlx::query_scalar("SELECT mode FROM lane_goal WHERE lane_key = ?")
+            .bind(&lane_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mode, "full");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM lane_goal_revisions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
 
         let injected = dispatch(
             &context,

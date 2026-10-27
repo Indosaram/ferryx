@@ -5,7 +5,10 @@
 //! It acts only on committed ready intents ([`ready_dispatches`]). For each one it:
 //! 1. checks the grant before claiming;
 //! 2. claims the intent transactionally ([`claim_dispatch`]);
-//! 3. launches and attaches the worker pane ([`attach_session`], never `lanes.omo_thread_id`);
+//! 3. launches and attaches the worker pane ([`attach_session`], never `lanes.omo_thread_id`).
+//!    Like the legacy lane runner, a lane at a repository root first gets a task-owned
+//!    worktree ([`crate::lanes::worktree::create`], off with `OMON_LANE_AUTO_WORKTREE=0`), so
+//!    goals on one project never share the owner's checkout;
 //! 4. re-checks the grant;
 //! 5. confirms the claim ([`confirm_claim_before_transmit`]) exactly once and transmits the
 //!    stable request id once, immediately after `Ok`, with no other await in between;
@@ -13,9 +16,11 @@
 //!
 //! Every claim gets exactly one confirm call. On a hold before transmission, that call
 //! releases the claim. Otherwise it is the final check before the transmit, and nothing
-//! confirms again after the transmit. A released claim is never transmitted. A claim left
-//! behind by a dispatcher that stopped (crash, `hub stop`) cannot be proven untransmitted, so
-//! [`Dispatcher::run`] first calls [`reconcile_claims_after_restart`], which holds it
+//! confirms again after the transmit. A store error after the claim and before the transmit
+//! holds the goal ([`DISPATCH_FAILED`]) and releases the claim the same way, so no row stays
+//! `claimed`. A released claim is never transmitted. A claim left behind by a dispatcher that
+//! stopped (crash, `hub stop`) cannot be proven untransmitted, so [`Dispatcher::run`] first
+//! calls [`reconcile_claims_after_restart`] (retried with a bounded backoff), which holds it
 //! `delivery_uncertain`. It is resent only after the owner's
 //! [`super::resolve_uncertain_delivery`].
 //! The dispatcher never advances an execution generation: rebinding a worker is the
@@ -32,6 +37,7 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, Notify};
 
+use super::admission::goal_grant;
 use super::{
     attach_session, claim_dispatch, confirm_claim_before_transmit, execution_binding_of, goal_of,
     identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt,
@@ -49,6 +55,11 @@ pub const DISPATCH_RESCAN: Duration = Duration::from_secs(5);
 /// Most ready intents one drain considers.
 const DRAIN_LIMIT: u32 = 256;
 
+/// Attempts at restart reconciliation before the first drain, and the first retry delay
+/// (doubled after each failure: at most 0.25 + 0.5 + 1 + 2 + 4 seconds in all).
+const RECONCILE_ATTEMPTS: u32 = 6;
+const RECONCILE_BACKOFF: Duration = Duration::from_millis(250);
+
 /// Hold codes (`state_detail` prefixes) the dispatcher writes.
 pub const MHC_WORKER_UNAVAILABLE: &str = "MHC_WORKER_UNAVAILABLE";
 pub const REMOTE_LAUNCH_UNAVAILABLE: &str = "REMOTE_LAUNCH_UNAVAILABLE";
@@ -58,6 +69,8 @@ pub const TURN_LIMIT: &str = "TURN_LIMIT";
 pub const LAUNCH_FAILED: &str = "LAUNCH_FAILED";
 pub const SEND_REFUSED: &str = "SEND_REFUSED";
 pub const LANE_PAUSED: &str = "LANE_PAUSED";
+/// A store error after the claim and before the transmit; nothing was sent.
+pub const DISPATCH_FAILED: &str = "DISPATCH_FAILED";
 
 /// The daemon's dispatcher wake, shared by every in-process admission.
 pub fn dispatch_wake() -> Arc<Notify> {
@@ -161,14 +174,7 @@ impl Dispatcher {
     /// wake and on each rescan. Started once per hub generation, after the previous
     /// generation's tasks were aborted, so no other dispatcher of this hub is running.
     pub async fn run(self, wake: Arc<Notify>) {
-        match reconcile_claims_after_restart(&self.pool).await {
-            Ok(held) if held.is_empty() => {}
-            Ok(held) => tracing::warn!(
-                held = held.len(),
-                "unconfirmed supervisor claims held as delivery_uncertain"
-            ),
-            Err(error) => tracing::warn!(%error, "supervisor claims were not reconciled at start"),
-        }
+        self.reconcile_at_start().await;
         loop {
             let notified = wake.notified();
             tokio::pin!(notified);
@@ -181,6 +187,36 @@ impl Dispatcher {
             tokio::select! {
                 () = &mut notified => {}
                 () = tokio::time::sleep(self.rescan) => {}
+            }
+        }
+    }
+
+    /// Restart reconciliation before the first drain, retried with a bounded backoff. If it
+    /// still fails, the stale claims stay `claimed`: never resent (a drain only reads `ready`
+    /// intents), but their goals wait until a later start reconciles them.
+    async fn reconcile_at_start(&self) {
+        let mut delay = RECONCILE_BACKOFF;
+        for attempt in 1..=RECONCILE_ATTEMPTS {
+            match reconcile_claims_after_restart(&self.pool).await {
+                Ok(held) => {
+                    if !held.is_empty() {
+                        tracing::warn!(
+                            held = held.len(),
+                            "unconfirmed supervisor claims held as delivery_uncertain"
+                        );
+                    }
+                    return;
+                }
+                Err(error) if attempt < RECONCILE_ATTEMPTS => {
+                    tracing::warn!(%error, attempt, "supervisor claims were not reconciled; retrying");
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+                Err(error) => tracing::error!(
+                    %error,
+                    attempts = RECONCILE_ATTEMPTS,
+                    "supervisor claims were not reconciled at start; stale claims stay claimed and are not resent"
+                ),
             }
         }
     }
@@ -255,19 +291,44 @@ impl Dispatcher {
             Err(error) => return Ok(skipped(request_id, error.code())),
         };
 
-        // From here the claim is ours: every exit makes exactly one confirm call, which either
-        // releases the claim (hold) or clears the transmit that follows it.
+        // From here the claim is ours: every exit makes one effective confirm call, which
+        // either releases the claim (hold) or clears the transmit that follows it. An error
+        // can only happen before the transmit, so it holds the goal and releases the claim
+        // instead of leaving it `claimed` until the next restart.
+        match self.run_claimed(&goal, &binding, &claimed).await {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                tracing::warn!(%error, request_id, "supervisor dispatch failed after its claim; holding the goal");
+                self.hold_claimed(
+                    &claimed,
+                    RunState::Degraded,
+                    format!("{DISPATCH_FAILED}: {error}; nothing was sent"),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Launch, re-check, confirm and transmit for a claimed intent. Returns `Err` only before
+    /// the transmit.
+    async fn run_claimed(
+        &self,
+        goal: &SupervisorGoal,
+        binding: &ExecutionBinding,
+        claimed: &Dispatch,
+    ) -> Result<DispatchResult, SupervisorError> {
+        let request_id = claimed.request_id.as_str();
         let session = match binding.provider_session_id.clone() {
             Some(session) => session,
-            None => match self.launch(&goal, &claimed).await? {
+            None => match self.launch(goal, claimed).await? {
                 Launch::Session(session) => session,
                 Launch::Held(result) => return Ok(result),
             },
         };
-        if self.lane_paused(&goal).await {
+        if self.lane_paused(goal).await {
             return self
                 .hold_claimed(
-                    &claimed,
+                    claimed,
                     RunState::Paused,
                     format!("{LANE_PAUSED}: the owner paused lane {}", goal.lane_key),
                 )
@@ -275,11 +336,11 @@ impl Dispatcher {
         }
         let Some(binding) = execution_binding_of(&self.pool, &goal.goal_id).await? else {
             return self
-                .hold_claimed(&claimed, RunState::Degraded, "the execution binding disappeared".into())
+                .hold_claimed(claimed, RunState::Degraded, "the execution binding disappeared".into())
                 .await;
         };
-        if let Some((to, detail)) = self.grant_hold(&goal, &binding).await? {
-            return self.hold_claimed(&claimed, to, detail).await;
+        if let Some((to, detail)) = self.grant_hold(goal, &binding).await? {
+            return self.hold_claimed(claimed, to, detail).await;
         }
         // The last check; the transmit follows with no other await in between.
         let host = (binding.host_id != self.local_host_id).then_some(binding.host_id.as_str());
@@ -292,7 +353,7 @@ impl Dispatcher {
             .control
             .send_confirmed(host, &session, &sent.instruction, &sent.request_id)
             .await;
-        self.settle_transmission(&goal, &sent, &session, &outcome).await;
+        self.settle_transmission(goal, &sent, &session, &outcome).await;
         Ok(DispatchResult::Transmitted {
             request_id: request_id.to_owned(),
             outcome,
@@ -300,8 +361,9 @@ impl Dispatcher {
     }
 
     /// Why the goal must not dispatch now, checked against durable state: the worker kind and
-    /// host this dispatcher can serve, the owner's identity, the project's host mapping, the
-    /// goal mode (only `full` continues without the owner) and the turn budget.
+    /// host this dispatcher can serve, the owner's identity, the persisted operation grant,
+    /// the project's host mapping, the goal mode (only `full` continues without the owner) and
+    /// the turn budget.
     async fn grant_hold(
         &self,
         goal: &SupervisorGoal,
@@ -331,6 +393,15 @@ impl Dispatcher {
                     goal.owner_principal
                 ),
             )));
+        }
+        // The worker instruction names the grant persisted at admission; without a readable
+        // grant nothing is dispatched.
+        match goal_grant(&self.pool, &goal.goal_id).await {
+            Ok(_) => {}
+            Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+            Err(error) => {
+                return Ok(Some((RunState::AwaitingOwner, format!("{GRANT_REVOKED}: {error}"))))
+            }
         }
         let mapped: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM supervisor_project_hosts
@@ -388,7 +459,10 @@ impl Dispatcher {
     }
 
     /// Launches the worker pane in the lane's directory and binds it to the current
-    /// generation.
+    /// generation. A lane at a repository root first gets its task-owned worktree
+    /// (`<repo>-lanes/<lane>` on branch `lane/<lane>`), exactly like the legacy lane runner;
+    /// `create` records it and points `lanes.cwd` at it, and a lane that already owns one keeps
+    /// the one `lanes.cwd` names.
     async fn launch(
         &self,
         goal: &SupervisorGoal,
@@ -403,6 +477,19 @@ impl Dispatcher {
             return Ok(Launch::Held(
                 self.hold_claimed(claimed, RunState::Degraded, detail).await?,
             ));
+        };
+        let cwd = match crate::lanes::worktree::create(&self.pool, &goal.lane_key, &cwd).await {
+            Ok(Some(tree)) => tree,
+            Ok(None) => cwd,
+            Err(error) => {
+                let detail = format!(
+                    "{LAUNCH_FAILED}: the worktree for lane {} was not created: {error}",
+                    goal.lane_key
+                );
+                return Ok(Launch::Held(
+                    self.hold_claimed(claimed, RunState::Degraded, detail).await?,
+                ));
+            }
         };
         let session = match self.launcher.launch_pane(&cwd, &[]).await {
             Ok(session) => session,

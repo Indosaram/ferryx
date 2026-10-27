@@ -527,6 +527,9 @@ pub struct AdmitRequest {
     pub requirements: Vec<RequirementSpec>,
     pub mode: GoalMode,
     pub turn_limit: u32,
+    /// The operations the request was granted, persisted with the goal
+    /// (`supervisor_goals.operation_grant`). Empty grants no write operation.
+    pub operation_grant: Vec<admission::OperationClass>,
 }
 
 impl AdmitRequest {
@@ -1433,6 +1436,61 @@ async fn admitted_request(
     ))
 }
 
+/// The receipt of an earlier admission, if it is a replay of the same request: the same
+/// supervisor and owner (`CROSS_OWNER` otherwise) and the same body (`REQUEST_CONFLICT`
+/// otherwise).
+fn replayed_receipt(
+    admitted: Admitted,
+    supervisor_id: &str,
+    owner_principal: &str,
+    source_adapter: ChannelProvider,
+    source_message_id: &str,
+    body_sha256: &str,
+) -> Result<AdmissionReceipt, SupervisorError> {
+    if admitted.supervisor_id != supervisor_id || admitted.owner_principal != owner_principal {
+        return Err(SupervisorError::CrossOwner(format!(
+            "{source_adapter} message {source_message_id}"
+        )));
+    }
+    if admitted.body_sha256 != body_sha256 {
+        return Err(SupervisorError::RequestBodyChanged {
+            source_adapter,
+            source_message_id: source_message_id.to_owned(),
+            goal_id: admitted.receipt.goal_id,
+            revision: admitted.current_revision,
+        });
+    }
+    Ok(admitted.receipt)
+}
+
+/// The receipt of an earlier admission of this source message, checked exactly like
+/// [`admit_request`]'s replay (owner, then body hash), or `None` when the message was never
+/// admitted. Admission handlers call it before resolving a scope, so a same-body replay always
+/// returns the existing goal whatever the current projects and hosts are.
+pub async fn replayed_admission(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    owner_principal: &str,
+    source_adapter: ChannelProvider,
+    source_message_id: &str,
+    body: &str,
+) -> Result<Option<AdmissionReceipt>, SupervisorError> {
+    let mut conn = pool.acquire().await?;
+    let Some(admitted) = admitted_request(&mut conn, source_adapter, source_message_id).await?
+    else {
+        return Ok(None);
+    };
+    replayed_receipt(
+        admitted,
+        supervisor_id,
+        owner_principal,
+        source_adapter,
+        source_message_id,
+        &sha256_hex(body),
+    )
+    .map(Some)
+}
+
 /// Admits one owner request in a single write transaction: the lane, its goal contract, the
 /// supervisor goal (`ready`), the typed execution binding, the request dedupe row and the
 /// initial ready dispatch intent. Nothing is visible until commit; a failure leaves none of
@@ -1447,28 +1505,21 @@ pub async fn admit_request(
 ) -> Result<Admission, SupervisorError> {
     request.validate()?;
     let body_sha256 = sha256_hex(&request.body);
+    let operation_grant = serde_json::to_string(&request.operation_grant)
+        .map_err(|error| SupervisorError::Invalid(format!("operation grant: {error}")))?;
     let mut tx = pool.begin_write().await?;
     if let Some(admitted) =
         admitted_request(&mut tx, request.source_adapter, &request.source_message_id).await?
     {
-        if admitted.supervisor_id != request.supervisor_id
-            || admitted.owner_principal != request.owner_principal
-        {
-            return Err(SupervisorError::CrossOwner(format!(
-                "{} message {}",
-                request.source_adapter, request.source_message_id
-            )));
-        }
-        if admitted.body_sha256 != body_sha256 {
-            return Err(SupervisorError::RequestBodyChanged {
-                source_adapter: request.source_adapter,
-                source_message_id: request.source_message_id.clone(),
-                goal_id: admitted.receipt.goal_id,
-                revision: admitted.current_revision,
-            });
-        }
         return Ok(Admission {
-            receipt: admitted.receipt,
+            receipt: replayed_receipt(
+                admitted,
+                &request.supervisor_id,
+                &request.owner_principal,
+                request.source_adapter,
+                &request.source_message_id,
+                &body_sha256,
+            )?,
             duplicate: true,
         });
     }
@@ -1563,8 +1614,8 @@ pub async fn admit_request(
     }
     sqlx::query(
         "INSERT INTO supervisor_goals(goal_id, supervisor_id, project_id, lane_key,
-                owner_principal, run_state, revision, created_at, updated_at)
-         VALUES(?,?,?,?,?,?,1,?,?)",
+                owner_principal, run_state, revision, operation_grant, created_at, updated_at)
+         VALUES(?,?,?,?,?,?,1,?,?,?)",
     )
     .bind(&goal_id)
     .bind(&request.supervisor_id)
@@ -1572,6 +1623,7 @@ pub async fn admit_request(
     .bind(&lane_key)
     .bind(&request.owner_principal)
     .bind(RunState::Ready.as_str())
+    .bind(&operation_grant)
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
@@ -2698,6 +2750,20 @@ pub async fn consume_wake(pool: &SqlitePool, wake_id: i64) -> Result<bool, Super
     .execute(pool)
     .await?;
     Ok(updated.rows_affected() == 1)
+}
+
+/// Refusal code of a legacy lane API (`lane.drive`, goal set, mode, approve) aimed at a lane
+/// that belongs to a supervisor goal.
+pub const SUPERVISOR_OWNED: &str = "SUPERVISOR_OWNED";
+
+/// True when a supervisor goal owns the lane. Its worker is started only by the hub's
+/// supervisor dispatcher, and its requirements, mode and budget change only through the
+/// supervisor (which bumps the goal revision), never through the legacy lane APIs.
+pub async fn supervisor_owns_lane(pool: &SqlitePool, lane_key: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)")
+        .bind(lane_key)
+        .fetch_one(pool)
+        .await
 }
 
 #[cfg(test)]

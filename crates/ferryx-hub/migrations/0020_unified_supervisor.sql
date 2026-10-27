@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS supervisor_goals (
     run_state TEXT NOT NULL CHECK(run_state IN ('ready','dispatching','running','waiting_children','waiting_event','awaiting_owner','verifying','completed','paused','degraded','delivery_uncertain','cancelled')),
     state_detail TEXT,
     revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+    -- Operations the admitted request was granted, a JSON array of operation classes
+    -- ("edit", "test", "commit", "push", "publish", "spend", "destructive"). Fixed at
+    -- admission: what the request declared, limited to the baseline and the owner's explicit
+    -- choices. An empty array grants no write operation (a read-only request).
+    operation_grant TEXT NOT NULL DEFAULT '[]'
+        CHECK(json_valid(operation_grant) AND json_type(operation_grant) = 'array'),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(supervisor_id, goal_id),
