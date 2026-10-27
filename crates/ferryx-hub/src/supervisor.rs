@@ -1978,6 +1978,8 @@ async fn require_nothing_in_flight(
 /// the hold can never dispatch; cancelling also cancels pending waits. All in one transaction.
 /// A dispatch already claimed when a hold lands is not superseded here, because it may be in
 /// flight; the dispatcher releases it with [`confirm_claim_before_transmit`].
+/// After commit it pokes this process's wake scheduler ([`wakes::poke`]), so an owner pause,
+/// cancel or resume is delivered without waiting for the scheduler's rescan.
 pub async fn transition_goal(
     pool: &SqlitePool,
     goal_id: &str,
@@ -1990,6 +1992,7 @@ pub async fn transition_goal(
     let goal =
         transition_goal_in(&mut tx, goal_id, expected_revision, expected_state, to, detail).await?;
     tx.commit().await?;
+    wakes::poke();
     Ok(goal)
 }
 
@@ -2091,6 +2094,7 @@ async fn transition_goal_in(
 /// Records an owner correction: bumps the goal revision and supersedes every unsent intent
 /// of an older revision, so a stale instruction is never sent. The caller enqueues the
 /// corrected instruction with [`enqueue_dispatch`] at the new revision.
+/// After commit it pokes this process's wake scheduler ([`wakes::poke`]).
 pub async fn revise_goal(
     pool: &SqlitePool,
     goal_id: &str,
@@ -2118,6 +2122,7 @@ pub async fn revise_goal(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    wakes::poke();
     Ok(SupervisorGoal {
         revision,
         updated_at: now,
@@ -2417,6 +2422,7 @@ pub async fn resolve_uncertain_delivery(
         });
     }
     tx.commit().await?;
+    wakes::poke();
     Ok(SupervisorGoal {
         run_state: to,
         state_detail: detail.map(str::to_owned),
@@ -2500,6 +2506,7 @@ pub async fn record_receipt(
     match apply_receipt(&mut tx, request_id, generation, receipt).await? {
         AppliedReceipt::Recorded(dispatch) => {
             tx.commit().await?;
+            wakes::poke();
             Ok(*dispatch)
         }
         // The older dispatch's evidence is kept; the receipt itself is refused.
@@ -2768,6 +2775,7 @@ pub async fn record_start(
         .await?;
     }
     tx.commit().await?;
+    wakes::poke();
     Ok(dispatch)
 }
 
@@ -3022,6 +3030,9 @@ pub async fn record_wait_event(
         None
     };
     tx.commit().await?;
+    if wake.is_some() {
+        wakes::poke();
+    }
     Ok(WaitEventReceipt {
         inserted,
         wait,
@@ -3154,3 +3165,4 @@ mod tests;
 pub mod admission;
 pub mod dispatcher;
 pub mod receipts;
+pub mod wakes;

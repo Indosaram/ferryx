@@ -11,6 +11,28 @@ use crate::storage::{now_rfc3339, WriteTx};
 /// times within a few hours).
 const REPEAT_WINDOW_HOURS: i64 = 6;
 
+/// omo's batch window for ordinary events: a group is admitted once its oldest event is this
+/// old, and a target gets at most one delivery per window. The window is anchored on the
+/// oldest event, so continuous traffic never extends it. The supervisor's goal wakes
+/// (`supervisor::wakes`) use the same policy.
+pub(crate) const BATCH_WINDOW_SECS: i64 = 30;
+
+/// True once a group whose oldest event arrived at `oldest` may be admitted at `now`.
+pub(crate) fn batch_window_elapsed(
+    oldest: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    (now - oldest).num_seconds() >= BATCH_WINDOW_SECS
+}
+
+/// True while a target's last delivery at `last` is within the batch window of `now`.
+pub(crate) fn delivered_recently(
+    last: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    last.is_some_and(|last| (now - last).num_seconds() < BATCH_WINDOW_SECS)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneEvent {
     pub id: i64,
@@ -164,7 +186,7 @@ where
         let Some(oldest) = events.iter().map(|event| event.created_at).min() else {
             continue;
         };
-        if (now - oldest).num_seconds() < 30
+        if !batch_window_elapsed(oldest, now)
             && !events.iter().any(|event| {
                 matches!(
                     event.kind.as_str(),
@@ -180,9 +202,10 @@ where
         .bind(&target)
         .fetch_one(pool)
         .await?;
-        let recent = last
+        let last = last
             .and_then(|last| chrono::DateTime::parse_from_rfc3339(&last).ok())
-            .is_some_and(|last| (now - last.with_timezone(&chrono::Utc)).num_seconds() < 30);
+            .map(|last| last.with_timezone(&chrono::Utc));
+        let recent = delivered_recently(last, now);
         if recent {
             continue;
         }

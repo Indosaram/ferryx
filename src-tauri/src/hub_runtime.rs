@@ -1170,6 +1170,16 @@ fn settle_pty_run(
     });
 }
 
+/// The supervisor's wake scheduler for this hub generation: dependency, settle, deadline,
+/// owner and report wakes, decided by durable state checks before any judgment, so no model
+/// runs while a goal waits. It recovers pending wakes and the state-event cursor at start.
+fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let pool = launch.hub.pool.clone();
+    let handler = std::sync::Arc::new(ferryx_hub::supervisor::wakes::StateHandler::new(pool.clone()));
+    let scheduler = ferryx_hub::supervisor::wakes::WakeScheduler::new(pool, handler);
+    tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
+}
+
 async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let mut tasks = Vec::new();
     #[cfg(feature = "hub-discord")]
@@ -1248,6 +1258,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         }
     }));
     tasks.push(spawn_supervisor_dispatcher(launch, idle));
+    tasks.push(spawn_supervisor_wakes(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
