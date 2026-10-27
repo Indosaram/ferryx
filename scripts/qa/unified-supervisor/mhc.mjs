@@ -109,8 +109,14 @@ function freeLoopbackPort() {
 
 export async function startProviderStub(ctx) {
   const requests = [];
-  const state = { failWith: null };
+  // `arrivals` counts requests when they start (before their body is read and their reply
+  // streams); each recorded entry carries its arrival number, so a caller can count only the
+  // requests that arrived after a point it observed, whatever order they finish in.
+  const state = { failWith: null, arrivals: 0 };
   const server = createServer((request, response) => {
+    state.arrivals += 1;
+    const arrival = state.arrivals;
+    const arrivedAt = new Date().toISOString();
     let body = '';
     request.setEncoding('utf8');
     request.on('data', (chunk) => { body += chunk; });
@@ -118,7 +124,7 @@ export async function startProviderStub(ctx) {
       let json = null;
       try { json = JSON.parse(body); } catch { /* recorded raw */ }
       const tools = toolNamesOf(json);
-      const entry = { at: new Date().toISOString(), method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools, failWith: state.failWith };
+      const entry = { at: new Date().toISOString(), arrival, arrivedAt, method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools, failWith: state.failWith };
       requests.push(entry);
       ctx.evidence.appendJsonl('runtime/provider-requests.jsonl', entry);
       ctx.journal.push({ source: 'provider-stub', kind: 'request', ...entry });
@@ -160,6 +166,7 @@ export async function startProviderStub(ctx) {
   return {
     baseUrl,
     requests,
+    arrivals: () => state.arrivals,
     // Every request fails with `status` until succeed(). `code` is the provider error code in
     // the body (e.g. insufficient_quota) and `headers` extra response headers (e.g.
     // x-should-retry: false, which mhc's transport retry honours before any backoff).

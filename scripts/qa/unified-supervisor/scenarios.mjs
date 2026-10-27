@@ -788,9 +788,14 @@ async function supervisedHub(ctx, { workspaceId, extraEnv = {}, label }) {
   const shell = join(data, 'bin', 'qa-worker-shell');
   mkdirSync(dirname(shell), { recursive: true });
   writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)}\n`, { mode: 0o755 });
+  // OMON_INBOX_ENABLED=0 is the hub's own switch for its inbox watchers
+  // (ferryx-hub inbox_watch.rs inbox_enabled, read in hub_runtime spawn_generation). The
+  // isolated run has no iMessage or mail; a watcher that ran would fail and `hub status
+  // --check` would count it (control.rs status_report), so health would mean nothing.
+  const isolation = { SHELL: shell, FERRYX_HUB_WORKSPACE: workspaceId, OMON_LANE_AUTO_WORKTREE: '1', OMON_INBOX_ENABLED: '0' };
   const env = typeof extraEnv === 'function'
-    ? await extraEnv({ SHELL: shell, FERRYX_HUB_WORKSPACE: workspaceId, OMON_LANE_AUTO_WORKTREE: '1' })
-    : ctx.productEnv({ SHELL: shell, FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${await freeLoopbackPort()}`, FERRYX_HUB_WORKSPACE: workspaceId, OMON_LANE_AUTO_WORKTREE: '1', ...extraEnv });
+    ? await extraEnv(isolation)
+    : ctx.productEnv({ ...isolation, FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${await freeLoopbackPort()}`, ...extraEnv });
   const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', ADMISSION_PROJECT, '--repo-identity', ADMISSION_REPO_IDENTITY,
     '--host', ADMISSION_HOST, '--git-common-dir', realpathSync(join(repo, '.git')), '--json'], { label: `${label}-setup`, env });
   ctx.assert('setup-created-identity-project-and-host', setup.code === 0 && setup.json?.ok === true, { code: setup.code, json: setup.json, stderr: setup.stderr });
@@ -1175,7 +1180,6 @@ async function runCapabilities(ctx) {
     // generation restarts (hub stop/start), never the daemon, so every PTY stays alive.
     writeFileSync(dropFile, mhc.DROPPED_CAPABILITY);
     note(`engine wrapper now drops ${mhc.DROPPED_CAPABILITY}; restarting the hub generation only`);
-    const providerBefore = stub.requests.length;
     // Child census around the hub-generation restart: the owned engine (profile pid record
     // `<pid> <hub pid>`) is replaced, while the daemon and every worker are the same processes.
     const pidFile = join(mhc.engineStateDir(ctx), 'mhc-supervisor.pid');
@@ -1189,6 +1193,11 @@ async function runCapabilities(ctx) {
     const oldProbe = oldEngine ? await probeProcess(oldEngine) : null;
     const childrenBefore = await h.children('capability-before');
     ctx.assert('hub-stopped-capability', await hubControl(ctx, engineEnv, 'stop', 'capability'), {});
+    // Baseline by arrival, taken once the stop has returned: the stop ends the old engine with
+    // its generation, so a request arriving after this can only come from the new one. A
+    // request of an earlier leg that is still streaming arrived before, and is not counted.
+    const arrivalsBefore = stub.arrivals();
+    const degradedSends = () => stub.requests.filter((entry) => entry.arrival > arrivalsBefore);
     ctx.assert('hub-started-capability', await hubControl(ctx, engineEnv, 'start', 'capability'), {});
     const degraded = await mhc.awaitEngine(ctx, engineEnv, 'degraded', (json) => json?.engine?.state === 'degraded', 120_000);
     ctx.assert('missing-capability-is-degraded', degraded?.engine?.faultCode === 'MHC_CAPABILITY_MISSING'
@@ -1228,8 +1237,9 @@ async function runCapabilities(ctx) {
       && survived(childrenBefore, childrenAfter), degradedCensus);
     const refused = await mhc.engineAssess(ctx, engineEnv, 'degraded-refused', 'Assess again.');
     const seen = mhc.readFrames(frames);
-    ctx.assert('degraded-engine-got-zero-sends', refused.json?.code === 'MHC_CAPABILITY_MISSING' && stub.requests.length === providerBefore
-      && seen.length >= 1 && seen.every((frame) => frame.type === 'get_protocol_info'), { frames: seen, providerRequests: stub.requests.length - providerBefore });
+    ctx.assert('degraded-engine-got-zero-sends', refused.json?.code === 'MHC_CAPABILITY_MISSING' && stub.arrivals() === arrivalsBefore
+      && degradedSends().length === 0 && seen.length >= 1 && seen.every((frame) => frame.type === 'get_protocol_info'),
+    { frames: seen, arrivalsBefore, arrivalsNow: stub.arrivals(), providerRequests: degradedSends() });
     ctx.assert('no-fallback-canary-requests', stub.requests.every((entry) => entry.model !== mhc.CANARY_MODEL), { requests: stub.requests.length });
     const panesAfter = await h.panes('after-faults');
     const rows = goalRows(h.hub, goalId);
