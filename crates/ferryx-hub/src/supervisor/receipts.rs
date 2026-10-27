@@ -504,3 +504,42 @@ pub async fn record_pty_settle(
         .await
         .map(|dispatch| PtySettle::Settled(Box::new(dispatch)))
 }
+
+/// [`record_pty_settle`] for the hub observer after a daemon restart. The live run of a local
+/// pane that started under an earlier observer epoch ([`PtySettle::OtherEpoch`]) cannot be
+/// ordered by sequence, but `instance` is this daemon's own epoch: every reading of it was
+/// taken after this daemon started, so after that run's start. An idle reading without a
+/// prompt of the bound pane in the current epoch therefore ends the predecessor's run, and it
+/// is settled instead of being left `running` forever. A reading of any other epoch is
+/// ignored. Nothing is ever sent.
+pub async fn record_pty_settle_across_restart(
+    pool: &SqlitePool,
+    host_id: &str,
+    session_id: &str,
+    instance: &str,
+    sequence: u64,
+) -> Result<PtySettle, SupervisorError> {
+    let (request_id, run_id) =
+        match record_pty_settle(pool, host_id, session_id, instance, sequence).await? {
+            PtySettle::OtherEpoch { request_id, run_id } => (request_id, run_id),
+            other => return Ok(other),
+        };
+    let generation: Option<i64> = sqlx::query_scalar(
+        "SELECT generation FROM supervisor_dispatches
+          WHERE request_id = ? AND state = 'started' AND run_id = ?",
+    )
+    .bind(&request_id)
+    .bind(&run_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(generation) = generation else {
+        return Ok(PtySettle::Ignored);
+    };
+    let settled = Receipt::Settled {
+        run_id,
+        provider_session_id: session_id.to_owned(),
+    };
+    record_receipt(pool, &request_id, generation, &settled)
+        .await
+        .map(|dispatch| PtySettle::Settled(Box::new(dispatch)))
+}

@@ -1390,10 +1390,11 @@ fn settle_pty_run(
     let instance = instance.to_owned();
     let sequence = observation.sequence;
     tokio::spawn(async move {
-        use ferryx_hub::supervisor::receipts::{record_pty_settle, PtySettle};
-        match record_pty_settle(&pool, ferryx_hub::agent_control::LOCAL_HOST_ID, &session_id, &instance, sequence).await {
-            Ok(PtySettle::OtherEpoch { request_id, run_id }) => {
-                tracing::warn!(request_id = %request_id, run_id = %run_id, "a supervisor run started under an earlier daemon; its end is left to restart reconciliation");
+        use ferryx_hub::supervisor::receipts::{record_pty_settle_across_restart, PtySettle};
+        // A run that started under an earlier daemon is ended by an idle reading of this one.
+        match record_pty_settle_across_restart(&pool, ferryx_hub::agent_control::LOCAL_HOST_ID, &session_id, &instance, sequence).await {
+            Ok(PtySettle::Settled(dispatch)) if !dispatch.run_id.as_deref().is_some_and(|run| run.contains(&format!(":{instance}:"))) => {
+                tracing::info!(request_id = %dispatch.request_id, "a supervisor run started under an earlier daemon was settled by this daemon's idle reading");
             }
             Ok(_) => {}
             Err(error) => {
