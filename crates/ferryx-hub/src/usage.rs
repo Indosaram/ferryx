@@ -24,13 +24,17 @@ fn kst_day(at: DateTime<Utc>) -> String {
         .to_string()
 }
 
+/// Judge calls and omo fallbacks in `[since, until)`. Rows of the retained mhc supervisor engine
+/// (`mhc_` kinds, recorded with `used_fallback = 1`) count as judge calls but never as omo
+/// fallback calls.
 pub async fn report(
     pool: &SqlitePool,
     since: DateTime<Utc>,
     until: DateTime<Utc>,
 ) -> Result<Report> {
     let (attempts, fallback_calls, capped): (i64, i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(sum(used_fallback=0),0), COALESCE(sum(used_fallback=1),0),
+        "SELECT COALESCE(sum(used_fallback=0 OR substr(kind,1,4)='mhc_'),0),
+                COALESCE(sum(used_fallback=1 AND substr(kind,1,4)<>'mhc_'),0),
                 COALESCE(sum(outcome LIKE 'capped:%'),0)
            FROM judge_calls
           WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?)",
@@ -189,5 +193,31 @@ mod tests {
         );
         assert!(render(&pool, "0h", false, now).await.is_err());
         assert!(render(&pool, "5w", false, now).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn supervisor_engine_rows_are_judge_calls_but_not_omo_fallbacks() {
+        let pool = crate::storage::memory().await.unwrap();
+        for (kind, fallback) in [
+            ("choice", 0),
+            ("choice", 1),
+            ("mhc_structured", 1),
+            ("mhc_choice", 1),
+        ] {
+            sqlx::query("INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at) VALUES(?, 'gap_assess', ?, 1, 'ok', ?, '2026-10-22T01:00:00+00:00')")
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(kind)
+                .bind(fallback)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let since = Utc.with_ymd_and_hms(2026, 10, 22, 0, 0, 0).unwrap();
+        let until = Utc.with_ymd_and_hms(2026, 10, 23, 0, 0, 0).unwrap();
+        let report = report(&pool, since, until).await.unwrap();
+        assert_eq!(report.judge_calls, 4);
+        assert_eq!(report.fallback_calls, 1);
+        assert_eq!(report.fallback_rate, 0.25);
+        assert!(!report.cap_reached);
     }
 }

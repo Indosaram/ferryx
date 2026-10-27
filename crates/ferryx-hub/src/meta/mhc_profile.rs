@@ -44,38 +44,18 @@ pub const REQUIRED_CAPABILITIES: [&str; 9] = [
 /// spawners) nor the `task_*`/`team_*` families (mhc 3584f7d4 semantics). Decision,
 /// convergence and conversation sessions rely on it.
 pub const MEMORY_WRITE_DENY_EFFECTS_CAPABILITY: &str = "memory_write_deny_effects";
-/// Optional: the engine honors `context.effect_tools = "deny"`, withholding that same effect set
-/// (prefix families included) from a session whose memory writes stay allowed. The owner-ingest
-/// session uses it when advertised and [`INGEST_EXCLUDED_TOOLS`] otherwise.
+/// The engine honors `context.effect_tools = "deny"`, withholding that same effect set (prefix
+/// families included) from a session whose memory writes stay allowed. The owner-ingest session
+/// requires it: without it owner ingest fails as `MHC_CAPABILITY_MISSING` before any session
+/// opens. There is no explicit fallback list, which could not name the prefix families and
+/// which mhc refuses when it names a tool the build does not register. Other roles do not
+/// need it.
 pub const EFFECT_TOOLS_DENY_CAPABILITY: &str = "effect_tools_deny";
 /// Session context key of [`EFFECT_TOOLS_DENY_CAPABILITY`].
 pub const EFFECT_TOOLS_CONTEXT_KEY: &str = "effect_tools";
-/// mhc `MEMORY_WRITE_DENY_EXCLUDED_TOOL_NAMES` minus the Windows-only `powershell`: the owner
-/// ingest session learns (memory writes allowed) but holds no execution or effect tool. mhc
-/// refuses a non-`mcp_` exclusion that withholds nothing, so the list is platform-exact.
-pub const INGEST_EXCLUDED_TOOLS: [&str; 17] = [
-    "bash",
-    "bash_input",
-    "bash_output",
-    "bash_resize",
-    "kill_bash",
-    "monitor",
-    "eval",
-    "apply_patch",
-    "lsp_rename",
-    "lsp_format",
-    "ast_grep_replace",
-    "generate_image",
-    "computer",
-    "task",
-    "dag",
-    "workflow",
-    "workpool",
-];
-/// Effect tools mhc registers on Windows only.
-pub const WINDOWS_ONLY_EXCLUDED_TOOLS: [&str; 1] = ["powershell"];
-/// Hub env key that turns the engine on. Read from the hub env file only, which every hub
-/// process (daemon, MCP server, CLI) shares; a value in one process's environment is ignored.
+/// Hub env key that turns the engine on. Turned on from the hub env file only, which every hub
+/// process (daemon, MCP server, CLI) shares; one process's environment can only turn it off
+/// for that process (see [`MhcProfileConfig::from_env_in`]).
 pub const ENABLE_KEY: &str = "FERRYX_HUB_MHC_SUPERVISOR";
 /// Lock file under the hub data directory held by the process that owns the engine, from
 /// before its launch until the owned child is reaped.
@@ -152,6 +132,22 @@ fn env_text(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// 1/true/yes/on, any case, surrounding whitespace ignored.
+fn is_on(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// 0/false/no/off, any case, surrounding whitespace ignored.
+fn is_off(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
 /// A tool name the engine accepts in `tools_exclude` (`^[A-Za-z0-9_.-]{1,64}$`).
 pub fn is_tool_name(name: &str) -> bool {
     !name.is_empty()
@@ -165,26 +161,38 @@ impl MhcProfileConfig {
     /// True when the shared hub env (the hub env file entries) turns the engine on
     /// (1/true/yes/on).
     pub fn enabled_in(shared: &BTreeMap<String, String>) -> bool {
-        shared.get(ENABLE_KEY).is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        shared.get(ENABLE_KEY).is_some_and(|value| is_on(value))
     }
 
-    /// `None` unless [`ENABLE_KEY`] in the hub env file turns the engine on, so every hub
-    /// process agrees on whether the supervisor is mhc. `FERRYX_HUB_MHC_BIN`,
+    /// [`Self::from_env_in`] over the hub env file entries and this process's [`ENABLE_KEY`].
+    pub fn from_env() -> Option<Self> {
+        let process = std::env::var(ENABLE_KEY).ok();
+        Self::from_env_in(crate::hub_env::file_env(), process.as_deref())
+    }
+
+    /// `None` unless [`ENABLE_KEY`] in the shared hub env file entries (`shared`) turns the
+    /// engine on, so every hub process agrees on whether the supervisor is mhc. An explicit
+    /// disable (0/false/no/off) in this process's environment (`process`) wins over the file
+    /// and keeps this process from launching the engine; the shared file still names mhc, so
+    /// its judge holds as `MHC_NOT_RUNNING` instead of switching to another model. A process
+    /// value never turns the engine on. `FERRYX_HUB_MHC_BIN`,
     /// `FERRYX_HUB_MHC_PROVIDER` + `FERRYX_HUB_MHC_MODEL`,
     /// `FERRYX_HUB_MHC_THINKING` and `FERRYX_HUB_MHC_EFFECT_TOOLS` (extra comma-separated names)
     /// refine it for the owning daemon.
-    pub fn from_env() -> Option<Self> {
-        if !Self::enabled_in(crate::hub_env::file_env()) {
-            if std::env::var_os(ENABLE_KEY).is_some() {
+    pub fn from_env_in(shared: &BTreeMap<String, String>, process: Option<&str>) -> Option<Self> {
+        let process_off = process.is_some_and(is_off);
+        if !Self::enabled_in(shared) {
+            if process.is_some_and(|value| !value.trim().is_empty() && !is_off(value)) {
                 tracing::warn!(
-                    "FERRYX_HUB_MHC_SUPERVISOR is read from the hub env file only; the process environment value was ignored"
+                    "FERRYX_HUB_MHC_SUPERVISOR turns the engine on from the hub env file only; the process environment value was ignored"
                 );
             }
+            return None;
+        }
+        if process_off {
+            tracing::warn!(
+                "FERRYX_HUB_MHC_SUPERVISOR in the process environment disables the engine the hub env file turns on; supervisor decisions hold as MHC_NOT_RUNNING"
+            );
             return None;
         }
         let mut config = Self::default();
@@ -365,6 +373,21 @@ impl MhcProfile {
             .collect()
     }
 
+    /// Capabilities beyond [`REQUIRED_CAPABILITIES`] that the role of `spec` needs and
+    /// `advertised` lacks: the owner-ingest session needs [`EFFECT_TOOLS_DENY_CAPABILITY`].
+    pub fn missing_role_capabilities(&self, spec: &RoleSpec, advertised: &[String]) -> Vec<String> {
+        let needed: &[&str] = if spec.role == "owner_ingest" {
+            &[EFFECT_TOOLS_DENY_CAPABILITY]
+        } else {
+            &[]
+        };
+        needed
+            .iter()
+            .filter(|needed| !advertised.iter().any(|name| name == *needed))
+            .map(|needed| (*needed).to_owned())
+            .collect()
+    }
+
     /// Creates the profile directory (owner-only on unix) and the profile-local memory identity
     /// config. Nothing outside `<data>` is written.
     pub fn prepare(&self) -> Result<()> {
@@ -435,29 +458,14 @@ impl MhcProfile {
         self.config.effect_tools.join(",")
     }
 
-    /// The owner-ingest exclusions: the configured effect tools, then
-    /// [`INGEST_EXCLUDED_TOOLS`], then [`WINDOWS_ONLY_EXCLUDED_TOOLS`] on Windows.
-    fn ingest_tools(&self) -> String {
-        let platform: &[&str] = if cfg!(windows) {
-            &WINDOWS_ONLY_EXCLUDED_TOOLS
-        } else {
-            &[]
-        };
-        let mut names = self.config.effect_tools.clone();
-        for name in INGEST_EXCLUDED_TOOLS.iter().chain(platform) {
-            if !names.iter().any(|existing| existing == name) {
-                names.push((*name).to_owned());
-            }
-        }
-        names.join(",")
-    }
-
-    /// The session policy of a role.
+    /// The session policy of a role. The owner-ingest session learns (memory writes allowed)
+    /// but asks the engine to withhold the whole effect set ([`EFFECT_TOOLS_DENY_CAPABILITY`]).
     pub fn role_spec(&self, role: &SessionRole) -> RoleSpec {
         let mut context = BTreeMap::new();
         let (key, name, durable, cancellable) = match role {
             SessionRole::OwnerIngest => {
-                context.insert("tools_exclude".to_owned(), self.ingest_tools());
+                context.insert("tools_exclude".to_owned(), self.effect_tools());
+                context.insert(EFFECT_TOOLS_CONTEXT_KEY.to_owned(), "deny".to_owned());
                 ("owner-ingest".to_owned(), "owner_ingest", true, false)
             }
             SessionRole::Conversation(scope) => {
@@ -489,26 +497,6 @@ impl MhcProfile {
         }
     }
 
-    /// The `open_session` context of a role on an engine advertising `capabilities`. With
-    /// [`EFFECT_TOOLS_DENY_CAPABILITY`] the owner-ingest session asks the engine to withhold the
-    /// whole effect set (prefix families included) and names only the configured effect tools;
-    /// otherwise it keeps the explicit [`INGEST_EXCLUDED_TOOLS`] list. Other roles are unchanged.
-    pub fn session_context(
-        &self,
-        spec: &RoleSpec,
-        capabilities: &[String],
-    ) -> BTreeMap<String, String> {
-        let mut context = spec.context.clone();
-        let enforced = capabilities
-            .iter()
-            .any(|name| name == EFFECT_TOOLS_DENY_CAPABILITY);
-        if spec.role == "owner_ingest" && enforced {
-            context.insert(EFFECT_TOOLS_CONTEXT_KEY.to_owned(), "deny".to_owned());
-            context.insert("tools_exclude".to_owned(), self.effect_tools());
-        }
-        context
-    }
-
     /// `open_session` for a role. The engine's mixed wire casing is kept: `retain_on_disconnect`
     /// and `auto_title` are snake_case, the rest camelCase.
     pub fn open_session_command(
@@ -516,7 +504,6 @@ impl MhcProfile {
         spec: &RoleSpec,
         durable_session_id: &str,
         session_path: Option<&str>,
-        capabilities: &[String],
     ) -> Value {
         let mut command = json!({
             "type": "open_session",
@@ -524,7 +511,7 @@ impl MhcProfile {
             "auto_title": false,
             "retain_on_disconnect": false,
             "durableSessionId": durable_session_id,
-            "context": self.session_context(spec, capabilities),
+            "context": spec.context,
         });
         if let Some(path) = session_path {
             command["sessionPath"] = json!(path);

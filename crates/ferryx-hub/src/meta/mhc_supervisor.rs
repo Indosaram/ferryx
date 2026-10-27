@@ -735,9 +735,14 @@ fn cleanup(
 }
 
 /// mhc runs a prompt that starts with `/` as a slash command (`/model` would switch the
-/// supervisor's model) instead of a turn. A leading space keeps any text an ordinary turn.
+/// supervisor's model) instead of a turn; a leading space keeps such text an ordinary turn.
+/// A prompt that trims to a bare `.` is mhc's manual-continue shortcut ("resume the most
+/// recent intent") on any session with history. mhc trims before comparing, so a space does
+/// not escape it; the dot is sent quoted instead.
 fn escape_command(message: &str) -> Cow<'_, str> {
-    if message.starts_with('/') {
+    if message.trim() == "." {
+        Cow::Borrowed("\".\"")
+    } else if message.starts_with('/') {
         Cow::Owned(format!(" {message}"))
     } else {
         Cow::Borrowed(message)
@@ -905,6 +910,11 @@ impl Inner {
                 Ok(engine)
             }
             Err(fault) => {
+                if self.is_stopped() {
+                    // Stopped while waiting for the profile lock: nothing launched, and the
+                    // stop owns the health state, so no backoff or degraded state is recorded.
+                    return Err(fault);
+                }
                 tracing::warn!(%fault, "mhc supervisor engine is degraded; no automatic action runs");
                 state.last_fault = Some(fault.clone());
                 state.retry_at = Some(tokio::time::Instant::now() + state.backoff);
@@ -921,6 +931,14 @@ impl Inner {
 
     async fn launch(self: &Arc<Self>, generation: u64) -> Result<Arc<Engine>, SupervisorFault> {
         let lock = self.acquire_profile_lock().await?;
+        // The lock wait can last SHUTDOWN_GRACE + drain + KILL_WAIT; a runtime stopped
+        // meanwhile launches nothing.
+        if self.is_stopped() {
+            drop(lock);
+            return Err(SupervisorFault::not_running(
+                "the supervisor engine stopped with the hub",
+            ));
+        }
         // Another supervisor process may have written the store while it owned the profile.
         self.store().reload();
         let Launched {
@@ -1086,6 +1104,13 @@ impl Inner {
     /// The routing handle of a role's session: the live one, a resumed persisted one, or a new
     /// one. A resumed session must return the persisted identity or it is closed and refused.
     async fn session(&self, engine: &Engine, spec: &RoleSpec) -> Result<OpenSession, SupervisorFault> {
+        // Checked before any command: a role the engine cannot scope opens nothing.
+        let missing = self
+            .profile
+            .missing_role_capabilities(spec, &engine.info.capabilities);
+        if !missing.is_empty() {
+            return Err(SupervisorFault::Capability { missing });
+        }
         if spec.durable {
             if let Some(open) = engine.live_handle(&spec.key) {
                 return Ok(open);
@@ -1114,7 +1139,6 @@ impl Inner {
             spec,
             &durable_id,
             resume_path.as_deref(),
-            &engine.info.capabilities,
         );
         let data = engine
             .client

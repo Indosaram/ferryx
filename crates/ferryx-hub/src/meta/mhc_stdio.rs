@@ -19,9 +19,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub const WORK_REQUEST_EVENT: &str = "supervisor.work_request";
 /// Extension request that answers one work request.
 pub const WORK_REPLY_REQUEST: &str = "supervisor.work_reply";
-/// Work-tool requests queued for the supervisor; beyond this a request is dropped and logged
-/// (the reader never blocks on a slow handler).
+/// Work-tool requests queued for the supervisor; beyond this a request is answered at once
+/// with a [`WORK_BUSY_CODE`] error reply (the reader never blocks on a slow handler).
 pub const WORK_QUEUE: usize = 64;
+/// Error code of the reply to a work request the full queue could not take.
+pub const WORK_BUSY_CODE: &str = "SUPERVISOR_WORK_BUSY";
 
 pub type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 pub type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
@@ -57,6 +59,10 @@ struct Shared {
     /// `None` once the transport is gone; every waiter is released by dropping its sender.
     routes: Mutex<Option<Routes>>,
     malformed: AtomicU64,
+    /// Work requests refused because the queue was full; also numbers their reply ids.
+    busy: AtomicU64,
+    /// The writer queue, held weakly so [`StdioClient::close`] still shuts the engine's stdin.
+    outbound: mpsc::WeakUnboundedSender<String>,
     gone: watch::Sender<Option<String>>,
 }
 
@@ -83,6 +89,43 @@ impl Shared {
         tracing::warn!(why, bytes, "mhc supervisor engine sent a malformed line; it was skipped");
     }
 
+    /// Answers a work request the full queue cannot take with an error reply, so the engine's
+    /// tool call fails at once instead of waiting for its deadline. The reply's response is
+    /// not awaited (its id has no pending route).
+    fn refuse_busy(&self, record: &Value) {
+        let request_id = record
+            .get("data")
+            .and_then(|data| data.get("requestId"))
+            .and_then(Value::as_str);
+        let handle = record.get("sessionId").and_then(Value::as_str);
+        let (Some(request_id), Some(handle)) = (request_id, handle) else {
+            tracing::warn!("a supervisor work request was dropped: the work queue is full and the request names no session to answer");
+            return;
+        };
+        let number = self.busy.fetch_add(1, Ordering::Relaxed) + 1;
+        let command = json!({
+            "type": "extension_request",
+            "id": format!("fx-busy-{number}"),
+            "sessionId": handle,
+            "name": WORK_REPLY_REQUEST,
+            "data": {
+                "requestId": request_id,
+                "ok": false,
+                "error": {
+                    "code": WORK_BUSY_CODE,
+                    "message": "the supervisor work queue is full; retry the request later",
+                },
+            },
+        });
+        let mut line = command.to_string();
+        line.push('\n');
+        let sent = self
+            .outbound
+            .upgrade()
+            .is_some_and(|sender| sender.send(line).is_ok());
+        tracing::warn!(sent, "a supervisor work request was refused: the work queue is full");
+    }
+
     fn dispatch(&self, value: Value) {
         let Some(kind) = value.get("type").and_then(Value::as_str).map(str::to_owned) else {
             self.malformed("record without a type", value.to_string().len());
@@ -106,10 +149,12 @@ impl Shared {
             && value.get("name").and_then(Value::as_str) == Some(WORK_REQUEST_EVENT)
         {
             if let Some(work) = &routes.work {
-                if work.try_send(value).is_err() {
-                    tracing::warn!(
-                        "a supervisor work request was dropped: the work queue is full or closed"
-                    );
+                match work.try_send(value) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(record)) => self.refuse_busy(&record),
+                    Err(mpsc::error::TrySendError::Closed(_)) => tracing::warn!(
+                        "a supervisor work request was dropped: the work queue is closed"
+                    ),
                 }
             }
             return;
@@ -196,15 +241,17 @@ impl StdioClient {
     ) -> (Arc<Self>, mpsc::Receiver<Value>) {
         let (work_tx, work_rx) = mpsc::channel(WORK_QUEUE);
         let (gone, _) = watch::channel(None);
+        let (outbound, mut lines) = mpsc::unbounded_channel::<String>();
         let shared = Arc::new(Shared {
             routes: Mutex::new(Some(Routes {
                 work: Some(work_tx),
                 ..Routes::default()
             })),
             malformed: AtomicU64::new(0),
+            busy: AtomicU64::new(0),
+            outbound: outbound.downgrade(),
             gone,
         });
-        let (outbound, mut lines) = mpsc::unbounded_channel::<String>();
         let writer_shared = shared.clone();
         tokio::spawn(async move {
             let mut writer = writer;

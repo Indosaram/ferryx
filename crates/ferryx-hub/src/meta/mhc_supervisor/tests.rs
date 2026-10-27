@@ -491,17 +491,16 @@ fn decision_context() -> Value {
     json!({"ferryx_role": "decision", "memory_write": "deny", "tools_exclude": "bash,edit,write"})
 }
 
-/// The owner-ingest exclusions on this platform without the engine-enforced effect deny.
-fn ingest_exclusions() -> String {
-    let mut names = vec![
-        "bash", "edit", "write", "bash_input", "bash_output", "bash_resize", "kill_bash",
-        "monitor", "eval", "apply_patch", "lsp_rename", "lsp_format", "ast_grep_replace",
-        "generate_image", "computer", "task", "dag", "workflow", "workpool",
-    ];
-    if cfg!(windows) {
-        names.push("powershell");
-    }
-    names.join(",")
+/// Learning stays allowed (no memory_write key); the engine withholds the whole effect set.
+fn ingest_context() -> Value {
+    json!({"effect_tools": "deny", "ferryx_role": "owner_ingest", "tools_exclude": "bash,edit,write"})
+}
+
+/// The required capabilities plus `effect_tools_deny`, which owner ingest needs.
+fn ingest_capabilities() -> Vec<String> {
+    let mut capabilities = all_capabilities();
+    capabilities.push("effect_tools_deny".to_owned());
+    capabilities
 }
 
 #[tokio::test]
@@ -885,7 +884,7 @@ async fn work_tool_requests_reach_the_typed_handler_with_the_hub_scope() {
 
 #[tokio::test]
 async fn owner_ingest_is_serialized_and_idempotent_across_restarts() {
-    let harness = Harness::new("ingest", all_capabilities());
+    let harness = Harness::new("ingest", ingest_capabilities());
     let supervisor = harness.supervisor();
     let text = "Use the QA host for remote tests";
     let first = supervisor.ingest_owner("slack:C1:1700.1", text).await.unwrap();
@@ -902,7 +901,7 @@ async fn owner_ingest_is_serialized_and_idempotent_across_restarts() {
     );
     assert_eq!(
         harness.peer.of_type("open_session")[0]["context"],
-        json!({"ferryx_role": "owner_ingest", "tools_exclude": ingest_exclusions()})
+        ingest_context()
     );
     drop(supervisor);
     let restarted = harness.supervisor();
@@ -1115,28 +1114,37 @@ async fn whether_the_supervisor_is_mhc_comes_from_shared_sources_only() {
 
 #[tokio::test]
 async fn ingest_holds_no_effect_tools_and_denied_roles_need_the_effect_capability() {
+    // Without `effect_tools_deny` owner ingest is a typed capability fault: nothing opens,
+    // nothing is sent, the source is not recorded. Decisions on the same engine still run.
     let harness = Harness::new("ingest-scope", all_capabilities());
     let supervisor = harness.supervisor();
-    supervisor.ingest_owner("slack:C1:1700.9", "Keep PRs small").await.unwrap();
-    let opens = harness.peer.of_type("open_session");
-    // Learning stays allowed (no memory_write key); every effect tool is named explicitly.
+    let fault = supervisor
+        .ingest_owner("slack:C1:1700.9", "Keep PRs small")
+        .await
+        .unwrap_err();
     assert_eq!(
-        opens[0]["context"],
-        json!({"ferryx_role": "owner_ingest", "tools_exclude": ingest_exclusions()})
+        fault,
+        SupervisorFault::Capability {
+            missing: vec!["effect_tools_deny".to_owned()]
+        }
     );
+    assert_eq!(fault.code(), "MHC_CAPABILITY_MISSING");
+    assert!(harness.peer.of_type("open_session").is_empty());
+    assert!(harness.peer.of_type("prompt").is_empty());
+    assert!(!supervisor.inner.store().was_ingested("slack:C1:1700.9"));
+    assert_eq!(supervisor.decide("question").await.unwrap(), "answer:question");
+    let opens = harness.peer.of_type("open_session");
+    assert_eq!(opens.len(), 1);
+    assert_eq!(opens[0]["context"], decision_context());
+    assert_eq!(supervisor.health().state, HealthState::Ready);
 
-    // An engine that enforces the effect deny itself gets the role key instead of the list.
-    let mut capabilities = all_capabilities();
-    capabilities.push("effect_tools_deny".to_owned());
-    let enforced = Harness::new("ingest-enforced", capabilities);
+    // An engine that enforces the effect deny gets the role key and only the configured names.
+    let enforced = Harness::new("ingest-enforced", ingest_capabilities());
     let supervisor = enforced.supervisor();
     supervisor.ingest_owner("slack:C1:1701.0", "Keep PRs small").await.unwrap();
     supervisor.decide("question").await.unwrap();
     let opens = enforced.peer.of_type("open_session");
-    assert_eq!(
-        opens[0]["context"],
-        json!({"effect_tools": "deny", "ferryx_role": "owner_ingest", "tools_exclude": "bash,edit,write"})
-    );
+    assert_eq!(opens[0]["context"], ingest_context());
     assert_eq!(opens[1]["context"], decision_context());
 
     // `memory_write_deny` alone does not pin the effect exclusions of denied sessions.
@@ -1252,7 +1260,7 @@ async fn a_prompt_the_engine_did_not_start_is_aborted_as_a_protocol_fault() {
 
 #[tokio::test]
 async fn concurrent_ingests_of_one_source_send_one_prompt() {
-    let harness = Harness::new("ingest-race", all_capabilities());
+    let harness = Harness::new("ingest-race", ingest_capabilities());
     let supervisor = harness.supervisor();
     let other = supervisor.clone();
     let (a, b) = tokio::join!(
@@ -1349,6 +1357,117 @@ async fn channel_text_starting_with_a_slash_is_never_an_engine_command() {
         harness.peer.of_type("prompt")[0]["message"],
         json!(" /model other-provider/other-model")
     );
+}
+
+#[tokio::test]
+async fn a_bare_dot_is_never_the_engine_manual_continue_shortcut() {
+    let harness = Harness::new("dot", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:C9".to_owned(),
+    };
+    // The session has history, which is when mhc would treat "." as manual continue.
+    supervisor.converse(&scope, "first").await.unwrap();
+    assert_eq!(supervisor.converse(&scope, ".").await.unwrap(), "answer:\".\"");
+    supervisor.converse(&scope, " .\n").await.unwrap();
+    supervisor.converse(&scope, "done.").await.unwrap();
+    let messages: Vec<Value> = harness
+        .peer
+        .of_type("prompt")
+        .iter()
+        .map(|prompt| prompt["message"].clone())
+        .collect();
+    assert_eq!(
+        messages,
+        [json!("first"), json!("\".\""), json!("\".\""), json!("done.")]
+    );
+}
+
+#[tokio::test]
+async fn a_full_work_queue_answers_the_engine_with_an_error_reply() {
+    use crate::meta::mhc_stdio::{WORK_BUSY_CODE, WORK_QUEUE, WORK_REQUEST_EVENT};
+    let (client_io, engine_io) = tokio::io::duplex(1 << 20);
+    let (read, write) = tokio::io::split(client_io);
+    let (client, mut work) = StdioClient::start(Box::new(read), Box::new(write), 1 << 16);
+    let (engine_read, mut engine_write) = tokio::io::split(engine_io);
+    let mut records = String::new();
+    // Nothing drains the queue: the first WORK_QUEUE requests fill it, the next one is refused.
+    for n in 0..=WORK_QUEUE {
+        let record = json!({"type": "extension_event", "sessionId": "h7",
+            "name": WORK_REQUEST_EVENT, "data": {"requestId": format!("r{n}"), "sessionId": "d7"}});
+        records.push_str(&record.to_string());
+        records.push('\n');
+    }
+    engine_write.write_all(records.as_bytes()).await.unwrap();
+    let mut lines = BufReader::new(engine_read).lines();
+    let line = tokio::time::timeout(WAIT, lines.next_line())
+        .await
+        .expect("the refused request is answered")
+        .unwrap()
+        .expect("a reply line");
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["type"], "extension_request");
+    assert_eq!(reply["sessionId"], "h7");
+    assert_eq!(reply["name"], WORK_REPLY_REQUEST);
+    assert_eq!(reply["data"]["requestId"], json!(format!("r{WORK_QUEUE}")));
+    assert_eq!(reply["data"]["ok"], json!(false));
+    assert_eq!(reply["data"]["error"]["code"], WORK_BUSY_CODE);
+    // The queued requests are intact and in order; the refused one is not queued.
+    for n in 0..WORK_QUEUE {
+        let queued = work.try_recv().expect("a queued request");
+        assert_eq!(queued["data"]["requestId"], json!(format!("r{n}")));
+    }
+    assert!(work.try_recv().is_err());
+    assert!(!client.is_gone());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_runtime_stopped_while_waiting_for_the_profile_launches_nothing() {
+    let harness = Harness::new("stopped-waiting", all_capabilities());
+    let supervisor = harness.supervisor();
+    let held = supervisor
+        .profile()
+        .try_lock()
+        .unwrap()
+        .expect("the test takes the free profile lock");
+    let mut health = supervisor.subscribe_health();
+    let waiting = supervisor.clone();
+    let started = tokio::spawn(async move { waiting.start().await });
+    tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Waiting))
+        .await
+        .expect("the launch waits for the profile")
+        .unwrap();
+    // The hub stops while the launch waits; then the profile frees up.
+    supervisor.inner.run_state.store(STOPPED, Ordering::SeqCst);
+    drop(held);
+    let fault = tokio::time::timeout(WAIT, started)
+        .await
+        .expect("the waiting launch returns")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(fault.code(), "MHC_NOT_RUNNING");
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 0);
+    assert!(harness.peer.frames().is_empty());
+    // The stop is not recorded as a failed launch, and the profile lock was released.
+    assert!(supervisor.inner.engine.lock().await.retry_at.is_none());
+    assert!(supervisor.profile().try_lock().unwrap().is_some());
+    supervisor.shutdown().await;
+    assert_eq!(supervisor.health().state, HealthState::Stopped);
+}
+
+#[test]
+fn a_process_disable_wins_over_the_shared_enable_and_a_process_enable_is_ignored() {
+    let on = BTreeMap::from([("FERRYX_HUB_MHC_SUPERVISOR".to_owned(), "on".to_owned())]);
+    let none = BTreeMap::new();
+    assert!(MhcProfileConfig::from_env_in(&on, None).is_some());
+    assert!(MhcProfileConfig::from_env_in(&on, Some("1")).is_some());
+    assert!(MhcProfileConfig::from_env_in(&on, Some("")).is_some());
+    for off in ["0", "false", " OFF ", "no"] {
+        assert!(MhcProfileConfig::from_env_in(&on, Some(off)).is_none(), "{off}");
+    }
+    assert!(MhcProfileConfig::from_env_in(&none, Some("1")).is_none());
+    assert!(MhcProfileConfig::from_env_in(&none, None).is_none());
 }
 
 #[test]
