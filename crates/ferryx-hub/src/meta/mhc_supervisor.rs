@@ -573,7 +573,8 @@ enum Lease {
         slot: usize,
         inner: Arc<Inner>,
     },
-    Exclusive(OwnedMutexGuard<()>),
+    /// Held only so its drop releases the role's exclusive context.
+    Exclusive { _guard: OwnedMutexGuard<()> },
 }
 
 impl Drop for Lease {
@@ -761,7 +762,7 @@ struct Inner {
     ingest_order: tokio::sync::Mutex<()>,
     /// Held by the ingest turn until any abort drain is done.
     ingest_session: Arc<tokio::sync::Mutex<()>>,
-    conversations: Mutex<HashMap<String, (ConversationScope, Arc<tokio::sync::Mutex<()>>)>>,
+    conversations: Mutex<HashMap<String, ConversationEntry>>,
     cancel: watch::Sender<u64>,
     work: RwLock<Arc<dyn WorkToolHandler>>,
     /// Decisions waiting for a slot; mirrored in [`SupervisorHealth::queued_decisions`].
@@ -770,6 +771,9 @@ struct Inner {
     run_state: AtomicU64,
     next_token: AtomicU64,
 }
+
+/// One conversation's scope and the lock serialising its turns.
+type ConversationEntry = (ConversationScope, Arc<tokio::sync::Mutex<()>>);
 
 type TurnResult = Result<String, SupervisorFault>;
 
@@ -806,9 +810,7 @@ impl Inner {
         self.free_slots.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn conversations(
-        &self,
-    ) -> MutexGuard<'_, HashMap<String, (ConversationScope, Arc<tokio::sync::Mutex<()>>)>> {
+    fn conversations(&self) -> MutexGuard<'_, HashMap<String, ConversationEntry>> {
         self.conversations.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -1655,7 +1657,7 @@ impl MhcSupervisor {
             .run(
                 SessionRole::Conversation(scope.clone()),
                 message.to_owned(),
-                Lease::Exclusive(guard),
+                Lease::Exclusive { _guard: guard },
                 cancel,
                 epoch,
             )
@@ -1685,7 +1687,7 @@ impl MhcSupervisor {
             .run(
                 SessionRole::OwnerIngest,
                 format!("[ferryx owner message {source}]\n{text}"),
-                Lease::Exclusive(guard),
+                Lease::Exclusive { _guard: guard },
                 cancel,
                 epoch,
             )
