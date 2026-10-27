@@ -139,15 +139,15 @@ impl AgentControl for DaemonBridge {
             };
         }
         let Some(gateway) = self.gateway.as_ref().filter(|_| local) else {
-            let op = AgentOp::Send {
+            // A paired host's send counts as started only from that host's own start receipt
+            // naming this request and session; its acceptance alone never does.
+            let send = ferryx_hub::agent_control::WorkerSend {
+                host_id: host_id.map(str::to_owned),
                 session_id: session_id.to_owned(),
                 text: text.to_owned(),
                 request_id: request_id.to_owned(),
             };
-            return match self.execute(host_id, op).await {
-                Ok(_) => ferryx_hub::goals::SendOutcome::Started,
-                Err(error) => ferryx_hub::agent_control::send_error_outcome(&error.to_string()),
-            };
+            return self.deliver(&send).await.send_outcome(&send);
         };
         hub_send_outcome(
             crate::agent_control::delivery::send_confirmed(
@@ -159,6 +159,54 @@ impl AgentControl for DaemonBridge {
             )
             .await,
         )
+    }
+
+    /// One supervisor dispatch with a causal start receipt. On this machine the in-process
+    /// observer attributes the start (`agent_control::delivery::deliver`); a paired host runs
+    /// the same delivery and answers with its own receipt, and a host without
+    /// `agentControlReceiptsV1` is never sent it. Without an observer nothing is sent.
+    async fn deliver(
+        &self,
+        send: &ferryx_hub::agent_control::WorkerSend,
+    ) -> ferryx_hub::agent_control::Delivery {
+        use ferryx_hub::agent_control::Delivery;
+        let deadline = crate::agent_control::delivery::turn_start_deadline();
+        let op = AgentControlOp::Deliver {
+            session_id: send.session_id.clone(),
+            text: send.text.clone(),
+            request_id: send.request_id.clone(),
+            observe_ms: u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+        };
+        let remote = send
+            .host_id
+            .as_deref()
+            .filter(|host| !host.is_empty() && *host != "local");
+        let Some(host_id) = remote else {
+            let Some(gateway) = self.gateway.as_ref() else {
+                return Delivery::Unsupported {
+                    code: ferryx_hub::goals::loop_driver::OBSERVER_UNAVAILABLE.into(),
+                };
+            };
+            return match crate::remote::server::agent_control_service::handle(gateway, op).await {
+                Ok(result) => crate::agent_control::delivery::hub_delivery_from_reply(&result),
+                Err(error) => crate::agent_control::delivery::hub_delivery(Err(error)),
+            };
+        };
+        let request = DaemonRequest::AgentControl {
+            request: op,
+            host_id: Some(host_id.to_owned()),
+        };
+        match self.client.send_request(request).await {
+            Ok(DaemonResponse::AgentControlOk { result }) => {
+                crate::agent_control::delivery::hub_delivery_from_reply(&result)
+            }
+            Ok(DaemonResponse::Error { code, .. }) => Delivery::from_error_code(code.as_deref()),
+            // Whether the daemon forwarded the request cannot be known.
+            Ok(_) | Err(_) => Delivery::Uncertain {
+                accepted: false,
+                code: ferryx_hub::agent_control::SEND_FAILED.into(),
+            },
+        }
     }
 }
 
@@ -1118,6 +1166,17 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             match events.recv().await {
                 Ok(observation) => {
                     let idle = matches!(observation.state, AgentControlState::Idle);
+                    if idle && observation.prompt_id.is_none() {
+                        // The idle reading after a supervisor run's start reading settles it.
+                        let pool = watch_hub.pool.clone();
+                        let session_id = observation.session_id.clone();
+                        let sequence = observation.sequence;
+                        tokio::spawn(async move {
+                            if let Err(error) = ferryx_hub::supervisor::receipts::record_pty_settle(&pool, "local", &session_id, sequence).await {
+                                tracing::warn!(%error, session_id = %session_id, "a supervisor run settle was not recorded");
+                            }
+                        });
+                    }
                     if matches!(observation.state, AgentControlState::Working | AgentControlState::Blocked) {
                         worked.insert(observation.session_id.clone());
                     } else if idle && observation.prompt_id.is_none() && worked.remove(&observation.session_id) {

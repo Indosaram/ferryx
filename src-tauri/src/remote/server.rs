@@ -3904,6 +3904,7 @@ async fn get_capabilities(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
             }
@@ -6793,6 +6794,9 @@ pub(crate) async fn reference_chat_submit_with_clock(
     let paste_session = session_id.clone();
     let authorize = reference_chat_authorize(&state, &headers, &target);
     let request_id = body.request_id.clone();
+    // A phone chat message is input another request's delivery did not send: mark it before it
+    // is typed, so no delivery attributes the turn it starts to itself.
+    state.agent_events.note_input(&session_id, Some(request_id.as_str()));
     // The transaction runs on its own task: a caller that disconnects drops this handler, and
     // must not cancel the transaction between its paste and its Enter.
     let transaction = tokio::spawn(async move {

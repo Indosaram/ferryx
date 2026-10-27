@@ -501,6 +501,7 @@ impl Operation {
                     crate::agent_control::AgentControlOp::List => {}
                     crate::agent_control::AgentControlOp::Read { session_id }
                     | crate::agent_control::AgentControlOp::Send { session_id, .. }
+                    | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
                     | crate::agent_control::AgentControlOp::Answer { session_id, .. }
                     | crate::agent_control::AgentControlOp::Stop { session_id, .. }
                     | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
@@ -512,6 +513,21 @@ impl Operation {
                         path = "agent-control/events";
                         r.query.push(("after".into(), after.to_string()));
                     }
+                }
+                // A delivery rides the send route with `observeMs`, but only to a host that
+                // reports causal start receipts; any other host is never sent it. Its budget
+                // covers the host's submit deadline plus the start wait.
+                if let crate::agent_control::AgentControlOp::Deliver { observe_ms, .. } = op {
+                    r.capability = Some(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+                    let observe = crate::agent_control::delivery::observe_deadline(*observe_ms);
+                    let submit = crate::remote::reference_chat::input::REFERENCE_SUBMIT_DEADLINE_MS;
+                    r.budget_secs = Some(
+                        submit
+                            .div_ceil(1000)
+                            .saturating_add(observe.as_secs())
+                            .saturating_add(15)
+                            .min(315),
+                    );
                 }
                 if let crate::agent_control::AgentControlOp::Wait {
                     until,
@@ -545,13 +561,18 @@ impl Operation {
             Self::AgentControl { op } => match op {
                 crate::agent_control::AgentControlOp::Read { session_id }
                 | crate::agent_control::AgentControlOp::Send { session_id, .. }
+                | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
                 | crate::agent_control::AgentControlOp::Answer { session_id, .. }
                 | crate::agent_control::AgentControlOp::Stop { session_id, .. }
                 | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
                     r.segments.push(session_id.clone());
                     if matches!(op, crate::agent_control::AgentControlOp::Wait { .. }) {
                         r.segments.push("wait".into());
-                    } else if matches!(op, crate::agent_control::AgentControlOp::Send { .. }) {
+                    } else if matches!(
+                        op,
+                        crate::agent_control::AgentControlOp::Send { .. }
+                            | crate::agent_control::AgentControlOp::Deliver { .. }
+                    ) {
                         r.segments.push("send".into());
                     } else if matches!(op, crate::agent_control::AgentControlOp::Answer { .. }) {
                         r.segments.push("answer".into());
@@ -1849,6 +1870,17 @@ fn agent_control_body(op: &crate::agent_control::AgentControlOp) -> serde_json::
         } => {
             serde_json::json!({ "text": text, "requestId": request_id })
         }
+        crate::agent_control::AgentControlOp::Deliver {
+            text,
+            request_id,
+            observe_ms,
+            ..
+        } => serde_json::json!({
+            "text": text,
+            "requestId": request_id,
+            // Never 0 on the wire: its presence is what makes the host deliver.
+            "observeMs": crate::agent_control::delivery::observe_deadline(*observe_ms).as_millis() as u64,
+        }),
         crate::agent_control::AgentControlOp::Answer {
             prompt_id,
             screen_revision,

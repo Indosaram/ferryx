@@ -2140,6 +2140,18 @@ impl DaemonClient {
                             .saturating_add(15_000),
                     )
             },
+            // A delivery waits for the target's submit, then for its turn start, on top of the
+            // paired host's own budget for both.
+            DaemonRequest::AgentControl {
+                request: crate::agent_control::AgentControlOp::Deliver { observe_ms, .. },
+                ..
+            } => {
+                crate::agent_control::delivery::observe_deadline(*observe_ms)
+                    + std::time::Duration::from_millis(
+                        crate::remote::reference_chat::input::REFERENCE_SUBMIT_DEADLINE_MS,
+                    )
+                    + std::time::Duration::from_secs(25)
+            }
             DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
             DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. } => {
                 Self::REMOTE_CONTROL_OUTER_TIMEOUT

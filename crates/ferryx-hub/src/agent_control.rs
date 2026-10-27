@@ -90,10 +90,132 @@ pub trait AgentControl: Send + Sync {
             Err(error) => send_error_outcome(&error.to_string()),
         }
     }
+
+    /// Sends one supervisor dispatch once and reports what the target observed, stage by
+    /// stage. Only a target-side receipt naming this request and session counts as a start;
+    /// acceptance alone never does. Never retries.
+    ///
+    /// This default has no causal observer, so it sends nothing and reports
+    /// [`OBSERVER_CAPABILITY_MISSING`]: a backend that cannot attribute a start to a request
+    /// is a capability hold, never assumed success. The daemon bridge overrides it.
+    async fn deliver(&self, _send: &WorkerSend) -> Delivery {
+        Delivery::Unsupported {
+            code: OBSERVER_CAPABILITY_MISSING.to_owned(),
+        }
+    }
 }
 
 /// Wire code of an unknown send outcome: the bytes may or may not have reached the pane.
 pub const OPERATION_OUTCOME_UNKNOWN: &str = "OPERATION_OUTCOME_UNKNOWN";
+
+/// The backend has no observer that can attribute a turn start to one request; nothing was
+/// sent.
+pub const OBSERVER_CAPABILITY_MISSING: &str = "OBSERVER_CAPABILITY_MISSING";
+
+/// A paired host that does not advertise causal delivery receipts; nothing was sent to it.
+pub const PAIRED_HOST_CAPABILITY_UNAVAILABLE: &str = "PAIRED_HOST_CAPABILITY_UNAVAILABLE";
+
+/// A transport failure without a wire code: whether the bytes left is unknown.
+pub const SEND_FAILED: &str = "SEND_FAILED";
+
+/// A start receipt that names another request or session than the dispatch it answers.
+pub const RECEIPT_MISMATCH: &str = "RECEIPT_MISMATCH";
+
+/// One supervisor dispatch to a bound worker: the stable request id, transmitted once, the
+/// bound provider session and the host mapping it is bound on (`None` is this machine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerSend {
+    pub host_id: Option<String>,
+    pub session_id: String,
+    pub text: String,
+    pub request_id: String,
+}
+
+/// A target-side start receipt: the run the target attributes to one request on one session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartReceipt {
+    pub request_id: String,
+    pub session_id: String,
+    pub run_id: String,
+}
+
+impl StartReceipt {
+    /// Whether this receipt names exactly this dispatch: its request id and bound session.
+    pub fn names(&self, send: &WorkerSend) -> bool {
+        self.request_id == send.request_id && self.session_id == send.session_id
+    }
+}
+
+/// What one [`AgentControl::deliver`] learned. Accepted and started are separate facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// Nothing was sent: the target cannot report a causal start (a capability hold).
+    Unsupported { code: String },
+    /// Nothing was typed; the target refused the send.
+    Refused { code: String },
+    /// The target accepted the bytes and attributes this run to the request. The caller still
+    /// checks [`StartReceipt::names`] before recording a start.
+    Started(StartReceipt),
+    /// No start can be attributed to the request. `accepted` when the target confirmed it
+    /// took the bytes. Never resend.
+    Uncertain { accepted: bool, code: String },
+}
+
+impl Delivery {
+    /// The delivery a failed transport call reports, from its wire code. An unknown outcome
+    /// and a failure without a code are uncertain; a paired host without the receipt
+    /// capability is a capability hold; any other code typed nothing.
+    pub fn from_error_code(code: Option<&str>) -> Self {
+        match code.map(str::trim).filter(|code| !code.is_empty()) {
+            None => Delivery::Uncertain {
+                accepted: false,
+                code: SEND_FAILED.to_owned(),
+            },
+            Some(code) if code.contains(OPERATION_OUTCOME_UNKNOWN) => Delivery::Uncertain {
+                accepted: false,
+                code: OPERATION_OUTCOME_UNKNOWN.to_owned(),
+            },
+            Some(PAIRED_HOST_CAPABILITY_UNAVAILABLE) => Delivery::Unsupported {
+                code: PAIRED_HOST_CAPABILITY_UNAVAILABLE.to_owned(),
+            },
+            Some(code) => Delivery::Refused {
+                code: code.to_owned(),
+            },
+        }
+    }
+
+    /// The legacy confirmed-send outcome of this delivery. A start counts only when its
+    /// receipt names `send`; a capability hold typed nothing.
+    pub fn send_outcome(&self, send: &WorkerSend) -> SendOutcome {
+        match self {
+            Delivery::Started(receipt) if receipt.names(send) => SendOutcome::Started,
+            Delivery::Started(_) => SendOutcome::Uncertain {
+                code: RECEIPT_MISMATCH.to_owned(),
+            },
+            Delivery::Uncertain { code, .. } => SendOutcome::Uncertain { code: code.clone() },
+            Delivery::Refused { code } | Delivery::Unsupported { code } => {
+                SendOutcome::Refused { code: code.clone() }
+            }
+        }
+    }
+}
+
+/// Run id of a PTY turn: the pane's session and the sequence of the observer reading that
+/// started the turn. The target mints it; the hub reads the sequence back to order a settle.
+pub fn pty_run_id(session_id: &str, sequence: u64) -> String {
+    format!("pty:{session_id}:{sequence}")
+}
+
+/// The start sequence of a [`pty_run_id`] minted for `session_id`.
+pub fn pty_run_sequence(run_id: &str, session_id: &str) -> Option<u64> {
+    let rest = run_id.strip_prefix("pty:")?;
+    let (session, sequence) = rest.rsplit_once(':')?;
+    if session != session_id {
+        return None;
+    }
+    sequence.parse().ok()
+}
 
 /// Maps a failed send's error text (`"{CODE} {message}"` from the daemon bridge) to an
 /// outcome. An unknown outcome is uncertain; every other failure typed nothing.
@@ -124,6 +246,18 @@ pub struct RecordingControl {
     pub result: Mutex<Value>,
     pub hang: AtomicBool,
     pub fail_hosts: Mutex<HashSet<String>>,
+    /// What [`AgentControl::deliver`] reports. `None` (the default) is the trait default: no
+    /// causal observer, nothing recorded or sent.
+    pub receipts: Mutex<Option<ReceiptScript>>,
+}
+
+/// How a [`RecordingControl`] target answers a delivery after recording its send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptScript {
+    /// The target attributes a new run to exactly the request and session it was sent.
+    Echo,
+    /// The target answers with this delivery, whatever was sent.
+    Fixed(Delivery),
 }
 
 impl Default for RecordingControl {
@@ -133,6 +267,7 @@ impl Default for RecordingControl {
             result: Mutex::new(json!({"ok": true})),
             hang: AtomicBool::new(false),
             fail_hosts: Mutex::new(HashSet::new()),
+            receipts: Mutex::new(None),
         }
     }
 }
@@ -140,6 +275,17 @@ impl Default for RecordingControl {
 impl RecordingControl {
     pub fn ops(&self) -> Vec<(Option<String>, AgentOp)> {
         self.ops.lock().expect("ops").clone()
+    }
+
+    /// A target that reports a causal start receipt for every delivery it records.
+    pub fn observing() -> Self {
+        Self::scripted(ReceiptScript::Echo)
+    }
+
+    pub fn scripted(script: ReceiptScript) -> Self {
+        let control = Self::default();
+        *control.receipts.lock().expect("receipts") = Some(script);
+        control
     }
 }
 
@@ -159,6 +305,41 @@ impl AgentControl for RecordingControl {
             .expect("ops")
             .push((host_id.map(str::to_owned), op));
         Ok(self.result.lock().expect("result").clone())
+    }
+
+    async fn deliver(&self, send: &WorkerSend) -> Delivery {
+        let script = self.receipts.lock().expect("receipts").clone();
+        let Some(script) = script else {
+            return Delivery::Unsupported {
+                code: OBSERVER_CAPABILITY_MISSING.to_owned(),
+            };
+        };
+        // A target that cannot observe, or that refuses, types nothing: nothing is recorded.
+        if let ReceiptScript::Fixed(
+            delivery @ (Delivery::Unsupported { .. } | Delivery::Refused { .. }),
+        ) = script
+        {
+            return delivery;
+        }
+        let op = AgentOp::Send {
+            session_id: send.session_id.clone(),
+            text: send.text.clone(),
+            request_id: send.request_id.clone(),
+        };
+        if let Err(error) = self.execute(send.host_id.as_deref(), op).await {
+            return Delivery::from_error_code(error.to_string().split_whitespace().next());
+        }
+        match script {
+            ReceiptScript::Echo => {
+                let sequence = self.ops.lock().expect("ops").len() as u64;
+                Delivery::Started(StartReceipt {
+                    request_id: send.request_id.clone(),
+                    session_id: send.session_id.clone(),
+                    run_id: pty_run_id(&send.session_id, sequence),
+                })
+            }
+            ReceiptScript::Fixed(delivery) => delivery,
+        }
     }
 }
 
@@ -258,5 +439,106 @@ mod tests {
                 code: "SEND_FAILED".into()
             }
         );
+    }
+
+    fn send() -> WorkerSend {
+        WorkerSend {
+            host_id: None,
+            session_id: "pane-1".into(),
+            text: "next step".into(),
+            request_id: "sv-goal-r1-d1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_delivery_sends_nothing_and_legacy_sends_are_unchanged() {
+        let control = RecordingControl::default();
+        assert_eq!(
+            control.deliver(&send()).await,
+            Delivery::Unsupported {
+                code: OBSERVER_CAPABILITY_MISSING.into()
+            }
+        );
+        assert!(control.ops().is_empty(), "no observer, no transmission");
+        // The legacy confirmed send keeps its accepted-is-started default for its callers.
+        assert_eq!(
+            control
+                .send_confirmed(None, "pane-1", "next step", "hub-goal-lane-a-1")
+                .await,
+            SendOutcome::Started
+        );
+        assert_eq!(control.ops().len(), 1);
+    }
+
+    #[test]
+    fn only_a_receipt_naming_the_request_and_session_is_a_start() {
+        let send = send();
+        let receipt = |request_id: &str, session_id: &str| {
+            Delivery::Started(StartReceipt {
+                request_id: request_id.into(),
+                session_id: session_id.into(),
+                run_id: pty_run_id(session_id, 4),
+            })
+        };
+        assert_eq!(
+            receipt("sv-goal-r1-d1", "pane-1").send_outcome(&send),
+            SendOutcome::Started
+        );
+        for wrong in [receipt("sv-goal-r1-d2", "pane-1"), receipt("sv-goal-r1-d1", "pane-2")] {
+            assert_eq!(
+                wrong.send_outcome(&send),
+                SendOutcome::Uncertain {
+                    code: RECEIPT_MISMATCH.into()
+                }
+            );
+        }
+        let accepted = Delivery::Uncertain {
+            accepted: true,
+            code: "TURN_NOT_OBSERVED".into(),
+        };
+        assert_eq!(
+            accepted.send_outcome(&send),
+            SendOutcome::Uncertain {
+                code: "TURN_NOT_OBSERVED".into()
+            }
+        );
+    }
+
+    #[test]
+    fn transport_error_codes_map_to_delivery_stages() {
+        assert_eq!(
+            Delivery::from_error_code(Some(OPERATION_OUTCOME_UNKNOWN)),
+            Delivery::Uncertain {
+                accepted: false,
+                code: OPERATION_OUTCOME_UNKNOWN.into()
+            }
+        );
+        assert_eq!(
+            Delivery::from_error_code(None),
+            Delivery::Uncertain {
+                accepted: false,
+                code: SEND_FAILED.into()
+            }
+        );
+        assert_eq!(
+            Delivery::from_error_code(Some(PAIRED_HOST_CAPABILITY_UNAVAILABLE)),
+            Delivery::Unsupported {
+                code: PAIRED_HOST_CAPABILITY_UNAVAILABLE.into()
+            }
+        );
+        assert_eq!(
+            Delivery::from_error_code(Some("CONTROL_CONFLICT")),
+            Delivery::Refused {
+                code: "CONTROL_CONFLICT".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_pty_run_id_names_its_session_and_start_reading() {
+        let run = pty_run_id("sess:a", 42);
+        assert_eq!(pty_run_sequence(&run, "sess:a"), Some(42));
+        assert_eq!(pty_run_sequence(&run, "sess"), None);
+        assert_eq!(pty_run_sequence("sv-goal-r1-d1", "sess:a"), None);
     }
 }

@@ -1775,6 +1775,36 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
 }
 
 #[test]
+fn a_delivery_rides_the_send_route_only_to_a_host_with_receipts() {
+    use crate::agent_control::AgentControlOp;
+    let deliver = Operation::AgentControl {
+        op: AgentControlOp::Deliver {
+            session_id: "s-1".into(),
+            text: "hi".into(),
+            request_id: "sv-goal-r1-d1".into(),
+            observe_ms: 20_000,
+        },
+    };
+    assert!(deliver.is_mutation());
+    assert_eq!(deliver.agent_control_mutation_id().as_deref(), Some("sv-goal-r1-d1"));
+    let route = deliver.route().expect("delivery route");
+    assert_eq!(route.capability, Some("agentControlReceiptsV1"));
+    assert_eq!(
+        route.segments,
+        vec!["agent-control", "sessions", "s-1", "send"]
+    );
+    assert_eq!(route.method, Method::POST);
+    assert!(route.request_id.is_none());
+    // The host's submit deadline (45s), the start wait (20s) and a margin.
+    assert_eq!(route.budget_secs, Some(80));
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({"text": "hi", "requestId": "sv-goal-r1-d1", "observeMs": 20_000})
+    );
+}
+
+#[test]
 fn discover_repos_route_and_desktop_id_rewrite() {
     let op = Operation::DiscoverRepos {
         path: Some("~/src".into()),

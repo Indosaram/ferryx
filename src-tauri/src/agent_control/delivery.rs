@@ -14,9 +14,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use super::events::{self, AgentEventBus, AgentObservation, AgentReplay, WaitHit};
 use super::{AgentControlOp, AgentControlState};
 use crate::remote::RemoteGatewayState;
+use crate::remote::server::agent_control_service;
 use crate::scoped_contracts::{ScopeError, ScopeErrorCode};
 
 /// Env override for the turn-start deadline, in milliseconds.
@@ -199,6 +202,196 @@ pub async fn send_confirmed(
     }
     SendOutcome::Uncertain {
         code: TURN_NOT_OBSERVED.to_string(),
+    }
+}
+
+/// Code for a turn start that cannot be attributed to the delivered request: other input
+/// reached the pane after the send's cursor (another request, a phone chat message, a person
+/// typing), so the start may be theirs.
+pub const FOREIGN_INPUT: &str = "FOREIGN_INPUT";
+
+/// What a delivery learned once its bytes were typed. A refusal (nothing typed) and an
+/// unknown outcome are errors of the send itself, exactly as for a plain send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum DeliveryReport {
+    /// The pane started a turn that only this request can have caused. `run_id` names the
+    /// observer reading that started it ([`ferryx_hub::agent_control::pty_run_id`]).
+    Started {
+        request_id: String,
+        session_id: String,
+        run_id: String,
+    },
+    /// The bytes were typed but no start attributable to this request was seen. Never resend.
+    Accepted {
+        request_id: String,
+        session_id: String,
+        code: String,
+    },
+}
+
+/// The start wait a delivery asked for: 0 is the configured default, anything else is clamped
+/// like the env override.
+pub fn observe_deadline(observe_ms: u64) -> Duration {
+    if observe_ms == 0 {
+        return turn_start_deadline();
+    }
+    Duration::from_millis(observe_ms.clamp(TURN_START_MIN_MS, TURN_START_MAX_MS))
+}
+
+/// The earliest reading after `after` that starts a turn for `session_id`.
+fn first_start(
+    readings: impl IntoIterator<Item = AgentObservation>,
+    session_id: &str,
+    after: u64,
+    pre: &PreSend,
+) -> Option<AgentObservation> {
+    readings
+        .into_iter()
+        .filter(|observation| starts_turn(observation, session_id, after, pre))
+        .min_by_key(|observation| observation.sequence)
+}
+
+fn logged_start(bus: &AgentEventBus, session_id: &str, after: u64, pre: &PreSend) -> Option<AgentObservation> {
+    match bus.replay(after) {
+        AgentReplay::Events { events, .. } => first_start(events, session_id, after, pre),
+        AgentReplay::Gap { snapshot, .. } => first_start(snapshot, session_id, after, pre),
+    }
+}
+
+/// Type `text` once into `session_id`, then attribute the pane's next turn start to
+/// `request_id` only when the cause cannot be anything else.
+///
+/// The observer cursor and the input cursor are both taken BEFORE the send (subscribe before
+/// trigger). A start is a reading of this session newer than that cursor that is Working,
+/// Blocked or carries a prompt (on a pane already busy before the send, with a moved screen,
+/// see [`PreSend`]). It is attributed only when no other input reached this pane since the
+/// cursor: no other request's mark ([`AgentEventBus::foreign_input_since`]) and no raw
+/// keystrokes. Activity of another session, or of this pane caused by someone else, never
+/// starts this request's run. Never retries the send.
+pub async fn deliver(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    text: String,
+    request_id: String,
+    deadline: Duration,
+    authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+) -> Result<DeliveryReport, ScopeError> {
+    let bus = Arc::clone(&state.agent_events);
+    let origin = cursor_now(&bus);
+    let inputs = bus.input_cursor();
+    let pre = PreSend::of(&bus, session_id);
+    let sent_at_ms = agent_control_service::input_clock_ms();
+    agent_control_service::send_text(
+        state,
+        session_id.to_string(),
+        text,
+        Some(request_id.clone()),
+        authorize,
+    )
+    .await?;
+
+    let attribute = |observation: &AgentObservation| {
+        let foreign = bus.foreign_input_since(session_id, inputs, &request_id)
+            || agent_control_service::raw_input_since(session_id, sent_at_ms);
+        if foreign {
+            DeliveryReport::Accepted {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+                code: FOREIGN_INPUT.to_string(),
+            }
+        } else {
+            DeliveryReport::Started {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+                run_id: ferryx_hub::agent_control::pty_run_id(session_id, observation.sequence),
+            }
+        }
+    };
+    let mut cursor = origin;
+    let until = tokio::time::Instant::now() + deadline;
+    loop {
+        // Every reading since the send, including one published while the bytes were typed.
+        if let Some(start) = logged_start(&bus, session_id, origin, &pre) {
+            return Ok(attribute(&start));
+        }
+        let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match events::wait_for(&bus, session_id, "any", cursor, None, remaining).await {
+            None => break,
+            Some(WaitHit::Observation(observation)) => {
+                if starts_turn(&observation, session_id, origin, &pre) {
+                    return Ok(attribute(&observation));
+                }
+                cursor = cursor.max(observation.sequence);
+            }
+            Some(WaitHit::Gap {
+                snapshot,
+                after_sequence,
+            }) => {
+                if let Some(start) = first_start(snapshot, session_id, origin, &pre) {
+                    return Ok(attribute(&start));
+                }
+                cursor = cursor.max(after_sequence);
+            }
+        }
+    }
+    Ok(DeliveryReport::Accepted {
+        request_id,
+        session_id: session_id.to_string(),
+        code: TURN_NOT_OBSERVED.to_string(),
+    })
+}
+
+/// Code for a delivery the target answered as typed but without a readable start receipt.
+pub const START_RECEIPT_MISSING: &str = "START_RECEIPT_MISSING";
+
+/// The hub's view of one delivery on this machine: a start receipt, a typed send without one,
+/// or the send's own refusal (nothing typed) or unknown outcome.
+pub fn hub_delivery(result: Result<DeliveryReport, ScopeError>) -> ferryx_hub::agent_control::Delivery {
+    use ferryx_hub::agent_control::{Delivery, StartReceipt};
+    match result {
+        Ok(DeliveryReport::Started {
+            request_id,
+            session_id,
+            run_id,
+        }) => Delivery::Started(StartReceipt {
+            request_id,
+            session_id,
+            run_id,
+        }),
+        Ok(DeliveryReport::Accepted { code, .. }) => Delivery::Uncertain {
+            accepted: true,
+            code,
+        },
+        Err(error) => {
+            let code = wire_code(error.code);
+            match refusal_outcome(&error) {
+                SendOutcome::Uncertain { .. } => Delivery::Uncertain {
+                    accepted: false,
+                    code,
+                },
+                SendOutcome::Started | SendOutcome::Refused { .. } => Delivery::Refused { code },
+            }
+        }
+    }
+}
+
+/// The hub's view of a successful `Deliver` reply (`{delivery}`) from a paired host. The send
+/// was typed, so a reply without a readable report is accepted without a start, never a start.
+pub fn hub_delivery_from_reply(result: &serde_json::Value) -> ferryx_hub::agent_control::Delivery {
+    match result
+        .get("delivery")
+        .cloned()
+        .map(serde_json::from_value::<DeliveryReport>)
+    {
+        Some(Ok(report)) => hub_delivery(Ok(report)),
+        _ => ferryx_hub::agent_control::Delivery::Uncertain {
+            accepted: true,
+            code: START_RECEIPT_MISSING.to_string(),
+        },
     }
 }
 
@@ -538,5 +731,169 @@ mod tests {
         assert_eq!(parse_turn_start_ms(Some(" 7000 ")), Duration::from_millis(7_000));
         assert_eq!(parse_turn_start_ms(Some("10")), Duration::from_millis(2_000));
         assert_eq!(parse_turn_start_ms(Some("999999")), Duration::from_millis(120_000));
+    }
+
+    async fn deliver_one(
+        state: &Arc<RemoteGatewayState>,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<DeliveryReport, ScopeError> {
+        deliver(state, session_id, "do it".into(), request_id.into(), DEADLINE, None).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_start_caused_only_by_this_delivery_is_its_run() {
+        let session_id = "deliver-causal";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        let cursor = cursor_now(&state.agent_events);
+
+        let report = deliver_one(&state, session_id, "sv-goal-r1-d1").await.expect("typed");
+        let start = state.agent_events.latest(session_id).expect("the start reading");
+        assert!(start.sequence > cursor);
+        assert_eq!(
+            report,
+            DeliveryReport::Started {
+                request_id: "sv-goal-r1-d1".into(),
+                session_id: session_id.into(),
+                run_id: format!("pty:{session_id}:{}", start.sequence),
+            }
+        );
+        assert_eq!(
+            ferryx_hub::agent_control::pty_run_sequence(&format!("pty:{session_id}:{}", start.sequence), session_id),
+            Some(start.sequence)
+        );
+        assert_one_submit(&backend);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_start_after_other_input_reached_the_pane_is_not_this_deliverys() {
+        let session_id = "deliver-foreign";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Idle)]);
+        // Subscribed before the send: when the pane reacts to the Enter, a phone chat message
+        // (another request id) is typed into the same pane, then the pane starts working.
+        let mut receiver = state.agent_events.subscribe();
+        let bus = Arc::clone(&state.agent_events);
+        let other = tokio::spawn(async move {
+            let idle = receiver.recv().await.expect("the Idle reading");
+            assert_eq!(idle.session_id, "deliver-foreign");
+            bus.note_input("deliver-foreign", Some("phone-chat-1"));
+            bus.publish(draft("deliver-foreign", AgentControlState::Working));
+        });
+
+        let report = deliver_one(&state, session_id, "sv-goal-r1-d1").await.expect("typed");
+        other.await.expect("the other input");
+        assert_eq!(
+            report,
+            DeliveryReport::Accepted {
+                request_id: "sv-goal-r1-d1".into(),
+                session_id: session_id.into(),
+                code: FOREIGN_INPUT.into(),
+            }
+        );
+        assert_one_submit(&backend);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_of_another_pane_is_never_this_deliverys_start() {
+        let session_id = "deliver-own";
+        let (backend, state) = pane(
+            session_id,
+            vec![draft("deliver-other", AgentControlState::Working)],
+        );
+
+        assert_eq!(
+            deliver_one(&state, session_id, "sv-goal-r1-d2").await.expect("typed"),
+            DeliveryReport::Accepted {
+                request_id: "sv-goal-r1-d2".into(),
+                session_id: session_id.into(),
+                code: TURN_NOT_OBSERVED.into(),
+            }
+        );
+        assert_one_submit(&backend);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_delivery_types_nothing() {
+        let session_id = "deliver-human-typing";
+        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        crate::remote::server::agent_control_service::note_human_keystrokes(session_id);
+
+        let error = deliver_one(&state, session_id, "sv-goal-r1-d3").await.expect_err("refused");
+        assert_eq!(error.code, ScopeErrorCode::ControlConflict);
+        assert_eq!(backend.write_attempts.load(Ordering::SeqCst), 0);
+    }
+
+    fn scope(code: ScopeErrorCode) -> ScopeError {
+        ScopeError {
+            code,
+            message: "x".into(),
+            retryable: false,
+            details: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn delivery_reports_map_to_hub_stages() {
+        use ferryx_hub::agent_control::{Delivery, StartReceipt};
+        let started = DeliveryReport::Started {
+            request_id: "sv-1".into(),
+            session_id: "pane".into(),
+            run_id: "pty:pane:4".into(),
+        };
+        let wire = serde_json::to_value(&started).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"stage": "started", "requestId": "sv-1", "sessionId": "pane", "runId": "pty:pane:4"})
+        );
+        assert_eq!(
+            hub_delivery_from_reply(&serde_json::json!({ "delivery": wire })),
+            Delivery::Started(StartReceipt {
+                request_id: "sv-1".into(),
+                session_id: "pane".into(),
+                run_id: "pty:pane:4".into(),
+            })
+        );
+        // A typed send without a readable receipt is never a start.
+        for reply in [serde_json::json!({}), serde_json::json!({"delivery": {"stage": "started"}})] {
+            assert_eq!(
+                hub_delivery_from_reply(&reply),
+                Delivery::Uncertain {
+                    accepted: true,
+                    code: START_RECEIPT_MISSING.into()
+                }
+            );
+        }
+        assert_eq!(
+            hub_delivery(Ok(DeliveryReport::Accepted {
+                request_id: "sv-1".into(),
+                session_id: "pane".into(),
+                code: FOREIGN_INPUT.into(),
+            })),
+            Delivery::Uncertain {
+                accepted: true,
+                code: FOREIGN_INPUT.into()
+            }
+        );
+        assert_eq!(
+            hub_delivery(Err(scope(ScopeErrorCode::ControlConflict))),
+            Delivery::Refused {
+                code: "CONTROL_CONFLICT".into()
+            }
+        );
+        assert_eq!(
+            hub_delivery(Err(scope(ScopeErrorCode::OperationOutcomeUnknown))),
+            Delivery::Uncertain {
+                accepted: false,
+                code: "OPERATION_OUTCOME_UNKNOWN".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_delivery_waits_the_asked_time_within_bounds() {
+        assert_eq!(observe_deadline(0), turn_start_deadline());
+        assert_eq!(observe_deadline(5_000), Duration::from_millis(5_000));
+        assert_eq!(observe_deadline(1), Duration::from_millis(TURN_START_MIN_MS));
+        assert_eq!(observe_deadline(u64::MAX), Duration::from_millis(TURN_START_MAX_MS));
     }
 }

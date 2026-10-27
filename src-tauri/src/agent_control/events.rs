@@ -22,6 +22,10 @@ pub const AGENT_CONTROL_EVENT: &str = "agentControlChanged";
 /// How many observations the log retains. Older cursors come back as a gap.
 pub const AGENT_EVENT_RETAIN: usize = 256;
 
+/// How many input marks the bus keeps per session. A cursor older than the oldest kept mark
+/// counts as if another input had arrived.
+const INPUT_MARKS_PER_SESSION: usize = 32;
+
 /// One change a supervisor can wait for. The prompt body is intentionally absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +109,23 @@ struct Log {
     capacity: usize,
 }
 
+/// Which inputs reached each pane, in arrival order. A delivery reads it to tell whether a turn
+/// start can only have been caused by its own input.
+#[derive(Default)]
+struct InputLedger {
+    /// Last mark issued; marks count up across every session.
+    issued: u64,
+    sessions: HashMap<String, SessionInputs>,
+}
+
+#[derive(Default)]
+struct SessionInputs {
+    /// (mark, request id of the input; `None` when it had none).
+    marks: VecDeque<(u64, Option<String>)>,
+    /// Highest mark that fell out of `marks`.
+    evicted_through: u64,
+}
+
 /// Retained agent-control observations. Publishing also forwards a slim machine event when the
 /// machine stream is attached.
 pub struct AgentEventBus {
@@ -112,6 +133,7 @@ pub struct AgentEventBus {
     tx: broadcast::Sender<AgentObservation>,
     machine_events: Mutex<Option<Arc<crate::remote::machine_events::MachineEvents>>>,
     local_sequence: Mutex<u64>,
+    inputs: Mutex<InputLedger>,
 }
 
 impl AgentEventBus {
@@ -129,6 +151,7 @@ impl AgentEventBus {
             tx,
             machine_events: Mutex::new(None),
             local_sequence: Mutex::new(0),
+            inputs: Mutex::new(InputLedger::default()),
         }
     }
 
@@ -146,6 +169,41 @@ impl AgentEventBus {
 
     pub fn revision(&self) -> u64 {
         self.log.lock().revision
+    }
+
+    /// The newest input mark. Take it before a send; [`Self::foreign_input_since`] compares
+    /// against it.
+    pub fn input_cursor(&self) -> u64 {
+        self.inputs.lock().issued
+    }
+
+    /// Record that input under `request_id` reached (or may have reached) `session_id`.
+    pub fn note_input(&self, session_id: &str, request_id: Option<&str>) {
+        let mut guard = self.inputs.lock();
+        let ledger = &mut *guard;
+        ledger.issued = ledger.issued.saturating_add(1);
+        let mark = ledger.issued;
+        let session = ledger.sessions.entry(session_id.to_string()).or_default();
+        session.marks.push_back((mark, request_id.map(str::to_string)));
+        while session.marks.len() > INPUT_MARKS_PER_SESSION {
+            if let Some((evicted, _)) = session.marks.pop_front() {
+                session.evicted_through = session.evicted_through.max(evicted);
+            }
+        }
+    }
+
+    /// Whether input other than `request_id`'s reached `session_id` after the mark `after`.
+    /// Marks that fell out of the bounded ledger after `after` count as foreign.
+    pub fn foreign_input_since(&self, session_id: &str, after: u64, request_id: &str) -> bool {
+        let ledger = self.inputs.lock();
+        let Some(session) = ledger.sessions.get(session_id) else {
+            return false;
+        };
+        session.evicted_through > after
+            || session
+                .marks
+                .iter()
+                .any(|(mark, id)| *mark > after && id.as_deref() != Some(request_id))
     }
 
     /// Newest sequence issued in the shared domain or logged, whichever is higher.
@@ -606,5 +664,28 @@ mod tests {
         assert_eq!(reading.state, AgentControlState::Blocked);
         assert!(reading.prompt_id.is_some(), "the approval card has an id");
         assert_eq!(reading.kind.as_deref(), Some("approval"));
+    }
+
+    #[test]
+    fn only_other_input_on_the_same_pane_after_the_cursor_is_foreign() {
+        let bus = AgentEventBus::new(8);
+        bus.note_input("pane", Some("before"));
+        let cursor = bus.input_cursor();
+        assert!(!bus.foreign_input_since("pane", cursor, "mine"), "earlier input is not foreign");
+        bus.note_input("pane", Some("mine"));
+        bus.note_input("other-pane", Some("theirs"));
+        assert!(!bus.foreign_input_since("pane", cursor, "mine"));
+        bus.note_input("pane", None);
+        assert!(bus.foreign_input_since("pane", cursor, "mine"), "untagged input is foreign");
+
+        // Marks that fell out of the bounded ledger after the cursor count as foreign.
+        let cursor = bus.input_cursor();
+        for _ in 0..=INPUT_MARKS_PER_SESSION {
+            bus.note_input("busy", Some("mine"));
+        }
+        assert!(
+            bus.foreign_input_since("busy", cursor, "mine"),
+            "a mark evicted after the cursor can no longer be attributed"
+        );
     }
 }
