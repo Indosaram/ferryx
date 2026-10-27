@@ -606,20 +606,23 @@ async function runRemoteDelivery(ctx) {
   ctx.assert('paired-route-is-relay', routeBefore === 'relay', { route: routeBefore });
 
   // The daemon opens its hub after the socket is up and publishes no event for it, so ask the
-  // read-only status request until it stops answering SUPERVISOR_UNAVAILABLE (bounded backoff;
-  // the deadline fails the run, it never passes it).
+  // read-only status request for a goal that cannot exist until the hub itself answers NOT_FOUND
+  // (bounded backoff). Any other answer - unavailable, timeout, connect error - keeps polling,
+  // and is the recorded failure if it is still the answer at the deadline.
   const hubReadyBy = Date.now() + 90_000;
   let hubProbe = null;
   for (let attempt = 0, pauseMs = 250; ; attempt += 1, pauseMs = Math.min(pauseMs * 2, 2_000)) {
     hubProbe = await ctx.cli(['supervisor', 'dispatch', 'status', '--goal', `qa-hub-ready-${attempt}`, '--json'], { label: `hub-ready-${attempt}`, env: hubEnv });
-    if (hubProbe.json?.code !== 'SUPERVISOR_UNAVAILABLE') break;
+    if (hubProbe.json?.code === 'NOT_FOUND') break;
     if (Date.now() + pauseMs > hubReadyBy) break;
     await new Promise((resolvePause, rejectPause) => {
-      const timer = setTimeout(resolvePause, pauseMs);
-      ctx.signal.addEventListener('abort', () => { clearTimeout(timer); rejectPause(ctx.signal.reason); }, { once: true });
+      if (ctx.signal.aborted) { rejectPause(ctx.signal.reason); return; }
+      const onAbort = () => { clearTimeout(timer); rejectPause(ctx.signal.reason); };
+      const timer = setTimeout(() => { ctx.signal.removeEventListener('abort', onAbort); resolvePause(); }, pauseMs);
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
     });
   }
-  ctx.assert('hub-open-on-the-hub-daemon', hubProbe?.json?.code !== 'SUPERVISOR_UNAVAILABLE', { code: hubProbe?.code, json: hubProbe?.json });
+  ctx.assert('hub-open-on-the-hub-daemon', hubProbe?.json?.code === 'NOT_FOUND', { code: hubProbe?.code, json: hubProbe?.json });
 
   // 5. Positive receipt: the reporting pane starts the run from its own report.
   const positive = await submit('positive', reportingPane);
@@ -730,6 +733,8 @@ async function runRemoteDelivery(ctx) {
   const alive = workerPids.filter((pid) => pidAlive(pid));
   ctx.evidence.writeJson('worker-cleanup.json', {
     workerPids, allExitedCleanly: closed, reaped, alive, descendantsObservable: targetReceipt?.descendantsObservable ?? null,
+    workerDescendants: (targetReceipt?.descendants ?? []).filter((entry) => workerPids.includes(entry.pid))
+      .map(({ pid, initial, finalState }) => ({ pid, initial, finalState })),
     note: 'pids from worker-<pid>.jsonl; reaped = workers the harness still found alive after the target daemon exited',
   });
   // Four panes: reporting, silent, bystander, after-reconnect.
