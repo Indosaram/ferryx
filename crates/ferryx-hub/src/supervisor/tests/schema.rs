@@ -834,7 +834,7 @@ async fn waits_refuse_self_cycles_and_cross_owner_links_and_wake_once() {
 
     let due = Utc::now() + chrono::Duration::seconds(1);
     let pending = pending_wakes(pool, due, 10).await.unwrap();
-    assert_eq!(pending, [wake.clone()]);
+    assert_eq!(pending, std::slice::from_ref(&wake));
     assert!(consume_wake(pool, wake.id).await.unwrap());
     assert!(
         !consume_wake(pool, wake.id).await.unwrap(),
@@ -1988,8 +1988,10 @@ fn refused<T>(outcome: Result<T, SupervisorError>, path: &[Step]) -> bool {
     }
 }
 
+type WalkRowTuple = (String, String, i64, Option<String>, Option<String>);
+
 async fn walk_rows(pool: &SqlitePool, goal_id: &str, revision: i64) -> Vec<WalkRow> {
-    let rows: Vec<(String, String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+    let rows: Vec<WalkRowTuple> = sqlx::query_as(
         "SELECT request_id, state, goal_revision, run_id, owner_resolved_at
          FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id",
     )
@@ -2209,7 +2211,7 @@ async fn every_bounded_event_ordering_keeps_at_most_one_dispatch_in_flight() {
     let any_row = |wanted: &dyn Fn(&WalkRow) -> bool| {
         reached
             .iter()
-            .any(|state| state.rows.iter().any(|row| wanted(row)))
+            .any(|state| state.rows.iter().any(wanted))
     };
     assert!(
         any_row(&|row: &WalkRow| row.state == "released"),
