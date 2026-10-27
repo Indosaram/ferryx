@@ -63,6 +63,10 @@ pub enum SupervisorError {
     },
     #[error("goal {goal_id} has no live run on its current execution generation")]
     NoLiveRun { goal_id: String },
+    #[error("goal {goal_id} has a live run; it resumes to running and takes no new dispatch")]
+    LiveRun { goal_id: String },
+    #[error("dispatch {request_id} was released before transmission: {why}")]
+    ClaimReleased { request_id: String, why: String },
     #[error(
         "{source_adapter} message {source_message_id} was already admitted as goal {goal_id} with a different body"
     )]
@@ -129,6 +133,8 @@ impl SupervisorError {
             SupervisorError::RevisionConflict { .. } => "REVISION_CONFLICT",
             SupervisorError::StateConflict { .. } => "REVISION_CONFLICT",
             SupervisorError::NoLiveRun { .. } => "NO_LIVE_RUN",
+            SupervisorError::LiveRun { .. } => "LIVE_RUN",
+            SupervisorError::ClaimReleased { .. } => "SUPERSEDED",
             SupervisorError::RequestBodyChanged { .. } => "REQUEST_CONFLICT",
             SupervisorError::IllegalTransition { .. } => "ILLEGAL_TRANSITION",
             SupervisorError::GoalClosed { .. } => "GOAL_CLOSED",
@@ -238,7 +244,7 @@ impl RunState {
     /// never stops a worker and a restart may find one still running; [`transition_goal`]
     /// additionally requires a live run (a started, unsettled dispatch on the binding's current
     /// generation, run and session) for every move into `running`. Without one, resuming a
-    /// paused goal goes to `ready`.
+    /// paused goal goes to `ready`; with one, `ready` is refused and it resumes to `running`.
     pub fn can_transition_to(self, to: RunState) -> bool {
         use RunState::*;
         if self.is_terminal() || self == to {
@@ -1607,9 +1613,12 @@ async fn has_live_run(conn: &mut SqliteConnection, goal_id: &str) -> Result<bool
 /// Compare-and-set of a goal's run state: moves it only when the goal is still at
 /// `expected_revision` and in `expected_state` (otherwise `REVISION_CONFLICT`) and the table
 /// allows the move. `dispatching` is entered only by [`claim_dispatch`]; `running` only with a
-/// live run. Entering an owner hold (`paused`, `awaiting_owner`, `cancelled`) bumps the
+/// live run; `ready` only without one (`LIVE_RUN`), so a busy worker never gets a second
+/// instruction. Entering an owner hold (`paused`, `awaiting_owner`, `cancelled`) bumps the
 /// revision and supersedes every unsent intent of an older revision, so a decision made before
 /// the hold can never dispatch; cancelling also cancels pending waits. All in one transaction.
+/// A dispatch already claimed when a hold lands is not superseded here, because it may be in
+/// flight; the dispatcher releases it with [`confirm_claim_before_transmit`].
 pub async fn transition_goal(
     pool: &SqlitePool,
     goal_id: &str,
@@ -1642,6 +1651,11 @@ pub async fn transition_goal(
     }
     if to == RunState::Running && !has_live_run(&mut tx, goal_id).await? {
         return Err(SupervisorError::NoLiveRun {
+            goal_id: goal_id.to_owned(),
+        });
+    }
+    if to == RunState::Ready && has_live_run(&mut tx, goal_id).await? {
+        return Err(SupervisorError::LiveRun {
             goal_id: goal_id.to_owned(),
         });
     }
@@ -1800,7 +1814,8 @@ pub async fn ready_dispatches(
 /// Claims a ready intent for transmission: the intent moves to `claimed` and its goal to
 /// `dispatching` together. Refused unless the goal is `ready` at `expected_revision`, the
 /// intent was written for that revision, and `generation` is the binding's and the intent's
-/// current generation. At most one claimer wins; the request id is transmitted once.
+/// current generation, and while the goal has a live run (`LIVE_RUN`). At most one claimer
+/// wins; the request id is transmitted once, after [`confirm_claim_before_transmit`].
 pub async fn claim_dispatch(
     pool: &SqlitePool,
     request_id: &str,
@@ -1835,6 +1850,11 @@ pub async fn claim_dispatch(
             why: format!("the goal is {}", goal.run_state),
         });
     }
+    if has_live_run(&mut tx, &goal.goal_id).await? {
+        return Err(SupervisorError::LiveRun {
+            goal_id: goal.goal_id.clone(),
+        });
+    }
     let now = now_rfc3339();
     sqlx::query(
         "UPDATE supervisor_dispatches SET state = 'claimed', claimed_at = ?, updated_at = ?
@@ -1862,6 +1882,72 @@ pub async fn claim_dispatch(
     })
 }
 
+/// The dispatcher's last check, made right before it transmits a claimed dispatch and after
+/// any work it did since claiming. Returns the dispatch when it is still `claimed`, the goal is
+/// still `dispatching` at the dispatch's revision and the binding is still at its generation:
+/// transmit then. Otherwise an owner hold, correction or generation change landed after the
+/// claim; because the caller has not transmitted, the dispatch is released as `superseded` in
+/// the same transaction (a goal left `dispatching` by a correction returns to `ready`) and
+/// `SUPERSEDED` is returned: do not transmit. Bytes already handed to the transport cannot be
+/// recalled; their receipts arrive through [`record_receipt`].
+pub async fn confirm_claim_before_transmit(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<Dispatch, SupervisorError> {
+    let mut tx = pool.begin_write().await?;
+    let dispatch = require_dispatch(&mut tx, request_id).await?;
+    if dispatch.state != DispatchState::Claimed {
+        return Err(SupervisorError::NotClaimable {
+            request_id: request_id.to_owned(),
+            why: format!("it is {}, not claimed", dispatch.state),
+        });
+    }
+    let goal = require_goal(&mut tx, &dispatch.goal_id).await?;
+    let binding = require_binding(&mut tx, &dispatch.goal_id).await?;
+    let why = if goal.revision != dispatch.goal_revision {
+        Some(format!(
+            "goal revision moved from {} to {}",
+            dispatch.goal_revision, goal.revision
+        ))
+    } else if goal.run_state != RunState::Dispatching {
+        Some(format!("goal is {}, not dispatching", goal.run_state))
+    } else if binding.generation != dispatch.generation {
+        Some(format!(
+            "execution generation moved from {} to {}",
+            dispatch.generation, binding.generation
+        ))
+    } else {
+        None
+    };
+    let Some(why) = why else {
+        return Ok(dispatch);
+    };
+    let now = now_rfc3339();
+    sqlx::query(
+        "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
+         WHERE id = ? AND state = 'claimed'",
+    )
+    .bind(&now)
+    .bind(dispatch.id)
+    .execute(&mut *tx)
+    .await?;
+    if goal.run_state == RunState::Dispatching {
+        sqlx::query(
+            "UPDATE supervisor_goals SET run_state = 'ready', state_detail = NULL, updated_at = ?
+             WHERE goal_id = ? AND run_state = 'dispatching'",
+        )
+        .bind(&now)
+        .bind(&goal.goal_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Err(SupervisorError::ClaimReleased {
+        request_id: request_id.to_owned(),
+        why,
+    })
+}
+
 /// Records one delivery receipt for a claimed intent. Accepted, started, settled and
 /// uncertain are separate facts: acceptance never implies a start, and a receipt from a stale
 /// generation is refused. A start or settle must name the binding's current provider session
@@ -1869,6 +1955,14 @@ pub async fn claim_dispatch(
 /// started or settled by such a receipt, so restart reconciliation records a run that really
 /// happened; its uncertain code and time stay as history. Repeating the receipt already
 /// recorded is a no-op. Goal run-state moves are the caller's, through [`transition_goal`].
+///
+/// Only the newest claimed dispatch of the goal's generation owns the binding's run: a start
+/// marks it live, a settle ends it (`run_id` back to NULL). A start or settle for an older
+/// dispatch while a newer one was claimed is `RECEIPT_OUT_OF_ORDER`: the older dispatch keeps
+/// its state, and only its evidence (run, session, first observed start/settle time) is
+/// committed, never the binding, so a late reconcile can never take the live-run marker from
+/// the newer run. A start or settle naming a run other than the binding's live one is
+/// `RUN_MISMATCH`.
 pub async fn record_receipt(
     pool: &SqlitePool,
     request_id: &str,
@@ -1932,6 +2026,51 @@ pub async fn record_receipt(
                 });
             }
         }
+        let newer_claimed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM supervisor_dispatches
+              WHERE goal_id = ? AND generation = ? AND id > ? AND claimed_at IS NOT NULL)",
+        )
+        .bind(&dispatch.goal_id)
+        .bind(generation)
+        .bind(dispatch.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if newer_claimed {
+            let observed_at = if to == DispatchState::Started {
+                "started_at"
+            } else {
+                "settled_at"
+            };
+            let sql = format!(
+                "UPDATE supervisor_dispatches SET run_id = ?, provider_session_id = ?,
+                        {observed_at} = COALESCE({observed_at}, ?), updated_at = ?
+                 WHERE id = ?"
+            );
+            let now = now_rfc3339();
+            sqlx::query(&sql)
+                .bind(run_id)
+                .bind(session)
+                .bind(&now)
+                .bind(&now)
+                .bind(dispatch.id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Err(SupervisorError::ReceiptOutOfOrder {
+                request_id: request_id.to_owned(),
+                from: dispatch.state,
+                to,
+            });
+        }
+        if let Some(bound) = binding.run_id.as_deref() {
+            if bound != run_id {
+                return Err(SupervisorError::RunMismatch {
+                    request_id: request_id.to_owned(),
+                    expected: binding.run_id.clone(),
+                    actual: run_id.to_owned(),
+                });
+            }
+        }
     }
     let now = now_rfc3339();
     let mut updated = dispatch;
@@ -1964,14 +2103,17 @@ pub async fn record_receipt(
                 .bind(updated.id)
                 .execute(&mut *tx)
                 .await?;
+            // This dispatch is the newest claimed one and the binding holds no other run.
+            let bound_run = (to == DispatchState::Started).then_some(run_id);
             sqlx::query(
                 "UPDATE supervisor_execution_bindings SET run_id = ?, updated_at = ?
-                 WHERE goal_id = ? AND generation = ?",
+                 WHERE goal_id = ? AND generation = ? AND (run_id IS NULL OR run_id = ?)",
             )
-            .bind(run_id)
+            .bind(bound_run)
             .bind(&now)
             .bind(&updated.goal_id)
             .bind(generation)
+            .bind(run_id)
             .execute(&mut *tx)
             .await?;
             updated.run_id = Some(run_id.clone());

@@ -165,6 +165,21 @@ fn settled(run_id: &str, session: &str) -> Receipt {
     }
 }
 
+async fn dispatch_state(pool: &SqlitePool, request_id: &str) -> String {
+    sqlx::query_scalar("SELECT state FROM supervisor_dispatches WHERE request_id = ?")
+        .bind(request_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn live(pool: &SqlitePool, goal_id: &str) -> bool {
+    let mut conn = pool.acquire().await.unwrap();
+    crate::supervisor::has_live_run(&mut conn, goal_id)
+        .await
+        .unwrap()
+}
+
 async fn count(pool: &SqlitePool, sql: &str) -> i64 {
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
@@ -1264,4 +1279,275 @@ async fn a_goal_owner_is_pinned_to_its_supervisor_identity() {
             .await
             .unwrap();
     assert_eq!(owner, OWNER);
+}
+
+#[tokio::test]
+async fn a_late_reconcile_of_an_older_dispatch_leaves_the_newer_run_live() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let r1 = admitted.dispatch_request_id.as_str();
+    claim_dispatch(pool, r1, 1, 1).await.unwrap();
+    attach_session(pool, goal_id, 1, "S1").await.unwrap();
+    record_receipt(
+        pool,
+        r1,
+        1,
+        &Receipt::Uncertain {
+            code: "SEND_TIMEOUT".into(),
+        },
+    )
+    .await
+    .unwrap();
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Dispatching,
+        RunState::DeliveryUncertain,
+        Some("SEND_TIMEOUT"),
+    )
+    .await
+    .unwrap();
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::DeliveryUncertain,
+        RunState::Ready,
+        Some("owner chose to resend"),
+    )
+    .await
+    .unwrap();
+    let r2 = enqueue_dispatch(pool, goal_id, 1, "Resend the instruction.")
+        .await
+        .unwrap();
+    assert_eq!((r2.goal_revision, r2.ordinal), (1, 2));
+    claim_dispatch(pool, &r2.request_id, 1, 1).await.unwrap();
+    confirm_claim_before_transmit(pool, &r2.request_id)
+        .await
+        .unwrap();
+    record_receipt(pool, &r2.request_id, 1, &started("run-b", "S1"))
+        .await
+        .unwrap();
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Dispatching,
+        RunState::Running,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(live(pool, goal_id).await);
+
+    // The first send did run after all, and its receipts arrive late.
+    for late in [started("run-a", "S1"), settled("run-a", "S1")] {
+        let error = record_receipt(pool, r1, 1, &late).await.unwrap_err();
+        assert_eq!(error.code(), "RECEIPT_OUT_OF_ORDER", "{error}");
+    }
+    let evidence: (String, Option<String>, Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT state, run_id, provider_session_id, started_at, settled_at
+             FROM supervisor_dispatches WHERE request_id = ?",
+        )
+        .bind(r1)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(evidence.0, "uncertain", "the older dispatch never becomes live");
+    assert_eq!(evidence.1.as_deref(), Some("run-a"), "its run is kept as evidence");
+    assert_eq!(evidence.2.as_deref(), Some("S1"));
+    assert!(evidence.3.is_some() && evidence.4.is_some());
+    let binding = execution_binding_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!(binding.run_id.as_deref(), Some("run-b"));
+    assert!(live(pool, goal_id).await, "run-b keeps the live-run marker");
+
+    // The newer run settles normally and ends the live run.
+    record_receipt(pool, &r2.request_id, 1, &settled("run-b", "S1"))
+        .await
+        .unwrap();
+    let binding = execution_binding_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!(binding.run_id, None);
+    assert!(!live(pool, goal_id).await);
+}
+
+#[tokio::test]
+async fn a_live_run_resumes_to_running_and_refuses_ready_and_new_claims() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let r1 = admitted.dispatch_request_id.as_str();
+    attach_session(pool, goal_id, 1, "S1").await.unwrap();
+    claim_dispatch(pool, r1, 1, 1).await.unwrap();
+    record_receipt(pool, r1, 1, &started("run-a", "S1"))
+        .await
+        .unwrap();
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Dispatching,
+        RunState::Running,
+        None,
+    )
+    .await
+    .unwrap();
+    let paused = transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Running,
+        RunState::Paused,
+        Some("owner paused"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(paused.revision, 2);
+    let to_ready = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Ready, None)
+        .await
+        .unwrap_err();
+    assert_eq!(to_ready.code(), "LIVE_RUN", "{to_ready}");
+    let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (RunState::Paused, 2));
+    let resumed = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Running, None)
+        .await
+        .unwrap();
+    assert_eq!((resumed.run_state, resumed.revision), (RunState::Running, 2));
+
+    // A goal that reached ready before its accepted dispatch started takes no new claim.
+    let other = admit(&fixture, "msg-2").await;
+    let other_goal = other.goal_id.as_str();
+    attach_session(pool, other_goal, 1, "S2").await.unwrap();
+    claim_dispatch(pool, &other.dispatch_request_id, 1, 1)
+        .await
+        .unwrap();
+    record_receipt(pool, &other.dispatch_request_id, 1, &Receipt::Accepted)
+        .await
+        .unwrap();
+    transition_goal(
+        pool,
+        other_goal,
+        1,
+        RunState::Dispatching,
+        RunState::Degraded,
+        Some("observer lost"),
+    )
+    .await
+    .unwrap();
+    transition_goal(
+        pool,
+        other_goal,
+        1,
+        RunState::Degraded,
+        RunState::Ready,
+        None,
+    )
+    .await
+    .unwrap();
+    let next = enqueue_dispatch(pool, other_goal, 1, "Next step.")
+        .await
+        .unwrap();
+    record_receipt(pool, &other.dispatch_request_id, 1, &started("run-c", "S2"))
+        .await
+        .unwrap();
+    let busy = claim_dispatch(pool, &next.request_id, 1, 1)
+        .await
+        .unwrap_err();
+    assert_eq!(busy.code(), "LIVE_RUN", "{busy}");
+    assert_eq!(dispatch_state(pool, &next.request_id).await, "ready");
+    assert_eq!(
+        goal_of(pool, other_goal).await.unwrap().unwrap().run_state,
+        RunState::Ready
+    );
+}
+
+#[tokio::test]
+async fn a_dispatch_claimed_before_an_owner_hold_is_released_before_transmit() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let r1 = admitted.dispatch_request_id.as_str();
+    let claimed = claim_dispatch(pool, r1, 1, 1).await.unwrap();
+    assert_eq!(
+        confirm_claim_before_transmit(pool, r1).await.unwrap(),
+        claimed
+    );
+
+    let paused = transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Dispatching,
+        RunState::Paused,
+        Some("owner paused"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(paused.revision, 2);
+    assert_eq!(
+        dispatch_state(pool, r1).await,
+        "claimed",
+        "the hold leaves a claim alone: it may be in flight"
+    );
+    let released = confirm_claim_before_transmit(pool, r1).await.unwrap_err();
+    assert_eq!(released.code(), "SUPERSEDED", "{released}");
+    assert_eq!(dispatch_state(pool, r1).await, "superseded");
+    let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (RunState::Paused, 2));
+    assert_eq!(
+        confirm_claim_before_transmit(pool, r1)
+            .await
+            .unwrap_err()
+            .code(),
+        "NOT_CLAIMABLE"
+    );
+    assert!(matches!(
+        record_receipt(pool, r1, 1, &Receipt::Accepted).await,
+        Err(SupervisorError::ReceiptOutOfOrder {
+            from: DispatchState::Superseded,
+            ..
+        })
+    ));
+
+    // A correction during the claim releases it and hands the goal back to ready.
+    let corrected = admit(&fixture, "msg-2").await;
+    let corrected_goal = corrected.goal_id.as_str();
+    claim_dispatch(pool, &corrected.dispatch_request_id, 1, 1)
+        .await
+        .unwrap();
+    revise_goal(pool, corrected_goal, 1).await.unwrap();
+    let released = confirm_claim_before_transmit(pool, &corrected.dispatch_request_id)
+        .await
+        .unwrap_err();
+    assert_eq!(released.code(), "SUPERSEDED", "{released}");
+    let goal = goal_of(pool, corrected_goal).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (RunState::Ready, 2));
+    let fresh = enqueue_dispatch(pool, corrected_goal, 2, "Corrected instruction.")
+        .await
+        .unwrap();
+    claim_dispatch(pool, &fresh.request_id, 2, 1).await.unwrap();
+    confirm_claim_before_transmit(pool, &fresh.request_id)
+        .await
+        .unwrap();
+
+    // A generation change during the claim releases it too.
+    let rebound = admit(&fixture, "msg-3").await;
+    let rebound_goal = rebound.goal_id.as_str();
+    claim_dispatch(pool, &rebound.dispatch_request_id, 1, 1)
+        .await
+        .unwrap();
+    advance_generation(pool, rebound_goal, 1, Some("S9"))
+        .await
+        .unwrap();
+    let released = confirm_claim_before_transmit(pool, &rebound.dispatch_request_id)
+        .await
+        .unwrap_err();
+    assert_eq!(released.code(), "SUPERSEDED", "{released}");
+    let goal = goal_of(pool, rebound_goal).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (RunState::Ready, 1));
 }
