@@ -1866,10 +1866,11 @@ pub async fn admit_request_with(
 /// before any dispatcher can read the binding, so the goal is delivered to that pane (on a
 /// paired host, through the paired path) and no pane is launched for it.
 ///
-/// The session's host must be the goal's target host, and a session another open goal (not
-/// completed or cancelled) is bound to on that host is refused with
-/// [`SupervisorError::SessionAlreadyBound`]. A replay returns the original receipt before
-/// either is checked.
+/// The session's host must be the goal's target host and the worker a pane (checked first,
+/// before anything is read). A session another open goal (not completed or cancelled) is
+/// bound to on that host is refused with [`SupervisorError::SessionAlreadyBound`]; that check
+/// runs after the replay lookup, so a replay of an admitted request returns its original
+/// receipt (and binding) even when its pane is now held.
 pub async fn admit_request_bound(
     pool: &SqlitePool,
     request: &AdmitRequest,

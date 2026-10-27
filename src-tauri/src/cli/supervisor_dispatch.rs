@@ -3,9 +3,11 @@
 //! `submit` admits one owner request through the running daemon's hub as the installation
 //! owner (adapter `cli`). With `--session` the goal is bound at admission to that existing pane
 //! on `--host` (a paired host's pane is then delivered through the paired path), so no pane is
-//! launched for it. The pane choice exists only here, on the owner socket: the model's work
-//! has no such field, a worker inside a Ferryx pane (FERRYX_SESSION_ID set) is refused, and a
-//! pane another open goal holds is SESSION_ALREADY_BOUND (exit 4). A lost answer is
+//! launched for it. The pane choice exists only on the daemon's local socket, which any
+//! same-uid local process can reach (it is not proof that the owner sent it): the model's work
+//! has no such field, this CLI refuses to run inside a Ferryx pane (FERRYX_SESSION_ID set; a
+//! speed bump, not a gate), and a pane another open goal holds is SESSION_ALREADY_BOUND
+//! (exit 4). A lost answer is
 //! OPERATION_OUTCOME_UNKNOWN; re-running with the same message id replays the admission.
 //!
 //! `dispatch status` reads one goal's run state, binding and dispatches with their receipts.

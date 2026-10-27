@@ -905,8 +905,9 @@ impl From<ferryx_hub::supervisor::SupervisorError> for SupervisorDispatchError {
 }
 
 /// Owner work bound to a chosen pane (`submit`), or one goal's dispatch status (`status`),
-/// on the daemon's own hub. Only the owner socket carries this request, so the sender is the
-/// installation owner. `status` only reads.
+/// on the daemon's own hub. Only the local daemon socket carries this request, so the sender
+/// is any same-uid local process; it is admitted as the installation owner, as MCP
+/// `supervisor.request` is. `status` only reads.
 pub async fn supervisor_dispatch(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorDispatchAction,

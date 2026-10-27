@@ -203,6 +203,38 @@ async fn a_pane_bound_to_an_open_goal_is_not_bound_twice() {
 }
 
 #[tokio::test]
+async fn a_pane_is_released_when_its_goal_completes() {
+    let pool = owner_pool().await;
+    let (first, request_id) = admit(&pool, "m-1", pane_choice(PANE)).await;
+    let goal = goal_of(&pool, &first).await.unwrap().unwrap();
+    claim_dispatch(&pool, &request_id, goal.revision, 1).await.unwrap();
+    confirm_claim_before_transmit(&pool, &request_id).await.unwrap();
+    record_receipt(&pool, &request_id, 1, &Receipt::Accepted).await.unwrap();
+    let run_id = pty_run_id(PANE, RecordingControl::EPOCH, 1);
+    let started = Receipt::Started { run_id: run_id.clone(), provider_session_id: PANE.into() };
+    record_receipt(&pool, &request_id, 1, &started).await.unwrap();
+    transition_goal(&pool, &first, goal.revision, RunState::Dispatching, RunState::Running, None)
+        .await
+        .unwrap();
+    // While the goal runs (and while it is verified) the pane stays bound to it.
+    let refused = submit_work(&pool, &actor(OWNER, "m-2", pane_choice(PANE)), &work()).await.unwrap_err();
+    assert_eq!(refused.code(), SESSION_ALREADY_BOUND, "{refused}");
+    let settled = Receipt::Settled { run_id, provider_session_id: PANE.into() };
+    record_receipt(&pool, &request_id, 1, &settled).await.unwrap();
+    let goal = goal_of(&pool, &first).await.unwrap().unwrap();
+    transition_goal(&pool, &first, goal.revision, goal.run_state, RunState::Verifying, None)
+        .await
+        .unwrap();
+    let refused = submit_work(&pool, &actor(OWNER, "m-3", pane_choice(PANE)), &work()).await.unwrap_err();
+    assert_eq!(refused.code(), SESSION_ALREADY_BOUND, "{refused}");
+    transition_goal(&pool, &first, goal.revision, RunState::Verifying, RunState::Completed, Some("verified"))
+        .await
+        .unwrap();
+    let (second, _) = admit(&pool, "m-4", pane_choice(PANE)).await;
+    assert_ne!(second, first, "a completed goal no longer holds its pane");
+}
+
+#[tokio::test]
 async fn dispatch_status_reading_writes_nothing() {
     let pool = owner_pool().await;
     let (goal_id, request_id) = admit(&pool, "m-1", pane_choice(PANE)).await;

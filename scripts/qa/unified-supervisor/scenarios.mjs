@@ -393,10 +393,13 @@ async function runAdmission(ctx) {
 // test crates/ferryx-hub/src/supervisor/tests/receipts.rs and listed as notCovered here.
 
 const REMOTE_WORKSPACE_ID = 'qa-remote';
-const REMOTE_BODY = 'Create result.txt containing READY. Run the verifier.';
-const REMOTE_WORK = Object.freeze({
+// The owner's body differs from the work's instruction, and every submit carries its own
+// nonce in the instruction only: a delivery types it on exactly one line, so counting the
+// nonce's lines counts deliveries (the body and scope lines never contain it).
+const REMOTE_BODY = 'Please write result.txt with READY in it and check it with the verifier.';
+const remoteWork = (nonce) => ({
   title: 'Write result.txt',
-  instruction: 'Create result.txt containing READY. Run the verifier.',
+  instruction: `${nonce} Create result.txt containing READY. Run the verifier.`,
   requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
   operations: ['edit', 'test'],
 });
@@ -405,13 +408,28 @@ const REMOTE_WORK = Object.freeze({
 const GATEWAY_PORT = 43821;
 const TURN_START_MS = 6_000;
 
+// Free only when nothing answers a connect to 127.0.0.1:<port> (also catches a 0.0.0.0
+// listener a SO_REUSEADDR bind probe misses on macOS) and a loopback bind succeeds.
 function portIsFree(port) {
-  return new Promise((resolvePort) => {
+  const connects = new Promise((resolveConnect) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    const done = (value) => { socket.destroy(); resolveConnect(value); };
+    socket.setTimeout(2_000, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+  const binds = () => new Promise((resolvePort) => {
     const server = createServer();
     server.unref();
     server.once('error', () => resolvePort(false));
     server.listen(port, '127.0.0.1', () => server.close(() => resolvePort(true)));
   });
+  return connects.then((taken) => (taken ? false : binds()));
+}
+
+// True while `pid` exists (signal 0 probes without sending anything).
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
 }
 
 // One request on a fresh connection after a handshake; a protocolMismatch retries once with
@@ -497,10 +515,10 @@ async function runRemoteDelivery(ctx) {
     FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${trackerPort}`, FERRYX_HUB_WORKSPACE: REMOTE_WORKSPACE_ID,
     FERRYX_SUPERVISOR_TURN_START_MS: String(TURN_START_MS),
   });
-  // The hub daemon's gateway stays off so only the target binds the fixed gateway port.
-  mkdirSync(join(hubEnv.FERRYX_DATA_DIR, 'remote'), { recursive: true });
-  writeFileSync(join(hubEnv.FERRYX_DATA_DIR, 'remote', 'remote-config.json'), `${JSON.stringify({ mode: 'off' })}\n`);
-  ctx.announce({ remoteDelivery: 'fixture', relayUrl, repo, gitCommonDir, hubDb, targetSocket });
+  // The hub daemon's gateway stays at its default (off), so only the target binds the fixed
+  // gateway port. The relay binds 0.0.0.0:<relayPort> (bin/relay.rs has no bind flag), so it
+  // is reachable from this host's network for the run; recorded below.
+  ctx.announce({ remoteDelivery: 'fixture', relayUrl, relayBind: `0.0.0.0:${relayPort}`, repo, gitCommonDir, hubDb, targetSocket });
   transcript(`fixture relay=${relayUrl} repo=${repo} hubDb=${hubDb} targetSocket=${targetSocket}`);
 
   // 1. Loopback relay, then the target daemon in relay mode with agent control on.
@@ -530,10 +548,18 @@ async function runRemoteDelivery(ctx) {
   await ctx.startDaemon({ env: hubEnv, deadlineMs: 60_000 });
   const paired = await daemonCall(ctx, hubSocket, 'hub-pair-target', { type: 'pairedHostPair', request: { relayOrigin: relayUrl, pin: code.code, displayLabel: 'qa-target' } }, 60_000);
   const hostId = paired?.host?.hostId ?? null;
-  ctx.assert('hub-paired-with-target', paired?.type === 'pairedHostPairOk' && typeof hostId === 'string' && paired.host.grantScope !== undefined,
+  ctx.assert('hub-paired-with-target', paired?.type === 'pairedHostPairOk' && typeof hostId === 'string' && paired.host.grantScope === 'machine',
     { paired: paired && { type: paired.type, host: paired.host ?? null, error: paired.error ?? paired.message ?? null } });
   if (!hostId) throw new HarnessError('PAIRING_FAILED', 'the hub daemon did not pair with the target');
   transcript(`paired hostId=${hostId}`);
+  // The route the hub uses for that host: the relay must carry the traffic, so restarting
+  // the relay below is a real transport interruption, not a bypassed one.
+  const routeOf = async (label) => {
+    const reply = await daemonCall(ctx, hubSocket, label, { type: 'pairedHostRouteList' });
+    const entry = reply?.type === 'pairedHostRouteListOk' ? reply.entries.find((route) => route.hostId === hostId) ?? null : null;
+    ctx.evidence.appendJsonl('routes.jsonl', { label, reply, entry, at: new Date().toISOString() });
+    return entry?.state ?? null;
+  };
 
   // 3. Owner set-up on the hub with the project mapped on the paired host (`--remote`: the
   //    target's realpath'd <repo>/.git, stored as given; the hub cannot resolve it).
@@ -543,27 +569,30 @@ async function runRemoteDelivery(ctx) {
     && setup.json?.gitCommonDir === gitCommonDir, { code: setup.code, json: setup.json, stderr: setup.stderr });
   if (setup.code !== 0) throw new HarnessError('SETUP_FAILED', `the project could not be mapped on paired host ${hostId}: ${setup.json?.code ?? setup.code}`);
 
-  // 4. Two worker panes on the target: one reports its turn start, one stays silent.
+  // 4. Worker panes on the target: reporting panes start their turn, the silent one never does.
   const registered = await daemonCall(ctx, targetSocket, 'target-register-workspace', { type: 'registerWorkspace', workspaceId: REMOTE_WORKSPACE_ID, repoRoot: realpathSync(workspaceRoot) });
-  const spawnPane = async (mode) => {
+  const spawnPane = async (mode, name = mode) => {
     writeFileSync(modeFile, `${mode}\n`);
-    const reply = await daemonCall(ctx, targetSocket, `target-spawn-${mode}`, { type: 'spawn', clientRequestId: `qa-${mode}-${ctx.runId}`, workspaceId: REMOTE_WORKSPACE_ID, worktree: null, cwd: repo, cols: 100, rows: 30 }, 60_000);
+    const reply = await daemonCall(ctx, targetSocket, `target-spawn-${name}`, { type: 'spawn', clientRequestId: `qa-${name}-${ctx.runId}`, workspaceId: REMOTE_WORKSPACE_ID, worktree: null, cwd: repo, cols: 100, rows: 30 }, 60_000);
     const sessionId = reply?.type === 'spawnOk' ? reply.sessionId : null;
-    if (!sessionId) throw new HarnessError('FIXTURE_FAILED', `the ${mode} pane was not spawned: ${JSON.stringify(reply)}`);
-    await waitForChange(ctx, `${mode} worker ready`, workerLogs, () => ({ done: readWorkerLogs(workerLogs).some((entry) => entry.sessionId === sessionId) }), 30_000);
-    transcript(`pane ${mode} sessionId=${sessionId}`);
+    if (!sessionId) throw new HarnessError('FIXTURE_FAILED', `the ${name} pane was not spawned: ${JSON.stringify(reply)}`);
+    await waitForChange(ctx, `${name} worker ready`, workerLogs, () => ({ done: readWorkerLogs(workerLogs).some((entry) => entry.sessionId === sessionId) }), 30_000);
+    transcript(`pane ${name} (${mode}) sessionId=${sessionId}`);
     return sessionId;
   };
   ctx.assert('target-workspace-registered', registered?.type === 'registerWorkspaceOk', { registered });
   const reportingPane = await spawnPane('report');
   const silentPane = await spawnPane('silent');
+  const bystanderPane = await spawnPane('report', 'bystander');
   const workerOf = (sessionId) => readWorkerLogs(workerLogs).find((entry) => entry.sessionId === sessionId) ?? null;
-  const inputsOf = (sessionId) => (workerOf(sessionId)?.entries ?? []).filter((entry) => entry.kind === 'input' && entry.text.includes(REMOTE_WORK.instruction)).length;
+  // Lines a pane received carrying `nonce`: one per delivery of that submit.
+  const inputsOf = (sessionId, nonce) => (workerOf(sessionId)?.entries ?? []).filter((entry) => entry.kind === 'input' && entry.text.includes(nonce)).length;
+  const nonceOf = (label) => `[qa-${label}-${ctx.runId}]`;
 
   const hub = await openHubReader(hubDb);
   const submit = async (label, sessionId) => {
     const file = join(data, `${label}.request.json`);
-    writeFileSync(file, `${JSON.stringify({ messageId: `qa-${label}-${ctx.runId}`, body: REMOTE_BODY, work: REMOTE_WORK })}\n`);
+    writeFileSync(file, `${JSON.stringify({ messageId: `qa-${label}-${ctx.runId}`, body: REMOTE_BODY, work: remoteWork(nonceOf(label)) })}\n`);
     return ctx.cli(['supervisor', 'submit', '--host', hostId, '--session', sessionId, '--request-file', file, '--json'], { label: `submit-${label}`, env: hubEnv });
   };
   const status = (label, goalId) => ctx.cli(['supervisor', 'dispatch', 'status', '--goal', goalId, '--json'], { label: `status-${label}`, env: hubEnv });
@@ -572,6 +601,9 @@ async function runRemoteDelivery(ctx) {
     const dispatches = hub.all('SELECT request_id, state, run_id, uncertain_code, accepted_at, started_at FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId);
     return { done: done(goal, dispatches), goal, dispatches };
   }, 4 * TURN_START_MS + 60_000);
+
+  const routeBefore = await routeOf('route-after-pairing');
+  ctx.assert('paired-route-is-relay', routeBefore === 'relay', { route: routeBefore });
 
   // 5. Positive receipt: the reporting pane starts the run from its own report.
   const positive = await submit('positive', reportingPane);
@@ -585,12 +617,17 @@ async function runRemoteDelivery(ctx) {
   ctx.assert('positive-receipt-started-the-run', positiveStatus.code === 0 && positiveStatus.json?.binding?.hostId === hostId
     && positiveStatus.json?.binding?.providerSessionId === reportingPane && positiveStatus.json?.dispatches?.length === 1
     && positiveRow?.state === 'started' && typeof positiveRow?.runId === 'string' && typeof positiveRow?.startedAt === 'string'
-    && positiveRow?.requestId === positive.json?.receipt?.dispatch_request_id && inputsOf(reportingPane) === 1,
-  { status: positiveStatus.json, inputs: inputsOf(reportingPane) });
+    && positiveRow?.requestId === positive.json?.receipt?.dispatch_request_id && inputsOf(reportingPane, nonceOf('positive')) === 1,
+  { status: positiveStatus.json, inputs: inputsOf(reportingPane, nonceOf('positive')) });
   transcript(`positive goal=${positiveGoal} dispatch=${JSON.stringify(positiveRow)}`);
 
-  // 6. Missing receipt: the silent pane takes the bytes but never shows a turn start.
-  const missing = await submit('missing', silentPane);
+  // 6. Missing receipt: the silent pane takes the bytes but never shows a turn start. While its
+  //    start window is open, a person's input starts a turn in another (bystander) pane: that
+  //    unrelated start must not count as the silent dispatch's receipt.
+  const missingSubmit = submit('missing', silentPane);
+  const bystanderTyped = waitForChange(ctx, 'silent pane received its dispatch', workerLogs, () => ({ done: inputsOf(silentPane, nonceOf('missing')) > 0 }), 60_000)
+    .then(() => ctx.cli(['agents', 'send', bystanderPane, 'unrelated activity from a person', '--host', hostId, '--json'], { label: 'send-bystander', env: hubEnv }));
+  const missing = await missingSubmit;
   const missingGoal = missing.json?.receipt?.goal_id ?? null;
   ctx.assert('missing-admitted-bound-to-paired-pane', missing.code === 0 && missing.json?.outcome === 'admitted' && typeof missingGoal === 'string',
     { code: missing.code, json: missing.json, stderr: missing.stderr });
@@ -602,8 +639,14 @@ async function runRemoteDelivery(ctx) {
     && typeof row?.acceptedAt === 'string' && row?.startedAt === null && row?.settledAt === null && row?.runId === null
     && ['TURN_NOT_OBSERVED', 'START_RECEIPT_MISSING'].includes(row?.uncertainCode) && body?.binding?.runId === null;
   ctx.assert('missing-receipt-accepted-never-started', missingStatus.code === 0 && acceptedNotStarted(missingStatus.json, missingRow)
-    && missingStatus.json?.binding?.providerSessionId === silentPane && inputsOf(silentPane) === 1,
-  { status: missingStatus.json, inputs: inputsOf(silentPane), worker: workerOf(silentPane)?.entries ?? null });
+    && missingStatus.json?.binding?.providerSessionId === silentPane && inputsOf(silentPane, nonceOf('missing')) === 1,
+  { status: missingStatus.json, inputs: inputsOf(silentPane, nonceOf('missing')), worker: workerOf(silentPane)?.entries ?? null });
+  const bystander = await bystanderTyped;
+  const bystanderStarted = await waitForChange(ctx, 'bystander turn start report', workerLogs, () => ({
+    done: (workerOf(bystanderPane)?.entries ?? []).some((entry) => entry.kind === 'reported' && entry.state === 'working'),
+  }), 30_000).then(() => true, () => false);
+  ctx.assert('unrelated-activity-is-not-a-receipt', bystander.code === 0 && bystanderStarted && acceptedNotStarted(missingStatus.json, missingRow),
+    { send: { code: bystander.code, json: bystander.json }, bystanderStarted, missing: missingRow });
   const missingRead = await ctx.cli(['agents', 'read', silentPane, '--host', hostId, '--json'], { label: 'read-silent-pane', env: hubEnv });
   ctx.evidence.writeJson('silent-pane-read.json', missingRead.json);
   transcript(`missing goal=${missingGoal} dispatch=${JSON.stringify(missingRow)} paneRead=${missingRead.code}`);
@@ -615,28 +658,58 @@ async function runRemoteDelivery(ctx) {
     && hub.count('SELECT COUNT(*) AS n FROM supervisor_goals') === goalsBefore, { code: doubled.code, json: doubled.json, goalsBefore });
 
   // 8. Reconnect: the relay (recorded PID) is stopped and restarted on the same port; the
-  //    target's control channel reconnects and the hub reaches the pane again. Nothing is
-  //    resent and the uncertain delivery stays accepted, never started.
+  //    target's control channel reconnects. A fresh goal on a fresh reporting pane must then
+  //    start through the hub dispatcher and the paired transport: a full pass after the
+  //    reconnect. Only after that are the earlier deliveries re-checked: nothing resent, the
+  //    uncertain one still accepted and never started.
   const connectedBefore = countLines(targetLog, 'relay control channel connected');
   await ctx.terminate(relay, 'reconnect');
   transcript(`relay pid=${relay.pid} stopped for reconnect`);
   relay = await startRelay('relay-2');
   await relayConnected(connectedBefore + 1, 'target relay control channel reconnect');
   const reread = await ctx.cli(['agents', 'read', silentPane, '--host', hostId, '--json'], { label: 'read-silent-pane-after-reconnect', env: hubEnv, deadlineMs: 60_000 });
+  const freshPane = await spawnPane('report', 'after-reconnect');
+  const fresh = await submit('after-reconnect', freshPane);
+  const freshGoal = fresh.json?.receipt?.goal_id ?? null;
+  if (!freshGoal) throw new HarnessError('ADMISSION_FAILED', `the post-reconnect submit returned no goal: ${JSON.stringify(fresh.json)}`);
+  const freshSettled = await settledDispatch('post-reconnect dispatch start', freshGoal, (goal, rows) => rows.some((row) => row.state === 'started') || HELD_STATES.has(goal?.run_state));
+  const freshStatus = await status('after-reconnect', freshGoal);
+  const routeAfter = await routeOf('route-after-reconnect');
+  ctx.assert('post-reconnect-dispatch-started', fresh.code === 0 && freshStatus.json?.dispatches?.length === 1 && freshStatus.json.dispatches[0].state === 'started'
+    && freshStatus.json?.binding?.providerSessionId === freshPane && inputsOf(freshPane, nonceOf('after-reconnect')) === 1 && routeAfter === 'relay',
+  { admitted: fresh.json, status: freshStatus.json, settled: freshSettled, route: routeAfter });
   const afterStatus = await status('missing-after-reconnect', missingGoal);
   const afterPositive = await status('positive-after-reconnect', positiveGoal);
   ctx.assert('reconnected-without-resend', reread.code === 0 && afterStatus.code === 0 && acceptedNotStarted(afterStatus.json, afterStatus.json?.dispatches?.[0])
     && afterStatus.json?.dispatches?.[0]?.requestId === missingRow?.requestId && afterPositive.json?.dispatches?.length === 1
-    && inputsOf(silentPane) === 1 && inputsOf(reportingPane) === 1
+    && afterPositive.json?.dispatches?.[0]?.requestId === positiveRow?.requestId
+    && inputsOf(silentPane, nonceOf('missing')) === 1 && inputsOf(reportingPane, nonceOf('positive')) === 1
     && hub.count("SELECT COUNT(*) AS n FROM supervisor_dispatches WHERE state = 'ready'") === 0,
-  { reread: { code: reread.code, json: reread.json }, missing: afterStatus.json, positive: afterPositive.json, inputs: { silent: inputsOf(silentPane), reporting: inputsOf(reportingPane) } });
-  transcript(`reconnect: relay-2 pid=${relay.pid} silentInputs=${inputsOf(silentPane)} reportingInputs=${inputsOf(reportingPane)} missingState=${afterStatus.json?.dispatches?.[0]?.state}`);
+  { reread: { code: reread.code, json: reread.json }, missing: afterStatus.json, positive: afterPositive.json,
+    inputs: { silent: inputsOf(silentPane, nonceOf('missing')), reporting: inputsOf(reportingPane, nonceOf('positive')) } });
+  transcript(`reconnect: relay-2 pid=${relay.pid} fresh=${freshStatus.json?.dispatches?.[0]?.state} silentInputs=${inputsOf(silentPane, nonceOf('missing'))} reportingInputs=${inputsOf(reportingPane, nonceOf('positive'))} missingState=${afterStatus.json?.dispatches?.[0]?.state}`);
+
+  // 9. Fixture workers live in target panes, outside the process ledger: stop the target
+  //    daemon (recorded PID), then every worker must log its input closing and be gone.
+  const workerPids = readWorkerLogs(workerLogs).map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
+  await ctx.terminate(targetDaemon, 'worker-cleanup');
+  const closed = await waitForChange(ctx, 'fixture workers exit', workerLogs, () => {
+    const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => line.kind === 'stdin-closed'));
+    return { done: open.length === 0, open: open.map((entry) => entry.name) };
+  }, 30_000).then(() => true, () => false);
+  // A worker logs stdin-closed and then exits; a pid still alive past that is a leak.
+  const alive = workerPids.filter((pid) => pidAlive(pid));
+  ctx.evidence.writeJson('worker-cleanup.json', { workerPids, allClosedInput: closed, alive, note: 'pids from worker-<pid>.jsonl; probed with signal 0' });
+  // Four panes: reporting, silent, bystander, after-reconnect.
+  ctx.assert('fixture-workers-gone', closed && workerPids.length === 4 && alive.length === 0, { workerPids, closed, alive });
 
   for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
   if (existsSync(targetLog)) ctx.evidence.writeText('target-daemon.log', readFileSync(targetLog, 'utf8'));
   ctx.evidence.writeJson('remote-delivery.json', {
     worker: { kind: 'fixture', note: 'Target panes run fixture-worker.mjs; the reporting pane reports agentState working on its first typed line, the silent pane (--no-report) never does. Neither is a real provider worker.' },
-    hostId, panes: { reporting: reportingPane, silent: silentPane },
+    hostId, relayBind: `0.0.0.0:${relayPort}`, routes: { afterPairing: routeBefore, afterReconnect: routeAfter },
+    panes: { reporting: reportingPane, silent: silentPane, bystander: bystanderPane, afterReconnect: freshPane },
+    afterReconnect: { goalId: freshGoal, admitted: fresh.json, status: freshStatus.json },
     positive: { goalId: positiveGoal, admitted: positive.json, status: positiveStatus.json },
     missing: { goalId: missingGoal, admitted: missing.json, status: missingStatus.json, afterReconnect: afterStatus.json },
     doubleBinding: doubled.json,
@@ -673,7 +746,8 @@ export const SCENARIOS = Object.freeze({
     requiredAssertions: [
       'target-ready-for-pairing', 'hub-paired-with-target', 'project-mapped-on-paired-host', 'target-workspace-registered',
       'positive-admitted-bound-to-paired-pane', 'positive-receipt-started-the-run', 'missing-admitted-bound-to-paired-pane',
-      'missing-receipt-accepted-never-started', 'double-binding-refused', 'reconnected-without-resend',
+      'paired-route-is-relay', 'missing-receipt-accepted-never-started', 'unrelated-activity-is-not-a-receipt', 'double-binding-refused',
+      'post-reconnect-dispatch-started', 'reconnected-without-resend', 'fixture-workers-gone',
     ],
     // Listed in assertions.json, never counted toward PASS.
     notCovered: [

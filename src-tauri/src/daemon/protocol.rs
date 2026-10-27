@@ -563,11 +563,12 @@ impl SupervisorGoalAction {
 }
 
 /// Submit owner work bound to an existing pane, or read one goal's dispatch status. Gated by
-/// `supervisorDispatchV1`; carried only on the owner socket. `status` writes nothing.
+/// `supervisorDispatchV1`; carried only on the local daemon socket, so any same-uid local
+/// process can send it. `status` writes nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SupervisorDispatchAction {
-    /// Admit `work` as the installation owner (adapter `cli`, dedupe id `message_id`). With
+    /// Admit `work` on behalf of the installation owner (adapter `cli`, dedupe id `message_id`). With
     /// `session_id` the goal is bound at admission to that existing pane on `host_id`.
     Submit {
         message_id: String,
