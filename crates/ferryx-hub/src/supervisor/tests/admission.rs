@@ -1418,7 +1418,7 @@ async fn an_adoption_during_a_legacy_launch_wins_and_the_legacy_drive_sends_noth
 
     // The adopting goal is the one worker.
     let adopted = launcher.adopted.lock().unwrap().take().expect("the adoption committed");
-    let worker = Arc::new(RecordingControl::default());
+    let worker = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert_eq!(dispatcher.drain().await.len(), 1);
     assert_eq!(
@@ -1553,7 +1553,7 @@ async fn an_adopted_lane_is_not_reopened_or_sent_to_by_the_legacy_paths() {
     assert_eq!(lane_goal_snapshot(&pool, "nightly").await, before);
 
     // The adopting goal is the one worker.
-    let worker = Arc::new(RecordingControl::default());
+    let worker = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert_eq!(dispatcher.drain().await.len(), 1);
     assert_eq!(
@@ -1739,7 +1739,7 @@ async fn a_legacy_goal_pass_never_sends_to_a_lane_adopted_during_its_judge_call(
     }
     assert!(sends(&legacy).is_empty(), "nothing reached a legacy pane");
 
-    let worker = Arc::new(RecordingControl::default());
+    let worker = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert_eq!(dispatcher.drain().await.len(), 2);
     let panes: Vec<String> = sends(&worker)
