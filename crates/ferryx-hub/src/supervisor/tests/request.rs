@@ -134,6 +134,10 @@ async fn state(pool: &SqlitePool, goal_id: &str) -> (RunState, i64) {
 
 /// Claims the ready intent and records a started run, so the goal is `running`.
 async fn start_run(pool: &SqlitePool, goal_id: &str) -> String {
+    start_run_on(pool, goal_id, "pane-1").await
+}
+
+async fn start_run_on(pool: &SqlitePool, goal_id: &str, session: &str) -> String {
     let (_, revision) = state(pool, goal_id).await;
     let request_id: String = sqlx::query_scalar(
         "SELECT request_id FROM supervisor_dispatches WHERE goal_id = ? AND state = 'ready'",
@@ -142,11 +146,11 @@ async fn start_run(pool: &SqlitePool, goal_id: &str) -> String {
     .fetch_one(pool)
     .await
     .unwrap();
-    attach_session(pool, goal_id, 1, "pane-1").await.unwrap();
+    attach_session(pool, goal_id, 1, session).await.unwrap();
     claim_dispatch(pool, &request_id, revision, 1).await.unwrap();
     confirm_claim_before_transmit(pool, &request_id).await.unwrap();
     record_receipt(pool, &request_id, 1, &Receipt::Accepted).await.unwrap();
-    let started = Receipt::Started { run_id: "run-1".into(), provider_session_id: "pane-1".into() };
+    let started = Receipt::Started { run_id: "run-1".into(), provider_session_id: session.into() };
     record_receipt(pool, &request_id, 1, &started).await.unwrap();
     transition_goal(pool, goal_id, revision, RunState::Dispatching, RunState::Running, None)
         .await
@@ -678,4 +682,132 @@ async fn a_stale_depend_writes_no_wait() {
     .unwrap_err();
     assert_eq!(inner.http_status(), 409);
     assert_eq!(fingerprint(&fixture.pool).await, before);
+}
+
+#[tokio::test]
+async fn a_correction_fences_a_claimed_send_and_the_claim_is_released_untransmitted() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "cf1").await;
+    let request_id = claim(&fixture.pool, &goal_id).await;
+    let corrected = handle(&fixture.pool, &context(OWNER), goal_call("correct", &goal_id, 1, json!({"text": "Use DONE"})))
+        .await
+        .unwrap();
+    assert_eq!(corrected["revision"], 2);
+    assert_eq!(corrected["carriedOriginal"], false, "a claimed send may be typed already; it is not carried");
+    // The dispatcher's pre-transmit check sees the moved revision: the claim is released, never typed.
+    assert!(confirm_claim_before_transmit(&fixture.pool, &request_id).await.is_err());
+    let state: String = sqlx::query_scalar("SELECT state FROM supervisor_dispatches WHERE request_id = ?")
+        .bind(&request_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "released");
+    let ready = ready_instructions(&fixture.pool, &goal_id).await;
+    assert_eq!(ready.len(), 1);
+    assert!(ready[0].contains("Use DONE"), "{ready:?}");
+}
+
+#[tokio::test]
+async fn approve_of_a_hold_placed_after_a_settled_run_goes_to_verifying() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "v1").await;
+    let request_id = start_run(&fixture.pool, &goal_id).await;
+    settle(&fixture.pool, &request_id).await;
+    let (_, revision) = state(&fixture.pool, &goal_id).await;
+    // A verify-time hold (T10's OWNER_APPROVAL_REQUIRED / model stop): no unsent intent exists.
+    transition_goal(&fixture.pool, &goal_id, revision, RunState::Running, RunState::AwaitingOwner,
+        Some("OWNER_APPROVAL_REQUIRED: a supervised goal's verdict needs the owner")).await.unwrap();
+    let approved = handle(&fixture.pool, &context(OWNER), goal_call("approve", &goal_id, revision + 1, json!({})))
+        .await
+        .unwrap();
+    assert_eq!(approved["runState"], "verifying", "{approved}");
+    assert_eq!(approved["stateDetail"], "TURN_SETTLED");
+    assert!(ready_instructions(&fixture.pool, &goal_id).await.is_empty(), "a settled run is not resent");
+}
+
+#[tokio::test]
+async fn approve_with_nothing_to_release_is_refused_and_resume_holds_instead_of_an_empty_ready() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "n1").await;
+    start_run(&fixture.pool, &goal_id).await;
+    let (_, revision) = state(&fixture.pool, &goal_id).await;
+    // The run was fenced away (a new generation): no live run, nothing unsent, nothing settled.
+    sqlx::query("UPDATE supervisor_execution_bindings SET generation = generation + 1 WHERE goal_id = ?")
+        .bind(&goal_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    transition_goal(&fixture.pool, &goal_id, revision, RunState::Running, RunState::AwaitingOwner,
+        Some("OWNER_APPROVAL_REQUIRED: model stop")).await.unwrap();
+    let before = fingerprint(&fixture.pool).await;
+    let refused = handle(&fixture.pool, &context(OWNER), goal_call("approve", &goal_id, revision + 1, json!({})))
+        .await
+        .unwrap_err();
+    assert_eq!((refused.code.as_str(), refused.status), ("NOTHING_TO_RELEASE", 409), "{refused}");
+    assert_eq!(fingerprint(&fixture.pool).await, before);
+
+    let paused_goal = admit(&fixture, "n2").await;
+    start_run_on(&fixture.pool, &paused_goal, "pane-2").await;
+    let (_, at) = state(&fixture.pool, &paused_goal).await;
+    handle(&fixture.pool, &context(OWNER), goal_call("pause", &paused_goal, at, json!({}))).await.unwrap();
+    sqlx::query("UPDATE supervisor_execution_bindings SET generation = generation + 1 WHERE goal_id = ?")
+        .bind(&paused_goal)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let resumed = handle(&fixture.pool, &context(OWNER), goal_call("resume", &paused_goal, at + 1, json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resumed["runState"], "awaiting_owner", "{resumed}");
+    assert!(resumed["stateDetail"].as_str().unwrap().starts_with("OWNER_DECISION_NEEDED"));
+}
+
+#[tokio::test]
+async fn resume_clears_a_legacy_lane_pause_row_so_the_dispatcher_does_not_hold_it_again() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "lp1").await;
+    let lane: String = sqlx::query_scalar("SELECT lane_key FROM supervisor_goals WHERE goal_id = ?")
+        .bind(&goal_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    // A row written by the pre-T13 legacy pause path on a supervisor lane.
+    crate::lanes::pause::pause(&fixture.pool, &lane, "desktop").await.unwrap();
+    handle(&fixture.pool, &context(OWNER), goal_call("pause", &goal_id, 1, json!({}))).await.unwrap();
+    let resumed = handle(&fixture.pool, &context(OWNER), goal_call("resume", &goal_id, 2, json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resumed["runState"], "ready");
+    assert!(!crate::lanes::pause::is_paused(&fixture.pool, &lane).await.unwrap(), "the lane pause row is cleared");
+    assert_eq!(ready_instructions(&fixture.pool, &goal_id).await.len(), 1);
+
+    // The legacy lane resume adapter on a goal that is not paused clears a stranded row too.
+    let other = admit(&fixture, "lp2").await;
+    let other_lane: String = sqlx::query_scalar("SELECT lane_key FROM supervisor_goals WHERE goal_id = ?")
+        .bind(&other)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    crate::lanes::pause::pause(&fixture.pool, &other_lane, "desktop").await.unwrap();
+    let changed = crate::supervisor::request::lane_pause(&fixture.pool, &context(OWNER), &other_lane, false)
+        .await
+        .unwrap();
+    assert_eq!(changed, Some(true));
+    assert!(!crate::lanes::pause::is_paused(&fixture.pool, &other_lane).await.unwrap());
+    assert_eq!(state(&fixture.pool, &other).await, (RunState::Ready, 1), "the goal itself is unchanged");
+}
+
+#[tokio::test]
+async fn cancel_clears_the_pre_pause_state() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "cc1").await;
+    handle(&fixture.pool, &context(OWNER), goal_call("pause", &goal_id, 1, json!({}))).await.unwrap();
+    handle(&fixture.pool, &context(OWNER), goal_call("cancel", &goal_id, 2, json!({}))).await.unwrap();
+    let held: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT held_from, held_detail FROM supervisor_goals WHERE goal_id = ?")
+            .bind(&goal_id)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(held, (None, None));
 }

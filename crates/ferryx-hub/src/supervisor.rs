@@ -303,7 +303,9 @@ impl RunState {
     /// A resume may also restore what the pause interrupted (see
     /// [`request`](self::request)): `paused` reaches `verifying` (the run settled during the
     /// pause, or its dependencies resolved), `waiting_children`/`waiting_event` (waits are
-    /// still pending) and `delivery_uncertain` (an unresolved uncertain delivery remains).
+    /// still pending) and `delivery_uncertain` (an unresolved uncertain delivery remains). An
+    /// owner approval releases `awaiting_owner` the same way (a hold placed at verify time goes
+    /// back to `verifying`), so those moves are listed from `awaiting_owner` too.
     pub fn can_transition_to(self, to: RunState) -> bool {
         use RunState::*;
         if self.is_terminal() || self == to {
@@ -323,14 +325,14 @@ impl RunState {
             Dispatching => self == Ready,
             Running => matches!(
                 self,
-                Dispatching | Paused | Degraded | DeliveryUncertain | Ready
+                Dispatching | Paused | Degraded | DeliveryUncertain | Ready | AwaitingOwner
             ),
             WaitingChildren | WaitingEvent => {
-                matches!(self, Running | Verifying | WaitingChildren | WaitingEvent | Paused)
+                matches!(self, Running | Verifying | WaitingChildren | WaitingEvent | Paused | AwaitingOwner)
             }
-            Verifying => matches!(self, Running | WaitingChildren | WaitingEvent | Paused),
+            Verifying => matches!(self, Running | WaitingChildren | WaitingEvent | Paused | AwaitingOwner),
             Completed => self == Verifying,
-            DeliveryUncertain => matches!(self, Dispatching | Running | Paused),
+            DeliveryUncertain => matches!(self, Dispatching | Running | Paused | AwaitingOwner),
             AwaitingOwner | Paused | Degraded | Cancelled => true,
         }
     }
@@ -2388,17 +2390,44 @@ pub async fn revise_goal(
     expected_revision: i64,
 ) -> Result<SupervisorGoal, SupervisorError> {
     let mut tx = pool.begin_write().await?;
-    let goal = require_goal(&mut tx, goal_id).await?;
+    let goal = revise_goal_in(&mut tx, goal_id, expected_revision).await?;
+    tx.commit().await?;
+    wakes::poke();
+    Ok(goal)
+}
+
+/// [`revise_goal`]'s checks and writes inside the caller's write transaction, so an owner
+/// correction commits its contract, revision bump and corrected intent together. Every
+/// owner correction goes through here, so this is the one place a claimed send of the goal
+/// is revoked (the typing fence of the completion work belongs here, inside the caller's
+/// transaction); the claimed row itself is left to the dispatcher, whose pre-transmit check
+/// sees the moved revision and releases it untransmitted.
+pub(crate) async fn revise_goal_in(
+    conn: &mut SqliteConnection,
+    goal_id: &str,
+    expected_revision: i64,
+) -> Result<SupervisorGoal, SupervisorError> {
+    let goal = require_goal(conn, goal_id).await?;
     check_revision(&goal, expected_revision)?;
     check_open(&goal)?;
     let revision = goal.revision + 1;
     let now = now_rfc3339();
-    sqlx::query("UPDATE supervisor_goals SET revision = ?, updated_at = ? WHERE goal_id = ?")
-        .bind(revision)
-        .bind(&now)
-        .bind(goal_id)
-        .execute(&mut *tx)
-        .await?;
+    let moved = sqlx::query(
+        "UPDATE supervisor_goals SET revision = ?, updated_at = ? WHERE goal_id = ? AND revision = ?",
+    )
+    .bind(revision)
+    .bind(&now)
+    .bind(goal_id)
+    .bind(expected_revision)
+    .execute(&mut *conn)
+    .await?;
+    if moved.rows_affected() != 1 {
+        return Err(SupervisorError::RevisionConflict {
+            goal_id: goal_id.to_owned(),
+            expected: expected_revision,
+            actual: goal.revision,
+        });
+    }
     sqlx::query(
         "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
          WHERE goal_id = ? AND state = 'ready' AND goal_revision < ?",
@@ -2406,10 +2435,8 @@ pub async fn revise_goal(
     .bind(&now)
     .bind(goal_id)
     .bind(revision)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-    tx.commit().await?;
-    wakes::poke();
     Ok(SupervisorGoal {
         revision,
         updated_at: now,

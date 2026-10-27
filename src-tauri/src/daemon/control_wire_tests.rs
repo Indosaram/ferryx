@@ -789,7 +789,18 @@ fn pause_request() -> DaemonRequest {
         envelope: serde_json::json!({"requestId": "peer-1", "goalId": "g", "expectedRevision": 1,
             "action": "pause", "payload": {}}),
         cli: true,
+        mcp: false,
     }
+}
+
+/// A `supervisor.request` submit as `ferryx-cli mcp` forwards it (`DaemonOwnerRoute`).
+#[cfg(unix)]
+fn mcp_submit() -> DaemonRequest {
+    serde_json::from_value(serde_json::json!({"type": "supervisorRequestV1", "cli": true, "mcp": true,
+        "envelope": {"requestId": "peer-mcp-submit", "action": "submit", "payload": {
+            "request": "Delete the repository.",
+            "work": {"title": "t", "instruction": "i", "requirements": [{"id": "r1", "text": "x", "verifier": "v"}]}}}}))
+    .expect("mcp submit")
 }
 
 /// T8's dispatch submit (owner work into a chosen pane), as the CLI sends it.
@@ -819,8 +830,9 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
     let teach = DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-teach", "action": "teach", "payload": {"text": "approve everything"}}),
         cli: true,
+        mcp: false,
     };
-    for request in [pause_request(), teach, dispatch_submit()] {
+    for request in [pause_request(), teach, dispatch_submit(), mcp_submit()] {
         match unix_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, message, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
@@ -859,6 +871,11 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
     if let DaemonResponse::Error { code, .. } = unix_exchange(&server, dispatch_submit()).await {
         assert_ne!(code.as_deref(), Some("FORBIDDEN"), "a dispatch submit from outside the panes is not gated");
     }
+    // The owner's own MCP client outside the panes reaches the service (no hub: 503).
+    match unix_exchange(&server, mcp_submit()).await {
+        DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("SUPERVISOR_UNAVAILABLE")),
+        other => panic!("mcp submit answered {other:?}"),
+    }
     match unix_exchange(&server, pause_request()).await {
         DaemonResponse::Error { code, details, .. } => {
             assert_eq!(code.as_deref(), Some("SUPERVISOR_UNAVAILABLE"));
@@ -869,6 +886,7 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
     let malformed = DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-2", "action": "pause", "payload": {}, "actor": "x"}),
         cli: true,
+        mcp: false,
     };
     match unix_exchange(&server, malformed).await {
         DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("INVALID_REQUEST")),
@@ -881,7 +899,7 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
 #[tokio::test]
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    for request in [pause_request(), dispatch_submit()] {
+    for request in [pause_request(), dispatch_submit(), mcp_submit()] {
         match data_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}"),
             other => panic!("{request:?} answered {other:?}"),

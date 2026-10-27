@@ -25,6 +25,10 @@ impl Gateway {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
+        // Agent control is off on a fresh daemon (the owner opts in); every route here is an
+        // agent-control route, so the fixture is the owner who turned it on. The off state is
+        // pinned by `with_agent_control_off_a_machine_control_device_cannot_mutate`.
+        daemon.remote_state().agent_control_policy.set_enabled(true);
         let router = create_remote_router(daemon.remote_state().clone());
         let mut tasks = tokio::task::JoinSet::new();
         tasks.spawn(async move { axum::serve(listener, router).await.expect("serve") });
@@ -97,10 +101,28 @@ async fn a_device_outside_the_agent_control_allowlist_cannot_pause_a_lane() {
     // device that the agent-control policy no longer admits.
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    // Agent control stays on; only the allowlist leaves this device out.
+    assert!(gateway.state().agent_control_policy.enabled());
     gateway.state().agent_control_policy.restrict_to(["another-device"]);
 
     let (status, _, body) = gateway.post(&token, PAUSE).await;
 
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn with_agent_control_off_a_machine_control_device_cannot_mutate() {
+    let gateway = Gateway::start().await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().agent_control_policy.set_enabled(false);
+
+    let (status, _, body) = gateway.post(&token, PAUSE).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    let request = r#"{"requestId":"off-1","action":"message","payload":{"text":"hi"}}"#;
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/request", &token, request).await;
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"]["code"], "FORBIDDEN");
     gateway.stop().await;

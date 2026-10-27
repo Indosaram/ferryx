@@ -65,7 +65,7 @@ pub fn run_request_cli(args: &[String]) -> i32 {
         }
         Ok(envelope) => match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime.block_on(async {
-                let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true };
+                let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true, mcp: false };
                 match tokio::time::timeout(
                     super::supervisor_goal::GOAL_CLI_TIMEOUT,
                     super::supervisor_goal::exchange_once(

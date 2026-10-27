@@ -15,7 +15,8 @@
 //! Fail closed: a peer whose pid or start time cannot be read, whose start time changed since
 //! accept (the pid was reused), or an ancestor that vanished mid-walk (the chain changed under
 //! the walk) is refused. An ancestor that exists but cannot be read (another uid's process,
-//! e.g. a root sshd) ends the walk; pane descendants of another uid are still caught by the
+//! e.g. a root sshd, including one `hidepid` hides from /proc, told apart from an exited one
+//! by `kill(pid, 0)`) ends the walk; pane descendants of another uid are still caught by the
 //! session and terminal signals above.
 //!
 //! Not caught: a pane process that both calls `setsid` and gives up the pane's terminal and
@@ -23,8 +24,9 @@
 //! limit of what a same-uid owner socket can tell; the request still needs the owner's
 //! authority on the hub side.
 //!
-//! What is gated (see `server.rs`): `SupervisorRequestV1` and the supervisor-owned branch of
-//! `SupervisorSetPaused`. The pre-existing lane-goal (`SupervisorGoal`) and legacy lane pause
+//! What is gated (see `server.rs`): `SupervisorRequestV1` (including every write
+//! `ferryx-cli mcp` forwards: submit, adopt, a message with work, goal control, memory), a
+//! mutating `SupervisorDispatch` and the supervisor-owned branch of `SupervisorSetPaused`. The pre-existing lane-goal (`SupervisorGoal`) and legacy lane pause
 //! requests keep their semantics for the owner's own shell in a Ferryx pane; a supervisor
 //! goal's lane already refuses them with `SUPERVISOR_OWNED`.
 //!
@@ -141,7 +143,9 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
     {
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(ProcError::Vanished),
+            // Under `hidepid` another uid's process has no /proc entry for us, so ENOENT alone
+            // does not mean it exited: `kill(pid, 0)` (not affected by hidepid) tells them apart.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(absent_or_hidden(pid)),
             Err(_) => return Err(ProcError::Unreadable),
         };
         // Fields after the command name: index n-3 is field n of proc(5).
@@ -186,6 +190,24 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
     {
         let _ = pid;
         Err(ProcError::Unreadable)
+    }
+}
+
+/// A pid without a readable /proc entry: `Vanished` only when the kernel says no such process
+/// (`ESRCH`); a live process hidden by `hidepid` (`EPERM`, or signalable but unlisted) is
+/// `Unreadable`, which ends an ancestor walk like any other uid's process instead of refusing
+/// the owner for good.
+#[cfg(target_os = "linux")]
+fn absent_or_hidden(pid: u32) -> ProcError {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return ProcError::Vanished;
+    };
+    // SAFETY: signal 0 only checks that the process exists and may be signalled.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    match (alive, std::io::Error::last_os_error().raw_os_error()) {
+        (true, _) => ProcError::Unreadable,
+        (false, Some(libc::ESRCH)) => ProcError::Vanished,
+        (false, _) => ProcError::Unreadable,
     }
 }
 
@@ -362,6 +384,18 @@ mod tests {
         procs.unreadable.insert(245);
         assert!(refusal(peer(250), &panes, &procs).is_some());
         assert_eq!(refusal(PeerOrigin::TokenAuthenticated, &panes, &procs), None);
+    }
+
+    /// hidepid: a live process without a /proc entry for us is unreadable (the walk ends
+    /// outside), and only a reaped one is vanished (the walk fails closed).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hidden_live_process_is_unreadable_and_a_reaped_one_vanished() {
+        assert_eq!(absent_or_hidden(1), ProcError::Unreadable, "pid 1 always exists");
+        let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap");
+        assert_eq!(absent_or_hidden(pid), ProcError::Vanished);
     }
 
     #[cfg(unix)]

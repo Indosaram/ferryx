@@ -872,12 +872,16 @@ impl SupervisorEngineError {
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorRequestV1`.
 pub const SUPERVISOR_REQUEST_CAPABILITY: &str = "supervisorRequestV1";
 
-/// Who a supervisor request reaches the shared service as. `Desktop` is the owner's own
-/// desktop or CLI over the owner socket; `Remote` a paired device the gateway authorized.
+/// Which adapter a supervisor request reached the shared service through, recorded as the
+/// request's source adapter. The principal is always the installation owner, derived by the
+/// daemon: `Desktop` is the desktop app, `Cli` the owner's `ferryx-cli` and `Mcp` the
+/// `ferryx-cli mcp` server forwarding for an MCP client (all over the owner socket, behind
+/// its pane peer check); `Remote` a paired device the gateway authorized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorCaller {
     Desktop,
     Cli,
+    Mcp,
     Remote { device_id: String },
 }
 
@@ -887,6 +891,7 @@ impl SupervisorCaller {
         match self {
             Self::Desktop => ChannelProvider::Desktop,
             Self::Cli => ChannelProvider::Cli,
+            Self::Mcp => ChannelProvider::Mcp,
             Self::Remote { .. } => ChannelProvider::Phone,
         }
     }
@@ -2311,9 +2316,12 @@ async fn on_agent_event(
     Ok(())
 }
 
-/// Forwards `supervisor.request` goal and memory actions from `ferryx-cli mcp` to the daemon's
-/// `SupervisorRequestV1`, where the peer check sees this MCP process: run from inside a Ferryx
-/// pane it is refused `FORBIDDEN`, exactly like the CLI.
+/// Forwards every writing `supervisor.request` (submit, adopt, a message with work, goal
+/// control, memory) from `ferryx-cli mcp` to the daemon's `SupervisorRequestV1`, where the
+/// peer check sees this MCP process: run from inside a Ferryx pane it is refused `FORBIDDEN`,
+/// exactly like the CLI. Bounded by the CLI's goal timeout; a daemon that does not answer in
+/// time is `SUPERVISOR_UNAVAILABLE` (the request may still commit; a replay with the same
+/// `requestId` returns its result).
 struct DaemonOwnerRoute;
 
 #[async_trait]
@@ -2324,8 +2332,15 @@ impl ferryx_hub::mcp::OwnerRoute for DaemonOwnerRoute {
     ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
         use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
         use ferryx_hub::supervisor::request::RequestFailure;
-        let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true };
-        match crate::cli::supervisor_goal::exchange_once(SUPERVISOR_REQUEST_CAPABILITY, request, true).await {
+        let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true, mcp: true };
+        let exchange = crate::cli::supervisor_goal::exchange_once(SUPERVISOR_REQUEST_CAPABILITY, request, true);
+        let Ok(answer) = tokio::time::timeout(crate::cli::supervisor_goal::GOAL_CLI_TIMEOUT, exchange).await else {
+            return Err(RequestFailure::new(
+                "SUPERVISOR_UNAVAILABLE",
+                "the daemon did not answer the supervisor request in time",
+            ));
+        };
+        match answer {
             Ok(DaemonResponse::SupervisorRequestV1Ok { receipt }) => Ok(receipt),
             Ok(DaemonResponse::Error { code, message, .. }) => {
                 Err(RequestFailure::new(code.as_deref().unwrap_or("INTERNAL"), message))

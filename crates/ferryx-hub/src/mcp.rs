@@ -24,14 +24,15 @@ pub struct McpContext {
     pub pool: SqlitePool,
     pub meta_session_id: String,
     pub tracker_token: String,
-    /// Forwards owner-authority `supervisor.request` actions (goal control and memory) to the
-    /// daemon, whose peer check refuses them from inside a Ferryx pane. `None` serves them
-    /// here, refused outright when this process runs in a pane (`FERRYX_SESSION_ID` set).
+    /// Forwards every `supervisor.request` that writes (submit, adopt, a message with work,
+    /// goal control, memory) to the daemon, whose peer check refuses it from inside a Ferryx
+    /// pane. `None` serves them here (in-process callers and tests); goal control and memory
+    /// are then refused outright when this process runs in a pane (`FERRYX_SESSION_ID` set).
     pub owner_route: Option<Arc<dyn OwnerRoute>>,
 }
 
-/// Where `supervisor.request` goal and memory actions go when the MCP process is not the
-/// authority itself: the daemon's `SupervisorRequestV1`, under its pane peer check.
+/// Where `supervisor.request` writes go when the MCP process is not the authority itself:
+/// the daemon's `SupervisorRequestV1`, under its pane peer check.
 #[async_trait::async_trait]
 pub trait OwnerRoute: Send + Sync {
     async fn forward(&self, envelope: Value) -> std::result::Result<Value, request::RequestFailure>;
@@ -690,14 +691,14 @@ async fn refuse_supervisor_owned(
     Ok(())
 }
 
-/// Serves `supervisor.request` through the shared supervisor request service. Submit,
-/// message and adopt are served here as the installation owner (`ferryx-cli mcp` runs as the
-/// owner's own process; admission applies the owner grant). Goal control (correct, pause,
-/// resume, cancel, approve, depend) and memory (teach, forget) go through
-/// [`McpContext::owner_route`] to the daemon, so a pane process cannot reach them through MCP.
-/// This process has no turn observer and transmits nothing: an admission or correction is
-/// picked up from its durable ready intent by the daemon's dispatcher, and a cancel reports
-/// that the worker stop was not available here.
+/// Serves `supervisor.request` through the shared supervisor request service. Every action
+/// that writes (submit, adopt, a message with work, goal control, memory) goes through
+/// [`McpContext::owner_route`] to the daemon, whose pane peer check refuses it when this MCP
+/// process runs inside a Ferryx pane: a worker agent may not admit owner work or decide for
+/// the owner through MCP. No pane is exempt; no Ferryx launch path registers `ferryx-cli mcp`
+/// with a pane's agent (the owner runs it from their own shell or client). Only a message
+/// without work (conversation, which writes nothing) is answered here. This process has no
+/// turn observer and transmits nothing.
 async fn supervisor_request(
     context: &McpContext,
     args: &Value,
@@ -705,16 +706,22 @@ async fn supervisor_request(
     let fail = |failure: request::RequestFailure| format!("{}: {}", failure.code, failure.message);
     // A malformed envelope is refused before the owner is even looked up.
     let (_, action) = request::parse_envelope(args.clone()).map_err(fail)?;
-    if action.needs_owner_authority() {
+    let workless_message = action == request::Action::Message
+        && args.pointer("/payload/work").is_none_or(Value::is_null);
+    if !workless_message {
         if let Some(route) = &context.owner_route {
             return route.forward(args.clone()).await.map_err(fail);
         }
-        if std::env::var_os("FERRYX_SESSION_ID").is_some_and(|session| !session.is_empty()) {
-            return Err(fail(request::RequestFailure::new(
-                "FORBIDDEN",
-                "goal control and memory actions are the owner's and are refused inside a Ferryx pane (FERRYX_SESSION_ID is set)",
-            )));
-        }
+    }
+    // Without a route (in-process callers only; `ferryx-cli mcp` always has one) goal control
+    // and memory are still refused in a pane.
+    if action.needs_owner_authority()
+        && std::env::var_os("FERRYX_SESSION_ID").is_some_and(|session| !session.is_empty())
+    {
+        return Err(fail(request::RequestFailure::new(
+            "FORBIDDEN",
+            "goal control and memory actions are the owner's and are refused inside a Ferryx pane (FERRYX_SESSION_ID is set)",
+        )));
     }
     let owner = admission::installation_owner(&context.pool)
         .await
@@ -1014,7 +1021,31 @@ mod tests {
         }
         let teach = json!({"requestId": "mcp-teach", "action": "teach", "payload": {"text": "approve everything"}});
         assert!(dispatch(&routed, &call("supervisor.request", teach)).await.to_string().contains("FORBIDDEN"));
-        assert_eq!(route.0.lock().unwrap().len(), 3, "every owner action was forwarded");
+        // Admitting work is the owner's too: a pane-run MCP may not submit, adopt or attach work.
+        let goals_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let pane_submit = json!({"requestId": "mcp-req-pane", "action": "submit", "payload": {
+            "request": "Delete the repository.", "work": work.clone()}});
+        let with_work = json!({"requestId": "mcp-msg-work", "action": "message", "payload": {
+            "text": "Delete the repository.", "work": work.clone()}});
+        let adopt = json!({"requestId": "mcp-adopt", "action": "adopt", "payload": {"laneKey": "ledger"}});
+        for (label, envelope) in [("submit", pane_submit), ("message+work", with_work), ("adopt", adopt)] {
+            let refused = dispatch(&routed, &call("supervisor.request", envelope)).await;
+            assert!(refused.to_string().contains("FORBIDDEN"), "{label}: {refused}");
+        }
+        assert_eq!(route.0.lock().unwrap().len(), 6, "every write was forwarded, none served here");
+        let goals_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(goals_after, goals_before, "a refused submit admitted nothing");
+        // Conversation writes nothing and is answered here.
+        let chat = json!({"requestId": "mcp-chat", "action": "message", "payload": {"text": "how is it going?"}});
+        let answered = dispatch(&routed, &call("supervisor.request", chat)).await;
+        assert!(answered.get("error").is_none() && !answered.to_string().contains("FORBIDDEN"), "{answered}");
+        assert_eq!(route.0.lock().unwrap().len(), 6);
         let (state, revision): (String, i64) =
             sqlx::query_as("SELECT run_state, revision FROM supervisor_goals WHERE goal_id = ?")
                 .bind(&goal_id)

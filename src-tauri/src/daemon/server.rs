@@ -7391,8 +7391,10 @@ impl DaemonServer {
                         },
                     }
                 }
-                Ok(DaemonRequest::SupervisorRequestV1 { envelope, cli }) => {
-                    let caller = if cli {
+                Ok(DaemonRequest::SupervisorRequestV1 { envelope, cli, mcp }) => {
+                    let caller = if mcp {
+                        crate::hub_runtime::SupervisorCaller::Mcp
+                    } else if cli {
                         crate::hub_runtime::SupervisorCaller::Cli
                     } else {
                         crate::hub_runtime::SupervisorCaller::Desktop

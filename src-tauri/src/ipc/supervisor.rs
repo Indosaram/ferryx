@@ -92,7 +92,7 @@ pub async fn cmd_supervisor_request(
 ) -> Result<serde_json::Value, IpcError> {
     receipt_from(
         daemon_client
-            .send_request(DaemonRequest::SupervisorRequestV1 { envelope, cli: false })
+            .send_request(DaemonRequest::SupervisorRequestV1 { envelope, cli: false, mcp: false })
             .await?,
     )
 }

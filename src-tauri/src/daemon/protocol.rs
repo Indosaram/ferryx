@@ -866,12 +866,17 @@ pub enum DaemonRequest {
     /// One unified supervisor request envelope `{requestId, projectId?, goalId?,
     /// expectedRevision?, action, payload}`, served by the hub's shared request service.
     /// Gated by `supervisorRequestV1`. The actor is server-derived; `cli` only says whether
-    /// the owner's CLI or desktop sent it.
+    /// the owner's CLI or desktop sent it, and `mcp` that the CLI forwarded it for
+    /// `ferryx-cli mcp` (recorded as the `mcp` adapter). `mcp` is omitted when false, so the
+    /// wire is unchanged for every other sender; a daemon that predates it ignores it and
+    /// records `cli`.
     #[serde(rename = "supervisorRequestV1", rename_all = "camelCase")]
     SupervisorRequestV1 {
         envelope: serde_json::Value,
         #[serde(default)]
         cli: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mcp: bool,
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
@@ -2091,16 +2096,25 @@ mod tests {
     fn the_supervisor_request_envelope_round_trips_on_the_daemon_wire() {
         let envelope = serde_json::json!({"requestId": "r1", "goalId": "g1", "expectedRevision": 3,
             "action": "pause", "payload": {"reason": "lunch"}});
-        let request = DaemonRequest::SupervisorRequestV1 { envelope: envelope.clone(), cli: true };
+        let request = DaemonRequest::SupervisorRequestV1 { envelope: envelope.clone(), cli: true, mcp: false };
         let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(wire, serde_json::json!({"type": "supervisorRequestV1", "envelope": envelope, "cli": true}));
         match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
-            DaemonRequest::SupervisorRequestV1 { envelope: decoded, cli } => {
+            DaemonRequest::SupervisorRequestV1 { envelope: decoded, cli, mcp } => {
                 assert_eq!(decoded, envelope);
                 assert!(cli);
+                assert!(!mcp);
             }
             other => panic!("decoded as {other:?}"),
         }
+        // An MCP-forwarded request carries `mcp: true`; it round-trips.
+        let forwarded = DaemonRequest::SupervisorRequestV1 { envelope: envelope.clone(), cli: true, mcp: true };
+        let wire = serde_json::to_value(&forwarded).unwrap();
+        assert_eq!(wire["mcp"], true);
+        assert!(matches!(
+            serde_json::from_value::<DaemonRequest>(wire).unwrap(),
+            DaemonRequest::SupervisorRequestV1 { cli: true, mcp: true, .. }
+        ));
         // `cli` defaults to the desktop.
         let desktop: DaemonRequest = serde_json::from_value(serde_json::json!(
             {"type": "supervisorRequestV1", "envelope": {"requestId": "r", "action": "message", "payload": {"text": "hi"}}}

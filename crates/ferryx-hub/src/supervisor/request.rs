@@ -31,7 +31,7 @@ use super::admission::{self, ActorContext, AdmissionError, AdoptWork, OwnerChoic
 use super::dispatcher::{GRANT_REVOKED, TURN_LIMIT};
 use super::wakes::{self, DependencyError};
 use super::{
-    execution_binding_of, goal_of, identity_of, transition_goal, waits_of, ChannelProvider, RunState, SupervisorError, SupervisorGoal, WaitState, WaitTarget,
+    execution_binding_of, goal_of, identity_of, waits_of, ChannelProvider, RunState, SupervisorError, SupervisorGoal, WaitState, WaitTarget,
 };
 use crate::agent_control::{AgentControl, AgentOp, LOCAL_HOST_ID};
 use crate::goals::contract::{self, RequirementSpec};
@@ -51,6 +51,11 @@ pub const OWNER_PAUSED: &str = "OWNER_PAUSED";
 pub const OWNER_CANCELLED: &str = "OWNER_CANCELLED";
 /// `state_detail` prefix of an owner approval releasing a hold.
 pub const OWNER_APPROVED: &str = "OWNER_APPROVED";
+/// `state_detail` prefix of a goal a resume held because nothing could follow without the
+/// owner (no unsent instruction, no settled run to verify).
+pub const OWNER_DECISION_NEEDED: &str = "OWNER_DECISION_NEEDED";
+/// An approve that would release a goal with nothing to do next (409; nothing changes).
+pub const NOTHING_TO_RELEASE: &str = "NOTHING_TO_RELEASE";
 
 /// Longest correction or teach text.
 const MAX_TEXT_CHARS: usize = 64_000;
@@ -104,6 +109,7 @@ pub fn status_for_code(code: &str) -> u16 {
         | "RUN_MISMATCH"
         | "SESSION_MISMATCH"
         | "TURN_IN_FLIGHT"
+        | NOTHING_TO_RELEASE
         | super::SUPERVISOR_OWNED
         | super::SETUP_CONFLICT
         | admission::SCOPE_NEEDS_OWNER
@@ -544,8 +550,9 @@ async fn goal_action(
                 None => format!("{OWNER_CANCELLED}: by {by}"),
             };
             let live = live_run(pool, goal_id).await?;
-            let cancelled = transition_goal(
-                pool,
+            let mut tx = pool.begin_write().await?;
+            let cancelled = super::transition_goal_in(
+                &mut tx,
                 goal_id,
                 expected,
                 goal.run_state,
@@ -553,6 +560,12 @@ async fn goal_action(
                 Some(&detail),
             )
             .await?;
+            sqlx::query("UPDATE supervisor_goals SET held_from = NULL, held_detail = NULL WHERE goal_id = ?")
+                .bind(goal_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            wakes::poke();
             extra.insert(
                 "workerStop".into(),
                 stop_worker(context, live, goal_id, cancelled.revision).await,
@@ -616,20 +629,12 @@ async fn pause(
     Ok(())
 }
 
-/// Where a resume takes a paused goal, decided from what is true now (the persisted pre-pause
-/// state breaks ties), in this order:
-/// 1. a live run goes on: `running`;
-/// 2. an unresolved uncertain delivery stays the owner's: `delivery_uncertain`;
-/// 3. another dispatch still in flight (a claim the dispatcher has not released yet, an
-///    accepted send) is `DISPATCH_IN_FLIGHT`, nothing changes, retry;
-/// 4. a system hold the pause interrupted is restored: `awaiting_owner` with its detail;
-/// 5. the latest instruction was never transmitted (superseded by the pause, released by the
-///    dispatcher, or none yet): `ready`, with that instruction queued again;
-/// 6. pending waits: `waiting_children` / `waiting_event`;
-/// 7. the run settled, before or during the pause: `verifying`;
-/// 8. otherwise `ready`.
-///
-/// All in one write transaction under the revision compare-and-set.
+/// Owner resume of a paused goal, in one write transaction under the revision
+/// compare-and-set: the target is [`release_target`] with the pre-pause state as a tie
+/// breaker (an interrupted `awaiting_owner` hold is restored, a `verifying` detail kept). A
+/// legacy lane pause row left on the goal's lane (written before lane pauses of supervisor
+/// lanes became goal pauses) is cleared in the same transaction, or the dispatcher would hold
+/// the goal `LANE_PAUSED` again on its next claim.
 async fn resume(
     pool: &SqlitePool,
     goal: &SupervisorGoal,
@@ -653,54 +658,15 @@ async fn resume(
     .fetch_one(&mut *tx)
     .await?;
     let held_from = held_from.as_deref().map(str::parse::<RunState>).transpose()?;
-    let uncertain: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM supervisor_dispatches d
-            JOIN supervisor_execution_bindings b ON b.goal_id = d.goal_id AND b.generation = d.generation
-            WHERE d.goal_id = ? AND d.state = 'uncertain' AND d.owner_resolved_at IS NULL)",
-    )
-    .bind(goal_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let pending: Vec<String> = sqlx::query_scalar(
-        "SELECT kind FROM supervisor_waits WHERE goal_id = ? AND state = 'pending'",
-    )
-    .bind(goal_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    let latest = latest_dispatch_state(&mut tx, goal_id).await?;
-    let (to, to_detail): (RunState, String) = if super::has_live_run(&mut tx, goal_id).await? {
-        (RunState::Running, detail.to_owned())
-    } else if uncertain {
-        (RunState::DeliveryUncertain, detail.to_owned())
-    } else if let Some(request_id) = super::in_flight_dispatch(&mut tx, goal_id).await? {
-        return Err(SupervisorError::DispatchInFlight {
-            goal_id: goal_id.to_owned(),
-            request_id,
-        }
-        .into());
-    } else if held_from == Some(RunState::AwaitingOwner) {
-        let restored = held_detail.clone().unwrap_or_else(|| detail.to_owned());
-        (RunState::AwaitingOwner, restored)
-    } else if matches!(latest.as_deref(), None | Some("ready" | "superseded" | "released")) {
-        // The goal's latest instruction was never transmitted: it goes out again first.
-        (RunState::Ready, detail.to_owned())
-    } else if !pending.is_empty() {
-        let to = if pending.iter().any(|kind| kind == "child_goal") {
-            RunState::WaitingChildren
-        } else {
-            RunState::WaitingEvent
+    let restore_hold = (held_from == Some(RunState::AwaitingOwner))
+        .then(|| held_detail.clone().unwrap_or_else(|| detail.to_owned()));
+    let held_verifying = (held_from == Some(RunState::Verifying)).then(|| held_detail.clone()).flatten();
+    let (to, to_detail, requeue) =
+        match release_target(&mut tx, goal_id, restore_hold, held_verifying, detail).await? {
+            Release::To { to, detail, requeue } => (to, detail, requeue),
+            // Nothing the goal could do next without the owner: held for an explicit decision.
+            Release::Hold(why) => (RunState::AwaitingOwner, why, false),
         };
-        (to, format!("{}: {} pending dependencies ({detail})", wakes::WAITING_ON, pending.len()))
-    } else if latest.as_deref() == Some("settled") {
-        // The run settled before or during the pause: its result is checked next.
-        let restored = match (held_from, held_detail.as_deref()) {
-            (Some(RunState::Verifying), Some(held)) => held.to_owned(),
-            _ => wakes::TURN_SETTLED.to_owned(),
-        };
-        (RunState::Verifying, restored)
-    } else {
-        (RunState::Ready, detail.to_owned())
-    };
     let moved = super::transition_goal_in(
         &mut tx,
         goal_id,
@@ -710,17 +676,127 @@ async fn resume(
         Some(&to_detail),
     )
     .await?;
-    if to == RunState::Ready {
+    if requeue {
         requeue_unsent(&mut tx, goal_id, moved.revision).await?;
     }
     sqlx::query("UPDATE supervisor_goals SET held_from = NULL, held_detail = NULL WHERE goal_id = ?")
         .bind(goal_id)
         .execute(&mut *tx)
         .await?;
+    clear_lane_pause(&mut tx, &goal.lane_key).await?;
     tx.commit().await?;
     wakes::poke();
     super::dispatcher::poke();
     Ok(to.as_str())
+}
+
+/// Where an owner release (resume, approve) takes a held goal.
+enum Release {
+    /// Move to `to` with `detail`; `requeue` queues the never-transmitted instruction again.
+    To { to: RunState, detail: String, requeue: bool },
+    /// Nothing can follow without an owner decision; why.
+    Hold(String),
+}
+
+/// The state a held goal is released to, decided from what is true now, in this order:
+/// 1. a live run goes on: `running`;
+/// 2. an unresolved uncertain delivery stays the owner's: `delivery_uncertain`;
+/// 3. another dispatch still in flight (a claim not yet released, an accepted send) is
+///    `DISPATCH_IN_FLIGHT` (409), nothing changes, retry;
+/// 4. `restore_hold` (resume of a pause that interrupted `awaiting_owner`): that hold;
+/// 5. the latest instruction was never transmitted (ready, superseded by a hold, released
+///    by the dispatcher): `ready`, with it queued again;
+/// 6. pending waits: `waiting_children` / `waiting_event`;
+/// 7. the latest run settled: `verifying` (`TURN_SETTLED`, or `held_verifying`'s detail),
+///    exactly where the settle wake would have put it;
+/// 8. otherwise (no dispatch at all, or a delivery that never settled on the current
+///    generation, or an uncertain delivery the owner resolved): [`Release::Hold`]. A `ready`
+///    goal is never left without an intent; resending such an instruction is the owner's
+///    explicit `correct`.
+async fn release_target(
+    conn: &mut sqlx::SqliteConnection,
+    goal_id: &str,
+    restore_hold: Option<String>,
+    held_verifying: Option<String>,
+    detail: &str,
+) -> Result<Release, RequestFailure> {
+    let uncertain: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM supervisor_dispatches d
+            JOIN supervisor_execution_bindings b ON b.goal_id = d.goal_id AND b.generation = d.generation
+            WHERE d.goal_id = ? AND d.state = 'uncertain' AND d.owner_resolved_at IS NULL)",
+    )
+    .bind(goal_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let pending: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM supervisor_waits WHERE goal_id = ? AND state = 'pending'",
+    )
+    .bind(goal_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let latest = latest_dispatch_state(&mut *conn, goal_id).await?;
+    let to = |to: RunState, detail: String, requeue: bool| Release::To { to, detail, requeue };
+    Ok(if super::has_live_run(&mut *conn, goal_id).await? {
+        to(RunState::Running, detail.to_owned(), false)
+    } else if uncertain {
+        to(RunState::DeliveryUncertain, detail.to_owned(), false)
+    } else if let Some(request_id) = super::in_flight_dispatch(&mut *conn, goal_id).await? {
+        return Err(SupervisorError::DispatchInFlight {
+            goal_id: goal_id.to_owned(),
+            request_id,
+        }
+        .into());
+    } else if let Some(hold) = restore_hold {
+        Release::Hold(hold)
+    } else if matches!(latest.as_deref(), Some("ready" | "superseded" | "released")) {
+        to(RunState::Ready, detail.to_owned(), true)
+    } else if !pending.is_empty() {
+        let state = if pending.iter().any(|kind| kind == "child_goal") {
+            RunState::WaitingChildren
+        } else {
+            RunState::WaitingEvent
+        };
+        to(state, format!("{}: {} pending dependencies ({detail})", wakes::WAITING_ON, pending.len()), false)
+    } else if latest.as_deref() == Some("settled") {
+        to(RunState::Verifying, held_verifying.unwrap_or_else(|| wakes::TURN_SETTLED.to_owned()), false)
+    } else {
+        Release::Hold(format!(
+            "{OWNER_DECISION_NEEDED}: the goal has no unsent instruction and no settled run to verify (latest dispatch: {}); send a correction to continue",
+            latest.as_deref().unwrap_or("none")
+        ))
+    })
+}
+
+/// Clears a legacy lane pause row on a supervisor goal's lane, with its history line, inside
+/// the caller's transaction. False (nothing written) when the lane is not paused.
+async fn clear_lane_pause(conn: &mut sqlx::SqliteConnection, lane_key: &str) -> Result<bool, RequestFailure> {
+    let now = crate::storage::now_rfc3339();
+    let cleared = sqlx::query(
+        "UPDATE lane_pauses SET resumed_at = ? WHERE lane_key = ? AND resumed_at IS NULL",
+    )
+    .bind(&now)
+    .bind(lane_key)
+    .execute(&mut *conn)
+    .await?;
+    if cleared.rows_affected() == 0 {
+        return Ok(false);
+    }
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
+        .bind(lane_key)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if let Some(status) = status {
+        sqlx::query(
+            "INSERT INTO lane_history(lane_key, at, from_status, to_status, reason) VALUES (?, ?, ?, ?, 'resumed')",
+        )
+        .bind(lane_key)
+        .bind(&now)
+        .bind(&status)
+        .bind(&status)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(true)
 }
 
 /// State of the goal's latest dispatch row, if any.
@@ -737,11 +813,14 @@ async fn latest_dispatch_state(
 }
 
 /// Releases an `awaiting_owner` hold under the goal's existing grant, in one write
-/// transaction: the compare-and-set to `ready`, the lane mode switch to `full` (the
-/// dispatcher sends a non-full goal's turns only with the owner, so the approval is the
-/// owner's standing approval for this goal's remaining turns; reported as `modeChanged`) and
-/// the never-transmitted intent queued again. A 409 changes nothing. Returns whether the mode
-/// changed.
+/// transaction: the compare-and-set to [`release_target`]'s state (`ready` with the
+/// never-transmitted intent queued again, or `verifying` when the hold came after a settled
+/// run, e.g. a verify-time `OWNER_APPROVAL_REQUIRED` or a model stop), and the lane mode
+/// switch to `full` (the dispatcher sends a non-full goal's turns only with the owner, so the
+/// approval is the owner's standing approval for this goal's remaining turns; reported as
+/// `modeChanged`). When nothing could follow the approval (no unsent instruction, no settled
+/// run to verify) it is refused `NOTHING_TO_RELEASE` (409): the owner sends a `correct`
+/// instead. A 409 changes nothing. Returns whether the mode changed.
 async fn approve(
     pool: &SqlitePool,
     goal: &SupervisorGoal,
@@ -770,13 +849,24 @@ async fn approve(
         ));
     }
     let mut tx = pool.begin_write().await?;
+    let approved = format!("{OWNER_APPROVED}: by {by}");
+    let (to, to_detail, requeue) =
+        match release_target(&mut tx, &goal.goal_id, None, None, &approved).await? {
+            Release::To { to, detail, requeue } => (to, detail, requeue),
+            Release::Hold(why) => {
+                return Err(RequestFailure::new(
+                    NOTHING_TO_RELEASE,
+                    format!("approving would leave the goal with nothing to do: {why}"),
+                ))
+            }
+        };
     let moved = super::transition_goal_in(
         &mut tx,
         &goal.goal_id,
         expected,
         RunState::AwaitingOwner,
-        RunState::Ready,
-        Some(&format!("{OWNER_APPROVED}: by {by}")),
+        to,
+        Some(&to_detail),
     )
     .await?;
     let mode: Option<String> = sqlx::query_scalar("SELECT mode FROM lane_goal WHERE lane_key = ?")
@@ -787,7 +877,9 @@ async fn approve(
     if mode_changed {
         contract::set_mode_in(&mut tx, &goal.lane_key, GoalMode::Full).await?;
     }
-    requeue_unsent(&mut tx, &goal.goal_id, moved.revision).await?;
+    if requeue {
+        requeue_unsent(&mut tx, &goal.goal_id, moved.revision).await?;
+    }
     tx.commit().await?;
     wakes::poke();
     super::dispatcher::poke();
@@ -853,6 +945,7 @@ async fn correct_goal(
     .bind(goal_id)
     .fetch_optional(&mut *tx)
     .await?;
+    // A claimed send is not carried: it may already be typed, and revise_goal_in fences it.
     let original = latest
         .filter(|(state, _)| matches!(state.as_str(), "ready" | "superseded" | "released"))
         .map(|(_, instruction)| instruction);
@@ -875,33 +968,10 @@ async fn correct_goal(
         let turn_limit = u32::try_from(turn_limit).unwrap_or(u32::MAX);
         contract::set_contract_in(&mut tx, &goal.lane_key, requirements, mode, turn_limit).await?;
     }
-    let now = crate::storage::now_rfc3339();
-    let moved = sqlx::query(
-        "UPDATE supervisor_goals SET revision = ?, updated_at = ? WHERE goal_id = ? AND revision = ?",
-    )
-    .bind(revision)
-    .bind(&now)
-    .bind(goal_id)
-    .bind(expected)
-    .execute(&mut *tx)
-    .await?;
-    if moved.rows_affected() != 1 {
-        return Err(SupervisorError::RevisionConflict {
-            goal_id: goal_id.to_owned(),
-            expected,
-            actual: current.revision,
-        }
-        .into());
-    }
-    sqlx::query(
-        "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
-         WHERE goal_id = ? AND state = 'ready' AND goal_revision < ?",
-    )
-    .bind(&now)
-    .bind(goal_id)
-    .bind(revision)
-    .execute(&mut *tx)
-    .await?;
+    // The same revision path as every owner correction (supersede, claimed-send fence).
+    let revised = super::revise_goal_in(&mut tx, goal_id, expected).await?;
+    debug_assert_eq!(revised.revision, revision);
+    let now = revised.updated_at.clone();
     let generation = super::require_binding(&mut tx, goal_id).await?.generation;
     let dispatch =
         super::insert_dispatch(&mut tx, goal_id, revision, generation, &instruction, &now).await?;
@@ -1050,7 +1120,18 @@ pub async fn lane_pause(
     };
     let goal = owned_goal(pool, context, &goal_id, None).await?;
     let action = match (paused, goal.run_state == RunState::Paused) {
-        (true, true) | (false, false) => return Ok(Some(false)),
+        (true, true) => return Ok(Some(false)),
+        (false, false) => {
+            // A legacy lane pause row stranded on the goal's lane (the dispatcher would hold
+            // the goal `LANE_PAUSED` on its next claim) is cleared; nothing else changes.
+            let mut tx = pool.begin_write().await?;
+            let cleared = clear_lane_pause(&mut tx, lane_key).await?;
+            tx.commit().await?;
+            if cleared {
+                super::dispatcher::poke();
+            }
+            return Ok(Some(cleared));
+        }
         (true, false) => "pause",
         (false, true) => "resume",
     };
