@@ -214,19 +214,62 @@ pub async fn run_button_clicks(
             ("OMON_BUTTON_PLATFORM".into(), "slack".into()),
         ];
         let outcome = run_button_action(&config, &click, &extra).await?;
-        let text = if outcome.success {
-            let stdout = outcome.stdout.trim();
-            if stdout.is_empty() {
-                "완료했습니다.".to_owned()
-            } else {
-                stdout.to_owned()
-            }
-        } else {
-            format!("button {} failed: {}", click.action, outcome.stderr.trim())
-        };
-        lines.push(text);
+        lines.push(outcome_text(&click.action, &outcome));
     }
     Ok(lines)
+}
+
+/// Longest reply shown for one click; Slack ephemeral text stays readable well under its own limit.
+const MAX_REPLY_CHARS: usize = 1500;
+/// A crash dump shows only its last lines (the error), never the whole trace.
+const MAX_ERROR_LINES: usize = 3;
+
+/// What the person who clicked sees. The command's stdout is its human result (also on failure, when the
+/// command explains itself there); stderr is only a fallback, reduced to its last lines. Terminal colour
+/// codes are removed and the text is capped, so a command can never paste a raw dump into Slack.
+fn outcome_text(action: &str, outcome: &ActionOutcome) -> String {
+    let stdout = clean(&outcome.stdout);
+    if outcome.success {
+        return if stdout.is_empty() {
+            "완료했습니다.".to_owned()
+        } else {
+            cap(&stdout)
+        };
+    }
+    if !stdout.is_empty() {
+        return cap(&stdout);
+    }
+    let stderr = clean(&outcome.stderr);
+    let tail: Vec<&str> = stderr.lines().rev().take(MAX_ERROR_LINES).collect();
+    let tail: Vec<&str> = tail.into_iter().rev().collect();
+    let code = outcome
+        .code
+        .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    if tail.is_empty() {
+        format!("⚠️ {action} 실패 (exit {code})")
+    } else {
+        cap(&format!(
+            "⚠️ {action} 실패 (exit {code})\n{}",
+            tail.join("\n")
+        ))
+    }
+}
+
+fn clean(text: &str) -> String {
+    static ANSI: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let ansi = ANSI.get_or_init(|| {
+        regex::Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("valid ANSI pattern")
+    });
+    ansi.replace_all(text, "").trim().to_owned()
+}
+
+fn cap(text: &str) -> String {
+    if text.chars().count() <= MAX_REPLY_CHARS {
+        return text.to_owned();
+    }
+    let mut shown: String = text.chars().take(MAX_REPLY_CHARS - 1).collect();
+    shown.push('…');
+    shown
 }
 
 pub fn payload_has_button(payload: &Value) -> bool {
@@ -273,5 +316,48 @@ mod tests {
             vec!["okpublish\n86".to_owned()]
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn outcome(success: bool, stdout: &str, stderr: &str) -> ActionOutcome {
+        ActionOutcome {
+            success,
+            code: Some(if success { 0 } else { 1 }),
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_failed_command_that_explains_itself_on_stdout_shows_that_text() {
+        let text = outcome_text(
+            "apply",
+            &outcome(false, "⚠️ 위시켓 지원 실패\n• 로그아웃\n", "bun: noise\n"),
+        );
+        assert_eq!(text, "⚠️ 위시켓 지원 실패\n• 로그아웃");
+    }
+
+    #[test]
+    fn a_crash_shows_only_the_last_stderr_lines_without_colour_codes() {
+        let stderr = "line1\nline2\n    at a (x:1)\n    at b (x:2)\n\x1b[31merror: boom\x1b[0m\n";
+        let text = outcome_text("bid", &outcome(false, "", stderr));
+        assert_eq!(
+            text,
+            "⚠️ bid 실패 (exit 1)\n    at a (x:1)\n    at b (x:2)\nerror: boom"
+        );
+    }
+
+    #[test]
+    fn success_text_is_cleaned_and_capped() {
+        assert_eq!(
+            outcome_text("send", &outcome(true, "\x1b[2mok\x1b[0m\n", "")),
+            "ok"
+        );
+        assert_eq!(
+            outcome_text("send", &outcome(true, "  \n", "")),
+            "완료했습니다."
+        );
+        let long = outcome_text("send", &outcome(true, &"가".repeat(2000), ""));
+        assert_eq!(long.chars().count(), MAX_REPLY_CHARS);
+        assert!(long.ends_with('…'));
     }
 }
