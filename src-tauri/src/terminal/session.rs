@@ -548,6 +548,12 @@ pub struct PtySession {
     close_grace: Arc<Mutex<Option<Duration>>>,
     #[cfg(unix)]
     relinquish_wake: Option<std::os::unix::net::UnixStream>,
+    /// Unix, spawned sessions: wakes the reader out of its `poll` when a teardown releases it
+    /// while it waits for output. Without it a paused reader of a quiet shell sits in `poll`
+    /// until the shell prints again, so a predecessor letting go of a session it handed over
+    /// waited out the whole reader-shutdown bound for each one.
+    #[cfg(unix)]
+    pause_wake: Option<std::os::unix::net::UnixStream>,
     /// Unix: the EOF-on-drop switch of this session's [PtyInputWriter]. Cleared before a session
     /// another daemon still serves is let go, so dropping the writer here never sends EOF to that
     /// daemon's child. `None` on Windows, whose ConPTY writer is portable-pty's own.
@@ -652,6 +658,9 @@ impl PtySession {
                 .try_clone_to_owned()
                 .expect("duplicate PTY poll descriptor")
         };
+        #[cfg(unix)]
+        let (pause_wake_read, pause_wake_write) =
+            std::os::unix::net::UnixStream::pair().expect("create PTY reader wake pair");
         let metrics_session_id = config.id.clone();
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
@@ -728,10 +737,12 @@ impl PtySession {
                     #[cfg(unix)]
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         use std::os::fd::AsRawFd;
-                        let mut poll = libc::pollfd {
+                        let mut poll = [libc::pollfd {
                             fd: reader_poll.as_raw_fd(), events: libc::POLLIN, revents: 0,
-                        };
-                        if unsafe { libc::poll(&mut poll, 1, -1) } < 0
+                        }, libc::pollfd {
+                            fd: pause_wake_read.as_raw_fd(), events: libc::POLLIN, revents: 0,
+                        }];
+                        if unsafe { libc::poll(poll.as_mut_ptr(), 2, -1) } < 0
                             && std::io::Error::last_os_error().kind()
                                 != std::io::ErrorKind::Interrupted
                         {
@@ -752,6 +763,8 @@ impl PtySession {
             id: config.id,
             #[cfg(unix)]
             relinquish_wake: None,
+            #[cfg(unix)]
+            pause_wake: Some(pause_wake_write),
             writer_eof,
             incarnation: config.incarnation,
             suspension_receipt: Mutex::new(None),
@@ -1050,7 +1063,7 @@ impl PtySession {
         self.pause_requested.store(false, Ordering::Release);
         self.reader_park.1.notify_all();
         #[cfg(unix)]
-        if let Some(wake) = &self.relinquish_wake {
+        if let Some(wake) = self.relinquish_wake.as_ref().or(self.pause_wake.as_ref()) {
             if let Err(error) = std::io::Write::write_all(&mut &*wake, &[1]) {
                 tracing::warn!(%error, "failed to wake relinquished PTY reader");
             }
@@ -1872,6 +1885,7 @@ impl PtySession {
             input_gate: tokio::sync::Mutex::new(()),
             id: snapshot.session_id,
             relinquish_wake: Some(wake_write),
+            pause_wake: None,
             writer_eof,
             suspension_receipt: Mutex::new(snapshot.suspension_receipt.filter(|receipt|
                 receipt.matches(snapshot.pid, snapshot.incarnation.as_deref()))),

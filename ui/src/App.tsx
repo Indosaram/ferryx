@@ -2153,13 +2153,32 @@ function WorkspaceApp({
     [activeProject.workspaceId, state, parkedActivityVersion],
   );
   const publishedTerminalPayloadKey = useRef<string | null>(null);
+  const [focusedTerminalRetry, setFocusedTerminalRetry] = useState(0);
 
   useEffect(() => {
     const key = JSON.stringify(focusedTerminalPayload);
     if (publishedTerminalPayloadKey.current === key) return;
     publishedTerminalPayloadKey.current = key;
-    void Promise.resolve(publishFocusedTerminal(focusedTerminalPayload)).catch(reportRuntimeError);
-  }, [focusedTerminalPayload, reportRuntimeError]);
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    void Promise.resolve(publishFocusedTerminal(focusedTerminalPayload)).catch((error: unknown) => {
+      // An unpublished selection must not count as published, or the remote view keeps the old
+      // one until the focus moves again.
+      if (publishedTerminalPayloadKey.current === key) publishedTerminalPayloadKey.current = null;
+      const code = toIpcError(error).code;
+      // A daemon handing over to its successor answers busy for a moment; the selection is
+      // published again once it settles instead of surfacing an error.
+      if (code === "DAEMON_BUSY" || code === "HANDOVER_BUSY") {
+        if (!settled) retry = setTimeout(() => setFocusedTerminalRetry((value) => value + 1), 1000);
+        return;
+      }
+      reportRuntimeError(error);
+    });
+    return () => {
+      settled = true;
+      clearTimeout(retry);
+    };
+  }, [focusedTerminalPayload, focusedTerminalRetry, reportRuntimeError]);
 
   const unreadBadgeCount = useMemo(
     () => unreadBadgeCountFromStore ?? selectGlobalUnreadBadgeCount(state, activeProject.workspaceId),
