@@ -14,7 +14,8 @@
 //! else is resolved, so it returns the existing goal even when the owner's projects or hosts
 //! changed since.
 //!
-//! Admission is the store's single transaction ([`admit_request_with`]). A goal held for the
+//! Admission is the store's single transaction ([`super::admit_request_bound`], which also
+//! binds an owner-chosen existing pane). A goal held for the
 //! owner is committed directly as `awaiting_owner`, and an adoption's legacy-lane liveness is
 //! checked inside that transaction. The acknowledgment is built only after commit, from the
 //! persisted goal, so a model can never claim that work was registered. Nothing here
@@ -29,9 +30,10 @@ use sqlx::SqlitePool;
 
 use super::dispatcher::{OWNER_APPROVAL_REQUIRED, TURN_LIMIT};
 use super::{
-    admit_request_with, goal_of, identity_of, replayed_admission, AdmissionReceipt, AdmitRequest,
-    AdmitTerms, ChannelProvider, ExecutionKind, ExecutionTarget, LegacyGoalRead, RunState,
-    SupervisorError, SupervisorIdentity, ADOPT_MESSAGE_PREFIX, DEFAULT_TURN_LIMIT, LANE_KEY_PREFIX,
+    admit_request_bound, goal_of, identity_of, replayed_admission, AdmissionReceipt, AdmitRequest,
+    AdmitTerms, BoundSession, ChannelProvider, ExecutionKind, ExecutionTarget, LegacyGoalRead,
+    RunState, SupervisorError, SupervisorIdentity, ADOPT_MESSAGE_PREFIX, DEFAULT_TURN_LIMIT,
+    LANE_KEY_PREFIX,
 };
 use crate::goals::contract::{contract_of, RequirementSpec};
 use crate::goals::types::{GoalError, GoalMode};
@@ -104,6 +106,11 @@ pub struct OwnerChoices {
     pub cwd: Option<String>,
     pub turn_limit: Option<u32>,
     pub operations: Vec<OperationClass>,
+    /// An existing terminal pane on `host_id` to deliver the work to, instead of launching
+    /// one. Only the owner's authenticated adapter sets it (`ferryx-cli supervisor submit
+    /// --session`); the model's [`SubmitWork`] has no such field, and a sender who is not the
+    /// owner is refused before it is read. Requires `host_id`.
+    pub session_id: Option<String>,
 }
 
 /// Who sent a request and what they wrote, as the authenticated adapter established it. Never
@@ -397,6 +404,12 @@ pub async fn adopt_work(
 ) -> Result<SubmitOutcome, AdmissionError> {
     let identity = authenticate(pool, actor).await?;
     let lane_key = adopt.lane_key.as_str();
+    if actor.choices.session_id.is_some() {
+        return Err(SupervisorError::Invalid(
+            "an adoption continues in its legacy lane; a pane choice is only for a new submission".into(),
+        )
+        .into());
+    }
     if lane_key.trim().is_empty() || lane_key.trim() != lane_key {
         return Err(SupervisorError::Invalid("lane key is required".into()).into());
     }
@@ -572,6 +585,21 @@ async fn admit_scoped(
     if !scope.holds.is_empty() {
         holds.push(format!("{SCOPE_NEEDS_OWNER}: {}", scope.holds.join("; ")));
     }
+    // The owner's pane choice names its host explicitly; the store checks it is the goal's
+    // target host and that no other open goal holds the pane.
+    let session = match (&actor.choices.session_id, &actor.choices.host_id) {
+        (None, _) => None,
+        (Some(session_id), Some(host_id)) => Some(BoundSession {
+            host_id: host_id.clone(),
+            session_id: session_id.clone(),
+        }),
+        (Some(_), None) => {
+            return Err(SupervisorError::Invalid(
+                "a pane choice needs the host it lives on".into(),
+            )
+            .into())
+        }
+    };
     let mode = if holds.is_empty() {
         GoalMode::Full
     } else {
@@ -604,7 +632,7 @@ async fn admit_scoped(
         adopts_lane: adopts_lane.map(|(lane, _)| lane.to_owned()),
         legacy_goal_read: adopts_lane.map(|(_, read)| read),
     };
-    let admission = admit_request_with(pool, &request, &terms).await?;
+    let admission = admit_request_bound(pool, &request, &terms, session.as_ref()).await?;
     if admission.duplicate {
         // Admitted concurrently between the replay check and this transaction.
         return admitted(pool, admission.receipt, true).await;

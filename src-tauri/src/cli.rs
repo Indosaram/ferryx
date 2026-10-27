@@ -5,6 +5,7 @@ pub mod agent_hook;
 pub mod billing;
 pub mod direct_trust;
 pub mod supervisor_goal;
+pub mod supervisor_dispatch;
 
 pub use billing::AccountCliError;
 pub use direct_trust::{

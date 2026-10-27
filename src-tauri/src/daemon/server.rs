@@ -7222,6 +7222,7 @@ impl DaemonServer {
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
@@ -7232,6 +7233,16 @@ impl DaemonServer {
                 Ok(DaemonRequest::SupervisorSnapshot) => DaemonResponse::SupervisorSnapshotOk {
                     snapshot: crate::hub_runtime::supervisor_snapshot(self.remote_state()).await,
                 },
+                Ok(DaemonRequest::SupervisorDispatch { request }) => {
+                    match crate::hub_runtime::supervisor_dispatch(self.remote_state(), request).await {
+                        Ok(result) => DaemonResponse::SupervisorDispatchOk { result },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::AgentControlSettingsGet) => DaemonResponse::AgentControlSettingsOk {
                     settings: self.remote_state.agent_control_settings(),
                 },

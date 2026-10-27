@@ -54,6 +54,9 @@ pub const ADOPT_MESSAGE_PREFIX: &str = "adopt:";
 /// Code of [`SupervisorError::SetupConflict`].
 pub const SETUP_CONFLICT: &str = "SETUP_CONFLICT";
 
+/// Code of [`SupervisorError::SessionAlreadyBound`]: a 409-class refusal.
+pub const SESSION_ALREADY_BOUND: &str = "SESSION_ALREADY_BOUND";
+
 /// `lanes.done_signals` of an admitted lane: completion is the goal contract, not a marker.
 const LANE_DONE_SIGNALS: &str = "goal contract";
 
@@ -157,6 +160,14 @@ pub enum SupervisorError {
     /// rename a project or move a project's host mapping. Nothing was written.
     #[error("SETUP_CONFLICT: {0}")]
     SetupConflict(String),
+    /// The owner chose a pane for a new goal that another open goal is already bound to on
+    /// that host. Nothing was written (409-class).
+    #[error("SESSION_ALREADY_BOUND: session {session_id} on host {host_id} is bound to open goal {goal_id}")]
+    SessionAlreadyBound {
+        host_id: String,
+        session_id: String,
+        goal_id: String,
+    },
     #[error(transparent)]
     Goal(#[from] GoalError),
     #[error(transparent)]
@@ -188,6 +199,7 @@ impl SupervisorError {
             SupervisorError::LegacyLaneLive { .. } => admission::LEGACY_LANE_LIVE,
             SupervisorError::LegacyTermsChanged { .. } => admission::LEGACY_TERMS_CHANGED,
             SupervisorError::SetupConflict(_) => SETUP_CONFLICT,
+            SupervisorError::SessionAlreadyBound { .. } => SESSION_ALREADY_BOUND,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
             | SupervisorError::Goal(_) => "INVALID_REQUEST",
@@ -536,6 +548,15 @@ pub struct PendingWake {
 pub struct ExecutionTarget {
     pub kind: ExecutionKind,
     pub host_id: String,
+}
+
+/// An existing pane the owner chose for a new goal: its provider session on the goal's host.
+/// Bound in the admission transaction ([`admit_request_bound`]), so the dispatcher never sees
+/// the goal unbound and never launches a pane for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundSession {
+    pub host_id: String,
+    pub session_id: String,
 }
 
 /// One owner request to admit. Actor fields are server-derived from the authenticated
@@ -1837,7 +1858,40 @@ pub async fn admit_request_with(
     request: &AdmitRequest,
     terms: &AdmitTerms,
 ) -> Result<Admission, SupervisorError> {
+    admit_request_bound(pool, request, terms, None).await
+}
+
+/// [`admit_request_with`] that also binds an existing pane the owner chose (`session`) to
+/// the new goal's first generation, in the same transaction: `provider_session_id` is set
+/// before any dispatcher can read the binding, so the goal is delivered to that pane (on a
+/// paired host, through the paired path) and no pane is launched for it.
+///
+/// The session's host must be the goal's target host and the worker a pane (checked first,
+/// before anything is read). A session another open goal (not completed or cancelled) is
+/// bound to on that host is refused with [`SupervisorError::SessionAlreadyBound`]; that check
+/// runs after the replay lookup, so a replay of an admitted request returns its original
+/// receipt (and binding) even when its pane is now held.
+pub async fn admit_request_bound(
+    pool: &SqlitePool,
+    request: &AdmitRequest,
+    terms: &AdmitTerms,
+    session: Option<&BoundSession>,
+) -> Result<Admission, SupervisorError> {
     request.validate()?;
+    if let Some(session) = session {
+        require_id("provider session id", &session.session_id, MAX_ID_CHARS)?;
+        if session.host_id != request.target.host_id {
+            return Err(SupervisorError::Invalid(format!(
+                "session {} is on host {}, but the goal targets host {}",
+                session.session_id, session.host_id, request.target.host_id
+            )));
+        }
+        if request.target.kind != ExecutionKind::Pty {
+            return Err(SupervisorError::Invalid(
+                "only a terminal (pty) worker can be bound to an existing pane".into(),
+            ));
+        }
+    }
     match &terms.adopts_lane {
         Some(lane) if request.source_message_id != format!("{ADOPT_MESSAGE_PREFIX}{lane}") => {
             return Err(SupervisorError::Invalid(format!(
@@ -1935,6 +1989,27 @@ pub async fn admit_request_with(
             Some(_) => {}
         }
     }
+    if let Some(session) = session {
+        // Under the write lock: of two admissions choosing the same pane exactly one commits.
+        let holder: Option<String> = sqlx::query_scalar(
+            "SELECT b.goal_id FROM supervisor_execution_bindings b
+               JOIN supervisor_goals g ON g.goal_id = b.goal_id
+              WHERE b.kind = 'pty' AND b.host_id = ? AND b.provider_session_id = ?
+                AND g.run_state NOT IN ('completed','cancelled')
+              LIMIT 1",
+        )
+        .bind(&session.host_id)
+        .bind(&session.session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(goal_id) = holder {
+            return Err(SupervisorError::SessionAlreadyBound {
+                host_id: session.host_id.clone(),
+                session_id: session.session_id.clone(),
+                goal_id,
+            });
+        }
+    }
     // Checked under the write lock. A legacy launch attaches its pane only through
     // [`attach_legacy_pane`], which refuses a lane this admission adopted, so SQLite's write
     // serialization lets exactly one of the two commit.
@@ -2012,12 +2087,14 @@ pub async fn admit_request_with(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO supervisor_execution_bindings(goal_id, kind, host_id, generation, updated_at)
-         VALUES(?,?,?,1,?)",
+        "INSERT INTO supervisor_execution_bindings(goal_id, kind, host_id, provider_session_id,
+                generation, updated_at)
+         VALUES(?,?,?,?,1,?)",
     )
     .bind(&goal_id)
     .bind(request.target.kind.as_str())
     .bind(&request.target.host_id)
+    .bind(session.map(|session| session.session_id.as_str()))
     .bind(&now)
     .execute(&mut *tx)
     .await?;
@@ -2090,6 +2167,16 @@ pub async fn execution_binding_of(
 ) -> Result<Option<ExecutionBinding>, SupervisorError> {
     let mut conn = pool.acquire().await?;
     load_binding(&mut conn, goal_id).await
+}
+
+/// Every dispatch of `goal_id`, oldest first, with its receipts. Read-only.
+pub async fn dispatches_of(
+    pool: &SqlitePool,
+    goal_id: &str,
+) -> Result<Vec<Dispatch>, SupervisorError> {
+    let sql = format!("SELECT {DISPATCH_COLUMNS} FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id");
+    let rows: Vec<DispatchRow> = sqlx::query_as(&sql).bind(goal_id).fetch_all(pool).await?;
+    rows.into_iter().map(dispatch_from_row).collect()
 }
 
 /// True when the goal has a started, unsettled dispatch on its binding's current generation,

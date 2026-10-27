@@ -285,8 +285,10 @@ export function assertIsolatedRoot(path, label, context = {}) {
 // Config.
 
 export const CONFIG_REQUIRED = Object.freeze(['ferryxCli', 'ferryxApp', 'mhcBin', 'dataRoot', 'memoryRoot', 'projectRoot', 'ownerPrincipal']);
-export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', '$schema', '$comment']);
+export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', '$schema', '$comment']);
 const BINARY_FIELDS = ['ferryxCli', 'ferryxApp', 'mhcBin'];
+// Binaries only some scenarios need; validated like BINARY_FIELDS when present.
+const OPTIONAL_BINARY_FIELDS = ['ferryxRelay'];
 const ROOT_FIELDS = ['dataRoot', 'memoryRoot', 'projectRoot'];
 const STATE_ROOT_ENTRIES = new Set(['.qa-unified-supervisor', 'runs']);
 
@@ -312,6 +314,17 @@ export function loadConfig(path, context = {}) {
     if (value.startsWith('~')) throw new HarnessError('CONFIG_INVALID', `${key} must be absolute; ~ is never expanded`);
     if (!isAbsolute(value)) throw new HarnessError('CONFIG_INVALID', `${key} must be an absolute path, got ${value}`);
     if (value.split(/[\\/]+/).includes('..')) throw new HarnessError('CONFIG_INVALID', `${key} must not contain .. segments`);
+  }
+  for (const key of OPTIONAL_BINARY_FIELDS) {
+    const value = config[key];
+    if (value === undefined || value === null) continue;
+    if (value.startsWith('~')) throw new HarnessError('CONFIG_INVALID', `${key} must be absolute; ~ is never expanded`);
+    if (!isAbsolute(value)) throw new HarnessError('CONFIG_INVALID', `${key} must be an absolute path, got ${value}`);
+    if (value.split(/[\\/]+/).includes('..')) throw new HarnessError('CONFIG_INVALID', `${key} must not contain .. segments`);
+    assertNotProduction(value, key, context);
+    let info;
+    try { info = statSync(value); } catch { throw new HarnessError('CONFIG_INVALID', `${key} ${value} does not exist`); }
+    if (!info.isFile()) throw new HarnessError('CONFIG_INVALID', `${key} ${value} is not a file`);
   }
   for (const key of BINARY_FIELDS) assertNotProduction(config[key], key, context);
   for (const key of ROOT_FIELDS) assertIsolatedRoot(config[key], key, context);
@@ -1532,11 +1545,13 @@ export async function collectReceipts({ repoRoot, configInfo = null, scripts = [
       ferryxCli: await describeArtifact(config.ferryxCli),
       ferryxApp: await describeArtifact(config.ferryxApp),
       mhcBin: await describeArtifact(config.mhcBin),
+      ...(config.ferryxRelay ? { ferryxRelay: await describeArtifact(config.ferryxRelay) } : {}),
     } : null,
     binaryRepos: config ? {
       ferryxCli: await containingRepo(config.ferryxCli),
       ferryxApp: await containingRepo(config.ferryxApp),
       mhcBin: await containingRepo(config.mhcBin),
+      ...(config.ferryxRelay ? { ferryxRelay: await containingRepo(config.ferryxRelay) } : {}),
     } : null,
     config: configInfo ? { path: configInfo.path, sha256: configInfo.sha256, bytes: configInfo.bytes } : null,
   };
@@ -1730,6 +1745,9 @@ export async function runScenario({ name, scenario, configInfo, evidence, receip
     schema: SCHEMA, scenario: name, runId, status, exitCode,
     passRule: 'PASS only when at least one assertion is recorded, every assertion (and every required one) is ok, none arrived late, no error or uncaught fault occurred and cleanup.json is ok',
     assertions, lateAssertions: state.late, requiredAssertions: scenario.requiredAssertions ?? [], error, cleanupOk: cleanup.ok,
+    // Acceptance clauses this scenario deliberately does not prove, each naming what covers it
+    // instead. Listed, never counted: they cannot turn a run into PASS.
+    notCovered: scenario.notCovered ?? [],
   });
   evidence.writeJson('run.json', { ...runInfo, finishedAt: new Date().toISOString(), status, exitCode });
   evidence.log(`scenario ${name} ${status} exit=${exitCode}`);

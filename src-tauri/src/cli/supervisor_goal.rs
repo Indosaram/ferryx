@@ -10,6 +10,10 @@
 //! the path must be a repository's common dir or a checkout root, and its canonical common dir
 //! is what is stored, so two spellings of one checkout are one mapping. A pane worker
 //! (FERRYX_SESSION_ID set) is refused: set-up is the owner's act.
+//! `--remote` maps the project on a paired host instead (`--host` other than `local`). That
+//! path cannot be resolved here, so it is normalized lexically only (`remote_git_common_dir`):
+//! absolute, trailing separators stripped, no `.`/`..`/empty components, ending in `.git`
+//! (the common dir itself, never a checkout root), and stored as given.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +26,7 @@ use ferryx_hub::goals::GoalMode;
 
 pub const SUPERVISOR_USAGE: &str = "usage: ferryx-cli supervisor goal set <lane> (--requirement <id>|<text>|<verifier>)... [--requirements-json <json>] [--mode <off|supervised|full>] [--turn-limit <n>] [--json]\n       ferryx-cli supervisor goal show <lane> [--json]\n       ferryx-cli supervisor goal mode <lane> <off|supervised|full> [--json]\n       ferryx-cli supervisor goal approve <lane> [--json]\n       ferryx-cli supervisor goal discard <lane> [--json]\n       ferryx-cli supervisor goal accept-revision <id> [--json]\n       ferryx-cli supervisor goal reject-revision <id> [--json]";
 
-pub const SETUP_USAGE: &str = "usage: ferryx-cli supervisor setup --owner <principal> --project <name> --repo-identity <id> --host <host-id> --git-common-dir <absolute dir> [--json]";
+pub const SETUP_USAGE: &str = "usage: ferryx-cli supervisor setup --owner <principal> --project <name> --repo-identity <id> --host <host-id> --git-common-dir <absolute dir> [--remote] [--json]\n  --remote: --host is a paired host (not local) and --git-common-dir is its absolute <repo>/.git, stored as given";
 
 /// The arguments of `ferryx-cli supervisor setup`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +36,8 @@ pub struct SetupArgs {
     pub repo_identity: String,
     pub host: String,
     pub git_common_dir: String,
+    /// `--remote`: the host is a paired host; its dir is normalized lexically, not resolved.
+    pub remote: bool,
 }
 
 /// Parse `ferryx-cli supervisor setup ...`. Every flag is required once; nothing else is accepted.
@@ -40,6 +46,12 @@ pub fn parse_setup_cli(args: &[String]) -> Result<SetupArgs, UsageError> {
         return Err(UsageError(SETUP_USAGE.into()));
     }
     let mut rest: Vec<String> = args.iter().skip(3).filter(|arg| *arg != "--json").cloned().collect();
+    let remote = match rest.iter().filter(|arg| *arg == "--remote").count() {
+        0 => false,
+        1 => true,
+        _ => return Err(UsageError(format!("--remote may be given once\n{SETUP_USAGE}"))),
+    };
+    rest.retain(|arg| arg != "--remote");
     let mut flag = |name: &str| -> Result<String, UsageError> {
         match take_value(&mut rest, name)? {
             Some(value) if !value.trim().is_empty() && !value.starts_with("--") => Ok(value),
@@ -52,12 +64,16 @@ pub fn parse_setup_cli(args: &[String]) -> Result<SetupArgs, UsageError> {
         repo_identity: flag("--repo-identity")?,
         host: flag("--host")?,
         git_common_dir: flag("--git-common-dir")?,
+        remote,
     };
     if let Some(extra) = rest.first() {
         return Err(UsageError(format!("unexpected argument {extra}\n{SETUP_USAGE}")));
     }
     if !std::path::Path::new(&parsed.git_common_dir).is_absolute() {
         return Err(UsageError("--git-common-dir must be an absolute path".into()));
+    }
+    if parsed.remote && parsed.host == ferryx_hub::agent_control::LOCAL_HOST_ID {
+        return Err(UsageError(format!("--remote is for a paired host; this host (local) is resolved without it\n{SETUP_USAGE}")));
     }
     Ok(parsed)
 }
@@ -139,9 +155,39 @@ pub fn canonical_git_common_dir(host: &str, dir: &str) -> Result<String, (&'stat
     common.to_str().map(str::to_owned).ok_or_else(|| refuse("the path is not UTF-8".into()))
 }
 
+/// The git common dir `dir` names on paired host `host`, normalized lexically: it cannot be
+/// resolved from this machine. Absolute, trailing separators stripped, and refused with
+/// NOT_A_GIT_DIR when any component is empty, `.` or `..`, or the last one is not `.git` (the
+/// common dir itself, not a checkout root). `local` is resolved by [`canonical_git_common_dir`].
+pub fn remote_git_common_dir(host: &str, dir: &str) -> Result<String, (&'static str, String)> {
+    if host == ferryx_hub::agent_control::LOCAL_HOST_ID {
+        return Err(("INVALID_REQUEST", "a remote mapping names a paired host, not local".into()));
+    }
+    let refuse = |why: &str| (NOT_A_GIT_DIR, format!("{dir} is not an absolute <repo>/.git path on host {host}: {why}"));
+    if !Path::new(dir).is_absolute() {
+        return Err(refuse("it is not absolute"));
+    }
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let trimmed = dir.trim_end_matches(separators);
+    let components: Vec<&str> = trimmed.split(separators).collect();
+    // The first component is the root (empty on POSIX, the drive on Windows).
+    if components.iter().skip(1).any(|part| part.is_empty() || *part == "." || *part == "..") {
+        return Err(refuse("it has an empty, `.` or `..` component"));
+    }
+    if components.len() < 2 || components.last() != Some(&".git") {
+        return Err(refuse("it does not end in a .git component"));
+    }
+    Ok(trimmed.to_owned())
+}
+
 async fn run_setup(setup: SetupArgs) -> (Value, i32) {
     // Resolved before the database is opened: a refused path writes and migrates nothing.
-    let git_common_dir = match canonical_git_common_dir(&setup.host, &setup.git_common_dir) {
+    let resolved = if setup.remote {
+        remote_git_common_dir(&setup.host, &setup.git_common_dir)
+    } else {
+        canonical_git_common_dir(&setup.host, &setup.git_common_dir)
+    };
+    let git_common_dir = match resolved {
         Ok(dir) => dir,
         Err((code, message)) => {
             let (value, _) = failure(code, &message);
@@ -340,7 +386,7 @@ pub fn outcome_of(response: DaemonResponse) -> (Value, i32) {
 }
 
 #[cfg(unix)]
-async fn connect_daemon() -> Result<tokio::net::UnixStream, (Value, i32)> {
+pub(super) async fn connect_daemon() -> Result<tokio::net::UnixStream, (Value, i32)> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let path = crate::daemon::server::get_socket_path();
     let not_running = || {
@@ -357,7 +403,7 @@ async fn connect_daemon() -> Result<tokio::net::UnixStream, (Value, i32)> {
 }
 
 #[cfg(not(unix))]
-async fn connect_daemon() -> Result<tokio::net::TcpStream, (Value, i32)> {
+pub(super) async fn connect_daemon() -> Result<tokio::net::TcpStream, (Value, i32)> {
     let path = crate::daemon::server::get_socket_path();
     let not_running = || {
         let (value, _) = failure("NOT_FOUND", "no Ferryx daemon is listening");
@@ -428,6 +474,9 @@ pub async fn request_goal(action: SupervisorGoalAction) -> (Value, i32) {
 pub fn run_supervisor_cli(args: &[String]) -> i32 {
     if args.get(2).map(String::as_str) == Some("setup") {
         return run_setup_cli(args);
+    }
+    if matches!(args.get(2).map(String::as_str), Some("submit" | "dispatch")) {
+        return super::supervisor_dispatch::run_dispatch_cli(args);
     }
     let (value, code) = match parse_supervisor_cli(args) {
         Err(UsageError(message)) => {
@@ -557,6 +606,7 @@ mod tests {
                 repo_identity: "qa:qa-supervisor".into(),
                 host: "local".into(),
                 git_common_dir: "/work/qa/.git".into(),
+                remote: false,
             }
         );
         let without = |flag: &str| -> Vec<String> {
@@ -636,6 +686,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.1, project, "the same project through another spelling is the same mapping");
+    }
+
+    /// `--remote` maps a paired host's `<repo>/.git` lexically: accepted for a paired host id,
+    /// refused for local, relative, `..` and non-.git paths; a trailing separator is the same
+    /// mapping, so a second project on it is SETUP_CONFLICT.
+    #[tokio::test]
+    async fn setup_remote_form_maps_a_paired_host_lexically() {
+        let paired = "relay:http://127.0.0.1:8787#machine-1";
+        let base = [
+            "ferryx-cli", "supervisor", "setup", "--owner", "qa-owner", "--project", "qa-supervisor",
+            "--repo-identity", "qa:qa-supervisor", "--git-common-dir", "/r/.git", "--json",
+        ];
+        let with = |host: &str, remote: bool| -> Vec<String> {
+            let mut words = argv(&base);
+            words.extend(["--host".to_owned(), host.to_owned()]);
+            if remote {
+                words.push("--remote".into());
+            }
+            words
+        };
+        let parsed = parse_setup_cli(&with(paired, true)).unwrap();
+        assert!(parsed.remote && parsed.host == paired);
+        assert!(!parse_setup_cli(&with(paired, false)).unwrap().remote, "without --remote the local path runs (HOST_NOT_LOCAL)");
+        assert!(parse_setup_cli(&with("local", true)).is_err(), "--remote with host local is a usage error");
+        let mut twice = with(paired, true);
+        twice.push("--remote".into());
+        assert!(parse_setup_cli(&twice).is_err());
+        assert_eq!(canonical_git_common_dir(paired, "/r/.git").unwrap_err().0, HOST_NOT_LOCAL, "the local path still refuses a paired host");
+
+        assert_eq!(remote_git_common_dir(paired, "/r/.git").unwrap(), "/r/.git");
+        assert_eq!(remote_git_common_dir(paired, "/r/.git/").unwrap(), "/r/.git");
+        assert_eq!(remote_git_common_dir(paired, "/r/.git//").unwrap(), "/r/.git");
+        assert!(remote_git_common_dir("local", "/r/.git").is_err());
+        for refused in ["r/.git", "/r/../r/.git", "/r/./.git", "/r//.git", "/r", "/r/", "/r/.git/objects", "/.git.bak", "/"] {
+            assert_eq!(remote_git_common_dir(paired, refused).unwrap_err().0, NOT_A_GIT_DIR, "{refused}");
+        }
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let first = remote_git_common_dir(paired, "/r/.git").unwrap();
+        let (_, project, host) =
+            ferryx_hub::supervisor::provision_owner(&pool, "qa-owner", "a", "id-a", paired, &first).await.unwrap();
+        assert_eq!((host.host_id.as_str(), host.git_common_dir.as_str()), (paired, "/r/.git"));
+        let respelled = remote_git_common_dir(paired, "/r/.git/").unwrap();
+        let again = ferryx_hub::supervisor::provision_owner(&pool, "qa-owner", "a", "id-a", paired, &respelled).await.unwrap();
+        assert_eq!(again.1, project, "the trailing separator is the same mapping");
+        let refused = ferryx_hub::supervisor::provision_owner(&pool, "qa-owner", "b", "id-b", paired, &respelled)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), ferryx_hub::supervisor::SETUP_CONFLICT, "{refused}");
     }
 
     #[test]

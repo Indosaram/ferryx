@@ -870,6 +870,126 @@ pub async fn supervisor_goal(
     Ok(snapshot)
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorDispatch`.
+pub const SUPERVISOR_DISPATCH_CAPABILITY: &str = "supervisorDispatchV1";
+
+/// Why a supervisor dispatch request was refused: the admission's typed code (e.g.
+/// `UNAUTHORIZED`, `SESSION_ALREADY_BOUND`, `REQUEST_CONFLICT`), or an unopened hub.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorDispatchError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    #[error("{message}")]
+    Refused { code: &'static str, message: String },
+}
+
+impl SupervisorDispatchError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::Refused { code, .. } => code,
+        }
+    }
+}
+
+impl From<ferryx_hub::supervisor::admission::AdmissionError> for SupervisorDispatchError {
+    fn from(error: ferryx_hub::supervisor::admission::AdmissionError) -> Self {
+        Self::Refused { code: error.code(), message: error.to_string() }
+    }
+}
+
+impl From<ferryx_hub::supervisor::SupervisorError> for SupervisorDispatchError {
+    fn from(error: ferryx_hub::supervisor::SupervisorError) -> Self {
+        Self::Refused { code: error.code(), message: error.to_string() }
+    }
+}
+
+/// Owner work bound to a chosen pane (`submit`), or one goal's dispatch status (`status`),
+/// on the daemon's own hub. Only the local daemon socket carries this request, so the sender
+/// is any same-uid local process; it is admitted as the installation owner, as MCP
+/// `supervisor.request` is. `status` only reads.
+pub async fn supervisor_dispatch(
+    state: &RemoteGatewayState,
+    action: crate::daemon::protocol::SupervisorDispatchAction,
+) -> Result<Value, SupervisorDispatchError> {
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return Err(SupervisorDispatchError::Unavailable);
+    };
+    let result = apply_dispatch_action(&hub.pool, action).await?;
+    if let Some(goal_id) = result.pointer("/receipt/goal_id") {
+        crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "goalId": goal_id }),
+        );
+    }
+    Ok(result)
+}
+
+/// The store side of [`supervisor_dispatch`].
+async fn apply_dispatch_action(
+    pool: &ferryx_hub::goals::SqlitePool,
+    action: crate::daemon::protocol::SupervisorDispatchAction,
+) -> Result<Value, SupervisorDispatchError> {
+    use crate::daemon::protocol::SupervisorDispatchAction as Action;
+    use ferryx_hub::supervisor::{self as sv, admission};
+    match action {
+        Action::Submit { message_id, body, host_id, session_id, work } => {
+            let actor = admission::ActorContext {
+                principal: admission::installation_owner(pool).await?,
+                source_adapter: sv::ChannelProvider::Cli,
+                source_message_id: message_id,
+                source_body: body,
+                channel_binding_id: None,
+                choices: admission::OwnerChoices { host_id, session_id, ..Default::default() },
+            };
+            let outcome = admission::submit_work(pool, &actor, &work).await?;
+            serde_json::to_value(&outcome).map_err(|error| SupervisorDispatchError::Refused {
+                code: "INTERNAL",
+                message: error.to_string(),
+            })
+        }
+        Action::Status { goal_id } => {
+            let goal = sv::goal_of(pool, &goal_id).await?.ok_or_else(|| SupervisorDispatchError::Refused {
+                code: "NOT_FOUND",
+                message: format!("goal not found: {goal_id}"),
+            })?;
+            let binding = sv::execution_binding_of(pool, &goal_id).await?;
+            let dispatches = sv::dispatches_of(pool, &goal_id).await?;
+            Ok(json!({
+                "goal": {
+                    "goalId": goal.goal_id,
+                    "laneKey": goal.lane_key,
+                    "runState": goal.run_state,
+                    "stateDetail": goal.state_detail,
+                    "revision": goal.revision,
+                    "updatedAt": goal.updated_at,
+                },
+                "binding": binding.map(|binding| json!({
+                    "kind": binding.kind,
+                    "hostId": binding.host_id,
+                    "providerSessionId": binding.provider_session_id,
+                    "runId": binding.run_id,
+                    "generation": binding.generation,
+                })),
+                "dispatches": dispatches.into_iter().map(|dispatch| json!({
+                    "requestId": dispatch.request_id,
+                    "ordinal": dispatch.ordinal,
+                    "generation": dispatch.generation,
+                    "state": dispatch.state,
+                    "runId": dispatch.run_id,
+                    "providerSessionId": dispatch.provider_session_id,
+                    "uncertainCode": dispatch.uncertain_code,
+                    "acceptedAt": dispatch.accepted_at,
+                    "startedAt": dispatch.started_at,
+                    "settledAt": dispatch.settled_at,
+                    "uncertainAt": dispatch.uncertain_at,
+                    "createdAt": dispatch.created_at,
+                })).collect::<Vec<_>>(),
+            }))
+        }
+    }
+}
+
 /// The store side of [`supervisor_goal`]: checks the lane, refuses a change to a lane the
 /// supervisor owns, and applies the action. Returns the lane the action named and what the
 /// action changed.
@@ -2032,6 +2152,62 @@ mod tests {
             base
         );
         assert!(control.ops().is_empty());
+    }
+
+    /// `supervisor submit` binds the chosen pane at admission and `dispatch status` reads it
+    /// back with its dispatch; a second goal on the same pane is refused SESSION_ALREADY_BOUND,
+    /// and reading the status writes nothing.
+    #[tokio::test]
+    async fn dispatch_submit_binds_the_pane_and_status_reads_without_writing() {
+        use crate::daemon::protocol::SupervisorDispatchAction as Action;
+        use ferryx_hub::supervisor as sv;
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        sv::provision_owner(&pool, "qa-owner", "qa", "qa:qa", "paired-1", "/work/qa/.git").await.unwrap();
+        let work: sv::admission::SubmitWork = serde_json::from_value(json!({
+            "title": "Write result.txt",
+            "instruction": "Create result.txt containing READY.",
+            "requirements": [{"id": "r1", "text": "result.txt contains READY", "verifier": "test -f result.txt"}],
+            "operations": ["edit"],
+        }))
+        .unwrap();
+        let submit = |message_id: &str| Action::Submit {
+            message_id: message_id.into(),
+            body: "Create result.txt containing READY.".into(),
+            host_id: Some("paired-1".into()),
+            session_id: Some("pane-1".into()),
+            work: Box::new(work.clone()),
+        };
+        let admitted = apply_dispatch_action(&pool, submit("m-1")).await.unwrap();
+        assert_eq!(admitted["outcome"], "admitted", "{admitted}");
+        let goal_id = admitted["receipt"]["goal_id"].as_str().unwrap().to_owned();
+        let refused = apply_dispatch_action(&pool, submit("m-2")).await.unwrap_err();
+        assert_eq!(refused.code(), sv::SESSION_ALREADY_BOUND, "{refused}");
+
+        // Every row the status reads, in full (revision and timestamps included).
+        let fingerprint = || async {
+            (
+                sv::goal_of(&pool, &goal_id).await.unwrap(),
+                sv::execution_binding_of(&pool, &goal_id).await.unwrap(),
+                sv::dispatches_of(&pool, &goal_id).await.unwrap(),
+            )
+        };
+        let before = fingerprint().await;
+        let status = apply_dispatch_action(&pool, Action::Status { goal_id: goal_id.clone() }).await.unwrap();
+        assert_eq!(fingerprint().await, before, "a status read writes nothing");
+        assert_eq!(status["goal"]["runState"], "ready", "{status}");
+        assert_eq!(status["goal"]["revision"], 1);
+        assert_eq!(status["binding"]["hostId"], "paired-1");
+        assert_eq!(status["binding"]["providerSessionId"], "pane-1");
+        let dispatches = status["dispatches"].as_array().unwrap();
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0]["requestId"], admitted["receipt"]["dispatch_request_id"]);
+        assert_eq!(dispatches[0]["state"], "ready");
+        assert!(dispatches[0]["acceptedAt"].is_null() && dispatches[0]["uncertainCode"].is_null());
+
+        let missing = apply_dispatch_action(&pool, Action::Status { goal_id: "00000000-0000-4000-8000-000000000000".into() })
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), "NOT_FOUND");
     }
 
     #[test]
