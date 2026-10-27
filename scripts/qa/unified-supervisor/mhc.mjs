@@ -7,7 +7,8 @@
 // provider is a loopback openai-completions stub served by this runner, and the mhc memory home
 // (MAHO_MEMORY_HOME, memory-core/src/identity/layout.rs:11) under the run's memory root. No
 // production credentials or state are read.
-import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { delimiter, isAbsolute, join } from 'node:path';
@@ -37,6 +38,10 @@ export const MEMORY_NAME = 'ferryx-supervisor';
 // writer tools (tool_metadata.rs:2-7 MCP spellings, facts_record_tool.rs:19). memory_forget and
 // memory_correct are owner extension request names (owner_memory.rs:83-84), not tools; they are
 // listed only so a future tool of that name would fail the check.
+// create_goal/update_goal (goal mutation, maho-ext-goal extension.rs:24-37) and
+// omo_browser_bridge (publishes browser state to the app, maho-omo-browser-bridge index.rs:97-124)
+// are effects too; the hub withholds them from decision sessions (mhc_profile
+// DECISION_EXCLUDED_TOOLS).
 export const FORBIDDEN_DECISION_TOOLS = Object.freeze([
   'memory', 'memory_apply_patch', 'mcp_omo-memory_memory', 'mcp_omo-memory_memory_apply_patch', 'record_fact',
   'memory_forget', 'memory_correct',
@@ -45,6 +50,7 @@ export const FORBIDDEN_DECISION_TOOLS = Object.freeze([
   'computer', 'computer_actions', 'task', 'dag', 'workflow', 'workpool',
   'edit', 'write',
   'supervisor_submit_work', 'supervisor_work_status',
+  'create_goal', 'update_goal', 'omo_browser_bridge',
 ]);
 // task_/team_ families (write_policy.rs:48); process* steering (the review's withheld set).
 export const FORBIDDEN_DECISION_TOOL_PREFIXES = Object.freeze(['task_', 'team_', 'process']);
@@ -54,7 +60,7 @@ export const READ_ONLY_DECISION_TOOLS = Object.freeze([
   'read', 'grep', 'glob', 'find', 'ls', 'lsp_diagnostics', 'lsp_goto_definition', 'lsp_find_references', 'lsp_symbols',
   'lsp_hover', 'lsp_prepare_rename', 'ast_grep_search', 'web_search', 'webfetch', 'web_fetch', 'tool_search', 'x_search',
   'todo', 'todowrite', 'ask_user_question', 'session_entries', 'search', 'scan', 'look_at', 'read_video',
-  'mcp_list_resources', 'mcp_read_resource',
+  'mcp_list_resources', 'mcp_read_resource', 'get_goal',
 ]);
 export const forbiddenDecisionTool = (name) => FORBIDDEN_DECISION_TOOLS.includes(name)
   || FORBIDDEN_DECISION_TOOL_PREFIXES.some((prefix) => String(name).startsWith(prefix));
@@ -298,7 +304,7 @@ export async function awaitEngine(ctx, env, label, predicate, deadlineMs) {
 // ---------------------------------------------------------------------------
 // Restart only the owned engine.
 
-const ENGINE_ARGS = ['--mode', 'rpc', '--multi-session', '--no-model-fallback'];
+const ENGINE_ARGS = ['--mode', 'rpc', '--multi-session', '--no-model-fallback', '--ttsr-rules-disabled=repetitive-turns'];
 
 function argvOf(probe) {
   if (Array.isArray(probe.argv)) return probe.argv;
@@ -467,23 +473,33 @@ function sessionRecordOf(ctx, binding, profileCwd) {
   return {
     path,
     memoryIdentity: bindings.at(-1)?.identity ?? null,
+    memoryRepoPathHash: bindings.at(-1)?.repoPathHash ?? null,
     bindingMemoryWrite: bindings.at(-1)?.memoryWrite ?? null,
     policyMemoryWrite: policies.some((policy) => policy?.memoryWrite === 'deny') ? 'deny' : null,
     policyToolsExclude: [...new Set(policies.flatMap((policy) => (Array.isArray(policy?.toolsExclude) ? policy.toolsExclude : [])))],
   };
 }
 
-/** Native memory dirs of the supervisor under the run's MAHO_MEMORY_HOME (`agents/<slug>-<sha8>`). */
-function memoryDirsOf(ctx) {
-  try { return readdirSync(join(ctx.paths.memory, 'mhc', 'agents')).filter((name) => name.startsWith(MEMORY_NAME)).sort(); } catch { return []; }
+/**
+ * Whether the binding mhc recorded points at the identity's memory repo under the run's
+ * MAHO_MEMORY_HOME. The binding's `repoPathHash` is sha256 of that repo path (maho-omo-memory
+ * binding.rs:13-15; repo = <home>/agents/<id>/repo, memory-core layout.rs:69-73). The directory
+ * itself is not observed: a memory-write-denied session never creates it (only the memory write
+ * path does, engine_session.rs:15-18), so its absence is by design.
+ */
+function memoryRepoUnderRunHome(ctx, session) {
+  const identity = session?.memoryIdentity;
+  if (typeof identity !== 'string' || typeof session?.memoryRepoPathHash !== 'string') return false;
+  const repo = join(ctx.paths.memory, 'mhc', 'agents', identity, 'repo');
+  return createHash('sha256').update(repo).digest('hex') === session.memoryRepoPathHash;
 }
 
 /**
  * Supervisor identity as observed from one engine reply. `supervisors` are the hub's rows;
  * `hubProfileMemoryAgent` is the hub's own profile config (`.omo/omo.jsonc`, written by the hub,
  * not an engine observation); the engine observations are `sessionMemoryIdentity` (the memory
- * binding mhc wrote into the decision session) and `memoryDirs` (the identity dirs mhc created
- * under the run's MAHO_MEMORY_HOME).
+ * binding mhc wrote into the decision session) and `memoryRepoUnderRunHome` (that binding's repo
+ * path hash names the identity's repo under the run's MAHO_MEMORY_HOME).
  */
 function identityOf(ctx, json, session) {
   return {
@@ -492,7 +508,7 @@ function identityOf(ctx, json, session) {
       : null,
     hubProfileMemoryAgent: json?.engine?.memoryAgent ?? null,
     sessionMemoryIdentity: session?.memoryIdentity ?? null,
-    memoryDirs: memoryDirsOf(ctx),
+    memoryRepoUnderRunHome: memoryRepoUnderRunHome(ctx, session),
   };
 }
 
@@ -584,6 +600,7 @@ async function runRuntime(ctx) {
 
       // Effect tools, measured from what the engine offered the model and what it recorded.
       const binding = bindingOf(first.json);
+      lastBinding = binding;
       const session = sessionRecordOf(ctx, binding, first.json.engine.profileCwd);
       const parsedNames = turnRequests.flatMap((entry) => entry.tools);
       const unparsed = parsedNames.filter((name) => typeof name !== 'string' || name === '').length;
@@ -609,12 +626,12 @@ async function runRuntime(ctx) {
       identities.a = identityA;
       ctx.evidence.writeJson('runtime/identity-a.json', identityA);
       // mhc names the identity `<slug>-<sha256-8>` of the configured agent (memory-core
-      // identity/resolve.rs:112-114) and keeps it in <MAHO_MEMORY_HOME>/agents/<id>
-      // (layout.rs:69-70): exactly that one directory, under the run's memory home.
+      // identity/resolve.rs:112-114) and binds the session to <MAHO_MEMORY_HOME>/agents/<id>/repo
+      // (layout.rs:69-73), here under the run's memory home.
       ctx.assert('supervisor-identity-observed', identityA.hubProfileMemoryAgent === MEMORY_NAME && typeof supervisorId === 'string'
         && same(identityA.supervisors?.map((row) => [row.id, row.memoryName]), [[supervisorId, MEMORY_NAME]])
         && typeof identityA.sessionMemoryIdentity === 'string' && /^ferryx-supervisor-[0-9a-f]{8}$/.test(identityA.sessionMemoryIdentity)
-        && same(identityA.memoryDirs, [identityA.sessionMemoryIdentity]), identityA);
+        && identityA.memoryRepoUnderRunHome === true, identityA);
       note(`assessment ok; decision-0 durable=${binding?.durableSessionId} file=${binding?.sessionFile} identity=${identityA.sessionMemoryIdentity}`);
 
       // 3. Restart only the owned engine: kill the recorded pid after the identity checks; the
@@ -638,6 +655,7 @@ async function runRuntime(ctx) {
       const second = await engineAssess(ctx, env, 'a-after-engine-restart', ASSESS_PROMPT);
       if (!expectReply('engine-relaunched-under-the-same-daemon', second)) return;
       const restarted = second.json.engine;
+      lastBinding = bindingOf(second.json);
       ctx.assert('engine-relaunched-under-the-same-daemon', restarted.state === 'ready' && restarted.generation > generationA && restarted.pid !== killed.recorded[0],
         replyDetail(second));
       ctx.assert('engine-restart-keeps-the-durable-session', same(bindingOf(second.json), binding), { before: binding, after: bindingOf(second.json) });
@@ -654,6 +672,7 @@ async function runRuntime(ctx) {
       if (!await expectEngine('resume-from-another-parent-cwd-keeps-identity-and-session', env, 'b-ready', ready, 120_000)) return;
       const third = await engineAssess(ctx, env, 'b-after-daemon-restart', ASSESS_PROMPT);
       if (!expectReply('resume-from-another-parent-cwd-keeps-identity-and-session', third)) return;
+      lastBinding = bindingOf(third.json);
       note(`daemon-b pid=${daemonB.pid} cwd=${parentB} engine pid=${third.json.engine.pid}`);
       const identityB = identityOf(ctx, third.json, sessionRecordOf(ctx, bindingOf(third.json), third.json.engine.profileCwd));
       identities.b = identityB;
@@ -677,7 +696,7 @@ async function runRuntime(ctx) {
         && !/fell back/i.test(faultMessage), replyDetail(providerFault));
       ctx.assert('engine-runs-without-model-fallback', Boolean(engineArgv?.includes('--no-model-fallback')) && killed.noModelFallback, { engineArgv, killedArgv: killed.argv });
       ctx.assert('provider-error-sent-no-pane-input', replied(afterFault) && noPaneInput(afterFault.json), replyDetail(afterFault));
-      lastBinding = replied(afterFault) ? bindingOf(afterFault.json) : null;
+      if (replied(afterFault)) lastBinding = bindingOf(afterFault.json);
     };
     await realLegs();
     ctx.assert('no-fallback-canary-got-zero-requests', stub.requests.every((entry) => entry.model !== CANARY_MODEL),

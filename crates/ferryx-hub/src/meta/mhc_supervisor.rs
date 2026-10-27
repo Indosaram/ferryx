@@ -98,8 +98,8 @@ pub trait EngineLauncher: Send + Sync {
     async fn launch(&self, profile: &MhcProfile) -> Result<Launched, SupervisorFault>;
 }
 
-/// Spawns `mhc --mode rpc --multi-session --no-model-fallback` with the hub child environment,
-/// in the profile directory, with piped stdio and stderr in an owner-only log.
+/// Spawns `mhc` with [`super::mhc_profile::LAUNCH_ARGS`] and the hub child environment, in the
+/// profile directory, with piped stdio and stderr in an owner-only log.
 pub struct ProcessLauncher {
     search_path: Option<OsString>,
     pathext: Option<OsString>,

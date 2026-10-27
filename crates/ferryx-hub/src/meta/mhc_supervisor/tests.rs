@@ -488,7 +488,8 @@ async fn barrier(supervisor: &MhcSupervisor) {
 }
 
 fn decision_context() -> Value {
-    json!({"ferryx_role": "decision", "memory_write": "deny", "tools_exclude": "bash,edit,write"})
+    json!({"ferryx_role": "decision", "memory_write": "deny",
+        "tools_exclude": "bash,edit,write,create_goal,update_goal,omo_browser_bridge"})
 }
 
 /// Learning stays allowed (no memory_write key); the engine withholds the whole effect set.
@@ -1592,7 +1593,16 @@ fn the_owned_launch_is_stdio_rpc_in_the_profile_directory() {
         .spec(&MhcProfile::resolve(&data, Path::new("/elsewhere"), config()))
         .unwrap();
     assert_eq!(spec.program, bin.join("mhc.EXE"));
-    assert_eq!(spec.args, ["--mode", "rpc", "--multi-session", "--no-model-fallback"]);
+    assert_eq!(
+        spec.args,
+        [
+            "--mode",
+            "rpc",
+            "--multi-session",
+            "--no-model-fallback",
+            "--ttsr-rules-disabled=repetitive-turns"
+        ]
+    );
     assert_eq!(spec.cwd, data.join("mhc-supervisor"));
 }
 

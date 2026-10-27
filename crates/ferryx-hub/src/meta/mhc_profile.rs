@@ -1,6 +1,7 @@
 //! Launch profile and durable session identities of the retained mhc supervisor engine.
 //!
-//! The engine always runs as `mhc --mode rpc --multi-session --no-model-fallback` over stdio, in
+//! The engine always runs as `mhc --mode rpc --multi-session --no-model-fallback
+//! --ttsr-rules-disabled=repetitive-turns` over stdio, in
 //! the fixed profile directory `<data>/mhc-supervisor`, whatever directory the hub itself was
 //! started from. Its native memory identity is pinned by a profile-local `.omo/omo.jsonc`; no
 //! global configuration is written. Session roles get their policy from host-supplied session
@@ -21,7 +22,19 @@ pub const PROFILE_DIRNAME: &str = "mhc-supervisor";
 pub const DEFAULT_MHC_BIN: &str = "mhc";
 /// Arguments of the owned engine. `--no-model-fallback` keeps the engine from substituting a
 /// model on errors; the supervisor never does either.
-pub const LAUNCH_ARGS: [&str; 4] = ["--mode", "rpc", "--multi-session", "--no-model-fallback"];
+///
+/// `--ttsr-rules-disabled=repetitive-turns` turns off only the engine's repeated-turn guard
+/// (mhc maho-ext-ttsr index.rs:22-23,54, repetitive_turns_lane.rs:9,14-18): a durable decision
+/// session legitimately answers the same verdict for an unchanged goal, and that guard aborts
+/// a streamed turn that repeats the previous persisted answer, so every repeated verdict was
+/// lost as a fault. The other stream rules stay on.
+pub const LAUNCH_ARGS: [&str; 5] = [
+    "--mode",
+    "rpc",
+    "--multi-session",
+    "--no-model-fallback",
+    "--ttsr-rules-disabled=repetitive-turns",
+];
 /// Capabilities the engine must advertise before any session opens: the host baseline the
 /// client relies on, then the plan's supervisor capabilities. `memory_forget` also stands for
 /// `memory_correct`; there is no separate capability to guess. `memory_write_deny` alone does
@@ -65,6 +78,11 @@ pub const CLIENT_CAPABILITIES: [&str; 1] = ["extension_events"];
 /// Tools no decision, convergence, conversation or ingest session may register: terminal
 /// commands and file mutation. Memory write tools are withheld by `memory_write = deny`.
 pub const DEFAULT_EFFECT_TOOLS: [&str; 3] = ["bash", "edit", "write"];
+/// Tools a decision session additionally never registers: it only judges, so it must not
+/// create or update a goal (the engine's goal extension, maho-ext-goal extension.rs:24-37) or
+/// publish browser state to the app (maho-omo-browser-bridge index.rs:9,97-124). `get_goal`
+/// reads and stays.
+pub const DECISION_EXCLUDED_TOOLS: [&str; 3] = ["create_goal", "update_goal", "omo_browser_bridge"];
 /// Concurrent decision contexts.
 pub const DECISION_SLOTS: usize = 4;
 /// Most recent owner source message ids remembered for idempotent ingest.
@@ -477,7 +495,11 @@ impl MhcProfile {
                 (format!("conversation-{scope_key}"), "conversation", true, false)
             }
             SessionRole::Decision(slot) => {
-                context.insert("tools_exclude".to_owned(), self.effect_tools());
+                let tools = std::iter::once(self.effect_tools())
+                    .chain(DECISION_EXCLUDED_TOOLS.iter().map(|tool| (*tool).to_owned()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                context.insert("tools_exclude".to_owned(), tools);
                 context.insert("memory_write".to_owned(), "deny".to_owned());
                 (format!("decision-{slot}"), "decision", true, true)
             }
