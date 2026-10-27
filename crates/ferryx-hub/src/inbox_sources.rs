@@ -859,13 +859,15 @@ mod tests {
         assert!(!GITHUB_NOTIFY_REASONS.contains(&"author"));
         let prs = json!({"data": {"search": {"nodes": []}}});
         let base = github_diff(None, &json!([]), &prs).unwrap();
-        let note = |id: &str, reason: &str| json!({
-            "id": id,
-            "updated_at": "2026-10-16T00:00:00Z",
-            "reason": reason,
-            "repository": {"full_name": "o/r"},
-            "subject": {"title": "t", "url": "https://api.github.com/repos/o/r/pulls/7"}
-        });
+        let note = |id: &str, reason: &str| {
+            json!({
+                "id": id,
+                "updated_at": "2026-10-16T00:00:00Z",
+                "reason": reason,
+                "repository": {"full_name": "o/r"},
+                "subject": {"title": "t", "url": "https://api.github.com/repos/o/r/pulls/7"}
+            })
+        };
         let notes = json!([note("a1", "author"), note("m1", "mention")]);
         let next = github_diff(Some(&base.cursor), &notes, &prs).unwrap();
         assert_eq!(next.items.len(), 1);

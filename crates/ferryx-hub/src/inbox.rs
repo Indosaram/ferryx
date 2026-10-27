@@ -156,7 +156,7 @@ pub async fn decide(
 }
 
 pub const TRIAGE_OPTIONS: &[&str] = &["owner_must_act", "bot_can_handle", "fyi", "ignore"];
-pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is waiting for the owner's own reply, decision, signature or payment, OR an account security/billing notice (new sign-in or suspicious login, password or 2FA change, failed or overdue payment, suspended or expiring account, domain or subscription expiry); surveys, reminders, newsletters, receipts, routine notices, verification/one-time codes and other automated mail are never owner_must_act; bot_can_handle = a coding/ops task an agent can do alone without speaking as the owner; fyi = information only; ignore = ads/promotions. Classify only the message marked as the message to classify, using the earlier conversation for context; small talk, reactions and group-chat chatter are fyi.";
+pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is waiting for the owner's own reply, decision, signature or payment, OR an account security/billing notice (new sign-in or suspicious login, password or 2FA change, failed or overdue payment, suspended or expiring account, domain or subscription expiry); surveys, reminders, newsletters, receipts, routine notices, verification/one-time codes, unsolicited recruiter/headhunter/job-board scout pitches and other automated mail are never owner_must_act; bot_can_handle = a coding/ops task an agent can do alone without speaking as the owner; fyi = information only; ignore = ads/promotions. Classify only the message marked as the message to classify, using the earlier conversation for context; small talk, reactions and group-chat chatter are fyi.";
 
 /// Earlier messages of the same conversation shown to the judge with a new one.
 const THREAD_CONTEXT_MESSAGES: i64 = 6;
@@ -508,7 +508,11 @@ struct DigestGroup {
 
 /// Which conversation an item belongs to: a kakao room, a cron job, or a mail/GitHub thread.
 fn digest_key(row: &DigestRow) -> String {
-    let title = row.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    let title = row
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
     match row.source.as_str() {
         "cron" => title
             .map(|t| t.split_once(": needs you").map_or(t, |(job, _)| job))
@@ -769,10 +773,34 @@ mod tests {
             link: None,
         };
         let rows = vec![
-            row("kakao", "여신님", "여신님", "도착 시간 톡해주세요", "2026-10-26T07:20:59+00:00"),
-            row("kakao", "김진옥", "이모님", "청약서 보낼까", "2026-10-26T05:00:00+00:00"),
-            row("kakao", "여신님", "여신님", "긴급", "2026-10-26T02:37:52+00:00"),
-            row("kakao", "여신님", "여신님", "호시는?", "2026-10-26T01:00:00+00:00"),
+            row(
+                "kakao",
+                "여신님",
+                "여신님",
+                "도착 시간 톡해주세요",
+                "2026-10-26T07:20:59+00:00",
+            ),
+            row(
+                "kakao",
+                "김진옥",
+                "이모님",
+                "청약서 보낼까",
+                "2026-10-26T05:00:00+00:00",
+            ),
+            row(
+                "kakao",
+                "여신님",
+                "여신님",
+                "긴급",
+                "2026-10-26T02:37:52+00:00",
+            ),
+            row(
+                "kakao",
+                "여신님",
+                "여신님",
+                "호시는?",
+                "2026-10-26T01:00:00+00:00",
+            ),
             row(
                 "cron",
                 "omon",
@@ -796,9 +824,20 @@ mod tests {
              - [카톡] 이모님 (김진옥) · 최근 10/26 14:00\n  > 청약서 보낼까\n\
              - [크론] job-a · 2건 · 최근 10/26 09:00\n  > boom\n  > again"
         );
-        assert_eq!(render_digest_section("봇 처리 제안", Vec::new()), "## 봇 처리 제안\n없음");
+        assert_eq!(
+            render_digest_section("봇 처리 제안", Vec::new()),
+            "## 봇 처리 제안\n없음"
+        );
         let mut many: Vec<DigestRow> = (0..DIGEST_MAX_GROUPS)
-            .map(|n| row("mail", "a", &format!("t{n}"), "s", "2026-10-26T00:00:00+00:00"))
+            .map(|n| {
+                row(
+                    "mail",
+                    "a",
+                    &format!("t{n}"),
+                    "s",
+                    "2026-10-26T00:00:00+00:00",
+                )
+            })
             .collect();
         many.push(row("kakao", "x", "방1", "s", "2026-10-25T00:00:00+00:00"));
         many.push(row("kakao", "y", "방2", "s", "2026-10-25T00:00:00+00:00"));

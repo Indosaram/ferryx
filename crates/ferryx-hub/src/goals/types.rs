@@ -281,7 +281,10 @@ mod tests {
         assert_round_trip(GoalMode::ALL, GoalMode::as_str);
         assert_round_trip(RequirementStatus::ALL, RequirementStatus::as_str);
         assert_round_trip(ProposalState::ALL, ProposalState::as_str);
-        let reasons: Vec<&str> = StopReason::ALL.iter().map(|reason| reason.as_str()).collect();
+        let reasons: Vec<&str> = StopReason::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect();
         assert_eq!(
             reasons,
             [
@@ -336,7 +339,10 @@ mod tests {
             },
         ] {
             let value = serde_json::to_value(&outcome).unwrap();
-            assert_eq!(serde_json::from_value::<SendOutcome>(value).unwrap(), outcome);
+            assert_eq!(
+                serde_json::from_value::<SendOutcome>(value).unwrap(),
+                outcome
+            );
         }
         assert_eq!(
             serde_json::to_value(SendOutcome::Started).unwrap(),
@@ -404,7 +410,9 @@ mod tests {
             Err(GoalError::InvalidDecision(_))
         ));
         assert!(matches!(
-            parse_model_decision(r#"{"decision":"continue","instruction":" ","gap_ids":["g1"],"expected_change":"","verification":""}"#),
+            parse_model_decision(
+                r#"{"decision":"continue","instruction":" ","gap_ids":["g1"],"expected_change":"","verification":""}"#
+            ),
             Err(GoalError::InvalidDecision(_))
         ));
         assert!(matches!(

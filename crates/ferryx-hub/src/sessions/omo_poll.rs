@@ -116,7 +116,11 @@ fn pending_question(session: &Value) -> Option<String> {
 
 /// One omo session as a hub observation. `target` is `<machine>:<omo session id>`, the form the
 /// watch list (`session_watches`) has always used.
-pub fn observation(machine: &str, session: &Value, watched: &HashSet<String>) -> Option<Observation> {
+pub fn observation(
+    machine: &str,
+    session: &Value,
+    watched: &HashSet<String>,
+) -> Option<Observation> {
     let session_id = session.get("session_id")?.as_str()?.to_owned();
     let target = format!("{machine}:{session_id}");
     let name = session
@@ -133,7 +137,10 @@ pub fn observation(machine: &str, session: &Value, watched: &HashSet<String>) ->
         machine: machine.to_owned(),
         session_id,
         name,
-        message_count: session.get("message_count").and_then(Value::as_u64).unwrap_or(0),
+        message_count: session
+            .get("message_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         streaming: flag("streaming") || flag("compacting"),
         blocking_question: flag("blocking_question") && question.is_none(),
         question,
@@ -209,7 +216,9 @@ pub async fn run(hub: Arc<Hub>) {
         return;
     }
     let Some(binary) = binary() else {
-        tracing::warn!("omo session poller has no omo-gateway binary; omo session questions are not reported");
+        tracing::warn!(
+            "omo session poller has no omo-gateway binary; omo session questions are not reported"
+        );
         return;
     };
     let every = interval();
@@ -249,9 +258,17 @@ mod tests {
     use crate::config::HubConfig;
     use serde_json::json;
 
-    fn session(id: &str, streaming: bool, blocking: bool, question: Option<&str>, count: u64) -> Value {
+    fn session(
+        id: &str,
+        streaming: bool,
+        blocking: bool,
+        question: Option<&str>,
+        count: u64,
+    ) -> Value {
         let questions = match question {
-            Some(text) => json!([{"request_id": "call_1", "questions": [{"id": "q1", "header": "Pick", "question": text, "options": ["Ship", "Hold"]}]}]),
+            Some(text) => {
+                json!([{"request_id": "call_1", "questions": [{"id": "q1", "header": "Pick", "question": text, "options": ["Ship", "Hold"]}]}])
+            }
             None => json!([]),
         };
         json!({
@@ -312,7 +329,11 @@ mod tests {
         );
         assert_eq!(apply(&hub, &first).await.unwrap(), 4);
         let kinds: Vec<String> = notices(&pool).await.into_iter().map(|row| row.1).collect();
-        assert_eq!(kinds, vec!["blocked", "question"], "first poll: no completion baseline yet");
+        assert_eq!(
+            kinds,
+            vec!["blocked", "question"],
+            "first poll: no completion baseline yet"
+        );
 
         let second = overview(
             vec![
@@ -324,20 +345,37 @@ mod tests {
         );
         apply(&hub, &second).await.unwrap();
         let stored = notices(&pool).await;
-        assert_eq!(stored.len(), 3, "the same question and block are not sent again: {stored:?}");
-        assert!(stored.iter().any(|(key, kind)| kind == "completion" && key.contains("omarchy:w-1")));
-        assert!(stored.iter().any(|(key, kind)| kind == "question" && key.contains("local:q-1")));
+        assert_eq!(
+            stored.len(),
+            3,
+            "the same question and block are not sent again: {stored:?}"
+        );
+        assert!(stored
+            .iter()
+            .any(|(key, kind)| kind == "completion" && key.contains("omarchy:w-1")));
+        assert!(stored
+            .iter()
+            .any(|(key, kind)| kind == "question" && key.contains("local:q-1")));
 
         let outbox = crate::chat::reply::pending(&pool).await.unwrap();
-        assert_eq!(outbox.len(), 2, "question and block are posted, the completion is ledger-only: {outbox:?}");
-        assert!(outbox.iter().any(|row| row.2.contains("Deploy now? [Ship / Hold]")));
+        assert_eq!(
+            outbox.len(),
+            2,
+            "question and block are posted, the completion is ledger-only: {outbox:?}"
+        );
+        assert!(outbox
+            .iter()
+            .any(|row| row.2.contains("Deploy now? [Ship / Hold]")));
     }
 
     #[tokio::test]
     async fn a_failed_host_neither_errors_nor_hides_the_other_machine() {
         let pool = crate::storage::memory().await.unwrap();
         let hub = hub(pool.clone()).await;
-        let polled = overview(vec![session("q-2", false, false, Some("Merge?"), 3)], Err("ssh: connect timed out"));
+        let polled = overview(
+            vec![session("q-2", false, false, Some("Merge?"), 3)],
+            Err("ssh: connect timed out"),
+        );
         assert_eq!(apply(&hub, &polled).await.unwrap(), 1);
         let stored = notices(&pool).await;
         assert_eq!(stored.len(), 1, "{stored:?}");
@@ -350,7 +388,10 @@ mod tests {
         let unnamed = json!({"session_id": "01a16600-dbb3-7ba3-9c2e-ae2418179155", "name": null});
         let observed = observation("local", &unnamed, &HashSet::new()).unwrap();
         assert_eq!(observed.name, "01a16600-dbb3");
-        assert_eq!(observed.target, "local:01a16600-dbb3-7ba3-9c2e-ae2418179155");
+        assert_eq!(
+            observed.target,
+            "local:01a16600-dbb3-7ba3-9c2e-ae2418179155"
+        );
         assert!(observed.question.is_none());
     }
 }

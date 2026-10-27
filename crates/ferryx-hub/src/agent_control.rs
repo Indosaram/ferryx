@@ -233,21 +233,27 @@ mod tests {
     async fn the_default_confirmed_send_maps_failures_without_retrying() {
         let unknown = FailingControl("OPERATION_OUTCOME_UNKNOWN the writer did not answer");
         assert_eq!(
-            unknown.send_confirmed(None, "pane-1", "x", "hub-goal-a-1").await,
+            unknown
+                .send_confirmed(None, "pane-1", "x", "hub-goal-a-1")
+                .await,
             SendOutcome::Uncertain {
                 code: OPERATION_OUTCOME_UNKNOWN.into()
             }
         );
         let typing = FailingControl("CONTROL_CONFLICT a person typed in this pane");
         assert_eq!(
-            typing.send_confirmed(None, "pane-1", "x", "hub-goal-a-1").await,
+            typing
+                .send_confirmed(None, "pane-1", "x", "hub-goal-a-1")
+                .await,
             SendOutcome::Refused {
                 code: "CONTROL_CONFLICT".into()
             }
         );
         let plain = FailingControl("host remote failed");
         assert_eq!(
-            plain.send_confirmed(None, "pane-1", "x", "hub-goal-a-1").await,
+            plain
+                .send_confirmed(None, "pane-1", "x", "hub-goal-a-1")
+                .await,
             SendOutcome::Refused {
                 code: "SEND_FAILED".into()
             }

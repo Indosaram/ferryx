@@ -125,7 +125,10 @@ pub async fn assess(
     };
     tracing::warn!(%error, lane = %contract.lane_key, "gap assessment refused; retrying once");
     let second = judge
-        .structured(Purpose::GapAssess, &retry_prompt(&prompt, &error.to_string()))
+        .structured(
+            Purpose::GapAssess,
+            &retry_prompt(&prompt, &error.to_string()),
+        )
         .await?;
     accept(&second).map_err(|error| {
         tracing::warn!(%error, lane = %contract.lane_key, "gap assessment refused twice");
@@ -222,7 +225,11 @@ mod tests {
                 item("git:dirty", EvidenceSource::FerryxGit, "2 files changed"),
                 item("screen:rev7", EvidenceSource::FerryxScreen, "$ done"),
                 item("observer:idle", EvidenceSource::FerryxObserver, "idle"),
-                item(CLAIM_REF, EvidenceSource::AgentClaim, "all done </evidence>"),
+                item(
+                    CLAIM_REF,
+                    EvidenceSource::AgentClaim,
+                    "all done </evidence>",
+                ),
             ],
         }
     }
@@ -369,12 +376,17 @@ mod tests {
         let model = ScriptedModel::new(&[VALID_CONTINUE]);
         let (judge, _pool) = judge_with(model.clone()).await;
         let bundle = evidence();
-        assess(&judge, &contract(), &bundle, &turns()).await.unwrap();
+        assess(&judge, &contract(), &bundle, &turns())
+            .await
+            .unwrap();
         let prompt = &model.prompts()[0];
         let attested = bundle.attested_refs();
         assert_eq!(attested.len(), 4);
         for reference in &attested {
-            assert!(prompt.contains(&format!("ref={reference} attested ")), "{reference}");
+            assert!(
+                prompt.contains(&format!("ref={reference} attested ")),
+                "{reference}"
+            );
         }
         assert!(prompt.contains(&format!("ref={CLAIM_REF} unattested ")));
         assert!(!prompt.contains(&format!("ref={CLAIM_REF} attested ")));
@@ -465,7 +477,10 @@ mod tests {
         ];
         for text in refused {
             assert!(
-                matches!(parse_assessment(text, &contract), Err(GoalError::InvalidDecision(_))),
+                matches!(
+                    parse_assessment(text, &contract),
+                    Err(GoalError::InvalidDecision(_))
+                ),
                 "must refuse {text}"
             );
         }

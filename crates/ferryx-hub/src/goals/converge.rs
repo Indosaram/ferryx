@@ -378,7 +378,11 @@ mod tests {
                 item("git:clean", EvidenceSource::FerryxGit, Some(true)),
                 item("git:dirty", EvidenceSource::FerryxGit, Some(false)),
                 item("git:unknown", EvidenceSource::FerryxGit, None),
-                item("observer:no-pane", EvidenceSource::FerryxObserver, Some(false)),
+                item(
+                    "observer:no-pane",
+                    EvidenceSource::FerryxObserver,
+                    Some(false),
+                ),
                 item("sig:invalid", EvidenceSource::FerryxSignal, None),
                 EvidenceItem {
                     reference: CLAIM_REF.into(),
@@ -483,9 +487,14 @@ mod tests {
         assert!(!prompt.contains(CLAIM_TEXT));
         assert!(prompt.contains(CLAIM_REF));
 
-        let input = serde_json::to_value(ConvergeInput::new(&contract(&["r1"]), &evidence()))
-            .unwrap();
-        let mut keys: Vec<&str> = input.as_object().unwrap().keys().map(String::as_str).collect();
+        let input =
+            serde_json::to_value(ConvergeInput::new(&contract(&["r1"]), &evidence())).unwrap();
+        let mut keys: Vec<&str> = input
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["evidence", "requirements"]);
         let mut requirement_keys: Vec<&str> = input["requirements"][0]
@@ -577,7 +586,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_fenced_reply_is_accepted_and_ordered_by_the_contract() {
-        let text = format!("```json\n{}\n```", reply(&[("r2", true, &["git:clean"]), ("r1", true, &["sig:0"])]));
+        let text = format!(
+            "```json\n{}\n```",
+            reply(&[("r2", true, &["git:clean"]), ("r1", true, &["sig:0"])])
+        );
         let harness = Harness::replying(&text).await;
         let outcome = converge(&harness.judge, &contract(&["r1", "r2"]), &evidence())
             .await
@@ -585,7 +597,10 @@ mod tests {
         let ConvergenceOutcome::Converged { verdicts } = outcome else {
             panic!("expected Converged");
         };
-        let ids: Vec<&str> = verdicts.iter().map(|verdict| verdict.req_id.as_str()).collect();
+        let ids: Vec<&str> = verdicts
+            .iter()
+            .map(|verdict| verdict.req_id.as_str())
+            .collect();
         assert_eq!(ids, ["r1", "r2"]);
     }
 }

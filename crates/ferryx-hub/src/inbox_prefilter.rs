@@ -181,8 +181,78 @@ impl PrefilterRules {
             &text,
             &["failed", "error", "review requested", "mentioned you"],
         );
-        (known && !escalated).then_some("fyi")
+        (known && !escalated)
+            .then_some("fyi")
+            .or_else(|| is_unsolicited_recruiting(&author, &text).then_some("fyi"))
     }
+}
+
+/// Mass recruiting mail: job-board scouts and headhunter pitches the owner did not ask for.
+/// He reads job leads on his own; they never need his action (2026-10-25: a BizReach
+/// "プラチナスカウト" was alerted as owner mail). `author` and `text` are lowercased.
+fn is_unsolicited_recruiting(author: &str, text: &str) -> bool {
+    let job_board = contains_any(
+        author,
+        &[
+            "bizreach.co.jp",
+            "doda.jp",
+            "type.jp",
+            "en-japan.com",
+            "green-japan.com",
+            "wantedly.com",
+            "rikunabi.com",
+            "r-agent.com",
+            "jac-recruitment",
+            "michaelpage",
+            "robertwalters",
+            "hays.co.jp",
+            "saramin.co.kr",
+            "jobkorea.co.kr",
+            "wanted.co.kr",
+            "rememberapp.co.kr",
+            "peoplenjob.com",
+        ],
+    );
+    let scout = contains_any(
+        text,
+        &[
+            "スカウト",
+            "ヘッドハンター",
+            "転職",
+            "求人",
+            "스카우트",
+            "헤드헌터",
+            "채용 제안",
+            "포지션 제안",
+            "이직 제안",
+            "경력직 채용",
+            "job opportunity",
+            "new role",
+            "recruiter",
+        ],
+    );
+    (job_board || scout) && !is_application_in_progress(text)
+}
+
+/// A reply about an application the owner made (interview, result, offer) is not a pitch.
+fn is_application_in_progress(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "面接",
+            "面談日程",
+            "選考結果",
+            "内定",
+            "応募いただき",
+            "ご応募",
+            "면접 일정",
+            "서류 결과",
+            "지원해 주셔서",
+            "interview",
+            "your application",
+            "offer letter",
+        ],
+    )
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -346,11 +416,23 @@ mod tests {
         let mut update = item("mail", "Shop <shop@x.example>", "your order shipped");
         update.mail_categories = vec!["updates".into()];
         assert_eq!(rules.drop_reason(&update), Some("mail_updates"));
-        let mut alert = item("mail", "Google <no-reply@accounts.google.com>", "Security alert: new sign-in on Mac");
+        let mut alert = item(
+            "mail",
+            "Google <no-reply@accounts.google.com>",
+            "Security alert: new sign-in on Mac",
+        );
         alert.mail_categories = vec!["updates".into()];
-        assert_eq!(rules.drop_reason(&alert), None, "security notices reach the owner");
         assert_eq!(
-            rules.drop_reason(&item("mail", "Cloudflare <noreply@notify.cloudflare.com>", "Payment failed for your invoice")),
+            rules.drop_reason(&alert),
+            None,
+            "security notices reach the owner"
+        );
+        assert_eq!(
+            rules.drop_reason(&item(
+                "mail",
+                "Cloudflare <noreply@notify.cloudflare.com>",
+                "Payment failed for your invoice"
+            )),
             None,
             "billing notices reach the owner"
         );
@@ -369,6 +451,45 @@ mod tests {
         assert_eq!(rules.drop_reason(&item("imessage", "+8210", "점심?")), None);
         assert_eq!(rules.drop_reason(&item("slack", "U1", "anything")), None);
         assert_eq!(rules.drop_reason(&item("mail", "a", "  ")), Some("empty"));
+    }
+
+    #[test]
+    fn recruiter_scouts_are_fyi_but_an_application_in_progress_is_not() {
+        let rules = PrefilterRules::default();
+        let mail = |author: &str, title: &str, snippet: &str| {
+            let mut item = item("mail", author, snippet);
+            item.title = Some(title.into());
+            item
+        };
+        assert_eq!(
+            rules.direct_class(&mail(
+                "ビズリーチスカウト <scout@bizreach.co.jp>",
+                "[プラチナスカウト]【特別スカウト】キャリア相談",
+                "ヘッドハンターからプラチナスカウトが届きました"
+            )),
+            Some("fyi")
+        );
+        assert_eq!(
+            rules.direct_class(&mail(
+                "김지훈 <jkim@prosearchkorea.com>",
+                "경력직 채용 제안 드립니다.",
+                "클라우드 풀스택 엔지니어"
+            )),
+            Some("fyi")
+        );
+        assert_eq!(
+            rules.direct_class(&mail(
+                "Michael Page Japan <MichaelPage@mail.michaelpage.co.jp>",
+                "面接日程のご連絡",
+                "ご応募いただきありがとうございます"
+            )),
+            None,
+            "a step in an application he made still reaches triage"
+        );
+        assert_eq!(
+            rules.direct_class(&mail("Person <p@x.example>", "Re: quote", "please sign")),
+            None
+        );
     }
 
     #[test]
