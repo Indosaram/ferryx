@@ -451,7 +451,48 @@ pub fn outgoing_text(text: &str) -> String {
     } else {
         text.to_owned()
     };
-    omo_client::filter_reasoning(&stripped)
+    strip_handoff_block(&omo_client::filter_reasoning(&stripped))
+}
+
+/// Binding reply rules every Slack session turn carries: in the thread's developer
+/// instructions when the thread starts, and once on the next turn of a thread that started
+/// before they existed. `TURN_RULES_MARKER` is the machine-checkable sentinel.
+pub const TURN_RULES_MARKER: &str = "[ferryx-turn-rules v1]";
+const TURN_RULES: &str = "[ferryx-turn-rules v1] Binding rules for every reply in this conversation:
+1. Approval: only an explicit approval word or sentence from the owner (e.g. '승인', '확정해', '그렇게 진행해') approves something. The owner quoting your own caveat or plan, asking a question, or answering 'ㅇㅋ'/'ㅇㅇ' right after you asked a question is NOT approval of a commitment to third parties: ask once, plainly, instead of recording it as confirmed. Never promise anything to third parties (rewards, deadlines, deliverables, public notices) without that explicit approval; a proposal stays labelled a proposal.
+2. Done means verified: report an action as done only after you checked its outcome (the delivery is visible, the file exists, the page shows it). Until then say what you sent or started and that verification is pending; do not use done/complete/접수 완료 wording.
+3. Slack format: reply to the owner in plain, natural Korean prose. Never write handoff labels ('Ask:', 'wanted:', 'For you:', 'Now:', 'Next:') or routing preambles ('I read this as ...').";
+
+/// The developer instructions a session's thread starts with: its persona prompt plus the
+/// binding reply rules.
+fn with_turn_rules(system_prompt: Option<&str>) -> String {
+    match system_prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        Some(prompt) if prompt.contains(TURN_RULES_MARKER) => prompt.to_owned(),
+        Some(prompt) => format!("{prompt}\n\n{TURN_RULES}"),
+        None => TURN_RULES.to_owned(),
+    }
+}
+
+/// Drops a leaked agent handoff block (`Ask: ... For you: ... Now: ... Next: ...`) at the start
+/// of a reply, keeping its `For you` report and everything after the block.
+fn strip_handoff_block(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if !trimmed.trim_start_matches('*').starts_with("Ask:") {
+        return text.to_owned();
+    }
+    let (block, rest) = trimmed.split_once("\n\n").unwrap_or((trimmed, ""));
+    let Some((_, report)) = block.split_once("For you:") else {
+        return text.to_owned();
+    };
+    let report = report
+        .split_once("Now:")
+        .map_or(report, |(report, _)| report)
+        .trim_matches(|c: char| c == '*' || c == '—' || c.is_whitespace());
+    [report, rest.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 async fn post(channel: &str, thread: Option<&str>, text: &str) {
@@ -548,7 +589,7 @@ pub async fn run_session_turn(
             .get("omo_thread_id")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        system_prompt: state.system_prompt.clone(),
+        system_prompt: Some(with_turn_rules(state.system_prompt.as_deref())),
         model: if turn.background {
             Some(crate::model_policy::background_model())
         } else {
@@ -571,6 +612,12 @@ pub async fn run_session_turn(
         });
     if let Some(briefings) = &briefings {
         request.text = format!("{}\n{}", briefings.text, request.text);
+    }
+    // A thread started before the rules existed never saw them in its developer instructions.
+    let rules_known = state.metadata.get("turn_rules").and_then(Value::as_str)
+        == Some(TURN_RULES_MARKER);
+    if request.thread_id.is_some() && !rules_known {
+        request.text = format!("{TURN_RULES}\n\n{}", request.text);
     }
     let (progress, mut interim) = tokio::sync::mpsc::unbounded_channel::<String>();
     let relay_pool = pool.clone();
@@ -731,6 +778,9 @@ pub async fn run_session_turn(
             state
                 .metadata
                 .insert("omo_thread_id".into(), json!(outcome.thread_id));
+            state
+                .metadata
+                .insert("turn_rules".into(), json!(TURN_RULES_MARKER));
             if let Err(error) = save_state(pool, &turn.key, &state).await {
                 tracing::warn!(%error, "session state was not saved");
             }
@@ -1149,6 +1199,24 @@ mod tests {
         assert!(!is_owner_dm(&home, "UOWNER"));
         let stranger = SessionKey::new("slack", None::<String>, "D2", None::<String>, "U2");
         assert!(!is_owner_dm(&stranger, "UOWNER"));
+    }
+
+    #[test]
+    fn every_thread_starts_with_the_turn_rules_and_a_leaked_handoff_is_dropped() {
+        assert!(with_turn_rules(None).starts_with(TURN_RULES_MARKER));
+        let persona = with_turn_rules(Some("You are wawabot."));
+        assert!(persona.starts_with("You are wawabot."));
+        assert_eq!(persona.matches(TURN_RULES_MARKER).count(), 1);
+        assert_eq!(with_turn_rules(Some(&persona)), persona);
+        assert_eq!(
+            outgoing_text("Ask: x - wanted: y. For you: 사진 3장 보냈어요. Now: a. Next: b.\n\n확인은 아직이에요."),
+            "사진 3장 보냈어요.\n\n확인은 아직이에요."
+        );
+        assert_eq!(outgoing_text("Ask me anything."), "Ask me anything.");
+        assert_eq!(
+            outgoing_text("**Ask:** 저장 — **For you:** 15장 저장했어요. **Now:** 완료. **Next:** 없음."),
+            "15장 저장했어요."
+        );
     }
 
     #[tokio::test]
