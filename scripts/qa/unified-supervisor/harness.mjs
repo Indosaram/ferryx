@@ -3,24 +3,26 @@
 // subscribe-before-trigger barriers, bounded deadlines and receipts.
 //
 // Ownership model. Every process the runner starts is recorded (pid, absolute
-// executable, argv, OS start stamp, owning runner) in an append-only ledger under
-// the configured dataRoot before anything waits on it. Teardown signals only
-// recorded processes: in-run through the unreaped child handle (its pid cannot
-// have been reused), across runs (--cleanup) only after the OS start stamp and
-// argv still match the record. A mismatch is reported and never signalled.
+// executable, argv, spawn time, owning runner) in an append-only ledger under
+// the configured dataRoot immediately after spawn(), and its OS start stamp is
+// appended as soon as it is read. Teardown signals only recorded processes:
+// in-run through the unreaped child handle (its pid cannot have been reused);
+// across runs (--cleanup) only when the recorded and observed OS start stamps
+// are both present and equal and argv still matches. Anything else is reported
+// (mismatch / unverifiable) and never signalled.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync, createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
   readlinkSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync,
 } from 'node:fs';
-import { arch, homedir, hostname, release } from 'node:os';
+import { arch, homedir, hostname, release, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 export const PLATFORM = process.platform;
 export const POSIX = PLATFORM !== 'win32';
-export const SCHEMA = 'unified-supervisor/1';
+export const SCHEMA = 'unified-supervisor/2';
 
 export const EXIT = Object.freeze({ PASS: 0, FAIL: 1, USAGE: 2, NOT_IMPLEMENTED: 3, HARNESS: 4, CLEANUP: 5, INTERRUPTED: 130 });
 export const STATUS_EXIT = Object.freeze({
@@ -33,7 +35,10 @@ export const STATUS_EXIT = Object.freeze({
   INTERRUPTED: EXIT.INTERRUPTED,
 });
 const STATUS_PRECEDENCE = ['INTERRUPTED', 'HARNESS_ERROR', 'DEADLINE_EXCEEDED', 'CLEANUP_FAILED', 'FAIL', 'NOT_IMPLEMENTED'];
-const USAGE_CODES = new Set(['USAGE', 'CONFIG_INVALID', 'PRODUCTION_PATH_REFUSED', 'EVIDENCE_DIR_NOT_EMPTY', 'UNKNOWN_SCENARIO']);
+const USAGE_CODES = new Set([
+  'USAGE', 'CONFIG_INVALID', 'PRODUCTION_PATH_REFUSED', 'FOREIGN_STATE_ROOT', 'EVIDENCE_DIR_NOT_EMPTY', 'UNKNOWN_SCENARIO',
+  'INTERNAL_FLAG_REFUSED', 'STALE_OWNED_STATE',
+]);
 
 const FORCE_EXIT_MS = 5_000;
 const MEMBER_GONE_MS = 3_000;
@@ -41,6 +46,10 @@ const PROBE_TIMEOUT_MS = 15_000;
 const LOG_CAP_BYTES = 16 * 1024 * 1024;
 const LINE_CAP = 64 * 1024;
 const OUTPUT_CAP_BYTES = 4 * 1024 * 1024;
+const LINEAGE_SLACK_MS = 5_000;
+export const MAX_SOCKET_PATH_BYTES = 100;
+export const RUN_ID_MAX = 24;
+const RUN_ID_PATTERN = /^qa-[a-z0-9]+-[a-z0-9]+-\d+$/;
 export const DEFAULT_SCENARIO_DEADLINE_MS = 15 * 60_000;
 let runCounter = 0;
 
@@ -64,7 +73,9 @@ export function exitCodeForError(error) {
   return EXIT.HARNESS;
 }
 
+// An empty result set is never a PASS; anything not PASS (including SKIPPED) is not a PASS.
 export function aggregateExit(results) {
+  if (results.length === 0) return { status: 'NOT_RUN', exitCode: EXIT.FAIL };
   if (results.every((result) => result.status === 'PASS')) return { status: 'PASS', exitCode: EXIT.PASS };
   for (const status of STATUS_PRECEDENCE) {
     if (results.some((result) => result.status === status)) return { status, exitCode: STATUS_EXIT[status] };
@@ -76,6 +87,17 @@ export const isSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/
 export const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 export const safeName = (value) => String(value).replace(/[^A-Za-z0-9._-]/g, '_');
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+// Short and sun_path-friendly: qa-<base36 ms>-<base36 pid>-<n>.
+export function newRunId() {
+  const id = `qa-${Date.now().toString(36)}-${process.pid.toString(36)}-${++runCounter}`;
+  if (id.length > RUN_ID_MAX) throw new HarnessError('HARNESS_ERROR', `run id ${id} exceeds ${RUN_ID_MAX} characters`);
+  return id;
+}
+
+export function runtimeSocketPath(dataRoot, runId) {
+  return join(dataRoot, 'runs', runId, 'runtime', 'daemon.sock');
+}
 
 // Resolves after `ms` with onTimeout(); the timer is always cleared.
 export function withDeadline(promise, ms, onTimeout) {
@@ -89,14 +111,23 @@ export function withDeadline(promise, ms, onTimeout) {
 
 const SECRET_NAME = /(token|secret|passw(?:or)?d|api[-_]?key|authorization|cookie|credential|private[-_]?key|session[-_]?key)/i;
 const SECRET_PATTERNS = [
-  [/\bxox[abposr]-[A-Za-z0-9-]{6,}/g, '[REDACTED:slack-token]'],
+  [/\bxox[a-z][.-][A-Za-z0-9.-]{6,}/g, '[REDACTED:slack-token]'],
   [/\bxapp-[A-Za-z0-9-]{6,}/g, '[REDACTED:slack-app-token]'],
+  [/https:\/\/hooks\.slack\.com\/(?:services|workflows|triggers)\/[A-Za-z0-9/_-]+/g, '[REDACTED:slack-webhook]'],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[REDACTED:jwt]'],
   [/\bsk-(?:ant-)?[A-Za-z0-9_-]{12,}/g, '[REDACTED:api-key]'],
   [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[REDACTED:github-token]'],
+  [/\bAIza[0-9A-Za-z_-]{35}/g, '[REDACTED:google-key]'],
   [/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED:aws-key]'],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [REDACTED]'],
+  // JSON "…token…": "value"
   [/("[^"\\]*(?:token|secret|passw(?:or)?d|api[-_]?key|authorization|cookie|credential|private[-_]?key)[^"\\]*"\s*:\s*)"(?:[^"\\]|\\.)*"/gi, '$1"[REDACTED]"'],
-  [/\b([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY)[A-Za-z0-9_]*)=([^\s"',;\\]+)/gi, '$1=[REDACTED]'],
+  // CLI flags: --token v, --api-key=v
+  [/(--?[A-Za-z0-9-]*(?:token|secret|passw(?:or)?d|api[-_]?key)[A-Za-z0-9-]*)(=|[ \t]+)(?!\[REDACTED)([^\s"'=]+)/gi, '$1$2[REDACTED]'],
+  // env / query style: token=v, SLACK_BOT_TOKEN=v, ?token=v&
+  [/\b([A-Za-z0-9_]*(?:token|secret|passw(?:or)?d|api_?key)[A-Za-z0-9_]*)=(?!\[REDACTED)([^\s"',;&\\]+)/gi, '$1=[REDACTED]'],
+  // YAML / header style: token: v, X-Api-Key: v (also inside a JSON string value)
+  [/(^|[\s{,"])([A-Za-z0-9_-]*(?:token|secret|passw(?:or)?d|api[-_]?key)[A-Za-z0-9_-]*)([ \t]*:[ \t]+)(?!\[REDACTED)("[^"\n]*"|'[^'\n]*'|[^\s"',}\]]+)/gim, '$1$2$3[REDACTED]'],
 ];
 let envSecrets = null;
 
@@ -133,7 +164,7 @@ export function redactValue(value, key = null) {
 const CASE_INSENSITIVE = PLATFORM === 'darwin' || PLATFORM === 'win32';
 
 function norm(path) {
-  let out = resolve(path);
+  let out = resolve(String(path).replace(/^\\\\\?\\/, ''));
   if (out.length > 1 && (out.endsWith('/') || out.endsWith('\\')) && !/^[A-Za-z]:[\\/]$/.test(out)) out = out.slice(0, -1);
   return CASE_INSENSITIVE ? out.toLowerCase() : out;
 }
@@ -147,8 +178,8 @@ export function isInside(child, parent) {
 }
 
 // Real path of `path`, or of its nearest existing ancestor joined with the rest.
-function realish(path) {
-  let current = resolve(path);
+export function realish(path) {
+  let current = resolve(String(path).replace(/^\\\\\?\\/, ''));
   const rest = [];
   for (;;) {
     try { return join(realpathSync(current), ...rest.reverse()); } catch { /* walk up */ }
@@ -159,7 +190,8 @@ function realish(path) {
   }
 }
 
-export function productionRoots({ env = process.env, home = homedir() } = {}) {
+// Every production root in both spellings: as written and symlink-resolved.
+export function productionRoots({ env = process.env, home = homedir(), uid = process.getuid?.() ?? null } = {}) {
   const roots = [
     join(home, '.ferryx'),
     join(home, '.config', 'ferryx'), join(home, '.local', 'share', 'ferryx'), join(home, '.local', 'state', 'ferryx'), join(home, '.cache', 'ferryx'),
@@ -169,14 +201,28 @@ export function productionRoots({ env = process.env, home = homedir() } = {}) {
     join(home, '.maho'), join(home, '.mhc'), join(home, '.config', 'maho'), join(home, '.config', 'mhc'),
     join(home, '.local', 'share', 'maho'), join(home, '.local', 'share', 'mhc'),
   ];
+  for (const base of [env.XDG_CONFIG_HOME, env.XDG_DATA_HOME, env.XDG_STATE_HOME, env.XDG_CACHE_HOME]) {
+    if (base && isAbsolute(base)) for (const name of ['ferryx', 'com.ferryx.app', 'maho', 'mhc']) roots.push(join(base, name));
+  }
+  if (env.XDG_RUNTIME_DIR && isAbsolute(env.XDG_RUNTIME_DIR)) roots.push(join(env.XDG_RUNTIME_DIR, 'ferryx'));
+  if (POSIX) {
+    // Daemon runtime dirs (/tmp/ferryx-{uid}[-dev], legacy /tmp/rorca-{uid}) and the host endpoint dir.
+    roots.push('/tmp/ferryx', join(env.TMPDIR && isAbsolute(env.TMPDIR) ? env.TMPDIR : '/tmp', 'ferryx'));
+    if (uid !== null) for (const name of [`ferryx-${uid}`, `ferryx-${uid}-dev`, `rorca-${uid}`, `rorca-${uid}-dev`]) roots.push(join('/tmp', name));
+  } else {
+    roots.push(join(tmpdir(), 'ferryx'));
+  }
   for (const base of [env.APPDATA, env.LOCALAPPDATA]) {
     if (base && isAbsolute(base)) roots.push(join(base, 'ferryx'), join(base, 'com.ferryx.app'), join(base, 'maho'), join(base, 'mhc'));
   }
   // The invoking shell's live Ferryx locations are production by definition.
-  for (const name of ['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_HUB_DB', 'FERRYX_HUB_CONFIG']) {
+  for (const name of ['FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_HUB_DB', 'FERRYX_HUB_CONFIG', 'FERRYX_SESSION_DIR',
+    'FERRYX_ACCOUNT_DATA_DIR', 'FERRYX_RELAY_DATA_DIR', 'FERRYX_LEGACY_RUNTIME_DIR']) {
     if (env[name] && isAbsolute(env[name])) roots.push(env[name]);
   }
-  return roots;
+  const all = new Set();
+  for (const root of roots) { all.add(resolve(root)); all.add(realish(root)); }
+  return [...all];
 }
 
 function namesHubDatabase(path) {
@@ -184,11 +230,12 @@ function namesHubDatabase(path) {
 }
 
 export function assertNotProduction(path, label, context = {}) {
+  const roots = productionRoots(context);
   for (const candidate of new Set([resolve(path), realish(path)])) {
     if (namesHubDatabase(candidate)) {
       throw new HarnessError('PRODUCTION_PATH_REFUSED', `${label} ${candidate} names a hub.sqlite database`);
     }
-    for (const root of productionRoots(context)) {
+    for (const root of roots) {
       if (isInside(candidate, root)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${label} ${candidate} is inside production path ${root}`);
     }
   }
@@ -197,11 +244,14 @@ export function assertNotProduction(path, label, context = {}) {
 export function assertIsolatedRoot(path, label, context = {}) {
   assertNotProduction(path, label, context);
   const home = context.home ?? homedir();
+  const roots = productionRoots(context);
   for (const candidate of new Set([resolve(path), realish(path)])) {
-    for (const root of productionRoots(context)) {
+    for (const root of roots) {
       if (isInside(root, candidate)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${label} ${candidate} contains production path ${root}`);
     }
-    if (isInside(home, candidate)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${label} ${candidate} contains the home directory ${home}`);
+    for (const h of new Set([resolve(home), realish(home)])) {
+      if (isInside(h, candidate)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${label} ${candidate} contains the home directory ${h}`);
+    }
   }
 }
 
@@ -212,6 +262,7 @@ export const CONFIG_REQUIRED = Object.freeze(['ferryxCli', 'ferryxApp', 'mhcBin'
 export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', '$schema', '$comment']);
 const BINARY_FIELDS = ['ferryxCli', 'ferryxApp', 'mhcBin'];
 const ROOT_FIELDS = ['dataRoot', 'memoryRoot', 'projectRoot'];
+const STATE_ROOT_ENTRIES = new Set(['.qa-unified-supervisor', 'runs']);
 
 export function loadConfig(path, context = {}) {
   if (!path) throw new HarnessError('CONFIG_INVALID', '--config <json> is required');
@@ -226,7 +277,7 @@ export function loadConfig(path, context = {}) {
   if (unknown.length > 0) throw new HarnessError('CONFIG_INVALID', `unknown field(s): ${unknown.join(', ')}`);
   const missing = CONFIG_REQUIRED.filter((key) => typeof config[key] !== 'string' || config[key].trim() === '');
   if (missing.length > 0) throw new HarnessError('CONFIG_INVALID', `missing required field(s): ${missing.join(', ')}`);
-  for (const key of ['pairedHostId', 'slackChannel', '$schema', '$comment']) {
+  for (const key of CONFIG_OPTIONAL) {
     if (config[key] === undefined || config[key] === null) continue;
     if (typeof config[key] !== 'string' || config[key].trim() === '') throw new HarnessError('CONFIG_INVALID', `${key} must be a non-empty string or null`);
   }
@@ -240,13 +291,30 @@ export function loadConfig(path, context = {}) {
   for (const key of ROOT_FIELDS) assertIsolatedRoot(config[key], key, context);
   for (const a of ROOT_FIELDS) {
     for (const b of ROOT_FIELDS) {
-      if (a !== b && isInside(config[a], config[b])) throw new HarnessError('CONFIG_INVALID', `${a} and ${b} must be disjoint roots`);
+      if (a !== b && (isInside(config[a], config[b]) || isInside(realish(config[a]), realish(config[b])))) {
+        throw new HarnessError('CONFIG_INVALID', `${a} and ${b} must be disjoint roots`);
+      }
     }
   }
   for (const key of BINARY_FIELDS) {
     let info;
     try { info = statSync(config[key]); } catch { throw new HarnessError('CONFIG_INVALID', `${key} ${config[key]} does not exist`); }
     if (key !== 'ferryxApp' && !info.isFile()) throw new HarnessError('CONFIG_INVALID', `${key} ${config[key]} is not a file`);
+  }
+  if (POSIX) {
+    const socket = runtimeSocketPath(config.dataRoot, 'q'.repeat(RUN_ID_MAX));
+    const bytes = Buffer.byteLength(socket);
+    if (bytes > MAX_SOCKET_PATH_BYTES) {
+      throw new HarnessError('CONFIG_INVALID', `dataRoot is too long: the isolated daemon socket path would be ${bytes} bytes (limit ${MAX_SOCKET_PATH_BYTES}); choose a shorter dataRoot`);
+    }
+  }
+  for (const key of ['dataRoot', 'memoryRoot']) {
+    if (!existsSync(config[key])) continue;
+    if (!statSync(config[key]).isDirectory()) throw new HarnessError('FOREIGN_STATE_ROOT', `${key} ${config[key]} exists and is not a directory`);
+    const foreign = readdirSync(config[key]).filter((name) => !STATE_ROOT_ENTRIES.has(name));
+    if (foreign.length > 0) {
+      throw new HarnessError('FOREIGN_STATE_ROOT', `${key} ${config[key]} already holds state this runner did not create (${foreign.slice(0, 5).join(', ')}); use an empty task-owned root`);
+    }
   }
   if (!/^\S+$/.test(config.ownerPrincipal)) throw new HarnessError('CONFIG_INVALID', 'ownerPrincipal must not contain whitespace');
   if (config.slackChannel && !/^[CDG][A-Z0-9]{6,}$/.test(config.slackChannel)) {
@@ -271,7 +339,7 @@ export class Evidence {
     if (existsSync(target)) {
       if (!lstatSync(target).isDirectory()) throw new HarnessError('EVIDENCE_DIR_NOT_EMPTY', `${target} exists and is not a directory`);
       if (readdirSync(target).length > 0) {
-        if (!force) throw new HarnessError('EVIDENCE_DIR_NOT_EMPTY', `${target} holds evidence from a prior run; choose a new directory or pass --force to move it aside`);
+        if (!force) throw new HarnessError('EVIDENCE_DIR_NOT_EMPTY', `${target} holds evidence from a prior run; choose a new directory or pass --force-evidence to move it aside`);
         movedPrior = `${target}.prior-${stamp()}`;
         renameSync(target, movedPrior);
       }
@@ -334,43 +402,55 @@ export class Ledger {
     return { records, invalidLines };
   }
 
+  // Open spawn/path records, with start stamps appended after spawn merged in.
   open() {
     const { records } = this.read();
     const closed = new Set(records.filter((r) => r.type === 'released' || r.type === 'path-released').map((r) => r.key));
-    return records.filter((r) => (r.type === 'spawn' || r.type === 'path') && !closed.has(r.key));
+    const stamps = new Map(records.filter((r) => r.type === 'stamp' && r.startStamp).map((r) => [r.key, r.startStamp]));
+    return records
+      .filter((r) => (r.type === 'spawn' || r.type === 'path') && !closed.has(r.key))
+      .map((r) => (r.type === 'spawn' && !r.startStamp && stamps.has(r.key) ? { ...r, startStamp: stamps.get(r.key) } : r));
   }
 }
 
 // ---------------------------------------------------------------------------
 // Bounded capture for read-only probes (ps, PowerShell, git). Not ledgered: the
-// child is killed through its own handle at the deadline.
+// child is killed through its own handle at the deadline. Detached on POSIX so a
+// terminal or group signal aimed at the runner cannot kill a probe mid-read.
 
-export function capture(file, args, { timeoutMs = 10_000, cwd, env } = {}) {
+export function capture(file, args, { timeoutMs = 10_000, cwd, env, hash = false } = {}) {
   return new Promise((resolvePromise) => {
     let child;
     try {
-      child = spawn(file, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      child = spawn(file, args, { cwd, env, detached: POSIX, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch (error) {
       resolvePromise({ code: null, signal: null, stdout: '', stderr: '', timedOut: false, error: String(error?.message ?? error) });
       return;
     }
     const out = [];
     const err = [];
+    const hasher = hash ? createHash('sha256') : null;
+    let hashedBytes = 0;
     let size = 0;
     let settled = false;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolvePromise({ stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), ...result });
+      resolvePromise({
+        stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'),
+        stdoutSha256: hasher ? hasher.digest('hex') : null, stdoutBytes: hasher ? hashedBytes : size, ...result,
+      });
     };
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
       finish({ code: null, signal: 'SIGKILL', timedOut: true });
     }, timeoutMs);
-    const collect = (sink) => (chunk) => { if (size < OUTPUT_CAP_BYTES) { sink.push(chunk); size += chunk.length; } };
-    child.stdout?.on('data', collect(out));
-    child.stderr?.on('data', collect(err));
+    child.stdout?.on('data', (chunk) => {
+      if (hasher) { hasher.update(chunk); hashedBytes += chunk.length; return; }
+      if (size < OUTPUT_CAP_BYTES) { out.push(chunk); size += chunk.length; }
+    });
+    child.stderr?.on('data', (chunk) => { if (err.length < 64) err.push(chunk); });
     child.on('error', (error) => finish({ code: null, signal: null, timedOut: false, error: String(error?.message ?? error) }));
     child.on('close', (code, signal) => finish({ code, signal, timedOut: false }));
   });
@@ -396,6 +476,33 @@ function lastJsonLine(text) {
 
 const powershell = (script) => capture('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: PROBE_TIMEOUT_MS });
 
+// kill(pid, 0): ESRCH is authoritative "gone"; EPERM means the pid exists.
+export function posixExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    return null;
+  }
+}
+
+// Interpret `ps -o state= -o lstart= -p PID`. Only kill(0) can declare a pid
+// gone; a ps that was signalled, timed out or failed while the pid still
+// exists is 'unknown', never 'gone'.
+export function interpretDarwinPs(result, existsAfter) {
+  if (existsAfter === false) return { state: 'gone' };
+  const line = String(result?.stdout ?? '').trim();
+  if (!result?.timedOut && !result?.error && result?.code === 0 && line) {
+    const match = /^(\S+)\s+(.+)$/.exec(line);
+    if (!match) return { state: 'unknown', reason: `unparsed ps output: ${line}` };
+    const startStamp = `darwin:${match[2].replace(/\s+/g, ' ')}`;
+    return match[1].includes('Z') ? { state: 'zombie', startStamp } : { state: 'alive', startStamp };
+  }
+  return { state: 'unknown', reason: `ps ended code=${result?.code ?? null} signal=${result?.signal ?? null} timedOut=${Boolean(result?.timedOut)} while the pid ${existsAfter ? 'still exists' : 'state is unknown'}` };
+}
+
 // One process: state alive | zombie | gone | unknown, plus start stamp and argv.
 export async function probeProcess(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return { state: 'gone', reason: 'invalid pid' };
@@ -420,22 +527,18 @@ export async function probeProcess(pid) {
       `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}";`,
       "if ($null -eq $p) { 'null' } else { [ordered]@{ pid = [int]$p.ProcessId; ppid = [int]$p.ParentProcessId; exe = [string]$p.ExecutablePath; cmd = [string]$p.CommandLine; created = $p.CreationDate.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress }",
     ].join('\n'));
-    if (result.timedOut || result.error) return { state: 'unknown', reason: result.error ?? 'process probe timed out' };
+    if (result.timedOut || result.error || result.code !== 0) return { state: 'unknown', reason: result.error ?? `process probe ended code=${result.code}` };
     const parsed = lastJsonLine(result.stdout);
     if (!parsed.ok) return { state: 'unknown', reason: 'unparsed process probe output' };
     if (parsed.value === null) return { state: 'gone' };
     return { state: 'alive', startStamp: `win32:${parsed.value.created}`, ppid: parsed.value.ppid, command: parsed.value.cmd || null, executable: parsed.value.exe || null };
   }
+  if (posixExists(pid) === false) return { state: 'gone' };
   const st = await capture('ps', ['-o', 'state=', '-o', 'lstart=', '-p', String(pid)], { timeoutMs: PROBE_TIMEOUT_MS });
-  if (st.timedOut || st.error) return { state: 'unknown', reason: st.error ?? 'ps timed out' };
-  const line = st.stdout.trim();
-  if (st.code !== 0 || !line) return { state: 'gone' };
-  const match = /^(\S+)\s+(.+)$/.exec(line);
-  if (!match) return { state: 'unknown', reason: `unparsed ps output: ${line}` };
-  const startStamp = `darwin:${match[2].replace(/\s+/g, ' ')}`;
-  if (match[1].includes('Z')) return { state: 'zombie', startStamp };
+  const verdict = interpretDarwinPs(st, posixExists(pid));
+  if (verdict.state !== 'alive') return verdict;
   const cmd = await capture('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { timeoutMs: PROBE_TIMEOUT_MS });
-  return { state: 'alive', startStamp, command: cmd.stdout.trim() || null };
+  return { ...verdict, command: cmd.code === 0 ? cmd.stdout.trim() || null : null };
 }
 
 // One process-table read: [{ pid, ppid, pgid, state, startStamp }] or null when unobservable.
@@ -451,7 +554,7 @@ export async function listProcesses() {
         rows.push({ pid: Number(name), ppid: stat.ppid, pgid: stat.pgid, state: stat.state === 'Z' ? 'zombie' : 'alive', startStamp: stat.startStamp });
       } catch { /* exited during the scan */ }
     }
-    return rows;
+    return rows.length > 0 ? rows : null;
   }
   if (PLATFORM === 'win32') {
     const result = await powershell([
@@ -459,11 +562,12 @@ export async function listProcesses() {
       '$rows = @(Get-CimInstance Win32_Process | ForEach-Object { [ordered]@{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId; created = [string]$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString(\'o\') }) } });',
       'ConvertTo-Json -InputObject $rows -Compress -Depth 3',
     ].join('\n'));
-    if (result.timedOut || result.error) return null;
+    if (result.timedOut || result.error || result.code !== 0) return null;
     const parsed = lastJsonLine(result.stdout);
     if (!parsed.ok) return null;
-    const rows = Array.isArray(parsed.value) ? parsed.value : [parsed.value];
-    return rows.filter(Boolean).map((row) => ({ pid: Number(row.pid), ppid: Number(row.ppid), pgid: null, state: 'alive', startStamp: row.created ? `win32:${row.created}` : null }));
+    const rows = (Array.isArray(parsed.value) ? parsed.value : [parsed.value]).filter(Boolean)
+      .map((row) => ({ pid: Number(row.pid), ppid: Number(row.ppid), pgid: null, state: 'alive', startStamp: row.created ? `win32:${row.created}` : null }));
+    return rows.length > 0 ? rows : null;
   }
   const result = await capture('ps', ['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'state=', '-o', 'lstart='], { timeoutMs: PROBE_TIMEOUT_MS });
   if (result.timedOut || result.error || result.code !== 0) return null;
@@ -476,29 +580,67 @@ export async function listProcesses() {
       state: match[4].includes('Z') ? 'zombie' : 'alive', startStamp: `darwin:${match[5].replace(/\s+/g, ' ')}`,
     });
   }
-  return rows;
+  return rows.length > 0 ? rows : null;
 }
 
-// Descendants by parent links from one table read, plus (POSIX) members of the
-// root's own process group. The root itself is excluded.
-export function familyOf(rows, rootPid) {
+let linuxBootMs;
+// Absolute start time (ms) of a start stamp, or null when it cannot be derived.
+export function stampEpochMs(startStamp) {
+  if (typeof startStamp !== 'string') return null;
+  const index = startStamp.indexOf(':');
+  if (index < 0) return null;
+  const kind = startStamp.slice(0, index);
+  const value = startStamp.slice(index + 1);
+  if (kind === 'linux') {
+    if (linuxBootMs === undefined) {
+      try {
+        const match = /^btime\s+(\d+)/m.exec(readFileSync('/proc/stat', 'utf8'));
+        linuxBootMs = match ? Number(match[1]) * 1000 : null;
+      } catch { linuxBootMs = null; }
+    }
+    const ticks = Number(value);
+    // USER_HZ is 100 on every Linux ABI.
+    return linuxBootMs === null || !Number.isFinite(ticks) ? null : linuxBootMs + ticks * 10;
+  }
+  if (kind === 'darwin' || kind === 'win32') {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
+// Descendants of rootPid from one table read, plus (POSIX) members of its own
+// process group; the root itself is excluded. Windows never updates a dead
+// parent's ParentProcessId, so there a row only counts as a child when it was
+// created at or after its parent (applied transitively).
+export function familyOf(rows, rootPid, { platform = PLATFORM, rootStartStamp = null } = {}) {
+  const posix = platform !== 'win32';
   const byParent = new Map();
   for (const row of rows) {
     if (!byParent.has(row.ppid)) byParent.set(row.ppid, []);
     byParent.get(row.ppid).push(row);
   }
+  const rootRow = rows.find((row) => row.pid === rootPid);
+  const epochs = new Map([[rootPid, stampEpochMs(rootRow?.startStamp ?? rootStartStamp)]]);
   const seen = new Set([rootPid]);
   const out = [];
   const queue = [rootPid];
   while (queue.length > 0) {
-    for (const row of byParent.get(queue.shift()) ?? []) {
+    const parent = queue.shift();
+    for (const row of byParent.get(parent) ?? []) {
       if (seen.has(row.pid)) continue;
+      if (!posix) {
+        const parentEpoch = epochs.get(parent);
+        const childEpoch = stampEpochMs(row.startStamp);
+        if (parentEpoch === null || parentEpoch === undefined || childEpoch === null || childEpoch < parentEpoch) continue;
+        epochs.set(row.pid, childEpoch);
+      }
       seen.add(row.pid);
       out.push(row);
       queue.push(row.pid);
     }
   }
-  if (POSIX) {
+  if (posix) {
     for (const row of rows) {
       if (row.pgid === rootPid && !seen.has(row.pid)) { seen.add(row.pid); out.push(row); }
     }
@@ -525,8 +667,9 @@ function argvVerdict(record, probe) {
   return null;
 }
 
-// match: positively the recorded process. mismatch: positively not (pid reused).
-// gone: exited (zombies count). unknown: unobservable, never signalled.
+// match: consistent with the record (see strength). mismatch: positively not
+// the recorded process. gone: exited (zombies count). unknown: unobservable.
+// Signalling across runs additionally requires sameStartStamp() below.
 export function identityVerdict(record, probe) {
   if (probe.state === 'gone' || probe.state === 'zombie') return { verdict: 'gone', reason: probe.state };
   if (probe.state !== 'alive') return { verdict: 'unknown', reason: probe.reason ?? 'process state unobservable' };
@@ -541,6 +684,18 @@ export function identityVerdict(record, probe) {
   if (argv === false) return { verdict: 'mismatch', reason: 'argv differs from the recorded launch' };
   if (argv === null && !stamps) return { verdict: 'unknown', reason: 'neither argv nor start stamp observable' };
   return { verdict: 'match', strength: stamps ? (argv ? 'start-stamp+argv' : 'start-stamp') : 'argv-only' };
+}
+
+export function sameStartStamp(record, probe) {
+  return Boolean(record.startStamp && probe.startStamp && record.startStamp === probe.startStamp);
+}
+
+// A termination receipt is ok only when the leader exited, the process table
+// was observable before signalling and (POSIX) again after exit, and every
+// recorded descendant is gone.
+export function settledOk(receipt) {
+  return receipt.exited === true && receipt.descendantsObservable === true && receipt.postExitObservable === true
+    && Array.isArray(receipt.descendants) && receipt.descendants.every((entry) => entry.finalState === 'gone');
 }
 
 // Cross-process absence check. There is no exit event for a process this runner
@@ -575,13 +730,14 @@ async function killPid(pid, signal, { group = false } = {}) {
 // SIGKILL one recorded descendant only while its start stamp still matches.
 export async function reapMember(member) {
   const record = { pid: member.pid, startStamp: member.startStamp };
-  const { verdict, reason } = identityVerdict(record, await probeProcess(member.pid));
+  const probe = await probeProcess(member.pid);
+  const { verdict, reason } = identityVerdict(record, probe);
   const entry = { pid: member.pid, startStamp: member.startStamp, initial: verdict, reason: reason ?? null, signals: [], finalState: null };
-  if (verdict === 'match') {
+  if (verdict === 'match' && sameStartStamp(record, probe)) {
     entry.signals.push(await killPid(member.pid, 'SIGKILL'));
     entry.finalState = (await awaitGone(record, MEMBER_GONE_MS)) ? 'gone' : 'alive';
   } else {
-    entry.finalState = verdict === 'unknown' ? 'unknown' : 'gone';
+    entry.finalState = verdict === 'gone' || verdict === 'mismatch' ? 'gone' : 'unknown';
   }
   return entry;
 }
@@ -699,9 +855,12 @@ export class Owned {
     try { return await work; } finally { this.pending.delete(work); }
   }
 
-  async #spawn(id, executable, args, { cwd, env = process.env, graceMs = 3_000, stdin = 'ignore', onLine } = {}) {
+  // `env` is mandatory: callers choose productEnv() or an explicit inheritance.
+  async #spawn(id, executable, args, { cwd, env, graceMs = 3_000, stdin = 'ignore', onLine } = {}) {
     if (!isAbsolute(executable)) throw new HarnessError('SPAWN_FAILED', `${id}: executable must be absolute, got ${executable}`);
+    if (!env || typeof env !== 'object') throw new HarnessError('SPAWN_FAILED', `${id}: an explicit env is required`);
     const key = `${this.runId}/proc/${safeName(id)}#${++this.counter}`;
+    const spawnedAtMs = Date.now();
     let child;
     try {
       child = spawn(executable, args, { cwd, env, detached: POSIX, stdio: [stdin, 'pipe', 'pipe'], windowsHide: true });
@@ -727,49 +886,64 @@ export class Owned {
       const error = await withDeadline(errored, 5_000, () => null);
       throw new HarnessError('SPAWN_FAILED', `${id}: ${error?.message ?? 'no pid was assigned'}`);
     }
+    // Owned from this instant: teardown sees the handle even while the probe below runs.
+    handle.record = {
+      type: 'spawn', key, runId: this.runId, id, pid: child.pid, executable, args: [...args], cwd: cwd ?? process.cwd(),
+      detached: POSIX, graceMs, spawnedAtMs, startStamp: null, runnerPid: process.pid, runnerStartStamp: this.runnerStamp,
+    };
+    this.handles.push(handle);
+    this.ledger.append(handle.record);
+    this.evidence.appendJsonl('owned.jsonl', handle.record);
     this.#pipe(handle, child.stdout, 'stdout', onLine);
     this.#pipe(handle, child.stderr, 'stderr', onLine);
     const probe = await probeProcess(child.pid);
-    handle.record = {
-      type: 'spawn', key, runId: this.runId, id, pid: child.pid, executable, args: [...args], cwd: cwd ?? process.cwd(),
-      detached: POSIX, graceMs, startStamp: probe.startStamp ?? null, runnerPid: process.pid, runnerStartStamp: this.runnerStamp,
-    };
-    this.ledger.append(handle.record);
-    this.evidence.appendJsonl('owned.jsonl', handle.record);
-    this.handles.push(handle);
+    if (probe.startStamp) {
+      handle.record.startStamp = probe.startStamp;
+      const stampRecord = { type: 'stamp', key, startStamp: probe.startStamp };
+      this.ledger.append(stampRecord);
+      this.evidence.appendJsonl('owned.jsonl', stampRecord);
+    }
     this.journal.push({ source: id, kind: 'spawned', pid: child.pid, executable, args });
     return handle;
   }
 
+  // Lines are redacted before truncation (a cut can never expose half a
+  // secret); an over-long line is truncated and the rest dropped up to the
+  // next newline. onLine receives the raw line for in-memory use only.
   #pipe(handle, stream, kind, onLine) {
     if (!stream) return;
     const logRel = `logs/${safeName(handle.id)}.${kind}.log`;
     let buffer = '';
+    let dropping = false;
     let written = 0;
     const emit = (raw) => {
-      const line = raw.length > LINE_CAP ? `${raw.slice(0, LINE_CAP)}[line truncated]` : raw;
+      const safe = redact(raw);
+      const line = safe.length > LINE_CAP ? `${safe.slice(0, LINE_CAP)}[line truncated]` : safe;
       if (written < LOG_CAP_BYTES) {
         this.evidence.appendText(logRel, `${line}\n`);
         written += line.length + 1;
         if (written >= LOG_CAP_BYTES) this.evidence.appendText(logRel, '[log capped]\n');
       }
       let json = null;
-      const trimmed = line.trim();
-      if (trimmed.startsWith('{')) { try { json = JSON.parse(trimmed); } catch { /* plain text */ } }
+      const trimmed = raw.trim();
+      if (trimmed.startsWith('{') && trimmed.length <= LINE_CAP) { try { json = JSON.parse(trimmed); } catch { /* plain text */ } }
       this.journal.push({ source: handle.id, kind, line, json, pid: handle.pid });
-      onLine?.(kind, line, json);
+      onLine?.(kind, raw, json);
     };
     stream.setEncoding('utf8');
     stream.on('data', (chunk) => {
       buffer += chunk;
       let index;
       while ((index = buffer.indexOf('\n')) >= 0) {
-        emit(buffer.slice(0, index).replace(/\r$/, ''));
+        const piece = buffer.slice(0, index).replace(/\r$/, '');
         buffer = buffer.slice(index + 1);
+        if (dropping) { dropping = false; continue; }
+        emit(piece);
       }
-      if (buffer.length > LINE_CAP * 4) { emit(buffer); buffer = ''; }
+      if (!dropping && buffer.length > LINE_CAP * 4) { emit(buffer); buffer = ''; dropping = true; }
+      if (dropping) buffer = '';
     });
-    stream.on('end', () => { if (buffer) emit(buffer); buffer = ''; });
+    stream.on('end', () => { if (buffer && !dropping) emit(buffer); buffer = ''; });
     stream.on('error', () => { /* the exit event decides */ });
   }
 
@@ -825,13 +999,9 @@ export class Owned {
 
   async #signal(handle, signal, receipt) {
     const at = new Date().toISOString();
-    if (!POSIX) {
-      receipt.signals.push({ ...(await killPid(handle.pid, signal, { group: true })), at });
-      return;
-    }
     const grouped = await killPid(handle.pid, signal, { group: true });
     receipt.signals.push({ ...grouped, at });
-    if (!grouped.error) return;
+    if (!POSIX || !grouped.error) return;
     try {
       handle.child.kill(signal);
       receipt.signals.push({ signal, target: 'leader', error: null, at });
@@ -844,8 +1014,10 @@ export class Owned {
     const receipt = {
       key: handle.key, id: handle.id, pid: handle.pid, executable: handle.record?.executable ?? null, args: handle.record?.args ?? null,
       startStamp: handle.record?.startStamp ?? null, reason, startedAt: new Date().toISOString(), identity: null, probe: null,
-      signals: [], alreadyExited: false, exited: false, exitCode: null, exitSignal: null, descendantsObservable: false, descendants: [], ok: false,
+      signals: [], alreadyExited: false, exited: false, exitCode: null, exitSignal: null,
+      descendantsObservable: false, postExitObservable: false, descendants: [], ok: false,
     };
+    const lineage = { rootStartStamp: handle.record?.startStamp ?? null };
     const before = await listProcesses();
     receipt.descendantsObservable = before !== null;
     let members = [];
@@ -853,13 +1025,13 @@ export class Owned {
       receipt.alreadyExited = true;
       receipt.identity = 'exited-before-teardown';
       // A row now holding the leader's pid is a reused pid: its group is not ours.
-      if (before && !before.some((row) => row.pid === handle.pid)) members = familyOf(before, handle.pid);
+      if (before && !before.some((row) => row.pid === handle.pid)) members = familyOf(before, handle.pid, lineage);
     } else {
       // An unreaped child cannot have had its pid reused: the handle is the identity proof.
       receipt.identity = 'child-handle';
       const probe = await probeProcess(handle.pid);
       receipt.probe = { state: probe.state, ...identityVerdict(handle.record ?? {}, probe) };
-      members = before ? familyOf(before, handle.pid) : [];
+      members = before ? familyOf(before, handle.pid, lineage) : [];
       await this.#signal(handle, 'SIGTERM', receipt);
       if (!(await this.#exitWithin(handle, handle.graceMs))) {
         await this.#signal(handle, 'SIGKILL', receipt);
@@ -869,14 +1041,17 @@ export class Owned {
     receipt.exited = handle.exitInfo !== null;
     receipt.exitCode = handle.exitInfo?.code ?? null;
     receipt.exitSignal = handle.exitInfo?.signal ?? null;
-    if (POSIX && receipt.exited) {
+    if (!POSIX) {
+      receipt.postExitObservable = receipt.descendantsObservable;
+    } else if (receipt.exited) {
       const after = await listProcesses();
+      receipt.postExitObservable = after !== null;
       if (after && !after.some((row) => row.pid === handle.pid)) {
         members = dedupeRows([...members, ...after.filter((row) => row.pgid === handle.pid)]);
       }
     }
     for (const member of members) receipt.descendants.push(await reapMember(member));
-    receipt.ok = receipt.exited && receipt.descendants.every((entry) => entry.finalState === 'gone');
+    receipt.ok = settledOk(receipt);
     receipt.finishedAt = new Date().toISOString();
     if (receipt.ok) this.ledger.append({ type: 'released', key: handle.key, reason, exited: receipt.exited });
     return receipt;
@@ -884,7 +1059,8 @@ export class Owned {
 
   async teardown(reason) {
     this.closed = true;
-    await withDeadline(Promise.allSettled([...this.pending]), 15_000, () => null);
+    // Handles are registered right after spawn(), so a spawn still probing is torn down too.
+    await withDeadline(Promise.allSettled([...this.pending]), 2 * PROBE_TIMEOUT_MS + 5_000, () => null);
     const receipts = [];
     for (const handle of [...this.handles].reverse()) {
       try {
@@ -893,29 +1069,33 @@ export class Owned {
         receipts.push({ key: handle.key, id: handle.id, pid: handle.pid, ok: false, error: errorInfo(error) });
       }
     }
+    if (this.pending.size > 0) receipts.push({ key: `${this.runId}/pending`, ok: false, error: { code: 'SPAWN_STILL_PENDING', message: `${this.pending.size} spawn(s) did not settle` } });
     return receipts.reverse();
   }
 }
 
-// Cross-run reclaim for --cleanup: identity-verified, never by name or port.
-export async function reclaimProcess(record, { ledger, force = false }) {
+// Cross-run reclaim for --cleanup: never by name or port, and never without
+// equal recorded and observed OS start stamps.
+export async function reclaimProcess(record, { ledger, forceOwner = false }) {
   const entry = {
     kind: 'process', key: record.key, runId: record.runId, id: record.id, pid: record.pid, executable: record.executable, args: record.args,
-    startStamp: record.startStamp ?? null, status: null, identity: null, killed: false, signals: [], descendants: [], ok: false,
+    startStamp: record.startStamp ?? null, status: null, identity: null, killed: false, signals: [],
+    descendantsObservable: false, postExitObservable: false, descendants: [], exited: false, ok: false,
   };
   if (record.pid === process.pid || record.pid === process.ppid) {
     entry.status = 'refused-self';
     return entry;
   }
-  if (!force && record.runnerPid) {
+  if (!forceOwner && record.runnerPid) {
     const runner = identityVerdict({ pid: record.runnerPid, startStamp: record.runnerStartStamp ?? null }, await probeProcess(record.runnerPid));
     if (runner.verdict === 'match' || runner.verdict === 'unknown') {
       entry.status = runner.verdict === 'match' ? 'owner-runner-alive' : 'owner-runner-unverifiable';
-      entry.detail = 'the run that owns this process may still be active and tears down its own resources; pass --force to override';
+      entry.detail = 'the run that owns this process may still be active and tears down its own resources; pass --force-owner to override';
       return entry;
     }
   }
-  entry.identity = identityVerdict(record, await probeProcess(record.pid));
+  const probe = await probeProcess(record.pid);
+  entry.identity = identityVerdict(record, probe);
   if (entry.identity.verdict === 'gone' || entry.identity.verdict === 'mismatch') {
     entry.status = entry.identity.verdict === 'gone' ? 'already-gone' : 'identity-mismatch';
     entry.ok = true;
@@ -926,8 +1106,24 @@ export async function reclaimProcess(record, { ledger, force = false }) {
     entry.status = 'unverifiable';
     return entry;
   }
+  if (!sameStartStamp(record, probe)) {
+    // No recorded stamp: a live process that provably started at another time
+    // is a reused pid (released, untouched); otherwise it stays unverifiable.
+    const started = stampEpochMs(probe.startStamp);
+    if (started !== null && Number.isFinite(record.spawnedAtMs) && Math.abs(started - record.spawnedAtMs) > LINEAGE_SLACK_MS) {
+      entry.status = 'identity-mismatch';
+      entry.reason = `no recorded start stamp; the live process started ${Math.round((started - record.spawnedAtMs) / 1000)}s from the recorded spawn time`;
+      entry.ok = true;
+      ledger.append({ type: 'released', key: record.key, reason: 'cleanup:identity-mismatch' });
+      return entry;
+    }
+    entry.status = 'unverifiable';
+    entry.reason = 'start stamps are not both present and equal; a process is never signalled on argv alone';
+    return entry;
+  }
   const rows = await listProcesses();
-  let members = rows ? familyOf(rows, record.pid) : [];
+  entry.descendantsObservable = rows !== null;
+  let members = rows ? familyOf(rows, record.pid, { rootStartStamp: record.startStamp }) : [];
   const group = Boolean(record.detached) || !POSIX;
   entry.killed = true;
   entry.signals.push(await killPid(record.pid, 'SIGTERM', { group }));
@@ -936,15 +1132,37 @@ export async function reclaimProcess(record, { ledger, force = false }) {
     entry.signals.push(await killPid(record.pid, 'SIGKILL', { group }));
     gone = await awaitGone(record, FORCE_EXIT_MS);
   }
-  if (POSIX && gone) {
+  entry.exited = gone;
+  if (!POSIX) {
+    entry.postExitObservable = entry.descendantsObservable;
+  } else if (gone) {
     const after = await listProcesses();
+    entry.postExitObservable = after !== null;
     if (after && !after.some((row) => row.pid === record.pid)) members = dedupeRows([...members, ...after.filter((row) => row.pgid === record.pid)]);
   }
   for (const member of members) entry.descendants.push(await reapMember(member));
   entry.status = gone ? 'terminated' : 'kill-failed';
-  entry.ok = gone && entry.descendants.every((member) => member.finalState === 'gone');
+  entry.ok = settledOk(entry);
   if (entry.ok) ledger.append({ type: 'released', key: record.key, reason: 'cleanup:terminated' });
   return entry;
+}
+
+// Before a run: refuse when an earlier, no-longer-running runner left owned
+// processes that may still be alive; they would pollute this run's census.
+export async function preflightOwnedState(configInfo) {
+  const ledger = Ledger.forDataRoot(configInfo.config.dataRoot);
+  const stale = [];
+  for (const record of ledger.open().filter((r) => r.type === 'spawn')) {
+    if (record.runnerPid) {
+      const runner = identityVerdict({ pid: record.runnerPid, startStamp: record.runnerStartStamp ?? null }, await probeProcess(record.runnerPid));
+      if (runner.verdict === 'match') continue;
+    }
+    const { verdict } = identityVerdict(record, await probeProcess(record.pid));
+    if (verdict === 'match' || verdict === 'unknown') stale.push({ key: record.key, pid: record.pid, verdict });
+  }
+  if (stale.length > 0) {
+    throw new HarnessError('STALE_OWNED_STATE', `${stale.length} owned process(es) from an earlier run may still be alive; run --cleanup with this config first`, { stale });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -980,11 +1198,16 @@ function preserveLogs(root, evidence, rel) {
   return preserved;
 }
 
-export function releaseRunRoot(ledger, record, evidence) {
-  const entry = { kind: 'path', key: record.key, label: record.label, path: record.path, status: null, preserved: [], removed: false, ok: false };
+// Removes only <configured base>/runs/<well-formed runId> exactly as recorded.
+export function releaseRunRoot(ledger, record, evidence, allowedBases) {
+  const entry = { kind: 'path', key: record.key, label: record.label ?? null, path: record.path, status: null, preserved: [], removed: false, ok: false };
+  if (!allowedBases.some((base) => typeof record.base === 'string' && norm(base) === norm(record.base))) {
+    entry.status = 'refused-outside-configured-roots';
+    return entry;
+  }
   const runsDir = join(record.base, 'runs');
-  if (!isInside(record.path, runsDir) || norm(record.path) === norm(runsDir)) {
-    entry.status = 'refused-outside-owned-runs';
+  if (!RUN_ID_PATTERN.test(String(record.runId)) || typeof record.path !== 'string' || norm(record.path) !== norm(join(runsDir, record.runId))) {
+    entry.status = 'refused-unexpected-run-path';
     return entry;
   }
   try { assertNotProduction(record.path, 'run root'); } catch (error) {
@@ -994,7 +1217,7 @@ export function releaseRunRoot(ledger, record, evidence) {
   }
   try {
     if (existsSync(record.path)) {
-      entry.preserved = preserveLogs(record.path, evidence, `logs/run-roots/${safeName(record.label)}`);
+      entry.preserved = preserveLogs(record.path, evidence, `logs/run-roots/${safeName(record.label ?? 'root')}`);
       rmSync(record.path, { recursive: true, force: true });
     }
   } catch (error) {
@@ -1009,31 +1232,36 @@ export function releaseRunRoot(ledger, record, evidence) {
 
 // ---------------------------------------------------------------------------
 // Product environment: an allowlist plus isolated Ferryx locations. Inherited
-// FERRYX_*, SLACK_* and provider variables never reach product binaries, and
-// HOME points inside the run root so no default ~/.ferryx path is reachable.
+// FERRYX_*, SLACK_*, XDG_* and provider variables never reach product binaries;
+// HOME and TMPDIR point inside the run root so no default ~/.ferryx path or
+// shared $TMPDIR/ferryx endpoint is reachable.
 
-const ENV_ALLOW = ['PATH', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TMPDIR', 'TZ',
-  'SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'ComSpec', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)'];
+const ENV_ALLOW = ['PATH', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TZ',
+  'SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'ComSpec', 'COMSPEC', 'PATHEXT', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)'];
 
 export function productEnv({ dataRun, extra = {} }) {
   const env = {};
   for (const key of ENV_ALLOW) if (process.env[key] !== undefined) env[key] = process.env[key];
   const home = join(dataRun, 'home');
+  const tmp = join(dataRun, 'tmp');
   mkdirSync(home, { recursive: true });
+  mkdirSync(tmp, { recursive: true });
   Object.assign(env, {
     HOME: home,
+    TMPDIR: tmp,
     FERRYX_DATA_DIR: join(dataRun, 'data'),
     FERRYX_RUNTIME_DIR: join(dataRun, 'runtime'),
     FERRYX_HUB_DB: join(dataRun, 'hub', 'hub.sqlite'),
     FERRYX_HUB: 'on',
     FERRYX_HUB_QUIET_HOURS: 'off',
   });
-  if (!POSIX) Object.assign(env, { USERPROFILE: home, APPDATA: join(home, 'AppData', 'Roaming'), LOCALAPPDATA: join(home, 'AppData', 'Local') });
+  if (!POSIX) Object.assign(env, { USERPROFILE: home, TEMP: tmp, TMP: tmp, APPDATA: join(home, 'AppData', 'Roaming'), LOCALAPPDATA: join(home, 'AppData', 'Local') });
   return { ...env, ...extra };
 }
 
 // ---------------------------------------------------------------------------
-// Receipts: source revision, binary and config hashes, host and runtime.
+// Receipts: source revision (including dirty content), binary and config
+// hashes, the repositories that contain the binaries, host and runtime.
 
 export function hashFile(path) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -1086,16 +1314,52 @@ export async function describeArtifact(path) {
   }
 }
 
-async function gitReceipt(dir) {
-  const rev = await capture('git', ['-C', dir, 'rev-parse', 'HEAD'], { timeoutMs: PROBE_TIMEOUT_MS });
-  if (rev.code !== 0) return { dir, rev: null, error: (rev.error ?? rev.stderr.trim()) || 'git rev-parse failed' };
-  const branch = await capture('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeoutMs: PROBE_TIMEOUT_MS });
-  const status = await capture('git', ['-C', dir, 'status', '--porcelain=v1'], { timeoutMs: PROBE_TIMEOUT_MS });
+const UNTRACKED_LIMIT = 5_000;
+
+export async function gitReceipt(dir, { full = true } = {}) {
+  const top = await capture('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { timeoutMs: PROBE_TIMEOUT_MS });
+  if (top.code !== 0) return { dir, toplevel: null, rev: null, error: (top.error ?? top.stderr.trim()) || 'not inside a git work tree' };
+  const toplevel = top.stdout.trim();
+  const rev = await capture('git', ['-C', toplevel, 'rev-parse', 'HEAD'], { timeoutMs: PROBE_TIMEOUT_MS });
+  const receipt = { dir, toplevel, rev: rev.code === 0 ? rev.stdout.trim() : null };
+  if (!full) return receipt;
+  const branch = await capture('git', ['-C', toplevel, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeoutMs: PROBE_TIMEOUT_MS });
+  const status = await capture('git', ['-C', toplevel, 'status', '--porcelain=v1'], { timeoutMs: PROBE_TIMEOUT_MS });
   const dirty = status.code === 0 ? status.stdout.split('\n').filter(Boolean) : null;
-  return {
-    dir, rev: rev.stdout.trim(), branch: branch.code === 0 ? branch.stdout.trim() : null,
-    dirtyEntries: dirty ? dirty.length : null, statusSha256: dirty ? sha256(status.stdout) : null,
-  };
+  receipt.branch = branch.code === 0 ? branch.stdout.trim() : null;
+  receipt.dirtyEntries = dirty ? dirty.length : null;
+  receipt.statusSha256 = dirty ? sha256(status.stdout) : null;
+  // Content of the dirty tree, not just its path list.
+  const diff = await capture('git', ['-C', toplevel, 'diff', '--binary', 'HEAD'], { timeoutMs: 60_000, hash: true });
+  receipt.diffSha256 = diff.code === 0 && !diff.timedOut ? diff.stdoutSha256 : null;
+  receipt.diffBytes = diff.code === 0 ? diff.stdoutBytes : null;
+  const untracked = await capture('git', ['-C', toplevel, 'ls-files', '--others', '--exclude-standard', '-z'], { timeoutMs: PROBE_TIMEOUT_MS });
+  if (untracked.code === 0) {
+    const names = untracked.stdout.split('\0').filter(Boolean).sort();
+    const hash = createHash('sha256');
+    for (const name of names.slice(0, UNTRACKED_LIMIT)) {
+      let digest;
+      try { digest = await hashFile(join(toplevel, name)); } catch (error) { digest = `unreadable:${error?.code ?? 'error'}`; }
+      hash.update(`${name}\0${digest}\n`);
+    }
+    receipt.untrackedCount = names.length;
+    receipt.untrackedTruncated = names.length > UNTRACKED_LIMIT;
+    receipt.untrackedSha256 = hash.digest('hex');
+  } else {
+    receipt.untrackedSha256 = null;
+  }
+  return receipt;
+}
+
+// Repository containing a binary (or app bundle), when it lives inside a work tree.
+async function containingRepo(path) {
+  try {
+    const real = realpathSync(path);
+    const dir = statSync(real).isDirectory() ? real : dirname(real);
+    return await gitReceipt(dir, { full: false });
+  } catch (error) {
+    return { dir: path, toplevel: null, rev: null, error: String(error?.message ?? error) };
+  }
 }
 
 export async function collectReceipts({ repoRoot, configInfo = null, scripts = [] }) {
@@ -1110,20 +1374,25 @@ export async function collectReceipts({ repoRoot, configInfo = null, scripts = [
     host: { hostname: hostname(), platform: PLATFORM, release: release(), arch: arch() },
     runner: { bun: globalThis.Bun?.version ?? process.versions?.bun ?? null, execPath: process.execPath, exec: await describeArtifact(process.execPath), scripts: scriptHashes },
     git: await gitReceipt(repoRoot),
-    project: config ? { root: config.projectRoot, exists: existsSync(config.projectRoot), git: existsSync(config.projectRoot) ? await gitReceipt(config.projectRoot) : null } : null,
+    project: config ? { root: config.projectRoot, exists: existsSync(config.projectRoot), git: existsSync(config.projectRoot) ? await gitReceipt(config.projectRoot, { full: false }) : null } : null,
     binaries: config ? {
       ferryxCli: await describeArtifact(config.ferryxCli),
       ferryxApp: await describeArtifact(config.ferryxApp),
       mhcBin: await describeArtifact(config.mhcBin),
+    } : null,
+    binaryRepos: config ? {
+      ferryxCli: await containingRepo(config.ferryxCli),
+      ferryxApp: await containingRepo(config.ferryxApp),
+      mhcBin: await containingRepo(config.mhcBin),
     } : null,
     config: configInfo ? { path: configInfo.path, sha256: configInfo.sha256, bytes: configInfo.bytes } : null,
   };
 }
 
 // ---------------------------------------------------------------------------
-// One scenario run: evidence, deadline, assertions, guaranteed teardown.
+// One scenario run: evidence, deadline, frozen assertions, guaranteed teardown.
 
-function makeContext({ name, runId, configInfo, evidence, journal, owned, signal, assertions, dataRoot, memoryRoot }) {
+function makeContext({ name, runId, configInfo, evidence, journal, owned, signal, assertions, state, dataRoot, memoryRoot }) {
   const config = configInfo.config;
   let requestSeq = 0;
   const ctx = {
@@ -1135,18 +1404,25 @@ function makeContext({ name, runId, configInfo, evidence, journal, owned, signal
       process.stdout.write(`${text}\n`);
       evidence.log(`[announce] ${text}`);
     },
+    // Frozen once the scenario settles: a late assertion is recorded, throws and fails the run.
     assert: (assertion, ok, detail = null) => {
       const entry = { name: assertion, ok: ok === true, detail };
+      if (state.frozen) {
+        state.late.push(entry);
+        evidence.log(`late assert ${assertion} after the scenario settled`);
+        throw new HarnessError('LATE_ASSERTION', `assertion ${assertion} was recorded after the scenario settled`);
+      }
       assertions.push(entry);
       evidence.log(`assert ${assertion} ${entry.ok ? 'ok' : 'FAILED'}`);
       return entry.ok;
     },
-    spawn: (id, executable, args, options = {}) => owned.spawn(id, executable, args, options),
-    run: (id, executable, args, options = {}) => owned.run(id, executable, args, { signal, ...options }),
+    productEnv: (extra = {}) => productEnv({ dataRun: dataRoot.path, extra }),
+    // Default env is productEnv(); pass `env: process.env` only to opt in to inheritance.
+    spawn: (id, executable, args, options = {}) => owned.spawn(id, executable, args, { ...options, env: options.env ?? ctx.productEnv() }),
+    run: (id, executable, args, options = {}) => owned.run(id, executable, args, { signal, ...options, env: options.env ?? ctx.productEnv() }),
     terminate: (handle, reason = 'scenario') => owned.terminate(handle, reason),
     waitFor: (label, predicate, options = {}) => journal.waitFor(label, predicate, { signal, ...options }),
     waitForPath: (target, options = {}) => waitForPath(target, { signal, ...options }),
-    productEnv: (extra = {}) => productEnv({ dataRun: dataRoot.path, extra }),
     // Production CLI surface; every call lands in requests.jsonl / responses.jsonl.
     cli: async (args, { deadlineMs = 30_000, input, label = args[0] ?? 'cli', env } = {}) => {
       const seq = ++requestSeq;
@@ -1167,7 +1443,9 @@ function makeContext({ name, runId, configInfo, evidence, journal, owned, signal
       let readiness = null;
       if (!ready) {
         if (!POSIX) throw new HarnessError('DAEMON_READINESS_UNDEFINED', 'Windows daemon readiness needs a scenario-supplied ready(ctx, handle) barrier');
-        readiness = waitForPath(join(runtimeDir, 'daemon.sock'), { deadlineMs, signal, label: 'daemon socket' });
+        const socket = join(runtimeDir, 'daemon.sock');
+        if (Buffer.byteLength(socket) > MAX_SOCKET_PATH_BYTES) throw new HarnessError('CONFIG_INVALID', `daemon socket path ${socket} exceeds ${MAX_SOCKET_PATH_BYTES} bytes`);
+        readiness = waitForPath(socket, { deadlineMs, signal, label: 'daemon socket' });
         readiness.catch(() => { /* raced below */ });
       }
       const cursor = journal.cursor();
@@ -1192,7 +1470,7 @@ function makeContext({ name, runId, configInfo, evidence, journal, owned, signal
 
 export async function runScenario({ name, scenario, configInfo, evidence, receipts, interrupts, argv }) {
   const config = configInfo.config;
-  const runId = `qa-${stamp()}-${process.pid}-${++runCounter}`;
+  const runId = newRunId();
   const startedAt = new Date().toISOString();
   const ledger = Ledger.forDataRoot(config.dataRoot);
   const journal = new Journal(evidence);
@@ -1201,6 +1479,12 @@ export async function runScenario({ name, scenario, configInfo, evidence, receip
   const controller = new AbortController();
   const forward = () => controller.abort(interrupts.signal.reason);
   if (interrupts.signal.aborted) forward(); else interrupts.signal.addEventListener('abort', forward, { once: true });
+  const faultsAtStart = interrupts.faults.length;
+  const onFault = (kind, message) => {
+    journal.push({ source: 'runner', kind: 'harness-fault', fault: kind, message });
+    if (!controller.signal.aborted) controller.abort(new HarnessError('HARNESS_ERROR', `${kind}: ${message}`));
+  };
+  interrupts.faultListeners.add(onFault);
   const deadlineMs = scenario.deadlineMs ?? DEFAULT_SCENARIO_DEADLINE_MS;
   const deadlineTimer = setTimeout(() => controller.abort(new HarnessError('DEADLINE_EXCEEDED', `scenario ${name} exceeded its ${deadlineMs}ms deadline`)), deadlineMs);
   const runInfo = { schema: SCHEMA, runId, scenario: name, task: scenario.task ?? null, summary: scenario.summary ?? null, startedAt, pid: process.pid, argv, deadlineMs };
@@ -1211,6 +1495,7 @@ export async function runScenario({ name, scenario, configInfo, evidence, receip
   evidence.log(`scenario ${name} run ${runId} started`);
 
   const assertions = [];
+  const state = { frozen: false, late: [] };
   const roots = [];
   let status;
   let error = null;
@@ -1223,7 +1508,7 @@ export async function runScenario({ name, scenario, configInfo, evidence, receip
       roots.push(dataRoot);
       const memoryRoot = claimRunRoot(ledger, runId, 'memory', config.memoryRoot);
       roots.push(memoryRoot);
-      const ctx = makeContext({ name, runId, configInfo, evidence, journal, owned, signal: controller.signal, assertions, dataRoot, memoryRoot });
+      const ctx = makeContext({ name, runId, configInfo, evidence, journal, owned, signal: controller.signal, assertions, state, dataRoot, memoryRoot });
       const work = Promise.resolve().then(() => scenario.run(ctx));
       work.catch(() => { /* raced below */ });
       const aborted = new Promise((_, rejectAbort) => {
@@ -1233,17 +1518,25 @@ export async function runScenario({ name, scenario, configInfo, evidence, receip
       aborted.catch(() => { /* raced below */ });
       await Promise.race([work, aborted]);
       if (controller.signal.aborted) throw controller.signal.reason;
+      state.frozen = true;
+      const missing = (scenario.requiredAssertions ?? []).filter((required) => !assertions.some((assertion) => assertion.name === required));
       if (assertions.length === 0) {
         status = 'FAIL';
         error = { code: 'NO_ASSERTIONS', message: 'the scenario recorded no assertions; PASS requires named assertions' };
+      } else if (!assertions.every((assertion) => assertion.ok)) {
+        status = 'FAIL';
+      } else if (missing.length > 0) {
+        status = 'FAIL';
+        error = { code: 'MISSING_ASSERTIONS', message: `required assertion(s) never recorded: ${missing.join(', ')}`, detail: missing };
       } else {
-        status = assertions.every((assertion) => assertion.ok) ? 'PASS' : 'FAIL';
+        status = 'PASS';
       }
     }
   } catch (caught) {
     error = errorInfo(caught);
     status = caught?.code === 'INTERRUPTED' ? 'INTERRUPTED' : caught?.code === 'DEADLINE_EXCEEDED' ? 'DEADLINE_EXCEEDED' : 'HARNESS_ERROR';
   } finally {
+    state.frozen = true;
     clearTimeout(deadlineTimer);
     interrupts.signal.removeEventListener('abort', forward);
   }
@@ -1253,20 +1546,33 @@ export async function runScenario({ name, scenario, configInfo, evidence, receip
   evidence.log(`scenario ${name} teardown started (status so far ${status})`);
   const cleanupStarted = new Date().toISOString();
   const processes = await owned.teardown(status === 'INTERRUPTED' ? 'interrupted' : 'teardown');
-  const paths = roots.map((record) => releaseRunRoot(ledger, record, evidence));
+  const paths = roots.map((record) => releaseRunRoot(ledger, record, evidence, [config.dataRoot, config.memoryRoot]));
+  interrupts.faultListeners.delete(onFault);
+  const faults = interrupts.faults.slice(faultsAtStart);
   const cleanup = {
     schema: SCHEMA, runId, scenario: name, ledger: ledger.file, startedAt: cleanupStarted, finishedAt: new Date().toISOString(),
-    interrupts: interrupts.count, interruptsDuringCleanup: interrupts.duringCleanup, received: interrupts.received,
+    interrupts: interrupts.count, interruptsDuringCleanup: interrupts.duringCleanup, received: interrupts.received, faults,
     processes, paths, ok: processes.every((entry) => entry.ok) && paths.every((entry) => entry.ok),
   };
   evidence.writeJson('cleanup.json', cleanup);
+
+  // Final status is recomputed from everything observed, never only from the settle-time view.
+  if (faults.length > 0 && status !== 'INTERRUPTED') {
+    status = 'HARNESS_ERROR';
+    if (error?.code !== 'HARNESS_ERROR') error = { code: 'HARNESS_ERROR', message: `uncaught fault during the run: ${faults[0].kind}`, detail: faults };
+  }
+  if (status === 'PASS' && state.late.length > 0) {
+    status = 'FAIL';
+    error = { code: 'LATE_ASSERTION', message: 'assertions were recorded after the scenario settled', detail: state.late };
+  }
+  if (status === 'PASS' && !assertions.every((assertion) => assertion.ok)) status = 'FAIL';
   if (!cleanup.ok && status === 'PASS') status = 'CLEANUP_FAILED';
   if (interrupts.count > 0) status = 'INTERRUPTED';
   const exitCode = STATUS_EXIT[status];
   evidence.writeJson('assertions.json', {
     schema: SCHEMA, scenario: name, runId, status, exitCode,
-    passRule: 'PASS only when at least one assertion is recorded, every assertion is ok, no error occurred and cleanup.json is ok',
-    assertions, error, cleanupOk: cleanup.ok,
+    passRule: 'PASS only when at least one assertion is recorded, every assertion (and every required one) is ok, none arrived late, no error or uncaught fault occurred and cleanup.json is ok',
+    assertions, lateAssertions: state.late, requiredAssertions: scenario.requiredAssertions ?? [], error, cleanupOk: cleanup.ok,
   });
   evidence.writeJson('run.json', { ...runInfo, finishedAt: new Date().toISOString(), status, exitCode });
   evidence.log(`scenario ${name} ${status} exit=${exitCode}`);
@@ -1274,25 +1580,27 @@ export async function runScenario({ name, scenario, configInfo, evidence, receip
   return { name, runId, status, exitCode };
 }
 
-export async function cleanupMode({ configInfo, evidence, interrupts, force }) {
+export async function cleanupMode({ configInfo, evidence, interrupts, forceOwner = false }) {
   interrupts.phase = 'cleanup';
   const startedAt = new Date().toISOString();
-  const ledger = Ledger.forDataRoot(configInfo.config.dataRoot);
+  const { config } = configInfo;
+  const ledger = Ledger.forDataRoot(config.dataRoot);
   const { invalidLines } = ledger.read();
   const open = ledger.open();
   const entries = [];
   for (const record of open.filter((r) => r.type === 'spawn')) {
-    try { entries.push(await reclaimProcess(record, { ledger, force })); } catch (error) {
+    try { entries.push(await reclaimProcess(record, { ledger, forceOwner })); } catch (error) {
       entries.push({ kind: 'process', key: record.key, pid: record.pid, status: 'error', ok: false, error: errorInfo(error) });
     }
   }
-  for (const record of open.filter((r) => r.type === 'path')) entries.push(releaseRunRoot(ledger, record, evidence));
+  for (const record of open.filter((r) => r.type === 'path')) entries.push(releaseRunRoot(ledger, record, evidence, [config.dataRoot, config.memoryRoot]));
   const ok = entries.every((entry) => entry.ok);
   evidence.writeJson('cleanup.json', {
     schema: SCHEMA, mode: 'cleanup', ledger: ledger.file, invalidLedgerLines: invalidLines, startedAt, finishedAt: new Date().toISOString(),
-    interrupts: interrupts.count, interruptsDuringCleanup: interrupts.duringCleanup, received: interrupts.received, force, ok, entries,
+    interrupts: interrupts.count, interruptsDuringCleanup: interrupts.duringCleanup, received: interrupts.received, faults: interrupts.faults,
+    forceOwner, ok, entries,
   });
   evidence.log(`cleanup ${ok ? 'ok' : 'INCOMPLETE'} entries=${entries.length}`);
-  if (!ok) return EXIT.CLEANUP;
+  if (!ok || interrupts.faults.length > 0) return EXIT.CLEANUP;
   return interrupts.count > 0 ? EXIT.INTERRUPTED : EXIT.PASS;
 }

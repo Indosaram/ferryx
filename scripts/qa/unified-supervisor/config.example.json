@@ -4,9 +4,9 @@
   "ferryxCli": "/home/indo/code/ferryx-wt/.target/debug/ferryx-cli",
   "ferryxApp": "/home/indo/code/ferryx-wt/.target/debug/ferryx",
   "mhcBin": "/home/indo/code/mhc-wt/unified-supervisor-20261027/target/debug/mhc",
-  "dataRoot": "/home/indo/code/ferryx-wt/.qa-state/unified-supervisor-20261027/data",
-  "memoryRoot": "/home/indo/code/ferryx-wt/.qa-state/unified-supervisor-20261027/memory",
-  "projectRoot": "/home/indo/code/ferryx-wt/.qa-state/unified-supervisor-20261027/project",
+  "dataRoot": "/home/indo/code/.usqa/data",
+  "memoryRoot": "/home/indo/code/.usqa/memory",
+  "projectRoot": "/home/indo/code/.usqa/project",
   "pairedHostId": "maho-mac",
   "ownerPrincipal": "qa-owner",
   "slackChannel": null
