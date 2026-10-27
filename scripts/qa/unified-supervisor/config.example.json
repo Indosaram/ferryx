@@ -1,6 +1,6 @@
 {
   "$schema": "./config.schema.json",
-  "$comment": "Example for omarchy. Task 1 writes the real .qa/unified-supervisor.json on each remote host from discovered binaries/ports/host ids with apply_patch. Every path must be absolute and task-owned; production roots such as ~/.ferryx or any hub.sqlite are refused. slackChannel stays null until a QA channel is approved in the execution session.",
+  "$comment": "Example for omarchy. Task 1 writes the real .qa/unified-supervisor.json on each remote host from discovered binaries/ports/host ids with apply_patch. Every path must be absolute and task-owned; production roots such as ~/.ferryx or any hub.sqlite are refused. slackChannel stays null until a QA channel is approved in the execution session. The admission scenario needs no extra field: it builds its fixture git project, hub port (FERRYX_HUB_TRACKER_ADDR on a free loopback port), workspace and POSIX worker shell inside the run root; git must be on PATH.",
   "ferryxCli": "/home/indo/code/ferryx-wt/.target/debug/ferryx-cli",
   "ferryxApp": "/home/indo/code/ferryx-wt/.target/debug/ferryx",
   "mhcBin": "/home/indo/code/mhc-wt/unified-supervisor-20261027/target/debug/mhc",

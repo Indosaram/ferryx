@@ -1,6 +1,11 @@
 //! `ferryx-cli supervisor goal ...`: show or steer one lane's goal contract through the running
 //! daemon. Connect-only like `ferryx-cli agents`: never spawns, upgrades or retries, and prints one
 //! JSON value. Exit codes follow `agent_control::exit_code_for` (REQUEST_CONFLICT is 4).
+//!
+//! `ferryx-cli supervisor setup ...` sets up this installation's supervisor identity, one project
+//! and its mapping on one host ([`ferryx_hub::supervisor::provision_owner`]). It writes the hub
+//! database the same way `ferryx-cli mcp` opens it, needs no running daemon and prints one JSON
+//! value. A conflicting set-up (SETUP_CONFLICT) exits 4 and writes nothing.
 
 use serde_json::Value;
 
@@ -10,6 +15,117 @@ use ferryx_hub::goals::contract::RequirementSpec;
 use ferryx_hub::goals::GoalMode;
 
 pub const SUPERVISOR_USAGE: &str = "usage: ferryx-cli supervisor goal set <lane> (--requirement <id>|<text>|<verifier>)... [--requirements-json <json>] [--mode <off|supervised|full>] [--turn-limit <n>] [--json]\n       ferryx-cli supervisor goal show <lane> [--json]\n       ferryx-cli supervisor goal mode <lane> <off|supervised|full> [--json]\n       ferryx-cli supervisor goal approve <lane> [--json]\n       ferryx-cli supervisor goal discard <lane> [--json]\n       ferryx-cli supervisor goal accept-revision <id> [--json]\n       ferryx-cli supervisor goal reject-revision <id> [--json]";
+
+pub const SETUP_USAGE: &str = "usage: ferryx-cli supervisor setup --owner <principal> --project <name> --repo-identity <id> --host <host-id> --git-common-dir <absolute dir> [--json]";
+
+/// The arguments of `ferryx-cli supervisor setup`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupArgs {
+    pub owner: String,
+    pub project: String,
+    pub repo_identity: String,
+    pub host: String,
+    pub git_common_dir: String,
+}
+
+/// Parse `ferryx-cli supervisor setup ...`. Every flag is required once; nothing else is accepted.
+pub fn parse_setup_cli(args: &[String]) -> Result<SetupArgs, UsageError> {
+    if args.get(1).map(String::as_str) != Some("supervisor") || args.get(2).map(String::as_str) != Some("setup") {
+        return Err(UsageError(SETUP_USAGE.into()));
+    }
+    let mut rest: Vec<String> = args.iter().skip(3).filter(|arg| *arg != "--json").cloned().collect();
+    let mut flag = |name: &str| -> Result<String, UsageError> {
+        match take_value(&mut rest, name)? {
+            Some(value) if !value.trim().is_empty() && !value.starts_with("--") => Ok(value),
+            _ => Err(UsageError(format!("{name} is required\n{SETUP_USAGE}"))),
+        }
+    };
+    let parsed = SetupArgs {
+        owner: flag("--owner")?,
+        project: flag("--project")?,
+        repo_identity: flag("--repo-identity")?,
+        host: flag("--host")?,
+        git_common_dir: flag("--git-common-dir")?,
+    };
+    if let Some(extra) = rest.first() {
+        return Err(UsageError(format!("unexpected argument {extra}\n{SETUP_USAGE}")));
+    }
+    if !std::path::Path::new(&parsed.git_common_dir).is_absolute() {
+        return Err(UsageError("--git-common-dir must be an absolute path".into()));
+    }
+    Ok(parsed)
+}
+
+/// Exit code of a set-up error code: a conflict is a refusal (4), a bad argument is invalid (2).
+fn setup_exit_code(code: &str) -> i32 {
+    match code {
+        ferryx_hub::supervisor::SETUP_CONFLICT => crate::agent_control::EXIT_REFUSED,
+        other => crate::agent_control::exit_code_for(other),
+    }
+}
+
+async fn run_setup(setup: SetupArgs) -> (Value, i32) {
+    // The same database `ferryx-cli mcp` and the daemon's hub open: the config file path wins,
+    // then FERRYX_HUB_DB, then the default.
+    let config = match ferryx_hub::HubConfig::load() {
+        Ok(config) => config,
+        Err(error) => return failure("INVALID_REQUEST", &format!("hub config: {error}")),
+    };
+    let path = config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let pool = match ferryx_hub::storage::connect(&path).await {
+        Ok(pool) => pool,
+        Err(error) => return failure("STORAGE", &error.to_string()),
+    };
+    let provisioned = ferryx_hub::supervisor::provision_owner(
+        &pool,
+        &setup.owner,
+        &setup.project,
+        &setup.repo_identity,
+        &setup.host,
+        &setup.git_common_dir,
+    )
+    .await;
+    pool.close().await;
+    match provisioned {
+        Ok((identity, project, host)) => (
+            serde_json::json!({
+                "ok": true,
+                "supervisorId": identity.supervisor_id,
+                "ownerPrincipal": identity.owner_principal,
+                "projectId": project.project_id,
+                "projectName": project.name,
+                "repoIdentity": project.repo_identity,
+                "hostId": host.host_id,
+                "gitCommonDir": host.git_common_dir,
+            }),
+            EXIT_OK,
+        ),
+        Err(error) => {
+            let code = error.code();
+            let (value, _) = failure(code, &error.to_string());
+            (value, setup_exit_code(code))
+        }
+    }
+}
+
+/// Run `ferryx-cli supervisor setup ...`: print one JSON value on stdout and return the exit code.
+fn run_setup_cli(args: &[String]) -> i32 {
+    let (value, code) = match parse_setup_cli(args) {
+        Err(UsageError(message)) => {
+            let (value, _) = failure("INVALID_REQUEST", &message);
+            (value, EXIT_INVALID)
+        }
+        Ok(setup) => match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime.block_on(run_setup(setup)),
+            Err(error) => failure("INTERNAL", &error.to_string()),
+        },
+    };
+    println!("{value}");
+    code
+}
 
 /// How long one goal action may take: an approve waits for the pane to start the turn.
 const GOAL_CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
@@ -221,6 +337,9 @@ pub async fn request_goal(action: SupervisorGoalAction) -> (Value, i32) {
 
 /// Run `ferryx-cli supervisor ...`: print one JSON value on stdout and return the exit code.
 pub fn run_supervisor_cli(args: &[String]) -> i32 {
+    if args.get(2).map(String::as_str) == Some("setup") {
+        return run_setup_cli(args);
+    }
     let (value, code) = match parse_supervisor_cli(args) {
         Err(UsageError(message)) => {
             let (value, _) = failure("INVALID_REQUEST", &message);
@@ -333,6 +452,41 @@ mod tests {
         ] {
             assert!(parse_supervisor_cli(&argv(words)).is_err(), "{words:?} should be refused");
         }
+    }
+
+    #[test]
+    fn the_setup_cli_needs_every_flag_once_and_an_absolute_dir() {
+        let full = [
+            "ferryx-cli", "supervisor", "setup", "--owner", "qa-owner", "--project", "qa-supervisor",
+            "--repo-identity", "qa:qa-supervisor", "--host", "local", "--git-common-dir", "/work/qa/.git", "--json",
+        ];
+        assert_eq!(
+            parse_setup_cli(&argv(&full)).unwrap(),
+            SetupArgs {
+                owner: "qa-owner".into(),
+                project: "qa-supervisor".into(),
+                repo_identity: "qa:qa-supervisor".into(),
+                host: "local".into(),
+                git_common_dir: "/work/qa/.git".into(),
+            }
+        );
+        let without = |flag: &str| -> Vec<String> {
+            let index = full.iter().position(|word| *word == flag).unwrap();
+            full.iter().enumerate().filter(|(i, _)| *i != index && *i != index + 1).map(|(_, w)| (*w).to_owned()).collect()
+        };
+        for flag in ["--owner", "--project", "--repo-identity", "--host", "--git-common-dir"] {
+            assert!(parse_setup_cli(&without(flag)).is_err(), "{flag} is required");
+        }
+        let mut twice = argv(&full);
+        twice.extend(["--host".to_owned(), "other".to_owned()]);
+        assert!(parse_setup_cli(&twice).is_err(), "a flag given twice is refused");
+        let mut extra = argv(&full);
+        extra.push("stray".into());
+        assert!(parse_setup_cli(&extra).is_err(), "an unknown argument is refused");
+        let relative: Vec<String> = full.iter().map(|w| if *w == "/work/qa/.git" { "work/.git".to_owned() } else { (*w).to_owned() }).collect();
+        assert!(parse_setup_cli(&relative).is_err(), "a relative dir is refused");
+        assert_eq!(setup_exit_code(ferryx_hub::supervisor::SETUP_CONFLICT), EXIT_REFUSED);
+        assert_eq!(setup_exit_code("INVALID_REQUEST"), EXIT_INVALID);
     }
 
     #[test]

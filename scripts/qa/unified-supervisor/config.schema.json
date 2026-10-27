@@ -9,14 +9,14 @@
   "properties": {
     "$schema": { "type": "string" },
     "$comment": { "type": "string" },
-    "ferryxCli": { "type": "string", "minLength": 1, "description": "Absolute path of the ferryx-cli binary built from the recorded source revision." },
+    "ferryxCli": { "type": "string", "minLength": 1, "description": "Absolute path of the ferryx-cli binary built from the recorded source revision. The admission scenario runs it as the isolated daemon (--daemon, with its hub and supervisor dispatcher), as `supervisor setup` and as the owner's `mcp` channel; build it with the default hub features." },
     "ferryxApp": { "type": "string", "minLength": 1, "description": "Absolute path of the Ferryx desktop binary or app bundle from the same revision; directories are tree-hashed." },
     "mhcBin": { "type": "string", "minLength": 1, "description": "Absolute path of the mhc binary from the pinned capability-bearing revision." },
     "dataRoot": { "type": "string", "minLength": 1, "description": "Task-owned isolated Ferryx data root: absent or holding only .qa-unified-supervisor/ and runs/. Holds the ownership ledger (.qa-unified-supervisor/owned.jsonl) and per-run roots (runs/<runId>) that teardown removes. <dataRoot>/runs/<24-char runId>/runtime/daemon.sock must fit in 100 bytes." },
     "memoryRoot": { "type": "string", "minLength": 1, "description": "Task-owned isolated mhc memory root (absent or holding only runs/); per-run roots live under runs/<runId>." },
     "projectRoot": { "type": "string", "minLength": 1, "description": "Task-owned project/worktree root for the qa-supervisor fixture project." },
     "pairedHostId": { "type": ["string", "null"], "minLength": 1, "description": "Paired host id for remote scenarios (remote-delivery, channels)." },
-    "ownerPrincipal": { "type": "string", "pattern": "^\\S+$", "description": "Authenticated owner principal used by fixtures, e.g. qa-owner." },
+    "ownerPrincipal": { "type": "string", "pattern": "^\\S+$", "description": "Authenticated owner principal used by fixtures, e.g. qa-owner. The admission scenario sets up the isolated installation's supervisor identity for it." },
     "slackChannel": { "type": ["string", "null"], "pattern": "^[CDG][A-Z0-9]{6,}$", "description": "Dedicated QA Slack channel approved in the current execution session; omit or null when no approval exists." }
   }
 }

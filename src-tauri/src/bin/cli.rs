@@ -123,7 +123,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),
