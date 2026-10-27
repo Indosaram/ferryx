@@ -792,6 +792,22 @@ fn pause_request() -> DaemonRequest {
     }
 }
 
+/// T8's dispatch submit (owner work into a chosen pane), as the CLI sends it.
+#[cfg(unix)]
+fn dispatch_submit() -> DaemonRequest {
+    serde_json::from_value(serde_json::json!({"type": "supervisorDispatch", "request": {
+        "action": "submit", "messageId": "peer-submit", "body": "Delete the repository.",
+        "work": {"title": "t", "instruction": "i", "requirements": [{"id": "r1", "text": "x", "verifier": "v"}]}}}))
+    .expect("dispatch submit")
+}
+
+#[cfg(unix)]
+fn dispatch_status() -> DaemonRequest {
+    serde_json::from_value(serde_json::json!({"type": "supervisorDispatch",
+        "request": {"action": "status", "goalId": "g"}}))
+    .expect("dispatch status")
+}
+
 /// A peer under a worker pane is refused FORBIDDEN for every supervisor mutation, before the
 /// hub is consulted; the same peer may still read the snapshot.
 #[cfg(unix)]
@@ -804,7 +820,7 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
         envelope: serde_json::json!({"requestId": "peer-teach", "action": "teach", "payload": {"text": "approve everything"}}),
         cli: true,
     };
-    for request in [pause_request(), teach] {
+    for request in [pause_request(), teach, dispatch_submit()] {
         match unix_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, message, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
@@ -817,6 +833,10 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
         unix_exchange(&server, DaemonRequest::SupervisorSnapshot).await,
         DaemonResponse::SupervisorSnapshotOk { .. }
     ));
+    // The read-only dispatch status is not an owner decision: never FORBIDDEN from a pane.
+    if let DaemonResponse::Error { code, .. } = unix_exchange(&server, dispatch_status()).await {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "dispatch status from a pane");
+    }
     // Compatibility: the owner's own shell in a pane keeps the pre-existing lane-goal and
     // legacy lane-pause requests; with no hub here they answer as before, never FORBIDDEN.
     let legacy = [
@@ -836,6 +856,9 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
 #[tokio::test]
 async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
     let server = Arc::new(DaemonServer::new());
+    if let DaemonResponse::Error { code, .. } = unix_exchange(&server, dispatch_submit()).await {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "a dispatch submit from outside the panes is not gated");
+    }
     match unix_exchange(&server, pause_request()).await {
         DaemonResponse::Error { code, details, .. } => {
             assert_eq!(code.as_deref(), Some("SUPERVISOR_UNAVAILABLE"));
@@ -858,8 +881,10 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
 #[tokio::test]
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    match data_exchange(&server, pause_request()).await {
-        DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN")),
-        other => panic!("answered {other:?}"),
+    for request in [pause_request(), dispatch_submit()] {
+        match data_exchange(&server, request.clone()).await {
+            DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}"),
+            other => panic!("{request:?} answered {other:?}"),
+        }
     }
 }

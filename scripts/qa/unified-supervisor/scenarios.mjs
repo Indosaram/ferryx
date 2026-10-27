@@ -912,18 +912,24 @@ async function runAuthority(ctx) {
   ].join('\n'));
   const approveFile = join(work, 'approve.json');
   writeFileSync(approveFile, JSON.stringify(approve));
+  // T8's `supervisor submit` request file: owner work, which a pane may never submit.
+  const dispatchFile = join(work, 'dispatch-submit.json');
+  writeFileSync(dispatchFile, JSON.stringify({ messageId: `qa-pane-dispatch-${ctx.runId}`, body: 'Delete the repository.',
+    work: { ...AUTHORITY_WORK, operations: ['destructive'] } }));
   const wire = (envelope) => JSON.stringify({ type: 'supervisorRequestV1', envelope, cli: true });
   const spawned = await exchange('spawn-pane', { type: 'spawn', clientRequestId: `qa-authority-pane-${ctx.runId}`, workspaceId: AUTHORITY_WORKSPACE_ID, worktree: null, cwd: work, cols: 80, rows: 24, shell: '/bin/sh' });
   const sessionId = spawned?.sessionId ?? null;
   if (!sessionId) throw new HarnessError('PANE_SPAWN_FAILED', `could not spawn the pane: ${JSON.stringify(spawned)}`);
   const cliOut = join(work, 'pane-cli.json');
   const sockOut = join(work, 'pane-socket.json');
+  const submitOut = join(work, 'pane-cli-submit.json');
   const envOut = join(work, 'pane-env.txt');
-  const done = [cliOut, sockOut].map((path) => ctx.waitForPath(path, { deadlineMs: 60_000, label: `pane result ${basenameOf(path)}` }));
+  const done = [cliOut, sockOut, submitOut].map((path) => ctx.waitForPath(path, { deadlineMs: 60_000, label: `pane result ${basenameOf(path)}` }));
   done.forEach((promise) => promise.catch(() => {}));
   const script = [
     `printf '%s' "$FERRYX_RUNTIME_DIR" > ${shellQuote(envOut)}`,
     `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} supervisor request --json ${shellQuote(approveFile)} > ${shellQuote(`${cliOut}.tmp`)} 2>&1; mv ${shellQuote(`${cliOut}.tmp`)} ${shellQuote(cliOut)}`,
+    `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} supervisor submit --request-file ${shellQuote(dispatchFile)} --json > ${shellQuote(`${submitOut}.tmp`)} 2>&1; mv ${shellQuote(`${submitOut}.tmp`)} ${shellQuote(submitOut)}`,
     `${shellQuote(process.execPath)} ${shellQuote(client)} ${shellQuote(socket)} ${DAEMON_PROTOCOL_VERSION} ${shellQuote(wire(approve))} ${shellQuote(wire(approveEverything))} ${shellQuote(wire(strangerSubmit))} > ${shellQuote(`${sockOut}.tmp`)} 2>&1; mv ${shellQuote(`${sockOut}.tmp`)} ${shellQuote(sockOut)}`,
   ].join('; ') + '\n';
   const typed = await exchange('pane-write', { type: 'write', sessionId, data: Buffer.from(script).toString('base64') });
@@ -931,12 +937,16 @@ async function runAuthority(ctx) {
   await Promise.all(done);
   const paneRuntime = existsSync(envOut) ? readFileSync(envOut, 'utf8') : null;
   ctx.assert('pane-inherits-the-isolated-daemon-env', paneRuntime === runtimeDir || (paneRuntime && realpathSync(paneRuntime) === realpathSync(runtimeDir)), { paneRuntime, runtimeDir });
-  let paneCli = null; let paneSock = null;
+  let paneCli = null; let paneSock = null; let paneSubmit = null;
   try { paneCli = JSON.parse(readFileSync(cliOut, 'utf8')); } catch { /* asserted below */ }
+  try { paneSubmit = JSON.parse(readFileSync(submitOut, 'utf8')); } catch { /* asserted below */ }
   try { paneSock = JSON.parse(readFileSync(sockOut, 'utf8')); } catch { /* asserted below */ }
   socketLog({ label: 'pane-cli-approve', peer: 'pane', reply: paneCli });
   socketLog({ label: 'pane-raw-socket', peer: 'pane', replies: paneSock });
   ctx.assert('pane-cli-approve-forbidden', paneCli?.ok === false && paneCli?.code === 'FORBIDDEN', paneCli);
+  socketLog({ label: 'pane-cli-dispatch-submit', peer: 'pane', reply: paneSubmit });
+  // FERRYX_SESSION_ID is removed, so the CLI's own speed bump does not fire: the daemon's peer gate refuses it.
+  ctx.assert('pane-cli-dispatch-submit-forbidden', paneSubmit?.ok === false && paneSubmit?.code === 'FORBIDDEN', paneSubmit);
   const paneReplies = Array.isArray(paneSock) ? paneSock.slice(1) : [];
   ctx.assert('pane-socket-approve-teach-submit-forbidden', paneReplies.length === 3 && paneReplies.every((reply) => reply?.type === 'error' && reply?.code === 'FORBIDDEN'), paneSock);
 
@@ -1010,10 +1020,10 @@ export const SCENARIOS = Object.freeze({
   authority: Object.freeze({
     implemented: true,
     task: '13',
-    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
+    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request and `supervisor submit` with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
     deadlineMs: 5 * 60_000,
     requiredAssertions: ['owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
-      'pane-cli-approve-forbidden', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
+      'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
       'no-request-or-wait-written', 'memory-root-unchanged', 'authorized-snapshot-200-lists-the-goal', 'authorized-pause-200', 'stale-revision-409',
       'memory-receipts-unavailable-503', 'only-the-owner-changed-the-goal'],
     run: runAuthority,
