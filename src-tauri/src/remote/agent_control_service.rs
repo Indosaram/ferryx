@@ -1301,6 +1301,7 @@ mod tests {
             Ok(Json(SendBody {
                 text: "echo hi".into(),
                 request_id: Some(request_id.into()),
+                observe_ms: None,
             }))
         };
 
