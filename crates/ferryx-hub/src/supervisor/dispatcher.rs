@@ -1,0 +1,590 @@
+//! The supervisor's initial dispatcher. It runs only inside the daemon's hub, where the
+//! observer that confirms a turn start lives. The `ferryx-cli mcp` process admits work but
+//! never transmits.
+//!
+//! It acts only on committed ready intents ([`ready_dispatches`]). For each one it:
+//! 1. checks the grant before claiming;
+//! 2. claims the intent transactionally ([`claim_dispatch`]);
+//! 3. launches and attaches the worker pane ([`attach_session`], never `lanes.omo_thread_id`);
+//! 4. re-checks the grant;
+//! 5. confirms the claim ([`confirm_claim_before_transmit`]) exactly once and transmits the
+//!    stable request id once, immediately after `Ok`, with no other await in between;
+//! 6. records each receipt as a separate fact.
+//!
+//! Every claim gets exactly one confirm call. On a hold before transmission, that call
+//! releases the claim. Otherwise it is the final check before the transmit, and nothing
+//! confirms again after the transmit. A released claim is never transmitted. A claim left
+//! behind by a dispatcher that stopped (crash, `hub stop`) cannot be proven untransmitted, so
+//! [`Dispatcher::run`] first calls [`reconcile_claims_after_restart`], which holds it
+//! `delivery_uncertain`. It is resent only after the owner's
+//! [`super::resolve_uncertain_delivery`].
+//! The dispatcher never advances an execution generation: rebinding a worker is the
+//! reattach policy's job, not the first dispatch's.
+//!
+//! Wake: [`Dispatcher::run`] drains at start, which is the startup drain. It then waits on a
+//! [`Notify`] that it subscribes to before every drain, so a wake fired during a drain is
+//! never lost. Admissions inside the daemon call [`poke`]. Admissions committed by another
+//! process reach it through the durable ready intent and the bounded [`DISPATCH_RESCAN`].
+//! That rescan is a database query, never a model call.
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use sqlx::SqlitePool;
+use tokio::sync::{mpsc, Notify};
+
+use super::{
+    attach_session, claim_dispatch, confirm_claim_before_transmit, execution_binding_of, goal_of,
+    identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt,
+    transition_goal, Dispatch, ExecutionBinding, ExecutionKind, Receipt, RunState,
+    SupervisorError, SupervisorGoal,
+};
+use crate::agent_control::{AgentControl, TaskLauncher};
+use crate::goals::types::{GoalMode, SendOutcome};
+use crate::lanes::state::LaneStatus;
+
+/// How often the dispatcher rereads durable ready intents when nothing wakes it: the path by
+/// which an admission committed in another process is picked up.
+pub const DISPATCH_RESCAN: Duration = Duration::from_secs(5);
+
+/// Most ready intents one drain considers.
+const DRAIN_LIMIT: u32 = 256;
+
+/// Hold codes (`state_detail` prefixes) the dispatcher writes.
+pub const MHC_WORKER_UNAVAILABLE: &str = "MHC_WORKER_UNAVAILABLE";
+pub const REMOTE_LAUNCH_UNAVAILABLE: &str = "REMOTE_LAUNCH_UNAVAILABLE";
+pub const GRANT_REVOKED: &str = "GRANT_REVOKED";
+pub const OWNER_APPROVAL_REQUIRED: &str = "OWNER_APPROVAL_REQUIRED";
+pub const TURN_LIMIT: &str = "TURN_LIMIT";
+pub const LAUNCH_FAILED: &str = "LAUNCH_FAILED";
+pub const SEND_REFUSED: &str = "SEND_REFUSED";
+pub const LANE_PAUSED: &str = "LANE_PAUSED";
+
+/// The daemon's dispatcher wake, shared by every in-process admission.
+pub fn dispatch_wake() -> Arc<Notify> {
+    static WAKE: OnceLock<Arc<Notify>> = OnceLock::new();
+    Arc::clone(WAKE.get_or_init(|| Arc::new(Notify::new())))
+}
+
+/// Wakes this process's dispatcher. In a process without one (`ferryx-cli mcp`) it does
+/// nothing; the daemon's rescan finds the durable intent instead.
+pub fn poke() {
+    dispatch_wake().notify_one();
+}
+
+/// What one drain did with one ready intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchResult {
+    /// Transmitted once; `outcome` is what the transport confirmed.
+    Transmitted {
+        request_id: String,
+        outcome: SendOutcome,
+    },
+    /// Not transmitted: the goal was held (before or after claiming) for the reason given.
+    Held {
+        request_id: String,
+        state: RunState,
+        detail: String,
+    },
+    /// Claimed, then released before transmission because a hold, correction or generation
+    /// change landed first (`SUPERSEDED`; the dispatch is `released`).
+    Released {
+        request_id: String,
+        code: String,
+        why: String,
+    },
+    /// Not eligible right now (lost a race, paused lane). Nothing changed.
+    Skipped { request_id: String, code: String },
+}
+
+fn skipped(request_id: &str, code: &str) -> DispatchResult {
+    DispatchResult::Skipped {
+        request_id: request_id.to_owned(),
+        code: code.to_owned(),
+    }
+}
+
+fn released(request_id: &str, error: &SupervisorError) -> DispatchResult {
+    DispatchResult::Released {
+        request_id: request_id.to_owned(),
+        code: error.code().to_owned(),
+        why: error.to_string(),
+    }
+}
+
+/// A launched and attached worker pane, or the result of holding the goal instead.
+enum Launch {
+    Session(String),
+    Held(DispatchResult),
+}
+
+pub struct Dispatcher {
+    pool: SqlitePool,
+    control: Arc<dyn AgentControl>,
+    launcher: Arc<dyn TaskLauncher>,
+    /// The host id this dispatcher can launch panes on (`launch_pane` has no host argument).
+    local_host_id: String,
+    rescan: Duration,
+    /// Told how many intents each drain handled, after the drain's wake subscription.
+    drained: Option<mpsc::UnboundedSender<usize>>,
+}
+
+impl Dispatcher {
+    pub fn new(
+        pool: SqlitePool,
+        control: Arc<dyn AgentControl>,
+        launcher: Arc<dyn TaskLauncher>,
+        local_host_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            pool,
+            control,
+            launcher,
+            local_host_id: local_host_id.into(),
+            rescan: DISPATCH_RESCAN,
+            drained: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_rescan(mut self, rescan: Duration) -> Self {
+        self.rescan = rescan;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_drain_probe(mut self, probe: mpsc::UnboundedSender<usize>) -> Self {
+        self.drained = Some(probe);
+        self
+    }
+
+    /// Holds claims left by a dispatcher that stopped, then drains forever: at start, on every
+    /// wake and on each rescan. Started once per hub generation, after the previous
+    /// generation's tasks were aborted, so no other dispatcher of this hub is running.
+    pub async fn run(self, wake: Arc<Notify>) {
+        match reconcile_claims_after_restart(&self.pool).await {
+            Ok(held) if held.is_empty() => {}
+            Ok(held) => tracing::warn!(
+                held = held.len(),
+                "unconfirmed supervisor claims held as delivery_uncertain"
+            ),
+            Err(error) => tracing::warn!(%error, "supervisor claims were not reconciled at start"),
+        }
+        loop {
+            let notified = wake.notified();
+            tokio::pin!(notified);
+            // Subscribe before draining: a wake fired while the drain runs is kept, not lost.
+            notified.as_mut().enable();
+            let handled = self.drain().await.len();
+            if let Some(probe) = &self.drained {
+                let _ = probe.send(handled);
+            }
+            tokio::select! {
+                () = &mut notified => {}
+                () = tokio::time::sleep(self.rescan) => {}
+            }
+        }
+    }
+
+    /// One pass over the committed ready intents, oldest first. Safe to run concurrently with
+    /// another dispatcher: the claim lets exactly one of them transmit.
+    pub async fn drain(&self) -> Vec<DispatchResult> {
+        let ready = match ready_dispatches(&self.pool, DRAIN_LIMIT).await {
+            Ok(ready) => ready,
+            Err(error) => {
+                tracing::warn!(%error, "ready supervisor dispatches were not read");
+                return Vec::new();
+            }
+        };
+        let mut results = Vec::with_capacity(ready.len());
+        for dispatch in &ready {
+            match self.dispatch_one(dispatch).await {
+                Ok(result) => results.push(result),
+                Err(error) => {
+                    tracing::warn!(%error, request_id = %dispatch.request_id, "supervisor dispatch failed");
+                    results.push(skipped(&dispatch.request_id, error.code()));
+                }
+            }
+        }
+        results
+    }
+
+    async fn dispatch_one(&self, dispatch: &Dispatch) -> Result<DispatchResult, SupervisorError> {
+        let request_id = dispatch.request_id.as_str();
+        let Some(goal) = goal_of(&self.pool, &dispatch.goal_id).await? else {
+            return Ok(skipped(request_id, "NOT_FOUND"));
+        };
+        if goal.run_state != RunState::Ready || goal.revision != dispatch.goal_revision {
+            return Ok(skipped(request_id, "REVISION_CONFLICT"));
+        }
+        let Some(binding) = execution_binding_of(&self.pool, &goal.goal_id).await? else {
+            return Ok(skipped(request_id, "NOT_FOUND"));
+        };
+        if let Some((to, detail)) = self.grant_hold(&goal, &binding).await? {
+            return match transition_goal(
+                &self.pool,
+                &goal.goal_id,
+                goal.revision,
+                RunState::Ready,
+                to,
+                Some(&detail),
+            )
+            .await
+            {
+                Ok(_) => Ok(DispatchResult::Held {
+                    request_id: request_id.to_owned(),
+                    state: to,
+                    detail,
+                }),
+                Err(SupervisorError::Sql(error)) => Err(SupervisorError::Sql(error)),
+                Err(error) => Ok(skipped(request_id, error.code())),
+            };
+        }
+        if self.lane_paused(&goal).await {
+            return Ok(skipped(request_id, LANE_PAUSED));
+        }
+        let claimed = match claim_dispatch(
+            &self.pool,
+            request_id,
+            goal.revision,
+            binding.generation,
+        )
+        .await
+        {
+            Ok(claimed) => claimed,
+            Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+            Err(error) => return Ok(skipped(request_id, error.code())),
+        };
+
+        // From here the claim is ours: every exit makes exactly one confirm call, which either
+        // releases the claim (hold) or clears the transmit that follows it.
+        let session = match binding.provider_session_id.clone() {
+            Some(session) => session,
+            None => match self.launch(&goal, &claimed).await? {
+                Launch::Session(session) => session,
+                Launch::Held(result) => return Ok(result),
+            },
+        };
+        if self.lane_paused(&goal).await {
+            return self
+                .hold_claimed(
+                    &claimed,
+                    RunState::Paused,
+                    format!("{LANE_PAUSED}: the owner paused lane {}", goal.lane_key),
+                )
+                .await;
+        }
+        let Some(binding) = execution_binding_of(&self.pool, &goal.goal_id).await? else {
+            return self
+                .hold_claimed(&claimed, RunState::Degraded, "the execution binding disappeared".into())
+                .await;
+        };
+        if let Some((to, detail)) = self.grant_hold(&goal, &binding).await? {
+            return self.hold_claimed(&claimed, to, detail).await;
+        }
+        // The last check; the transmit follows with no other await in between.
+        let host = (binding.host_id != self.local_host_id).then_some(binding.host_id.as_str());
+        let sent = match confirm_claim_before_transmit(&self.pool, request_id).await {
+            Ok(sent) => sent,
+            Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+            Err(error) => return Ok(released(request_id, &error)),
+        };
+        let outcome = self
+            .control
+            .send_confirmed(host, &session, &sent.instruction, &sent.request_id)
+            .await;
+        self.settle_transmission(&goal, &sent, &session, &outcome).await;
+        Ok(DispatchResult::Transmitted {
+            request_id: request_id.to_owned(),
+            outcome,
+        })
+    }
+
+    /// Why the goal must not dispatch now, checked against durable state: the worker kind and
+    /// host this dispatcher can serve, the owner's identity, the project's host mapping, the
+    /// goal mode (only `full` continues without the owner) and the turn budget.
+    async fn grant_hold(
+        &self,
+        goal: &SupervisorGoal,
+        binding: &ExecutionBinding,
+    ) -> Result<Option<(RunState, String)>, SupervisorError> {
+        if binding.kind == ExecutionKind::Mhc {
+            return Ok(Some((
+                RunState::Degraded,
+                format!("{MHC_WORKER_UNAVAILABLE}: no native mhc worker adapter is wired to this dispatcher"),
+            )));
+        }
+        if binding.host_id != self.local_host_id && binding.provider_session_id.is_none() {
+            return Ok(Some((
+                RunState::Degraded,
+                format!(
+                    "{REMOTE_LAUNCH_UNAVAILABLE}: a worker cannot be launched on host {} from here",
+                    binding.host_id
+                ),
+            )));
+        }
+        let owner = identity_of(&self.pool, &goal.owner_principal).await?;
+        if owner.is_none_or(|identity| identity.supervisor_id != goal.supervisor_id) {
+            return Ok(Some((
+                RunState::AwaitingOwner,
+                format!(
+                    "{GRANT_REVOKED}: {} no longer owns this supervisor",
+                    goal.owner_principal
+                ),
+            )));
+        }
+        let mapped: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM supervisor_project_hosts
+             WHERE project_id = ? AND host_id = ?)",
+        )
+        .bind(&goal.project_id)
+        .bind(&binding.host_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !mapped {
+            return Ok(Some((
+                RunState::AwaitingOwner,
+                format!(
+                    "{GRANT_REVOKED}: project {} is no longer mapped on host {}",
+                    goal.project_id, binding.host_id
+                ),
+            )));
+        }
+        let contract: Option<(String, i64, i64)> = sqlx::query_as(
+            "SELECT mode, turn_limit, turns_used FROM lane_goal WHERE lane_key = ?",
+        )
+        .bind(&goal.lane_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((mode, turn_limit, turns_used)) = contract else {
+            return Ok(Some((
+                RunState::AwaitingOwner,
+                format!("{OWNER_APPROVAL_REQUIRED}: lane {} has no goal contract", goal.lane_key),
+            )));
+        };
+        if mode != GoalMode::Full.as_str() {
+            return Ok(Some((
+                RunState::AwaitingOwner,
+                format!("{OWNER_APPROVAL_REQUIRED}: a {mode} goal is not dispatched without the owner"),
+            )));
+        }
+        if turns_used >= turn_limit {
+            return Ok(Some((
+                RunState::AwaitingOwner,
+                format!("{TURN_LIMIT}: {turns_used} of {turn_limit} turns are used"),
+            )));
+        }
+        Ok(None)
+    }
+
+    /// A person's lane pause gates unsent work. Unreadable counts as paused.
+    async fn lane_paused(&self, goal: &SupervisorGoal) -> bool {
+        match crate::lanes::pause::is_paused(&self.pool, &goal.lane_key).await {
+            Ok(paused) => paused,
+            Err(error) => {
+                tracing::warn!(%error, lane = %goal.lane_key, "lane pause was not read; not dispatching");
+                true
+            }
+        }
+    }
+
+    /// Launches the worker pane in the lane's directory and binds it to the current
+    /// generation.
+    async fn launch(
+        &self,
+        goal: &SupervisorGoal,
+        claimed: &Dispatch,
+    ) -> Result<Launch, SupervisorError> {
+        let cwd: Option<String> = sqlx::query_scalar("SELECT cwd FROM lanes WHERE key = ?")
+            .bind(&goal.lane_key)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(cwd) = cwd else {
+            let detail = format!("{LAUNCH_FAILED}: lane {} is missing", goal.lane_key);
+            return Ok(Launch::Held(
+                self.hold_claimed(claimed, RunState::Degraded, detail).await?,
+            ));
+        };
+        let session = match self.launcher.launch_pane(&cwd, &[]).await {
+            Ok(session) => session,
+            Err(error) => {
+                let detail = format!("{LAUNCH_FAILED}: {error}");
+                return Ok(Launch::Held(
+                    self.hold_claimed(claimed, RunState::Degraded, detail).await?,
+                ));
+            }
+        };
+        match attach_session(&self.pool, &goal.goal_id, claimed.generation, &session).await {
+            Ok(_) => Ok(Launch::Session(session)),
+            Err(SupervisorError::Sql(error)) => Err(SupervisorError::Sql(error)),
+            Err(error) => {
+                tracing::warn!(%error, session_id = %session, goal_id = %goal.goal_id, "a launched pane was not bound to the goal and is left unused");
+                let detail = format!("{LAUNCH_FAILED}: pane {session} was not bound: {error}");
+                Ok(Launch::Held(
+                    self.hold_claimed(claimed, RunState::Degraded, detail).await?,
+                ))
+            }
+        }
+    }
+
+    /// Before transmission only: moves the goal out of `dispatching`, then makes this claim's
+    /// one confirm call, which releases it. If the goal already moved (an owner hold landed
+    /// first), only the release applies.
+    async fn hold_claimed(
+        &self,
+        claimed: &Dispatch,
+        to: RunState,
+        detail: String,
+    ) -> Result<DispatchResult, SupervisorError> {
+        match transition_goal(
+            &self.pool,
+            &claimed.goal_id,
+            claimed.goal_revision,
+            RunState::Dispatching,
+            to,
+            Some(&detail),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+            Err(error) => {
+                tracing::debug!(%error, request_id = %claimed.request_id, "goal moved before the dispatcher held it");
+            }
+        }
+        match confirm_claim_before_transmit(&self.pool, &claimed.request_id).await {
+            Ok(_) => {
+                tracing::warn!(request_id = %claimed.request_id, "a held dispatch is still claimed; it is not transmitted");
+            }
+            Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+            Err(_) => {}
+        }
+        Ok(DispatchResult::Held {
+            request_id: claimed.request_id.clone(),
+            state: to,
+            detail,
+        })
+    }
+
+    /// Records what the transmission produced. Accepted and started are separate receipts;
+    /// an unconfirmed delivery holds `delivery_uncertain` and is never resent. A refusal
+    /// happens after transmission, so the claim is not confirmed again. It gets an uncertain
+    /// receipt naming the refusal and the owner decides. A resend needs
+    /// [`super::resolve_uncertain_delivery`].
+    async fn settle_transmission(
+        &self,
+        goal: &SupervisorGoal,
+        sent: &Dispatch,
+        session: &str,
+        outcome: &SendOutcome,
+    ) {
+        match outcome {
+            SendOutcome::Started => {
+                if let Err(error) =
+                    record_receipt(&self.pool, &sent.request_id, sent.generation, &Receipt::Accepted)
+                        .await
+                {
+                    tracing::warn!(%error, request_id = %sent.request_id, "accepted receipt was not recorded");
+                }
+                // Until causal run ids exist, the run a dispatch drove is named by its request id.
+                let started = Receipt::Started {
+                    run_id: sent.request_id.clone(),
+                    provider_session_id: session.to_owned(),
+                };
+                if let Err(error) =
+                    record_receipt(&self.pool, &sent.request_id, sent.generation, &started).await
+                {
+                    tracing::warn!(%error, request_id = %sent.request_id, "started receipt was not recorded");
+                    return;
+                }
+                if let Err(error) = transition_goal(
+                    &self.pool,
+                    &sent.goal_id,
+                    sent.goal_revision,
+                    RunState::Dispatching,
+                    RunState::Running,
+                    None,
+                )
+                .await
+                {
+                    // An owner hold that landed after transmission keeps its state; the worker runs.
+                    tracing::debug!(%error, request_id = %sent.request_id, "goal did not move to running");
+                }
+                if let Err(error) = crate::lanes::state::transition(
+                    &self.pool,
+                    &goal.lane_key,
+                    LaneStatus::Working,
+                    Some("supervisor dispatch"),
+                )
+                .await
+                {
+                    tracing::debug!(%error, lane = %goal.lane_key, "lane status was not projected to working");
+                }
+                if let Some(origin) =
+                    crate::goals::turns::origin_for_request_id(Some(&sent.request_id))
+                {
+                    if let Err(error) = crate::goals::turns::record_turn(
+                        &self.pool,
+                        &goal.lane_key,
+                        origin,
+                        Some(&sent.instruction),
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, request_id = %sent.request_id, "the dispatch turn was not recorded");
+                    }
+                }
+            }
+            SendOutcome::Uncertain { code } => {
+                let receipt = Receipt::Uncertain { code: code.clone() };
+                if let Err(error) =
+                    record_receipt(&self.pool, &sent.request_id, sent.generation, &receipt).await
+                {
+                    tracing::warn!(%error, request_id = %sent.request_id, "uncertain receipt was not recorded");
+                }
+                let detail = format!(
+                    "{code}: delivery of {} was not confirmed; it is not resent",
+                    sent.request_id
+                );
+                if let Err(error) = transition_goal(
+                    &self.pool,
+                    &sent.goal_id,
+                    sent.goal_revision,
+                    RunState::Dispatching,
+                    RunState::DeliveryUncertain,
+                    Some(&detail),
+                )
+                .await
+                {
+                    tracing::debug!(%error, request_id = %sent.request_id, "goal did not move to delivery_uncertain");
+                }
+            }
+            SendOutcome::Refused { code } => {
+                let receipt = Receipt::Uncertain {
+                    code: format!("{SEND_REFUSED}:{code}"),
+                };
+                if let Err(error) =
+                    record_receipt(&self.pool, &sent.request_id, sent.generation, &receipt).await
+                {
+                    tracing::warn!(%error, request_id = %sent.request_id, "refused receipt was not recorded");
+                }
+                let detail = format!(
+                    "{SEND_REFUSED}: {code}; the transport reported nothing typed for {}, resolve the delivery to resend",
+                    sent.request_id
+                );
+                if let Err(error) = transition_goal(
+                    &self.pool,
+                    &sent.goal_id,
+                    sent.goal_revision,
+                    RunState::Dispatching,
+                    RunState::AwaitingOwner,
+                    Some(&detail),
+                )
+                .await
+                {
+                    tracing::debug!(%error, request_id = %sent.request_id, "goal did not move to awaiting_owner");
+                }
+            }
+        }
+    }
+}

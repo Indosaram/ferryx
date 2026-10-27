@@ -649,11 +649,9 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
     if ferryx_hub::goals::turns::origin_for_request_id(request_id.as_deref()).is_none() {
         return;
     }
-    // The goal loop records its own `hub-goal-*` turn once the pane is seen starting it.
-    if request_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with(ferryx_hub::goals::turns::SUPERVISOR_REQUEST_PREFIX))
-    {
+    // The goal loop (`hub-goal-*`) and the supervisor dispatcher (`sv-*`) record their own
+    // turn once the pane is seen starting it.
+    if ferryx_hub::goals::turns::records_own_turn(request_id.as_deref()) {
         return;
     }
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
@@ -1045,6 +1043,20 @@ struct Generation {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+/// The supervisor's dispatcher for this hub generation. It drains committed ready intents at
+/// start (the startup drain), then on every in-process admission wake and on a bounded rescan
+/// that picks up admissions committed by `ferryx-cli mcp`. Only this daemon transmits: the
+/// MCP process has no observer and only admits.
+fn spawn_supervisor_dispatcher(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let dispatcher = ferryx_hub::supervisor::dispatcher::Dispatcher::new(
+        launch.hub.pool.clone(),
+        launch.bridge.clone(),
+        launch.bridge.clone(),
+        "local",
+    );
+    tokio::spawn(dispatcher.run(ferryx_hub::supervisor::dispatcher::dispatch_wake()))
+}
+
 async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let mut tasks = Vec::new();
     #[cfg(feature = "hub-discord")]
@@ -1096,6 +1108,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             }
         }
     }));
+    tasks.push(spawn_supervisor_dispatcher(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {

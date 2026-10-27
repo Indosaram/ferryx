@@ -13,6 +13,8 @@ use crate::cron::{self, CronJob, CronTarget};
 use crate::error::Result;
 use crate::lanes::runner::LaneRunner;
 use crate::lanes::state::{self, transition, LaneStatus};
+use crate::supervisor::admission::{self, ActorContext, AdoptWork, OwnerChoices, SubmitWork};
+use crate::supervisor::ChannelProvider;
 use crate::tracker::Tracker;
 
 pub struct McpContext {
@@ -200,6 +202,17 @@ pub(crate) fn tool_list() -> Vec<Value> {
             "lane_goal_approve",
             "Approve and send the lane's proposal awaiting approval, once (owner meta-agent channel only).",
             schema(json!({"key": {"type": "string"}}), &["key"]),
+        ),
+        (
+            "supervisor.request",
+            "Send owner work to the unified supervisor (owner meta-agent channel only). action=submit with payload {request: the owner's exact words, work: {title, instruction, requirements, projectId?, hostId?, kind?, cwd?, operations?, turnLimit?}} admits one goal in a single transaction and returns the persisted receipt; the hub daemon then starts the worker. Only an outcome of admitted or awaiting_owner means work is registered. action=message with payload {text, work?} is conversation unless work is attached. action=adopt with payload {laneKey, projectId?, hostId?, requirements?} adopts one legacy lane explicitly. Operations beyond edit, test and commit hold the goal for the owner.",
+            schema(
+                json!({"requestId": request_id, "projectId": {"type": "string"},
+                "goalId": {"type": "string"}, "expectedRevision": {"type": "integer"},
+                "action": {"type": "string", "enum": ["submit", "message", "adopt", "correct", "pause", "resume", "cancel", "approve", "teach", "forget"]},
+                "payload": {"type": "object"}}),
+                &["requestId", "action", "payload"],
+            ),
         ),
         ("cron.list", "List scheduled jobs.", schema(json!({}), &[])),
         (
@@ -445,6 +458,20 @@ async fn call_tool(
         }
         "lane.drive" => {
             let key = required(args, "key")?;
+            // An admitted goal's lane is driven only by the hub's supervisor dispatcher; a
+            // legacy drive would launch a second worker.
+            let supervised: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)",
+            )
+            .bind(&key)
+            .fetch_one(&context.pool)
+            .await
+            .map_err(|error| error.to_string())?;
+            if supervised {
+                return Err(format!(
+                    "SUPERVISOR_OWNED: lane {key} belongs to a supervisor goal; the hub dispatcher drives it"
+                ));
+            }
             let runner = LaneRunner {
                 pool: context.pool.clone(),
                 control: Arc::clone(&context.control),
@@ -539,6 +566,7 @@ async fn call_tool(
             .map_err(|error| error.to_string())?;
             Ok(json!(outcome))
         }
+        "supervisor.request" => supervisor_request(context, args).await,
         "tracker.issues" => {
             let tracker = Tracker::new(context.pool.clone(), context.tracker_token.clone());
             if let Some(title) = args.get("title").and_then(Value::as_str) {
@@ -631,6 +659,118 @@ fn required(args: &Value, key: &str) -> std::result::Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("missing {key}"))
+}
+
+/// The `supervisor.request` envelope. Actor, host grant and channel are server-derived; the
+/// caller's fields only describe the work.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SupervisorRequest {
+    request_id: String,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    goal_id: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<i64>,
+    action: String,
+    payload: Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitPayload {
+    request: String,
+    work: SubmitWork,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessagePayload {
+    text: String,
+    #[serde(default)]
+    work: Option<SubmitWork>,
+}
+
+fn invalid(message: impl std::fmt::Display) -> String {
+    format!("INVALID_REQUEST: {message}")
+}
+
+/// Fills a work proposal's project from the envelope; a contradiction is refused.
+fn with_project(
+    proposed: &mut Option<String>,
+    envelope: Option<&str>,
+) -> std::result::Result<(), String> {
+    match (proposed.as_deref(), envelope) {
+        (Some(work), Some(envelope)) if work != envelope => Err(invalid(format!(
+            "projectId {envelope} contradicts the work's projectId {work}"
+        ))),
+        (None, Some(envelope)) => {
+            *proposed = Some(envelope.to_owned());
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Serves `supervisor.request`. It only admits: nothing is transmitted from this process,
+/// which has no turn observer. The daemon's dispatcher picks the committed ready intent up.
+async fn supervisor_request(
+    context: &McpContext,
+    args: &Value,
+) -> std::result::Result<Value, String> {
+    let request: SupervisorRequest =
+        serde_json::from_value(args.clone()).map_err(invalid)?;
+    if request.goal_id.is_some() || request.expected_revision.is_some() {
+        return Err(invalid(format!(
+            "{} does not take goalId or expectedRevision",
+            request.action
+        )));
+    }
+    let owner = admission::installation_owner(&context.pool)
+        .await
+        .map_err(|error| format!("{}: {error}", error.code()))?;
+    let actor = |source_body: String| ActorContext {
+        principal: owner.clone(),
+        source_adapter: ChannelProvider::Mcp,
+        source_message_id: request.request_id.clone(),
+        source_body,
+        channel_binding_id: None,
+        choices: OwnerChoices::default(),
+    };
+    let outcome = match request.action.as_str() {
+        "submit" => {
+            let mut payload: SubmitPayload =
+                serde_json::from_value(request.payload.clone()).map_err(invalid)?;
+            with_project(&mut payload.work.project_id, request.project_id.as_deref())?;
+            admission::submit_work(&context.pool, &actor(payload.request), &payload.work).await
+        }
+        "message" => {
+            let mut payload: MessagePayload =
+                serde_json::from_value(request.payload.clone()).map_err(invalid)?;
+            if let Some(work) = payload.work.as_mut() {
+                with_project(&mut work.project_id, request.project_id.as_deref())?;
+            }
+            admission::handle_message(&context.pool, &actor(payload.text), payload.work.as_ref())
+                .await
+        }
+        "adopt" => {
+            let mut payload: AdoptWork =
+                serde_json::from_value(request.payload.clone()).map_err(invalid)?;
+            with_project(&mut payload.project_id, request.project_id.as_deref())?;
+            let body = format!("adopt {}", payload.lane_key);
+            admission::adopt_work(&context.pool, &actor(body), &payload).await
+        }
+        "correct" | "pause" | "resume" | "cancel" | "approve" | "teach" | "forget" => {
+            return Err(format!(
+                "UNSUPPORTED_ACTION: {} is not served by supervisor.request yet",
+                request.action
+            ))
+        }
+        other => return Err(invalid(format!("unknown action {other}"))),
+    }
+    .map_err(|error| format!("{}: {error}", error.code()))?;
+    serde_json::to_value(&outcome).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -831,5 +971,91 @@ mod tests {
             contract.requirements[0].id, "r1",
             "active requirements untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn supervisor_request_submit_only_admits_and_never_transmits() {
+        let pool = crate::storage::memory().await.unwrap();
+        let identity = crate::supervisor::ensure_identity(&pool, "slack:T1:U-owner")
+            .await
+            .unwrap();
+        let project = crate::supervisor::create_project(
+            &pool,
+            &identity.supervisor_id,
+            "ferryx",
+            "github.com/example/ferryx",
+        )
+        .await
+        .unwrap();
+        crate::supervisor::bind_project_host(&pool, &project.project_id, "local", "/repo/.git")
+            .await
+            .unwrap();
+        let control = Arc::new(RecordingControl::default());
+        let launcher = Arc::new(FixedLauncher::new("pane"));
+        let context = McpContext {
+            control: control.clone(),
+            launcher: launcher.clone(),
+            pool: pool.clone(),
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+        };
+        let call = |name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": arguments}});
+        let text = |response: &Value| -> Value {
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap()
+        };
+        let work = json!({"title": "Write result.txt", "instruction": "Create result.txt containing READY.",
+            "requirements": [{"id": "r1", "text": "result.txt contains READY", "verifier": "verify.sh exits 0"}]});
+        let submit = json!({"requestId": "mcp-req-1", "action": "submit", "payload": {
+            "request": "Create result.txt containing READY. Run the verifier.", "work": work.clone()}});
+
+        let first = dispatch(&context, &call("supervisor.request", submit.clone())).await;
+        assert!(first.get("error").is_none(), "{first}");
+        let body = text(&first);
+        assert_eq!(body["outcome"], "admitted");
+        assert_eq!(body["runState"], "ready");
+        assert_eq!(body["turnLimit"], 20);
+        let goal_id = body["receipt"]["goal_id"].as_str().unwrap().to_owned();
+        let lane_key = body["receipt"]["lane_key"].as_str().unwrap().to_owned();
+        assert!(control.ops().is_empty(), "the MCP process never transmits");
+        assert!(launcher.launched.lock().unwrap().is_empty());
+
+        let replay = dispatch(&context, &call("supervisor.request", submit)).await;
+        let replayed = text(&replay);
+        assert_eq!(replayed["receipt"]["goal_id"], goal_id.as_str());
+        assert_eq!(replayed["duplicate"], true);
+
+        let drive = dispatch(&context, &call("lane.drive", json!({"key": lane_key}))).await;
+        assert!(drive.to_string().contains("SUPERVISOR_OWNED"), "{drive}");
+
+        let injected = dispatch(
+            &context,
+            &call(
+                "supervisor.request",
+                json!({"requestId": "mcp-req-2", "action": "submit", "payload": {
+                    "request": "Ship it.", "work": work, "actor": "slack:T1:U-stranger"}}),
+            ),
+        )
+        .await;
+        assert!(injected.to_string().contains("INVALID_REQUEST"), "{injected}");
+        let chat = dispatch(
+            &context,
+            &call(
+                "supervisor.request",
+                json!({"requestId": "mcp-req-3", "action": "message", "payload": {"text": "What can you do?"}}),
+            ),
+        )
+        .await;
+        assert_eq!(text(&chat)["outcome"], "conversational");
+
+        assert!(control.ops().is_empty());
+        let goals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(goals, 1);
+        assert!(tool_list()
+            .iter()
+            .any(|tool| tool["name"] == "supervisor.request"));
     }
 }
