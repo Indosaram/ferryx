@@ -625,8 +625,15 @@ async function runRemoteDelivery(ctx) {
   //    start window is open, a person's input starts a turn in another (bystander) pane: that
   //    unrelated start must not count as the silent dispatch's receipt.
   const missingSubmit = submit('missing', silentPane);
+  // Settles either way at once, so a timeout here cannot surface later as an unhandled rejection;
+  // the outcome is asserted below.
   const bystanderTyped = waitForChange(ctx, 'silent pane received its dispatch', workerLogs, () => ({ done: inputsOf(silentPane, nonceOf('missing')) > 0 }), 60_000)
-    .then(() => ctx.cli(['agents', 'send', bystanderPane, 'unrelated activity from a person', '--host', hostId, '--json'], { label: 'send-bystander', env: hubEnv }));
+    .then(() => ctx.cli(['agents', 'send', bystanderPane, 'unrelated activity from a person', '--host', hostId, '--json'], { label: 'send-bystander', env: hubEnv }))
+    .then((result) => result, (error) => {
+      if (ctx.signal.aborted) throw error;
+      return { code: null, json: null, error: String(error?.code ?? error?.message ?? error) };
+    });
+  bystanderTyped.catch(() => {});
   const missing = await missingSubmit;
   const missingGoal = missing.json?.receipt?.goal_id ?? null;
   ctx.assert('missing-admitted-bound-to-paired-pane', missing.code === 0 && missing.json?.outcome === 'admitted' && typeof missingGoal === 'string',
@@ -646,7 +653,7 @@ async function runRemoteDelivery(ctx) {
     done: (workerOf(bystanderPane)?.entries ?? []).some((entry) => entry.kind === 'reported' && entry.state === 'working'),
   }), 30_000).then(() => true, () => false);
   ctx.assert('unrelated-activity-is-not-a-receipt', bystander.code === 0 && bystanderStarted && acceptedNotStarted(missingStatus.json, missingRow),
-    { send: { code: bystander.code, json: bystander.json }, bystanderStarted, missing: missingRow });
+    { send: { code: bystander.code, json: bystander.json, error: bystander.error ?? null }, bystanderStarted, missing: missingRow });
   const missingRead = await ctx.cli(['agents', 'read', silentPane, '--host', hostId, '--json'], { label: 'read-silent-pane', env: hubEnv });
   ctx.evidence.writeJson('silent-pane-read.json', missingRead.json);
   transcript(`missing goal=${missingGoal} dispatch=${JSON.stringify(missingRow)} paneRead=${missingRead.code}`);
@@ -690,18 +697,28 @@ async function runRemoteDelivery(ctx) {
   transcript(`reconnect: relay-2 pid=${relay.pid} fresh=${freshStatus.json?.dispatches?.[0]?.state} silentInputs=${inputsOf(silentPane, nonceOf('missing'))} reportingInputs=${inputsOf(reportingPane, nonceOf('positive'))} missingState=${afterStatus.json?.dispatches?.[0]?.state}`);
 
   // 9. Fixture workers live in target panes, outside the process ledger: stop the target
-  //    daemon (recorded PID), then every worker must log its input closing and be gone.
+  //    daemon (recorded PID); every worker must record a clean exit (input closed or terminal
+  //    hang-up) and must already be gone when the harness looks for the daemon's descendants,
+  //    so none of them needed reaping.
   const workerPids = readWorkerLogs(workerLogs).map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
-  await ctx.terminate(targetDaemon, 'worker-cleanup');
+  const cleanExit = new Set(['stdin-closed', 'hangup', 'terminated']);
+  const targetReceipt = await ctx.terminate(targetDaemon, 'worker-cleanup');
   const closed = await waitForChange(ctx, 'fixture workers exit', workerLogs, () => {
-    const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => line.kind === 'stdin-closed'));
+    const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind)));
     return { done: open.length === 0, open: open.map((entry) => entry.name) };
-  }, 30_000).then(() => true, () => false);
-  // A worker logs stdin-closed and then exits; a pid still alive past that is a leak.
+  }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
+  // The harness reaps any descendant still alive after the daemon exits, so a later signal-0
+  // probe cannot fail. The receipt's per-descendant initial verdict can: a worker that had to
+  // be reaped shows up as 'match'; one that exited by itself is absent or 'gone'.
+  const reaped = (targetReceipt?.descendants ?? []).filter((entry) => workerPids.includes(entry.pid) && entry.initial !== 'gone');
   const alive = workerPids.filter((pid) => pidAlive(pid));
-  ctx.evidence.writeJson('worker-cleanup.json', { workerPids, allClosedInput: closed, alive, note: 'pids from worker-<pid>.jsonl; probed with signal 0' });
+  ctx.evidence.writeJson('worker-cleanup.json', {
+    workerPids, allExitedCleanly: closed, reaped, alive, descendantsObservable: targetReceipt?.descendantsObservable ?? null,
+    note: 'pids from worker-<pid>.jsonl; reaped = workers the harness still found alive after the target daemon exited',
+  });
   // Four panes: reporting, silent, bystander, after-reconnect.
-  ctx.assert('fixture-workers-gone', closed && workerPids.length === 4 && alive.length === 0, { workerPids, closed, alive });
+  ctx.assert('fixture-workers-gone', closed && workerPids.length === 4 && targetReceipt?.descendantsObservable === true
+    && reaped.length === 0 && alive.length === 0, { workerPids, closed, reaped, alive });
 
   for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
   if (existsSync(targetLog)) ctx.evidence.writeText('target-daemon.log', readFileSync(targetLog, 'utf8'));

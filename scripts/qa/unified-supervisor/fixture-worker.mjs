@@ -62,3 +62,7 @@ lines.on('close', () => {
   record({ kind: 'stdin-closed' });
   process.exit(0);
 });
+// The pane child is a session leader on its PTY: when the daemon exits the kernel hangs the
+// terminal up and sends SIGHUP, usually before readline sees the input close. Record it and exit.
+process.on('SIGHUP', () => { record({ kind: 'hangup' }); process.exit(0); });
+process.on('SIGTERM', () => { record({ kind: 'terminated' }); process.exit(0); });
