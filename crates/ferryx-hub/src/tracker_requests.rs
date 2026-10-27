@@ -9,6 +9,7 @@
 //! owner deletes is not recreated and a state the owner sets is kept until the inbox decision
 //! itself changes.
 
+use crate::storage::WriteTx;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
@@ -293,7 +294,7 @@ async fn sync_requester(
         let due_date = due_at.as_deref().and_then(kst_date);
         let issue_id = Uuid::new_v4().to_string();
 
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_write().await?;
         let number: i64 = sqlx::query_scalar(
             "UPDATE tracker_teams SET issue_seq = issue_seq + 1 WHERE id = ? RETURNING issue_seq",
         )

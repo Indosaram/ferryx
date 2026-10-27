@@ -9,6 +9,7 @@ use sqlx::SqlitePool;
 
 use super::contract::{contract_of, Contract, RequirementSpec};
 use super::types::GoalError;
+use crate::storage::WriteTx;
 use crate::storage::now_rfc3339;
 
 /// Shortest trimmed quote a revision may cite.
@@ -214,7 +215,7 @@ pub async fn accept(pool: &SqlitePool, id: i64) -> Result<Contract, GoalError> {
     let revision = proposed(pool, id).await?;
     let lane_key = revision.lane_key.as_str();
     let now = now_rfc3339();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let bumped = sqlx::query(
         "UPDATE lane_goal SET revision = revision + 1, updated_at = ? WHERE lane_key = ? AND revision = ?",
     )

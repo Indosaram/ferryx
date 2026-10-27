@@ -4,6 +4,7 @@
 //! delete, cron job get/update/delete, and bot profile CRUD. List routes return omo's
 //! `items`/`page`/`per_page`/`total` keys next to the keys ferryx already served, so both
 //! readers keep working.
+use crate::storage::WriteTx;
 use std::net::IpAddr;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -396,7 +397,7 @@ pub async fn delete_session(
             format!("session has {bound} cron job(s); delete or move them first"),
         ));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.pool.begin_write().await?;
     let deleted = sqlx::query(
         "DELETE FROM sessions WHERE session_key = ?1
          AND NOT EXISTS (SELECT 1 FROM scheduled_jobs WHERE session_key = ?1)",

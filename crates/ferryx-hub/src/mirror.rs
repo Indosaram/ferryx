@@ -3,6 +3,7 @@
 //! the pending deliveries as context, so the agent knows what "it" posted there and can
 //! answer follow-ups. The inbox digest (it can carry a one-time owner token) is never
 //! mirrored into a prompt, and owner tokens are redacted from every mirrored copy.
+use crate::storage::WriteTx;
 use std::collections::HashSet;
 
 use serde_json::json;
@@ -46,7 +47,7 @@ pub async fn mirror_to_session(
         "mirror": true,
         "mirror_source": source_label.unwrap_or("out_of_band"),
     });
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let sequence: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages")
         .fetch_one(&mut *tx)
         .await?;
@@ -251,7 +252,7 @@ pub async fn peek_pending_cron_briefings(
 }
 
 pub async fn mark_cron_briefings_injected(pool: &SqlitePool, message_ids: &[String]) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     for id in message_ids {
         sqlx::query(
             "UPDATE messages SET metadata_json = json_set(metadata_json, '$.mirror_injected', json('true'))

@@ -8,6 +8,7 @@
 //! - login, quota, or payment trouble goes to the owner.
 //!
 //! The owner gets a one-time token. Only its sha256 is stored, and an approval spends it.
+use crate::storage::WriteTx;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -471,7 +472,7 @@ impl Remediator {
         let now = update_stamp();
         let action = scrub(action);
         let token = mint_owner_token();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_write().await?;
         let escalated = sqlx::query("UPDATE cron_problems SET status = 'needs_owner', updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status != 'fixed'")
             .bind(&now)
             .bind(problem.id)
@@ -1035,7 +1036,7 @@ pub async fn reconcile_fixed(pool: &SqlitePool, job: &str) -> Result<()> {
         .await?;
         if let Some(from) = from {
             let now = now_rfc3339();
-            let mut tx = pool.begin().await?;
+            let mut tx = pool.begin_write().await?;
             sqlx::query("UPDATE lanes SET status = 'verified_done', updated_at = ? WHERE key = ? AND status = ?")
                 .bind(&now)
                 .bind(&key)

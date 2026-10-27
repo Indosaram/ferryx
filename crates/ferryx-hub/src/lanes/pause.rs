@@ -1,5 +1,6 @@
 //! omo-gateway's lane pause (`omo-gateway lanes pause|resume`, storage/lanes.rs): the lead
 //! stops driving a live lane without changing its status, and the tracker shows it Paused.
+use crate::storage::WriteTx;
 use std::collections::HashSet;
 
 use sqlx::SqlitePool;
@@ -28,7 +29,7 @@ pub async fn paused_keys(pool: &SqlitePool) -> Result<HashSet<String>> {
 /// Pauses a live lane; false when it was already paused. The status is left unchanged and
 /// the history row records the pause with from = to = current status, as omo.
 pub async fn pause(pool: &SqlitePool, key: &str, by: &str) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
         .bind(key)
         .fetch_optional(&mut *tx)
@@ -69,7 +70,7 @@ pub async fn pause(pool: &SqlitePool, key: &str, by: &str) -> Result<bool> {
 
 /// Clears an active pause; false when the lane was not paused.
 pub async fn resume(pool: &SqlitePool, key: &str) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let now = now_rfc3339();
     let cleared = sqlx::query(
         "UPDATE lane_pauses SET resumed_at = ? WHERE lane_key = ? AND resumed_at IS NULL",

@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 
 use super::evidence::is_attested_ref;
 use super::types::{GoalError, GoalMode, ProposalState, RequirementStatus, StopReason};
+use crate::storage::WriteTx;
 use crate::storage::now_rfc3339;
 
 /// A requirement as the owner writes it.
@@ -110,7 +111,7 @@ pub async fn set_contract(
 ) -> Result<Contract, GoalError> {
     validate(requirements, turn_limit)?;
     let now = now_rfc3339();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let written = sqlx::query(
         "INSERT INTO lane_goal(lane_key, mode, turn_limit, updated_at) VALUES(?,?,?,?)
          ON CONFLICT(lane_key) DO UPDATE SET

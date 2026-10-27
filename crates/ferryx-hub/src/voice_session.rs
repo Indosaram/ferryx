@@ -6,6 +6,7 @@
 //! `route_inbound` would send a typed message to. The reply is that pane's new
 //! assistant lines, or the new screen suffix once the pane is idle.
 
+use crate::storage::WriteTx;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
@@ -298,7 +299,7 @@ async fn insert_message(
     role: &str,
     content: &str,
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     let sequence: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages")
         .fetch_one(&mut *tx)
         .await?;

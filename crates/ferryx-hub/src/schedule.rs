@@ -4,6 +4,7 @@
 //! is gone, or after the stale-lease safety net. Retries back off. Delivery targets
 //! come from the job payload (`slack:CHANNEL:THREAD`, `discord:ID`, `origin`).
 //! The scheduler sleeps until the next `next_run_at`; it does not poll.
+use crate::storage::WriteTx;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -399,8 +400,7 @@ struct LegacyOwnerRow {
 pub async fn reconcile_cron_owner_items(pool: &SqlitePool) -> Result<u64> {
     const LEGACY: &str = "d.status = 'open' AND d.class = 'owner' AND i.source = 'cron'
         AND d.item_id LIKE 'cron:%' AND d.item_id NOT LIKE 'cron:job:%'";
-    // IMMEDIATE: see inbox::reconcile_owner_threads (deferred upgrade fails with 517).
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = pool.begin_write().await?;
     // Remediation problem items (`cron:<problem id>`) were written without an author; take the
     // job from the problem row so they collapse with the rest of the job.
     sqlx::query(
@@ -496,7 +496,7 @@ async fn escalate_incident(
     let at = now.to_rfc3339();
     let action = crate::judge::scrub_for_external(detail);
     let title = format!("{job_id}: needs you - {kind}: {action}");
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     upsert_cron_owner_item(
         &mut tx,
         &CronOwnerItem {
@@ -945,7 +945,7 @@ pub async fn claim_due(
         let Some(observed) = occurrence.clone() else {
             continue;
         };
-        let mut tx = pool.begin().await?;
+        let mut tx = pool.begin_write().await?;
         let won = sqlx::query(
             "UPDATE scheduled_jobs SET next_run_at = NULL, updated_at = ? WHERE id = ? AND enabled = 1 AND next_run_at = ?",
         )
