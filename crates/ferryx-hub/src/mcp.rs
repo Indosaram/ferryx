@@ -440,6 +440,9 @@ async fn call_tool(
         }
         "lane.transition" => {
             let key = required(args, "key")?;
+            // A supervisor lane's status, and an adopted lane's worktree (where its supervisor
+            // worker may run), change only through the supervisor.
+            refuse_supervisor_owned(context, &key, "change its state through the supervisor").await?;
             let to = required(args, "status")?;
             let status: LaneStatus = to
                 .parse()
@@ -1038,6 +1041,22 @@ mod tests {
 
         let drive = dispatch(&context, &call("lane.drive", json!({"key": lane_key}))).await;
         assert!(drive.to_string().contains("SUPERVISOR_OWNED"), "{drive}");
+        // Neither is its status: a close would remove a worktree its worker may run in.
+        let close = dispatch(
+            &context,
+            &call(
+                "lane.transition",
+                json!({"key": lane_key, "status": "closed", "reason": "forced: test"}),
+            ),
+        )
+        .await;
+        assert!(close.to_string().contains("SUPERVISOR_OWNED"), "{close}");
+        let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
+            .bind(&lane_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "queued");
         // The legacy goal APIs are fenced the same way: no requirement, mode or approval
         // change bypasses the supervisor's revision.
         let set = dispatch(

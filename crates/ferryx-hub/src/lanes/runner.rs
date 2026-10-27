@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 
 use super::guard::{GuardThresholds, HostLoad};
 use super::settle::settle;
-use super::state::{self, set_claim, set_pane, transition, LaneStatus};
+use super::state::{self, set_claim, transition, LaneStatus};
 use crate::agent_control::{AgentControl, AgentOp, TaskLauncher};
 use crate::error::{HubError, Result};
 use crate::judge::Judge;
@@ -55,7 +55,20 @@ impl LaneRunner {
                 cwd = tree;
             }
             session_id = self.launcher.launch_pane(&cwd, &[]).await?;
-            set_pane(&self.pool, key, &session_id).await?;
+            // The attach refuses a lane the supervisor adopted while this launch ran, in the
+            // same statement, so the legacy path never starts a second worker on adopted work.
+            if !crate::supervisor::attach_legacy_pane(&self.pool, key, &session_id).await? {
+                // The launcher has no close operation; nothing was sent to the pane.
+                tracing::warn!(
+                    lane = key,
+                    session_id = %session_id,
+                    "lane was adopted by the supervisor during its legacy launch; the launched pane is left unused"
+                );
+                return Err(HubError::message(format!(
+                    "{}: lane {key} was adopted by the supervisor during its legacy launch; the hub dispatcher drives it",
+                    crate::supervisor::SUPERVISOR_OWNED
+                )));
+            }
             transition(&self.pool, key, LaneStatus::Working, Some("launched")).await?;
             // A lane with a brief file (cron remediation) sends the brief with the title.
             let brief = match brief_path.trim() {

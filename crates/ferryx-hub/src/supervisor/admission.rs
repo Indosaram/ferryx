@@ -38,7 +38,8 @@ use crate::goals::types::{GoalError, GoalMode};
 
 /// `state_detail` prefix of a goal admitted on hold because its scope needs the owner.
 pub const SCOPE_NEEDS_OWNER: &str = "SCOPE_NEEDS_OWNER";
-/// Adoption refused: the legacy lane still has a worker attached or a legacy turn in flight.
+/// Adoption refused at commit: the legacy lane still has a worker attached or a legacy turn in
+/// flight, or its legacy goal became stricter after the adoption read it.
 pub const LEGACY_LANE_LIVE: &str = "LEGACY_LANE_LIVE";
 /// Adoption refused: the legacy lane's goal loop is off, so it carries no autonomy to keep.
 pub const LEGACY_GOAL_OFF: &str = "LEGACY_GOAL_OFF";
@@ -374,9 +375,12 @@ pub async fn submit_work(
 /// is what the legacy goal had left, at most [`DEFAULT_TURN_LIMIT`], unless the owner chose a
 /// turn limit. A lane the legacy path still drives (a worker attached, or a legacy turn in
 /// flight) is refused ([`LEGACY_LANE_LIVE`]): adopting it would start a second worker. That
-/// check runs inside the admission transaction, so a legacy launch cannot slip in before the
-/// commit. Once adopted, the legacy lane is fenced from the legacy lane APIs
-/// ([`super::supervisor_owns_lane`]).
+/// check runs under the admission's write lock, together with a re-check that the legacy goal
+/// did not become stricter since it was read here, and the legacy runner attaches a launched
+/// pane only in a statement that refuses an adopted lane ([`super::attach_legacy_pane`]), so
+/// of a racing adoption and legacy launch exactly one commits. A second adoption, from any
+/// adapter, returns the first one's goal, also when both race. Once adopted, the legacy lane is
+/// fenced from the legacy lane APIs ([`super::supervisor_owns_lane`]).
 pub async fn adopt_work(
     pool: &SqlitePool,
     actor: &ActorContext,

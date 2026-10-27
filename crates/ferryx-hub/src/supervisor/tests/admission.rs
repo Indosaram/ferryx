@@ -119,24 +119,6 @@ fn allowed_operations(instruction: &str) -> String {
         .to_owned()
 }
 
-/// Pins the process environment the worktree test depends on, once per test binary: an empty
-/// hub env file, auto worktrees on (set in the process environment, which wins over an env
-/// file another test may already have loaded), and no global or system git config, so a
-/// host's signing, hooks or templates cannot change the result.
-fn isolate_git_and_hub_env() {
-    static ISOLATED: std::sync::Once = std::sync::Once::new();
-    ISOLATED.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("ferryx-sv-env-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let empty = dir.join("empty");
-        std::fs::write(&empty, "").unwrap();
-        std::env::set_var("FERRYX_HUB_ENV_FILE", &empty);
-        std::env::set_var("OMON_LANE_AUTO_WORKTREE", "1");
-        std::env::set_var("GIT_CONFIG_GLOBAL", &empty);
-        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-    });
-}
-
 /// A git repository with one commit at `<tmp>/ferryx-sv-<name>-<pid>/app`. Returns the
 /// scratch directory and the repository root, both canonical (and plain on Windows).
 fn git_repo(name: &str) -> (PathBuf, PathBuf) {
@@ -601,7 +583,7 @@ async fn a_read_only_request_is_granted_no_write_operation() {
 
 #[tokio::test]
 async fn two_goals_on_one_project_start_in_their_own_worktrees_not_the_checkout() {
-    isolate_git_and_hub_env();
+    crate::lanes::worktree::isolate_test_env();
     let (base, root) = git_repo("two-goals");
     let checkout = root.to_string_lossy().into_owned();
     let pool = crate::storage::memory().await.unwrap();
@@ -1186,8 +1168,9 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
         owner_hold: None,
         adopts_lane: Some("busy".into()),
     };
-    // The store itself refuses while the legacy worker is attached: no caller-side check
-    // can be raced.
+    // The store itself refuses while the legacy worker is attached, under its write lock. The
+    // other order, an adoption committing during a legacy launch, is refused by the legacy
+    // attach (an_adoption_during_a_legacy_launch_...).
     let error = admit_request_with(&pool, &request, &adopts).await.unwrap_err();
     assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
     for table in ["supervisor_goals", "supervisor_requests", "supervisor_dispatches"] {
@@ -1227,4 +1210,174 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
     );
     assert!(ready_dispatches(&pool, 16).await.unwrap().is_empty());
     assert!(supervisor_owns_lane(&pool, "busy").await.unwrap());
+}
+
+/// The admission an adoption of legacy lane `lane_key` makes, as `adopt_work` builds it.
+async fn adoption_request(pool: &SqlitePool, lane_key: &str, adapter: ChannelProvider) -> AdmitRequest {
+    let identity = identity_of(pool, OWNER).await.unwrap().unwrap();
+    let project_id: String = sqlx::query_scalar("SELECT project_id FROM supervisor_projects")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    AdmitRequest {
+        supervisor_id: identity.supervisor_id,
+        owner_principal: OWNER.into(),
+        source_adapter: adapter,
+        source_message_id: format!("adopt:{lane_key}"),
+        body: format!("Adopt legacy lane {lane_key}: Legacy {lane_key}"),
+        project_id,
+        channel_binding_id: None,
+        target: ExecutionTarget {
+            kind: ExecutionKind::Pty,
+            host_id: HOST.into(),
+        },
+        title: format!("Legacy {lane_key}"),
+        cwd: REPO.into(),
+        instruction: format!("Continue the work of legacy lane {lane_key}."),
+        requirements: work().requirements,
+        mode: GoalMode::Full,
+        turn_limit: 5,
+        operation_grant: OperationClass::BASELINE.to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn two_adapters_adopting_one_lane_admit_one_goal() {
+    let pool = owner_pool().await;
+    legacy_lane(&pool, "nightly", GoalMode::Full, 5).await;
+    let adopts = AdmitTerms {
+        owner_hold: None,
+        adopts_lane: Some("nightly".into()),
+    };
+    // Both adoptions reach the store as first ones, as when Slack and the desktop both pass
+    // adopt_work's lookup before either commits.
+    let slack = adoption_request(&pool, "nightly", ChannelProvider::Slack).await;
+    let desktop = AdmitRequest {
+        source_adapter: ChannelProvider::Desktop,
+        ..slack.clone()
+    };
+    let first = admit_request_with(&pool, &slack, &adopts).await.unwrap();
+    assert!(!first.duplicate);
+    let second = admit_request_with(&pool, &desktop, &adopts).await.unwrap();
+    assert!(second.duplicate, "the second adapter replays the first adoption");
+    assert_eq!(second.receipt, first.receipt);
+    // A different body from a third adapter is a typed refusal, never a second goal.
+    let edited = AdmitRequest {
+        source_adapter: ChannelProvider::Phone,
+        body: "Adopt legacy lane nightly: renamed".into(),
+        ..slack.clone()
+    };
+    let error = admit_request_with(&pool, &edited, &adopts).await.unwrap_err();
+    assert_eq!(error.code(), "REQUEST_CONFLICT", "{error}");
+    for table in ["supervisor_goals", "supervisor_requests", "supervisor_dispatches"] {
+        assert_eq!(count(&pool, &format!("SELECT COUNT(*) FROM {table}")).await, 1, "{table}");
+    }
+}
+
+#[tokio::test]
+async fn an_adoption_that_finds_the_legacy_goal_turned_off_is_refused_at_commit() {
+    let pool = owner_pool().await;
+    legacy_lane(&pool, "nightly", GoalMode::Full, 5).await;
+    let request = adoption_request(&pool, "nightly", ChannelProvider::Slack).await;
+    let adopts = AdmitTerms {
+        owner_hold: None,
+        adopts_lane: Some("nightly".into()),
+    };
+    // The owner narrowed the legacy goal after adopt_work read it as full.
+    set_mode(&pool, "nightly", GoalMode::Supervised).await.unwrap();
+    let error = admit_request_with(&pool, &request, &adopts).await.unwrap_err();
+    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    set_mode(&pool, "nightly", GoalMode::Off).await.unwrap();
+    let error = admit_request_with(&pool, &request, &adopts).await.unwrap_err();
+    assert_eq!(error.code(), LEGACY_LANE_LIVE, "{error}");
+    for table in ["supervisor_goals", "supervisor_requests", "supervisor_dispatches"] {
+        assert_eq!(count(&pool, &format!("SELECT COUNT(*) FROM {table}")).await, 0, "{table}");
+    }
+    // A supervised adoption of a supervised legacy goal is not narrower, so it commits.
+    set_mode(&pool, "nightly", GoalMode::Supervised).await.unwrap();
+    let held = AdmitRequest {
+        mode: GoalMode::Supervised,
+        ..request
+    };
+    let terms = AdmitTerms {
+        owner_hold: Some(format!("{OWNER_APPROVAL_REQUIRED}: the owner decides first")),
+        adopts_lane: Some("nightly".into()),
+    };
+    assert!(!admit_request_with(&pool, &held, &terms).await.unwrap().duplicate);
+}
+
+/// Adopts the legacy lane from inside the legacy pane launch: the adoption commits after the
+/// legacy drive passed its checks and created its worktree, and before it attaches the pane.
+struct AdoptingLauncher {
+    pool: SqlitePool,
+    lane_key: &'static str,
+    adopted: Mutex<Option<AdmittedWork>>,
+}
+
+#[async_trait]
+impl TaskLauncher for AdoptingLauncher {
+    async fn launch_pane(&self, _cwd: &str, _command: &[String]) -> crate::error::Result<String> {
+        let outcome = adopt_work(&self.pool, &actor("m-race", "adopt it"), &adopt_of(self.lane_key))
+            .await
+            .unwrap();
+        *self.adopted.lock().unwrap() = Some(admitted(outcome));
+        Ok("pane-legacy".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn an_adoption_during_a_legacy_launch_wins_and_the_legacy_drive_sends_nothing() {
+    use crate::lanes::guard::{GuardThresholds, HostLoad};
+    use crate::lanes::runner::LaneRunner;
+
+    let pool = owner_pool().await;
+    legacy_lane(&pool, "nightly", GoalMode::Full, 50).await;
+    let launcher = Arc::new(AdoptingLauncher {
+        pool: pool.clone(),
+        lane_key: "nightly",
+        adopted: Mutex::new(None),
+    });
+    let control = Arc::new(RecordingControl::default());
+    let runner = LaneRunner {
+        pool: pool.clone(),
+        control: control.clone(),
+        launcher: launcher.clone(),
+        judge: crate::judge::Judge::fallback_yes(),
+        load: HostLoad {
+            load: 0.1,
+            mem_free_pct: 50,
+            disk_free_gb: 100,
+            active_lanes: 0,
+        },
+        thresholds: GuardThresholds {
+            load_alert: 10.0,
+            mem_free_min_pct: 10,
+            disk_free_min_gb: 1,
+            lanes_max: 4,
+        },
+    };
+    let refused = timeout(DEADLINE, runner.drive("nightly"))
+        .await
+        .expect("the legacy drive finishes")
+        .expect_err("an adopted lane is not driven");
+    assert!(refused.to_string().starts_with(SUPERVISOR_OWNED), "{refused}");
+    assert!(control.ops().is_empty(), "no brief was sent to the legacy pane");
+    let (pane, status): (Option<String>, String) =
+        sqlx::query_as("SELECT omo_thread_id, status FROM lanes WHERE key = 'nightly'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pane, None, "the legacy pane is not attached");
+    assert_eq!(status, "queued", "the legacy lane did not start");
+
+    // The adopting goal is the one worker.
+    let adopted = launcher.adopted.lock().unwrap().take().expect("the adoption committed");
+    let worker = Arc::new(RecordingControl::default());
+    let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
+    assert_eq!(dispatcher.drain().await.len(), 1);
+    assert_eq!(
+        sends(&worker),
+        vec![(None, PANE.to_owned(), adopted.receipt.dispatch_request_id)]
+    );
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_goals").await, 1);
 }

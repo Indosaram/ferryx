@@ -140,10 +140,10 @@ pub enum SupervisorError {
         "SUPERVISOR_OWNED: lane {lane_key} belongs to a supervisor goal; change it through the supervisor"
     )]
     SupervisorOwned { lane_key: String },
-    /// An adoption whose legacy lane the legacy path still drives at commit.
-    #[error(
-        "legacy lane {lane_key} is still live ({why}); end it or let its legacy goal loop stop before adopting it"
-    )]
+    /// An adoption whose legacy lane the legacy path still drives at commit, or whose legacy
+    /// goal became stricter (off, or supervised under a `full` adoption) after the adoption
+    /// read it.
+    #[error("legacy lane {lane_key} cannot be adopted now: {why}")]
     LegacyLaneLive { lane_key: String, why: String },
     #[error(transparent)]
     Goal(#[from] GoalError),
@@ -578,9 +578,12 @@ pub struct AdmitTerms {
     /// The goal is never `ready`, so nothing can claim it and the reason is never replaced.
     pub owner_hold: Option<String>,
     /// The legacy lane this admission adopts. The request's source message id must be
-    /// `adopt:<lane>` ([`ADOPT_MESSAGE_PREFIX`]). Refused with `LEGACY_LANE_LIVE` when, inside
-    /// the transaction, the legacy lane still has a worker attached (and has not ended) or a
-    /// legacy goal turn in flight.
+    /// `adopt:<lane>` ([`ADOPT_MESSAGE_PREFIX`]). A lane is adopted once: an earlier
+    /// `adopt:<lane>` admission from any adapter answers as the replay (or refuses a different
+    /// owner or body), checked under the write lock. Refused with `LEGACY_LANE_LIVE` when,
+    /// inside the transaction, the legacy lane still has a worker attached (and has not ended)
+    /// or a legacy goal turn in flight, or its legacy goal is now stricter than the request's
+    /// mode.
     pub adopts_lane: Option<String>,
 }
 
@@ -1469,6 +1472,20 @@ async fn admitted_request(
     ))
 }
 
+/// The adapter of an earlier admission of an `adopt:<lane>` message id, from any adapter.
+async fn adoption_adapter(
+    conn: &mut SqliteConnection,
+    source_message_id: &str,
+) -> Result<Option<ChannelProvider>, SupervisorError> {
+    let adapter: Option<String> = sqlx::query_scalar(
+        "SELECT source_adapter FROM supervisor_requests WHERE source_message_id = ? LIMIT 1",
+    )
+    .bind(source_message_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    adapter.map(|adapter| adapter.parse::<ChannelProvider>()).transpose()
+}
+
 /// The receipt of an earlier admission, if it is a replay of the same request: the same
 /// supervisor and owner (`CROSS_OWNER` otherwise) and the same body (`REQUEST_CONFLICT`
 /// otherwise).
@@ -1524,25 +1541,42 @@ pub async fn replayed_admission(
     .map(Some)
 }
 
-/// Why a legacy lane is still driven by the legacy path, or `None`: a worker attached to a
-/// lane that has not ended, or a legacy goal turn in flight. `NOT_FOUND` for an unknown lane.
+/// Why a legacy lane cannot be adopted at `admitted_mode` now, or `None`: a worker attached to
+/// a lane that has not ended, a legacy goal turn in flight, or a legacy goal that became
+/// stricter after the adoption read it (now `off`, or `supervised` under a `full` adoption).
+/// `NOT_FOUND` for an unknown lane.
+///
+/// The legacy budget needs no re-check: a legacy turn is counted only when it is sent to the
+/// lane's attached pane, which this refuses.
 async fn legacy_lane_live(
     conn: &mut SqliteConnection,
     lane_key: &str,
+    admitted_mode: GoalMode,
 ) -> Result<Option<String>, SupervisorError> {
-    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT l.status, l.omo_thread_id, g.proposal_state
+    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT l.status, l.omo_thread_id, g.proposal_state, g.mode
          FROM lanes l LEFT JOIN lane_goal g ON g.lane_key = l.key WHERE l.key = ?",
     )
     .bind(lane_key)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((status, pane, proposal_state)) = row else {
+    let Some((status, pane, proposal_state, legacy_mode)) = row else {
         return Err(SupervisorError::NotFound {
             kind: "lane",
             id: lane_key.to_owned(),
         });
     };
+    let stricter = match legacy_mode.as_deref() {
+        Some(mode) if mode == GoalMode::Off.as_str() => true,
+        Some(mode) if mode == GoalMode::Supervised.as_str() => admitted_mode == GoalMode::Full,
+        _ => false,
+    };
+    if stricter {
+        let mode = legacy_mode.unwrap_or_default();
+        return Ok(Some(format!(
+            "its legacy goal changed to {mode} while the adoption was prepared; adopt it again to take its current terms"
+        )));
+    }
     let ended = matches!(status.as_str(), "verified_done" | "closed" | "failed");
     let attached = !ended && pane.as_deref().is_some_and(|pane| !pane.is_empty());
     let turn_in_flight = proposal_state.as_deref() == Some(ProposalState::Sent.as_str());
@@ -1556,6 +1590,7 @@ async fn legacy_lane_live(
     if turn_in_flight {
         why.push_str(", legacy turn in flight");
     }
+    why.push_str("; end it or let its legacy goal loop stop before adopting it");
     Ok(Some(why))
 }
 
@@ -1576,7 +1611,8 @@ pub async fn admit_request(
 
 /// [`admit_request`] with [`AdmitTerms`] checked and applied in the same transaction: an
 /// owner hold commits the goal as `awaiting_owner`, and an adoption re-checks its legacy lane
-/// before anything is written. A replay returns the original receipt before either applies.
+/// before anything is written. A replay returns the original receipt before either applies;
+/// for an adoption, an `adopt:<lane>` admission from any adapter is that replay.
 pub async fn admit_request_with(
     pool: &SqlitePool,
     request: &AdmitRequest,
@@ -1603,15 +1639,24 @@ pub async fn admit_request_with(
     let operation_grant = serde_json::to_string(&request.operation_grant)
         .map_err(|error| SupervisorError::Invalid(format!("operation grant: {error}")))?;
     let mut tx = pool.begin_write().await?;
+    // A lane is adopted once, whichever adapter asks: the dedupe key is (adapter, message id),
+    // so under the write lock an adoption first looks for `adopt:<lane>` from any adapter and
+    // replays that admission (same owner and body) or refuses, never admitting a second goal.
+    let replay_adapter = match &terms.adopts_lane {
+        Some(_) => adoption_adapter(&mut tx, &request.source_message_id)
+            .await?
+            .unwrap_or(request.source_adapter),
+        None => request.source_adapter,
+    };
     if let Some(admitted) =
-        admitted_request(&mut tx, request.source_adapter, &request.source_message_id).await?
+        admitted_request(&mut tx, replay_adapter, &request.source_message_id).await?
     {
         return Ok(Admission {
             receipt: replayed_receipt(
                 admitted,
                 &request.supervisor_id,
                 &request.owner_principal,
-                request.source_adapter,
+                replay_adapter,
                 &request.source_message_id,
                 &body_sha256,
             )?,
@@ -1666,10 +1711,11 @@ pub async fn admit_request_with(
             Some(_) => {}
         }
     }
-    // Checked under the write lock, so a legacy launch cannot slip in between the check and
-    // the commit.
+    // Checked under the write lock. A legacy launch attaches its pane only through
+    // [`attach_legacy_pane`], which refuses a lane this admission adopted, so SQLite's write
+    // serialization lets exactly one of the two commit.
     if let Some(legacy) = &terms.adopts_lane {
-        if let Some(why) = legacy_lane_live(&mut tx, legacy).await? {
+        if let Some(why) = legacy_lane_live(&mut tx, legacy, request.mode).await? {
             return Err(SupervisorError::LegacyLaneLive {
                 lane_key: legacy.clone(),
                 why,
@@ -2878,8 +2924,9 @@ pub async fn consume_wake(pool: &SqlitePool, wake_id: i64) -> Result<bool, Super
     Ok(updated.rows_affected() == 1)
 }
 
-/// Refusal code of a legacy lane API (`lane.drive`, goal set, mode, approve) aimed at a lane
-/// that belongs to a supervisor goal.
+/// Refusal code of a legacy lane API (`lane.drive`, `lane.transition`, goal set, mode,
+/// approve, discard, and the legacy runner's pane attach) aimed at a lane that belongs to a
+/// supervisor goal.
 pub const SUPERVISOR_OWNED: &str = "SUPERVISOR_OWNED";
 
 /// True when the supervisor owns the lane: a supervisor goal's own lane, whose worker is
@@ -2912,6 +2959,30 @@ pub async fn refuse_legacy_goal_action(
         });
     }
     Ok(())
+}
+
+/// Attaches a pane the legacy lane runner launched, in one statement that refuses a lane the
+/// supervisor owns ([`supervisor_owns_lane`]): false when it was refused and nothing changed.
+/// An adoption checks the lane's pane under its write lock, and this checks the adoption row
+/// in the same write, so exactly one of a racing adoption and legacy launch commits.
+pub async fn attach_legacy_pane(
+    pool: &SqlitePool,
+    lane_key: &str,
+    session_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let attached = sqlx::query(
+        "UPDATE lanes SET omo_thread_id = ?, updated_at = ? WHERE key = ?
+           AND NOT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)
+           AND NOT EXISTS(SELECT 1 FROM supervisor_requests WHERE source_message_id = ?)",
+    )
+    .bind(session_id)
+    .bind(now_rfc3339())
+    .bind(lane_key)
+    .bind(lane_key)
+    .bind(format!("{ADOPT_MESSAGE_PREFIX}{lane_key}"))
+    .execute(pool)
+    .await?;
+    Ok(attached.rows_affected() == 1)
 }
 
 #[cfg(test)]

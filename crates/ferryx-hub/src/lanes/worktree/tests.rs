@@ -2,6 +2,7 @@ use super::*;
 use crate::lanes::state::insert_lane;
 
 fn repo(name: &str) -> PathBuf {
+    isolate_test_env();
     let base = std::env::temp_dir().join(format!("ferryx-wt-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("app");
@@ -156,6 +157,7 @@ async fn a_subdirectory_or_a_plain_directory_keeps_its_cwd() {
 
 #[tokio::test]
 async fn a_missing_directory_keeps_its_cwd_without_reading_git_messages() {
+    isolate_test_env();
     let pool = crate::storage::memory().await.unwrap();
     let missing = std::env::temp_dir()
         .join(format!("ferryx-wt-missing-{}", std::process::id()))
@@ -226,5 +228,21 @@ fn a_windows_verbatim_path_is_stored_in_its_plain_form() {
     assert_eq!(
         without_verbatim_prefix(PathBuf::from("/home/owner/app")),
         PathBuf::from("/home/owner/app")
+    );
+    // Forms with no plain equivalent keep their prefix.
+    for kept in [
+        r"\\?\Volume{4c1b02c1-d990-11dc-99ae-806e6f6e6963}\code\app",
+        r"\\?\GLOBALROOT\Device\HarddiskVolume2\code\app",
+        r"\\?\UNC\host",
+    ] {
+        assert_eq!(without_verbatim_prefix(PathBuf::from(kept)), PathBuf::from(kept));
+    }
+    // So does a path that is valid only with it: longer than MAX_PATH.
+    let long = format!(r"\\?\C:\{}", "d".repeat(300));
+    assert_eq!(without_verbatim_prefix(PathBuf::from(&long)), PathBuf::from(&long));
+    let fits = format!(r"C:\{}", "d".repeat(256));
+    assert_eq!(
+        without_verbatim_prefix(PathBuf::from(format!(r"\\?\{fits}"))),
+        PathBuf::from(fits)
     );
 }

@@ -795,12 +795,38 @@ pub async fn supervisor_goal(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorGoalAction,
 ) -> Result<Value, SupervisorGoalError> {
-    use crate::daemon::protocol::SupervisorGoalAction as Action;
-    use ferryx_hub::goals::{contract, revision, GoalMode, ProposalState};
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
         return Err(SupervisorGoalError::Unavailable);
     };
-    let pool = &hub.pool;
+    let mutates = action.mutates();
+    let (lane_key, changed) = apply_goal_action(&hub.pool, hub.control.as_ref(), action).await?;
+    if mutates {
+        let mut payload = json!({ "laneKey": lane_key });
+        if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), changed) {
+            payload.extend(extra);
+        }
+        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    }
+    let view = ferryx_hub::lanes::supervised::goal_view(&hub.pool, &lane_key)
+        .await
+        .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?;
+    let mut snapshot = supervisor_snapshot(state).await;
+    if let Some(fields) = snapshot.as_object_mut() {
+        fields.insert("goal".into(), json!({ "laneKey": lane_key, "goalContract": view }));
+    }
+    Ok(snapshot)
+}
+
+/// The store side of [`supervisor_goal`]: checks the lane, refuses a change to a lane the
+/// supervisor owns, and applies the action. Returns the lane the action named and what the
+/// action changed.
+async fn apply_goal_action(
+    pool: &ferryx_hub::goals::SqlitePool,
+    control: &dyn AgentControl,
+    action: crate::daemon::protocol::SupervisorGoalAction,
+) -> Result<(String, Value), SupervisorGoalError> {
+    use crate::daemon::protocol::SupervisorGoalAction as Action;
+    use ferryx_hub::goals::{contract, revision, GoalMode, ProposalState};
     if let Some(lane_key) = action.lane_key() {
         if ferryx_hub::lanes::state::status_of(pool, lane_key)
             .await
@@ -819,7 +845,6 @@ pub async fn supervisor_goal(
                 refused => SupervisorGoalError::Conflict(refused.to_string()),
             })?;
     }
-    let mutates = action.mutates();
     let mut changed = json!({});
     let lane_key: String = match action {
         Action::Show { lane_key } => lane_key,
@@ -849,7 +874,7 @@ pub async fn supervisor_goal(
                     "lane {lane_key} has no proposal awaiting approval"
                 )));
             }
-            let outcome = ferryx_hub::goals::r#loop::approve_proposal(pool, hub.control.as_ref(), &lane_key)
+            let outcome = ferryx_hub::goals::r#loop::approve_proposal(pool, control, &lane_key)
                 .await
                 // The proposal moved between the check and the send (a person spoke, a pass ran).
                 .map_err(|error| match error {
@@ -885,21 +910,7 @@ pub async fn supervisor_goal(
             lane_key.ok_or_else(|| SupervisorGoalError::Conflict(format!("no revision {id}")))?
         }
     };
-    if mutates {
-        let mut payload = json!({ "laneKey": lane_key });
-        if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), changed) {
-            payload.extend(extra);
-        }
-        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
-    }
-    let view = ferryx_hub::lanes::supervised::goal_view(pool, &lane_key)
-        .await
-        .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?;
-    let mut snapshot = supervisor_snapshot(state).await;
-    if let Some(fields) = snapshot.as_object_mut() {
-        fields.insert("goal".into(), json!({ "laneKey": lane_key, "goalContract": view }));
-    }
-    Ok(snapshot)
+    Ok((lane_key, changed))
 }
 
 /// Handover commit: this daemon keeps serving retained sessions but no longer owns the hub.
@@ -1785,6 +1796,60 @@ mod tests {
         let decided = revision_refusal(GoalError::InvalidContract("revision 3 is already accepted".into()));
         assert_eq!(decided.code(), "REQUEST_CONFLICT");
         assert_eq!(SupervisorGoalError::Unavailable.code(), "SUPERVISOR_UNAVAILABLE");
+    }
+
+    /// The desktop goal actions reach the SUPERVISOR_OWNED fence: on a supervisor goal's lane a
+    /// change is refused before anything is written, and show still answers.
+    #[tokio::test]
+    async fn a_desktop_goal_action_on_a_supervisor_lane_is_refused() {
+        use crate::daemon::protocol::SupervisorGoalAction as Action;
+        use ferryx_hub::goals::contract::{contract_of, RequirementSpec};
+        use ferryx_hub::goals::GoalMode;
+        use ferryx_hub::supervisor::{self as sv, AdmitRequest, ChannelProvider, ExecutionKind, ExecutionTarget};
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let owner = "slack:T1:U-owner";
+        let identity = sv::ensure_identity(&pool, owner).await.unwrap();
+        let project = sv::create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/example/ferryx")
+            .await
+            .unwrap();
+        sv::bind_project_host(&pool, &project.project_id, "host-a", "/repo/.git").await.unwrap();
+        let request = AdmitRequest {
+            supervisor_id: identity.supervisor_id,
+            owner_principal: owner.into(),
+            source_adapter: ChannelProvider::Desktop,
+            source_message_id: "d-1".into(),
+            body: "Create result.txt containing READY.".into(),
+            project_id: project.project_id,
+            channel_binding_id: None,
+            target: ExecutionTarget { kind: ExecutionKind::Pty, host_id: "host-a".into() },
+            title: "Write result.txt".into(),
+            cwd: "/repo".into(),
+            instruction: "Create result.txt containing READY.".into(),
+            requirements: vec![RequirementSpec {
+                id: "r1".into(),
+                text: "result.txt contains READY".into(),
+                verifier: "test -f result.txt".into(),
+            }],
+            mode: GoalMode::Full,
+            turn_limit: 5,
+            operation_grant: sv::admission::OperationClass::BASELINE.to_vec(),
+        };
+        let lane = sv::admit_request(&pool, &request).await.unwrap().receipt.lane_key;
+        let control = ferryx_hub::agent_control::RecordingControl::default();
+
+        let refused = apply_goal_action(&pool, &control, Action::Mode { lane_key: lane.clone(), mode: GoalMode::Off })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, SupervisorGoalError::Conflict(message) if message.starts_with("SUPERVISOR_OWNED")),
+            "{refused}"
+        );
+        assert_eq!(contract_of(&pool, &lane).await.unwrap().unwrap().mode, GoalMode::Full);
+        let (shown, _) = apply_goal_action(&pool, &control, Action::Show { lane_key: lane.clone() })
+            .await
+            .unwrap();
+        assert_eq!(shown, lane);
+        assert!(control.ops().is_empty());
     }
 
     #[test]

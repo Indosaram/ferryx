@@ -10,7 +10,8 @@
 //! interrupted halfway resumes where it stopped.
 //!
 //! Git runs with `LC_ALL=C`, so the probe's "not a git repository" match does not depend on
-//! the host's language. Stored and launched paths never carry the Windows verbatim prefix.
+//! the host's language. Stored and launched paths carry the Windows verbatim prefix only when
+//! they have no plain form ([`without_verbatim_prefix`]).
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
@@ -66,20 +67,62 @@ async fn canonical(path: &str) -> Result<PathBuf> {
 }
 
 /// `canonicalize` returns a verbatim path on Windows (`\\?\C:\...`, `\\?\UNC\host\share\...`),
-/// which git and many shells reject as a working directory. This is its plain form, as the
-/// `dunce` crate and the desktop's `worktree::git::strip_verbatim_prefix` produce. Any other
-/// path is returned unchanged.
+/// which git and many shells reject as a working directory. A drive or UNC verbatim path is
+/// returned in its plain form (`C:\...`, `\\host\share\...`) when that form is shorter than
+/// `MAX_PATH`. A longer one, and every verbatim form without a plain equivalent
+/// (`\\?\Volume{GUID}\...`, `\\?\GLOBALROOT\...`), keeps its prefix, which it needs to stay
+/// valid. Any other path is returned unchanged.
 pub(crate) fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    /// Longest path Windows accepts without the verbatim prefix: `MAX_PATH` less its NUL.
+    const MAX_PLAIN_UTF16: usize = 259;
     let Some(text) = path.to_str() else {
         return path;
     };
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{rest}"))
+    let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        let mut parts = rest.split('\\');
+        let (Some(host), Some(share)) = (parts.next(), parts.next()) else {
+            return path;
+        };
+        if host.is_empty() || share.is_empty() {
+            return path;
+        }
+        format!(r"\\{rest}")
     } else if let Some(rest) = text.strip_prefix(r"\\?\") {
-        PathBuf::from(rest)
+        let drive = rest.as_bytes();
+        if !(drive.len() >= 3
+            && drive[0].is_ascii_alphabetic()
+            && drive[1] == b':'
+            && drive[2] == b'\\')
+        {
+            return path;
+        }
+        rest.to_owned()
     } else {
-        path
+        return path;
+    };
+    if plain.encode_utf16().count() > MAX_PLAIN_UTF16 {
+        return path;
     }
+    PathBuf::from(plain)
+}
+
+/// Pins the process environment the worktree tests depend on, once per test binary: an empty
+/// hub env file, auto worktrees on (set in the process environment, which wins over an env
+/// file another test may already have loaded), and no global or system git config, so a
+/// host's signing, hooks or templates cannot change the result.
+#[cfg(test)]
+pub(crate) fn isolate_test_env() {
+    static ISOLATED: std::sync::Once = std::sync::Once::new();
+    ISOLATED.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("ferryx-test-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "").unwrap();
+        std::env::set_var("FERRYX_HUB_ENV_FILE", &empty);
+        std::env::set_var("OMON_LANE_AUTO_WORKTREE", "1");
+        std::env::set_var("GIT_CONFIG_GLOBAL", &empty);
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    });
 }
 
 /// Deletes a lane branch this attempt created, if it exists. Best effort: a failure is logged.
