@@ -56,9 +56,8 @@ use super::receipts::{
 use super::{
     attach_session, claim_dispatch, confirm_claim_before_transmit, execution_binding_of, goal_of,
     hold_live_run, identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt,
-    record_start,
-    transition_goal, Dispatch, DispatchRow, ExecutionBinding, ExecutionKind, Receipt, RunState,
-    SupervisorError, SupervisorGoal, DISPATCH_COLUMNS,
+    record_start, transition_goal, Dispatch, DispatchRow, ExecutionBinding, ExecutionKind, Receipt,
+    RunState, SupervisorError, SupervisorGoal, DISPATCH_COLUMNS,
 };
 use crate::agent_control::{
     AgentControl, AgentOp, Delivery, StartReceipt, TaskLauncher, WorkerSend, RECEIPT_MISMATCH,

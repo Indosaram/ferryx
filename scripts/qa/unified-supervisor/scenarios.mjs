@@ -865,13 +865,50 @@ const hubControl = async (ctx, env, op, step) => {
   return result.code === 0;
 };
 
+/**
+ * `ferryx-cli hub status [--check]` until `accept(result)` holds, bounded by `deadlineMs`.
+ * The daemon opens its hub only after it announced ready (src-tauri/src/cli.rs:3920-3925), and
+ * binds control.sock after the hub's first generation (hub_runtime.rs serve_control), so right
+ * after a daemon start (or a `hub start`, whose HTTP bind is async) the answer can still be
+ * "no control socket" or "unhealthy". Each try is one bounded CLI round trip; there is no
+ * event to subscribe to across the process boundary, so the pause only spaces the tries.
+ */
+const hubStatusUntil = async (ctx, env, step, { check = false, accept, deadlineMs = 60_000 }) => {
+  const deadline = performance.now() + deadlineMs;
+  const args = check ? ['hub', 'status', '--check'] : ['hub', 'status'];
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await ctx.cli(args, { label: `hub-status-${step}-${attempt}`, env });
+    if (accept(result)) {
+      ctx.evidence.appendJsonl('boundaries.jsonl', { step, op: args.slice(1).join(' '), attempt, code: result.code, stdout: result.stdout, at: new Date().toISOString() });
+      return { ok: true, attempt, result };
+    }
+    if (performance.now() >= deadline) return { ok: false, attempt, result };
+    if (ctx.signal.aborted) throw ctx.signal.reason;
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(250 * attempt, 2_000)));
+  }
+};
+const hubRunning = (result) => result.code === 0 && result.json?.running === true;
+const hubHealthy = (result) => result.code === 0 && result.json?.healthy === true;
+
+// The prompt the dispatcher types (supervisor/admission.rs dispatch text) is several lines:
+// the work instruction, then "Owner request (verbatim):" and the owner's body, then the scope.
+// The fixture logs one `input` entry per line, so a marker in both instruction and body would
+// count twice per line-count. One delivery is one header line followed by its body line.
+const OWNER_REQUEST_HEADER = 'Owner request (verbatim):';
+const deliveries = (workerLogs) => readWorkerLogs(workerLogs).flatMap((worker) => {
+  const inputs = worker.entries.filter((entry) => entry.kind === 'input');
+  return inputs.flatMap((entry, index) => (entry.text.trim() === OWNER_REQUEST_HEADER && inputs[index + 1]
+    ? [{ worker: worker.name, body: inputs[index + 1].text }] : []));
+});
+
 const goalRows = (hub, goalId) => ({
   goal: hub.one('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId),
   dispatches: hub.all('SELECT request_id, state, uncertain_code, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId),
 });
 
-const inputsWith = (workerLogs, needle) => readWorkerLogs(workerLogs)
-  .flatMap((worker) => worker.entries.filter((entry) => entry.kind === 'input' && entry.text.includes(needle)).map(() => worker.name));
+/** Workers (one entry per delivery) whose delivered owner request carries `needle`. */
+const inputsWith = (workerLogs, needle) => deliveries(workerLogs)
+  .filter((delivery) => delivery.body.includes(needle)).map((delivery) => delivery.worker);
 
 async function runRecovery(ctx) {
   const log = [];
@@ -896,8 +933,15 @@ async function runRecovery(ctx) {
   try {
     // Boundary 1: before send. The hub is stopped, so the admission commits a ready intent that
     // no dispatcher can claim; after the restart it runs exactly once.
+    // Precondition: the hub this daemon opened is running (control.sock bound, a generation
+    // live), so the stop below is a real stop, and afterwards status reports it not running.
+    const upFirst = await hubStatusUntil(ctx, env, 'before-send-up', { accept: hubRunning });
+    ctx.assert('hub-running-before-send', upFirst.ok, { attempt: upFirst.attempt, code: upFirst.result.code, json: upFirst.result.json, stderr: upFirst.result.stderr });
     const childrenFirst = await h.children('before-send-before');
-    ctx.assert('hub-stopped-before-send', await hubControl(ctx, env, 'stop', 'before-send'), {});
+    const stoppedFirst = await hubControl(ctx, env, 'stop', 'before-send');
+    const downFirst = await ctx.cli(['hub', 'status'], { label: 'hub-status-before-send-down', env });
+    ctx.assert('hub-stopped-before-send', stoppedFirst && downFirst.code === 0 && downFirst.json?.running === false
+      && downFirst.json?.stopped_flag === true, { stopped: stoppedFirst, status: downFirst.json, stderr: downFirst.stderr });
     const marker1 = `QA_RECOVERY_BEFORE_SEND_${ctx.runId}`;
     const first = await h.submit('before-send', `qa-recovery-1-${ctx.runId}`, `Create result.txt containing READY. ${marker1}`);
     const goal1 = first?.receipt?.goal_id ?? null;
@@ -957,8 +1001,8 @@ async function runRecovery(ctx) {
     ctx.assert('after-start-run-started', started.goal?.run_state === 'running' && started.dispatches[0]?.state === 'started', started);
     const panesLate = await take('after-start-restart');
     await restartHub('after-start');
-    const status = await ctx.cli(['hub', 'status', '--check'], { label: 'hub-status-after-start', env });
-    ctx.assert('hub-healthy-after-start-restart', status.code === 0, { code: status.code, stdout: status.stdout, stderr: status.stderr });
+    const status = await hubStatusUntil(ctx, env, 'after-start-check', { check: true, accept: hubHealthy, deadlineMs: 30_000 });
+    ctx.assert('hub-healthy-after-start-restart', status.ok, { attempt: status.attempt, code: status.result.code, stdout: status.result.stdout, stderr: status.result.stderr });
     // A live pane's run is left to the observer by the restart census, which writes nothing.
     // The new dispatcher runs its census before its first drain, so a sentinel goal submitted
     // now reaching `started` proves this generation's census already ran; goal3 is read after.
@@ -989,7 +1033,8 @@ async function runRecovery(ctx) {
     const liveRuns = startedSessions(hub);
     ctx.assert('pty-census-unchanged-across-restarts', census.every(({ ids }) => ids.every((id) => final.includes(id)))
       && liveRuns.length >= 2 && liveRuns.every((id) => final.includes(id)), { census, final, liveRuns });
-    const allInputs = readWorkerLogs(workerLogs).flatMap((worker) => worker.entries.filter((entry) => entry.kind === 'input' && entry.text.includes('QA_RECOVERY_')).map((entry) => entry.text));
+    // One body per delivery; every submit's body carries its own marker, so a repeat is a resend.
+    const allInputs = deliveries(workerLogs).map((delivery) => delivery.body).filter((body) => body.includes('QA_RECOVERY_'));
     ctx.assert('no-instruction-typed-twice', new Set(allInputs).size === allInputs.length, { allInputs });
   } finally {
     for (const worker of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${worker.name}`, worker.text);
@@ -1087,15 +1132,37 @@ async function runCapabilities(ctx) {
     ctx.assert('missing-capability-is-degraded', degraded?.engine?.faultCode === 'MHC_CAPABILITY_MISSING'
       && JSON.stringify(degraded?.engine?.fault?.missing) === JSON.stringify([mhc.DROPPED_CAPABILITY]), degraded?.engine ?? null);
     // The refused engine is ended and its pid record forgotten (MhcSupervisor::launch), so a
-    // degraded generation leaves no owned engine child at all.
+    // degraded generation leaves no owned engine child. Its relaunch loop records a transient
+    // pid per refused launch, so the record is re-read (bounded) until it is empty, or names a
+    // pid other than the old engine that is gone on a second probe.
     const oldAfter = oldEngine ? await probeProcess(oldEngine) : null;
-    const degradedEngine = enginePid();
+    // Ended only on positive evidence: gone or zombie, or alive with a defined, different start
+    // stamp. An `unknown` probe is never counted as ended.
+    const ended = (before, after) => Boolean(before) && before.state === 'alive' && typeof before.startStamp === 'string'
+      && Boolean(after) && (after.state === 'gone' || after.state === 'zombie'
+        || (after.state === 'alive' && typeof after.startStamp === 'string' && after.startStamp !== before.startStamp));
+    const recordReads = [];
+    const recordDeadline = performance.now() + 30_000;
+    let noOwnedEngine = false;
+    for (let attempt = 1; ; attempt += 1) {
+      const recorded = enginePid();
+      if (recorded === null) { recordReads.push({ attempt, recorded }); noOwnedEngine = true; break; }
+      if (recorded !== oldEngine) {
+        const first = await probeProcess(recorded);
+        const second = first.state === 'gone' ? first : await probeProcess(recorded);
+        recordReads.push({ attempt, recorded, first: first.state, second: second.state });
+        if (second.state === 'gone') { noOwnedEngine = true; break; }
+      } else {
+        recordReads.push({ attempt, recorded, note: 'still the old engine' });
+      }
+      if (performance.now() >= recordDeadline) break;
+      if (ctx.signal.aborted) throw ctx.signal.reason;
+      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(250 * attempt, 2_000)));
+    }
     const childrenAfter = await h.children('capability-after');
-    const ended = (before, after) => Boolean(before) && before.state === 'alive'
-      && (after.state === 'gone' || after.state === 'zombie' || after.startStamp !== before.startStamp);
-    const degradedCensus = { pidFile, oldEngine, oldProbe, oldAfter, degradedEngine, childrenBefore, childrenAfter };
+    const degradedCensus = { pidFile, oldEngine, oldProbe, oldAfter, recordReads, noOwnedEngine, childrenBefore, childrenAfter };
     ctx.evidence.writeJson('capabilities/engine-census-degraded.json', degradedCensus);
-    ctx.assert('engine-child-ended-workers-kept', ended(oldProbe, oldAfter) && degradedEngine === null
+    ctx.assert('engine-child-ended-workers-kept', ended(oldProbe, oldAfter) && noOwnedEngine
       && survived(childrenBefore, childrenAfter), degradedCensus);
     const refused = await mhc.engineAssess(ctx, engineEnv, 'degraded-refused', 'Assess again.');
     const seen = mhc.readFrames(frames);
@@ -1175,7 +1242,8 @@ export const SCENARIOS = Object.freeze({
     summary: 'Restart only the isolated hub generation at before-send, after-send-before-receipt and after-start boundaries: one execution when reconcilable, otherwise delivery_uncertain with no resend; every PTY survives',
     deadlineMs: 10 * 60_000,
     requiredAssertions: [
-      'setup-created-identity-project-and-host', 'workspace-registered', 'hub-stopped-before-send', 'before-send-admitted-while-stopped',
+      'setup-created-identity-project-and-host', 'workspace-registered', 'hub-running-before-send', 'hub-stopped-before-send',
+      'before-send-admitted-while-stopped',
       'hub-restarted-before-send', 'children-survived-before-send', 'before-send-runs-once-after-restart',
       'after-send-instruction-typed-while-claimed', 'hub-stopped-after-send', 'hub-started-after-send', 'children-survived-after-send',
       'after-send-held-uncertain-not-resent', 'after-start-run-started', 'hub-stopped-after-start', 'hub-started-after-start',
@@ -1183,6 +1251,9 @@ export const SCENARIOS = Object.freeze({
       'after-start-reattached-not-resent', 'after-start-still-running-at-end', 'no-goal-lost', 'pty-census-listed-final',
       'pty-census-unchanged-across-restarts', 'no-instruction-typed-twice',
     ],
+    // No product surface advances an execution generation for a live goal (advance_generation is
+    // called only from tests), so a predecessor's late completion cannot be provoked end to end.
+    notCovered: ['predecessor-completion-after-new-generation: crates/ferryx-hub/src/supervisor/tests/recovery.rs a_predecessor_completion_after_a_new_generation_is_ignored'],
     run: runRecovery,
   }),
   authority: planned('10,13', 'Non-owner submit/approve, mirror device mutation, worker "approve everything": 403/typed denial, zero dispatch, zero memory change'),
