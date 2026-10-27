@@ -6,7 +6,7 @@ use tokio::net::UnixListener;
 
 /// What the fake daemon does with one request frame.
 enum Reply {
-    Send(DaemonResponse),
+    Send(Box<DaemonResponse>),
     /// Close the connection without answering.
     Close,
     /// Keep the connection open and never answer.
@@ -58,7 +58,7 @@ impl FakeDaemon {
                         log.lock().push((connection, request));
                         match reply {
                             Reply::Send(response) => {
-                                let mut json = serde_json::to_string(&response).unwrap();
+                                let mut json = serde_json::to_string(&*response).unwrap();
                                 json.push('\n');
                                 if write.write_all(json.as_bytes()).await.is_err() {
                                     return;
@@ -140,13 +140,13 @@ async fn handover_busy_write_is_retried_until_the_daemon_accepts_it() {
     let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handler_writes = Arc::clone(&writes);
     let daemon = FakeDaemon::start(Arc::new(move |_: usize, request: &DaemonRequest| match request {
-        DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
-        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
+        DaemonRequest::Handshake { .. } => Reply::Send(Box::new(handshake_ok())),
+        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(Box::new(local_details())),
         DaemonRequest::Write { .. } => {
             if handler_writes.fetch_add(1, Ordering::SeqCst) == 0 {
-                Reply::Send(handover_busy())
+                Reply::Send(Box::new(handover_busy()))
             } else {
-                Reply::Send(DaemonResponse::WriteOk)
+                Reply::Send(Box::new(DaemonResponse::WriteOk))
             }
         }
         _ => Reply::Close,
@@ -165,9 +165,9 @@ async fn handover_busy_write_is_retried_until_the_daemon_accepts_it() {
 #[tokio::test]
 async fn persistent_handover_busy_keeps_its_code_and_reports_nothing_written() {
     let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
-        DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
-        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
-        DaemonRequest::Write { .. } | DaemonRequest::Resize { .. } => Reply::Send(handover_busy()),
+        DaemonRequest::Handshake { .. } => Reply::Send(Box::new(handshake_ok())),
+        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(Box::new(local_details())),
+        DaemonRequest::Write { .. } | DaemonRequest::Resize { .. } => Reply::Send(Box::new(handover_busy())),
         _ => Reply::Close,
     }));
     let client = daemon.client();
@@ -196,9 +196,9 @@ async fn persistent_handover_busy_keeps_its_code_and_reports_nothing_written() {
 #[tokio::test]
 async fn a_cached_slot_whose_peer_closed_is_reconnected_and_the_write_lands_once() {
     let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
-        DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
-        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
-        DaemonRequest::Write { .. } => Reply::Send(DaemonResponse::WriteOk),
+        DaemonRequest::Handshake { .. } => Reply::Send(Box::new(handshake_ok())),
+        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(Box::new(local_details())),
+        DaemonRequest::Write { .. } => Reply::Send(Box::new(DaemonResponse::WriteOk)),
         _ => Reply::Close,
     }));
     let client = daemon.client();
@@ -233,13 +233,13 @@ async fn an_applied_write_without_a_reply_is_not_replayed() {
     let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let applied = Arc::clone(&writes);
     let daemon = FakeDaemon::start(Arc::new(move |_: usize, request: &DaemonRequest| match request {
-        DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
-        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
+        DaemonRequest::Handshake { .. } => Reply::Send(Box::new(handshake_ok())),
+        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(Box::new(local_details())),
         DaemonRequest::Write { .. } => {
             if applied.fetch_add(1, Ordering::SeqCst) == 0 {
                 Reply::Close
             } else {
-                Reply::Send(DaemonResponse::WriteOk)
+                Reply::Send(Box::new(DaemonResponse::WriteOk))
             }
         }
         _ => Reply::Close,
@@ -285,12 +285,12 @@ async fn subscriptions_to_a_peer_that_never_answers_fail_within_six_seconds() {
 #[tokio::test]
 async fn a_list_sessions_failure_leaves_the_upgrade_retriable() {
     let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
-        DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
-        DaemonRequest::ListSessions => Reply::Send(DaemonResponse::Error {
+        DaemonRequest::Handshake { .. } => Reply::Send(Box::new(handshake_ok())),
+        DaemonRequest::ListSessions => Reply::Send(Box::new(DaemonResponse::Error {
             code: None,
             message: "transient".into(),
             details: None,
-        }),
+        })),
         _ => Reply::Close,
     }));
     let client = daemon.client();
@@ -319,9 +319,9 @@ async fn a_list_sessions_failure_leaves_the_upgrade_retriable() {
 #[tokio::test]
 async fn a_second_local_write_on_the_same_session_sends_no_classification() {
     let daemon = FakeDaemon::start(Arc::new(|_: usize, request: &DaemonRequest| match request {
-        DaemonRequest::Handshake { .. } => Reply::Send(handshake_ok()),
-        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(local_details()),
-        DaemonRequest::Write { .. } => Reply::Send(DaemonResponse::WriteOk),
+        DaemonRequest::Handshake { .. } => Reply::Send(Box::new(handshake_ok())),
+        DaemonRequest::RemoteSessionDetails { .. } => Reply::Send(Box::new(local_details())),
+        DaemonRequest::Write { .. } => Reply::Send(Box::new(DaemonResponse::WriteOk)),
         _ => Reply::Close,
     }));
     let client = daemon.client();

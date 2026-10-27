@@ -1047,7 +1047,7 @@ fn install_pty_resize_dispatcher(
         dispatch_pty_resizes(receiver, |session_id, cols, rows| {
             let daemon_client = Arc::clone(&daemon_client);
             async move {
-                daemon_client.resize_terminal(&session_id, cols, rows).await.map_err(IpcError::from)
+                daemon_client.resize_terminal(&session_id, cols, rows).await
             }
         })
         .await;
@@ -2985,7 +2985,7 @@ mod paste_chunk_tests {
 
     fn bracketed(len: usize) -> Vec<u8> {
         let mut bytes = BRACKETED_PASTE_START.to_vec();
-        bytes.extend(std::iter::repeat(b'x').take(len));
+        bytes.extend(std::iter::repeat_n(b'x', len));
         bytes.extend_from_slice(BRACKETED_PASTE_END);
         bytes
     }

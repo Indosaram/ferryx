@@ -3137,9 +3137,7 @@ mod tests {
         let mut seen = String::new();
         let found = tokio::time::timeout(LOAD_TOLERANT_BOUND, async {
             loop {
-                let Some(chunk) = rx.recv().await else {
-                    return None;
-                };
+                let chunk = rx.recv().await?;
                 seen.push_str(&String::from_utf8_lossy(&chunk));
                 for (index, _) in seen.match_indices(tag) {
                     let rest = &seen[index + tag.len()..];
