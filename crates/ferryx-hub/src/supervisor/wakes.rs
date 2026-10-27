@@ -14,11 +14,16 @@
 //!    log after a crash before the cursor moved changes nothing.
 //! 2. Sweep pending child waits whose child already ended: events that arrived before the
 //!    wait existed are reconciled, with the same event ids as step 1.
-//! 3. Per goal, deterministic state checks decide each wake set, with no model call:
-//!    - owner wakes go first, alone, at once: no batch, no judgment, whatever the goal does;
+//! 3. Owner wakes of every goal go first, before any other wake of any goal: alone, at once,
+//!    with no batch and no judgment, whatever the goal does. A goal whose owner turn the
+//!    handler did not take keeps its other wakes pending behind it.
+//! 4. Then, per goal, deterministic state checks decide the other wakes, with no model call.
+//!    Every decisive wake of the goal is read, and its ordinary reports oldest first, at most
+//!    `WAKE_LIMIT` per goal and tick, so one goal's backlog never hides another goal:
 //!    - wakes of an ended goal are closed;
-//!    - a held, degraded or uncertain goal, or a busy one (dispatch in flight, unsent intent,
-//!      dispatching), keeps its wakes pending and only its status changes;
+//!    - a held, degraded or uncertain goal, or a busy one (dispatch in flight, dispatching, or
+//!      `ready` with an unsent intent the dispatcher will claim), keeps its wakes pending and
+//!      only its status changes;
 //!    - with dependencies pending, only a dependency failure or a due deadline releases the
 //!      goal; dependency-ready and reports wait;
 //!    - a dependency, settle or due-deadline wake releases an idle goal at once, together with
@@ -27,17 +32,22 @@
 //!    - ordinary reports alone follow the lane dispatcher's policy
 //!      ([`crate::lanes::dispatch::batch_window_elapsed`]): admitted once the oldest is 30s
 //!      old and the goal had no delivery in the last 30s, never extended by newer reports.
-//! 4. Only then, and only for a report-only batch, the wake judge; its score is cached on the
-//!    turn row keyed by event set + goal revision + execution generation. Then the handler.
+//! 5. Only then, and only for a report-only batch, the wake judge; its score is cached on the
+//!    turn row keyed by event set + goal revision + execution generation, and a failing judge
+//!    is asked again for that goal only after a doubling backoff. Then the handler.
 //!
 //! A turn is written `pending` before the handler runs and settled with its wake receipts
 //! after the handler acknowledges, so a crash re-delivers it under the same turn id (the
-//! handler's idempotency key) and never loses it; a busy handler leaves everything pending.
+//! handler's idempotency key) and never loses it; a busy handler, or one that cannot act on a
+//! decisive wake in the goal's current state ([`WakeAck::NotApplicable`]), leaves everything
+//! pending. A storage error that fails the same way on every retry (a constraint, a row that
+//! does not decode) is confined to its goal, or stops the log at its event while persisted
+//! wakes are still scheduled; any other storage error stops the tick.
 //! The loop ([`WakeScheduler::run`]) sleeps until the next batch or deadline is due, a
-//! [`poke`], or the bounded [`WAKE_RESCAN`] (a database read): nothing calls a model while a
-//! goal waits.
-use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+//! [`poke`] (the store sends one with every goal transition and owner correction), or the
+//! bounded [`WAKE_RESCAN`] (a database read): nothing calls a model while a goal waits.
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -61,8 +71,17 @@ pub const WAKE_RESCAN: Duration = Duration::from_secs(5);
 /// State events applied per read of the log.
 const EVENT_BATCH: i64 = 256;
 
-/// Unconsumed wakes considered per tick.
-const WAKE_LIMIT: i64 = 4096;
+/// Ordinary reports read per goal and tick, oldest first. Decisive wakes (owner, dependency,
+/// settle, deadline) are never capped: each one can be the result the goal needs.
+pub(crate) const WAKE_LIMIT: i64 = 4096;
+
+/// Owner wake causes, as stored.
+const OWNER_CAUSES: &str = "'owner_control','owner_correction'";
+
+/// After the judge fails for a goal it is asked again only after this long, doubling per
+/// consecutive failure up to `JUDGE_RETRY_MAX_SECS`.
+const JUDGE_RETRY_MIN_SECS: i64 = 30;
+const JUDGE_RETRY_MAX_SECS: i64 = 600;
 
 /// This scheduler's row in `supervisor_event_cursors`.
 const CURSOR: &str = "wakes";
@@ -82,6 +101,10 @@ pub const DEPENDENCY_FAILED: &str = "DEPENDENCY_FAILED";
 pub const DEPENDENCIES_MET: &str = "DEPENDENCIES_MET";
 pub const TURN_SETTLED: &str = "TURN_SETTLED";
 pub const DEADLINE_PASSED: &str = "DEADLINE_PASSED";
+/// A settled run dispatched at an older goal revision than the goal has now (an owner
+/// correction or hold came after it): the worker is idle, but the run is not evidence for the
+/// current contract.
+pub const STALE_SETTLE: &str = "STALE_SETTLE";
 
 fn batch_window() -> chrono::Duration {
     chrono::Duration::seconds(BATCH_WINDOW_SECS)
@@ -120,10 +143,15 @@ impl WakeTurn {
 }
 
 /// A handler's answer. `Busy` keeps the turn and its wakes pending for a later tick.
+/// `NotApplicable` keeps them pending too: the goal is in a state where the handler cannot act
+/// on a decisive wake (a settle reaching a goal that resumed to `ready`), and receipting it as
+/// delivered would lose it. It is offered again on later ticks and applies once the goal
+/// reaches a state where it can.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeAck {
     Done,
     Busy,
+    NotApplicable,
 }
 
 /// What acts on an admitted wake turn: the deterministic [`StateHandler`], or a decision
@@ -170,13 +198,17 @@ impl WakeClock for SystemClock {
 pub enum Deferral {
     /// Owner hold, degraded or delivery uncertain: status only.
     Held(RunState),
-    /// A dispatch is in flight or unsent, or the goal is dispatching.
+    /// A dispatch is in flight, the goal is dispatching, or it is `ready` with an unsent
+    /// intent the dispatcher will claim.
     Busy,
     /// Dependencies are still pending and nothing releases the goal.
     Dependencies,
     /// Ordinary reports inside the batch window or the delivery spacing.
     Batching,
     HandlerBusy,
+    /// The handler cannot act on a decisive wake in this run state; it stays pending.
+    NotApplicable(RunState),
+    /// The judge failed; it is asked again after a backoff (`next_due`).
     JudgeUnavailable,
 }
 
@@ -393,6 +425,39 @@ fn is_owner(cause: WakeCause) -> bool {
     matches!(cause, WakeCause::OwnerControl | WakeCause::OwnerCorrection)
 }
 
+/// Wakes whose loss would lose a run result, a dependency outcome or a deadline.
+fn is_decisive(cause: WakeCause) -> bool {
+    matches!(
+        cause,
+        WakeCause::TurnSettled
+            | WakeCause::DependencyReady
+            | WakeCause::DependencyFailed
+            | WakeCause::Deadline
+    )
+}
+
+/// A storage error that may pass on retry (busy database, pool, I/O). One that fails the same
+/// way every time (a violated constraint, a row that does not decode) is not: it is confined
+/// to the goal or log event it came from instead of stopping every goal's wakes.
+fn transient(error: &SupervisorError) -> bool {
+    let SupervisorError::Sql(error) = error else {
+        return false;
+    };
+    let deterministic = match error {
+        sqlx::Error::Database(database) => {
+            !matches!(database.kind(), sqlx::error::ErrorKind::Other)
+        }
+        sqlx::Error::RowNotFound
+        | sqlx::Error::TypeNotFound { .. }
+        | sqlx::Error::ColumnIndexOutOfBounds { .. }
+        | sqlx::Error::ColumnNotFound(_)
+        | sqlx::Error::ColumnDecode { .. }
+        | sqlx::Error::Decode(_) => true,
+        _ => false,
+    };
+    !deterministic
+}
+
 /// The owner wake a goal state event carries: a revision bump in place is a correction;
 /// entering pause or cancel, or leaving an owner hold, is a control. A hold the system
 /// entered (`awaiting_owner`) wakes nothing: the goal now waits on the owner.
@@ -441,14 +506,21 @@ async fn pending_wait_kinds(
 }
 
 /// The worker is busy with the goal: a dispatch in flight on the current generation, or an
-/// unsent intent the dispatcher is about to claim.
+/// unsent intent the dispatcher will claim. The dispatcher claims only from a `ready` goal at
+/// the intent's revision (see [`super::ready_dispatches`]); an intent queued in any other
+/// state (a correction enqueued while the run still goes) waits for the goal to reach `ready`
+/// and does not make it busy, or a settled run would never move the goal on.
 async fn goal_busy(pool: &SqlitePool, goal_id: &str) -> Result<bool, SupervisorError> {
     let mut conn = pool.acquire().await?;
     if in_flight_dispatch(&mut conn, goal_id).await?.is_some() {
         return Ok(true);
     }
     let unsent: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM supervisor_dispatches WHERE goal_id = ? AND state = 'ready')",
+        "SELECT EXISTS(
+            SELECT 1 FROM supervisor_dispatches d
+            JOIN supervisor_goals g ON g.goal_id = d.goal_id
+            WHERE d.goal_id = ? AND d.state = 'ready'
+              AND g.run_state = 'ready' AND g.revision = d.goal_revision)",
     )
     .bind(goal_id)
     .fetch_one(&mut *conn)
@@ -560,16 +632,55 @@ async fn failure_detail(pool: &SqlitePool, goal_id: &str) -> Result<String, Supe
     )))
 }
 
-async fn unconsumed_wakes(pool: &SqlitePool) -> Result<Vec<PendingWake>, SupervisorError> {
+/// Every unconsumed owner wake of every goal, by goal, oldest first.
+async fn owner_wakes(pool: &SqlitePool) -> Result<Vec<PendingWake>, SupervisorError> {
     let sql = format!(
         "SELECT {WAKE_COLUMNS} FROM supervisor_pending_wakes
-         WHERE consumed_at IS NULL ORDER BY goal_id, id LIMIT ?"
+         WHERE consumed_at IS NULL AND cause IN ({OWNER_CAUSES}) ORDER BY goal_id, id"
     );
-    let rows: Vec<WakeRow> = sqlx::query_as(&sql)
+    let rows: Vec<WakeRow> = sqlx::query_as(&sql).fetch_all(pool).await?;
+    rows.into_iter().map(wake_from_row).collect()
+}
+
+/// Every goal with an unconsumed wake.
+async fn goals_with_wakes(pool: &SqlitePool) -> Result<Vec<String>, SupervisorError> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT goal_id FROM supervisor_pending_wakes
+         WHERE consumed_at IS NULL ORDER BY goal_id",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// The goal's unconsumed wakes other than owner wakes, in id order: every decisive one and
+/// its oldest `WAKE_LIMIT` reports.
+async fn goal_wakes(pool: &SqlitePool, goal_id: &str) -> Result<Vec<PendingWake>, SupervisorError> {
+    let decisive = format!(
+        "SELECT {WAKE_COLUMNS} FROM supervisor_pending_wakes
+         WHERE goal_id = ? AND consumed_at IS NULL AND cause NOT IN ({OWNER_CAUSES}, 'report')
+         ORDER BY id"
+    );
+    let reports = format!(
+        "SELECT {WAKE_COLUMNS} FROM supervisor_pending_wakes
+         WHERE goal_id = ? AND consumed_at IS NULL AND cause = 'report'
+         ORDER BY id LIMIT ?"
+    );
+    let mut rows: Vec<WakeRow> = sqlx::query_as(&decisive)
+        .bind(goal_id)
+        .fetch_all(pool)
+        .await?;
+    let page: Vec<WakeRow> = sqlx::query_as(&reports)
+        .bind(goal_id)
         .bind(WAKE_LIMIT)
         .fetch_all(pool)
         .await?;
-    rows.into_iter().map(wake_from_row).collect()
+    rows.extend(page);
+    let mut wakes = rows
+        .into_iter()
+        .map(wake_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    wakes.sort_unstable_by_key(|wake| wake.id);
+    Ok(wakes)
 }
 
 /// When the goal's last turn was delivered (the batch spacing).
@@ -647,6 +758,8 @@ pub struct WakeScheduler {
     rescan: Duration,
     /// Told what each loop tick did, after the tick's wake subscription.
     ticked: Option<mpsc::UnboundedSender<TickReport>>,
+    /// Per goal: when a judge that failed may be asked again, and its consecutive failures.
+    judge_backoff: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
 impl WakeScheduler {
@@ -658,6 +771,7 @@ impl WakeScheduler {
             clock: Arc::new(SystemClock),
             rescan: WAKE_RESCAN,
             ticked: None,
+            judge_backoff: Mutex::new(HashMap::new()),
         }
     }
 
@@ -717,26 +831,114 @@ impl WakeScheduler {
         }
     }
 
-    /// One pass at `now`. A storage error stops the pass with nothing lost: the cursor only
-    /// moves after its events applied, and wakes are consumed only with their receipts.
+    /// One pass at `now`. A storage error that may pass on retry stops the pass with nothing
+    /// lost: the cursor only moves after its events applied, and wakes are consumed only with
+    /// their receipts. One that fails the same way every time is confined: the log stops at
+    /// its event (persisted wakes are still scheduled), or that one goal's wakes stay pending.
     pub async fn tick(&self, now: DateTime<Utc>) -> Result<TickReport, SupervisorError> {
         let mut report = TickReport::default();
-        self.apply_state_events(now, &mut report).await?;
-        self.sweep_ended_children(&mut report).await?;
-        let mut by_goal = BTreeMap::<String, Vec<PendingWake>>::new();
-        for wake in unconsumed_wakes(&self.pool).await? {
-            by_goal.entry(wake.goal_id.clone()).or_default().push(wake);
+        if let Err(error) = self.apply_state_events(now, &mut report).await {
+            if transient(&error) {
+                return Err(error);
+            }
+            tracing::warn!(%error, "supervisor state log stopped at an event that cannot apply; pending wakes are still scheduled");
         }
-        for (goal_id, wakes) in by_goal {
-            match self.schedule_goal(&goal_id, wakes, now, &mut report).await {
+        if let Err(error) = self.sweep_ended_children(&mut report).await {
+            if transient(&error) {
+                return Err(error);
+            }
+            tracing::warn!(%error, "supervisor child sweep failed; it is retried next tick");
+        }
+        // Owner precedence across goals: every goal's owner wakes before any other scheduling.
+        let mut owners = BTreeMap::<String, Vec<PendingWake>>::new();
+        for wake in owner_wakes(&self.pool).await? {
+            owners.entry(wake.goal_id.clone()).or_default().push(wake);
+        }
+        let mut owner_pending = BTreeSet::new();
+        for (goal_id, wakes) in owners {
+            let taken = match self.schedule_owner(&goal_id, wakes, now, &mut report).await {
+                Ok(taken) => taken,
+                Err(error) if transient(&error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(%error, goal_id = %goal_id, "supervisor owner wakes were not delivered; they stay pending");
+                    false
+                }
+            };
+            if !taken {
+                owner_pending.insert(goal_id);
+            }
+        }
+        for goal_id in goals_with_wakes(&self.pool).await? {
+            if owner_pending.contains(&goal_id) {
+                // Nothing overtakes an owner wake the handler has not taken yet.
+                continue;
+            }
+            let scheduled = match goal_wakes(&self.pool, &goal_id).await {
+                Ok(wakes) if wakes.is_empty() => Ok(()),
+                Ok(wakes) => self.schedule_goal(&goal_id, wakes, now, &mut report).await,
+                Err(error) => Err(error),
+            };
+            match scheduled {
                 Ok(()) => {}
-                Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
+                Err(error) if transient(&error) => return Err(error),
                 Err(error) => {
                     tracing::warn!(%error, goal_id = %goal_id, "supervisor wakes were not scheduled; they stay pending");
                 }
             }
         }
         Ok(report)
+    }
+
+    /// A goal's owner wakes, at once and alone, whatever the goal does. Returns whether they
+    /// were consumed; when not (the handler was busy) the goal's other wakes wait behind them.
+    async fn schedule_owner(
+        &self,
+        goal_id: &str,
+        wakes: Vec<PendingWake>,
+        now: DateTime<Utc>,
+        report: &mut TickReport,
+    ) -> Result<bool, SupervisorError> {
+        let Some(goal) = goal_of(&self.pool, goal_id).await? else {
+            return Ok(false);
+        };
+        let generation = execution_binding_of(&self.pool, goal_id)
+            .await?
+            .map_or(0, |binding| binding.generation);
+        let batch = Batch {
+            wakes,
+            urgent: true,
+            judged: false,
+        };
+        self.deliver(&goal, generation, batch, now, report).await
+    }
+
+    /// When the judge may next be asked about `goal_id` after it failed, if it did.
+    fn judge_retry_at(&self, goal_id: &str) -> Option<DateTime<Utc>> {
+        self.judge_backoff
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(goal_id)
+            .map(|(retry_at, _)| *retry_at)
+    }
+
+    /// Records a failed judgment for `goal_id`; returns when to ask again.
+    fn judge_failed(&self, goal_id: &str, now: DateTime<Utc>) -> DateTime<Utc> {
+        let mut backoff = self
+            .judge_backoff
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let entry = backoff.entry(goal_id.to_owned()).or_insert((now, 0));
+        entry.1 = entry.1.saturating_add(1);
+        let delay = (JUDGE_RETRY_MIN_SECS << (entry.1 - 1).min(5)).min(JUDGE_RETRY_MAX_SECS);
+        entry.0 = now + chrono::Duration::seconds(delay);
+        entry.0
+    }
+
+    fn judge_answered(&self, goal_id: &str) {
+        self.judge_backoff
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(goal_id);
     }
 
     async fn apply_state_events(
@@ -830,7 +1032,8 @@ impl WakeScheduler {
             .transpose()?;
         match to {
             RunState::Completed | RunState::Cancelled => {
-                report.resolved_waits += resolve_child_waits(&self.pool, &event.goal_id, to).await?;
+                report.resolved_waits +=
+                    resolve_child_waits(&self.pool, &event.goal_id, to).await?;
             }
             RunState::Degraded
             | RunState::AwaitingOwner
@@ -851,6 +1054,11 @@ impl WakeScheduler {
     /// dependencies are pending) and, when the goal is still `running` with pending waits and
     /// nothing in flight, move it to waiting without any model call. A settle from a fenced
     /// generation is ignored.
+    ///
+    /// A settle whose dispatch answered an older goal revision is still kept: it is the only
+    /// sign that the worker went idle, and dropping it would strand a corrected or resumed goal
+    /// in `running`. It never counts as evidence for the current contract: [`StateHandler`]
+    /// marks such a move [`STALE_SETTLE`], and the decision handler must check the revision.
     async fn apply_settle(
         &self,
         event: &StateEvent,
@@ -882,11 +1090,12 @@ impl WakeScheduler {
         )
         .await?;
         if goal.run_state == RunState::Running
-            && !pending_wait_kinds(&self.pool, &goal.goal_id).await?.is_empty()
+            && !pending_wait_kinds(&self.pool, &goal.goal_id)
+                .await?
+                .is_empty()
             && !goal_busy(&self.pool, &goal.goal_id).await?
         {
-            match enter_waiting(&self.pool, &goal.goal_id, goal.revision, RunState::Running).await
-            {
+            match enter_waiting(&self.pool, &goal.goal_id, goal.revision, RunState::Running).await {
                 Ok(_) => report.waiting.push(goal.goal_id.clone()),
                 Err(SupervisorError::Sql(error)) => return Err(SupervisorError::Sql(error)),
                 Err(error) => {
@@ -913,7 +1122,8 @@ impl WakeScheduler {
         Ok(())
     }
 
-    /// The deterministic checks for one goal's unconsumed wakes. Nothing here calls a model.
+    /// The deterministic checks for one goal's unconsumed wakes other than owner wakes (those
+    /// were handled for every goal first). Nothing here calls a model.
     async fn schedule_goal(
         &self,
         goal_id: &str,
@@ -927,18 +1137,11 @@ impl WakeScheduler {
         let generation = execution_binding_of(&self.pool, goal_id)
             .await?
             .map_or(0, |binding| binding.generation);
-        let (owner, rest): (Vec<PendingWake>, Vec<PendingWake>) =
-            wakes.into_iter().partition(|wake| is_owner(wake.cause));
-        if !owner.is_empty() {
-            // Owner precedence: at once and alone. The rest is checked again next tick
-            // against the state the owner left.
-            let batch = Batch {
-                wakes: owner,
-                urgent: true,
-                judged: false,
-            };
-            return self.deliver(&goal, generation, batch, now, report).await;
-        }
+        // Owner wakes went out before any goal was scheduled (see `tick`); never batch one.
+        let rest: Vec<PendingWake> = wakes
+            .into_iter()
+            .filter(|wake| !is_owner(wake.cause))
+            .collect();
         if goal.run_state.is_terminal() {
             let ids: Vec<i64> = rest.iter().map(|wake| wake.id).collect();
             settle_wakes(&self.pool, None, &ids, now).await?;
@@ -982,7 +1185,10 @@ impl WakeScheduler {
         let decisive = present.iter().any(|wake| wake.cause != WakeCause::Report);
         if waits_pending {
             let releases = present.iter().any(|wake| {
-                matches!(wake.cause, WakeCause::DependencyFailed | WakeCause::Deadline)
+                matches!(
+                    wake.cause,
+                    WakeCause::DependencyFailed | WakeCause::Deadline
+                )
             });
             if !releases {
                 report
@@ -997,7 +1203,10 @@ impl WakeScheduler {
                 urgent: true,
                 judged: false,
             };
-            return self.deliver(&goal, generation, batch, now, report).await;
+            return self
+                .deliver(&goal, generation, batch, now, report)
+                .await
+                .map(drop);
         }
         // Ordinary reports only: the lane dispatcher's window, anchored on the oldest.
         let window = batch_window();
@@ -1016,7 +1225,9 @@ impl WakeScheduler {
         };
         if let Some(due) = wait_until {
             report.due_at(due);
-            report.deferred.push((goal_id.to_owned(), Deferral::Batching));
+            report
+                .deferred
+                .push((goal_id.to_owned(), Deferral::Batching));
             return Ok(());
         }
         let batch = Batch {
@@ -1024,11 +1235,14 @@ impl WakeScheduler {
             urgent: false,
             judged: true,
         };
-        self.deliver(&goal, generation, batch, now, report).await
+        self.deliver(&goal, generation, batch, now, report)
+            .await
+            .map(drop)
     }
 
     /// Writes the turn `pending`, judges a report-only batch once per cache key, runs the
-    /// handler outside every transaction, then settles the turn with its receipts.
+    /// handler outside every transaction, then settles the turn with its receipts. Returns
+    /// whether the wakes were consumed (delivered, skipped, or settled by another scheduler).
     async fn deliver(
         &self,
         goal: &SupervisorGoal,
@@ -1036,15 +1250,10 @@ impl WakeScheduler {
         batch: Batch,
         now: DateTime<Utc>,
         report: &mut TickReport,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<bool, SupervisorError> {
         let mut ids: Vec<i64> = batch.wakes.iter().map(|wake| wake.id).collect();
         ids.sort_unstable();
-        let key = sha256_hex(
-            &ids.iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+        let key = sha256_hex(&ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","));
         let mut causes: Vec<&'static str> =
             batch.wakes.iter().map(|wake| wake.cause.as_str()).collect();
         causes.sort_unstable();
@@ -1056,25 +1265,43 @@ impl WakeScheduler {
             .await?;
         if state != "pending" {
             // Another scheduler settled this exact turn; its wakes were consumed with it.
-            return Ok(());
+            return Ok(true);
         }
         if let Some(judge) = self.judge.as_ref().filter(|_| batch.judged) {
             let score = match cached {
                 Some(score) => score,
-                None => match self.judge_once(judge.as_ref(), goal, &batch, turn_id).await? {
-                    Some(score) => score,
-                    None => {
-                        report
-                            .deferred
-                            .push((goal.goal_id.clone(), Deferral::JudgeUnavailable));
-                        return Ok(());
+                None => {
+                    let backing_off = self.judge_retry_at(&goal.goal_id).filter(|at| *at > now);
+                    let score = match backing_off {
+                        Some(_) => None,
+                        None => {
+                            self.judge_once(judge.as_ref(), goal, &batch, turn_id)
+                                .await?
+                        }
+                    };
+                    match score {
+                        Some(score) => {
+                            self.judge_answered(&goal.goal_id);
+                            score
+                        }
+                        None => {
+                            // A failing judge is asked again only after a backoff, never on
+                            // every rescan.
+                            let retry_at = backing_off
+                                .unwrap_or_else(|| self.judge_failed(&goal.goal_id, now));
+                            report.due_at(retry_at);
+                            report
+                                .deferred
+                                .push((goal.goal_id.clone(), Deferral::JudgeUnavailable));
+                            return Ok(false);
+                        }
                     }
-                },
+                }
             };
             if score < JUDGE_THRESHOLD {
                 settle_wakes(&self.pool, Some((turn_id, "skipped")), &ids, now).await?;
                 report.skipped.push(turn_id);
-                return Ok(());
+                return Ok(true);
             }
         }
         let turn = WakeTurn {
@@ -1086,16 +1313,27 @@ impl WakeScheduler {
             urgent: batch.urgent,
             wakes: batch.wakes,
         };
-        match self.handler.handle(&turn).await {
+        let consumed = match self.handler.handle(&turn).await {
             WakeAck::Done => {
                 settle_wakes(&self.pool, Some((turn_id, "delivered")), &ids, now).await?;
                 report.delivered.push(turn_id);
+                true
             }
-            WakeAck::Busy => report
-                .deferred
-                .push((goal.goal_id.clone(), Deferral::HandlerBusy)),
-        }
-        Ok(())
+            WakeAck::Busy => {
+                report
+                    .deferred
+                    .push((goal.goal_id.clone(), Deferral::HandlerBusy));
+                false
+            }
+            WakeAck::NotApplicable => {
+                report.deferred.push((
+                    goal.goal_id.clone(),
+                    Deferral::NotApplicable(goal.run_state),
+                ));
+                false
+            }
+        };
+        Ok(consumed)
     }
 
     /// Scores a report-only batch once and caches the score on its turn row. `None` when the
@@ -1200,12 +1438,17 @@ impl WakeScheduler {
 ///   ([`DEPENDENCY_FAILED`]); it is never success.
 /// - A passed deadline holds the goal for the owner ([`DEADLINE_PASSED`]).
 /// - With no wait pending, a dependency-ready or turn-settled wake moves a running or waiting
-///   goal to `verifying` ([`DEPENDENCIES_MET`], [`TURN_SETTLED`]).
+///   goal to `verifying` ([`DEPENDENCIES_MET`], [`TURN_SETTLED`], or [`STALE_SETTLE`] when
+///   every settled run in the turn answered an older goal revision).
 /// - Owner wakes need nothing more: the revision bump that produced them already fences every
 ///   decision made before them.
 /// - Reports are status only.
 ///
-/// A goal that moved since the scheduler checked it (revision or state conflict), became busy,
+/// A decisive wake (settle, dependency, deadline) is never acknowledged without its effect:
+/// in a state this handler cannot act from (`ready` after a resume, `dispatching`, a hold),
+/// with a wait added since the scheduler checked, or after an error it cannot resolve, it
+/// answers [`WakeAck::NotApplicable`] and the wake stays pending for whoever can act on it. A
+/// goal that moved since the scheduler checked it (revision or state conflict), became busy,
 /// or a storage error answers `Busy`, so the wake is retried against the new state instead of
 /// being lost.
 pub struct StateHandler {
@@ -1224,6 +1467,7 @@ impl StateHandler {
         let Some(goal) = goal_of(&self.pool, &turn.goal_id).await? else {
             return Ok(WakeAck::Done);
         };
+        let decisive = turn.wakes.iter().any(|wake| is_decisive(wake.cause));
         if !matches!(
             goal.run_state,
             RunState::Running
@@ -1231,7 +1475,14 @@ impl StateHandler {
                 | RunState::WaitingEvent
                 | RunState::Verifying
         ) {
-            return Ok(WakeAck::Done);
+            // Reports are status only and an ended goal's wakes are closed. From any other
+            // state nothing here can act on a decisive wake, and receipting it as delivered
+            // would lose the very result progress needs.
+            return Ok(if decisive && !goal.run_state.is_terminal() {
+                WakeAck::NotApplicable
+            } else {
+                WakeAck::Done
+            });
         }
         if goal_busy(&self.pool, &goal.goal_id).await? {
             return Ok(WakeAck::Busy);
@@ -1269,29 +1520,72 @@ impl StateHandler {
             return Ok(WakeAck::Done);
         }
         let ended = turn.has(WakeCause::DependencyReady) || turn.has(WakeCause::TurnSettled);
-        if ended
-            && goal.run_state != RunState::Verifying
-            && pending_wait_kinds(&self.pool, &goal.goal_id)
-                .await?
-                .is_empty()
-        {
-            let detail = if turn.has(WakeCause::DependencyReady) {
-                DEPENDENCIES_MET
-            } else {
-                TURN_SETTLED
-            };
-            transition_goal(
-                &self.pool,
-                &goal.goal_id,
-                goal.revision,
-                goal.run_state,
-                RunState::Verifying,
-                Some(detail),
-            )
-            .await?;
+        if !ended || goal.run_state == RunState::Verifying {
+            return Ok(WakeAck::Done);
         }
+        if !pending_wait_kinds(&self.pool, &goal.goal_id)
+            .await?
+            .is_empty()
+        {
+            // A wait added after the scheduler checked: the result waits for it.
+            return Ok(WakeAck::NotApplicable);
+        }
+        let detail = if turn.has(WakeCause::DependencyReady) {
+            DEPENDENCIES_MET.to_owned()
+        } else {
+            settle_detail(&self.pool, turn, goal.revision).await?
+        };
+        transition_goal(
+            &self.pool,
+            &goal.goal_id,
+            goal.revision,
+            goal.run_state,
+            RunState::Verifying,
+            Some(&detail),
+        )
+        .await?;
         Ok(WakeAck::Done)
     }
+}
+
+/// [`TURN_SETTLED`], or [`STALE_SETTLE`] when every settled run in the turn was dispatched at
+/// an older goal revision than `revision`.
+async fn settle_detail(
+    pool: &SqlitePool,
+    turn: &WakeTurn,
+    revision: i64,
+) -> Result<String, SupervisorError> {
+    let mut older = Vec::new();
+    for wake in turn
+        .wakes
+        .iter()
+        .filter(|wake| wake.cause == WakeCause::TurnSettled)
+    {
+        let Some(request_id) = wake
+            .event_id
+            .strip_prefix("dispatch:")
+            .and_then(|rest| rest.strip_suffix(":settled"))
+        else {
+            return Ok(TURN_SETTLED.to_owned());
+        };
+        let dispatched: Option<i64> = sqlx::query_scalar(
+            "SELECT goal_revision FROM supervisor_dispatches WHERE request_id = ?",
+        )
+        .bind(request_id)
+        .fetch_optional(pool)
+        .await?;
+        match dispatched {
+            Some(at) if at < revision => older.push(format!("{request_id} (revision {at})")),
+            _ => return Ok(TURN_SETTLED.to_owned()),
+        }
+    }
+    if older.is_empty() {
+        return Ok(TURN_SETTLED.to_owned());
+    }
+    Ok(truncate(&format!(
+        "{STALE_SETTLE}: {} settled before goal revision {revision}; not evidence for the current contract",
+        older.join(", ")
+    )))
 }
 
 #[async_trait]
@@ -1306,6 +1600,10 @@ impl WakeHandler for StateHandler {
             Err(error) if error.code() == "REVISION_CONFLICT" => {
                 tracing::debug!(%error, turn_id = turn.turn_id, "goal moved before its wake applied; rechecking");
                 WakeAck::Busy
+            }
+            Err(error) if turn.wakes.iter().any(|wake| is_decisive(wake.cause)) => {
+                tracing::warn!(%error, turn_id = turn.turn_id, "decisive wake could not be applied; it stays pending");
+                WakeAck::NotApplicable
             }
             Err(error) => {
                 tracing::warn!(%error, turn_id = turn.turn_id, "wake turn needs no state change");
