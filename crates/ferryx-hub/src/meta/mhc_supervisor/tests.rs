@@ -582,7 +582,9 @@ async fn the_engine_snapshot_reports_health_and_the_persisted_role_bindings() {
     let stopped = supervisor.engine_snapshot().await;
     assert_eq!(stopped["state"], json!("stopped"));
     assert_eq!(stopped["generation"], json!(0));
+    assert_eq!(stopped["memoryAgent"], Value::Null, "no profile config yet");
     assert!(harness.peer.frames().is_empty(), "a snapshot never launches the engine");
+    supervisor.profile().prepare().unwrap();
 
     assert_eq!(supervisor.decide("question").await.unwrap(), "answer:question");
     let durable = harness.peer.of_type("open_session")[0]["durableSessionId"]
@@ -602,6 +604,7 @@ async fn the_engine_snapshot_reports_health_and_the_persisted_role_bindings() {
         json!(harness.data().join("mhc-supervisor").to_string_lossy())
     );
     assert_eq!(snapshot["decisionContext"], decision_context());
+    assert_eq!(snapshot["memoryAgent"], json!(crate::supervisor::MEMORY_NAME));
     assert_eq!(
         snapshot["sessions"]["decision-0"],
         json!({

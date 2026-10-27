@@ -18,9 +18,8 @@ const CHILD_DEADLINE_MS = 120_000;
 const ARM_DEADLINE_MS = 60_000;
 // The refusal, not-implemented, run-lock and stale-evidence steps need a registered scenario
 // that is still only planned: the first one, so implementing a scenario never silently runs
-// it against the self-test's fake binaries.
-const PLANNED = Object.entries(SCENARIOS).find(([, scenario]) => !scenario.implemented)?.[0];
-if (!PLANNED) throw new Error('self-test needs at least one planned scenario');
+// it against the self-test's fake binaries. selfTest() refuses to run without one.
+const PLANNED = Object.entries(SCENARIOS).find(([, scenario]) => !scenario.implemented)?.[0] ?? null;
 
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
@@ -129,6 +128,7 @@ function makeFixture(evidence, nonce) {
 }
 
 export async function selfTest(opts, interrupts, { script, repoRoot, scripts, writeOut }) {
+  if (!PLANNED) throw new Error('self-test needs at least one planned scenario for its refusal, run-lock and stale-evidence steps');
   const evidence = Evidence.prepare(opts.evidence, { force: opts.forceEvidence });
   const runId = `selftest-${Date.now().toString(36)}-${process.pid.toString(36)}`;
   const journal = new Journal(evidence);

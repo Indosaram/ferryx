@@ -859,18 +859,31 @@ async fn engine_view(
 /// Reads the retained mhc supervisor engine or asks it for one structured judgment, and adds
 /// the supervisor's recent pane input (`actions`, as in [`supervisor_snapshot`]) so a caller
 /// can see that nothing was typed. `hubOpen` says whether the hub database is open, which an
-/// assessment needs to record its `judge_calls` row.
+/// assessment needs to record its `judge_calls` row. `supervisorIdentities` are the hub's
+/// supervisor identity rows (read-only; null while the hub is not open or the read failed), so
+/// the identity the engine serves can be compared across engine and daemon restarts.
 pub async fn supervisor_engine(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorEngineAction,
 ) -> Result<Value, SupervisorEngineError> {
     let pool = SUPERVISOR_VIEW.get().map(|(hub, _)| hub.pool.clone());
     let hub_open = pool.is_some();
+    let identities = match &pool {
+        Some(pool) => match ferryx_hub::supervisor::identities(pool).await {
+            Ok(rows) => json!(rows),
+            Err(error) => {
+                tracing::warn!(%error, "supervisor engine view could not read the supervisor identities");
+                Value::Null
+            }
+        },
+        None => Value::Null,
+    };
     let mut view = engine_view(ferryx_hub::meta::mhc_supervisor::installed(), pool, action).await?;
     let actions = supervisor_snapshot(state).await.get("actions").cloned().unwrap_or_else(|| json!([]));
     if let Some(fields) = view.as_object_mut() {
         fields.insert("actions".into(), actions);
         fields.insert("hubOpen".into(), json!(hub_open));
+        fields.insert("supervisorIdentities".into(), identities);
     }
     Ok(view)
 }

@@ -5,7 +5,8 @@
 // engine as MHC_CAPABILITY_MISSING before opening any session.
 //   UNIFIED_SUPERVISOR_MHC_REAL         absolute path of the real mhc binary (required)
 //   UNIFIED_SUPERVISOR_MHC_DROP_CAPABILITY  the capability to remove (required)
-//   UNIFIED_SUPERVISOR_MHC_FRAMES       optional JSONL file: every command line received is appended
+//   UNIFIED_SUPERVISOR_MHC_FRAMES       optional JSONL file: every stdin line received is appended
+//                                       (`{type,id}` for JSON, `{unparsed:<line>}` otherwise)
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 
@@ -39,11 +40,16 @@ function lines(stream, onLine, onEnd) {
 }
 
 lines(process.stdin, (line) => {
+  let record;
   try {
     const command = JSON.parse(line);
-    if (frames) appendFileSync(frames, `${JSON.stringify({ type: command?.type ?? null, id: command?.id ?? null })}\n`);
+    record = { type: command?.type ?? null, id: command?.id ?? null };
     if (command?.type === 'get_protocol_info' && command.id !== undefined) protocolIds.add(String(command.id));
-  } catch { /* relayed unchanged */ }
+  } catch {
+    // Relayed unchanged, and recorded: a non-JSON write is still a send.
+    record = { unparsed: line };
+  }
+  if (frames) appendFileSync(frames, `${JSON.stringify(record)}\n`);
   child.stdin.write(`${line}\n`);
 }, () => child.stdin.end());
 

@@ -1563,8 +1563,10 @@ impl MhcSupervisor {
 
     /// Read-only view of the engine for operators and QA: health, the profile cwd, the
     /// persisted role bindings (durable session id and session file per role key) and the
-    /// session context a decision slot opens with. Sends nothing to the engine and never
-    /// launches it. It waits for the engine state lock, so it never shows half of a launch or
+    /// session context a decision slot opens with, and the native memory identity the engine
+    /// reads from the profile's `.omo/omo.jsonc` (`memoryAgent`, null when the file is absent
+    /// or names none). Sends nothing to the engine, never launches it and writes no file.
+    /// It waits for the engine state lock, so it never shows half of a launch or
     /// exit: every transition the engine logs under that lock (ready, degraded, exited) is
     /// visible to a snapshot taken after the log line. `retryInMs` is how long until a
     /// relaunch is allowed after a failed launch or an early exit.
@@ -1582,6 +1584,12 @@ impl MhcSupervisor {
         };
         let sessions = self.inner.store().sessions().clone();
         let decision = self.inner.profile.role_spec(&SessionRole::Decision(0));
+        let memory_agent = tokio::fs::read_to_string(self.inner.profile.memory_config_path())
+            .await
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|config| config.pointer("/memory/agent").cloned())
+            .unwrap_or(Value::Null);
         json!({
             "state": health.state,
             "generation": health.generation,
@@ -1596,6 +1604,7 @@ impl MhcSupervisor {
             "profileCwd": self.inner.profile.cwd().to_string_lossy(),
             "sessions": sessions,
             "decisionContext": decision.context,
+            "memoryAgent": memory_agent,
         })
     }
 

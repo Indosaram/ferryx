@@ -1253,6 +1253,28 @@ pub async fn identity_of(
     ))
 }
 
+/// Every supervisor identity of this installation, oldest first. Read-only: the engine status
+/// view reports it so an operator can see the identity is unchanged across engine restarts.
+pub async fn identities(pool: &SqlitePool) -> Result<Vec<SupervisorIdentity>, SupervisorError> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT supervisor_id, owner_principal, memory_name, created_at
+         FROM supervisor_identity ORDER BY created_at, supervisor_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(supervisor_id, owner_principal, memory_name, created_at)| SupervisorIdentity {
+                supervisor_id,
+                owner_principal,
+                memory_name,
+                created_at,
+            },
+        )
+        .collect())
+}
+
 type ProjectRow = (String, String, String, String, String);
 
 fn project_from_row(row: ProjectRow) -> Project {
