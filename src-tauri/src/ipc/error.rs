@@ -153,6 +153,7 @@ impl IpcErrorCode {
     pub fn from_code_str(s: &str) -> Self {
         match s {
             "SESSION_NOT_FOUND" => Self::SessionNotFound,
+            "PTY_IO_ERROR" => Self::PtyIoError,
             "SESSION_EXPIRED" => Self::SessionExpired,
             "PARENT_SESSION_MISMATCH" => Self::ParentSessionMismatch,
             "TIMEOUT" => Self::Timeout,
@@ -457,15 +458,22 @@ impl From<WorktreeError> for IpcError {
 
 impl From<PtyError> for IpcError {
     fn from(error: PtyError) -> Self {
+        if let PtyError::InputError { bytes_written, message } = error {
+            return Self::new(IpcErrorCode::PtyIoError, message).with_details(json!({
+                "inputWritten": bytes_written > 0,
+                "bytesWritten": bytes_written,
+                "partial": bytes_written > 0,
+            }));
+        }
         let code = match error {
             PtyError::SessionNotFound(_) => IpcErrorCode::SessionNotFound,
             PtyError::PtyCreationError(_) => IpcErrorCode::PtyCreationError,
             PtyError::SpawnError(_) => IpcErrorCode::PtySpawnError,
-            PtyError::IoError(_) => IpcErrorCode::PtyIoError,
+            PtyError::IoError(_) | PtyError::InputError { .. } => IpcErrorCode::PtyIoError,
             PtyError::ResizeError(_) => IpcErrorCode::PtyResizeError,
             PtyError::KillError(_) => IpcErrorCode::PtyKillError,
             PtyError::ChannelError(_) => IpcErrorCode::ChannelError,
-            PtyError::Other(_) => IpcErrorCode::InternalError,
+            PtyError::Other(_) | PtyError::RemoteInput(_) => IpcErrorCode::InternalError,
         };
         Self::new(code, error.to_string())
     }

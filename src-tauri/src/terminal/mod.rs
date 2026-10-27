@@ -14,6 +14,12 @@ pub enum PtyError {
     #[error("PTY I/O error: {0}")]
     IoError(String),
 
+    #[error("PTY input failed after {bytes_written} bytes: {message}")]
+    InputError { bytes_written: usize, message: String },
+
+    #[error(transparent)]
+    RemoteInput(#[from] remote::RemoteFailure),
+
     #[error("PTY resize error: {0}")]
     ResizeError(String),
 

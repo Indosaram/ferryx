@@ -10628,7 +10628,6 @@ mod tests {
 
         // Release slow consumer
         control.write_all(&[1]).await.unwrap();
-        let _ = pty.write_input_cancellable(b"!\n").await;
 
         let mut observed_ack = false;
         let mut ack_code = None;
@@ -10649,13 +10648,13 @@ mod tests {
             .await
             .expect("close acknowledgement must arrive within bounded timeout");
 
+        let reaped = pty.is_reaped();
+        fixture.cleanup().await;
         assert!(observed_ack, "gateway must send close acknowledgement frame under saturation");
         assert_eq!(ack_code, Some(1000), "ack close code must match client frame");
 
         // PTY must survive
-        assert!(!pty.is_reaped(), "PTY process must not be reaped by saturated socket close");
-
-        fixture.cleanup().await;
+        assert!(!reaped, "PTY process must not be reaped by saturated socket close");
     }
 
     #[test]

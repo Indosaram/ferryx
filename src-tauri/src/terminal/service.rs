@@ -33,6 +33,140 @@ pub struct TerminalService {
     remote: Arc<super::remote::RemoteRuntime>,
     paired: Arc<super::paired_runtime::Runtime>,
     lifecycle: Arc<Mutex<SessionLifecycleRegistry>>,
+    pastes: Arc<PasteRegistry>,
+}
+
+/// How long `cancel_paste` waits for the chunk in flight to stop at its next await point.
+const PASTE_CANCEL_SETTLE_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+/// Idle paste records (completed, failed or cancelled) are kept this long so a late
+/// `CancelPaste` still reports the exact count and a late chunk of a cancelled paste is refused.
+const PASTE_RECORD_RETENTION: std::time::Duration = std::time::Duration::from_secs(600);
+/// Upper bound on retained paste records across all sessions.
+const MAX_PASTE_RECORDS: usize = 1024;
+
+/// Outcome of `TerminalService::cancel_paste`. `bytes_written` is the exact count of the
+/// paste's bytes the kernel accepted across all of its chunks when `settled`, else a lower bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasteCancelOutcome {
+    pub found: bool,
+    pub bytes_written: u64,
+    pub settled: bool,
+}
+
+/// Failure of one `PasteWrite` chunk.
+#[derive(Debug)]
+pub enum PasteChunkError {
+    /// Refused (paste already cancelled) or stopped by `CancelPaste`; `bytes_written` is the
+    /// exact count of this chunk's bytes the kernel accepted.
+    Cancelled { bytes_written: usize },
+    /// The daemon holds no record of this paste; nothing was written.
+    Unknown,
+    Failed(PtyError),
+}
+
+impl From<PasteChunkError> for crate::ipc::IpcError {
+    fn from(error: PasteChunkError) -> Self {
+        match error {
+            PasteChunkError::Cancelled { bytes_written } => Self::new(
+                crate::ipc::IpcErrorCode::Custom(crate::daemon::protocol::PASTE_CANCELLED_CODE.into()),
+                "Paste cancelled",
+            )
+            .with_details(serde_json::json!({
+                "pasteCancelled": true,
+                "inputWritten": bytes_written > 0,
+                "bytesWritten": bytes_written,
+                "bytesWrittenExact": true,
+                "partial": bytes_written > 0,
+            })),
+            PasteChunkError::Unknown => Self::new(
+                crate::ipc::IpcErrorCode::Custom(crate::daemon::protocol::PASTE_UNKNOWN_CODE.into()),
+                "Paste unknown to this daemon",
+            )
+            .with_details(serde_json::json!({
+                "pasteUnknown": true,
+                "inputWritten": false,
+                "bytesWritten": 0,
+                "bytesWrittenExact": true,
+                "partial": false,
+            })),
+            PasteChunkError::Failed(error) => Self::from(error),
+        }
+    }
+}
+
+struct PasteRecord {
+    cancel: tokio_util::sync::CancellationToken,
+    /// Bytes of this paste the kernel accepted, advanced by the writer as each syscall lands,
+    /// so it is exact even when a chunk's future is dropped mid-write.
+    accepted: Arc<std::sync::atomic::AtomicU64>,
+    completed: bool,
+    /// true while no chunk of this paste is in flight.
+    idle: watch::Sender<bool>,
+    touched: std::time::Instant,
+}
+
+impl PasteRecord {
+    fn new() -> Self {
+        Self {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            accepted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            completed: false,
+            idle: watch::channel(true).0,
+            touched: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Identified pastes, keyed by (session id, paste id). Only `PasteWrite`/`CancelPaste` consult
+/// it; ordinary input never does, so no ordinary byte can be refused or swallowed by it.
+#[derive(Default)]
+struct PasteRegistry {
+    records: Mutex<std::collections::HashMap<(String, String), PasteRecord>>,
+}
+
+impl PasteRegistry {
+    fn begin(&self, session_id: &str) -> Result<String, PtyError> {
+        let mut records = self.records.lock();
+        Self::prune(&mut records, MAX_PASTE_RECORDS - 1);
+        if records.len() >= MAX_PASTE_RECORDS {
+            return Err(PtyError::InputError { bytes_written: 0, message: "PASTE_REGISTRY_FULL".into() });
+        }
+        let paste_id = uuid::Uuid::new_v4().to_string();
+        records.insert((session_id.to_string(), paste_id.clone()), PasteRecord::new());
+        Ok(paste_id)
+    }
+
+    /// Drops expired idle records, then the oldest idle records beyond the requested limit.
+    /// Only registration reserves an extra slot. In-flight records are never dropped.
+    fn prune(records: &mut std::collections::HashMap<(String, String), PasteRecord>, limit: usize) {
+        records.retain(|_, record| !*record.idle.borrow() || record.touched.elapsed() < PASTE_RECORD_RETENTION);
+        if records.len() <= limit {
+            return;
+        }
+        let mut idle: Vec<_> = records
+            .iter()
+            .filter(|(_, record)| *record.idle.borrow())
+            .map(|(key, record)| (record.touched, key.clone()))
+            .collect();
+        idle.sort_by_key(|(touched, _)| *touched);
+        let excess = records.len() - limit;
+        for (_, key) in idle.into_iter().take(excess) {
+            records.remove(&key);
+        }
+    }
+
+    /// Forgets every paste of a session that is going away; its in-flight chunk (if any) is
+    /// cancelled so it stops at its next await point instead of holding the closing PTY.
+    fn forget_session(&self, session_id: &str) {
+        self.records.lock().retain(|(id, _), record| {
+            if id == session_id {
+                record.cancel.cancel();
+                false
+            } else {
+                true
+            }
+        });
+    }
 }
 
 impl Default for TerminalService {
@@ -62,6 +196,7 @@ impl TerminalService {
             pty_manager,
             output_hub,
             lifecycle: Arc::new(Mutex::new(SessionLifecycleRegistry::default())),
+            pastes: Arc::new(PasteRegistry::default()),
         };
         // The daemon owns the PTYs and their output hub, so the private QA
         // channel is installed here as well; without the runner env this is a
@@ -101,15 +236,17 @@ impl TerminalService {
         id: &str,
         generation: u64,
         data: Vec<u8>,
-    ) -> Result<super::remote::RemoteOperation, PtyError> {
+    ) -> Result<futures_util::future::BoxFuture<'static, Result<(), PtyError>>, PtyError> {
         if super::paired_runtime::Runtime::owns(id) {
-            return self.paired.write(id, generation, data);
+            let pending = self.paired.write(id, generation, data)?;
+            return Ok(Box::pin(async move { pending.await.map_err(PtyError::RemoteInput) }));
         }
         if self.remote.contains(id) {
-            return self
+            let pending = self
                 .remote
                 .write(id, generation, data)
-                .map_err(|e| PtyError::Other(e.to_string()));
+                .map_err(|e| PtyError::Other(e.to_string()))?;
+            return Ok(Box::pin(async move { pending.await.map_err(PtyError::RemoteInput) }));
         }
         // Resolve session synchronously so missing IDs fail immediately with SessionNotFound.
         let session = self
@@ -126,13 +263,16 @@ impl TerminalService {
                 // Chunks are written strictly in order, each under the session's input gate.
                 // The gate is re-taken per chunk, so a second connection writing to the same
                 // session can interleave only at a 64 KiB boundary.
-                for chunk in data.chunks(MAX_CHUNK_SIZE) {
+                for (index, chunk) in data.chunks(MAX_CHUNK_SIZE).enumerate() {
                     session
                         .write_input_cancellable(chunk)
                         .await
-                        .map_err(|e| super::remote::RemoteFailure {
-                            kind: super::remote::RemoteFailureKind::Transport,
-                            message: e.to_string(),
+                        .map_err(|error| match error {
+                            PtyError::InputError { bytes_written, message } => PtyError::InputError {
+                                bytes_written: index * MAX_CHUNK_SIZE + bytes_written,
+                                message,
+                            },
+                            error => error,
                         })?;
                 }
                 Ok(())
@@ -144,16 +284,127 @@ impl TerminalService {
             Ok(Box::pin(async move {
                 tokio::task::spawn_blocking(move || session.write_input(&data))
                     .await
-                    .map_err(|e| super::remote::RemoteFailure {
-                        kind: super::remote::RemoteFailureKind::Transport,
-                        message: format!("PTY write task panicked: {e}"),
-                    })?
-                    .map_err(|e| super::remote::RemoteFailure {
-                        kind: super::remote::RemoteFailureKind::Transport,
-                        message: e.to_string(),
-                    })
+                    .map_err(|e| PtyError::Other(format!("PTY write task panicked: {e}")))?
             }))
         }
+    }
+
+    /// Allocates a server-owned paste identity. An absent identity is never recreated by a
+    /// chunk or cancellation, including after eviction, expiry, or daemon handover.
+    pub fn begin_paste(&self, id: &str) -> Result<String, PtyError> {
+        if self.pty_manager.get_session(id).is_none() {
+            return Err(PtyError::SessionNotFound(id.to_string()));
+        }
+        self.pastes.begin(id)
+    }
+
+    /// Writes one chunk of the identified paste `paste_id`. Local PTY chunks run under the
+    /// paste's cancellation token, so `cancel_paste` stops the chunk in flight and every later
+    /// chunk is refused. Remote and paired sessions keep ordinary write semantics.
+    pub async fn write_paste_chunk(
+        &self,
+        id: &str,
+        generation: u64,
+        paste_id: &str,
+        data: Vec<u8>,
+        final_chunk: bool,
+    ) -> Result<(), PasteChunkError> {
+        #[cfg(any(unix, windows))]
+        {
+            if !super::paired_runtime::Runtime::owns(id) && !self.remote.contains(id) {
+                let session = self
+                    .pty_manager
+                    .get_session(id)
+                    .ok_or_else(|| PasteChunkError::Failed(PtyError::SessionNotFound(id.to_string())))?;
+                return self.write_local_paste_chunk(&session, id, paste_id, &data, final_chunk).await;
+            }
+        }
+        let _ = (paste_id, final_chunk);
+        self.write_input_operation(id, generation, data)
+            .map_err(PasteChunkError::Failed)?
+            .await
+            .map_err(PasteChunkError::Failed)
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn write_local_paste_chunk(
+        &self,
+        session: &PtySession,
+        id: &str,
+        paste_id: &str,
+        data: &[u8],
+        final_chunk: bool,
+    ) -> Result<(), PasteChunkError> {
+        const MAX_CHUNK_SIZE: usize = 65536;
+        let key = (id.to_string(), paste_id.to_string());
+        let (token, progress, idle) = {
+            let mut records = self.pastes.records.lock();
+            PasteRegistry::prune(&mut records, MAX_PASTE_RECORDS);
+            let record = records.get_mut(&key).ok_or(PasteChunkError::Unknown)?;
+            record.touched = std::time::Instant::now();
+            if record.cancel.is_cancelled() {
+                return Err(PasteChunkError::Cancelled { bytes_written: 0 });
+            }
+            if record.completed || !*record.idle.borrow() {
+                return Err(PasteChunkError::Failed(PtyError::InputError {
+                    bytes_written: 0,
+                    message: "PASTE_CHUNK_OUT_OF_ORDER".into(),
+                }));
+            }
+            record.idle.send_replace(false);
+            (record.cancel.clone(), Arc::clone(&record.accepted), record.idle.clone())
+        };
+        // Restores the idle flag even if this future is dropped, so a waiting cancel never
+        // outlives its bound because of a vanished chunk. Byte accounting lives in `progress`.
+        struct Settle<'a> { registry: &'a PasteRegistry, key: (String, String), done: bool, idle: watch::Sender<bool> }
+        impl Drop for Settle<'_> {
+            fn drop(&mut self) {
+                if let Some(record) = self.registry.records.lock().get_mut(&self.key) {
+                    record.completed |= self.done;
+                    record.touched = std::time::Instant::now();
+                }
+                self.idle.send_replace(true);
+            }
+        }
+        let mut settle = Settle { registry: &self.pastes, key, done: false, idle };
+        let start = progress.load(std::sync::atomic::Ordering::Acquire);
+        let in_request = || (progress.load(std::sync::atomic::Ordering::Acquire) - start) as usize;
+        for chunk in data.chunks(MAX_CHUNK_SIZE) {
+            match session.write_input_until(chunk, &token, &progress).await {
+                Ok(()) => {}
+                Err(super::session::InputStop::Cancelled { .. }) => {
+                    return Err(PasteChunkError::Cancelled { bytes_written: in_request() });
+                }
+                Err(super::session::InputStop::Failed(PtyError::InputError { message, .. })) => {
+                    return Err(PasteChunkError::Failed(PtyError::InputError { bytes_written: in_request(), message }));
+                }
+                Err(super::session::InputStop::Failed(error)) => return Err(PasteChunkError::Failed(error)),
+            }
+        }
+        settle.done = final_chunk;
+        Ok(())
+    }
+
+    /// Cancels the paste `paste_id` on `id`: the chunk in flight stops at its next await point
+    /// and every later chunk is refused. An unknown paste remains unknown and cannot be
+    /// written; its previous accepted count is unavailable. Never signals or flushes the tty.
+    pub async fn cancel_paste(&self, id: &str, paste_id: &str) -> PasteCancelOutcome {
+        let key = (id.to_string(), paste_id.to_string());
+        let (found, mut idle, progress) = {
+            let mut records = self.pastes.records.lock();
+            let found = records.contains_key(&key);
+            let Some(record) = records.get_mut(&key) else {
+                return PasteCancelOutcome { found: false, bytes_written: 0, settled: false };
+            };
+            record.touched = std::time::Instant::now();
+            record.cancel.cancel();
+            (found, record.idle.subscribe(), Arc::clone(&record.accepted))
+        };
+        let settled = tokio::time::timeout(PASTE_CANCEL_SETTLE_BOUND, idle.wait_for(|idle| *idle))
+            .await
+            .is_ok_and(|result| result.is_ok());
+        let bytes_written = progress.load(std::sync::atomic::Ordering::Acquire);
+        PasteCancelOutcome { found, bytes_written, settled }
     }
 
     pub fn resize_operation(
@@ -496,6 +747,7 @@ impl TerminalService {
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<(), PtyError> {
+        self.pastes.forget_session(session_id);
         if super::paired_runtime::Runtime::owns(session_id) {
             self.paired
                 .detach(session_id)
@@ -526,6 +778,7 @@ impl TerminalService {
                 "Session hibernation is supported only for local PTYs".into(),
             ));
         }
+        self.pastes.forget_session(session_id);
         self.lifecycle
             .lock()
             .mark_hibernated(session_id.to_string());
@@ -611,6 +864,7 @@ impl TerminalService {
         session_id: &str,
         authorize: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     ) -> Result<(), PtyError> {
+        self.pastes.forget_session(session_id);
         self.pty_manager
             .close_authorized(session_id, std::time::Duration::from_secs(5), authorize)
             .await?;
@@ -678,6 +932,236 @@ pub(crate) fn remote_live_info(
     crate::daemon::protocol::LiveSessionInfo::remote(
         crate::daemon::protocol::LiveSessionKind::Ssh, id, pid, reader_open, connected,
     )
+}
+
+#[cfg(test)]
+mod paste_cancel_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_keeps_receipt_when_session_record_is_removed() {
+        let service = TerminalService::default();
+        let record = PasteRecord::new();
+        record.accepted.store(17, std::sync::atomic::Ordering::Release);
+        record.idle.send_replace(false);
+        let idle = record.idle.clone();
+        service.pastes.records.lock().insert(("s".into(), "p".into()), record);
+        let mut cancel = Box::pin(service.cancel_paste("s", "p"));
+        assert!(matches!(futures_util::poll!(cancel.as_mut()), std::task::Poll::Pending));
+        service.pastes.forget_session("s");
+        idle.send_replace(true);
+        assert_eq!(cancel.await, PasteCancelOutcome { found: true, bytes_written: 17, settled: true });
+    }
+
+    #[tokio::test]
+    async fn cancel_before_first_chunk_refuses_the_whole_paste_without_touching_ordinary_input() {
+        let service = TerminalService::default();
+        let outcome = service.cancel_paste("no-such-session", "p-early").await;
+        assert_eq!(outcome, PasteCancelOutcome { found: false, bytes_written: 0, settled: false });
+        // Unknown IDs cannot create records, so a later chunk cannot restart them.
+        let key = ("no-such-session".to_string(), "p-early".to_string());
+        assert!(!service.pastes.records.lock().contains_key(&key));
+        service.pastes.forget_session("no-such-session");
+        assert!(service.pastes.records.lock().is_empty(), "close must drop the session's records");
+    }
+
+    #[test]
+    fn registry_is_bounded_and_never_drops_an_in_flight_paste() {
+        let mut records = std::collections::HashMap::new();
+        let busy = PasteRecord::new();
+        busy.idle.send_replace(false);
+        records.insert(("s".to_string(), "busy".to_string()), busy);
+        for index in 0..MAX_PASTE_RECORDS + 50 {
+            records.insert(("s".to_string(), format!("idle-{index}")), PasteRecord::new());
+            PasteRegistry::prune(&mut records, MAX_PASTE_RECORDS);
+        }
+        assert!(records.len() <= MAX_PASTE_RECORDS);
+        assert!(records.contains_key(&("s".to_string(), "busy".to_string())));
+    }
+
+    #[test]
+    fn registry_lookup_at_capacity_preserves_registered_pastes() {
+        let registry = PasteRegistry::default();
+        let ids: Vec<_> = (0..MAX_PASTE_RECORDS).map(|_| registry.begin("s").unwrap()).collect();
+        let mut records = registry.records.lock();
+        PasteRegistry::prune(&mut records, MAX_PASTE_RECORDS);
+        assert_eq!(records.len(), MAX_PASTE_RECORDS);
+        for id in ids {
+            assert!(records.contains_key(&("s".into(), id)));
+        }
+    }
+
+    #[test]
+    fn registry_refuses_registration_when_every_slot_is_in_flight() {
+        let registry = PasteRegistry::default();
+        for _ in 0..MAX_PASTE_RECORDS {
+            let id = registry.begin("s").unwrap();
+            registry.records.lock().get(&("s".into(), id)).unwrap().idle.send_replace(false);
+        }
+        assert!(matches!(registry.begin("s"), Err(PtyError::InputError { bytes_written: 0, .. })));
+        assert_eq!(registry.records.lock().len(), MAX_PASTE_RECORDS);
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn await_marker(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>, marker: &str) -> Option<String> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut seen = Vec::new();
+            while let Some(chunk) = rx.recv().await {
+                seen.extend_from_slice(&chunk);
+                let text = String::from_utf8_lossy(&seen).into_owned();
+                if text.contains(marker) {
+                    return Some(text);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Drives `paste` only on its own wakeups until it is parked on a master the kernel reports
+    /// unwritable (the tty input queue is full): `Ok(None)`, or until it finishes: `Ok(Some(out))`.
+    #[cfg(target_os = "linux")]
+    async fn drive_until_parked<F>(paste: &mut std::pin::Pin<Box<F>>, master_fd: i32) -> Result<Option<F::Output>, ()>
+    where
+        F: std::future::Future,
+    {
+        use std::task::Poll;
+        let writable = || {
+            let mut probe = libc::pollfd { fd: master_fd, events: libc::POLLOUT, revents: 0 };
+            // SAFETY: one initialized pollfd; the session keeps the fd alive for the call.
+            (unsafe { libc::poll(&mut probe, 1, 0) }) > 0 && probe.revents & libc::POLLOUT != 0
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), std::future::poll_fn(|cx| {
+            match paste.as_mut().poll(cx) {
+                Poll::Ready(out) => Poll::Ready(Some(out)),
+                Poll::Pending if !writable() => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            }
+        }))
+        .await
+        .map_err(|_| ())
+    }
+
+    /// Raw (non-canonical, ISIG off) program that does not read until released. The pending
+    /// paste is cancelled server-side with an exact count, a late chunk of it is refused, and an
+    /// ordinary 0x03 byte then reaches the program as data, unchanged.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn raw_mode_paste_cancel_reports_exact_bytes_and_never_resumes_later_chunks() {
+        let fixture = tempfile::tempdir().unwrap();
+        let release = fixture.path().join("release");
+        let path = std::ffi::CString::new(release.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: path is a valid NUL-terminated string for the duration of the call.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let service = TerminalService::default();
+        let mut cmd = portable_pty::CommandBuilder::new("python3");
+        cmd.args(["-c", "import os,sys,termios\na=termios.tcgetattr(0)\na[3]&=~(termios.ICANON|termios.ECHO|termios.ISIG|termios.IEXTEN)\na[0]&=~(termios.IXON|termios.ICRNL)\ntermios.tcsetattr(0,termios.TCSANOW,a)\nf=os.open(sys.argv[1],os.O_RDWR)\nprint('READY',flush=True)\nos.read(f,1)\nx=y=o=0\nwhile True:\n b=os.read(0,65536)\n if not b: break\n i=b.find(b'\\x03')\n p=b if i<0 else b[:i]\n x+=p.count(b'x'); y+=p.count(b'y'); o+=len(p)-p.count(b'x')-p.count(b'y')\n if i>=0:\n  print('COUNT=%d Y=%d OTHER=%d CTRL=1' % (x,y,o),flush=True)\n  break\n"]);
+        cmd.arg(release.as_os_str());
+        let (id, mut output) = service.pty_manager().spawn(cmd, 80, 24).unwrap();
+        let session = service.get_session(&id).unwrap();
+        let ready = await_marker(&mut output, "READY").await.is_some();
+        let master_fd = session.raw_master_fd().expect("master fd");
+        const TOTAL: usize = 300 * 1024;
+
+        let paste_service = service.clone();
+        let paste_id = id.clone();
+        let registered = service.begin_paste(&id).unwrap();
+        let writing = registered.clone();
+        let mut paste = Box::pin(async move {
+            paste_service.write_paste_chunk(&paste_id, 0, &writing, vec![b'x'; TOTAL], true).await
+        });
+        let parked = if ready { drive_until_parked(&mut paste, master_fd).await } else { Err(()) };
+        let parked_ok = matches!(parked, Ok(None));
+        let (result, outcome) = if parked_ok {
+            tokio::join!(paste.as_mut(), service.cancel_paste(&id, &registered))
+        } else {
+            drop(paste);
+            (Err(PasteChunkError::Failed(PtyError::Other("paste was not parked".into()))),
+                service.cancel_paste(&id, &registered).await)
+        };
+        let late = service.write_paste_chunk(&id, 0, &registered, vec![b'y'; 16], false).await;
+        service.pastes.forget_session(&id);
+        let evicted = service.write_paste_chunk(&id, 0, &registered, vec![b'y'; 16], false).await;
+        let released = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(release)?.write_all(b"g")
+        }).await.unwrap();
+        let control = session.write_input_cancellable(&[0x03]).await;
+        let report = await_marker(&mut output, "CTRL=1").await;
+        service.close_session(&id).await.unwrap();
+
+        assert!(ready, "fixture never configured raw input");
+        assert!(parked_ok, "paste must be parked on the full PTY input queue");
+        let outcome_bytes = outcome.bytes_written as usize;
+        assert!(outcome.found && outcome.settled, "{outcome:?}");
+        assert!(outcome_bytes > 0 && outcome_bytes < TOTAL, "{outcome:?}");
+        match result {
+            Err(PasteChunkError::Cancelled { bytes_written }) => assert_eq!(bytes_written, outcome_bytes),
+            other => panic!("pending chunk must stop as cancelled: {other:?}"),
+        }
+        assert!(matches!(late, Err(PasteChunkError::Cancelled { bytes_written: 0 })), "{late:?}");
+        assert!(matches!(evicted, Err(PasteChunkError::Unknown)), "{evicted:?}");
+        released.unwrap();
+        assert!(control.is_ok(), "ordinary control byte after cancellation: {control:?}");
+        let report = report.expect("program reports what it received");
+        let line = report.lines().find(|line| line.contains("COUNT=")).unwrap().trim().to_string();
+        assert_eq!(line, format!("COUNT={outcome_bytes} Y=0 OTHER=0 CTRL=1"));
+    }
+
+    /// Canonical program with ISIG on that never reads stdin: an ordinary Ctrl+C byte after the
+    /// paste still raises SIGINT. Measured on Linux (pty-steady-full.log), a canonical tty never
+    /// fills: the line discipline accepts and drops input past its line limit, so the paste
+    /// normally completes and this checks plain kernel ISIG. The full-queue signal path is
+    /// covered by the raw-mode native paste test; if a kernel does park the paste, the accepted
+    /// count must match between the chunk result and the cancel reply.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canonical_mode_ctrl_c_reaches_program_after_a_paste() {
+        let service = TerminalService::default();
+        let mut cmd = portable_pty::CommandBuilder::new("python3");
+        cmd.args(["-c", "import signal,sys,termios\na=termios.tcgetattr(0)\na[3]=(a[3]|termios.ICANON|termios.ISIG)&~termios.ECHO\ntermios.tcsetattr(0,termios.TCSANOW,a)\nsignal.signal(signal.SIGINT,lambda *_:(print('GOT_INT',flush=True),sys.exit(0)))\nprint('READY',flush=True)\nsignal.pause()\n"]);
+        let (id, mut output) = service.pty_manager().spawn(cmd, 80, 24).unwrap();
+        let session = service.get_session(&id).unwrap();
+        let ready = await_marker(&mut output, "READY").await.is_some();
+        let master_fd = session.raw_master_fd().expect("master fd");
+        const TOTAL: usize = 300 * 1024;
+
+        let paste_service = service.clone();
+        let paste_id = id.clone();
+        let registered = service.begin_paste(&id).unwrap();
+        let writing = registered.clone();
+        let mut paste = Box::pin(async move {
+            paste_service.write_paste_chunk(&paste_id, 0, &writing, vec![b'x'; TOTAL], true).await
+        });
+        let parked = if ready { drive_until_parked(&mut paste, master_fd).await } else { Err(()) };
+        let parked_ok = parked.is_ok();
+        let (result, outcome) = match parked {
+            Ok(None) => tokio::join!(paste.as_mut(), service.cancel_paste(&id, &registered)),
+            Ok(Some(done)) => (done, service.cancel_paste(&id, &registered).await),
+            Err(()) => {
+                drop(paste);
+                (Err(PasteChunkError::Failed(PtyError::Other("paste stalled".into()))),
+                    service.cancel_paste(&id, &registered).await)
+            }
+        };
+        let control = session.write_input_cancellable(&[0x03]).await;
+        let interrupted = if control.is_ok() { await_marker(&mut output, "GOT_INT").await } else { None };
+        service.close_session(&id).await.unwrap();
+
+        assert!(ready, "fixture never announced READY");
+        assert!(parked_ok, "paste neither parked nor finished within the bound");
+        assert!(outcome.found && outcome.settled, "{outcome:?}");
+        match result {
+            Ok(()) => assert_eq!(outcome.bytes_written as usize, TOTAL),
+            Err(PasteChunkError::Cancelled { bytes_written }) => assert_eq!(bytes_written as u64, outcome.bytes_written),
+            Err(other) => panic!("unexpected paste failure: {other:?}"),
+        }
+        assert!(control.is_ok(), "Ctrl+C byte write failed: {control:?}");
+        assert!(interrupted.is_some(), "canonical program never received SIGINT");
+    }
 }
 
 #[cfg(test)]

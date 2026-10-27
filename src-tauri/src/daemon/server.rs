@@ -3542,6 +3542,9 @@ fn daemon_session_not_found(session_id: &str, source: &'static str) -> DaemonRes
 fn request_session_id(request: &DaemonRequest) -> Option<&str> {
     match request {
         DaemonRequest::Write { session_id, .. }
+        | DaemonRequest::PasteWrite { session_id, .. }
+        | DaemonRequest::BeginPaste { session_id }
+        | DaemonRequest::CancelPaste { session_id, .. }
         | DaemonRequest::Resize { session_id, .. }
         | DaemonRequest::Signal { session_id, .. }
         | DaemonRequest::Close { session_id }
@@ -6557,7 +6560,11 @@ impl DaemonServer {
                                 crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
                                 DaemonResponse::WriteOk
                             }
-                            Err(e) => daemon_error(e.to_string(),),
+                            Err(e) => DaemonResponse::Error {
+                                message: e.message,
+                                code: Some(e.code.to_string()),
+                                details: e.details,
+                            },
                         }
                     } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
                         match peer.write_input(&session_id, &data).await {
@@ -6571,6 +6578,55 @@ impl DaemonServer {
                         }
                     } else {
                         daemon_session_not_found(&session_id, "daemon_write")
+                    }
+                }
+                Ok(DaemonRequest::BeginPaste { session_id }) => {
+                    match self.terminal_service.begin_paste(&session_id) {
+                        Ok(paste_id) => DaemonResponse::BeginPasteOk { paste_id },
+                        Err(error) => {
+                            let error = crate::ipc::IpcError::from(error);
+                            DaemonResponse::Error { message: error.message, code: Some(error.code.to_string()), details: error.details }
+                        }
+                    }
+                }
+                Ok(DaemonRequest::PasteWrite { session_id, paste_id, data, final_chunk }) => {
+                    let served_here = self.serves_paired_here(&session_id);
+                    if served_here || self.session_router.is_local_session(&session_id) {
+                        let result = if served_here {
+                            self.terminal_service
+                                .write_paste_chunk(&session_id, 0, &paste_id, data, final_chunk)
+                                .await
+                                .map_err(crate::ipc::IpcError::from)
+                        } else {
+                            self.write_session_paste_chunk(&session_id, &paste_id, data, final_chunk).await
+                        };
+                        match result {
+                            Ok(()) => {
+                                crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                DaemonResponse::WriteOk
+                            }
+                            Err(e) => DaemonResponse::Error {
+                                message: e.message,
+                                code: Some(e.code.to_string()),
+                                details: e.details,
+                            },
+                        }
+                    } else if let Some(peer) = self.session_router.find_legacy_peer_for_session(&session_id) {
+                        // A legacy peer predates paste identity: the chunk is ordinary input there.
+                        match peer.write_input(&session_id, &data).await {
+                            Ok(()) => DaemonResponse::WriteOk,
+                            Err(message) => daemon_error(message),
+                        }
+                    } else {
+                        daemon_session_not_found(&session_id, "daemon_paste_write")
+                    }
+                }
+                Ok(DaemonRequest::CancelPaste { session_id, paste_id }) => {
+                    let outcome = self.terminal_service.cancel_paste(&session_id, &paste_id).await;
+                    DaemonResponse::CancelPasteOk {
+                        found: outcome.found,
+                        bytes_written: outcome.bytes_written,
+                        settled: outcome.settled,
                     }
                 }
                 Ok(DaemonRequest::Resize {
@@ -7142,6 +7198,7 @@ impl DaemonServer {
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -12400,6 +12457,137 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), server_task)
                 .await.expect("attach task ends").expect("attach task succeeds");
         }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn partial_input_receipt_matches_real_child_through_daemon_wire() {
+        use futures_util::FutureExt;
+        use tokio::io::AsyncReadExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let server = Arc::new(DaemonServer::new_with_paths(
+            Some(root.path().join("config")), Some(root.path().join("auth")),
+        ));
+        let listener = tokio::net::UnixListener::bind(root.path().join("child.sock")).unwrap();
+        let mut command = portable_pty::CommandBuilder::new("python3");
+        command.args(["-c", "import os,socket,sys,termios\na=termios.tcgetattr(0)\na[3]&=~(termios.ICANON|termios.ECHO)\ntermios.tcsetattr(0,termios.TCSANOW,a)\ns=socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])\ns.sendall(b'R')\ns.recv(1)\nos.set_blocking(0,False)\nn=0\nwhile True:\n try:\n  b=os.read(0,65536)\n  if not b: break\n  n+=len(b)\n except BlockingIOError: break\ns.sendall(n.to_bytes(8,'little'))\n"]);
+        command.arg(root.path().join("child.sock"));
+        let manager = server.terminal_service.pty_manager();
+        let (id, mut output) = manager.spawn(command, 80, 24).unwrap();
+        let drain = tokio::spawn(async move { while output.recv().await.is_some() {} });
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let owner = Arc::clone(&server);
+        let handler = tokio::spawn(async move { owner.handle_client(server_stream).await });
+        let mut wire = BufReader::new(client_stream);
+        let result = std::panic::AssertUnwindSafe(async {
+            let (mut child, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
+            assert_eq!(tokio::time::timeout(Duration::from_secs(5), child.read_u8()).await.unwrap().unwrap(), b'R');
+            let handshake = DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION, token: None };
+            wire.get_mut().write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes()).await.unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), wire.read_line(&mut line)).await.unwrap().unwrap();
+            assert!(matches!(serde_json::from_str::<DaemonResponse>(&line).unwrap(), DaemonResponse::HandshakeOk { .. }));
+            let request = DaemonRequest::Write { session_id: id.clone(), data: vec![b'x'; 65536] };
+            wire.get_mut().write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(15), wire.read_line(&mut line)).await.unwrap().unwrap();
+            child.write_all(b"D").await.unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(5), child.read_u64_le()).await.unwrap().unwrap();
+            let DaemonResponse::Error { code, details: Some(details), .. } = serde_json::from_str(&line).unwrap() else {
+                panic!("partial input receipt missing on daemon wire: {line}");
+            };
+            assert_eq!(code.as_deref(), Some("PTY_IO_ERROR"));
+            assert!(received > 0 && received < 65536);
+            assert_eq!(details["bytesWritten"], received);
+            assert_eq!(details["partial"], true);
+            assert_eq!(details["inputWritten"], true);
+            eprintln!("DAEMON_WIRE_PARTIAL_ACCEPTED={} CHILD_RECEIVED={received}", details["bytesWritten"]);
+        }).catch_unwind().await;
+        drop(wire);
+        if manager.has_session(&id) { manager.close_session(&id).await.unwrap(); }
+        tokio::time::timeout(Duration::from_secs(5), handler).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), drain).await.unwrap().unwrap();
+        drop(listener);
+        drop(server);
+        root.close().unwrap();
+        if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn paste_identity_cancel_and_late_chunk_refusal_through_daemon_wire() {
+        use futures_util::FutureExt;
+        use tokio::io::AsyncReadExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let server = Arc::new(DaemonServer::new_with_paths(
+            Some(root.path().join("config")), Some(root.path().join("auth")),
+        ));
+        let listener = tokio::net::UnixListener::bind(root.path().join("child.sock")).unwrap();
+        let mut command = portable_pty::CommandBuilder::new("python3");
+        command.args(["-c", "import os,socket,sys,termios\na=termios.tcgetattr(0)\na[3]&=~(termios.ICANON|termios.ECHO)\ntermios.tcsetattr(0,termios.TCSANOW,a)\ns=socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])\ns.sendall(b'R')\ns.recv(1)\nos.set_blocking(0,False)\nn=0\nwhile True:\n try:\n  b=os.read(0,65536)\n  if not b: break\n  n+=len(b)\n except BlockingIOError: break\ns.sendall(n.to_bytes(8,'little'))\n"]);
+        command.arg(root.path().join("child.sock"));
+        let manager = server.terminal_service.pty_manager();
+        let (id, mut output) = manager.spawn(command, 80, 24).unwrap();
+        let drain = tokio::spawn(async move { while output.recv().await.is_some() {} });
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let owner = Arc::clone(&server);
+        let handler = tokio::spawn(async move { owner.handle_client(server_stream).await });
+        let mut wire = BufReader::new(client_stream);
+        let result = std::panic::AssertUnwindSafe(async {
+            let (mut child, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await.unwrap().unwrap();
+            assert_eq!(tokio::time::timeout(Duration::from_secs(5), child.read_u8()).await.unwrap().unwrap(), b'R');
+            let handshake = DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION, token: None };
+            wire.get_mut().write_all(format!("{}\n", serde_json::to_string(&handshake).unwrap()).as_bytes()).await.unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), wire.read_line(&mut line)).await.unwrap().unwrap();
+            assert!(matches!(serde_json::from_str::<DaemonResponse>(&line).unwrap(), DaemonResponse::HandshakeOk { .. }));
+            let begin = DaemonRequest::BeginPaste { session_id: id.clone() };
+            wire.get_mut().write_all(format!("{}\n", serde_json::to_string(&begin).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(5), wire.read_line(&mut line)).await.unwrap().unwrap();
+            let DaemonResponse::BeginPasteOk { paste_id } = serde_json::from_str(&line).unwrap() else { panic!("begin response: {line}"); };
+            let request = DaemonRequest::PasteWrite { session_id: id.clone(), paste_id: paste_id.clone(), data: vec![b'x'; 65536], final_chunk: false };
+            wire.get_mut().write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(15), wire.read_line(&mut line)).await.unwrap().unwrap();
+            let partial_line = line.clone();
+            let cancel = DaemonRequest::CancelPaste { session_id: id.clone(), paste_id: paste_id.clone() };
+            wire.get_mut().write_all(format!("{}\n", serde_json::to_string(&cancel).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(5), wire.read_line(&mut line)).await.unwrap().unwrap();
+            let DaemonResponse::CancelPasteOk { found, bytes_written, settled } = serde_json::from_str(&line).unwrap() else { panic!("cancel response: {line}"); };
+            assert!(found && settled);
+            let late = DaemonRequest::PasteWrite { session_id: id.clone(), paste_id, data: b"unwanted".to_vec(), final_chunk: true };
+            wire.get_mut().write_all(format!("{}\n", serde_json::to_string(&late).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            tokio::time::timeout(Duration::from_secs(5), wire.read_line(&mut line)).await.unwrap().unwrap();
+            let DaemonResponse::Error { code, details: Some(late_details), .. } = serde_json::from_str(&line).unwrap() else { panic!("late chunk response: {line}"); };
+            assert_eq!(code.as_deref(), Some(crate::daemon::protocol::PASTE_CANCELLED_CODE));
+            assert_eq!(late_details["bytesWritten"], 0);
+            line = partial_line;
+            child.write_all(b"D").await.unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(5), child.read_u64_le()).await.unwrap().unwrap();
+            let DaemonResponse::Error { code, details: Some(details), .. } = serde_json::from_str(&line).unwrap() else {
+                panic!("partial input receipt missing on daemon wire: {line}");
+            };
+            assert_eq!(code.as_deref(), Some("PTY_IO_ERROR"));
+            assert!(received > 0 && received < 65536);
+            assert_eq!(details["bytesWritten"], received);
+            assert_eq!(bytes_written, received);
+            assert_eq!(details["partial"], true);
+            assert_eq!(details["inputWritten"], true);
+            eprintln!("DAEMON_WIRE_CANCEL_ACCEPTED={} CHILD_RECEIVED={received}", details["bytesWritten"]);
+        }).catch_unwind().await;
+        drop(wire);
+        if manager.has_session(&id) { manager.close_session(&id).await.unwrap(); }
+        tokio::time::timeout(Duration::from_secs(5), handler).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), drain).await.unwrap().unwrap();
+        drop(listener);
+        drop(server);
+        root.close().unwrap();
+        if let Err(panic) = result { std::panic::resume_unwind(panic); }
     }
 
     #[tokio::test]

@@ -1864,6 +1864,18 @@ where
         state.emit_scrollbar_if_changed(Some(app), session_id);
     }
 
+    schedule_native_terminal_input_receipt(app, state, session_id);
+    Ok(())
+}
+
+/// Delivers the IME-anchor receipt for a write that already landed, out of band on
+/// `native_terminal_input_receipt`. Shared by keystrokes and pastes so neither holds the
+/// caller's per-session input lane open for the main-thread rendezvous.
+fn schedule_native_terminal_input_receipt<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+) {
     // The receipt only repositions the IME candidate window. Awaiting it here held the caller's
     // per-session input queue open for the whole main-thread rendezvous, so the NEXT keystroke
     // could not start until this one's receipt arrived. Deliver it out of band instead: the write
@@ -1877,7 +1889,7 @@ where
         let pending = pending.get_or_insert_with(std::collections::HashMap::new);
         if let Some(dirty) = pending.get_mut(session_id) {
             *dirty = true;
-            return Ok(());
+            return;
         }
         pending.insert(session_id.to_string(), true);
     }
@@ -1914,7 +1926,6 @@ where
             }
         }
     });
-    Ok(())
 }
 
 /// Sessions with an input-receipt delivery task in flight; the flag is true when another
@@ -2044,6 +2055,21 @@ pub async fn cmd_native_terminal_send_input<R: Runtime>(
         generation,
         request_id,
         |bytes| async move {
+            if generation.is_none() && is_paste_interrupting_control(&bytes) {
+                let cancel_client = Arc::clone(daemon_client.inner());
+                let write_client = Arc::clone(daemon_client.inner());
+                let cancel_session = write_session_id.clone();
+                return write_control_past_pending_paste(
+                    &write_session_id,
+                    bytes,
+                    |paste_id| async move { cancel_client.cancel_paste(&cancel_session, &paste_id).await },
+                    |bytes| {
+                        let session_id = write_session_id.clone();
+                        async move { write_client.write_terminal(&session_id, bytes).await }
+                    },
+                )
+                .await;
+            }
             daemon_client
                 .write_terminal_at_generation(&write_session_id, generation, bytes)
                 .await
@@ -2514,27 +2540,998 @@ pub async fn cmd_native_terminal_paste<R: Runtime>(
     session_id: String,
     text: String,
     generation: Option<u64>,
-) -> Result<NativeTerminalBoundsReceipt, IpcError> {
+) -> Result<(), IpcError> {
     let bytes = match encode_attached_native_paste(state.inner(), &session_id, &text) {
         Ok(bytes) => bytes,
         Err(err) => return Err(IpcError::internal(err.to_string())),
     };
     state.emit_scrollbar_if_changed(Some(&app), &session_id);
-    daemon_client
-        .write_terminal_at_generation(&session_id, generation, bytes)
-        .await?;
+    let client = daemon_client.paste_client();
+    let probe_client = client.clone();
+    let identified = async move { generation.is_none() && probe_client.supports_paste_cancel().await };
+    let begin_client = client.clone();
+    let begin_session = session_id.clone();
+    let chunk_client = client.clone();
+    let chunk_session = session_id.clone();
+    let plain_client = client.clone();
+    let plain_session = session_id.clone();
+    write_native_paste(
+        &session_id,
+        bytes,
+        identified,
+        || async move { begin_client.begin_paste(&begin_session).await },
+        move |paste_id, chunk, final_chunk| {
+            let client = chunk_client.clone();
+            let session_id = chunk_session.clone();
+            async move { client.write_paste_chunk(&session_id, &paste_id, chunk, final_chunk).await }
+        },
+        move |chunk| {
+            let client = plain_client.clone();
+            let session_id = plain_session.clone();
+            async move {
+                client
+                    .write_terminal_at_generation(&session_id, generation, chunk)
+                    .await
+                    .map(|_| ())
+            }
+        },
+    )
+    .await?;
 
-    dispatch_native_terminal_receipt(&app, state.inner(), &session_id)
-        .await
-        .map_err(|mut error| {
-            if let Some(ref mut details) = error.details {
-                if let Some(obj) = details.as_object_mut() {
-                    obj.insert("inputWritten".to_string(), serde_json::Value::Bool(true));
-                    return error;
+    // Receipt parity with keystrokes: the paste landed, so the IME anchor follows on
+    // `native_terminal_input_receipt` instead of holding the input lane for the rendezvous.
+    schedule_native_terminal_input_receipt(&app, state.inner(), &session_id);
+    Ok(())
+}
+
+/// Writes one encoded paste. With `identified` (a local paste on a daemon serving
+/// cancellation) every chunk carries a daemon-issued paste id, so a control key can stop it
+/// server-side (see `write_control_past_pending_paste`). A session that cannot take an
+/// identity - a paired-host or remote pane, or a session still served by an older daemon -
+/// is refused by `begin`; the paste then takes the plain path, exactly as on a daemon without
+/// cancellation, instead of failing outright.
+pub(crate) async fn write_native_paste<B, BF, I, IF, P, PF>(
+    session_id: &str,
+    bytes: Vec<u8>,
+    identified: impl std::future::Future<Output = bool>,
+    begin: B,
+    mut identified_chunk: I,
+    plain_chunk: P,
+) -> Result<(), IpcError>
+where
+    B: FnOnce() -> BF,
+    BF: std::future::Future<Output = Result<String, IpcError>>,
+    I: FnMut(String, Vec<u8>, bool) -> IF,
+    IF: std::future::Future<Output = Result<(), IpcError>>,
+    P: FnMut(Vec<u8>) -> PF,
+    PF: std::future::Future<Output = Result<(), IpcError>>,
+{
+    // Registered before the first await: a control key pressed while the paste is still being
+    // set up (capability probe, identity registration) stops the paste before any byte of it.
+    let pending = PendingPasteGuard::register(session_id);
+    let paste_id = if identified.await {
+        match begin().await {
+            Ok(paste_id) => Some(paste_id),
+            Err(error) => {
+                tracing::info!(%session_id, %error, "Paste identity refused; writing the paste without cancellation");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let Some(paste_id) = paste_id else {
+        if !pending.proceed() {
+            return Err(paste_stopped_before_start());
+        }
+        return write_native_paste_chunked(bytes, plain_chunk).await;
+    };
+    let total = bytes.len();
+    let chunks = total.div_ceil(NATIVE_PASTE_CHUNK_BYTES);
+    let bracketed = bytes.starts_with(BRACKETED_PASTE_START) && bytes.ends_with(BRACKETED_PASTE_END);
+    let Some(active) = pending.promote(paste_id, total as u64, bracketed) else {
+        return Err(paste_stopped_before_start());
+    };
+    let paste_id = active.paste_id.clone();
+    let mut index = 0usize;
+    let mut plain_chunk = plain_chunk;
+    // Once the daemon reports the paste unknown, no identified write can land; the framing
+    // close that write_native_paste_chunked issues after a partial failure goes plain instead.
+    let unknown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    write_native_paste_chunked(bytes, |chunk| {
+        use futures_util::future::Either;
+        use std::sync::atomic::Ordering;
+        if unknown.load(Ordering::Acquire) {
+            return Either::Right(plain_chunk(chunk));
+        }
+        index += 1;
+        let write = identified_chunk(paste_id.clone(), chunk, index == chunks);
+        let unknown = std::sync::Arc::clone(&unknown);
+        Either::Left(async move {
+            let result = write.await;
+            if result.as_ref().is_err_and(is_paste_unknown) {
+                unknown.store(true, Ordering::Release);
+            }
+            result
+        })
+    })
+    .await
+}
+
+fn is_paste_unknown(error: &IpcError) -> bool {
+    error.details.as_ref().and_then(|d| d.get("pasteUnknown")) == Some(&serde_json::Value::Bool(true))
+}
+
+/// A control key stopped this paste while it was still being set up: none of it was written.
+fn paste_stopped_before_start() -> IpcError {
+    IpcError::new(
+        crate::ipc::IpcErrorCode::Custom(crate::daemon::protocol::PASTE_CANCELLED_CODE.into()),
+        "Paste cancelled before it started",
+    )
+    .with_details(serde_json::json!({
+        "pasteCancelled": true,
+        "inputWritten": false,
+        "bytesWritten": 0,
+        "bytesWrittenExact": true,
+        "partial": false,
+    }))
+}
+
+/// Pastes larger than this are written as ordered chunks so one paste never monopolises the
+/// session with a single huge write.
+pub(crate) const NATIVE_PASTE_CHUNK_BYTES: usize = 64 * 1024;
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
+/// A local identified paste currently being written, per session.
+#[derive(Debug, Clone)]
+pub(crate) struct ActivePaste {
+    pub(crate) paste_id: String,
+    pub(crate) total: u64,
+    pub(crate) bracketed: bool,
+}
+
+/// Per session: a paste still being set up, or one being written under a daemon paste id.
+#[derive(Debug, Clone)]
+enum PasteSlot {
+    Pending { token: u64, stopped: bool },
+    Active(ActivePaste),
+}
+
+static ACTIVE_NATIVE_PASTES: parking_lot::Mutex<Option<std::collections::HashMap<String, PasteSlot>>> =
+    parking_lot::Mutex::new(None);
+
+#[cfg(test)]
+fn active_native_paste(session_id: &str) -> Option<ActivePaste> {
+    match ACTIVE_NATIVE_PASTES.lock().as_ref()?.get(session_id)? {
+        PasteSlot::Active(active) => Some(active.clone()),
+        PasteSlot::Pending { .. } => None,
+    }
+}
+
+/// What a control key finds: an active paste to cancel server-side, or nothing. A paste still
+/// being set up is marked stopped here, under the same lock its start is decided under.
+fn control_target(session_id: &str) -> Option<ActivePaste> {
+    match ACTIVE_NATIVE_PASTES.lock().as_mut()?.get_mut(session_id)? {
+        PasteSlot::Active(active) => Some(active.clone()),
+        PasteSlot::Pending { stopped, .. } => {
+            *stopped = true;
+            None
+        }
+    }
+}
+
+/// A paste being set up. Dropped without starting, it unregisters itself if still its own.
+pub(crate) struct PendingPasteGuard {
+    session_id: String,
+    token: u64,
+}
+
+impl PendingPasteGuard {
+    fn register(session_id: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ACTIVE_NATIVE_PASTES
+            .lock()
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(session_id.to_string(), PasteSlot::Pending { token, stopped: false });
+        Self { session_id: session_id.to_string(), token }
+    }
+
+    /// Whether this paste may start (no control key stopped it). Unregisters either way.
+    fn proceed(self) -> bool {
+        let mut map = ACTIVE_NATIVE_PASTES.lock();
+        let Some(map) = map.as_mut() else { return true };
+        match map.get(&self.session_id) {
+            Some(PasteSlot::Pending { token, stopped }) if *token == self.token => {
+                let stopped = *stopped;
+                map.remove(&self.session_id);
+                !stopped
+            }
+            _ => true,
+        }
+    }
+
+    /// Becomes the active identified paste unless a control key already stopped it.
+    fn promote(self, paste_id: String, total: u64, bracketed: bool) -> Option<ActivePasteGuard> {
+        let mut map = ACTIVE_NATIVE_PASTES.lock();
+        let map = map.get_or_insert_with(std::collections::HashMap::new);
+        if matches!(map.get(&self.session_id), Some(PasteSlot::Pending { token, stopped: true }) if *token == self.token) {
+            map.remove(&self.session_id);
+            return None;
+        }
+        map.insert(
+            self.session_id.clone(),
+            PasteSlot::Active(ActivePaste { paste_id: paste_id.clone(), total, bracketed }),
+        );
+        Some(ActivePasteGuard { session_id: self.session_id.clone(), paste_id })
+    }
+}
+
+impl Drop for PendingPasteGuard {
+    fn drop(&mut self) {
+        if let Some(map) = ACTIVE_NATIVE_PASTES.lock().as_mut() {
+            if matches!(map.get(&self.session_id), Some(PasteSlot::Pending { token, .. }) if *token == self.token) {
+                map.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// Registers a paste for its whole lifetime and unregisters it on drop, only if still its own.
+pub(crate) struct ActivePasteGuard {
+    session_id: String,
+    pub(crate) paste_id: String,
+}
+
+impl ActivePasteGuard {
+    #[cfg(test)]
+    pub(crate) fn register(session_id: &str, total: u64, bracketed: bool) -> Self {
+        let paste_id = uuid::Uuid::new_v4().to_string();
+        Self::register_id(session_id, paste_id, total, bracketed)
+    }
+
+    #[cfg(test)]
+    fn register_id(session_id: &str, paste_id: String, total: u64, bracketed: bool) -> Self {
+        ACTIVE_NATIVE_PASTES
+            .lock()
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(session_id.to_string(), PasteSlot::Active(ActivePaste { paste_id: paste_id.clone(), total, bracketed }));
+        Self { session_id: session_id.to_string(), paste_id }
+    }
+}
+
+impl Drop for ActivePasteGuard {
+    fn drop(&mut self) {
+        if let Some(map) = ACTIVE_NATIVE_PASTES.lock().as_mut() {
+            if matches!(map.get(&self.session_id), Some(PasteSlot::Active(active)) if active.paste_id == self.paste_id) {
+                map.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// A single C0 control or DEL keystroke other than Tab/LF/CR (Ctrl+C, Ctrl+D, Ctrl+Z, Esc, ...).
+/// These must not wait behind a pending paste; every other input stays ordinary, ordered data.
+pub(crate) fn is_paste_interrupting_control(bytes: &[u8]) -> bool {
+    matches!(bytes, [byte] if (*byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r')) || *byte == 0x7f)
+}
+
+/// The exact bytes that finish the bracketed-paste framing after the kernel accepted
+/// `accepted` bytes of `active`: the rest of a torn start marker plus the end marker, the end
+/// marker alone, the rest of a torn end marker, or nothing when the paste was not bracketed,
+/// never started, or already delivered its end marker. The paste body is never resumed.
+pub(crate) fn bracket_completion(active: &ActivePaste, accepted: u64) -> Vec<u8> {
+    let start = BRACKETED_PASTE_START.len() as u64;
+    let end = BRACKETED_PASTE_END.len() as u64;
+    if !active.bracketed || accepted == 0 || accepted >= active.total {
+        return Vec::new();
+    }
+    if accepted < start {
+        let mut bytes = BRACKETED_PASTE_START[accepted as usize..].to_vec();
+        bytes.extend_from_slice(BRACKETED_PASTE_END);
+        return bytes;
+    }
+    let end_from = active.total - end;
+    if accepted <= end_from {
+        return BRACKETED_PASTE_END.to_vec();
+    }
+    BRACKETED_PASTE_END[(accepted - end_from) as usize..].to_vec()
+}
+
+/// Delivers a control keystroke without waiting behind the session's pending paste: the paste
+/// is cancelled server-side first (bounded by the daemon), its framing is closed exactly from
+/// the daemon's accepted-byte count, and the control byte follows in the same ordinary write.
+/// That write is the daemon's bounded write: if the kernel input queue is still full and the
+/// current termios makes the control byte a signal character, the daemon does what the line
+/// discipline would have done; any other byte fails within its bound with an honest
+/// `bytesWritten` receipt. Without an active paste the bytes are written unchanged.
+pub(crate) async fn write_control_past_pending_paste<C, CF, W, WF>(
+    session_id: &str,
+    bytes: Vec<u8>,
+    cancel: C,
+    write: W,
+) -> Result<(), IpcError>
+where
+    C: FnOnce(String) -> CF,
+    CF: std::future::Future<Output = Result<(bool, u64, bool), IpcError>>,
+    W: FnOnce(Vec<u8>) -> WF,
+    WF: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let Some(active) = control_target(session_id) else {
+        return write(bytes).await;
+    };
+    let (prefix, receipt) = match cancel(active.paste_id.clone()).await {
+        Ok((found, accepted, true)) => (
+            bracket_completion(&active, accepted),
+            serde_json::json!({ "pasteCancelled": true, "pasteFound": found,
+                "pasteBytesWritten": accepted, "pasteBytesWrittenExact": true }),
+        ),
+        // Unsettled: the count is only a lower bound, so the framing cannot be closed exactly.
+        Ok((found, accepted, false)) => (
+            Vec::new(),
+            serde_json::json!({ "pasteCancelled": true, "pasteFound": found,
+                "pasteBytesWritten": accepted, "pasteBytesWrittenExact": false }),
+        ),
+        Err(error) => {
+            tracing::warn!(%session_id, %error, "Paste cancellation failed; control sent as ordinary input");
+            (Vec::new(), serde_json::json!({ "pasteCancelled": false }))
+        }
+    };
+    let prefix_len = prefix.len();
+    let mut frame = prefix;
+    frame.extend_from_slice(&bytes);
+    write(frame).await.map_err(|mut error| {
+        let details = error.details.get_or_insert_with(|| serde_json::json!({}));
+        if let (Some(details), Some(receipt)) = (details.as_object_mut(), receipt.as_object()) {
+            details.extend(receipt.clone());
+            details.insert("bracketCloseBytes".into(), serde_json::json!(prefix_len));
+        }
+        error
+    })
+}
+
+fn with_partial_paste_details(mut error: IpcError, bytes_written: usize, exact: bool) -> IpcError {
+    let input_written = if bytes_written > 0 {
+        serde_json::Value::Bool(true)
+    } else {
+        serde_json::Value::Null
+    };
+    if let Some(obj) = error.details.as_mut().and_then(|d| d.as_object_mut()) {
+        obj.insert("inputWritten".to_string(), input_written);
+        obj.insert("partial".to_string(), serde_json::Value::Bool(true));
+        obj.insert("bytesWritten".to_string(), serde_json::json!(bytes_written));
+        obj.insert("bytesWrittenExact".to_string(), serde_json::Value::Bool(exact));
+        return error;
+    }
+    error.with_details(serde_json::json!({
+        "inputWritten": input_written,
+        "partial": true,
+        "bytesWritten": bytes_written,
+        "bytesWrittenExact": exact,
+    }))
+}
+
+/// Writes an encoded paste (at most one bracketed-paste pair) as ordered chunks. A failure
+/// after possible delivery closes the bracket with ESC[201~. Without a failed-chunk receipt,
+/// bytesWritten is a lower bound, explicitly marked by bytesWrittenExact=false.
+pub(crate) async fn write_native_paste_chunked<F, Fut>(
+    bytes: Vec<u8>,
+    mut write: F,
+) -> Result<(), IpcError>
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), IpcError>>,
+{
+    let bracketed =
+        bytes.starts_with(BRACKETED_PASTE_START) && bytes.ends_with(BRACKETED_PASTE_END);
+    let mut written = 0usize;
+    for chunk in bytes.chunks(NATIVE_PASTE_CHUNK_BYTES) {
+        if let Err(error) = write(chunk.to_vec()).await {
+            let accepted = error.details.as_ref()
+                .and_then(|details| details.get("bytesWritten"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok());
+            if let Some(accepted) = accepted {
+                written += accepted;
+            }
+            let exact = error.details.as_ref().is_some_and(|details| {
+                (accepted.is_some() && details.get("bytesWrittenExact") != Some(&serde_json::Value::Bool(false)))
+                    || details.get("inputWritten") == Some(&serde_json::Value::Bool(false))
+            });
+            // A cancelled paste is closed by the control path that cancelled it, from the
+            // daemon's exact count; appending ESC[201~ here would duplicate or misplace it.
+            if error.details.as_ref().and_then(|d| d.get("pasteCancelled")) == Some(&serde_json::Value::Bool(true)) {
+                return Err(with_partial_paste_details(error, written, exact));
+            }
+            if written == 0 && exact {
+                return Err(error);
+            }
+            if bracketed {
+                if let Err(close_error) = write(BRACKETED_PASTE_END.to_vec()).await {
+                    tracing::warn!(%close_error, "Failed to close bracketed paste after partial write");
                 }
             }
-            error.with_details(serde_json::json!({ "inputWritten": true }))
+            return Err(with_partial_paste_details(error, written, exact));
+        }
+        written += chunk.len();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod paste_chunk_tests {
+    use super::*;
+
+    fn run(bytes: Vec<u8>, fail_at: Option<usize>) -> (Result<(), IpcError>, Vec<Vec<u8>>) {
+        let attempts = std::sync::Mutex::new(Vec::<Vec<u8>>::new());
+        let result = tauri::async_runtime::block_on(write_native_paste_chunked(bytes, |chunk| {
+            let index = {
+                let mut attempts = attempts.lock().unwrap();
+                attempts.push(chunk);
+                attempts.len() - 1
+            };
+            let fail = fail_at == Some(index);
+            async move {
+                if fail {
+                    Err(IpcError::internal("write failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        }));
+        (result, attempts.into_inner().unwrap())
+    }
+
+    fn bracketed(len: usize) -> Vec<u8> {
+        let mut bytes = BRACKETED_PASTE_START.to_vec();
+        bytes.extend(std::iter::repeat(b'x').take(len));
+        bytes.extend_from_slice(BRACKETED_PASTE_END);
+        bytes
+    }
+
+    /// A paired-host or remote pane on a daemon serving cancellation: the daemon refuses a paste
+    /// identity (SESSION_NOT_FOUND for a non-local PTY). The paste must still be delivered whole
+    /// through the plain path, not fail with nothing written.
+    #[tokio::test]
+    async fn refused_paste_identity_still_delivers_the_whole_paste_plainly() {
+        let bytes = bracketed(3 * NATIVE_PASTE_CHUNK_BYTES);
+        let plain = std::sync::Mutex::new(Vec::<u8>::new());
+        let identified = std::sync::atomic::AtomicUsize::new(0);
+        let result = write_native_paste(
+            "daemon-session:paired-pane",
+            bytes.clone(),
+            async { true },
+            || async { Err(IpcError::from(crate::terminal::PtyError::SessionNotFound("daemon-session:paired-pane".into()))) },
+            |_, _, _| {
+                identified.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(()) }
+            },
+            |chunk| {
+                plain.lock().unwrap().extend_from_slice(&chunk);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "a refused identity must not fail the paste: {result:?}");
+        assert_eq!(identified.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(*plain.lock().unwrap(), bytes, "every byte must reach the plain writer, in order");
+        assert!(active_native_paste("daemon-session:paired-pane").is_none(), "no active paste may be registered");
+    }
+
+    /// A paste the daemon no longer holds (evicted, expired, or registered with a predecessor
+    /// before a handover) after its first chunk landed: the shell already entered bracketed
+    /// paste mode, so the writer must still close it, through a path that can still write.
+    #[tokio::test]
+    async fn unknown_paste_mid_write_still_closes_bracketed_paste_mode() {
+        let bytes = bracketed(3 * NATIVE_PASTE_CHUNK_BYTES);
+        let identified = std::sync::Mutex::new(0usize);
+        let plain = std::sync::Mutex::new(Vec::<Vec<u8>>::new());
+        let result = write_native_paste(
+            "local-unknown-after-handover",
+            bytes,
+            async { true },
+            || async { Ok("predecessor-paste".to_string()) },
+            |_, _, _| {
+                let call = {
+                    let mut calls = identified.lock().unwrap();
+                    *calls += 1;
+                    *calls
+                };
+                async move {
+                    if call == 1 {
+                        Ok(())
+                    } else {
+                        Err(IpcError::from(crate::terminal::PasteChunkError::Unknown))
+                    }
+                }
+            },
+            |chunk| {
+                plain.lock().unwrap().push(chunk);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        let error = result.expect_err("the paste did not finish");
+        assert_eq!(error.code.to_string(), crate::daemon::protocol::PASTE_UNKNOWN_CODE);
+        assert_eq!(*identified.lock().unwrap(), 2, "no identified write after the paste is unknown");
+        assert_eq!(
+            *plain.lock().unwrap(),
+            vec![BRACKETED_PASTE_END.to_vec()],
+            "the bracketed-paste close must be written exactly once"
+        );
+        let details = error.details.expect("partial receipt");
+        assert_eq!(details["bytesWritten"], NATIVE_PASTE_CHUNK_BYTES);
+    }
+
+    /// A control key pressed while the paste is still being set up (the identity round trip) must
+    /// stop the paste before any of it is written, and goes out as the ordinary byte it is.
+    #[tokio::test]
+    async fn control_during_paste_setup_stops_the_paste_before_any_byte() {
+        const SESSION: &str = "setup-window-session";
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let written = std::sync::Mutex::new(Vec::<Vec<u8>>::new());
+        let paste = write_native_paste(
+            SESSION,
+            bracketed(2 * NATIVE_PASTE_CHUNK_BYTES),
+            async { true },
+            || async move {
+                registered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                Ok("late-paste".to_string())
+            },
+            |_, chunk, _| {
+                written.lock().unwrap().push(chunk);
+                async { Ok(()) }
+            },
+            |chunk| {
+                written.lock().unwrap().push(chunk);
+                async { Ok(()) }
+            },
+        );
+        let control = async {
+            // Event before action: the paste is inside its identity round trip.
+            registered_rx.await.unwrap();
+            let mut control_frame = None;
+            let result = write_control_past_pending_paste(
+                SESSION,
+                vec![0x03],
+                |_| -> std::future::Ready<Result<(bool, u64, bool), IpcError>> {
+                    panic!("no daemon paste exists yet to cancel")
+                },
+                |frame| {
+                    control_frame = Some(frame);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await;
+            release_tx.send(()).unwrap();
+            (result, control_frame)
+        };
+        let (paste, (control, control_frame)) = tokio::join!(paste, control);
+        assert!(control.is_ok());
+        assert_eq!(control_frame, Some(vec![0x03]), "the control byte goes out unchanged");
+        let error = paste.expect_err("a stopped paste must not run");
+        assert_eq!(error.details.as_ref().unwrap()["bytesWritten"], 0);
+        assert!(written.lock().unwrap().is_empty(), "no byte of a stopped paste may be written");
+        assert!(active_native_paste(SESSION).is_none());
+        assert!(control_target(SESSION).is_none(), "nothing is left registered for the session");
+    }
+
+    /// A local paste whose identity is granted is written only through identified chunks, and is
+    /// registered as active while it runs.
+    #[tokio::test]
+    async fn granted_paste_identity_writes_every_chunk_identified() {
+        let bytes = bracketed(2 * NATIVE_PASTE_CHUNK_BYTES);
+        let seen = std::sync::Mutex::new(Vec::<(String, bool, u8)>::new());
+        let delivered = std::sync::Mutex::new(Vec::<u8>::new());
+        let result = write_native_paste(
+            "local-identified",
+            bytes.clone(),
+            async { true },
+            || async { Ok("paste-1".to_string()) },
+            |paste_id, chunk, final_chunk| {
+                let active = active_native_paste("local-identified").map(|a| a.paste_id);
+                seen.lock().unwrap().push((paste_id, final_chunk, u8::from(active.as_deref() == Some("paste-1"))));
+                delivered.lock().unwrap().extend_from_slice(&chunk);
+                async { Ok(()) }
+            },
+            |_| async { panic!("a granted identity must not use the plain path") },
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*delivered.lock().unwrap(), bytes);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), bytes.len().div_ceil(NATIVE_PASTE_CHUNK_BYTES));
+        assert!(seen.iter().all(|(id, _, active)| id == "paste-1" && *active == 1));
+        assert_eq!(seen.iter().filter(|(_, last, _)| *last).count(), 1);
+        assert!(seen.last().unwrap().1, "only the last chunk is final");
+        assert!(active_native_paste("local-identified").is_none(), "the guard unregisters when done");
+    }
+
+    fn count(haystack: &[u8], needle: &[u8]) -> usize {
+        haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
+    #[test]
+    fn large_paste_is_written_as_ordered_chunks_inside_one_bracket_pair() {
+        let bytes = bracketed(300 * 1024);
+        let (result, attempts) = run(bytes.clone(), None);
+        assert!(result.is_ok());
+        assert_eq!(attempts.len(), bytes.len().div_ceil(NATIVE_PASTE_CHUNK_BYTES));
+        assert!(attempts.iter().all(|c| c.len() <= NATIVE_PASTE_CHUNK_BYTES));
+        let joined = attempts.concat();
+        assert_eq!(joined, bytes);
+        assert_eq!(count(&joined, BRACKETED_PASTE_START), 1);
+        assert_eq!(count(&joined, BRACKETED_PASTE_END), 1);
+    }
+
+    #[test]
+    fn failure_after_partial_delivery_closes_bracket_and_reports_partial() {
+        let (result, attempts) = run(bracketed(300 * 1024), Some(2));
+        let error = result.expect_err("third chunk fails");
+        assert_eq!(attempts.last().map(Vec::as_slice), Some(BRACKETED_PASTE_END));
+        let details = error.details.expect("partial details");
+        assert_eq!(details["inputWritten"], serde_json::json!(true));
+        assert_eq!(details["partial"], serde_json::json!(true));
+        assert_eq!(details["bytesWritten"], serde_json::json!(2 * NATIVE_PASTE_CHUNK_BYTES));
+    }
+
+    #[test]
+    fn failure_on_first_chunk_with_unknown_delivery_closes_possible_bracket() {
+        let (result, attempts) = run(bracketed(300 * 1024), Some(0));
+        let error = result.expect_err("first chunk fails");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts.last().map(Vec::as_slice), Some(BRACKETED_PASTE_END));
+        let details = error.details.unwrap();
+        assert_eq!(details["partial"], true);
+        assert!(details["inputWritten"].is_null());
+        assert_eq!(details["bytesWrittenExact"], false);
+    }
+
+    #[test]
+    fn unknown_failed_chunk_count_is_only_a_lower_bound() {
+        let (result, _) = run(bracketed(300 * 1024), Some(1));
+        let details = result.unwrap_err().details.unwrap();
+        assert_eq!(details["bytesWritten"], NATIVE_PASTE_CHUNK_BYTES);
+        assert_eq!(details["bytesWrittenExact"], false);
+        assert_eq!(details["inputWritten"], true);
+    }
+
+    #[tokio::test]
+    async fn partial_chunk_receipt_is_added_to_completed_chunks() {
+        for completed in [0, 1] {
+            let mut attempts = Vec::new();
+            let result = write_native_paste_chunked(bracketed(300 * 1024), |chunk| {
+                let fail = attempts.len() == completed;
+                attempts.push(chunk);
+                std::future::ready(if fail {
+                    Err(IpcError::from(crate::terminal::PtyError::InputError {
+                        bytes_written: 12, message: "stalled".into(),
+                    }))
+                } else { Ok(()) })
+            }).await;
+            let error = result.unwrap_err();
+            let details = error.details.unwrap();
+            assert_eq!(details["bytesWritten"], completed * NATIVE_PASTE_CHUNK_BYTES + 12);
+            assert_eq!(details["bytesWrittenExact"], true);
+            assert_eq!(attempts.last().map(Vec::as_slice), Some(BRACKETED_PASTE_END));
+            assert_eq!(attempts.len(), completed + 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn known_zero_byte_refusal_does_not_close_an_unopened_bracket() {
+        let mut attempts = 0;
+        let result = write_native_paste_chunked(bracketed(100), |_| {
+            attempts += 1;
+            std::future::ready(Err(IpcError::from(crate::terminal::PtyError::InputError {
+                bytes_written: 0, message: "closed".into(),
+            })))
+        }).await;
+        let details = result.unwrap_err().details.unwrap();
+        assert_eq!(details["bytesWritten"], 0);
+        assert_eq!(details["inputWritten"], false);
+        assert_eq!(attempts, 1);
+    }
+
+    fn active(total: usize, bracketed: bool) -> ActivePaste {
+        ActivePaste { paste_id: "p".into(), total: total as u64, bracketed }
+    }
+
+    #[test]
+    fn only_single_c0_controls_and_del_bypass_a_pending_paste() {
+        for byte in [0x03u8, 0x04, 0x1a, 0x1b, 0x1c, 0x7f] {
+            assert!(is_paste_interrupting_control(&[byte]), "{byte:#x}");
+        }
+        let ordinary: [&[u8]; 7] = [b"\t", b"\r", b"\n", b"a", b"\x1b[A", b"\x03\x03", b""];
+        for bytes in ordinary {
+            assert!(!is_paste_interrupting_control(bytes), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn bracket_completion_closes_exactly_from_the_accepted_count() {
+        let total = BRACKETED_PASTE_START.len() + 100 + BRACKETED_PASTE_END.len();
+        let paste = active(total, true);
+        assert!(bracket_completion(&paste, 0).is_empty(), "nothing delivered: nothing to close");
+        let mut torn_start = BRACKETED_PASTE_START[2..].to_vec();
+        torn_start.extend_from_slice(BRACKETED_PASTE_END);
+        assert_eq!(bracket_completion(&paste, 2), torn_start);
+        assert_eq!(bracket_completion(&paste, BRACKETED_PASTE_START.len() as u64), BRACKETED_PASTE_END);
+        assert_eq!(bracket_completion(&paste, 50), BRACKETED_PASTE_END);
+        let end_from = (total - BRACKETED_PASTE_END.len()) as u64;
+        assert_eq!(bracket_completion(&paste, end_from), BRACKETED_PASTE_END);
+        assert_eq!(bracket_completion(&paste, end_from + 2), &BRACKETED_PASTE_END[2..]);
+        assert!(bracket_completion(&paste, total as u64).is_empty(), "complete paste is already closed");
+        assert!(bracket_completion(&active(100, false), 50).is_empty(), "unbracketed paste needs no close");
+    }
+
+    #[tokio::test]
+    async fn control_cancels_pending_paste_then_writes_close_and_byte_in_one_frame() {
+        let total = BRACKETED_PASTE_START.len() + 300 * 1024 + BRACKETED_PASTE_END.len();
+        let guard = ActivePasteGuard::register("ctl-session", total as u64, true);
+        let expected_id = guard.paste_id.clone();
+        let mut cancelled = None;
+        let mut written = None;
+        let result = write_control_past_pending_paste(
+            "ctl-session",
+            vec![0x03],
+            |id| { cancelled = Some(id); std::future::ready(Ok((true, 70_000, true))) },
+            |frame| { written = Some(frame); std::future::ready(Ok(())) },
+        ).await;
+        drop(guard);
+        assert!(result.is_ok());
+        assert_eq!(cancelled.as_deref(), Some(expected_id.as_str()));
+        let mut expected = BRACKETED_PASTE_END.to_vec();
+        expected.push(0x03);
+        assert_eq!(written, Some(expected));
+        assert!(active_native_paste("ctl-session").is_none(), "guard unregisters the paste");
+    }
+
+    #[tokio::test]
+    async fn control_without_active_paste_is_written_unchanged_and_never_cancels() {
+        let mut written = None;
+        let result = write_control_past_pending_paste(
+            "idle-session",
+            vec![0x03],
+            |_| -> std::future::Ready<Result<(bool, u64, bool), IpcError>> { panic!("no paste to cancel") },
+            |frame| { written = Some(frame); std::future::ready(Ok(())) },
+        ).await;
+        assert!(result.is_ok());
+        assert_eq!(written, Some(vec![0x03]));
+    }
+
+    #[tokio::test]
+    async fn control_after_unsettled_cancel_adds_no_guessed_close_and_reports_full_queue_honestly() {
+        let guard = ActivePasteGuard::register("full-session", 400_000, true);
+        let mut written = None;
+        let result = write_control_past_pending_paste(
+            "full-session",
+            vec![0x03],
+            |_| std::future::ready(Ok((true, 4096, false))),
+            |frame| {
+                written = Some(frame);
+                std::future::ready(Err(IpcError::from(crate::terminal::PtyError::InputError {
+                    bytes_written: 0, message: "PTY_INPUT_TIMEOUT".into(),
+                })))
+            },
+        ).await;
+        drop(guard);
+        assert_eq!(written, Some(vec![0x03]), "lower-bound count must not drive a bracket close");
+        let details = result.unwrap_err().details.unwrap();
+        assert_eq!(details["bytesWritten"], 0);
+        assert_eq!(details["inputWritten"], false);
+        assert_eq!(details["pasteCancelled"], true);
+        assert_eq!(details["pasteBytesWritten"], 4096);
+        assert_eq!(details["pasteBytesWrittenExact"], false);
+    }
+
+    #[tokio::test]
+    async fn cancelled_chunk_stops_the_paste_without_appending_a_bracket_close() {
+        let mut attempts = Vec::new();
+        let result = write_native_paste_chunked(bracketed(300 * 1024), |chunk| {
+            let cancel = attempts.len() == 1;
+            attempts.push(chunk);
+            std::future::ready(if cancel {
+                Err(IpcError::from(crate::terminal::PasteChunkError::Cancelled { bytes_written: 500 }))
+            } else { Ok(()) })
+        }).await;
+        assert_eq!(attempts.len(), 2, "no chunk after cancellation and no ESC[201~ append");
+        let details = result.unwrap_err().details.unwrap();
+        assert_eq!(details["pasteCancelled"], true);
+        assert_eq!(details["bytesWritten"], NATIVE_PASTE_CHUNK_BYTES + 500);
+        assert_eq!(details["bytesWrittenExact"], true);
+    }
+
+    #[cfg(unix)]
+    async fn await_output_marker(
+        rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+        marker: &str,
+        bound: std::time::Duration,
+    ) -> Option<()> {
+        tokio::time::timeout(bound, async {
+            let mut seen = Vec::new();
+            while let Some(chunk) = rx.recv().await {
+                seen.extend_from_slice(&chunk);
+                if String::from_utf8_lossy(&seen).contains(marker) {
+                    return Some(());
+                }
+            }
+            None
         })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn partial_input_timeout_reports_bytes_received_by_real_pty() {
+        let fixture = tempfile::tempdir().unwrap();
+        let release = fixture.path().join("release");
+        let path = std::ffi::CString::new(release.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let manager = crate::terminal::PtyManager::new();
+        let mut cmd = portable_pty::CommandBuilder::new("python3");
+        cmd.args(["-c", "import os, sys, termios\na = termios.tcgetattr(0)\na[3] &= ~(termios.ICANON | termios.ECHO)\ntermios.tcsetattr(0, termios.TCSANOW, a)\nf = os.open(sys.argv[1], os.O_RDWR)\nprint('READY', flush=True)\nos.read(f, 1)\nos.set_blocking(0, False)\nn = 0\nwhile True:\n try:\n  b = os.read(0, 65536)\n  if not b: break\n  n += len(b)\n except BlockingIOError: break\nprint('COUNT=' + str(n), flush=True)\n"]);
+        cmd.arg(release.as_os_str());
+        let (id, mut output) = manager.spawn(cmd, 80, 24).unwrap();
+        let session = manager.get_session(&id).unwrap();
+        let ready = await_output_marker(&mut output, "READY", std::time::Duration::from_secs(10)).await;
+        if ready.is_none() {
+            manager.close_session(&id).await.unwrap();
+            panic!("fixture did not configure raw input");
+        }
+        let result = session.write_input_cancellable(&vec![b'x'; 65536]).await;
+        let released = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(release)?.write_all(b"x")
+        }).await.unwrap();
+        let captured = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut bytes = Vec::new();
+            while let Some(chunk) = output.recv().await { bytes.extend_from_slice(&chunk); }
+            bytes
+        }).await;
+        if manager.has_session(&id) { manager.close_session(&id).await.unwrap(); }
+        released.unwrap();
+        let text = String::from_utf8(captured.expect("fixture exits after release")).unwrap();
+        let count: usize = text.lines().find_map(|line| line.trim().strip_prefix("COUNT=")).unwrap().parse().unwrap();
+        let error = result.expect_err("non-reading PTY must backpressure a 64 KiB frame");
+        let crate::terminal::PtyError::InputError { bytes_written, .. } = error else {
+            panic!("missing partial input receipt: {error:?}");
+        };
+        assert!(count > 0 && count < 65536, "fixture must receive only part of the frame");
+        assert_eq!(bytes_written, count);
+        eprintln!("PARTIAL_PTY_ACCEPTED={bytes_written} RECEIVED={count}");
+    }
+
+    /// Real-PTY regression: a 300 KiB paste into a foreground program that never reads stdin
+    /// stays pending on the full tty input queue, and typed Ctrl+C must
+    /// still reach that program's foreground process group instead of queueing behind the paste.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ctrl_c_reaches_foreground_program_while_300k_paste_is_pending() {
+        use crate::terminal::TerminalService;
+        use std::future::Future;
+        use std::task::Poll;
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let service = TerminalService::default();
+        let manager = service.pty_manager();
+        // Non-canonical so a full input queue backpressures the master write (Linux n_tty
+        // discards canonical overflow instead); ISIG stays on. Nothing ever reads stdin.
+        let mut cmd = portable_pty::CommandBuilder::new("python3");
+        cmd.arg("-c");
+        cmd.arg(
+            "import signal, termios, sys\n\
+             attrs = termios.tcgetattr(0)\n\
+             attrs[3] = (attrs[3] & ~(termios.ICANON | termios.ECHO)) | termios.ISIG\n\
+             termios.tcsetattr(0, termios.TCSANOW, attrs)\n\
+             signal.signal(signal.SIGINT, lambda *_: (print('GOT_INT', flush=True), sys.exit(0)))\n\
+             print('READY', flush=True)\n\
+             signal.pause()\n",
+        );
+        let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn foreground program");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // Event before action: termios is configured and the INT trap is armed.
+        let ready = await_output_marker(&mut rx, "READY", BOUND).await.is_some();
+        if !ready {
+            manager.close_session(&session_id).await.expect("close unready fixture");
+            panic!("foreground program never announced READY");
+        }
+
+        let bytes = bracketed(300 * 1024);
+        let total = bytes.len();
+        let registered = service.begin_paste(&session_id).unwrap();
+        let active = ActivePasteGuard::register_id(&session_id, registered.clone(), total as u64, true);
+        let paste_service = service.clone();
+        let paste_session_id = session_id.clone();
+        let mut chunk_index = 0;
+        let mut paste = Box::pin(write_native_paste_chunked(bytes, move |chunk| {
+            chunk_index += 1;
+            let last = chunk_index == total.div_ceil(NATIVE_PASTE_CHUNK_BYTES);
+            let service = paste_service.clone();
+            let session_id = paste_session_id.clone();
+            let registered = registered.clone();
+            async move {
+                service
+                    .write_paste_chunk(&session_id, 0, &registered, chunk, last)
+                    .await
+                    .map_err(IpcError::from)
+            }
+        }));
+        let master_fd = session.raw_master_fd().expect("master fd");
+        // Poll readiness is not a full-queue test on Linux: right after a refused write the
+        // master reports writable again while the line discipline drains its buffer into a queue
+        // that stays full. The kernel's own answer is: a nonblocking one-byte write refused with
+        // EAGAIN. A paste pending on writability means its own write was refused
+        // and nothing reads the queue, so the probe is refused too. A probe byte that is accepted
+        // goes to a program that never reads stdin and is discarded with the queue.
+        let queue_full = || {
+            // SAFETY: one valid byte; session keeps the nonblocking master fd alive.
+            let written = unsafe { libc::write(master_fd, b"x".as_ptr().cast(), 1) };
+            written < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
+        };
+        // Drive the paste only on its own wakeups until it is parked on a full tty input queue.
+        let saturated = tokio::time::timeout(
+            BOUND,
+            std::future::poll_fn(|cx| match paste.as_mut().poll(cx) {
+                Poll::Ready(result) => Poll::Ready(Err(result)),
+                Poll::Pending if queue_full() => Poll::Ready(Ok(())),
+                Poll::Pending => Poll::Pending,
+            }),
+        )
+        .await;
+        if !matches!(saturated, Ok(Ok(()))) {
+            // The paste future may have completed; it must not be polled again.
+            drop(paste);
+            drop(active);
+            manager.close_session(&session_id).await.expect("close unsaturated fixture");
+            panic!(
+                "paste must be parked on the full PTY input queue at Ctrl+C: {:?}",
+                saturated.map(|r| r.map_err(|e| e.err()))
+            );
+        }
+
+        let control = write_control_past_pending_paste(
+            &session_id,
+            vec![0x03],
+            |paste_id| {
+                let service = service.clone();
+                let id = session_id.clone();
+                async move {
+                    let outcome = service.cancel_paste(&id, &paste_id).await;
+                    Ok((outcome.found, outcome.bytes_written, outcome.settled))
+                }
+            },
+            |bytes| {
+                let session = session.clone();
+                async move { session.write_input_cancellable(&bytes).await.map_err(IpcError::from) }
+            },
+        );
+        let (signal, _) = tokio::join!(tokio::time::timeout(BOUND, control), paste.as_mut());
+        let interrupted = if matches!(&signal, Ok(Ok(()))) {
+            await_output_marker(&mut rx, "GOT_INT", BOUND).await
+        } else {
+            None
+        };
+        drop(paste);
+        drop(active);
+        // Cleanup before asserting so a failure cannot leak the looping program.
+        manager.close_session(&session_id).await.expect("close paste fixture");
+
+        let signal = signal
+            .expect("Ctrl+C delivery must not wait behind the pending paste");
+        assert!(signal.is_ok(), "Ctrl+C delivery failed: {signal:?}");
+        assert!(
+            interrupted.is_some(),
+            "foreground program never received SIGINT while the paste was pending"
+        );
+    }
 }
 
 pub(crate) fn authoritative_mouse_event(

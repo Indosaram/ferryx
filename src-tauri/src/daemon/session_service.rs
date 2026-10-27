@@ -1383,10 +1383,8 @@ impl DaemonSessionService {
         }
     }
 
-    pub(super) async fn write_session_input(&self, id: &str, data: Vec<u8>) -> Result<(), String> {
-        self.validate_session_ssh_target(id)
-            .await
-            .map_err(|e| e.to_string())?;
+    pub(super) async fn write_session_input(&self, id: &str, data: Vec<u8>) -> Result<(), crate::ipc::IpcError> {
+        self.validate_session_ssh_target(id).await?;
         let generation = self
             .terminal_service
             .remote()
@@ -1395,9 +1393,31 @@ impl DaemonSessionService {
             .unwrap_or(0);
         self.terminal_service
             .write_input_operation(id, generation, data)
-            .map_err(|e| e.to_string())?
+            .map_err(crate::ipc::IpcError::from)?
             .await
-            .map_err(|e| e.to_string())
+            .map_err(crate::ipc::IpcError::from)
+    }
+
+    /// One chunk of an identified, cancellable paste. Same target validation and generation
+    /// lookup as `write_session_input`.
+    pub(super) async fn write_session_paste_chunk(
+        &self,
+        id: &str,
+        paste_id: &str,
+        data: Vec<u8>,
+        final_chunk: bool,
+    ) -> Result<(), crate::ipc::IpcError> {
+        self.validate_session_ssh_target(id).await?;
+        let generation = self
+            .terminal_service
+            .remote()
+            .details(id)
+            .map(|d| d.generation)
+            .unwrap_or(0);
+        self.terminal_service
+            .write_paste_chunk(id, generation, paste_id, data, final_chunk)
+            .await
+            .map_err(crate::ipc::IpcError::from)
     }
 
     pub(crate) async fn resize_session(

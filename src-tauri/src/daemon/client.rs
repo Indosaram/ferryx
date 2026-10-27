@@ -569,6 +569,19 @@ pub(crate) fn manual_ssh_response(
     }
 }
 
+/// Maps a daemon reply to a write outcome, keeping the daemon's code and details.
+fn write_response(resp: DaemonResponse) -> Result<(), IpcError> {
+    match resp {
+        DaemonResponse::WriteOk => Ok(()),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = local_control_error(message, code);
+            if details.is_some() { error.details = details; }
+            Err(error)
+        }
+        _ => Err(IpcError::new(IpcErrorCode::InternalError, "Unexpected daemon response")),
+    }
+}
+
 fn request_is_retry_safe(req: &DaemonRequest) -> bool {
     matches!(
         req,
@@ -624,6 +637,9 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SpawnOperationStatus { .. } => "spawnOperationStatus",
         DaemonRequest::CancelSpawnOperation { .. } => "cancelSpawnOperation",
         DaemonRequest::Write { .. } => "write",
+        DaemonRequest::PasteWrite { .. } => "pasteWrite",
+        DaemonRequest::BeginPaste { .. } => "beginPaste",
+        DaemonRequest::CancelPaste { .. } => "cancelPaste",
         DaemonRequest::Resize { .. } => "resize",
         DaemonRequest::Signal { .. } => "signal",
         DaemonRequest::Close { .. } => "close",
@@ -1461,6 +1477,16 @@ impl DaemonClient {
             upgrade_retry_after: Arc::new(parking_lot::Mutex::new(None)),
             local_control_verified: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             spawn_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// A paste owns its connection slots until its final chunk completes. Key input
+    /// must not wait for that chunk's reply on the ordinary per-session socket.
+    pub(crate) fn paste_client(&self) -> Self {
+        Self {
+            local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            ..self.clone()
         }
     }
 
@@ -3413,6 +3439,9 @@ impl DaemonClient {
         }
 
         if let DaemonRequest::Write { ref session_id, .. }
+        | DaemonRequest::PasteWrite { ref session_id, .. }
+        | DaemonRequest::BeginPaste { ref session_id }
+        | DaemonRequest::CancelPaste { ref session_id, .. }
         | DaemonRequest::Resize { ref session_id, .. }
         | DaemonRequest::RemoteSessionDetails { ref session_id } = req
         {
@@ -4287,11 +4316,72 @@ impl DaemonClient {
 
         match resp {
             DaemonResponse::WriteOk => Ok(()),
-            DaemonResponse::Error { message, code, .. } => Err(local_control_error(message, code)),
+            DaemonResponse::Error { message, code, details } => {
+                let mut error = local_control_error(message, code);
+                if details.is_some() {
+                    error.details = details;
+                }
+                Err(error)
+            }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response",
             )),
+        }
+    }
+
+    /// Whether the daemon serves identified, cancellable pastes (`PasteWrite`/`CancelPaste`).
+    /// An older daemon, or one that cannot answer, is treated as not supporting them.
+    pub async fn supports_paste_cancel(&self) -> bool {
+        matches!(
+            self.send_request(DaemonRequest::GetCapabilities).await,
+            Ok(DaemonResponse::CapabilitiesOk { capabilities })
+                if capabilities.iter().any(|c| c == crate::daemon::protocol::PASTE_CANCEL_CAPABILITY)
+        )
+    }
+
+    /// Opens a cancellable paste on a local session and returns its id for `PasteWrite` chunks.
+    /// Same local-control gate as `write_terminal`.
+    pub async fn begin_paste(&self, session_id: &str) -> Result<String, IpcError> {
+        self.require_local_control(session_id).await?;
+        match self.send_local_control(DaemonRequest::BeginPaste { session_id: session_id.into() }).await? {
+            DaemonResponse::BeginPasteOk { paste_id } => Ok(paste_id),
+            response => Err(write_response(response).err().unwrap_or_else(|| IpcError::internal("Unexpected paste registration reply"))),
+        }
+    }
+
+    pub async fn write_paste_chunk(
+        &self,
+        session_id: &str,
+        paste_id: &str,
+        data: Vec<u8>,
+        final_chunk: bool,
+    ) -> Result<(), IpcError> {
+        self.require_local_control(session_id).await?;
+        let resp = self
+            .send_local_control(DaemonRequest::PasteWrite {
+                session_id: session_id.to_string(),
+                paste_id: paste_id.to_string(),
+                data,
+                final_chunk,
+            })
+            .await?;
+        write_response(resp)
+    }
+
+    /// Cancels the paste `paste_id` server-side: (found, bytes_written, settled).
+    pub async fn cancel_paste(&self, session_id: &str, paste_id: &str) -> Result<(bool, u64, bool), IpcError> {
+        match self
+            .send_interactive_request(DaemonRequest::CancelPaste {
+                session_id: session_id.to_string(),
+                paste_id: paste_id.to_string(),
+            })
+            .await?
+        {
+            DaemonResponse::CancelPasteOk { found, bytes_written, settled } => Ok((found, bytes_written, settled)),
+            other => Err(write_response(other).err().unwrap_or_else(|| {
+                IpcError::new(IpcErrorCode::InternalError, "Unexpected daemon response")
+            })),
         }
     }
 
@@ -4897,6 +4987,85 @@ mod local_control_isolation_tests {
     }
 
     #[tokio::test]
+    async fn paste_connection_does_not_block_keys_on_same_session() {
+        let client = DaemonClient::new();
+        let paste = client.paste_client();
+        assert!(!Arc::ptr_eq(&client.remote_connections, &paste.remote_connections));
+        assert!(Arc::ptr_eq(&client.epoch, &paste.epoch));
+        assert!(Arc::ptr_eq(&client.upgrade_requested, &paste.upgrade_requested));
+        let session_id = "paste-and-key";
+
+        #[cfg(unix)]
+        let (client_stream, server_stream) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_stream, server_stream) = stream_pair().await;
+        let (reader, writer) = client_stream.into_split();
+        let key_slot = client.local_connection_for_session(session_id).unwrap();
+        *key_slot.connection.lock().await = Some(ActiveConnection { reader: BufReader::new(reader), writer });
+        let paste_slot = paste.local_connection_for_session(session_id).unwrap();
+        let held_paste = paste_slot.connection.lock().await;
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = server_stream.into_split();
+            let mut reader = BufReader::new(reader);
+            for index in 0..2 {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let response = match (index, serde_json::from_str::<DaemonRequest>(&line).unwrap()) {
+                    (0, DaemonRequest::RemoteSessionDetails { session_id: id }) => {
+                        assert_eq!(id, session_id);
+                        DaemonResponse::RemoteSessionDetailsOk { details: None, legacy_direct_ssh: false }
+                    }
+                    (1, DaemonRequest::Write { session_id: id, data }) => {
+                        assert_eq!(id, session_id);
+                        assert_eq!(data, [3]);
+                        DaemonResponse::WriteOk
+                    }
+                    (_, request) => panic!("unexpected request: {request:?}"),
+                };
+                writer.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
+            }
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), client.write_terminal(session_id, vec![3])).await;
+        drop(held_paste);
+        if !matches!(&result, Ok(Ok(()))) {
+            server.abort();
+        }
+        assert!(matches!(result, Ok(Ok(()))), "key waited on paste connection: {result:?}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn paste_cancel_uses_control_connection_while_paste_connection_is_held() {
+        let client = DaemonClient::new();
+        let paste = client.paste_client();
+        let session_id = "cancel-paste-wire";
+        #[cfg(unix)]
+        let (client_stream, server_stream) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_stream, server_stream) = stream_pair().await;
+        let (reader, writer) = client_stream.into_split();
+        let key_slot = client.local_connection_for_session(session_id).unwrap();
+        *key_slot.connection.lock().await = Some(ActiveConnection { reader: BufReader::new(reader), writer });
+        let paste_slot = paste.local_connection_for_session(session_id).unwrap();
+        let held = paste_slot.connection.lock().await;
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = server_stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+                DaemonRequest::CancelPaste { session_id: id, paste_id } if id == session_id && paste_id == "registered"));
+            let response = DaemonResponse::CancelPasteOk { found: true, bytes_written: 11776, settled: true };
+            writer.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), client.cancel_paste(session_id, "registered")).await;
+        drop(held);
+        if !matches!(&result, Ok(Ok(_))) { server.abort(); }
+        assert_eq!(result.unwrap().unwrap(), (true, 11776, true));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn public_local_control_bypasses_busy_general_and_shared_interactive_connections() {
         #[cfg(unix)]
         let (client_stream, server_stream) = stream_pair();
@@ -4973,6 +5142,56 @@ mod local_control_isolation_tests {
             .expect("local control waited on general or shared interactive connection")
             .unwrap();
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_write_preserves_partial_delivery_error_details() {
+        #[cfg(unix)]
+        let (client_stream, server_stream) = stream_pair();
+        #[cfg(not(unix))]
+        let (client_stream, server_stream) = stream_pair().await;
+        let client = DaemonClient::new();
+        let (reader, writer) = client_stream.into_split();
+        client.local_connections.lock().insert(
+            "partial-write".into(),
+            Arc::new(LocalSessionSlot {
+                connection: Mutex::new(Some(ActiveConnection {
+                    reader: BufReader::new(reader), writer,
+                })),
+                active_refs: std::sync::atomic::AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
+        );
+        let details = serde_json::json!({ "inputWritten": true, "bytesWritten": 3, "partial": true });
+        let expected = details.clone();
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = server_stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+                DaemonRequest::RemoteSessionDetails { .. }));
+            let response = DaemonResponse::RemoteSessionDetailsOk { details: None, legacy_direct_ssh: false };
+            writer.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).unwrap(),
+                DaemonRequest::Write { data, .. } if data == b"abcdef"));
+            let response = DaemonResponse::Error {
+                code: Some("PTY_IO_ERROR".into()), message: "input stalled".into(), details: Some(details),
+            };
+            writer.write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes()).await.unwrap();
+            line.clear();
+            assert_eq!(reader.read_line(&mut line).await.unwrap(), 0, "partial write must not be retried");
+        });
+        let result = tokio::time::timeout(Duration::from_secs(5),
+            client.write_terminal("partial-write", b"abcdef".to_vec())).await;
+        drop(client);
+        let served = tokio::time::timeout(Duration::from_secs(5), server).await;
+        served.expect("fixture connection closes").unwrap();
+        let error = result.expect("write response arrives").unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::PtyIoError);
+        assert_eq!(error.details, Some(expected));
     }
 
     #[tokio::test]

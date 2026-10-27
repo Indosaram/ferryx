@@ -1133,7 +1133,7 @@ impl Runtime {
     pub(crate) fn completion_probe(
         &self,
         id: &str,
-        pending: super::remote::RemoteOperation,
+        pending: futures_util::future::BoxFuture<'static, Result<(), super::PtyError>>,
     ) -> impl std::future::Future<Output = ()> + '_ {
         let (weak, mut completed) = {
             let owners = self.owners.lock();
@@ -1148,6 +1148,9 @@ impl Runtime {
                 "completed owner retained in map"
             );
             let failure = pending.await.unwrap_err();
+            let super::PtyError::RemoteInput(failure) = failure else {
+                panic!("expected paired remote failure, got {failure:?}");
+            };
             assert_eq!(failure.kind, super::remote::RemoteFailureKind::Disconnected);
             assert_eq!(failure.message, "PAIRED_PROXY_UNAVAILABLE");
             assert_eq!(weak.strong_count(), 0, "owner sender retained");

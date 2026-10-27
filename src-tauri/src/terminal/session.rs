@@ -695,6 +695,131 @@ fn last_output_age_from(last_output_millis: u64) -> Option<u64> {
     Some(now.saturating_sub(last_output_millis))
 }
 
+/// Outcome of a token-bounded write that did not complete.
+#[derive(Debug)]
+pub enum InputStop {
+    /// The token fired at an await point; `bytes_written` bytes of this call were accepted.
+    Cancelled { bytes_written: usize },
+    Failed(PtyError),
+}
+
+/// Internal stop reason inside the bounded write loop.
+#[cfg(any(unix, windows))]
+enum WriteStop {
+    Cancelled,
+    Io(PtyError),
+}
+
+#[cfg(any(unix, windows))]
+impl From<PtyError> for WriteStop {
+    fn from(error: PtyError) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Awaits `fut` unless `cancel` fires first. Only ever wraps a wait (gate, writability,
+/// retry pause), so a cancellation never tears a syscall and the byte count stays exact.
+#[cfg(any(unix, windows))]
+async fn until_cancelled<F: std::future::Future>(
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    fut: F,
+) -> Result<F::Output, WriteStop> {
+    match cancel {
+        None => Ok(fut.await),
+        Some(token) => tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(WriteStop::Cancelled),
+            out = fut => Ok(out),
+        },
+    }
+}
+
+/// The slave device path of a pty master: ptsname_r where the platform has it, and
+/// ptsname under a process-wide lock elsewhere (macOS has no ptsname_r before 13.4).
+#[cfg(unix)]
+fn slave_path_of_master(fd: std::os::fd::RawFd) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let mut buf = vec![0 as libc::c_char; 128];
+        // SAFETY: `buf` is writable for its length; ptsname_r NUL-terminates on success.
+        if unsafe { libc::ptsname_r(fd, buf.as_mut_ptr(), buf.len()) } != 0 {
+            return None;
+        }
+        // SAFETY: success guarantees a NUL-terminated string inside `buf`.
+        let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes())))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        static PTSNAME: Mutex<()> = parking_lot::const_mutex(());
+        let _guard = PTSNAME.lock();
+        // SAFETY: ptsname returns a static buffer; the lock serializes every caller here.
+        let name = unsafe { libc::ptsname(fd) };
+        if name.is_null() {
+            return None;
+        }
+        // SAFETY: non-null ptsname results are NUL-terminated.
+        let name = unsafe { std::ffi::CStr::from_ptr(name) };
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes())))
+    }
+}
+
+/// Signals first and discards pending input only once the signal is delivered, the order the
+/// line discipline itself uses. A refused signal (EPERM for a privileged foreground group)
+/// leaves the user's pending input untouched. A failed flush after a delivered signal is only
+/// logged: the interrupt reached the program, which is what the user asked for.
+#[cfg(unix)]
+fn signal_then_flush(
+    noflsh: bool,
+    signal: impl FnOnce() -> std::io::Result<()>,
+    flush: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    signal()?;
+    if !noflsh {
+        if let Err(error) = flush() {
+            tracing::warn!(%error, "pending tty input was not discarded after a delivered signal");
+        }
+    }
+    Ok(())
+}
+
+/// Cheap prefilter before any tty syscall: signal characters are control bytes, so a frame
+/// ending in a printable byte (most keystrokes and every paste chunk of text) can never be one.
+#[cfg(unix)]
+fn could_be_signal_frame(frame: &[u8]) -> bool {
+    matches!(frame.last(), Some(&byte) if byte < 0x20 || byte == 0x7f)
+}
+
+/// The signal the tty line discipline raises for `frame`, or None. Only a frame ending in an
+/// enabled signal character (VINTR, VQUIT, VSUSP under ISIG) qualifies, and only when the kernel
+/// result is reproducible without queueing anything: bytes in front of the character would be
+/// flushed along with the full queue unless NOFLSH keeps them, and a full queue cannot keep them.
+#[cfg(unix)]
+fn signal_for_frame(frame: &[u8], lflag: libc::tcflag_t, cc: &[libc::cc_t]) -> Option<libc::c_int> {
+    if lflag & libc::ISIG == 0 {
+        return None;
+    }
+    let signal_of = |byte: u8| {
+        if byte == 0 || byte == 0xff {
+            return None; // _POSIX_VDISABLE on Linux and macOS respectively.
+        }
+        [(libc::VINTR, libc::SIGINT), (libc::VQUIT, libc::SIGQUIT), (libc::VSUSP, libc::SIGTSTP)]
+            .into_iter()
+            .find(|(index, _)| cc.get(*index) == Some(&byte))
+            .map(|(_, signal)| signal)
+    };
+    let (&last, prefix) = frame.split_last()?;
+    let signal = signal_of(last)?;
+    if prefix.iter().any(|&byte| signal_of(byte).is_some()) {
+        return None;
+    }
+    if !prefix.is_empty() && lflag & libc::NOFLSH != 0 {
+        return None;
+    }
+    Some(signal)
+}
+
 impl PtySession {
     pub(crate) fn new(config: PtySessionConfig) -> Self {
         let reader_interrupt = Arc::new(Mutex::new(config.reader_interrupt));
@@ -985,6 +1110,13 @@ impl PtySession {
     #[cfg(unix)]
     pub fn raw_master_fd(&self) -> Option<std::os::unix::io::RawFd> {
         self.master.lock().as_ref().and_then(|m| m.as_raw_fd())
+    }
+
+    /// The slave tty device this session's master serves, if known. Test-only: production code
+    /// reads the master's tty name where it needs it.
+    #[cfg(all(unix, test))]
+    pub(crate) fn slave_tty_name(&self) -> Option<PathBuf> {
+        self.master.lock().as_ref().and_then(|m| m.tty_name())
     }
 
     #[cfg(unix)]
@@ -1296,20 +1428,84 @@ impl PtySession {
     /// Cancellation drops the pending readiness future: no worker owns bytes.
     /// Bytes accepted before cancellation cannot be withdrawn from the kernel.
     /// A partial failure must never be retried as a complete frame.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub async fn write_input_cancellable(&self, data: &[u8]) -> Result<(), PtyError> {
+        self.write_input_bounded(data, None, None).await.map_err(|stop| match stop {
+            InputStop::Failed(error) => error,
+            InputStop::Cancelled { bytes_written } => PtyError::InputError {
+                bytes_written,
+                message: "PTY_INPUT_CANCELLED".into(),
+            },
+        })
+    }
+
+    /// The same bounded write, additionally stopped by `cancel` at its next await point (the
+    /// input gate, kernel writability, or the Windows retry pause). It never interrupts a
+    /// syscall, and adds every accepted byte to `progress` as the kernel takes it, so the count
+    /// stays exact even if this future is dropped mid-chunk. A frame the kernel refuses outright
+    /// gets the same signal-character handling as any bounded write (see
+    /// `signal_char_past_full_queue`).
+    #[cfg(any(unix, windows))]
+    pub async fn write_input_until(
+        &self,
+        data: &[u8],
+        cancel: &tokio_util::sync::CancellationToken,
+        progress: &std::sync::atomic::AtomicU64,
+    ) -> Result<(), InputStop> {
+        self.write_input_bounded(data, Some(cancel), Some(progress)).await
+    }
+
+    #[cfg(unix)]
+    async fn write_input_bounded(
+        &self,
+        data: &[u8],
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+        progress: Option<&std::sync::atomic::AtomicU64>,
+    ) -> Result<(), InputStop> {
         use std::os::fd::AsRawFd;
         if data.len() > 65536 {
-            return Err(PtyError::IoError("PTY_INPUT_TOO_LARGE".into()));
+            return Err(InputStop::Failed(PtyError::InputError { bytes_written: 0, message: "PTY_INPUT_TOO_LARGE".into() }));
         }
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let _gate = self.input_gate.lock().await;
+        let mut bytes_written = 0;
+        let result: Result<(), WriteStop> = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _gate = until_cancelled(cancel, self.input_gate.lock()).await?;
             let mut remaining = data;
+            // A signal character the kernel accepts can still sit behind unread input: once the
+            // line discipline's queue is full it stops taking bytes, so a 0x03 accepted into the
+            // pty buffer is never seen as a signal. With input already pending, do now what the
+            // line discipline does on receipt.
+            if could_be_signal_frame(remaining) && self.signal_char_past_full_queue(remaining, false)? {
+                bytes_written += remaining.len();
+                if let Some(progress) = progress {
+                    progress.fetch_add(remaining.len() as u64, Ordering::AcqRel);
+                }
+                return Ok(());
+            }
+            // Write readiness is edge-triggered: after an earlier write was refused, `writable()`
+            // waits for the queue to drain, which never happens while nothing reads it. Attempt
+            // first, so a full queue shows up as a refused write and a signal character still
+            // does what the line discipline would have done.
+            match self.try_write_input_now(remaining)? {
+                Some(n) => {
+                    bytes_written += n;
+                    if let Some(progress) = progress {
+                        progress.fetch_add(n as u64, Ordering::AcqRel);
+                    }
+                    remaining = &remaining[n..];
+                }
+                None => {
+                    if self.signal_char_past_full_queue(remaining, true)? {
+                        bytes_written += remaining.len();
+                        if let Some(progress) = progress {
+                            progress.fetch_add(remaining.len() as u64, Ordering::AcqRel);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
             while !remaining.is_empty() {
-                let mut ready = self
-                    .input
-                    .writable()
-                    .await
+                let mut ready = until_cancelled(cancel, self.input.writable())
+                    .await?
                     .map_err(|e| PtyError::IoError(e.to_string()))?;
                 // Do not wait behind a synchronous legacy writer or closed I/O.
                 let writer = self
@@ -1317,11 +1513,11 @@ impl PtySession {
                     .try_lock()
                     .ok_or_else(|| PtyError::IoError("PTY_INPUT_BUSY".into()))?;
                 if writer.is_none() {
-                    return Err(PtyError::IoError("PTY_INPUT_CLOSED".into()));
+                    return Err(PtyError::IoError("PTY_INPUT_CLOSED".into()).into());
                 }
                 let state = self.state.lock();
                 if !matches!(*state, PtySessionState::Starting | PtySessionState::Running) {
-                    return Err(PtyError::IoError("PTY_INPUT_CLOSED".into()));
+                    return Err(PtyError::IoError("PTY_INPUT_CLOSED".into()).into());
                 }
                 let result = ready.try_io(|fd| {
                     let n = unsafe {
@@ -1340,42 +1536,196 @@ impl PtySession {
                 drop(state);
                 drop(writer);
                 match result {
-                    Ok(Ok(0)) => return Err(PtyError::IoError("PTY write returned zero".into())),
-                    Ok(Ok(n)) => remaining = &remaining[n..],
+                    Ok(Ok(0)) => return Err(PtyError::IoError("PTY write returned zero".into()).into()),
+                    Ok(Ok(n)) => {
+                        bytes_written += n;
+                        if let Some(progress) = progress {
+                            progress.fetch_add(n as u64, Ordering::AcqRel);
+                        }
+                        remaining = &remaining[n..];
+                    }
                     Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Ok(Err(e)) => return Err(PtyError::IoError(e.to_string())),
-                    Err(_) => continue,
+                    Ok(Err(e)) => return Err(PtyError::IoError(e.to_string()).into()),
+                    // The kernel refused every byte: the tty input queue is full. A signal
+                    // character can still do what the line discipline would have done.
+                    Err(_) => {
+                        if self.signal_char_past_full_queue(remaining, true)? {
+                            bytes_written += remaining.len();
+                            if let Some(progress) = progress {
+                                progress.fetch_add(remaining.len() as u64, Ordering::AcqRel);
+                            }
+                            return Ok(());
+                        }
+                        continue;
+                    }
                 }
             }
-            Ok(())
+            Ok::<(), WriteStop>(())
         })
         .await
-        .map_err(|_| PtyError::IoError("PTY_INPUT_TIMEOUT".into()))?
+        .unwrap_or_else(|_| Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()).into()));
+        result.map_err(|stop| match stop {
+            WriteStop::Cancelled => InputStop::Cancelled { bytes_written },
+            WriteStop::Io(error) => InputStop::Failed(PtyError::InputError { bytes_written, message: error.to_string() }),
+        })
+    }
+
+    /// One nonblocking write attempt, without waiting for readiness: Some(accepted bytes), or
+    /// None when the kernel refused every byte. An interrupted call is retried.
+    #[cfg(unix)]
+    fn try_write_input_now(&self, data: &[u8]) -> Result<Option<usize>, PtyError> {
+        use std::os::fd::AsRawFd;
+        if data.is_empty() {
+            return Ok(Some(0));
+        }
+        let writer = self.writer.try_lock().ok_or_else(|| PtyError::IoError("PTY_INPUT_BUSY".into()))?;
+        if writer.is_none() {
+            return Err(PtyError::IoError("PTY_INPUT_CLOSED".into()));
+        }
+        let state = self.state.lock();
+        if !matches!(*state, PtySessionState::Starting | PtySessionState::Running) {
+            return Err(PtyError::IoError("PTY_INPUT_CLOSED".into()));
+        }
+        let (n, error) = loop {
+            // SAFETY: `data` is valid for its length; the session owns the nonblocking master fd.
+            let n = unsafe { libc::write(self.input.get_ref().as_raw_fd(), data.as_ptr().cast(), data.len()) };
+            let error = (n < 0).then(std::io::Error::last_os_error);
+            if !matches!(&error, Some(e) if e.kind() == std::io::ErrorKind::Interrupted) {
+                break (n, error);
+            }
+        };
+        drop(state);
+        drop(writer);
+        if n > 0 {
+            return Ok(Some(n as usize));
+        }
+        if n == 0 {
+            return Err(PtyError::IoError("PTY write returned zero".into()));
+        }
+        let error = error.unwrap_or_else(std::io::Error::last_os_error);
+        match error.kind() {
+            std::io::ErrorKind::WouldBlock => Ok(None),
+            _ => Err(PtyError::IoError(error.to_string())),
+        }
+    }
+
+    /// When the tty input queue is full the kernel cannot receive a signal character, so the
+    /// foreground program never gets the interrupt the user typed. This performs exactly what the
+    /// line discipline would have done on receiving it: signal the foreground process group, then
+    /// flush pending input (unless NOFLSH). It acts when `refused` (the kernel refused the frame
+    /// outright) or when unread input is already queued on the slave: measured on Linux, a full
+    /// line-discipline queue stops consuming the pty buffer, so a signal byte the master accepts
+    /// behind it is never processed, while poll readiness keeps reporting the master writable.
+    /// With nothing pending the frame is written and the kernel handles it itself. It acts only
+    /// when the current termios makes the frame a signal; otherwise the frame keeps waiting and a
+    /// still-full queue fails honestly within its bound. A foreground group that is already gone
+    /// is not an error: the frame is then written as ordinary input. Echo of ^C is not emulated.
+    #[cfg(unix)]
+    fn signal_char_past_full_queue(&self, frame: &[u8], refused: bool) -> Result<bool, PtyError> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        // The program's line discipline settings live on the slave side. On Linux a master's own
+        // termios is separate (ISIG off), so it must not be used to decide the frame's meaning.
+        let Some(slave_path) = self.master.lock().as_ref().and_then(|m| m.tty_name()) else {
+            return Ok(false);
+        };
+        let Ok(slave) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(&slave_path)
+        else {
+            return Ok(false);
+        };
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: `slave` is an open tty fd; tcgetattr fills the zeroed termios.
+        if unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut termios) } != 0 {
+            return Ok(false);
+        }
+        let Some(signal) = signal_for_frame(frame, termios.c_lflag, &termios.c_cc) else {
+            return Ok(false);
+        };
+        if !refused {
+            let mut pending: libc::c_int = 0;
+            // SAFETY: `slave` is an open tty fd; FIONREAD writes one c_int.
+            if unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD, &mut pending) } != 0 || pending <= 0 {
+                return Ok(false);
+            }
+        }
+        if !matches!(*self.state.lock(), PtySessionState::Starting | PtySessionState::Running) {
+            return Ok(false);
+        }
+        let Some(group) = self.foreground_process_group().map_err(|e| PtyError::IoError(e.to_string()))? else {
+            return Ok(false);
+        };
+        if group == 0 {
+            return Ok(false);
+        }
+        let delivered = signal_then_flush(
+            termios.c_lflag & libc::NOFLSH != 0,
+            || {
+                // SAFETY: plain syscall; `group` is the terminal's foreground process group.
+                if unsafe { libc::killpg(group as libc::pid_t, signal) } == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            },
+            || {
+                // SAFETY: `slave` is an open tty fd for the duration of the call.
+                if unsafe { libc::tcflush(slave.as_raw_fd(), libc::TCIFLUSH) } == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            },
+        );
+        match delivered {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(false),
+            Err(error) => return Err(PtyError::IoError(error.to_string())),
+        }
+        tracing::info!(session_id = %self.id, signal, "signal character delivered past a full tty input queue");
+        Ok(true)
     }
 
     #[cfg(windows)]
-    pub async fn write_input_cancellable(&self, data: &[u8]) -> Result<(), PtyError> {
+    async fn write_input_bounded(
+        &self,
+        data: &[u8],
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+        progress: Option<&std::sync::atomic::AtomicU64>,
+    ) -> Result<(), InputStop> {
         if data.len() > 65536 {
-            return Err(PtyError::IoError("PTY_INPUT_TOO_LARGE".into()));
+            return Err(InputStop::Failed(PtyError::InputError { bytes_written: 0, message: "PTY_INPUT_TOO_LARGE".into() }));
         }
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            let _gate = self.input_gate.lock().await;
+        let mut bytes_written = 0;
+        let result: Result<(), WriteStop> = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _gate = until_cancelled(cancel, self.input_gate.lock()).await?;
             if self.writer.try_lock().is_none_or(|w| w.is_none()) {
-                return Err(PtyError::IoError("PTY_INPUT_BUSY_OR_CLOSED".into()));
+                return Err(PtyError::IoError("PTY_INPUT_BUSY_OR_CLOSED".into()).into());
             }
             let mut bytes = data;
             while !bytes.is_empty() {
                 let n = self.write_input_slice(bytes)?;
                 if n == 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    until_cancelled(cancel, tokio::time::sleep(std::time::Duration::from_millis(1))).await?;
                 } else {
+                    bytes_written += n;
+                    if let Some(progress) = progress {
+                        progress.fetch_add(n as u64, Ordering::AcqRel);
+                    }
                     bytes = &bytes[n..];
                 }
             }
-            Ok(())
+            Ok::<(), WriteStop>(())
         })
         .await
-        .map_err(|_| PtyError::IoError("PTY_INPUT_TIMEOUT".into()))?
+        .unwrap_or_else(|_| Err(PtyError::IoError("PTY_INPUT_TIMEOUT".into()).into()));
+        result.map_err(|stop| match stop {
+            WriteStop::Cancelled => InputStop::Cancelled { bytes_written },
+            WriteStop::Io(error) => InputStop::Failed(PtyError::InputError { bytes_written, message: error.to_string() }),
+        })
     }
 
     /// One synchronous pump iteration for the Windows ConPTY input path. Every
@@ -1846,7 +2196,10 @@ impl PtySession {
         })?;
 
         // Reconstruct UnixMasterPty from the transferred master OwnedFd
-        let master_pty = portable_pty::master_from_owned_fd(master, None)
+        // The slave path is not part of the handover snapshot; derive it from the master so an
+        // adopted session keeps every slave-side operation (termios, input flush) it had before.
+        let slave_path = slave_path_of_master(master.as_raw_fd());
+        let master_pty = portable_pty::master_from_owned_fd(master, slave_path)
             .map_err(|e| PtyError::PtyCreationError(format!("Failed to adopt master PTY fd: {e}")))?;
 
         // Mirror the existing nonblocking-input pattern in PtyManager::spawn_with_id_and_worktree
@@ -2074,6 +2427,117 @@ mod tests {
     #[test]
     fn output_age_is_none_before_first_output() {
         assert_eq!(last_output_age_from(0), None);
+    }
+
+    /// Real PTY, Linux: a raw-mode program with ISIG on never reads and its line-discipline
+    /// queue fills. The master can then still ACCEPT a lone 0x03 that the kernel never processes
+    /// (measured, pty-ctrlc-after-drain.log). The bounded write must deliver SIGINT anyway.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ctrl_c_accepted_behind_a_full_queue_still_interrupts() {
+        use std::os::fd::AsRawFd;
+        async fn wait_for(rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>, marker: &str) -> bool {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut seen = Vec::new();
+                while let Some(chunk) = rx.recv().await {
+                    seen.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&seen).contains(marker) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .await
+            .unwrap_or(false)
+        }
+        let manager = crate::terminal::PtyManager::new();
+        let mut cmd = portable_pty::CommandBuilder::new("python3");
+        cmd.args(["-c", "import os,signal,termios,time\na=termios.tcgetattr(0)\na[3]=(a[3]&~(termios.ICANON|termios.ECHO))|termios.ISIG\ntermios.tcsetattr(0,termios.TCSANOW,a)\nsignal.signal(signal.SIGINT,lambda *_:(os.write(1,b'GOT_INT\\n'),os._exit(0)))\nos.write(1,b'READY\\n')\ntime.sleep(30)\n"]);
+        let (id, mut output) = manager.spawn(cmd, 80, 24).unwrap();
+        let session = manager.get_session(&id).unwrap();
+        let ready = wait_for(&mut output, "READY").await;
+        let master_fd = session.raw_master_fd().expect("master fd");
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .open(session.slave_tty_name().expect("slave path"))
+            .expect("open slave");
+        let pending = || {
+            let mut n: libc::c_int = 0;
+            // SAFETY: open tty fd; FIONREAD writes one c_int.
+            unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD, &mut n) };
+            n
+        };
+        // Fill the queue the way a stalled paste does: nonblocking writes until the kernel refuses.
+        let block = [b'x'; 4096];
+        // SAFETY: valid buffer; the session keeps the nonblocking master fd alive.
+        while unsafe { libc::write(master_fd, block.as_ptr().cast(), block.len()) } > 0 {}
+        // The kernel moves buffered bytes into the line-discipline queue asynchronously; wait,
+        // bounded, for that queue to fill (4095 is N_TTY's limit), as after a cancelled paste.
+        let filled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pending() < 4095 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        let control = session.write_input_cancellable(&[0x03]).await;
+        let interrupted = ready && control.is_ok() && wait_for(&mut output, "GOT_INT").await;
+        manager.close_session(&id).await.ok();
+        assert!(ready, "fixture never announced READY");
+        assert!(filled, "line-discipline queue never filled: {}", pending());
+        assert!(control.is_ok(), "Ctrl+C write failed: {control:?}");
+        assert!(interrupted, "a 0x03 behind a full tty queue never raised SIGINT");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refused_signal_never_discards_pending_input() {
+        let flushed = std::cell::Cell::new(0);
+        let refused = super::signal_then_flush(
+            false,
+            || Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            || {
+                flushed.set(flushed.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(refused.is_err(), "a refused signal is reported");
+        assert_eq!(flushed.get(), 0, "pending input must survive a refused signal");
+
+        let delivered = super::signal_then_flush(false, || Ok(()), || {
+            flushed.set(flushed.get() + 1);
+            Ok(())
+        });
+        assert!(delivered.is_ok());
+        assert_eq!(flushed.get(), 1, "a delivered signal discards pending input");
+
+        let kept = super::signal_then_flush(true, || Ok(()), || {
+            flushed.set(flushed.get() + 1);
+            Ok(())
+        });
+        assert!(kept.is_ok());
+        assert_eq!(flushed.get(), 1, "NOFLSH keeps pending input");
+    }
+
+    #[test]
+    fn signal_frames_follow_the_terminal_settings() {
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        termios.c_cc[libc::VINTR] = 0x03;
+        termios.c_cc[libc::VQUIT] = 0x1c;
+        termios.c_cc[libc::VSUSP] = 0x1a;
+        let cc = &termios.c_cc[..];
+        assert_eq!(signal_for_frame(b"\x03", libc::ISIG, cc), Some(libc::SIGINT));
+        assert_eq!(signal_for_frame(b"\x1b[201~\x03", libc::ISIG, cc), Some(libc::SIGINT));
+        assert_eq!(signal_for_frame(b"\x1c", libc::ISIG, cc), Some(libc::SIGQUIT));
+        assert_eq!(signal_for_frame(b"\x1a", libc::ISIG, cc), Some(libc::SIGTSTP));
+        assert_eq!(signal_for_frame(b"\x03", 0, cc), None, "ISIG off (raw mode, vim): Ctrl+C is ordinary input");
+        assert_eq!(signal_for_frame(b"\x03", libc::ISIG | libc::NOFLSH, cc), Some(libc::SIGINT));
+        assert_eq!(signal_for_frame(b"x\x03", libc::ISIG | libc::NOFLSH, cc), None, "NOFLSH would keep the prefix queued");
+        assert_eq!(signal_for_frame(b"\x03\x03", libc::ISIG, cc), None);
+        assert_eq!(signal_for_frame(b"a", libc::ISIG, cc), None);
+        assert_eq!(signal_for_frame(b"", libc::ISIG, cc), None);
+        termios.c_cc[libc::VINTR] = 0;
+        assert_eq!(signal_for_frame(b"\x00", libc::ISIG, &termios.c_cc[..]), None);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

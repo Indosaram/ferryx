@@ -1545,6 +1545,24 @@ mod tests {
         }
     }
 
+    /// An adopted session must know its slave tty like a spawned one does: slave-side input
+    /// handling (termios, input flush, the full-queue Ctrl+C) depends on it after every handover.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adopted_session_keeps_its_slave_tty_name() {
+        let source = super::PtyManager::new();
+        let successor = super::PtyManager::new();
+        let (id, _output) = source.spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24).unwrap();
+        let spawned = source.get_session(&id).unwrap().slave_tty_name();
+        assert!(spawned.is_some(), "a spawned session knows its slave tty");
+        let export = source.export_session(&id).unwrap();
+        successor.expect_transferred_owner(export.snapshot()).unwrap();
+        let _adopted_output = successor.adopt_transferred_export(export).unwrap();
+        let adopted = successor.get_session(&id).unwrap().slave_tty_name();
+        let _ = successor.close_session(&id).await;
+        assert_eq!(adopted, spawned, "the adopted session must keep the same slave tty");
+    }
+
     #[tokio::test]
     async fn pane_liveness_reader_rollback_rejected_identity_keeps_source_usable() {
         let source = super::PtyManager::new();

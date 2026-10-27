@@ -17,6 +17,15 @@ pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
 #[cfg(feature = "qa-protocol-bump")]
 pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
+/// Advertised in `GetCapabilities` by a daemon that serves `PasteWrite`/`CancelPaste`.
+pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
+/// Error code of a `PasteWrite` chunk that was refused or unwound by `CancelPaste`. Its
+/// details carry the exact `bytesWritten` of that chunk.
+pub const PASTE_CANCELLED_CODE: &str = "PASTE_CANCELLED";
+/// Error code of a `PasteWrite` chunk naming a paste this daemon does not hold (evicted,
+/// expired, or registered with a predecessor before a handover). Nothing was written, and
+/// unlike a cancellation no control path closes the paste's framing, so the writer must.
+pub const PASTE_UNKNOWN_CODE: &str = "PASTE_UNKNOWN";
 /// Error code a daemon that knows the agent integration requests puts on every failure of them,
 /// so a client can tell such a failure from an older daemon's untyped "malformed request" reply.
 pub const AGENT_INTEGRATION_ERROR_CODE: &str = "AGENT_INTEGRATION_FAILED";
@@ -648,6 +657,25 @@ pub enum DaemonRequest {
         data: Vec<u8>,
     },
     #[serde(rename_all = "camelCase")]
+    BeginPaste { session_id: String },
+    /// One chunk of an identified paste. Every chunk of one paste carries the same `paste_id`,
+    /// so `CancelPaste` stops the chunk in flight and refuses every later one. Ordinary `Write`
+    /// input never consults the paste registry.
+    #[serde(rename_all = "camelCase")]
+    PasteWrite {
+        session_id: String,
+        paste_id: String,
+        #[serde(with = "base64_serde")]
+        data: Vec<u8>,
+        #[serde(default)]
+        final_chunk: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    CancelPaste {
+        session_id: String,
+        paste_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
     Resize {
         session_id: String,
         cols: u16,
@@ -1199,6 +1227,17 @@ pub enum DaemonResponse {
     },
     MachineGatewayOk,
     WriteOk,
+    #[serde(rename_all = "camelCase")]
+    BeginPasteOk { paste_id: String },
+    /// `found` is false when no chunk of the paste had reached the daemon; the paste is then
+    /// refused from its first chunk. `settled` is false only if the chunk in flight did not
+    /// stop within the daemon's bound, in which case `bytes_written` is a lower bound.
+    #[serde(rename_all = "camelCase")]
+    CancelPasteOk {
+        found: bool,
+        bytes_written: u64,
+        settled: bool,
+    },
     ResizeOk,
     SignalOk,
     CloseOk,
@@ -2322,6 +2361,27 @@ mod tests {
         };
         let pair_json = serde_json::to_string(&pair_resp).expect("serialize pair code");
         assert!(pair_json.contains(r#""code":"123456""#));
+    }
+
+    #[test]
+    fn paste_write_is_additive_and_legacy_write_payload_is_unchanged() {
+        let legacy = serde_json::json!({"type":"write", "sessionId":"term-1", "data":"Aw=="});
+        let decoded: DaemonRequest = serde_json::from_value(legacy.clone()).expect("legacy write");
+        assert!(matches!(&decoded, DaemonRequest::Write { data, .. } if data == &[3]));
+        assert_eq!(serde_json::to_value(decoded).expect("encode write"), legacy);
+
+        let chunk = serde_json::json!({"type":"pasteWrite", "sessionId":"term-1", "pasteId":"p-1", "data":"eHg="});
+        let decoded: DaemonRequest = serde_json::from_value(chunk).expect("paste chunk");
+        assert!(matches!(&decoded, DaemonRequest::PasteWrite { paste_id, data, final_chunk: false, .. }
+            if paste_id == "p-1" && data == b"xx"));
+        let cancel = DaemonRequest::CancelPaste { session_id: "term-1".into(), paste_id: "p-1".into() };
+        assert_eq!(serde_json::to_value(&cancel).unwrap(),
+            serde_json::json!({"type":"cancelPaste", "sessionId":"term-1", "pasteId":"p-1"}));
+        let ok = DaemonResponse::CancelPasteOk { found: true, bytes_written: 70000, settled: true };
+        let wire = serde_json::to_value(&ok).unwrap();
+        assert_eq!(wire, serde_json::json!({"type":"cancelPasteOk", "found":true, "bytesWritten":70000, "settled":true}));
+        assert!(matches!(serde_json::from_value(wire).unwrap(),
+            DaemonResponse::CancelPasteOk { found: true, bytes_written: 70000, settled: true }));
     }
 
     #[test]
