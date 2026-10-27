@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { remoteHostStore, type RemoteHostStore } from "../state/remoteHostStore";
 import { decodeMachineJson, decodePairedProject, decodeU64, type DiscoveredRepositories } from "./pairedDaemonContracts";
+import type { AgentProviderSession } from "./types";
 
 export interface PairedHostContext { readonly hostId: string; readonly generation: string }
 export interface WorktreeIdentity { wsId: string; slug: string }
@@ -11,7 +12,7 @@ export interface DeleteWorktreeRequest extends Omit<CreateWorktreeRequest, "base
 export interface CreateSessionRequest {
   requestId: string; workspaceId: string; worktree: WorktreeIdentity | null; cols: number; rows: number;
   inheritFromSessionId: string | null; cwdRelative: string | null;
-  startup: { kind: "shell" } | { kind: "agentResume"; agentType: string; providerSession: { key: "session_id" | "conversation_id"; id: string; transcriptPath?: string } };
+  startup: { kind: "shell" } | { kind: "agentResume"; agentType: string; providerSession: AgentProviderSession };
 }
 export interface CloseSessionRequest { requestId: string; daemonEpoch: string }
 export type PairedHostOperation =

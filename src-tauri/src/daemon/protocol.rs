@@ -263,6 +263,12 @@ pub enum AgentProviderSessionKey {
     ConversationId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentLauncher {
+    Mhc,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentProviderSession {
@@ -270,6 +276,8 @@ pub struct AgentProviderSession {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher: Option<AgentLauncher>,
 }
 
 fn deserialize_optional_provider_session<'de, D>(
@@ -2097,7 +2105,7 @@ mod tests {
             state: Cow::Borrowed("working"),
             agent: Some(Cow::Borrowed("omo")),
             detail: None,
-            provider_session: Some(AgentProviderSession {
+            provider_session: Some(AgentProviderSession { launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "provider-1".to_string(),
                 transcript_path: None,
@@ -2826,7 +2834,7 @@ mod tests {
                     startup,
                     TerminalStartup::AgentResume {
                         agent_type: "claude".to_string(),
-                        provider_session: AgentProviderSession {
+                        provider_session: AgentProviderSession { launcher: None,
                             key: AgentProviderSessionKey::SessionId,
                             id: "claude-session-123".to_string(),
                             transcript_path: Some("/path/to/transcript.json".to_string()),

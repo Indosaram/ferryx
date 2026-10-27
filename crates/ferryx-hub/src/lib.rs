@@ -40,6 +40,7 @@ pub mod mcp;
 pub mod memory;
 pub mod meta;
 pub mod mirror;
+pub mod model_policy;
 pub mod owner_alert;
 pub mod readiness;
 pub mod retention;

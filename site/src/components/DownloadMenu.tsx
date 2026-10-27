@@ -177,14 +177,14 @@ export function DownloadMenu({ variant = 'hero', className, locale = getLocale('
                         <div className="flex flex-col gap-0.5">
                           <div className="flex items-center gap-1.5">
                             <span className={cn('font-medium', asset.recommended ? 'text-page' : 'text-ink')}>
-                              {locale.code === 'en' ? asset.name : asset.id === 'macos-universal' ? '通用 DMG (.dmg)' : asset.id === 'windows-installer' ? 'Windows 安装程序 (.exe)' : asset.id === 'linux-deb' ? 'Debian 软件包 (.deb)' : asset.name}
+                              {locale.code === 'en' ? asset.name : asset.id === 'macos-universal' ? '通用 DMG (.dmg)' : asset.id === 'windows-store' ? 'Microsoft Store（已签名）' : asset.id === 'windows-installer' ? 'Windows 安装程序 (.exe)' : asset.id === 'linux-deb' ? 'Debian 软件包 (.deb)' : asset.name}
                             </span>
                             {asset.recommended && (
                               <Sparkles className="h-3 w-3 text-page/70 inline" />
                             )}
                           </div>
                           <span className={cn('text-[11px] font-mono', asset.recommended ? 'text-page/80' : 'text-ink-faint')}>
-                            {locale.code === 'zh-cn' && asset.id === 'macos-universal' ? 'Apple Silicon + Intel（通用二进制）' : locale.code === 'zh-cn' && asset.id === 'linux-appimage' ? '通用 x86_64' : asset.architecture}
+                            {locale.code === 'zh-cn' && asset.id === 'macos-universal' ? 'Apple Silicon + Intel（通用二进制）' : locale.code === 'zh-cn' && asset.id === 'windows-store' ? 'x64 · MSIX（自动更新）' : locale.code === 'zh-cn' && asset.id === 'linux-appimage' ? '通用 x86_64' : asset.architecture}
                           </span>
                         </div>
                         <div className="flex items-center gap-1">

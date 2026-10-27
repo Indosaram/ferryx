@@ -3,6 +3,7 @@ import {
   PLATFORMS,
   GITHUB_RELEASE_LATEST,
   GITHUB_RELEASE_DOWNLOAD_BASE,
+  MICROSOFT_STORE_URL,
   MICROSOFT_STORE_SEARCH_URL,
   detectUserPlatform,
   type PlatformId,
@@ -49,20 +50,19 @@ describe('Cross-Platform Download Configuration', () => {
     expect(offered.length).toBeGreaterThan(0);
 
     for (const { asset } of offered) {
+      if (asset.id === 'windows-store') {
+        expect(asset.url).toBe(MICROSOFT_STORE_URL);
+        continue;
+      }
       expect(asset.url.startsWith(`${GITHUB_RELEASE_DOWNLOAD_BASE}/`), `${asset.id} does not resolve against the latest release`).toBe(true);
       const fileName = asset.url.slice(GITHUB_RELEASE_DOWNLOAD_BASE.length + 1);
       expect(VERIFIED_LATEST_RELEASE_ASSETS, `${asset.id} points at an asset the latest release does not publish`).toContain(fileName);
     }
   });
 
-  test('no download claims a Microsoft Store route, because no Store listing is published', () => {
-    // Verified 2026-09-19: the Store search API (storeedgefd v9.0 search/autosuggest and
-    // manifestSearch), DisplayCatalog, and apps.microsoft.com all return no Ferryx product.
-    // The constant survives only so analytics can classify Store links; it is not a destination.
-    expect(MICROSOFT_STORE_SEARCH_URL.startsWith('https://apps.microsoft.com/')).toBe(true);
-    for (const { asset } of everyAsset()) {
-      expect(asset.url.includes('apps.microsoft.com'), `${asset.id} links to an unpublished Store listing`).toBe(false);
-    }
+  test('Microsoft Store URL points at the live Ferryx Store product listing', () => {
+    expect(MICROSOFT_STORE_URL).toBe('https://apps.microsoft.com/detail/9NLHQL5JNLM4');
+    expect(MICROSOFT_STORE_SEARCH_URL).toBe(MICROSOFT_STORE_URL);
   });
 
   test('no release version is hardcoded anywhere in the download config', () => {
@@ -86,14 +86,19 @@ describe('Cross-Platform Download Configuration', () => {
     expect(macos.assets.map((a) => a.id)).toEqual(['macos-universal']);
   });
 
-  test('Windows offers the published x64 installer, not the Store-ingestion MSIX', () => {
+  test('Windows offers the Microsoft Store first and the x64 installer second, never the raw MSIX', () => {
     const windows = PLATFORMS.windows;
     expect(windows.id).toBe('windows');
     expect(windows.name).toBe('Windows');
-    expect(windows.defaultAsset.id).toBe('windows-installer');
-    expect(windows.defaultAsset.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`);
-    expect(windows.defaultAsset.fileType).toBe('.exe');
-    expect(windows.assets.map((a) => a.id)).toEqual(['windows-installer']);
+    expect(windows.defaultAsset.id).toBe('windows-store');
+    expect(windows.defaultAsset.url).toBe(MICROSOFT_STORE_URL);
+    expect(windows.defaultAsset.fileType).toBe('Store');
+    expect(windows.assets.map((a) => a.id)).toEqual(['windows-store', 'windows-installer']);
+
+    const exeAsset = windows.assets.find((a) => a.id === 'windows-installer');
+    expect(exeAsset?.url).toBe(`${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`);
+    expect(exeAsset?.fileType).toBe('.exe');
+    expect(exeAsset?.recommended).toBeUndefined();
 
     // The released MSIX carries no AppxSignature.p7x (verified 2026-09-19 by reading its zip
     // central directory over HTTP range requests), so a visitor could not install it.

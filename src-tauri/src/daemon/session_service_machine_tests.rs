@@ -45,6 +45,7 @@ async fn provider_resume_child() {
     request.startup = Startup::AgentResume {
         agent_type: "omo".into(),
         provider_session: crate::daemon::protocol::AgentProviderSession {
+            launcher: None,
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: "existing-provider-id".into(),
             transcript_path: None,

@@ -86,7 +86,7 @@ impl DaemonSessionService {
             // claude keeps no process-bound record of a fresh session (no open transcript, no id
             // in argv). Its proof is then the store-cwd check below, which it always gets because
             // it is not in MACHINE_RESUME_NO_CWD_PROOF.
-            None if crate::daemon::server::agent_has_no_process_bound_session(agent) => {}
+            None if crate::daemon::server::provider_has_no_process_bound_session(agent, provider) => {}
             None => return Err("AGENT_PROVIDER_UNVERIFIED".into()),
         }
         crate::terminal::shell::resolve_agent_resume_plan(agent, provider)

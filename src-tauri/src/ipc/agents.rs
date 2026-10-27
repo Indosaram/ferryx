@@ -255,7 +255,15 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
     };
     if normalized_agent == "omo" {
         let normalized_args = args.to_ascii_lowercase();
-        return normalized_args.contains("/omo.js")
+        let executable = if let Some(quoted) = args.trim_start().strip_prefix('"') {
+            quoted.split('"').next().unwrap_or("")
+        } else {
+            args.split_whitespace().next().unwrap_or("")
+        };
+        let basename = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
+        return basename.eq_ignore_ascii_case("mhc")
+            || basename.eq_ignore_ascii_case("mhc.exe")
+            || normalized_args.contains("/omo.js")
             || normalized_args.contains("/senpi/dist/cli.js");
     }
 
@@ -2032,6 +2040,11 @@ mod tests {
             "bun /Users/x/senpi/dist/cli.js run"
         ));
         assert!(!args_match_agent("omo", "/usr/local/bin/omo-helper serve"));
+        assert!(args_match_agent("omo", "/home/user/.local/bin/mhc --session id"));
+        assert!(args_match_agent("omo", "C:\\bin\\mhc.exe --session id"));
+        assert!(args_match_agent("omo", "\"C:\\Program Files\\mhc.exe\" --session id"));
+        assert!(!args_match_agent("omo", "/bin/echo mhc --session id"));
+        assert!(!args_match_agent("omo", "/bin/mhc-helper --session id"));
 
         assert!(args_match_agent(
             "claude",

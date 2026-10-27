@@ -77,6 +77,7 @@ function worktree(value: unknown) {
 function provider(value: unknown) {
   const v = object(value);
   return { key: choice(v.key, ["session_id", "conversation_id"]), id: text(v.id),
+    ...(v.launcher === undefined || v.launcher === null ? {} : { launcher: choice(v.launcher, ["mhc"]) }),
     ...(v.transcriptPath === undefined ? {} : { transcriptPath: text(v.transcriptPath) }) };
 }
 function session(value: unknown) {

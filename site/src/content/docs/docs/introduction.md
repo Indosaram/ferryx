@@ -42,7 +42,7 @@ Most of Ferryx reduces to six concepts.
 Download from the [releases page](https://github.com/Indosaram/ferryx/releases/latest); the links below resolve against the latest release. Releases are calendar-versioned, so the newest tag is the one the release page shows.
 
 - **macOS**: universal DMG for Apple Silicon and Intel, [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg)
-- **Windows**: x64 installer, [Ferryx_x64-setup.exe](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe). It isn't code-signed yet, so SmartScreen warns on first run; check the SHA-256 below before you run it. There is no Microsoft Store listing today, and the MSIX in the release is an unsigned Store-ingestion package rather than something you can install directly.
+- **Windows**: [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed by the Store with automatic updates; or the direct x64 installer [Ferryx_x64-setup.exe](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) (not code-signed, so SmartScreen warns on first run; check the SHA-256 below before running it). The `Ferryx_x64.msix` attached to releases is an unsigned Store-ingestion package rather than a direct installer.
 - **Linux**: [Ferryx_amd64.AppImage](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) or [Ferryx_amd64.deb](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb), both x64
 
 Each release also publishes a `SHA256SUMS.txt` beside the binaries, so you can check a download before running it:

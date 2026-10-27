@@ -110,6 +110,7 @@ fn slack_turn(text: &str) -> SessionTurn {
         reply_thread: Some("100.1".into()),
         status_ts: Some("100.1".into()),
         text: text.into(),
+        background: false,
     }
 }
 
@@ -649,6 +650,7 @@ async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
         reply_thread: None,
         status_ts: None,
         text: "[2026-10-23 15:00 KST] push   it".into(),
+        background: false,
     };
     let reply = with_test_api(base, "xoxb-test".into(), async {
         super::turn_status::INTERVAL_OVERRIDE

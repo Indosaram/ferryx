@@ -1,4 +1,4 @@
-//! Linear-style tracker API. The web UI at `~/.omon/web` calls these routes with no bearer
+//! Linear-style tracker API. The web UI at `~/.ferryx/hub/web` calls these routes with no bearer
 //! token, matching omo-gateway. The owner list stays on `hub_tracker_issues`.
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;

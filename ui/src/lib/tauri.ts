@@ -537,7 +537,7 @@ function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTe
   }
   if (startup.kind !== "agentResume") return null;
   const providerSession = startup.providerSession as
-    | { key?: unknown; id?: unknown; transcriptPath?: unknown }
+    | { key?: unknown; id?: unknown; transcriptPath?: unknown; launcher?: "mhc" }
     | null
     | undefined;
   if (!providerSession || typeof providerSession.id !== "string") return null;
@@ -549,6 +549,7 @@ function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTe
     providerSession: {
       key,
       id: providerSession.id,
+      ...(providerSession.launcher !== undefined ? { launcher: providerSession.launcher } : {}),
       ...(transcriptPath !== undefined ? { transcriptPath } : {}),
     },
   };

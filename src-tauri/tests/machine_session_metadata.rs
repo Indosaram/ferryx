@@ -157,7 +157,7 @@ async fn publishes_owner_metadata_when_inactive_shell_changes_title_and_cwd() {
         assert_eq!(projected, json!({"event":"fixtureBarrier","payload":{}}));
         let target: ferryx_lib::remote::machine_protocol::RemoteTerminalTarget = serde_json::from_value(session["target"].clone()).expect("typed owner target");
         let authority = &state.machine_services.as_ref().expect("authority").sessions;
-        let hint = ferryx_lib::daemon::protocol::AgentStateReport { session_id: id.into(), state: "idle".into(), agent: Some("omo".into()), detail: None, provider_session: Some(ferryx_lib::daemon::protocol::AgentProviderSession { key: ferryx_lib::daemon::protocol::AgentProviderSessionKey::SessionId, id: "forged-provider".into(), transcript_path: None }) };
+        let hint = ferryx_lib::daemon::protocol::AgentStateReport { session_id: id.into(), state: "idle".into(), agent: Some("omo".into()), detail: None, provider_session: Some(ferryx_lib::daemon::protocol::AgentProviderSession { launcher: None, key: ferryx_lib::daemon::protocol::AgentProviderSessionKey::SessionId, id: "forged-provider".into(), transcript_path: None }) };
         let mut stale = target.clone(); stale.daemon_epoch.0 += 1;
         assert!(authority.validate_machine_agent_report(stale, hint.clone()).await.is_err());
         let mut foreign = target.clone(); foreign.machine_id = "forged-machine".into();

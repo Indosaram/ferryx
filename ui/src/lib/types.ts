@@ -239,6 +239,7 @@ export type AgentProviderSession = {
   readonly key: AgentProviderSessionKey;
   readonly id: string;
   readonly transcriptPath?: string;
+  readonly launcher?: "mhc";
 };
 
 export type TerminalLifecycle = "starting" | "working" | "waiting" | "exited" | "failed" | "running";

@@ -901,6 +901,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
             provider_session: AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "--new".to_string(),
                 transcript_path: None,
@@ -945,6 +946,7 @@ async fn agent_resume_startup_validation_failure_before_pty_spawn() {
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
             provider_session: AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::ConversationId,
                 id: "sess-valid-id".to_string(),
                 transcript_path: None,
@@ -1020,6 +1022,7 @@ async fn agent_resume_startup_cwd_jail_enforcement() {
         startup: Some(TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
             provider_session: AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "sess-valid-id".to_string(),
                 transcript_path: None,
@@ -1332,6 +1335,7 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
         startup: Some(crate::daemon::protocol::TerminalStartup::AgentResume {
             agent_type: "claude".into(),
             provider_session: crate::daemon::protocol::AgentProviderSession {
+                launcher: None,
                 key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
                 id: "sess-1".into(),
                 transcript_path: None,

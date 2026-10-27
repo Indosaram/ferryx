@@ -290,7 +290,7 @@ describe("Tauri IPC wrapper contract", () => {
     });
   });
 
-  it("preserves typed agent-resume startup and binding metadata", async () => {
+  it.each([undefined, "mhc"] as const)("preserves typed agent-resume startup and launcher %s", async (launcher) => {
     core.invoke.mockResolvedValue({
       sessionId: "backend-resume-1",
       daemonEpoch: "42",
@@ -313,8 +313,8 @@ describe("Tauri IPC wrapper contract", () => {
         clientRequestId: "resume-request-1",
         startup: {
           kind: "agentResume",
-          agentType: "claude",
-          providerSession: { key: "session_id", id: "provider-1" },
+          agentType: "omo",
+          providerSession: { key: "session_id", id: "provider-1", ...(launcher ? { launcher } : {}) },
         },
       }),
     ).resolves.toMatchObject({
@@ -332,8 +332,8 @@ describe("Tauri IPC wrapper contract", () => {
         shell: null,
         startup: {
           kind: "agentResume",
-          agentType: "claude",
-          providerSession: { key: "session_id", id: "provider-1" },
+          agentType: "omo",
+          providerSession: { key: "session_id", id: "provider-1", ...(launcher ? { launcher } : {}) },
         },
         inheritFromSessionId: null,
         createOnly: null,

@@ -1706,6 +1706,7 @@ fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(|id| AgentProviderSession {
+            launcher: None,
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: id.to_string(),
             transcript_path: None,
@@ -1774,6 +1775,13 @@ const AGENTS_WITHOUT_PROCESS_BOUND_SESSION: [&str; 4] = ["claude", "omp", "cline
 
 pub(crate) fn agent_has_no_process_bound_session(agent: &str) -> bool {
     AGENTS_WITHOUT_PROCESS_BOUND_SESSION.contains(&agent)
+}
+
+pub(crate) fn provider_has_no_process_bound_session(agent: &str, provider: &AgentProviderSession) -> bool {
+    // Native mhc opens its JSONL only for each append (maho-core/session_manager.rs),
+    // so an idle or fresh session has no persistent transcript handle to discover.
+    agent_has_no_process_bound_session(agent)
+        || (agent == "omo" && provider.launcher == Some(crate::daemon::protocol::AgentLauncher::Mhc))
 }
 
 /// The discovered id that may bind (and veto) a report. For an agent with no process-bound
@@ -1912,6 +1920,11 @@ fn discovered_machine_report(
         retained.map_or_else(|| "idle".to_string(), |state| state.state.clone()),
         Some(agent.to_string()),
         Some(AgentProviderSession {
+            launcher: retained
+                .filter(|state| state.agent.as_deref() == Some(agent))
+                .and_then(|state| state.provider_session.as_ref())
+                .filter(|provider| provider.id == provider_id)
+                .and_then(|provider| provider.launcher),
             key: AgentProviderSessionKey::SessionId,
             id: provider_id.to_string(),
             transcript_path: None,
@@ -4182,6 +4195,7 @@ impl DaemonServer {
         let agent = agent.to_string();
         let id = provider.id.clone();
         let claimed = provider.transcript_path.clone().unwrap_or_default();
+        let store_proof_only = provider_has_no_process_bound_session(&agent, provider);
         let decision = crate::ipc::run_blocking(move || {
             let discovered = server
                 .ingress_pty_pid(&session_id)
@@ -4190,7 +4204,7 @@ impl DaemonServer {
             // With no discovered id, an agent that keeps no process-bound session record is
             // checked against the id it reported; every other agent proves nothing without one.
             let store_id = discovered.clone().or_else(|| {
-                agent_has_no_process_bound_session(&agent).then(|| id.trim().to_string())
+                store_proof_only.then(|| id.trim().to_string())
             });
             let path_is_own_store = store_id.as_deref().is_some_and(|found| {
                 if agent == "omo" {
@@ -4207,6 +4221,9 @@ impl DaemonServer {
                     })
                 }
             });
+            if discovered.is_none() && store_proof_only && path_is_own_store {
+                return Ok(IngressAdmissionIdentity::WithoutPath);
+            }
             Ok(ingress_admission_identity(
                 &agent,
                 &id,
@@ -4218,6 +4235,7 @@ impl DaemonServer {
         .await;
         match decision {
             Ok(IngressAdmissionIdentity::WithoutPath) => Some(AgentProviderSession {
+                launcher: provider.launcher,
                 key: provider.key,
                 id: provider.id.clone(),
                 transcript_path: None,
@@ -10031,6 +10049,7 @@ mod tests {
         TerminalStartup::AgentResume {
             agent_type: "claude".to_string(),
             provider_session: crate::daemon::protocol::AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: id.to_string(),
                 transcript_path: None,
@@ -10043,6 +10062,7 @@ mod tests {
         TerminalStartup::AgentResume {
             agent_type: "ferryx-test-agent".to_string(),
             provider_session: crate::daemon::protocol::AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: id.to_string(),
                 transcript_path: None,
@@ -10121,6 +10141,7 @@ mod tests {
         let startup = |transcript_path: &str| TerminalStartup::AgentResume {
             agent_type: "ferryx-test-agent".to_string(),
             provider_session: crate::daemon::protocol::AgentProviderSession {
+                launcher: None,
                 key: AgentProviderSessionKey::SessionId,
                 id: "same-provider-id".to_string(),
                 transcript_path: Some(transcript_path.to_string()),
@@ -10282,6 +10303,7 @@ mod tests {
                 Some(TerminalStartup::AgentResume {
                     agent_type: "omo".to_string(),
                     provider_session: crate::daemon::protocol::AgentProviderSession {
+                        launcher: None,
                         key: AgentProviderSessionKey::SessionId,
                         id: "provider-session".to_string(),
                         transcript_path: Some(transcript.to_string_lossy().into_owned()),
@@ -11775,9 +11797,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn discovered_report_preserves_mhc_only_for_the_same_provider() {
+        let provider = AgentProviderSession {
+            launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+            key: AgentProviderSessionKey::SessionId,
+            id: "01a112e9-02b1-7857-b11d-967060362583".into(),
+            transcript_path: None,
+        };
+        let retained = AgentState {
+            session_id: "pane-1".into(),
+            state: "idle".into(),
+            agent: Some("omo".into()),
+            provider_session: Some(provider.clone()),
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        };
+        let report = discovered_machine_report("pane-1", "omo", &provider.id, Some(&retained));
+        assert!(provider_has_no_process_bound_session("omo", &provider));
+        assert!(!provider_has_no_process_bound_session("codex", &provider));
+        let mut legacy = provider.clone();
+        legacy.launcher = None;
+        assert!(!provider_has_no_process_bound_session("omo", &legacy));
+        assert_eq!(report.3, Some(provider.clone()));
+        let admitted = DaemonServer::admit_agent_state_report(AgentStateReport {
+            session_id: report.0,
+            state: report.1,
+            agent: report.2,
+            provider_session: report.3,
+            detail: report.4,
+        }).expect("valid native report");
+        assert_eq!(admitted.3, Some(provider));
+        let switched = discovered_machine_report("pane-1", "omo", "different-id", Some(&retained));
+        assert_eq!(switched.3.unwrap().launcher, None);
+        let other_agent = discovered_machine_report("pane-1", "codex", &retained.provider_session.as_ref().unwrap().id, Some(&retained));
+        assert_eq!(other_agent.3.unwrap().launcher, None);
+    }
+
     /// A provider claim shaped the way the extension reports it.
     fn reported_claim(id: &str, path: Option<&str>) -> AgentProviderSession {
         AgentProviderSession {
+            launcher: None,
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: id.to_string(),
             transcript_path: path.map(str::to_string),

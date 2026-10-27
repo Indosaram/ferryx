@@ -10501,7 +10501,7 @@ mod tests {
             state: "working".into(),
             agent: Some("omo".into()),
             detail: None,
-            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession { launcher: None,
                 key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
                 id: conversation.to_string(),
                 transcript_path: None,

@@ -197,9 +197,11 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
             let request = super::omo_client::TurnRequest {
                 thread_id: None,
                 system_prompt: Some(prompt.to_owned()),
-                model: model.map(str::to_owned),
+                // Every turn through this client is a background turn.
+                model: Some(model.map_or_else(crate::model_policy::background_model, str::to_owned)),
                 toolsets: (!toolsets.is_empty()).then(|| toolsets.to_vec()),
                 text: prompt.to_owned(),
+                pin_model: true,
             };
             super::omo_client::run_turn(&config, &request, None)
                 .await
@@ -277,8 +279,20 @@ mod tests {
             .iter()
             .filter_map(|f| f.get("method").and_then(Value::as_str))
             .collect();
-        assert_eq!(methods, ["initialize", "thread/start", "turn/start"]);
-        assert_eq!(frames[2]["params"]["threadId"], "thr-k");
+        assert_eq!(
+            methods,
+            [
+                "initialize",
+                "thread/start",
+                "thread/settings/update",
+                "turn/start"
+            ]
+        );
+        assert_eq!(
+            frames[2]["params"]["model"],
+            crate::model_policy::background_model()
+        );
+        assert_eq!(frames[3]["params"]["threadId"], "thr-k");
     }
 
     #[test]

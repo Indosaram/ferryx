@@ -8,6 +8,14 @@ import identities from "../../../docs/evidence/paired-daemon/fixtures/identities
 import { createHash } from "node:crypto";
 
 describe("machine target boundary", () => {
+  it("preserves the mhc launcher through the remote session decoder", () => {
+    const fixture = fixtures.find(item => item.kind === "session");
+    if (!fixture) throw new Error("Missing session fixture");
+    const wire = { ...fixture.value, providerSession: { key: "session_id", id: "native-session", launcher: "mhc" } };
+    expect(decodeMachineJson("session", JSON.stringify(wire))).toEqual(wire);
+    expect(() => decodeMachineJson("session", JSON.stringify({ ...wire, providerSession: { ...wire.providerSession, launcher: "other" } }))).toThrow();
+  });
+
   it.each(identities)("parses Rust-owned full hash identity for $hostId", fixture => {
     const digest = (parts: readonly string[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
     expect(`daemon:${digest(["pairedDaemon", fixture.hostId, fixture.remoteWorkspaceId])}`).toBe(fixture.workspaceId);

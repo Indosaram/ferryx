@@ -82,6 +82,9 @@ pub struct TurnRequest {
     /// `enabledToolsets` for a new thread.
     pub toolsets: Option<Vec<String>>,
     pub text: String,
+    /// The turn must run on `model`. A switch the engine refuses for context size starts a
+    /// fresh thread on it instead of falling back to the thread's current model.
+    pub pin_model: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,15 +322,9 @@ pub fn is_model_switch_rejection(result: &Result<TurnOutcome>) -> bool {
     })
 }
 
-/// omo-gateway's fallback model (`OMON_OMO_FALLBACK_MODEL`).
-pub const DEFAULT_FALLBACK_MODEL: &str = "inferhub/cb/deepseek-v4.1-flash";
-
+/// The model a failed turn is retried on: the hub's background model.
 pub fn fallback_model() -> String {
-    crate::hub_env::var("OMON_OMO_FALLBACK_MODEL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_owned())
+    crate::model_policy::background_model()
 }
 
 /// omo-gateway's `fallback_eligible`: a turn that failed before any side effect, by producing
@@ -737,12 +734,20 @@ pub async fn run_turn_recovering(
 ) -> Result<TurnOutcome> {
     let mut first = run_turn(config, request, progress.clone()).await;
     if is_model_switch_rejection(&first) && request.model.is_some() {
-        tracing::warn!(error = ?first.as_ref().err().map(ToString::to_string), "model switch refused; retrying on the thread's current model");
-        let same_model = TurnRequest {
-            model: None,
-            ..request.clone()
+        let retry = if request.pin_model {
+            tracing::warn!(error = ?first.as_ref().err().map(ToString::to_string), "model switch refused; retrying on a fresh thread with the pinned model");
+            TurnRequest {
+                thread_id: None,
+                ..request.clone()
+            }
+        } else {
+            tracing::warn!(error = ?first.as_ref().err().map(ToString::to_string), "model switch refused; retrying on the thread's current model");
+            TurnRequest {
+                model: None,
+                ..request.clone()
+            }
         };
-        first = run_turn(config, &same_model, progress.clone()).await;
+        first = run_turn(config, &retry, progress.clone()).await;
     }
     if !needs_final_answer(&first) {
         return first;
@@ -1169,7 +1174,7 @@ pub fn token_from_file(path: &std::path::Path) -> Option<String> {
 }
 
 /// The workspace omo-gateway gives Slack turns: `<root>/agents/bot-<persona>` plus
-/// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.omon/workspace`. Absent when the
+/// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.ferryx/hub/workspace`. Absent when the
 /// directory does not exist, so the engine keeps its own default.
 pub fn slack_workspace() -> Option<protocol::Workspace> {
     let root = crate::hub_env::var("OMON_WORKSPACE_ROOT")
@@ -1178,7 +1183,7 @@ pub fn slack_workspace() -> Option<protocol::Workspace> {
         .map(PathBuf::from)
         .or_else(|| {
             crate::hub_env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".omon").join("workspace"))
+                .map(|home| PathBuf::from(home).join(".ferryx/hub/workspace"))
         })?;
     let persona = crate::hub_env::var("OMON_SLACK_PERSONA_FROM")
         .ok()
@@ -1585,6 +1590,50 @@ mod tests {
         assert!(starts[1].pointer("/params/model").is_none());
     }
 
+    /// A background turn pinned to its model never falls back to the thread's model: a refused
+    /// switch starts a fresh thread on the pinned model.
+    #[tokio::test]
+    async fn a_pinned_model_switch_refusal_starts_a_fresh_thread_on_that_model() {
+        let (url, log) = serve(Script {
+            switch_error: Some("Model \"mahoquot/gpt-6-luna\" cannot switch: target context window 272000 tokens is 84000 tokens short of the 356000-token requirement".into()),
+            ..script(&["unused"])
+        })
+        .await;
+        let _ = run_turn_recovering(
+            &OmoClientConfig::new(url),
+            &TurnRequest {
+                thread_id: Some("thr-old".into()),
+                text: "event".into(),
+                model: Some("mahoquot/gpt-6-luna".into()),
+                pin_model: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        let frames = log.frames.lock().unwrap().clone();
+        let methods: Vec<&str> = frames
+            .iter()
+            .filter_map(|frame| frame["method"].as_str())
+            .collect();
+        assert_eq!(
+            methods.iter().filter(|method| **method == "thread/resume").count(),
+            1
+        );
+        assert_eq!(
+            methods.iter().filter(|method| **method == "thread/start").count(),
+            1
+        );
+        let starts: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "turn/start")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        for start in starts {
+            assert_eq!(start["params"]["model"], "mahoquot/gpt-6-luna");
+        }
+    }
+
     /// A turn that ran tools and wrote no reply is asked for its answer on the same thread
     /// instead of posting a bare "Done".
     #[tokio::test]
@@ -1803,6 +1852,7 @@ mod tests {
             model: std::env::var("OMO_REAL_MODEL").ok(),
             toolsets: None,
             text: "Reply with exactly the word PONG and nothing else.".into(),
+            pin_model: false,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let first = run_turn(&config, &request, Some(tx))

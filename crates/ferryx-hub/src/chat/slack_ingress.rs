@@ -454,14 +454,14 @@ async fn add_reply_context(
 }
 
 /// omo's `attachment_dir`: `<workspace root>/attachments/slack` (`OMON_WORKSPACE_ROOT`, default
-/// `~/.omon/workspace`).
+/// `~/.ferryx/hub/workspace`).
 pub fn attachment_dir() -> PathBuf {
     crate::hub_env::var("OMON_WORKSPACE_ROOT")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".omon/workspace")
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".ferryx/hub/workspace")
         })
         .join("attachments")
         .join("slack")
@@ -677,11 +677,11 @@ async fn run_bounded(
 }
 
 /// omo's local transcription: ffmpeg to 16 kHz mono wav, then `whisper-cli` with
-/// `OMON_WHISPER_MODEL` (default `~/.omon/models/ggml-large-v3-turbo.bin`).
+/// `OMON_WHISPER_MODEL` (default `~/.ferryx/hub/models/ggml-large-v3-turbo.bin`).
 pub async fn transcribe_audio(input: &Path) -> Result<String, String> {
     let model = crate::hub_env::var("OMON_WHISPER_MODEL").unwrap_or_else(|_| {
         format!(
-            "{}/.omon/models/ggml-large-v3-turbo.bin",
+            "{}/.ferryx/hub/models/ggml-large-v3-turbo.bin",
             std::env::var("HOME").unwrap_or_default()
         )
     });

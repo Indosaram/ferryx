@@ -96,6 +96,7 @@ async fn test_spawn_startup_command_omo() {
     let startup = crate::daemon::protocol::TerminalStartup::AgentResume {
         agent_type: "omo".to_string(),
         provider_session: crate::daemon::protocol::AgentProviderSession {
+            launcher: None,
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: "fake-test-session".to_string(),
             transcript_path: None,

@@ -242,6 +242,7 @@ mod tests {
 
     fn provider(id: &str) -> AgentProviderSession {
         AgentProviderSession {
+            launcher: None,
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: id.to_string(),
             transcript_path: None,

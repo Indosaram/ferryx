@@ -1226,6 +1226,7 @@ async fn a_history_read_naming_a_rotated_provider_session_is_refused_target_expi
         state: "working".into(),
         agent: Some("omo".into()),
         provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            launcher: None,
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: "provider-rotated".into(),
             transcript_path: None,
@@ -1790,7 +1791,7 @@ fn publish_reference_provider(state: &RemoteGatewayState, session_id: &str, prov
             session_id: session_id.into(),
             state: "working".into(),
             agent: Some("omo".into()),
-            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession { launcher: None,
                 key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
                 id: provider.into(),
                 transcript_path: None,
@@ -1815,7 +1816,7 @@ async fn reference_provider_rotation_case(rotation: &str, named: Option<&str>) {
             session_id: rotate_session.clone(),
             state: "working".into(),
             agent: Some("omo".into()),
-            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession { launcher: None,
                 key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
                 id: "provider-b".into(),
                 transcript_path: None,

@@ -138,7 +138,7 @@ pub fn normalize_slack_home(raw: &str) -> Option<String> {
     (!channel.is_empty()).then_some(channel)
 }
 
-/// Token from `NAME_FILE`, then `NAME`, then `~/.omon/secrets/<name>` for the known
+/// Token from `NAME_FILE`, then `NAME`, then `~/.ferryx/hub/secrets/<name>` for the known
 /// gateway files. A `*_FILE` value wins so a secret file is not ignored in favor of an
 /// empty env var. The value itself is never logged.
 pub fn secret_from_env(name: &str) -> Option<String> {
@@ -174,7 +174,7 @@ pub fn secret_from_lookup(
     }
     let file = omon_secret_name(name)?;
     let home = home?;
-    let text = read(&home.join(".omon").join("secrets").join(file))?;
+    let text = read(&home.join(".ferryx").join("hub").join("secrets").join(file))?;
     let trimmed = text.trim().to_owned();
     if trimmed.is_empty() || !omon_prefix_ok(name, &trimmed) {
         return None;
@@ -285,17 +285,17 @@ mod tests {
     }
 
     #[test]
-    fn an_omon_secret_file_is_used_when_the_environment_is_empty() {
+    fn a_hub_secret_file_is_used_when_the_environment_is_empty() {
         let dir = std::env::temp_dir().join(format!("ferryx-hub-secret-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join(".omon/secrets")).unwrap();
+        std::fs::create_dir_all(dir.join(".ferryx/hub/secrets")).unwrap();
         std::fs::write(
-            dir.join(".omon/secrets/slack-bot-token"),
+            dir.join(".ferryx/hub/secrets/slack-bot-token"),
             "xoxb-from-file\n",
         )
         .unwrap();
         std::fs::write(
-            dir.join(".omon/secrets/slack-app-token"),
+            dir.join(".ferryx/hub/secrets/slack-app-token"),
             "not-an-app-token\n",
         )
         .unwrap();
