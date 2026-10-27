@@ -34,7 +34,9 @@ export const MEMORY_NAME = 'ferryx-supervisor';
 // maho-omo-memory write_policy.rs:34 (memory write tools), :42-46 (effect set), :48 (task_/team_
 // families), the hub's own tools_exclude (mhc_profile DEFAULT_EFFECT_TOOLS bash/edit/write),
 // maho-cli supervisor_work_tools.rs:22-24 (conversation-only work tools), and the other memory
-// writers (tool_metadata.rs:2-7 MCP spellings, facts_record_tool.rs:19).
+// writer tools (tool_metadata.rs:2-7 MCP spellings, facts_record_tool.rs:19). memory_forget and
+// memory_correct are owner extension request names (owner_memory.rs:83-84), not tools; they are
+// listed only so a future tool of that name would fail the check.
 export const FORBIDDEN_DECISION_TOOLS = Object.freeze([
   'memory', 'memory_apply_patch', 'mcp_omo-memory_memory', 'mcp_omo-memory_memory_apply_patch', 'record_fact',
   'memory_forget', 'memory_correct',
@@ -56,6 +58,24 @@ export const READ_ONLY_DECISION_TOOLS = Object.freeze([
 ]);
 export const forbiddenDecisionTool = (name) => FORBIDDEN_DECISION_TOOLS.includes(name)
   || FORBIDDEN_DECISION_TOOL_PREFIXES.some((prefix) => String(name).startsWith(prefix));
+/// Positive control: tools mhc always offers a decision session. With no `defaultTools` setting a
+/// shared-host session selects read/bash/edit/write/grep (maho-core sdk.rs:229-232; the host
+/// passes no tools list, maho-cli host_runtime.rs:767-783), and the decision exclusions remove
+/// only bash/edit/write, so read and grep remain.
+export const ALWAYS_OFFERED_DECISION_TOOLS = Object.freeze(['read', 'grep']);
+
+/// Tool names of one chat request: `tools[].function.name` or `tools[].custom.name`
+/// (maho-ai api/openai_completions.rs:1103-1140), plus deferred tool lists carried on system
+/// messages (`messages[].tools`, :1078-1080). An entry without a name is kept as null so the
+/// scenario can fail on a shape it could not parse.
+function toolNamesOf(json) {
+  const nameOf = (tool) => {
+    const name = tool?.function?.name ?? tool?.custom?.name ?? tool?.name;
+    return typeof name === 'string' ? name : null;
+  };
+  const lists = [json?.tools, ...(Array.isArray(json?.messages) ? json.messages.map((message) => message?.tools) : [])];
+  return lists.filter(Array.isArray).flatMap((list) => list.map(nameOf));
+}
 
 const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
@@ -91,7 +111,7 @@ export async function startProviderStub(ctx) {
     request.on('end', () => {
       let json = null;
       try { json = JSON.parse(body); } catch { /* recorded raw */ }
-      const tools = Array.isArray(json?.tools) ? json.tools.map((tool) => tool?.function?.name ?? tool?.name ?? null) : [];
+      const tools = toolNamesOf(json);
       const entry = { at: new Date().toISOString(), method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools, failWith: state.failWith };
       requests.push(entry);
       ctx.evidence.appendJsonl('runtime/provider-requests.jsonl', entry);
@@ -458,13 +478,19 @@ function memoryDirsOf(ctx) {
   try { return readdirSync(join(ctx.paths.memory, 'mhc', 'agents')).filter((name) => name.startsWith(MEMORY_NAME)).sort(); } catch { return []; }
 }
 
-/** Supervisor identity as observed from one engine reply: hub row, profile config, engine session binding, memory dirs. */
+/**
+ * Supervisor identity as observed from one engine reply. `supervisors` are the hub's rows;
+ * `hubProfileMemoryAgent` is the hub's own profile config (`.omo/omo.jsonc`, written by the hub,
+ * not an engine observation); the engine observations are `sessionMemoryIdentity` (the memory
+ * binding mhc wrote into the decision session) and `memoryDirs` (the identity dirs mhc created
+ * under the run's MAHO_MEMORY_HOME).
+ */
 function identityOf(ctx, json, session) {
   return {
     supervisors: Array.isArray(json?.supervisorIdentities)
       ? json.supervisorIdentities.map(({ supervisor_id: id, memory_name: memoryName, owner_principal: owner }) => ({ id, memoryName, owner }))
       : null,
-    memoryAgent: json?.engine?.memoryAgent ?? null,
+    hubProfileMemoryAgent: json?.engine?.memoryAgent ?? null,
     sessionMemoryIdentity: session?.memoryIdentity ?? null,
     memoryDirs: memoryDirsOf(ctx),
   };
@@ -559,22 +585,36 @@ async function runRuntime(ctx) {
       // Effect tools, measured from what the engine offered the model and what it recorded.
       const binding = bindingOf(first.json);
       const session = sessionRecordOf(ctx, binding, first.json.engine.profileCwd);
-      const offered = [...new Set(turnRequests.flatMap((entry) => entry.tools))].sort();
+      const parsedNames = turnRequests.flatMap((entry) => entry.tools);
+      const unparsed = parsedNames.filter((name) => typeof name !== 'string' || name === '').length;
+      const offered = [...new Set(parsedNames.filter((name) => typeof name === 'string' && name !== ''))].sort();
       const forbidden = offered.filter(forbiddenDecisionTool);
       const unclassified = offered.filter((tool) => !forbiddenDecisionTool(tool) && !READ_ONLY_DECISION_TOOLS.includes(tool));
-      const decisionTools = { offered, forbidden, unclassified, session, hubDecisionContext: first.json.engine.decisionContext ?? null };
+      const missingAlwaysOffered = ALWAYS_OFFERED_DECISION_TOOLS.filter((tool) => !offered.includes(tool));
+      const perRequest = turnRequests.map((entry) => ({ at: entry.at, model: entry.model, tools: entry.tools }));
+      const decisionTools = { offered, forbidden, unclassified, unparsed, missingAlwaysOffered, perRequest, session,
+        hubDecisionContext: first.json.engine.decisionContext ?? null };
       ctx.evidence.writeJson('runtime/decision-tools.json', decisionTools);
-      ctx.assert('decision-session-has-no-effect-tools', turnRequests.length >= 1 && forbidden.length === 0
-        && session.bindingMemoryWrite === 'deny', decisionTools);
+      // Positive control: every decision-turn request carries a tool list whose every entry
+      // parsed to a name, and the always-offered read-only tools are among them; only then does
+      // "no forbidden tool" mean something.
+      ctx.assert('decision-session-has-no-effect-tools', turnRequests.length >= 1
+        && turnRequests.every((entry) => entry.tools.length > 0 && entry.tools.every((name) => typeof name === 'string' && name !== ''))
+        && offered.length > 0 && missingAlwaysOffered.length === 0
+        && forbidden.length === 0 && session.bindingMemoryWrite === 'deny', decisionTools);
       ctx.assert('assessment-sent-no-pane-input', noPaneInput(first.json), { actions: first.json.actions ?? null });
       ctx.assert('decision-session-binding-persisted', typeof binding?.durableSessionId === 'string' && binding.role === 'decision'
         && typeof binding.sessionFile === 'string', { binding });
       const identityA = identityOf(ctx, first.json, session);
       identities.a = identityA;
       ctx.evidence.writeJson('runtime/identity-a.json', identityA);
-      ctx.assert('supervisor-identity-observed', identityA.memoryAgent === MEMORY_NAME && typeof supervisorId === 'string'
+      // mhc names the identity `<slug>-<sha256-8>` of the configured agent (memory-core
+      // identity/resolve.rs:112-114) and keeps it in <MAHO_MEMORY_HOME>/agents/<id>
+      // (layout.rs:69-70): exactly that one directory, under the run's memory home.
+      ctx.assert('supervisor-identity-observed', identityA.hubProfileMemoryAgent === MEMORY_NAME && typeof supervisorId === 'string'
         && same(identityA.supervisors?.map((row) => [row.id, row.memoryName]), [[supervisorId, MEMORY_NAME]])
-        && typeof identityA.sessionMemoryIdentity === 'string' && identityA.sessionMemoryIdentity.startsWith(MEMORY_NAME), identityA);
+        && typeof identityA.sessionMemoryIdentity === 'string' && /^ferryx-supervisor-[0-9a-f]{8}$/.test(identityA.sessionMemoryIdentity)
+        && same(identityA.memoryDirs, [identityA.sessionMemoryIdentity]), identityA);
       note(`assessment ok; decision-0 durable=${binding?.durableSessionId} file=${binding?.sessionFile} identity=${identityA.sessionMemoryIdentity}`);
 
       // 3. Restart only the owned engine: kill the recorded pid after the identity checks; the

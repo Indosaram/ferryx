@@ -868,6 +868,9 @@ pub async fn supervisor_engine(
 ) -> Result<Value, SupervisorEngineError> {
     let pool = SUPERVISOR_VIEW.get().map(|(hub, _)| hub.pool.clone());
     let hub_open = pool.is_some();
+    // engine_view refuses first (MHC_NOT_RUNNING) when no engine is installed, so the identity
+    // rows are read only for a view that is returned.
+    let mut view = engine_view(ferryx_hub::meta::mhc_supervisor::installed(), pool.clone(), action).await?;
     let identities = match &pool {
         Some(pool) => match ferryx_hub::supervisor::identities(pool).await {
             Ok(rows) => json!(rows),
@@ -878,7 +881,6 @@ pub async fn supervisor_engine(
         },
         None => Value::Null,
     };
-    let mut view = engine_view(ferryx_hub::meta::mhc_supervisor::installed(), pool, action).await?;
     let actions = supervisor_snapshot(state).await.get("actions").cloned().unwrap_or_else(|| json!([]));
     if let Some(fields) = view.as_object_mut() {
         fields.insert("actions".into(), actions);
