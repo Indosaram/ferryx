@@ -885,6 +885,14 @@ pub async fn spawn(pool: SqlitePool) -> Result<()> {
     if !inbox_enabled() {
         return Ok(());
     }
+    match crate::inbox::reconcile_owner_threads(&pool).await {
+        Ok(dismissed) => {
+            tracing::info!(dismissed, "inbox kept one open owner item per conversation");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "inbox owner-thread reconciliation failed");
+        }
+    }
     let (events, receiver) = watcher_channel();
     let _ = GATEWAY_EVENTS.set(events.clone());
     let _ = events.try_send(InboxWatcherEvent::Startup);

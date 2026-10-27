@@ -155,7 +155,175 @@ pub async fn decide(
 }
 
 pub const TRIAGE_OPTIONS: &[&str] = &["owner_must_act", "bot_can_handle", "fyi", "ignore"];
-pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is waiting for the owner's own reply, decision, signature or payment, OR an account security/billing notice (new sign-in or suspicious login, password or 2FA change, failed or overdue payment, suspended or expiring account, domain or subscription expiry); surveys, reminders, newsletters, receipts, routine notices, verification/one-time codes and other automated mail are never owner_must_act; bot_can_handle = a coding/ops task an agent can do alone without speaking as the owner; fyi = information only; ignore = ads/promotions";
+pub const TRIAGE_INSTRUCTIONS: &str = "owner_must_act = a specific person is waiting for the owner's own reply, decision, signature or payment, OR an account security/billing notice (new sign-in or suspicious login, password or 2FA change, failed or overdue payment, suspended or expiring account, domain or subscription expiry); surveys, reminders, newsletters, receipts, routine notices, verification/one-time codes and other automated mail are never owner_must_act; bot_can_handle = a coding/ops task an agent can do alone without speaking as the owner; fyi = information only; ignore = ads/promotions. Classify only the message marked as the message to classify, using the earlier conversation for context; small talk, reactions and group-chat chatter are fyi.";
+
+/// Earlier messages of the same conversation shown to the judge with a new one.
+const THREAD_CONTEXT_MESSAGES: i64 = 6;
+/// The whole judged text for a conversation message; the newest lines are kept.
+const TRIAGE_TEXT_MAX_CHARS: usize = 1500;
+/// One earlier message never takes more than this, so a long paste does not hide the rest.
+const CONTEXT_LINE_MAX_CHARS: usize = 300;
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn spoken(author: Option<&str>, text: &str) -> String {
+    match author.map(str::trim).filter(|author| !author.is_empty()) {
+        Some(author) => format!("{author}: {}", one_line(text)),
+        None => one_line(text),
+    }
+}
+
+/// The text the judge reads for a conversation message: the room title, up to
+/// `THREAD_CONTEXT_MESSAGES` earlier lines (oldest first), then the marked message.
+/// Capped at `TRIAGE_TEXT_MAX_CHARS`; the oldest lines go first, then the title.
+fn triage_text(
+    title: Option<&str>,
+    earlier: &[(Option<String>, String)],
+    author: Option<&str>,
+    snippet: &str,
+) -> String {
+    let marked: String = format!("Message to classify:\n>>> {}", spoken(author, snippet))
+        .chars()
+        .take(TRIAGE_TEXT_MAX_CHARS)
+        .collect();
+    let mut budget = TRIAGE_TEXT_MAX_CHARS.saturating_sub(marked.chars().count());
+    let mut parts = Vec::new();
+    if let Some(title) = title.map(one_line).filter(|title| !title.is_empty()) {
+        let heading = format!("Conversation: {title}");
+        let cost = heading.chars().count() + 1;
+        if cost <= budget {
+            budget -= cost;
+            parts.push(heading);
+        }
+    }
+    let label = "Earlier messages (oldest first):";
+    let mut room = budget.saturating_sub(label.chars().count() + 1);
+    let mut lines = Vec::new();
+    for (who, text) in earlier.iter().rev() {
+        let line: String = format!("- {}", spoken(who.as_deref(), text))
+            .chars()
+            .take(CONTEXT_LINE_MAX_CHARS)
+            .collect();
+        let cost = line.chars().count() + 1;
+        if cost > room {
+            break;
+        }
+        room -= cost;
+        lines.push(line);
+    }
+    if !lines.is_empty() {
+        lines.reverse();
+        parts.push(label.to_owned());
+        parts.extend(lines);
+    }
+    parts.push(marked);
+    parts.join("\n")
+}
+
+/// Up to `THREAD_CONTEXT_MESSAGES` messages of the same conversation received no later than
+/// `received_at`, oldest first, as (author, snippet).
+async fn earlier_in_thread(
+    pool: &SqlitePool,
+    id: &str,
+    source: &str,
+    thread_ref: &str,
+    received_at: &str,
+) -> Result<Vec<(Option<String>, String)>> {
+    let mut rows: Vec<(Option<String>, String)> = sqlx::query_as(
+        "SELECT author, snippet FROM inbox_items
+         WHERE source = ? AND thread_ref = ? AND id != ? AND julianday(received_at) <= julianday(?)
+         ORDER BY julianday(received_at) DESC, id DESC LIMIT ?",
+    )
+    .bind(source)
+    .bind(thread_ref)
+    .bind(id)
+    .bind(received_at)
+    .bind(THREAD_CONTEXT_MESSAGES)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// One open owner item per conversation: a new owner item dismisses the older (or same-time)
+/// open owner items of its thread, and is itself dismissed if a newer one is already open.
+async fn supersede_in_thread(
+    pool: &SqlitePool,
+    id: &str,
+    source: &str,
+    thread_ref: &str,
+    received_at: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE inbox_decisions SET status = 'dismissed'
+         WHERE status = 'open' AND class = 'owner' AND item_id != ? AND item_id IN (
+             SELECT id FROM inbox_items
+             WHERE source = ? AND thread_ref = ? AND julianday(received_at) <= julianday(?))",
+    )
+    .bind(id)
+    .bind(source)
+    .bind(thread_ref)
+    .bind(received_at)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE inbox_decisions SET status = 'dismissed'
+         WHERE item_id = ? AND status = 'open' AND EXISTS (
+             SELECT 1 FROM inbox_items i JOIN inbox_decisions d ON d.item_id = i.id
+             WHERE d.status = 'open' AND d.class = 'owner' AND i.source = ? AND i.thread_ref = ?
+               AND julianday(i.received_at) > julianday(?))",
+    )
+    .bind(id)
+    .bind(source)
+    .bind(thread_ref)
+    .bind(received_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Collapses a backlog to the newest open owner decision per (source, thread_ref) and dismisses
+/// the rest. Items without a thread are left alone. Returns how many were dismissed; idempotent.
+pub async fn reconcile_owner_threads(pool: &SqlitePool) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+    let older: Vec<String> = sqlx::query_scalar(
+        "SELECT i.id FROM inbox_items i JOIN inbox_decisions d ON d.item_id = i.id
+         WHERE d.status = 'open' AND d.class = 'owner' AND i.thread_ref IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM inbox_items j JOIN inbox_decisions e ON e.item_id = j.id
+               WHERE e.status = 'open' AND e.class = 'owner'
+                 AND j.source = i.source AND j.thread_ref = i.thread_ref
+                 AND (julianday(j.received_at) > julianday(i.received_at)
+                      OR (julianday(j.received_at) = julianday(i.received_at) AND j.id > i.id)))",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut dismissed = 0u64;
+    for id in &older {
+        dismissed += sqlx::query(
+            "UPDATE inbox_decisions SET status = 'dismissed' WHERE item_id = ? AND status = 'open'",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(dismissed)
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingRow {
+    id: String,
+    source: String,
+    snippet: String,
+    title: Option<String>,
+    received_at: String,
+    thread_ref: Option<String>,
+    author: Option<String>,
+}
 
 /// Classifies inbox rows that have no decision yet.
 /// A message older than 24 hours is fyi, except a GitHub `[CI failed]` snippet.
@@ -175,30 +343,50 @@ where
     F: FnMut(&str, Class) -> Fut,
     Fut: std::future::Future<Output = Result<Option<String>>>,
 {
-    let rows: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT id, source, snippet, title, received_at FROM inbox_items WHERE id NOT IN (SELECT item_id FROM inbox_decisions)",
+    let rows: Vec<PendingRow> = sqlx::query_as(
+        "SELECT id, source, snippet, title, received_at, thread_ref, author FROM inbox_items
+         WHERE id NOT IN (SELECT item_id FROM inbox_decisions)
+         ORDER BY julianday(received_at), id",
     )
     .fetch_all(pool)
     .await?;
     let mut ready = Vec::new();
-    for (id, source, snippet, title, received_at) in rows {
+    for PendingRow {
+        id,
+        source,
+        snippet,
+        title,
+        received_at,
+        thread_ref,
+        author,
+    } in rows
+    {
         let received = DateTime::parse_from_rfc3339(&received_at)
             .map(|value| value.with_timezone(&Utc))
             .unwrap_or(now);
         let due = parse_due_at(
-            &format!("{} {}", title.unwrap_or_default(), snippet),
+            &format!("{} {}", title.as_deref().unwrap_or_default(), snippet),
             received,
         )
         .filter(|due| *due >= now);
+        let thread = thread_ref.map(|thread| (source.clone(), thread, received_at.clone()));
         let ci_failure = source == "github" && snippet.starts_with("[CI failed]");
         if !ci_failure && is_stale(received, now) {
-            ready.push((id, Class::Fyi, "stale".to_owned(), None, due));
+            ready.push((id, Class::Fyi, "stale".to_owned(), None, due, thread));
             continue;
         }
+        let judged = match &thread {
+            Some((_, thread_ref, _)) => {
+                let earlier =
+                    earlier_in_thread(pool, &id, &source, thread_ref, &received_at).await?;
+                triage_text(title.as_deref(), &earlier, author.as_deref(), &snippet)
+            }
+            None => snippet,
+        };
         let choice = judge
             .choice(
                 crate::judge::Purpose::InboxClass,
-                &crate::judge::scrub_for_external(&snippet),
+                &crate::judge::scrub_for_external(&judged),
                 TRIAGE_INSTRUCTIONS,
                 TRIAGE_OPTIONS,
             )
@@ -214,11 +402,16 @@ where
             Class::Owner | Class::Bot => action_for(&id, class).await?,
             Class::Fyi | Class::Ignore => None,
         };
-        ready.push((id, class, choice.as_str().to_owned(), action, due));
+        ready.push((id, class, choice.as_str().to_owned(), action, due, thread));
     }
     let stored = ready.len();
-    for (id, class, reason, action, due) in ready {
+    for (id, class, reason, action, due, thread) in ready {
         decide(pool, &id, class, &reason, action.as_deref()).await?;
+        if class == Class::Owner {
+            if let Some((source, thread_ref, received_at)) = &thread {
+                supersede_in_thread(pool, &id, source, thread_ref, received_at).await?;
+            }
+        }
         if let Some(due) = due {
             sqlx::query("UPDATE inbox_decisions SET due_at = ? WHERE item_id = ?")
                 .bind(due.to_rfc3339())
@@ -287,6 +480,157 @@ pub fn parse_due_at(text: &str, sent_at: DateTime<Utc>) -> Option<DateTime<Utc>>
 }
 
 pub const DIGEST_JOB_ID: &str = "omon:inbox-digest";
+/// Conversations shown per digest section; the rest collapse into one count line.
+const DIGEST_MAX_GROUPS: usize = 15;
+/// Recent message previews kept per conversation.
+const DIGEST_PREVIEWS: usize = 2;
+
+#[derive(sqlx::FromRow)]
+struct DigestRow {
+    source: String,
+    author: Option<String>,
+    title: Option<String>,
+    snippet: String,
+    received_at: String,
+    link: Option<String>,
+}
+
+struct DigestGroup {
+    source: String,
+    name: String,
+    who: Option<String>,
+    count: usize,
+    latest: String,
+    previews: Vec<String>,
+    link: Option<String>,
+}
+
+/// Which conversation an item belongs to: a kakao room, a cron job, or a mail/GitHub thread.
+fn digest_key(row: &DigestRow) -> String {
+    let title = row.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    match row.source.as_str() {
+        "cron" => title
+            .map(|t| t.split_once(": needs you").map_or(t, |(job, _)| job))
+            .unwrap_or("cron")
+            .to_owned(),
+        _ => title
+            .or(row.author.as_deref())
+            .unwrap_or(row.snippet.as_str())
+            .to_owned(),
+    }
+}
+
+fn kst_short(at: &str) -> String {
+    DateTime::parse_from_rfc3339(at)
+        .map(|d| {
+            d.with_timezone(&chrono_tz::Asia::Seoul)
+                .format("%m/%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| at.to_owned())
+}
+
+/// Rows arrive newest first; one entry per conversation keeps the newest previews and link.
+fn group_digest_rows(rows: Vec<DigestRow>) -> Vec<DigestGroup> {
+    use crate::owner_alert::one_line;
+    let mut groups: Vec<DigestGroup> = Vec::new();
+    for row in rows {
+        let key = digest_key(&row);
+        let snippet = match row.source.as_str() {
+            "cron" => strip_cron_boilerplate(&row.snippet),
+            _ => row.snippet.as_str(),
+        };
+        let preview = one_line(snippet, 80);
+        let index = match groups
+            .iter()
+            .position(|g| g.source == row.source && g.name == key)
+        {
+            Some(index) => index,
+            None => {
+                let who = row
+                    .author
+                    .as_deref()
+                    .map(|a| one_line(a, 40))
+                    .filter(|a| !a.is_empty() && *a != key && row.source != "cron");
+                groups.push(DigestGroup {
+                    source: row.source.clone(),
+                    name: key,
+                    who,
+                    count: 0,
+                    latest: row.received_at.clone(),
+                    previews: Vec::new(),
+                    link: None,
+                });
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[index];
+        group.count += 1;
+        if group.link.is_none() {
+            group.link = row.link.filter(|l| !l.trim().is_empty());
+        }
+        if group.previews.len() < DIGEST_PREVIEWS
+            && !preview.is_empty()
+            && !group.previews.contains(&preview)
+        {
+            group.previews.push(preview);
+        }
+    }
+    groups
+}
+
+/// A cron failure snippet opens with "cron script failed with Some(N): "; the cause follows it.
+fn strip_cron_boilerplate(snippet: &str) -> &str {
+    let trimmed = snippet.trim_start();
+    trimmed
+        .strip_prefix("cron script failed with ")
+        .and_then(|rest| rest.split_once(": "))
+        .map_or(trimmed, |(_, cause)| cause)
+}
+
+/// One readable block per conversation: where, who, how many, when, and what was said.
+fn render_digest_section(heading: &str, rows: Vec<DigestRow>) -> String {
+    use crate::owner_alert::{one_line, source_label};
+    let total = rows.len();
+    let groups = group_digest_rows(rows);
+    if groups.is_empty() {
+        return format!("## {heading}\n없음");
+    }
+    let mut out = format!("## {heading} — {}곳, {total}건", groups.len());
+    for group in groups.iter().take(DIGEST_MAX_GROUPS) {
+        out.push_str(&format!(
+            "\n- [{}] {}",
+            source_label(&group.source),
+            one_line(&group.name, 60)
+        ));
+        if let Some(who) = &group.who {
+            out.push_str(&format!(" ({who})"));
+        }
+        if group.count > 1 {
+            out.push_str(&format!(" · {}건", group.count));
+        }
+        out.push_str(&format!(" · 최근 {}", kst_short(&group.latest)));
+        for preview in &group.previews {
+            out.push_str(&format!("\n  > {preview}"));
+        }
+        if let Some(link) = &group.link {
+            out.push_str(&format!("\n  {link}"));
+        }
+    }
+    if groups.len() > DIGEST_MAX_GROUPS {
+        let mut rest: Vec<&DigestGroup> = groups[DIGEST_MAX_GROUPS..].iter().collect();
+        let count: usize = rest.iter().map(|g| g.count).sum();
+        out.push_str(&format!("\n- 외 {}곳, {count}건", rest.len()));
+        rest.sort_by_key(|g| std::cmp::Reverse(g.count));
+        let busiest: Vec<String> = rest
+            .iter()
+            .take(3)
+            .map(|g| format!("{} {}", one_line(&g.name, 30), g.count))
+            .collect();
+        out.push_str(&format!(" ({} …)", busiest.join(", ")));
+    }
+    out
+}
 
 /// One KST-day digest. A succeeded run already stored today suppresses a second copy.
 /// Open owner and bot decisions, auth-expired cursors, and yesterday's cron count are the body.
@@ -313,20 +657,18 @@ pub async fn build_scheduled_digest(
     if delivered > 0 {
         return Ok(None);
     }
-    let owner: Vec<(String, String)> = sqlx::query_as(
-        "SELECT COALESCE(NULLIF(i.title, ''), i.snippet), i.source
-           FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
-          WHERE d.class = 'owner' AND d.status = 'open' ORDER BY d.decided_at",
-    )
-    .fetch_all(pool)
-    .await?;
-    let bot: Vec<(String, String)> = sqlx::query_as(
-        "SELECT COALESCE(NULLIF(i.title, ''), i.snippet), i.source
-           FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
-          WHERE d.class = 'bot' AND d.status = 'open' ORDER BY d.decided_at",
-    )
-    .fetch_all(pool)
-    .await?;
+    let open_rows = |class: &'static str| {
+        sqlx::query_as::<_, DigestRow>(
+            "SELECT i.source, i.author, i.title, i.snippet, i.received_at, i.link
+               FROM inbox_decisions d JOIN inbox_items i ON i.id = d.item_id
+              WHERE d.class = ? AND d.status = 'open'
+              ORDER BY julianday(i.received_at) DESC, i.id",
+        )
+        .bind(class)
+        .fetch_all(pool)
+    };
+    let owner = open_rows("owner").await?;
+    let bot = open_rows("bot").await?;
     let errors: Vec<(String,)> = sqlx::query_as(
         "SELECT source FROM inbox_cursors WHERE error IS NOT NULL AND (
             lower(error) LIKE '%auth_expired%' OR lower(error) LIKE '%unauthorized%'
@@ -350,19 +692,10 @@ pub async fn build_scheduled_digest(
     if owner.is_empty() && bot.is_empty() && errors.is_empty() && runs == 0 {
         return Ok(None);
     }
-    let render = |rows: &[(String, String)]| -> String {
-        if rows.is_empty() {
-            return "(none)".into();
-        }
-        rows.iter()
-            .map(|(title, source)| format!("- [{source}] {title}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     let mut message = format!(
-        "## Owner tasks\n{}\n\n## Bot proposals\n{}",
-        render(&owner),
-        render(&bot)
+        "{}\n\n{}",
+        render_digest_section("대표 확인 필요", owner),
+        render_digest_section("봇 처리 제안", bot)
     );
     message.push_str(&format!("\n\nUsage: {runs} cron runs in the last day"));
     // omo digest: yesterday's judge and inbox prefilter counts.
@@ -422,6 +755,54 @@ mod tests {
         let digest = digest(&[("pay".into(), Class::Owner), ("ci".into(), Class::Fyi)]);
         assert!(digest.contains("pay"));
         assert!(digest.contains("## fyi"));
+    }
+
+    #[test]
+    fn the_owner_digest_groups_a_room_and_shows_who_when_and_what() {
+        let row = |source: &str, author: &str, title: &str, snippet: &str, at: &str| DigestRow {
+            source: source.into(),
+            author: Some(author.into()),
+            title: Some(title.into()),
+            snippet: snippet.into(),
+            received_at: at.into(),
+            link: None,
+        };
+        let rows = vec![
+            row("kakao", "여신님", "여신님", "도착 시간 톡해주세요", "2026-10-26T07:20:59+00:00"),
+            row("kakao", "김진옥", "이모님", "청약서 보낼까", "2026-10-26T05:00:00+00:00"),
+            row("kakao", "여신님", "여신님", "긴급", "2026-10-26T02:37:52+00:00"),
+            row("kakao", "여신님", "여신님", "호시는?", "2026-10-26T01:00:00+00:00"),
+            row(
+                "cron",
+                "omon",
+                "job-a: needs you - failed: boom",
+                "cron script failed with Some(1): boom",
+                "2026-10-26T00:00:00+00:00",
+            ),
+            row(
+                "cron",
+                "omon",
+                "job-a: needs you - failed: again",
+                "again",
+                "2026-10-25T00:00:00+00:00",
+            ),
+        ];
+        let text = render_digest_section("대표 확인 필요", rows);
+        assert_eq!(
+            text,
+            "## 대표 확인 필요 — 3곳, 6건\n\
+             - [카톡] 여신님 · 3건 · 최근 10/26 16:20\n  > 도착 시간 톡해주세요\n  > 긴급\n\
+             - [카톡] 이모님 (김진옥) · 최근 10/26 14:00\n  > 청약서 보낼까\n\
+             - [크론] job-a · 2건 · 최근 10/26 09:00\n  > boom\n  > again"
+        );
+        assert_eq!(render_digest_section("봇 처리 제안", Vec::new()), "## 봇 처리 제안\n없음");
+        let mut many: Vec<DigestRow> = (0..DIGEST_MAX_GROUPS)
+            .map(|n| row("mail", "a", &format!("t{n}"), "s", "2026-10-26T00:00:00+00:00"))
+            .collect();
+        many.push(row("kakao", "x", "방1", "s", "2026-10-25T00:00:00+00:00"));
+        many.push(row("kakao", "y", "방2", "s", "2026-10-25T00:00:00+00:00"));
+        many.push(row("kakao", "y", "방2", "s2", "2026-10-24T00:00:00+00:00"));
+        assert!(render_digest_section("x", many).ends_with("\n- 외 2곳, 3건 (방2 2, 방1 1 …)"));
     }
 
     #[tokio::test]
@@ -611,5 +992,212 @@ mod tests {
                 .await
                 .unwrap();
         assert!(due.contains("2026-10-24"));
+    }
+
+    async fn chat(pool: &SqlitePool, id: &str, thread: &str, author: &str, text: &str, at: &str) {
+        sqlx::query(
+            "INSERT INTO inbox_items(id, source, source_ref, thread_ref, author, title, snippet, received_at, raw_hash, collected_at)
+             VALUES(?, 'kakao', ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(thread)
+        .bind(author)
+        .bind(format!("room {thread}"))
+        .bind(text)
+        .bind(at)
+        .bind(id)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn open_ids(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT item_id FROM inbox_decisions WHERE status = 'open' AND class = 'owner' ORDER BY item_id",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_new_owner_item_supersedes_the_older_open_ones_of_its_conversation() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        chat(
+            &pool,
+            "a1",
+            "A",
+            "여신님",
+            "호시는?",
+            "2026-10-26T01:00:00+00:00",
+        )
+        .await;
+        chat(
+            &pool,
+            "a2",
+            "A",
+            "여신님",
+            "긴급",
+            "2026-10-26T02:00:00+00:00",
+        )
+        .await;
+        chat(
+            &pool,
+            "b1",
+            "B",
+            "김진옥",
+            "청약서 보낼까",
+            "2026-10-26T01:30:00+00:00",
+        )
+        .await;
+        let judge = crate::judge::Judge::forced("owner_must_act");
+        let stored = classify_pending(
+            &pool,
+            &judge,
+            now,
+            "meta",
+            |_id, _class| async move { Ok(None) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored, 3);
+        assert_eq!(
+            open_ids(&pool).await,
+            vec!["a2".to_owned(), "b1".to_owned()]
+        );
+        chat(
+            &pool,
+            "a3",
+            "A",
+            "여신님",
+            "도착 시간 톡해주세요",
+            "2026-10-26T03:00:00+00:00",
+        )
+        .await;
+        classify_pending(
+            &pool,
+            &judge,
+            now,
+            "meta",
+            |_id, _class| async move { Ok(None) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            open_ids(&pool).await,
+            vec!["a3".to_owned(), "b1".to_owned()]
+        );
+        let dismissed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM inbox_decisions WHERE status = 'dismissed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dismissed, 2);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_keeps_the_newest_open_owner_item_per_conversation_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        for (id, thread, at) in [
+            ("a1", "A", "2026-10-26T01:00:00+00:00"),
+            ("a2", "A", "2026-10-26T02:00:00+00:00"),
+            ("a3", "A", "2026-10-26T03:00:00+00:00"),
+            ("b1", "B", "2026-10-26T01:00:00+00:00"),
+            ("b2", "B", "2026-10-26T04:00:00+00:00"),
+        ] {
+            chat(&pool, id, thread, "friend", "hi", at).await;
+            decide(&pool, id, Class::Owner, "owner_must_act", None)
+                .await
+                .unwrap();
+        }
+        ingest(
+            &pool,
+            "m1",
+            "mail",
+            "m1",
+            "pay",
+            "2026-10-26T00:00:00+00:00",
+        )
+        .await
+        .unwrap();
+        decide(&pool, "m1", Class::Owner, "owner_must_act", None)
+            .await
+            .unwrap();
+        assert_eq!(reconcile_owner_threads(&pool).await.unwrap(), 3);
+        assert_eq!(
+            open_ids(&pool).await,
+            vec!["a3".to_owned(), "b2".to_owned(), "m1".to_owned()]
+        );
+        assert_eq!(reconcile_owner_threads(&pool).await.unwrap(), 0);
+        assert_eq!(open_ids(&pool).await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_judged_text_carries_the_room_title_and_earlier_lines() {
+        let pool = crate::storage::memory().await.unwrap();
+        chat(
+            &pool,
+            "a1",
+            "A",
+            "여신님",
+            "내일 저녁\n어때?",
+            "2026-10-26T01:00:00+00:00",
+        )
+        .await;
+        chat(
+            &pool,
+            "a2",
+            "A",
+            "윤인도",
+            "좋아",
+            "2026-10-26T02:00:00+00:00",
+        )
+        .await;
+        chat(
+            &pool,
+            "a3",
+            "A",
+            "여신님",
+            "호시는?",
+            "2026-10-26T03:00:00+00:00",
+        )
+        .await;
+        chat(
+            &pool,
+            "b1",
+            "B",
+            "other",
+            "unrelated",
+            "2026-10-26T01:30:00+00:00",
+        )
+        .await;
+        let earlier = earlier_in_thread(&pool, "a3", "kakao", "A", "2026-10-26T03:00:00+00:00")
+            .await
+            .unwrap();
+        let text = triage_text(Some("room A"), &earlier, Some("여신님"), "호시는?");
+        assert_eq!(
+            text,
+            "Conversation: room A\n\
+             Earlier messages (oldest first):\n\
+             - 여신님: 내일 저녁 어때?\n\
+             - 윤인도: 좋아\n\
+             Message to classify:\n>>> 여신님: 호시는?"
+        );
+        let long: Vec<(Option<String>, String)> = (0..6)
+            .map(|n| (None, format!("{n}{}", "x".repeat(400))))
+            .collect();
+        let capped = triage_text(Some("room A"), &long, None, "new");
+        assert!(capped.chars().count() <= TRIAGE_TEXT_MAX_CHARS);
+        assert!(capped.ends_with(">>> new"));
+        assert!(capped.contains("- 5x"), "the newest earlier line is kept");
+        assert!(
+            !capped.contains("- 0x"),
+            "the oldest earlier line is dropped"
+        );
     }
 }

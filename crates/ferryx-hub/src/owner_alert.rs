@@ -19,8 +19,8 @@ pub struct PendingAlert {
     pub link: Option<String>,
 }
 
-pub fn alert_line(alert: &PendingAlert) -> String {
-    let label = match alert.source.as_str() {
+pub(crate) fn source_label(source: &str) -> &str {
+    match source {
         "mail" => "메일",
         "kakao" => "카톡",
         "imessage" => "문자",
@@ -29,7 +29,11 @@ pub fn alert_line(alert: &PendingAlert) -> String {
         "github" => "GitHub",
         "cron" => "크론",
         other => other,
-    };
+    }
+}
+
+pub fn alert_line(alert: &PendingAlert) -> String {
+    let label = source_label(&alert.source);
     let who = one_line(alert.author.as_deref().unwrap_or("알 수 없음"), 60);
     let what = alert
         .title
@@ -44,7 +48,7 @@ pub fn alert_line(alert: &PendingAlert) -> String {
     line
 }
 
-fn one_line(text: &str, max_chars: usize) -> String {
+pub(crate) fn one_line(text: &str, max_chars: usize) -> String {
     let flat: String = text
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })

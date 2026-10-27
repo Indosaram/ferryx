@@ -793,7 +793,7 @@ mod tests {
             .await
             .unwrap();
         assert!(first.deliver);
-        assert!(first.output.contains("Owner tasks"));
+        assert!(first.output.contains("## 대표 확인 필요 — 1곳, 1건"));
         assert!(first.output.contains("Sign"));
         assert!(first
             .output
