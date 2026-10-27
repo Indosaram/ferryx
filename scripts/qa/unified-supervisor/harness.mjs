@@ -8,13 +8,18 @@
 // appended as soon as it is read. Teardown signals only recorded processes:
 // in-run through the unreaped child handle (its pid cannot have been reused);
 // across runs (--cleanup) only when the recorded and observed OS start stamps
-// are both present and equal and argv still matches. Anything else is reported
-// (mismatch / unverifiable) and never signalled.
+// are both present and equal and argv still matches the launch (or the
+// interpreter-resolved argv observed at spawn, e.g. for #! scripts). Anything
+// else is reported (mismatch / argv-changed / unverifiable) and never
+// signalled; only a provably different process (unequal start stamps, or no
+// recorded stamp and a start time outside the spawn window) is released.
+// One run at a time per dataRoot: an exclusive run lock under
+// <dataRoot>/.qa-unified-supervisor refuses a concurrent run (RUN_LOCKED).
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync, createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
-  readlinkSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync,
+  readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, watch, writeFileSync,
 } from 'node:fs';
 import { arch, homedir, hostname, release, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -37,7 +42,7 @@ export const STATUS_EXIT = Object.freeze({
 const STATUS_PRECEDENCE = ['INTERRUPTED', 'HARNESS_ERROR', 'DEADLINE_EXCEEDED', 'CLEANUP_FAILED', 'FAIL', 'NOT_IMPLEMENTED'];
 const USAGE_CODES = new Set([
   'USAGE', 'CONFIG_INVALID', 'PRODUCTION_PATH_REFUSED', 'FOREIGN_STATE_ROOT', 'EVIDENCE_DIR_NOT_EMPTY', 'UNKNOWN_SCENARIO',
-  'INTERNAL_FLAG_REFUSED', 'STALE_OWNED_STATE',
+  'INTERNAL_FLAG_REFUSED', 'STALE_OWNED_STATE', 'RUN_LOCKED',
 ]);
 
 const FORCE_EXIT_MS = 5_000;
@@ -83,6 +88,14 @@ export function aggregateExit(results) {
   return { status: 'FAIL', exitCode: EXIT.FAIL };
 }
 
+// A fault (unhandled rejection / uncaught exception) anywhere in the process,
+// including between scenarios or after one returned, forces HARNESS_ERROR
+// unless the run was interrupted.
+export function finalExitCode(exitCode, faults) {
+  if (exitCode === EXIT.INTERRUPTED || !Array.isArray(faults) || faults.length === 0) return exitCode;
+  return EXIT.HARNESS;
+}
+
 export const isSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 export const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 export const safeName = (value) => String(value).replace(/[^A-Za-z0-9._-]/g, '_');
@@ -122,10 +135,11 @@ const SECRET_PATTERNS = [
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [REDACTED]'],
   // JSON "…token…": "value"
   [/("[^"\\]*(?:token|secret|passw(?:or)?d|api[-_]?key|authorization|cookie|credential|private[-_]?key)[^"\\]*"\s*:\s*)"(?:[^"\\]|\\.)*"/gi, '$1"[REDACTED]"'],
-  // CLI flags: --token v, --api-key=v
-  [/(--?[A-Za-z0-9-]*(?:token|secret|passw(?:or)?d|api[-_]?key)[A-Za-z0-9-]*)(=|[ \t]+)(?!\[REDACTED)([^\s"'=]+)/gi, '$1$2[REDACTED]'],
-  // env / query style: token=v, SLACK_BOT_TOKEN=v, ?token=v&
-  [/\b([A-Za-z0-9_]*(?:token|secret|passw(?:or)?d|api_?key)[A-Za-z0-9_]*)=(?!\[REDACTED)([^\s"',;&\\]+)/gi, '$1=[REDACTED]'],
+  // CLI flags: --token v, --api-key=v (a flag starts a word, so prose such as "refresh-token expired" is kept)
+  [/(^|[\s"'])(--?[A-Za-z0-9-]*(?:token|secret|passw(?:or)?d|api[-_]?key)[A-Za-z0-9-]*)(=|[ \t]+)(?!\[REDACTED)(\\"[^"\\\n]+\\"|"[^"\n,:{}[\]]+"|'[^'\n]+'|[^\s"'=\\]+)/gim, '$1$2$3[REDACTED]'],
+  // env / query style: token=v, SLACK_BOT_TOKEN=v, ?token=v&, API_KEY="v", token='v', and the JSON-escaped API_KEY=\"v\".
+  // A double-quoted value never spans JSON structure (, : { } [ ]), so redacting cannot break a JSON line.
+  [/\b([A-Za-z0-9_]*(?:token|secret|passw(?:or)?d|api_?key)[A-Za-z0-9_]*)=(?!\[REDACTED)(\\"[^"\\\n]+\\"|"[^"\n,:{}[\]]+"|'[^'\n]+'|[^\s"',;&\\]+)/gi, '$1=[REDACTED]'],
   // YAML / header style: token: v, X-Api-Key: v (also inside a JSON string value)
   [/(^|[\s{,"])([A-Za-z0-9_-]*(?:token|secret|passw(?:or)?d|api[-_]?key)[A-Za-z0-9_-]*)([ \t]*:[ \t]+)(?!\[REDACTED)("[^"\n]*"|'[^'\n]*'|[^\s"',}\]]+)/gim, '$1$2$3[REDACTED]'],
 ];
@@ -402,14 +416,19 @@ export class Ledger {
     return { records, invalidLines };
   }
 
-  // Open spawn/path records, with start stamps appended after spawn merged in.
+  // Open spawn/path records, with the start stamp (and the interpreter-resolved
+  // argv observed at spawn) appended after spawn merged in.
   open() {
     const { records } = this.read();
     const closed = new Set(records.filter((r) => r.type === 'released' || r.type === 'path-released').map((r) => r.key));
-    const stamps = new Map(records.filter((r) => r.type === 'stamp' && r.startStamp).map((r) => [r.key, r.startStamp]));
+    const stamps = new Map(records.filter((r) => r.type === 'stamp' && r.startStamp).map((r) => [r.key, r]));
     return records
       .filter((r) => (r.type === 'spawn' || r.type === 'path') && !closed.has(r.key))
-      .map((r) => (r.type === 'spawn' && !r.startStamp && stamps.has(r.key) ? { ...r, startStamp: stamps.get(r.key) } : r));
+      .map((r) => {
+        const s = r.type === 'spawn' && !r.startStamp ? stamps.get(r.key) : null;
+        if (!s) return r;
+        return { ...r, startStamp: s.startStamp, observedArgv: r.observedArgv ?? s.observedArgv ?? null, observedCommand: r.observedCommand ?? s.observedCommand ?? null };
+      });
   }
 }
 
@@ -650,7 +669,7 @@ export function familyOf(rows, rootPid, { platform = PLATFORM, rootStartStamp = 
 
 function stem(path) { return basename(String(path)).replace(/\.(exe|cmd|bat)$/i, '').toLowerCase(); }
 
-function argvVerdict(record, probe) {
+function launchVerdict(record, probe) {
   if (Array.isArray(probe.argv) && probe.argv.length > 0) {
     return stem(probe.argv[0]) === stem(record.executable) && isDeepStrictEqual(probe.argv.slice(1), record.args);
   }
@@ -667,8 +686,22 @@ function argvVerdict(record, probe) {
   return null;
 }
 
-// match: consistent with the record (see strength). mismatch: positively not
-// the recorded process. gone: exited (zombies count). unknown: unobservable.
+// true / false / null (unobservable). A launch that the kernel resolved through
+// an interpreter (#! scripts show argv[0] = /bin/sh) matches the argv observed
+// for this very process at spawn time.
+function argvVerdict(record, probe) {
+  const launched = launchVerdict(record, probe);
+  if (launched !== false) return launched;
+  if (Array.isArray(probe.argv) && Array.isArray(record.observedArgv)) return isDeepStrictEqual(probe.argv, record.observedArgv);
+  if (typeof probe.command === 'string' && typeof record.observedCommand === 'string') return probe.command === record.observedCommand;
+  return false;
+}
+
+// match: consistent with the record (see strength). mismatch: provably not the
+// recorded process (unequal start stamps). argv-changed: argv differs from the
+// launch; with equal stamps it is the same process after exec/retitle, without
+// stamps it is undecided - never signalled, never released on argv alone.
+// gone: exited (zombies count). unknown: unobservable.
 // Signalling across runs additionally requires sameStartStamp() below.
 export function identityVerdict(record, probe) {
   if (probe.state === 'gone' || probe.state === 'zombie') return { verdict: 'gone', reason: probe.state };
@@ -681,7 +714,9 @@ export function identityVerdict(record, probe) {
     return stamps ? { verdict: 'match', strength: 'start-stamp' } : { verdict: 'unknown', reason: 'no start stamp and no argv recorded' };
   }
   const argv = argvVerdict(record, probe);
-  if (argv === false) return { verdict: 'mismatch', reason: 'argv differs from the recorded launch' };
+  if (argv === false) {
+    return { verdict: 'argv-changed', reason: stamps ? 'equal start stamp but argv differs from the recorded launch (exec or retitle)' : 'argv differs from the recorded launch and no start stamp pins the process' };
+  }
   if (argv === null && !stamps) return { verdict: 'unknown', reason: 'neither argv nor start stamp observable' };
   return { verdict: 'match', strength: stamps ? (argv ? 'start-stamp+argv' : 'start-stamp') : 'argv-only' };
 }
@@ -716,8 +751,10 @@ export async function awaitGone(record, ms) {
 
 async function killPid(pid, signal, { group = false } = {}) {
   if (!POSIX) {
-    const result = await capture('taskkill', [...(group ? ['/T'] : []), ...(signal === 'SIGKILL' ? ['/F'] : []), '/PID', String(pid)], { timeoutMs: PROBE_TIMEOUT_MS });
-    return { signal, target: group ? 'tree' : 'pid', code: result.code, error: result.error ?? null };
+    // Never 'taskkill /T': its tree walk trusts stale ParentProcessId values.
+    // Descendants are reaped one by one from familyOf (creation-order lineage).
+    const result = await capture('taskkill', [...(signal === 'SIGKILL' ? ['/F'] : []), '/PID', String(pid)], { timeoutMs: PROBE_TIMEOUT_MS });
+    return { signal, target: 'pid', code: result.code, error: result.error ?? null };
   }
   try {
     process.kill(group ? -pid : pid, signal);
@@ -900,6 +937,14 @@ export class Owned {
     if (probe.startStamp) {
       handle.record.startStamp = probe.startStamp;
       const stampRecord = { type: 'stamp', key, startStamp: probe.startStamp };
+      // Our own unreaped child: whatever argv the kernel shows now (e.g. the #!
+      // interpreter first) is this launch, so --cleanup can recognise it later.
+      if (launchVerdict(handle.record, probe) === false) {
+        if (Array.isArray(probe.argv)) stampRecord.observedArgv = probe.argv;
+        else if (typeof probe.command === 'string') stampRecord.observedCommand = probe.command;
+        handle.record.observedArgv = stampRecord.observedArgv ?? null;
+        handle.record.observedCommand = stampRecord.observedCommand ?? null;
+      }
       this.ledger.append(stampRecord);
       this.evidence.appendJsonl('owned.jsonl', stampRecord);
     }
@@ -1121,6 +1166,13 @@ export async function reclaimProcess(record, { ledger, forceOwner = false }) {
     entry.reason = 'start stamps are not both present and equal; a process is never signalled on argv alone';
     return entry;
   }
+  if (entry.identity.verdict === 'argv-changed') {
+    // Same pid and start time, different argv: the owned process after exec or
+    // a retitle. It may still be ours, so it is neither signalled nor released.
+    entry.status = 'argv-changed';
+    entry.reason = 'equal start stamps but argv differs from the recorded launch; not signalled and left open (inspect and stop it by hand)';
+    return entry;
+  }
   const rows = await listProcesses();
   entry.descendantsObservable = rows !== null;
   let members = rows ? familyOf(rows, record.pid, { rootStartStamp: record.startStamp }) : [];
@@ -1158,10 +1210,63 @@ export async function preflightOwnedState(configInfo) {
       if (runner.verdict === 'match') continue;
     }
     const { verdict } = identityVerdict(record, await probeProcess(record.pid));
-    if (verdict === 'match' || verdict === 'unknown') stale.push({ key: record.key, pid: record.pid, verdict });
+    if (verdict === 'match' || verdict === 'unknown' || verdict === 'argv-changed') stale.push({ key: record.key, pid: record.pid, verdict });
   }
   if (stale.length > 0) {
     throw new HarnessError('STALE_OWNED_STATE', `${stale.length} owned process(es) from an earlier run may still be alive; run --cleanup with this config first`, { stale });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Exclusive run lock (<dataRoot>/.qa-unified-supervisor/run.lock). A lock whose
+// holder is provably gone (exited, or its pid now has another start stamp) is
+// moved aside and taken over; a live or unverifiable holder refuses the run.
+
+export async function acquireRunLock(dataRoot, { runnerStamp = null, mode = null } = {}) {
+  const dir = join(dataRoot, '.qa-unified-supervisor');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, 'run.lock');
+  const mine = { pid: process.pid, startStamp: runnerStamp, mode, at: new Date().toISOString(), nonce: Math.random().toString(36).slice(2) };
+  const takenOver = [];
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      writeFileSync(file, `${JSON.stringify(mine)}\n`, { flag: 'wx' });
+      return { file, mine, takenOver };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw new HarnessError('HARNESS_ERROR', `cannot create run lock ${file}: ${error?.message ?? error}`);
+    }
+    let raw = null;
+    try { raw = readFileSync(file, 'utf8'); } catch (error) { if (error?.code === 'ENOENT') continue; }
+    let holder = null;
+    try { holder = JSON.parse(raw); } catch { /* refused below */ }
+    if (!holder || !Number.isSafeInteger(holder.pid)) {
+      throw new HarnessError('RUN_LOCKED', `run lock ${file} is unreadable; if no run is active on this dataRoot, delete it by hand`, { raw });
+    }
+    const { verdict } = identityVerdict({ pid: holder.pid, startStamp: holder.startStamp ?? null }, await probeProcess(holder.pid));
+    if (verdict !== 'gone' && verdict !== 'mismatch') {
+      throw new HarnessError('RUN_LOCKED', `another run (pid ${holder.pid}, ${holder.mode ?? 'unknown mode'}, since ${holder.at ?? '?'}) holds ${file}; runs on one dataRoot are exclusive`, { holder, verdict });
+    }
+    const aside = `${file}.stale-${process.pid}-${attempt}`;
+    try { renameSync(file, aside); } catch (error) { if (error?.code === 'ENOENT') continue; throw error; }
+    let movedRaw = null;
+    try { movedRaw = readFileSync(aside, 'utf8'); } catch { /* checked below */ }
+    if (movedRaw !== raw) {
+      throw new HarnessError('RUN_LOCKED', `run lock ${file} changed while a stale lock was being taken over; retry`, { aside });
+    }
+    takenOver.push({ holder, verdict, movedTo: aside });
+  }
+  throw new HarnessError('RUN_LOCKED', `could not take run lock ${file}`);
+}
+
+export function releaseRunLock(lock) {
+  if (!lock) return false;
+  try {
+    const current = JSON.parse(readFileSync(lock.file, 'utf8'));
+    if (current.pid !== lock.mine.pid || current.nonce !== lock.mine.nonce) return false;
+    unlinkSync(lock.file);
+    return true;
+  } catch {
+    return false;
   }
 }
 

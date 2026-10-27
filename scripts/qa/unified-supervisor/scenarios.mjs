@@ -86,7 +86,7 @@ export const SELF_TEST_SCENARIOS = Object.freeze({
   // killed at its deadline, that a path barrier armed before its trigger
   // resolves, and that ctx.run/ctx.cli default to an isolated environment.
   '__selftest-hung-command': selfTest('positive control: bounded hung command, path barrier, isolated env', 60_000, {
-    requiredAssertions: ['hung-command-timed-out', 'path-barrier-armed-before-trigger-resolves', 'run-default-env-is-isolated', 'cli-env-is-isolated'],
+    requiredAssertions: ['hung-command-timed-out', 'path-barrier-armed-before-trigger-resolves', 'run-default-env-is-isolated', 'cli-env-is-isolated', 'spawn-default-env-is-isolated'],
     async run(ctx) {
       const hung = await ctx.run('hung-command', process.execPath, [SLEEPER], { deadlineMs: 1_500, graceMs: 1_000 });
       ctx.assert('hung-command-timed-out', hung.timedOut === true, { timedOut: hung.timedOut, durationMs: hung.durationMs });
@@ -111,14 +111,31 @@ export const SELF_TEST_SCENARIOS = Object.freeze({
       const echo = await ctx.cli(['-e', probe], { label: 'echo-env', deadlineMs: 15_000 });
       ctx.assert('cli-env-is-isolated', echo.code === 0 && inside(echo.json?.home) && inside(echo.json?.dataDir) && echo.json?.inherited?.length === 0,
         { code: echo.code, json: echo.json, stderr: echo.stderr });
+      // ctx.spawn with no env must also get the isolated product environment.
+      const spawnCursor = ctx.journal.cursor();
+      const spawned = await ctx.spawn('spawn-env-echo', process.execPath, ['-e', probe]);
+      const output = await ctx.waitFor('spawn-env-echo output', (e) => e.source === 'spawn-env-echo' && e.kind === 'stdout' && e.json !== null, { after: spawnCursor, deadlineMs: 15_000 });
+      const exited = await ctx.waitFor('spawn-env-echo exit', (e) => e.source === 'spawn-env-echo' && e.kind === 'exit', { after: spawnCursor, deadlineMs: 15_000 });
+      ctx.assert('spawn-default-env-is-isolated', exited.code === 0 && inside(output.json?.home) && inside(output.json?.tmp) && inside(output.json?.dataDir)
+        && output.json?.inherited?.length === 0, { pid: spawned.pid, code: exited.code, json: output.json });
     },
   }),
-  // Waits until the self-test parent SIGKILLs this runner, leaving an orphan
-  // for --cleanup to reclaim by recorded identity.
+  // Waits until the self-test parent SIGKILLs this runner, leaving orphans for
+  // --cleanup to reclaim by recorded identity: a sleeper and (POSIX) a #! script
+  // whose kernel argv starts with the interpreter rather than the launched path.
   '__selftest-orphan': selfTest('leave a ledgered orphan when the runner is SIGKILLed', 180_000, {
     async run(ctx) {
       const { ready } = await startSleeper(ctx, 'sleeper', [], 3_000);
-      ctx.announce({ selftest: 'armed', case: 'orphan', sleeperPid: ready.pid });
+      let scriptPid = null;
+      if (process.platform !== 'win32') {
+        const script = join(ctx.paths.data, 'worker.sh');
+        writeFileSync(script, '#!/bin/sh\nprintf \'{"ready":true,"pid":%s}\\n\' "$$"\nsleep 240\n', { mode: 0o755 });
+        const cursor = ctx.journal.cursor();
+        const handle = await ctx.spawn('script', script, [], { graceMs: 3_000 });
+        await ctx.waitFor('script ready line', (e) => e.source === 'script' && e.kind === 'stdout' && e.json?.ready === true, { after: cursor, deadlineMs: 20_000 });
+        scriptPid = handle.pid;
+      }
+      ctx.announce({ selftest: 'armed', case: 'orphan', sleeperPid: ready.pid, scriptPid });
       await ctx.waitFor('the self-test parent to SIGKILL this runner', () => false, { deadlineMs: 120_000 });
       ctx.assert('unreachable-after-orphan-wait', false);
     },

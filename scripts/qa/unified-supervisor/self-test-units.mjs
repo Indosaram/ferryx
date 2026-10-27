@@ -4,7 +4,8 @@
 import { mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  aggregateExit, assertNotProduction, EXIT, familyOf, interpretDarwinPs, PLATFORM, probeProcess, redact, redactValue, settledOk, stampEpochMs,
+  aggregateExit, assertNotProduction, EXIT, familyOf, finalExitCode, identityVerdict, interpretDarwinPs, PLATFORM, probeProcess, redact, redactValue,
+  settledOk, stampEpochMs,
 } from './harness.mjs';
 
 function redactionChecks(check) {
@@ -30,22 +31,31 @@ function redactionChecks(check) {
     ['token: yamlsecret789', 'yamlsecret789'],
     ['X-Api-Key: headersecret12', 'headersecret12'],
     ["password: 'quoted secret 1'", 'quoted secret 1'],
+    ['API_KEY="abc123def"', 'abc123def'],
+    ["token='abc12345'", 'abc12345'],
+    ['mhc login --token "quoted flag secret"', 'quoted flag secret'],
   ];
   const results = samples.map(([sample, core]) => {
     const out = redact(sample);
     return { out, ok: out.includes('[REDACTED') && !out.includes(core) };
   });
   check('redaction-patterns-mask-secrets', results.every((result) => result.ok), results);
-  const kept = redact('plain status line: 4 workers idle, revision 12');
-  check('redaction-keeps-ordinary-text', kept === 'plain status line: 4 workers idle, revision 12', { kept });
+  const ordinary = ['plain status line: 4 workers idle, revision 12', 'the refresh-token expired soon after login'];
+  const kept = ordinary.map((text) => ({ text, out: redact(text) }));
+  check('redaction-keeps-ordinary-text', kept.every((entry) => entry.out === entry.text), kept);
   const nested = redactValue({ password: 'hunter2-hunter2', nested: { apiKey: 'abc', list: ['Bearer abcdefghijkl'] }, plain: 'kept' });
   check('redaction-of-structured-values',
     nested.password === '[REDACTED]' && nested.nested.apiKey === '[REDACTED]' && nested.nested.list[0].includes('[REDACTED') && nested.plain === 'kept', nested);
   let parsed = null;
   try {
-    parsed = JSON.parse(redact(JSON.stringify({ message: 'auth Bearer abcdefghijklmnop', t: `xoxb-${'2'.repeat(10)}`, s: 'MY_TOKEN=abc\\"def', y: 'token: value12345' }, null, 2)));
+    parsed = JSON.parse(redact(JSON.stringify({
+      message: 'auth Bearer abcdefghijklmnop', t: `xoxb-${'2'.repeat(10)}`, s: 'MY_TOKEN=abc\\"def', y: 'token: value12345',
+      q: 'API_KEY="quotedenv123"', f: 'run --token "flagquoted456"', e: 'TOKEN=', n: 'next',
+    }, null, 2)));
   } catch { parsed = null; }
-  check('redaction-keeps-json-valid', parsed !== null && !JSON.stringify(parsed).includes('2222222222') && !JSON.stringify(parsed).includes('value12345'), parsed);
+  const flat = JSON.stringify(parsed);
+  check('redaction-keeps-json-valid', parsed !== null && !flat.includes('2222222222') && !flat.includes('value12345') && !flat.includes('quotedenv123')
+    && !flat.includes('flagquoted456') && parsed.n === 'next', parsed);
 }
 
 export async function unitChecks(check, stateRoot) {
@@ -66,6 +76,29 @@ export async function unitChecks(check, stateRoot) {
     return { label, result, ok: expect(result) };
   });
   check('aggregate-exit-gating', aggregate.every((entry) => entry.ok), aggregate);
+
+  const fault = [{ kind: 'unhandledRejection' }];
+  const faults = [
+    ['pass+fault', finalExitCode(EXIT.PASS, fault), EXIT.HARNESS],
+    ['not-implemented+fault', finalExitCode(EXIT.NOT_IMPLEMENTED, fault), EXIT.HARNESS],
+    ['cleanup+fault', finalExitCode(EXIT.CLEANUP, fault), EXIT.HARNESS],
+    ['interrupted+fault', finalExitCode(EXIT.INTERRUPTED, fault), EXIT.INTERRUPTED],
+    ['pass, no fault', finalExitCode(EXIT.PASS, []), EXIT.PASS],
+  ].map(([label, got, expected]) => ({ label, got, expected, ok: got === expected }));
+  check('fault-outside-a-scenario-forces-harness-error', faults.every((entry) => entry.ok), faults);
+
+  const alive = (startStamp, argv) => ({ state: 'alive', startStamp, argv });
+  const launch = { executable: '/opt/bin/bun', args: ['/qa/sleeper.mjs'], startStamp: 'linux:100' };
+  const script = { executable: '/qa/worker.sh', args: [], startStamp: 'linux:200' };
+  const verdicts = [
+    ['same process, same argv', identityVerdict(launch, alive('linux:100', ['/opt/bin/bun', '/qa/sleeper.mjs'])).verdict, 'match'],
+    ['equal stamp, argv changed', identityVerdict(launch, alive('linux:100', ['/bin/sh', '-c', 'other'])).verdict, 'argv-changed'],
+    ['unequal stamp', identityVerdict(launch, alive('linux:101', ['/opt/bin/bun', '/qa/sleeper.mjs'])).verdict, 'mismatch'],
+    ['no stamp, argv changed', identityVerdict({ ...launch, startStamp: null }, alive('linux:100', ['/bin/sh'])).verdict, 'argv-changed'],
+    ['#! script without observed argv', identityVerdict(script, alive('linux:200', ['/bin/sh', '/qa/worker.sh'])).verdict, 'argv-changed'],
+    ['#! script with observed argv', identityVerdict({ ...script, observedArgv: ['/bin/sh', '/qa/worker.sh'] }, alive('linux:200', ['/bin/sh', '/qa/worker.sh'])).verdict, 'match'],
+  ].map(([label, got, expected]) => ({ label, got, expected, ok: got === expected }));
+  check('identity-verdict-argv-change-is-never-mismatch', verdicts.every((entry) => entry.ok), verdicts);
 
   const lstart = 'Mon Oct 27 11:09:00 2026';
   const ps = [

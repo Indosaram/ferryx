@@ -232,6 +232,24 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
       { code: result.code, status: summary?.status ?? null, count: results.length });
     });
 
+    await step('run-lock', async () => {
+      const lockDir = join(fx.dataRoot, '.qa-unified-supervisor');
+      const lockFile = join(lockDir, 'run.lock');
+      mkdirSync(lockDir, { recursive: true });
+      // A live holder (this self-test parent) must refuse a second run on the same dataRoot.
+      writeFileSync(lockFile, `${JSON.stringify({ pid: process.pid, startStamp: owned.runnerStamp, mode: 'self-test-holder', at: new Date().toISOString(), nonce: 'held' })}\n`);
+      const heldDir = childDir('run-lock-held');
+      const held = await runChild('run-lock-held', ['--scenario', 'runtime', '--config', fx.good, '--evidence', heldDir]);
+      check('concurrent-run-refused-by-run-lock', held.code === EXIT.USAGE && stderrOf(held).includes('RUN_LOCKED') && !existsSync(heldDir) && existsSync(lockFile),
+        { code: held.code, tail: held.lines.slice(-3) });
+      // A holder that no longer exists is taken over, recorded, and the lock is released afterwards.
+      writeFileSync(lockFile, `${JSON.stringify({ pid: 2_000_000_000, startStamp: null, mode: 'crashed-holder', at: new Date().toISOString(), nonce: 'dead' })}\n`);
+      const staleDir = childDir('run-lock-stale');
+      const taken = await runChild('run-lock-stale', ['--scenario', 'runtime', '--config', fx.good, '--evidence', staleDir]);
+      check('stale-run-lock-taken-over-and-released', taken.code === EXIT.NOT_IMPLEMENTED && existsSync(join(staleDir, 'run-lock-takeover.json')) && !existsSync(lockFile),
+        { code: taken.code, tail: taken.lines.slice(-3) });
+    });
+
     await step('positive-control', async () => {
       const dir = childDir('positive');
       const result = await runChild('positive', scenarioArgs('__selftest-hung-command', dir));
@@ -350,20 +368,36 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
         onArmed: async (_armed, handle) => { signalChild(handle, 'SIGKILL'); },
       });
       const orphanPid = result.armed?.sleeperPid ?? null;
+      const scriptPid = result.armed?.scriptPid ?? null;
       check('orphan-runner-killed-without-teardown', result.signal === 'SIGKILL' && !existsSync(join(dir, 'cleanup.json')), { signal: result.signal });
       const record = fx.ledger.open().find((r) => r.type === 'spawn' && r.pid === orphanPid) ?? null;
       const survived = record ? identityVerdict(record, await probeProcess(orphanPid)) : { verdict: 'no-ledger-record' };
       check('orphan-survives-and-is-ledgered-with-stamp', survived.verdict === 'match' && Boolean(record?.startStamp), { orphanPid, survived });
+      const scriptRecord = scriptPid === null ? null : fx.ledger.open().find((r) => r.type === 'spawn' && r.pid === scriptPid) ?? null;
+      if (POSIX) {
+        // The kernel shows /bin/sh first for a #! script; the argv observed at spawn must still identify it.
+        const scriptSurvived = scriptRecord ? identityVerdict(scriptRecord, await probeProcess(scriptPid)) : { verdict: 'no-ledger-record' };
+        check('orphan-shebang-script-identified-by-observed-argv', scriptSurvived.verdict === 'match' && Boolean(scriptRecord?.startStamp)
+          && (Array.isArray(scriptRecord?.observedArgv) || typeof scriptRecord?.observedCommand === 'string'),
+        { scriptPid, scriptSurvived, observedArgv: scriptRecord?.observedArgv ?? null, observedCommand: scriptRecord?.observedCommand ?? null });
+      }
 
       // A foreign process the ledger only claims through forged records.
       const cursor = journal.cursor();
       const foreign = await owned.spawn('foreign-process', process.execPath, [SLEEPER], { env: { PATH: process.env.PATH ?? '' }, graceMs: 2_000 });
       await journal.waitFor('foreign process ready', (e) => e.source === 'foreign-process' && e.json?.ready === true, { after: cursor, deadlineMs: 20_000, signal: interrupts.signal });
-      const base = { type: 'spawn', pid: foreign.pid, executable: process.execPath, detached: POSIX, graceMs: 1_000, runnerPid: null, runnerStartStamp: null };
+      const base = { type: 'spawn', pid: foreign.pid, executable: process.execPath, detached: POSIX, graceMs: 1_000, runnerPid: null, runnerStartStamp: null, runId: `forged-${runId}` };
+      const realStamp = foreign.record.startStamp;
       const forged = {
-        argvMismatch: { ...base, key: `forged-${runId}/proc/argv#1`, runId: `forged-${runId}`, id: 'forged-argv', args: ['--not-the-recorded-launch'], startStamp: foreign.record.startStamp, spawnedAtMs: Date.now() },
-        noStampRecent: { ...base, key: `forged-${runId}/proc/nostamp#2`, runId: `forged-${runId}`, id: 'forged-nostamp', args: [SLEEPER], startStamp: null, spawnedAtMs: Date.now() },
-        noStampOld: { ...base, key: `forged-${runId}/proc/old#3`, runId: `forged-${runId}`, id: 'forged-old', args: [SLEEPER], startStamp: null, spawnedAtMs: Date.now() - 3_600_000 },
+        // Reused pid: a different start stamp (and argv) is provably another process: released untouched.
+        argvMismatch: { ...base, key: `forged-${runId}/proc/argv#1`, id: 'forged-argv', args: ['--not-the-recorded-launch'], startStamp: `${realStamp}-earlier`, spawnedAtMs: foreign.record.spawnedAtMs },
+        // Same process (equal stamp) whose argv no longer matches: possibly ours after exec, so never signalled and never released.
+        argvChanged: { ...base, key: `forged-${runId}/proc/argvchanged#2`, id: 'forged-argvchanged', args: ['--not-the-recorded-launch'], startStamp: realStamp, spawnedAtMs: foreign.record.spawnedAtMs },
+        noStampRecent: { ...base, key: `forged-${runId}/proc/nostamp#3`, id: 'forged-nostamp', args: [SLEEPER], startStamp: null, spawnedAtMs: foreign.record.spawnedAtMs },
+        noStampOld: { ...base, key: `forged-${runId}/proc/old#4`, id: 'forged-old', args: [SLEEPER], startStamp: null, spawnedAtMs: foreign.record.spawnedAtMs - 3_600_000 },
+        // Verified identity, but its owning runner (this self-test parent) is alive.
+        liveOwner: { ...base, key: `forged-${runId}/proc/liveowner#5`, id: 'forged-liveowner', args: [SLEEPER], startStamp: realStamp, spawnedAtMs: foreign.record.spawnedAtMs,
+          runnerPid: process.pid, runnerStartStamp: owned.runnerStamp },
       };
       for (const value of Object.values(forged)) fx.ledger.append(value);
       const decoyBase = join(fx.stateRoot, 'decoy');
@@ -385,11 +419,21 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
       check('cleanup-terminates-verified-orphan', orphanEntry?.status === 'terminated' && orphanEntry.ok === true && orphanEntry.identity?.verdict === 'match'
         && await goneNow(orphanPid, record?.startStamp), { orphanEntry });
       const argvEntry = entryFor(forged.argvMismatch.key);
+      const changedEntry = entryFor(forged.argvChanged.key);
       const recentEntry = entryFor(forged.noStampRecent.key);
       const oldEntry = entryFor(forged.noStampOld.key);
-      check('cleanup-never-signals-argv-mismatch', argvEntry?.status === 'identity-mismatch' && argvEntry.killed === false, { argvEntry });
+      const ownerEntry = entryFor(forged.liveOwner.key);
+      const scriptEntry = scriptRecord ? entryFor(scriptRecord.key) : null;
+      if (POSIX) {
+        check('cleanup-terminates-owned-shebang-script', scriptEntry?.status === 'terminated' && scriptEntry.ok === true && scriptEntry.killed === true
+          && await goneNow(scriptPid, scriptRecord?.startStamp), { scriptEntry });
+      }
+      check('cleanup-never-signals-argv-mismatch', argvEntry?.status === 'identity-mismatch' && argvEntry.killed === false && argvEntry.ok === true, { argvEntry });
+      check('cleanup-leaves-equal-stamp-argv-change-open', changedEntry?.status === 'argv-changed' && changedEntry.killed === false && changedEntry.ok === false
+        && (changedEntry.signals?.length ?? 1) === 0, { changedEntry });
       check('cleanup-never-signals-without-both-start-stamps', recentEntry?.status === 'unverifiable' && recentEntry.killed === false && recentEntry.ok === false, { recentEntry });
       check('cleanup-releases-pid-started-outside-spawn-window', oldEntry?.status === 'identity-mismatch' && oldEntry.killed === false, { oldEntry });
+      check('cleanup-respects-live-owner-runner', ownerEntry?.status === 'owner-runner-alive' && ownerEntry.killed === false && ownerEntry.ok === false, { ownerEntry });
       check('foreign-process-survives-cleanup', foreign.exitInfo === null && identityVerdict(foreign.record, await probeProcess(foreign.pid)).verdict === 'match', null);
       const decoyEntry = entryFor(decoy.key);
       const pathEntries = (report?.entries ?? []).filter((entry) => entry.kind === 'path' && entry.key !== decoy.key);
@@ -399,12 +443,31 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
 
       fx.ledger.append({ type: 'released', key: forged.noStampRecent.key, reason: 'self-test: forged record withdrawn' });
       fx.ledger.append({ type: 'path-released', key: decoy.key });
-      const secondDir = childDir('cleanup-2');
-      const second = await runChild('cleanup-2', ['--cleanup', '--config', fx.good, '--evidence', secondDir]);
-      check('cleanup-completes-once-nothing-unverifiable-remains', second.code === EXIT.PASS && readJson(join(secondDir, 'cleanup.json'))?.ok === true, { code: second.code });
+      // Only the argv-changed record (dead-owner, still alive) and the live-owner record remain open.
+      const changedDir = childDir('stale-preflight-argv-changed');
+      const changedRun = await runChild('stale-preflight-argv-changed', ['--scenario', 'runtime', '--config', fx.good, '--evidence', changedDir]);
+      const changedText = stderrOf(changedRun);
+      check('preflight-counts-argv-changed-as-stale', changedRun.code === EXIT.USAGE && changedText.includes('STALE_OWNED_STATE') && changedText.includes(forged.argvChanged.key)
+        && !changedText.includes(forged.liveOwner.key) && !existsSync(changedDir), { code: changedRun.code, tail: changedRun.lines.slice(-3) });
+      fx.ledger.append({ type: 'released', key: forged.argvChanged.key, reason: 'self-test: forged record withdrawn' });
+
       const postDir = childDir('post-cleanup');
       const post = await runChild('post-cleanup', ['--scenario', 'runtime', '--config', fx.good, '--evidence', postDir]);
-      check('runs-allowed-after-cleanup', post.code === EXIT.NOT_IMPLEMENTED, { code: post.code });
+      check('preflight-skips-records-of-a-live-runner', post.code === EXIT.NOT_IMPLEMENTED && foreign.exitInfo === null, { code: post.code, tail: post.lines.slice(-3) });
+
+      const secondDir = childDir('cleanup-2');
+      const second = await runChild('cleanup-2', ['--cleanup', '--config', fx.good, '--evidence', secondDir]);
+      const secondOwner = readJson(join(secondDir, 'cleanup.json'))?.entries?.find((entry) => entry.key === forged.liveOwner.key) ?? null;
+      check('cleanup-without-force-owner-exits-5-and-spares-live-owner', second.code === EXIT.CLEANUP && secondOwner?.status === 'owner-runner-alive'
+        && secondOwner.killed === false && secondOwner.ok === false && foreign.exitInfo === null, { code: second.code, secondOwner });
+
+      const thirdDir = childDir('cleanup-3-force-owner');
+      const third = await runChild('cleanup-3-force-owner', ['--cleanup', '--config', fx.good, '--evidence', thirdDir, '--force-owner']);
+      const thirdReport = readJson(join(thirdDir, 'cleanup.json'));
+      const thirdOwner = thirdReport?.entries?.find((entry) => entry.key === forged.liveOwner.key) ?? null;
+      const foreignExit = await withDeadline(foreign.exited, 10_000, () => null);
+      check('force-owner-reclaims-live-owner-record', third.code === EXIT.PASS && thirdReport?.ok === true && thirdOwner?.status === 'terminated'
+        && thirdOwner.killed === true && foreignExit !== null, { code: third.code, thirdOwner, foreignExit });
       const foreignReceipt = await owned.terminate(foreign, 'self-test');
       check('foreign-process-torn-down-by-its-owner', foreignReceipt.ok === true, foreignReceipt);
       rmSync(decoyBase, { recursive: true, force: true });

@@ -8,8 +8,9 @@
 //   bun scripts/qa/unified-supervisor.mjs --self-test    --evidence <dir> [--force-evidence]
 //
 // Exit codes: 0 PASS, 1 FAIL (including an empty or skipped run), 2 usage /
-// config / evidence / stale-state refusal, 3 NOT_IMPLEMENTED, 4 deadline or
-// harness error (including uncaught faults), 5 cleanup incomplete, 130 interrupted.
+// config / evidence / stale-state / run-lock refusal, 3 NOT_IMPLEMENTED, 4
+// deadline or harness error (including an uncaught fault anywhere in the
+// process), 5 cleanup incomplete, 130 interrupted.
 //
 // Contracts: assertions decide PASS, never log text; a scenario that is only
 // registered reports NOT_IMPLEMENTED; production paths (~/.ferryx, any
@@ -18,15 +19,16 @@
 // dataRoot/memoryRoot holding foreign state is refused; an evidence directory
 // from a prior run is refused unless --force-evidence moves it aside; a run is
 // refused while an earlier crashed run's owned processes may be alive
-// (STALE_OWNED_STATE: run --cleanup first); every spawned process is recorded
+// (STALE_OWNED_STATE: run --cleanup first); a second concurrent run on the same
+// dataRoot is refused (RUN_LOCKED); every spawned process is recorded
 // and torn down by recorded identity; cleanup.json is written on interrupts and
 // on uncaught faults. Config fields: see unified-supervisor/config.schema.json.
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  aggregateExit, cleanupMode, collectReceipts, errorInfo, EXIT, Evidence, exitCodeForError, HarnessError, isInside, loadConfig,
-  preflightOwnedState, redact, redactValue, runScenario, SCHEMA, withDeadline,
+  acquireRunLock, aggregateExit, cleanupMode, collectReceipts, errorInfo, EXIT, Evidence, exitCodeForError, finalExitCode, HarnessError,
+  isInside, loadConfig, preflightOwnedState, probeProcess, redact, redactValue, releaseRunLock, runScenario, SCHEMA, withDeadline,
 } from './unified-supervisor/harness.mjs';
 import { resolveScenario, SCENARIOS } from './unified-supervisor/scenarios.mjs';
 import { NONCE_ENV, NONCE_FILE, selfTest } from './unified-supervisor/self-test.mjs';
@@ -136,37 +138,52 @@ async function main(argv) {
     const scenario = opts.mode === 'scenario' ? resolveScenario(opts.scenario, opts.internal) : null;
     // Refusals happen before any directory is created or any process started.
     const configInfo = loadConfig(opts.config);
-    if (opts.mode !== 'cleanup') await preflightOwnedState(configInfo);
-    const evidence = Evidence.prepare(opts.evidence, { force: opts.forceEvidence });
-    evidence.log(`unified-supervisor mode=${opts.mode} pid=${process.pid} argv=${JSON.stringify(argv)}`);
-    if (opts.mode === 'cleanup') {
-      const exitCode = await cleanupMode({ configInfo, evidence, interrupts, forceOwner: opts.forceOwner });
-      await writeOut(process.stdout, `${JSON.stringify({ unifiedSupervisor: { mode: 'cleanup', exitCode, evidence: evidence.dir } })}\n`);
-      return exitCode;
+    const lock = await acquireRunLock(configInfo.config.dataRoot, { runnerStamp: (await probeProcess(process.pid)).startStamp ?? null, mode: opts.mode });
+    try {
+      return await runLocked(opts, interrupts, { scenario, configInfo, argv, lock });
+    } finally {
+      releaseRunLock(lock);
     }
-    const receipts = await collectReceipts({ repoRoot: REPO_ROOT, configInfo, scripts: SCRIPTS });
-    if (opts.mode === 'scenario') {
-      const result = await runScenario({ name: opts.scenario, scenario, configInfo, evidence, receipts, interrupts, argv });
-      await writeOut(process.stdout, `${JSON.stringify({ unifiedSupervisor: { mode: 'scenario', ...result, evidence: evidence.dir } })}\n`);
-      return result.exitCode;
-    }
-    evidence.writeJson('receipts.json', receipts);
-    const results = [];
-    for (const [name, entry] of Object.entries(SCENARIOS)) {
-      // A self-test child exercises --all over planned scenarios only; a skipped one is still not a PASS.
-      if (opts.internal && entry.implemented) { results.push({ name, status: 'SKIPPED', reason: 'self-test child runs planned scenarios only' }); continue; }
-      if (interrupts.count > 0) { results.push({ name, status: 'INTERRUPTED', exitCode: EXIT.INTERRUPTED, reason: 'not started after an interrupt' }); continue; }
-      results.push(await runScenario({ name, scenario: entry, configInfo, evidence: evidence.child(name), receipts, interrupts, argv }));
-    }
-    const { status, exitCode } = aggregateExit(results);
-    evidence.writeJson('summary.json', { schema: SCHEMA, mode: 'all', status, exitCode, results, faults: interrupts.faults, finishedAt: new Date().toISOString() });
-    await writeOut(process.stdout, `${JSON.stringify({ unifiedSupervisor: { mode: 'all', status, exitCode, evidence: evidence.dir } })}\n`);
-    return exitCode;
   } catch (error) {
     const info = errorInfo(error);
     await writeOut(process.stderr, `${JSON.stringify(redactValue({ error: info }))}\nunified-supervisor: ${redact(info.message)}\n${USAGE}\n`);
     return exitCodeForError(error);
   }
+}
+
+// Runs while this process holds the dataRoot run lock.
+async function runLocked(opts, interrupts, { scenario, configInfo, argv, lock }) {
+  if (opts.mode !== 'cleanup') await preflightOwnedState(configInfo);
+  const evidence = Evidence.prepare(opts.evidence, { force: opts.forceEvidence });
+  evidence.log(`unified-supervisor mode=${opts.mode} pid=${process.pid} argv=${JSON.stringify(argv)}`);
+  if (lock.takenOver.length > 0) evidence.writeJson('run-lock-takeover.json', lock.takenOver);
+  if (opts.mode === 'cleanup') {
+    const exitCode = finalExitCode(await cleanupMode({ configInfo, evidence, interrupts, forceOwner: opts.forceOwner }), interrupts.faults);
+    await writeOut(process.stdout, `${JSON.stringify({ unifiedSupervisor: { mode: 'cleanup', exitCode, evidence: evidence.dir } })}\n`);
+    return exitCode;
+  }
+  const receipts = await collectReceipts({ repoRoot: REPO_ROOT, configInfo, scripts: SCRIPTS });
+  if (opts.mode === 'scenario') {
+    const result = await runScenario({ name: opts.scenario, scenario, configInfo, evidence, receipts, interrupts, argv });
+    const exitCode = finalExitCode(result.exitCode, interrupts.faults);
+    if (exitCode !== result.exitCode) evidence.writeJson('faults.json', { exitCode, faults: interrupts.faults });
+    await writeOut(process.stdout, `${JSON.stringify({ unifiedSupervisor: { mode: 'scenario', ...result, exitCode, evidence: evidence.dir } })}\n`);
+    return exitCode;
+  }
+  evidence.writeJson('receipts.json', receipts);
+  const results = [];
+  for (const [name, entry] of Object.entries(SCENARIOS)) {
+    // A self-test child exercises --all over planned scenarios only; a skipped one is still not a PASS.
+    if (opts.internal && entry.implemented) { results.push({ name, status: 'SKIPPED', reason: 'self-test child runs planned scenarios only' }); continue; }
+    if (interrupts.count > 0) { results.push({ name, status: 'INTERRUPTED', exitCode: EXIT.INTERRUPTED, reason: 'not started after an interrupt' }); continue; }
+    results.push(await runScenario({ name, scenario: entry, configInfo, evidence: evidence.child(name), receipts, interrupts, argv }));
+  }
+  const aggregate = aggregateExit(results);
+  const exitCode = finalExitCode(aggregate.exitCode, interrupts.faults);
+  const status = exitCode === aggregate.exitCode ? aggregate.status : 'HARNESS_ERROR';
+  evidence.writeJson('summary.json', { schema: SCHEMA, mode: 'all', status, exitCode, results, faults: interrupts.faults, finishedAt: new Date().toISOString() });
+  await writeOut(process.stdout, `${JSON.stringify({ unifiedSupervisor: { mode: 'all', status, exitCode, evidence: evidence.dir } })}\n`);
+  return exitCode;
 }
 
 if (import.meta.main ?? resolve(process.argv[1] ?? '') === SCRIPT) {
