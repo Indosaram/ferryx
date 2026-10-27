@@ -215,7 +215,7 @@ export function TerminalSearchOverlay({
     <div
       role="search"
       aria-label="Terminal search"
-      data-native-terminal-yield={docked ? "off" : undefined}
+      data-native-terminal-keep-visible={docked ? "true" : undefined}
       data-native-terminal-search-layout={docked ? "docked" : "floating"}
       style={docked ? { height: TERMINAL_SEARCH_DOCK_HEIGHT } : undefined}
       className={`no-drag absolute z-40 flex items-center gap-1 border border-border bg-card/95 p-1 text-foreground shadow-lg backdrop-blur-sm ${docked

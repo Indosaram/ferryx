@@ -56,7 +56,8 @@ describe("terminal search and native visibility integration", () => {
     const identity = native.dataset.identity;
     await act(async () => rerender(<TerminalPane session={session} active searchOpen />));
     const search = screen.getByRole("search");
-    expect(search).toHaveAttribute("data-native-terminal-yield", "off");
+    expect(search).toHaveAttribute("data-native-terminal-keep-visible", "true");
+    expect(native).toHaveAttribute("data-interactive", "false");
     expect(search).toHaveAttribute("data-native-terminal-search-layout", "docked");
     expect(search).toHaveStyle({ height: "48px" });
     expect(screen.getByTestId("terminal-native-viewport")).toHaveStyle({ top: "48px" });

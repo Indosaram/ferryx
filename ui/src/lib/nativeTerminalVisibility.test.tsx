@@ -97,6 +97,28 @@ describe("useNativeTerminalVisibility", () => {
     }
   });
 
+  it("keeps a docked overlay visible but input-owned, observes marker changes, and honors another modal", async () => {
+    vi.mocked(isMacShortcutPlatform).mockReturnValue(false);
+    const { result } = renderHook(() => useNativeTerminalVisibilityState());
+    const search = document.createElement("div");
+    search.setAttribute("role", "search");
+    search.setAttribute("data-native-terminal-keep-visible", "true");
+    await act(async () => { document.body.append(search); });
+    expect(result.current).toEqual({ visible: true, interactive: false });
+    expect(hostBridge.setNativeTerminalDomOverlayInput).toHaveBeenLastCalledWith(true);
+    const modal = document.createElement("div");
+    modal.setAttribute("role", "dialog");
+    await act(async () => { document.body.append(modal); });
+    expect(result.current).toEqual({ visible: false, interactive: false });
+    await act(async () => { modal.remove(); });
+    expect(result.current).toEqual({ visible: true, interactive: false });
+    await act(async () => { search.removeAttribute("data-native-terminal-keep-visible"); });
+    expect(result.current).toEqual({ visible: false, interactive: false });
+    await act(async () => { search.remove(); });
+    expect(result.current).toEqual({ visible: true, interactive: true });
+    expect(hostBridge.setNativeTerminalDomOverlayInput).toHaveBeenLastCalledWith(false);
+  });
+
   it("returns true when no dialog is mounted", () => {
     const { result } = renderHook(() => useNativeTerminalVisibility());
     expect(result.current).toBe(true);

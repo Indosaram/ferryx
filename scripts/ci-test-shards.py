@@ -198,9 +198,63 @@ def executable_from_log(log):
     return executable
 
 
+def verify_runtime_target(build_snapshot):
+    hosts = re.findall(r"^host: (\S+)$", build_snapshot["rustc"], re.M)
+    if hosts != [build_snapshot["target"]]:
+        raise ValueError("--run-tests requires the native rustc host target; cross-target binaries cannot be executed by this runner")
+
+
+def prepare_runtime_helper(target, generated, env, evidence, bounded, timeout):
+    """Build this checkout's helper and stage the compile-time fixture path.
+
+    Cargo's JSON artifact path remains authoritative when CARGO_TARGET_DIR or an
+    explicit target changes the output layout. Never reuse an arbitrary helper
+    from the source checkout or assume the shared target directory's layout.
+    """
+    command = ["cargo", "build", "--manifest-path", "remote-helper/Cargo.toml",
+               "--bin", "ferryx-remote-helper", "--target", target,
+               "--locked", "--offline", "-j1", "--message-format=json"]
+    log = run_stage("runtime-helper-build", command, generated, env, evidence, bounded, timeout)
+    executables = set()
+    for line in log.read_text().splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        artifact_target = item.get("target", {})
+        if (item.get("reason") == "compiler-artifact"
+                and artifact_target.get("name") == "ferryx-remote-helper"
+                and artifact_target.get("kind") == ["bin"]
+                and item.get("profile", {}).get("test") is False
+                and item.get("executable")):
+            executables.add(item["executable"])
+    if len(executables) != 1:
+        raise ValueError("expected exactly one remote-helper binary artifact")
+    executable = Path(executables.pop())
+    if not executable.is_absolute():
+        executable = generated / executable
+    if not executable.is_file():
+        raise ValueError("reported remote-helper executable is missing")
+    suffix = ".exe" if "windows" in target else ""
+    staged = generated / "remote-helper/target/debug" / ("ferryx-remote-helper" + suffix)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    if executable.resolve() != staged.resolve():
+        shutil.copy2(executable, staged)
+    digest = sha(executable)
+    if sha(staged) != digest:
+        raise ValueError("staged remote-helper differs from Cargo artifact")
+    return {"target": target, "artifact": str(executable), "staged": str(staged),
+            "sha256": digest, "lock_sha256": sha(generated / "remote-helper/Cargo.lock")}
+
+
 def run_full_runtime(state, generated, env, evidence, bounded, timeout):
     """Run every compiled test with normal libtest ignored semantics, no filters."""
     state["runtime"] = "INCOMPLETE"
+    helper = state.get("runtime_helper")
+    if not helper or not Path(helper["staged"]).is_file() or sha(helper["staged"]) != helper["sha256"]:
+        raise ValueError("verified runtime helper is missing or changed")
     for shard in state["shards"]:
         log = run_stage(f"shard-{shard['index']}-runtime",
                         [shard["executable"], "--test-threads=1"], generated / "src-tauri",
@@ -250,6 +304,29 @@ def main():
     owned_worktree = False
     canonical = Path(output(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], source)).parent
     try:
+        if args.run_tests:
+            verify_runtime_target(state["snapshot"])
+        generated = worktree_root / ("test-shards-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + uuid.uuid4().hex[:12])
+        if generated.exists():
+            raise ValueError("refusing a preexisting generated-worktree path")
+        subprocess.run(["git", "worktree", "add", "--detach", str(generated), state["snapshot"]["commit"]], cwd=canonical, check=True)
+        owned_worktree = True
+        # Clone only the already verified local submodule; never silently fetch a new revision.
+        expected_ghostty = output(["git", "rev-parse", "HEAD:src-tauri/vendor/ghostty"], source)
+        if output(["git", "rev-parse", "HEAD"], source / "src-tauri/vendor/ghostty") != expected_ghostty:
+            raise ValueError("source Ghostty is not at its pinned commit")
+        subprocess.run(["git", "diff", "--exit-code", "HEAD"], cwd=source / "src-tauri/vendor/ghostty", check=True)
+        subprocess.run(["git", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c",
+                        "submodule.src-tauri/vendor/ghostty.url=" + str(source / "src-tauri/vendor/ghostty"),
+                        "submodule", "update", "--init", "--recursive", "--no-fetch"], cwd=generated,
+                       env=env | {"GIT_ALLOW_PROTOCOL": "file"}, check=True)
+        if output(["git", "rev-parse", "HEAD"], generated / "src-tauri/vendor/ghostty") != expected_ghostty:
+            raise ValueError("generated Ghostty revision differs")
+        state["ghostty_commit"] = expected_ghostty
+        shutil.copytree(source / "ui/dist", generated / "ui/dist")
+        if args.run_tests:
+            state["runtime_helper"] = prepare_runtime_helper(
+                args.target, generated, env, evidence, bounded, args.stage_timeout)
         if args.baseline:
             baseline = json.loads(args.baseline.read_text())
             if baseline["snapshot"] != state["snapshot"]:
@@ -271,24 +348,6 @@ def main():
         (evidence / "baseline.json").write_text(json.dumps({"snapshot": state["snapshot"], "compile_contract": baseline_contract, "tests": full_inventory, "source_locations": source_locations}, indent=2))
         state["full_inventory_count"] = len(full_inventory)
 
-        generated = worktree_root / ("test-shards-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + uuid.uuid4().hex[:12])
-        if generated.exists():
-            raise ValueError("refusing a preexisting generated-worktree path")
-        subprocess.run(["git", "worktree", "add", "--detach", str(generated), state["snapshot"]["commit"]], cwd=canonical, check=True)
-        owned_worktree = True
-        # Clone only the already verified local submodule; never silently fetch a new revision.
-        expected_ghostty = output(["git", "rev-parse", "HEAD:src-tauri/vendor/ghostty"], source)
-        if output(["git", "rev-parse", "HEAD"], source / "src-tauri/vendor/ghostty") != expected_ghostty:
-            raise ValueError("source Ghostty is not at its pinned commit")
-        subprocess.run(["git", "diff", "--exit-code", "HEAD"], cwd=source / "src-tauri/vendor/ghostty", check=True)
-        subprocess.run(["git", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c",
-                        "submodule.src-tauri/vendor/ghostty.url=" + str(source / "src-tauri/vendor/ghostty"),
-                        "submodule", "update", "--init", "--recursive", "--no-fetch"], cwd=generated,
-                       env=env | {"GIT_ALLOW_PROTOCOL": "file"}, check=True)
-        if output(["git", "rev-parse", "HEAD"], generated / "src-tauri/vendor/ghostty") != expected_ghostty:
-            raise ValueError("generated Ghostty revision differs")
-        state["ghostty_commit"] = expected_ghostty
-        shutil.copytree(source / "ui/dist", generated / "ui/dist")
         instrument = ["cargo", "run", "--offline", "--locked", "--manifest-path",
                       str(source / "tools/test-shard-instrumenter/Cargo.toml"), "--", "apply",
                       "--root", str(generated), "--shards", str(args.shards)]

@@ -15,20 +15,27 @@ const NativeTerminalVisibilityContext = createContext({ visible: true, occluded:
 const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"]';
 const OPT_OUT_SELECTOR = '[data-native-terminal-yield="off"]';
 
-function isYieldingSurfaceVisible(): boolean {
+// Docked search sits outside native bounds: retain rendering, not terminal input.
+// This applies to the marked surface only; it never exempts a separate modal.
+const KEEP_VISIBLE_SELECTOR = '[data-native-terminal-keep-visible="true"]';
+
+function getOverlayState(): { inputOwned: boolean; occluding: boolean } {
   if (typeof document === "undefined") {
-    return false;
+    return { inputOwned: false, occluding: false };
   }
   // A surface only forces the terminal to yield when it (and its ancestors) has
   // not opted out. Consulting the closest opt-out for every matching surface
   // means an opted-out popover cannot suppress a second, real modal.
+  let inputOwned = false;
+  let occluding = false;
   const surfaces = document.querySelectorAll(YIELDING_SURFACE_SELECTOR);
   for (const surface of surfaces) {
     if (surface.closest(OPT_OUT_SELECTOR) === null) {
-      return true;
+      inputOwned = true;
+      if (!surface.matches(KEEP_VISIBLE_SELECTOR)) occluding = true;
     }
   }
-  return false;
+  return { inputOwned, occluding };
 }
 
 /**
@@ -64,7 +71,7 @@ export function NativeTerminalVisibilityProvider({
  */
 export function useNativeTerminalVisibilityState(): { readonly visible: boolean; readonly interactive: boolean } {
   const owner = useContext(NativeTerminalVisibilityContext);
-  const [surfaceOpen, setSurfaceOpen] = useState(isYieldingSurfaceVisible);
+  const [overlay, setOverlay] = useState(getOverlayState);
 
   useEffect(() => {
     if (typeof document === "undefined" || typeof MutationObserver === "undefined") {
@@ -72,21 +79,25 @@ export function useNativeTerminalVisibilityState(): { readonly visible: boolean;
     }
 
     const update = () => {
-      const next = isYieldingSurfaceVisible();
-      reportDomOverlayInputOwner(next);
-      setSurfaceOpen((current) => (current === next ? current : next));
+      const next = getOverlayState();
+      reportDomOverlayInputOwner(next.inputOwned);
+      setOverlay((current) => (current.inputOwned === next.inputOwned && current.occluding === next.occluding
+        ? current : next));
     };
     update();
 
     const observer = new MutationObserver(update);
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["role", "data-native-terminal-yield", "data-native-terminal-keep-visible"],
+    });
     return () => observer.disconnect();
   }, []);
 
-  const occluded = owner.occluded || surfaceOpen;
+  const occluded = owner.occluded || overlay.occluding;
   return {
     visible: owner.visible && (isMacShortcutPlatform() || !occluded),
-    interactive: owner.visible && !occluded,
+    interactive: owner.visible && !owner.occluded && !overlay.inputOwned,
   };
 }
 

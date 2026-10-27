@@ -78,7 +78,15 @@ baseline after any source or configuration change.
 `COMPILE_AND_EXACT_INVENTORY_PASS` means every target-resolved library test was
 compiled once, not that any test passed at runtime. On a machine legitimately permitting all test capabilities, add `--run-tests`
 to execute every shard with no name filters or added skips. This occurs before
-the generated worktree is removed, preserving compile-time manifest paths. The
+the generated worktree is removed, preserving compile-time manifest paths.
+`--run-tests` requires the native `rustc` host target (no implicit cross-target
+emulator). Before inventory/shard compilation, it builds the generated checkout's
+remote helper using locked, offline Cargo and the selected target. The helper's
+Cargo-reported binary is copied to that checkout's `remote-helper/target/debug/`
+fixture path (including `.exe` on Windows), even when `CARGO_TARGET_DIR` points
+to a shared cache. Binary and lockfile hashes are recorded; missing, ambiguous or
+changed helper artifacts fail closed before any test execution. Compile/list-only
+mode does not build this runtime fixture. The
 runner checks each runtime summary against the complete inventory, including
 normal ignored-test semantics; only then records `FULL_RUNTIME_PASS`. Tests involving sockets,
 PTYs, processes, display or network require the corresponding legitimate runtime
