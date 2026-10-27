@@ -21,6 +21,10 @@ fn main() {
         println!("{}", ferryx_lib::cli::cli_version_line());
         return;
     }
+    // Before the generic `supervisor` dispatch: `supervisor engine` has its own parser.
+    if args.get(1).is_some_and(|arg| arg == "supervisor") && args.get(2).is_some_and(|arg| arg == "engine") {
+        std::process::exit(ferryx_lib::cli::supervisor_engine::run_supervisor_engine_cli(&args));
+    }
     if args.get(1).is_some_and(|arg| arg == "agents") {
         std::process::exit(ferryx_lib::agent_control::run_agents_cli(&args));
     }

@@ -24,6 +24,7 @@ async fn rows(pool: &SqlitePool) -> [i64; 3] {
 #[tokio::test]
 async fn setup_rerun_with_the_same_arguments_returns_the_same_ids() {
     let pool = crate::storage::memory().await.unwrap();
+    assert!(identities(&pool).await.unwrap().is_empty());
     let (identity, project, host) = provision_owner(&pool, OWNER, "qa-supervisor", REPO, HOST, DIR)
         .await
         .unwrap();
@@ -42,6 +43,7 @@ async fn setup_rerun_with_the_same_arguments_returns_the_same_ids() {
     assert_eq!(again_project, project);
     assert_eq!(again_host, host, "an unchanged mapping is not rewritten");
     assert_eq!(rows(&pool).await, [1, 1, 1]);
+    assert_eq!(identities(&pool).await.unwrap(), vec![identity.clone()]);
     // Admission resolves the set-up project and host without any choice.
     assert_eq!(
         project_for_host(&pool, HOST, DIR).await.unwrap(),

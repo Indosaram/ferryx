@@ -488,7 +488,8 @@ async fn barrier(supervisor: &MhcSupervisor) {
 }
 
 fn decision_context() -> Value {
-    json!({"ferryx_role": "decision", "memory_write": "deny", "tools_exclude": "bash,edit,write"})
+    json!({"ferryx_role": "decision", "memory_write": "deny",
+        "tools_exclude": "bash,edit,write,create_goal,update_goal,omo_browser_bridge"})
 }
 
 /// Learning stays allowed (no memory_write key); the engine withholds the whole effect set.
@@ -565,6 +566,54 @@ async fn a_missing_capability_degrades_with_zero_sends() {
         .collect();
     assert_eq!(kinds, ["get_protocol_info"]);
     assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 1);
+    let snapshot = supervisor.engine_snapshot().await;
+    assert_eq!(snapshot["state"], json!("degraded"));
+    assert_eq!(snapshot["faultCode"], json!("MHC_CAPABILITY_MISSING"));
+    assert_eq!(snapshot["pid"], Value::Null);
+    assert!(snapshot["retryInMs"].as_u64().is_some(), "{snapshot}");
+    assert_eq!(snapshot["sessions"], json!({}));
+    // Reading the snapshot sends nothing to the engine.
+    assert_eq!(harness.peer.frames().len(), 1);
+}
+
+#[tokio::test]
+async fn the_engine_snapshot_reports_health_and_the_persisted_role_bindings() {
+    let harness = Harness::new("snapshot", all_capabilities());
+    let supervisor = harness.supervisor();
+    let stopped = supervisor.engine_snapshot().await;
+    assert_eq!(stopped["state"], json!("stopped"));
+    assert_eq!(stopped["generation"], json!(0));
+    assert_eq!(stopped["memoryAgent"], Value::Null, "no profile config yet");
+    assert!(harness.peer.frames().is_empty(), "a snapshot never launches the engine");
+    supervisor.profile().prepare().unwrap();
+
+    assert_eq!(supervisor.decide("question").await.unwrap(), "answer:question");
+    let durable = harness.peer.of_type("open_session")[0]["durableSessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let frames = harness.peer.frames().len();
+    let snapshot = supervisor.engine_snapshot().await;
+    assert_eq!(harness.peer.frames().len(), frames, "a snapshot sends nothing");
+    assert_eq!(snapshot["state"], json!("ready"));
+    assert_eq!(snapshot["generation"], json!(1));
+    assert_eq!(snapshot["faultCode"], Value::Null);
+    assert_eq!(snapshot["serverVersion"], json!("0.0.0"));
+    assert_eq!(snapshot["capabilities"], json!(all_capabilities()));
+    assert_eq!(
+        snapshot["profileCwd"],
+        json!(harness.data().join("mhc-supervisor").to_string_lossy())
+    );
+    assert_eq!(snapshot["decisionContext"], decision_context());
+    assert_eq!(snapshot["memoryAgent"], json!(crate::supervisor::MEMORY_NAME));
+    assert_eq!(
+        snapshot["sessions"]["decision-0"],
+        json!({
+            "durableSessionId": durable,
+            "sessionFile": harness.peer.file_of(&durable),
+            "role": "decision",
+        })
+    );
 }
 
 #[tokio::test]
@@ -1054,6 +1103,8 @@ async fn the_judge_keeps_a_supervisor_turn_timeout_typed() {
 #[tokio::test]
 async fn a_process_without_the_engine_reports_not_running_instead_of_another_model() {
     assert!(installed().is_none());
+    let fault = installed_engine_snapshot().await.unwrap_err();
+    assert_eq!(fault.code(), "MHC_NOT_RUNNING");
     assert!(configured_model().is_none());
     let fault = InstalledModel
         .complete_typed("question", TurnContext::Retained)
@@ -1542,7 +1593,16 @@ fn the_owned_launch_is_stdio_rpc_in_the_profile_directory() {
         .spec(&MhcProfile::resolve(&data, Path::new("/elsewhere"), config()))
         .unwrap();
     assert_eq!(spec.program, bin.join("mhc.EXE"));
-    assert_eq!(spec.args, ["--mode", "rpc", "--multi-session", "--no-model-fallback"]);
+    assert_eq!(
+        spec.args,
+        [
+            "--mode",
+            "rpc",
+            "--multi-session",
+            "--no-model-fallback",
+            "--ttsr-rules-disabled=repetitive-turns"
+        ]
+    );
     assert_eq!(spec.cwd, data.join("mhc-supervisor"));
 }
 

@@ -16,6 +16,10 @@ export const NONCE_ENV = 'UNIFIED_SUPERVISOR_SELFTEST_NONCE';
 export const NONCE_FILE = 'selftest-nonce';
 const CHILD_DEADLINE_MS = 120_000;
 const ARM_DEADLINE_MS = 60_000;
+// The refusal, not-implemented, run-lock and stale-evidence steps need a registered scenario
+// that is still only planned: the first one, so implementing a scenario never silently runs
+// it against the self-test's fake binaries. selfTest() refuses to run without one.
+const PLANNED = Object.entries(SCENARIOS).find(([, scenario]) => !scenario.implemented)?.[0] ?? null;
 
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
@@ -124,6 +128,7 @@ function makeFixture(evidence, nonce) {
 }
 
 export async function selfTest(opts, interrupts, { script, repoRoot, scripts, writeOut }) {
+  if (!PLANNED) throw new Error('self-test needs at least one planned scenario for its refusal, run-lock and stale-evidence steps');
   const evidence = Evidence.prepare(opts.evidence, { force: opts.forceEvidence });
   const runId = `selftest-${Date.now().toString(36)}-${process.pid.toString(36)}`;
   const journal = new Journal(evidence);
@@ -196,15 +201,15 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
     await step('refusals', async () => {
       for (const [label, config, code, needle] of fx.refusals) {
         const dir = childDir(label);
-        const result = await runChild(label, ['--scenario', 'runtime', '--config', config, '--evidence', dir]);
+        const result = await runChild(label, ['--scenario', PLANNED, '--config', config, '--evidence', dir]);
         const text = stderrOf(result);
         check(`refuses-${label}`, result.code === EXIT.USAGE && text.includes(code) && (!needle || text.includes(needle)) && !existsSync(dir),
           { code: result.code, expected: code, evidenceCreated: existsSync(dir), tail: result.lines.slice(-3) });
       }
       const cases = [
-        ['missing-config', ['--scenario', 'runtime', '--evidence', childDir('missing-config')], 'CONFIG_INVALID', {}],
-        ['ambiguous-force', ['--scenario', 'runtime', '--config', fx.good, '--evidence', childDir('ambiguous-force'), '--force'], 'USAGE', {}],
-        ['force-owner-outside-cleanup', ['--scenario', 'runtime', '--config', fx.good, '--evidence', childDir('force-owner'), '--force-owner'], 'USAGE', {}],
+        ['missing-config', ['--scenario', PLANNED, '--evidence', childDir('missing-config')], 'CONFIG_INVALID', {}],
+        ['ambiguous-force', ['--scenario', PLANNED, '--config', fx.good, '--evidence', childDir('ambiguous-force'), '--force'], 'USAGE', {}],
+        ['force-owner-outside-cleanup', ['--scenario', PLANNED, '--config', fx.good, '--evidence', childDir('force-owner'), '--force-owner'], 'USAGE', {}],
         ['unknown-scenario', ['--scenario', 'no-such-scenario', '--config', fx.good, '--evidence', childDir('unknown')], 'UNKNOWN_SCENARIO', {}],
         ['hidden-scenario-without-internal-flag', ['--scenario', '__selftest-fail', '--config', fx.good, '--evidence', childDir('hidden')], 'UNKNOWN_SCENARIO', {}],
         ['internal-flag-without-nonce', scenarioArgs('__selftest-no-assertions', childDir('no-nonce')), 'INTERNAL_FLAG_REFUSED', { [NONCE_ENV]: '' }],
@@ -221,7 +226,7 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
 
     await step('not-implemented', async () => {
       const dir = childDir('not-implemented');
-      const result = await runChild('not-implemented', ['--scenario', 'runtime', '--config', fx.good, '--evidence', dir]);
+      const result = await runChild('not-implemented', ['--scenario', PLANNED, '--config', fx.good, '--evidence', dir]);
       const { assertions, cleanup, run } = readChild(dir);
       check('planned-scenario-reports-not-implemented', result.code === EXIT.NOT_IMPLEMENTED && assertions?.status === 'NOT_IMPLEMENTED' && cleanup?.ok === true,
         { code: result.code, status: assertions?.status ?? null });
@@ -254,13 +259,13 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
       // A live holder (this self-test parent) must refuse a second run on the same dataRoot.
       writeFileSync(lockFile, `${JSON.stringify({ pid: process.pid, startStamp: owned.runnerStamp, mode: 'self-test-holder', at: new Date().toISOString(), nonce: 'held' })}\n`);
       const heldDir = childDir('run-lock-held');
-      const held = await runChild('run-lock-held', ['--scenario', 'runtime', '--config', fx.good, '--evidence', heldDir]);
+      const held = await runChild('run-lock-held', ['--scenario', PLANNED, '--config', fx.good, '--evidence', heldDir]);
       check('concurrent-run-refused-by-run-lock', held.code === EXIT.USAGE && stderrOf(held).includes('RUN_LOCKED') && !existsSync(heldDir) && existsSync(lockFile),
         { code: held.code, tail: held.lines.slice(-3) });
       // A holder that no longer exists is taken over, recorded, and the lock is released afterwards.
       writeFileSync(lockFile, `${JSON.stringify({ pid: 2_000_000_000, startStamp: null, mode: 'crashed-holder', at: new Date().toISOString(), nonce: 'dead' })}\n`);
       const staleDir = childDir('run-lock-stale');
-      const taken = await runChild('run-lock-stale', ['--scenario', 'runtime', '--config', fx.good, '--evidence', staleDir]);
+      const taken = await runChild('run-lock-stale', ['--scenario', PLANNED, '--config', fx.good, '--evidence', staleDir]);
       check('stale-run-lock-taken-over-and-released', taken.code === EXIT.NOT_IMPLEMENTED && existsSync(join(staleDir, 'run-lock-takeover.json')) && !existsSync(lockFile),
         { code: taken.code, tail: taken.lines.slice(-3) });
     });
@@ -344,11 +349,11 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
     await step('stale-evidence', async () => {
       const dir = childDir('not-implemented');
       const before = existsSync(join(dir, 'run.json')) ? sha256(readFileSync(join(dir, 'run.json'))) : null;
-      const refused = await runChild('stale-evidence', ['--scenario', 'runtime', '--config', fx.good, '--evidence', dir]);
+      const refused = await runChild('stale-evidence', ['--scenario', PLANNED, '--config', fx.good, '--evidence', dir]);
       const after = existsSync(join(dir, 'run.json')) ? sha256(readFileSync(join(dir, 'run.json'))) : null;
       check('stale-evidence-dir-refused', refused.code === EXIT.USAGE && refused.lines.join('\n').includes('EVIDENCE_DIR_NOT_EMPTY') && before !== null && before === after,
         { code: refused.code, unchanged: before === after });
-      const forced = await runChild('stale-evidence-forced', ['--scenario', 'runtime', '--config', fx.good, '--evidence', dir, '--force-evidence']);
+      const forced = await runChild('stale-evidence-forced', ['--scenario', PLANNED, '--config', fx.good, '--evidence', dir, '--force-evidence']);
       const moved = readdirSync(children).some((name) => name.startsWith('not-implemented.prior-'));
       check('force-evidence-moves-prior-run-aside', forced.code === EXIT.NOT_IMPLEMENTED && moved, { code: forced.code, moved });
     });
@@ -468,14 +473,14 @@ export async function selfTest(opts, interrupts, { script, repoRoot, scripts, wr
       fx.ledger.append({ type: 'path-released', key: decoy.key });
       // Only the argv-changed record (dead-owner, still alive) and the live-owner record remain open.
       const changedDir = childDir('stale-preflight-argv-changed');
-      const changedRun = await runChild('stale-preflight-argv-changed', ['--scenario', 'runtime', '--config', fx.good, '--evidence', changedDir]);
+      const changedRun = await runChild('stale-preflight-argv-changed', ['--scenario', PLANNED, '--config', fx.good, '--evidence', changedDir]);
       const changedText = stderrOf(changedRun);
       check('preflight-counts-argv-changed-as-stale', changedRun.code === EXIT.USAGE && changedText.includes('STALE_OWNED_STATE') && changedText.includes(forged.argvChanged.key)
         && !changedText.includes(forged.liveOwner.key) && !existsSync(changedDir), { code: changedRun.code, tail: changedRun.lines.slice(-3) });
       fx.ledger.append({ type: 'released', key: forged.argvChanged.key, reason: 'self-test: forged record withdrawn' });
 
       const postDir = childDir('post-cleanup');
-      const post = await runChild('post-cleanup', ['--scenario', 'runtime', '--config', fx.good, '--evidence', postDir]);
+      const post = await runChild('post-cleanup', ['--scenario', PLANNED, '--config', fx.good, '--evidence', postDir]);
       check('preflight-skips-records-of-a-live-runner', post.code === EXIT.NOT_IMPLEMENTED && foreign.exitInfo === null, { code: post.code, tail: post.lines.slice(-3) });
 
       const secondDir = childDir('cleanup-2');
