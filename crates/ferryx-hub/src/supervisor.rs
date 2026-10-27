@@ -51,6 +51,9 @@ pub const LANE_KEY_PREFIX: &str = "sv-";
 /// the legacy lane as owned by the supervisor ([`supervisor_owns_lane`]).
 pub const ADOPT_MESSAGE_PREFIX: &str = "adopt:";
 
+/// Code of [`SupervisorError::SetupConflict`].
+pub const SETUP_CONFLICT: &str = "SETUP_CONFLICT";
+
 /// `lanes.done_signals` of an admitted lane: completion is the goal contract, not a marker.
 const LANE_DONE_SIGNALS: &str = "goal contract";
 
@@ -150,6 +153,10 @@ pub enum SupervisorError {
     /// the current terms.
     #[error("legacy lane {lane_key} changed while its adoption was prepared: {why}")]
     LegacyTermsChanged { lane_key: String, why: String },
+    /// Set-up would change what the installation already holds: give it a second owner,
+    /// rename a project or move a project's host mapping. Nothing was written.
+    #[error("SETUP_CONFLICT: {0}")]
+    SetupConflict(String),
     #[error(transparent)]
     Goal(#[from] GoalError),
     #[error(transparent)]
@@ -180,6 +187,7 @@ impl SupervisorError {
             SupervisorError::SupervisorOwned { .. } => SUPERVISOR_OWNED,
             SupervisorError::LegacyLaneLive { .. } => admission::LEGACY_LANE_LIVE,
             SupervisorError::LegacyTermsChanged { .. } => admission::LEGACY_TERMS_CHANGED,
+            SupervisorError::SetupConflict(_) => SETUP_CONFLICT,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
             | SupervisorError::Goal(_) => "INVALID_REQUEST",
@@ -1176,7 +1184,11 @@ async fn require_project_of(
 
 /// The owner's supervisor identity, created on first use. One per owner installation:
 /// repeated calls return the same UUID.
-pub async fn ensure_identity(
+///
+/// Test-only: it does not refuse a second owner, so [`provision_owner`] is the one production
+/// writer of identities and keeps one identity per installation.
+#[cfg(test)]
+pub(crate) async fn ensure_identity(
     pool: &SqlitePool,
     owner_principal: &str,
 ) -> Result<SupervisorIdentity, SupervisorError> {
@@ -1322,6 +1334,167 @@ pub async fn bind_project_host(
         git_common_dir: git_common_dir.to_owned(),
         updated_at: now,
     })
+}
+
+/// Sets up this installation's supervisor in one write transaction: its one owner identity,
+/// the project for `repo_identity` and the project's mapping on `host_id`. Re-running it with
+/// the same arguments changes nothing and returns the same ids.
+///
+/// It never changes what the installation already holds; each of these is
+/// [`SupervisorError::SetupConflict`] and writes nothing:
+/// - another owner already has this installation's identity (one identity per installation);
+/// - the owner's project for `repo_identity` already has another name;
+/// - the project is already mapped on `host_id` to another git common dir;
+/// - `git_common_dir` on `host_id` already belongs to another project.
+pub async fn provision_owner(
+    pool: &SqlitePool,
+    owner_principal: &str,
+    project_name: &str,
+    repo_identity: &str,
+    host_id: &str,
+    git_common_dir: &str,
+) -> Result<(SupervisorIdentity, Project, ProjectHost), SupervisorError> {
+    require_id("owner principal", owner_principal, 256)?;
+    require_text("project name", project_name, 256)?;
+    require_id("repository identity", repo_identity, 1024)?;
+    require_id("host id", host_id, 256)?;
+    require_id("git common dir", git_common_dir, 4096)?;
+    let mut tx = pool.begin_write().await?;
+
+    let owners: Vec<(String, String)> = sqlx::query_as(
+        "SELECT supervisor_id, owner_principal FROM supervisor_identity ORDER BY created_at",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if !owners.is_empty() && !owners.iter().any(|(_, owner)| owner == owner_principal) {
+        let held: Vec<&str> = owners.iter().map(|(_, owner)| owner.as_str()).collect();
+        return Err(SupervisorError::SetupConflict(format!(
+            "this installation's supervisor already belongs to {}; it is not given a second owner",
+            held.join(", ")
+        )));
+    }
+    let now = now_rfc3339();
+    sqlx::query(
+        "INSERT INTO supervisor_identity(supervisor_id, owner_principal, memory_name, created_at)
+         VALUES(?,?,?,?) ON CONFLICT(owner_principal) DO NOTHING",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(owner_principal)
+    .bind(MEMORY_NAME)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    let (supervisor_id, owner, memory_name, identity_created): (String, String, String, String) =
+        sqlx::query_as(
+            "SELECT supervisor_id, owner_principal, memory_name, created_at
+             FROM supervisor_identity WHERE owner_principal = ?",
+        )
+        .bind(owner_principal)
+        .fetch_one(&mut *tx)
+        .await?;
+    let identity = SupervisorIdentity {
+        supervisor_id,
+        owner_principal: owner,
+        memory_name,
+        created_at: identity_created,
+    };
+
+    let existing: Option<ProjectRow> = sqlx::query_as(
+        "SELECT project_id, supervisor_id, name, repo_identity, created_at
+         FROM supervisor_projects WHERE supervisor_id = ? AND repo_identity = ?",
+    )
+    .bind(&identity.supervisor_id)
+    .bind(repo_identity)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let project = match existing {
+        Some(row) => {
+            let project = project_from_row(row);
+            if project.name != project_name {
+                return Err(SupervisorError::SetupConflict(format!(
+                    "project {} for {repo_identity} is named {:?}, not {project_name:?}",
+                    project.project_id, project.name
+                )));
+            }
+            project
+        }
+        None => {
+            let project = Project {
+                project_id: Uuid::new_v4().to_string(),
+                supervisor_id: identity.supervisor_id.clone(),
+                name: project_name.to_owned(),
+                repo_identity: repo_identity.to_owned(),
+                created_at: now.clone(),
+            };
+            sqlx::query(
+                "INSERT INTO supervisor_projects(project_id, supervisor_id, name, repo_identity, created_at)
+                 VALUES(?,?,?,?,?)",
+            )
+            .bind(&project.project_id)
+            .bind(&project.supervisor_id)
+            .bind(&project.name)
+            .bind(&project.repo_identity)
+            .bind(&project.created_at)
+            .execute(&mut *tx)
+            .await?;
+            project
+        }
+    };
+
+    let mapped: Option<(String, String)> = sqlx::query_as(
+        "SELECT git_common_dir, updated_at FROM supervisor_project_hosts
+         WHERE project_id = ? AND host_id = ?",
+    )
+    .bind(&project.project_id)
+    .bind(host_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let claimed_by: Option<String> = sqlx::query_scalar(
+        "SELECT project_id FROM supervisor_project_hosts WHERE host_id = ? AND git_common_dir = ?",
+    )
+    .bind(host_id)
+    .bind(git_common_dir)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(other) = claimed_by.filter(|other| *other != project.project_id) {
+        return Err(SupervisorError::SetupConflict(format!(
+            "{git_common_dir} on {host_id} is already mapped to project {other}"
+        )));
+    }
+    let host = match mapped {
+        Some((dir, _)) if dir != git_common_dir => {
+            return Err(SupervisorError::SetupConflict(format!(
+                "project {} is already mapped on {host_id} to {dir}; it is not moved",
+                project.project_id
+            )))
+        }
+        Some((dir, updated_at)) => ProjectHost {
+            project_id: project.project_id.clone(),
+            host_id: host_id.to_owned(),
+            git_common_dir: dir,
+            updated_at,
+        },
+        None => {
+            sqlx::query(
+                "INSERT INTO supervisor_project_hosts(project_id, host_id, git_common_dir, updated_at)
+                 VALUES(?,?,?,?)",
+            )
+            .bind(&project.project_id)
+            .bind(host_id)
+            .bind(git_common_dir)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+            ProjectHost {
+                project_id: project.project_id.clone(),
+                host_id: host_id.to_owned(),
+                git_common_dir: git_common_dir.to_owned(),
+                updated_at: now,
+            }
+        }
+    };
+    tx.commit().await?;
+    Ok((identity, project, host))
 }
 
 /// The project whose canonical git common dir on `host_id` is `git_common_dir`.
