@@ -605,6 +605,22 @@ async function runRemoteDelivery(ctx) {
   const routeBefore = await routeOf('route-after-pairing');
   ctx.assert('paired-route-is-relay', routeBefore === 'relay', { route: routeBefore });
 
+  // The daemon opens its hub after the socket is up and publishes no event for it, so ask the
+  // read-only status request until it stops answering SUPERVISOR_UNAVAILABLE (bounded backoff;
+  // the deadline fails the run, it never passes it).
+  const hubReadyBy = Date.now() + 90_000;
+  let hubProbe = null;
+  for (let attempt = 0, pauseMs = 250; ; attempt += 1, pauseMs = Math.min(pauseMs * 2, 2_000)) {
+    hubProbe = await ctx.cli(['supervisor', 'dispatch', 'status', '--goal', `qa-hub-ready-${attempt}`, '--json'], { label: `hub-ready-${attempt}`, env: hubEnv });
+    if (hubProbe.json?.code !== 'SUPERVISOR_UNAVAILABLE') break;
+    if (Date.now() + pauseMs > hubReadyBy) break;
+    await new Promise((resolvePause, rejectPause) => {
+      const timer = setTimeout(resolvePause, pauseMs);
+      ctx.signal.addEventListener('abort', () => { clearTimeout(timer); rejectPause(ctx.signal.reason); }, { once: true });
+    });
+  }
+  ctx.assert('hub-open-on-the-hub-daemon', hubProbe?.json?.code !== 'SUPERVISOR_UNAVAILABLE', { code: hubProbe?.code, json: hubProbe?.json });
+
   // 5. Positive receipt: the reporting pane starts the run from its own report.
   const positive = await submit('positive', reportingPane);
   const positiveGoal = positive.json?.receipt?.goal_id ?? null;
@@ -761,7 +777,7 @@ export const SCENARIOS = Object.freeze({
     summary: 'Paired target pane: start receipt starts the run; suppressed receipt stays accepted/uncertain, never started, never resent across a relay reconnect',
     deadlineMs: 8 * 60_000,
     requiredAssertions: [
-      'target-ready-for-pairing', 'hub-paired-with-target', 'project-mapped-on-paired-host', 'target-workspace-registered',
+      'target-ready-for-pairing', 'hub-paired-with-target', 'project-mapped-on-paired-host', 'target-workspace-registered', 'hub-open-on-the-hub-daemon',
       'positive-admitted-bound-to-paired-pane', 'positive-receipt-started-the-run', 'missing-admitted-bound-to-paired-pane',
       'paired-route-is-relay', 'missing-receipt-accepted-never-started', 'unrelated-activity-is-not-a-receipt', 'double-binding-refused',
       'post-reconnect-dispatch-started', 'reconnected-without-resend', 'fixture-workers-gone',
