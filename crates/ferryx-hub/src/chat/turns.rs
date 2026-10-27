@@ -1,6 +1,6 @@
 //! Live omo turns by session, so `/omo-stop` can interrupt one and `/omo-steer` can inject
 //! guidance into it (omo-gateway's `active_turns`). A turn registers for as long as it runs;
-//! the engine ids arrive once `turn/start` is answered.
+//! the durable session id and hub-local turn id arrive after mhc opens the session.
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -80,6 +80,14 @@ pub fn started(key: &str, thread_id: &str, turn_id: &str) {
         entry.thread_id = Some(thread_id.to_owned());
         entry.turn_id = Some(turn_id.to_owned()).filter(|id| !id.is_empty());
     }
+    #[cfg(test)]
+    registry_changes().send_modify(|version| *version += 1);
+}
+
+#[cfg(test)]
+fn registry_changes() -> &'static watch::Sender<u64> {
+    static CHANGES: OnceLock<watch::Sender<u64>> = OnceLock::new();
+    CHANGES.get_or_init(|| watch::channel(0).0)
 }
 
 /// Fires once `/omo-stop` asks for this session's turn to end.
@@ -162,50 +170,23 @@ mod tests {
         assert!(!is_active("k-test-3"));
     }
 
-    /// e2e against a mock omo app-server whose turn never ends on its own: the turn is
-    /// steered (`turn/steer` with the live turn id) and then stopped (`turn/interrupt`).
+    /// The executable mhc peer acknowledges prompt but leaves the turn running.
     #[cfg(feature = "hub-slack")]
     #[tokio::test]
     async fn e2e_a_live_omo_turn_is_steered_then_stopped() {
         use crate::meta::omo_client::{run_turn, steer, OmoClientConfig, TurnRequest, STOPPED};
-        use futures_util::{SinkExt, StreamExt};
-        use serde_json::{json, Value};
-        use std::sync::{Arc, Mutex as StdMutex};
-        use tokio_tungstenite::tungstenite::Message;
+        use crate::meta::rpc_mock::{serve, Script};
 
-        let frames: Arc<StdMutex<Vec<Value>>> = Arc::default();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
-        let log = frames.clone();
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let log = log.clone();
-                tokio::spawn(async move {
-                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                    while let Some(Ok(Message::Text(text))) = ws.next().await {
-                        let frame: Value = serde_json::from_str(&text).unwrap();
-                        log.lock().unwrap().push(frame.clone());
-                        let id = frame.get("id").cloned().unwrap_or(Value::Null);
-                        let reply = match frame.get("method").and_then(Value::as_str) {
-                            Some("initialize") => json!({"jsonrpc":"2.0","id":id,"result":{}}),
-                            Some("thread/start") => {
-                                json!({"jsonrpc":"2.0","id":id,"result":{"thread":{"id":"th-live"}}})
-                            }
-                            Some("turn/start") => {
-                                json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"tu-live"}}})
-                            }
-                            Some("turn/steer") => json!({"jsonrpc":"2.0","id":id,"result":{}}),
-                            _ => continue,
-                        };
-                        ws.send(Message::text(reply.to_string())).await.unwrap();
-                    }
-                });
-            }
-        });
-
-        let config = OmoClientConfig::new(url);
+        let (binary, log) = serve(Script {
+            messages: Vec::new(),
+            approval: false,
+            live: true,
+        })
+        .await;
+        let config = OmoClientConfig::new(binary);
         let turn_config = config.clone();
         let guard = begin("k-e2e", "C-e2e");
+        let mut ready = registry_changes().subscribe();
         let turn = tokio::spawn(scope("k-e2e".into(), async move {
             run_turn(
                 &turn_config,
@@ -217,20 +198,16 @@ mod tests {
             )
             .await
         }));
-        let mut ids_seen = None;
-        for _ in 0..200 {
-            ids_seen = ids("k-e2e");
-            if ids_seen.is_some() {
-                break;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while ids("k-e2e").is_none() {
+                ready.changed().await.unwrap();
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let (thread_id, turn_id) = ids_seen.expect("the engine ids are registered");
-        assert_eq!(
-            (thread_id.as_str(), turn_id.as_str()),
-            ("th-live", "tu-live")
-        );
-
+        })
+        .await
+        .expect("turn ready");
+        let (thread_id, turn_id) = ids("k-e2e").expect("engine ids registered");
+        assert_eq!(thread_id, log.session_file.to_string_lossy());
+        assert!(!turn_id.is_empty());
         assert!(
             steer(&config, &thread_id, &turn_id, "[Steering] use staging")
                 .await
@@ -239,38 +216,19 @@ mod tests {
         assert!(stop("k-e2e"));
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
             .await
-            .expect("the stopped turn ends")
+            .expect("stopped turn ends")
             .unwrap();
         assert!(result.unwrap_err().to_string().contains(STOPPED));
         drop(guard);
-
-        // The interrupt is written just before the client closes; give the mock a moment.
-        for _ in 0..200 {
-            if frames
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|frame| frame["method"] == "turn/interrupt")
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let frames = frames.lock().unwrap().clone();
-        let steer_frame = frames
+        log.wait_for(|frames| frames.iter().any(|f| f["type"] == "steer"))
+            .await;
+        let frames = log.frames.lock().unwrap();
+        let steer = frames
             .iter()
-            .find(|frame| frame["method"] == "turn/steer")
-            .expect("turn/steer sent");
-        assert_eq!(steer_frame["params"]["expectedTurnId"], "tu-live");
-        assert_eq!(
-            steer_frame["params"]["input"][0]["text"],
-            "[Steering] use staging"
-        );
-        let interrupt = frames
-            .iter()
-            .find(|frame| frame["method"] == "turn/interrupt")
-            .expect("turn/interrupt sent");
-        assert_eq!(interrupt["params"]["turnId"], "tu-live");
-        assert_eq!(interrupt["params"]["threadId"], "th-live");
+            .find(|f| f["type"] == "steer")
+            .expect("steer sent");
+        assert_eq!(steer["message"], "[Steering] use staging");
+        // Each turn owns a single-session mhc RPC child, so steer frames carry no session id.
+        assert!(steer.get("sessionId").is_none());
     }
 }

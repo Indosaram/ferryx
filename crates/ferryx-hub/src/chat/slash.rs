@@ -213,7 +213,7 @@ fn live_turn_target(
 }
 
 /// `/omo-stop`: interrupts the session's running omo turn (`turn/interrupt`) and marks the
-/// session suspended. Without the omo app-server path, the meta pane is stopped instead.
+/// session suspended. Without the mhc RPC path, the meta pane is stopped instead.
 async fn stop(
     env: &SlashEnv<'_>,
     invocation: &SlashInvocation,
@@ -279,10 +279,7 @@ async fn steer(
             _ => return Ok(SlashReply::private(THREAD_ONLY)),
         };
         if let Some((thread_id, turn_id)) = super::turns::ids(&target) {
-            let mut omo = config.omo.clone();
-            if let Some(path) = &config.token_path {
-                omo.token = crate::meta::omo_client::token_from_file(path);
-            }
+            let omo = config.omo.clone();
             match crate::meta::omo_client::steer(&omo, &thread_id, &turn_id, &prompt).await {
                 Ok(true) => {
                     return Ok(SlashReply::private(format!(
@@ -439,7 +436,7 @@ async fn thread(
         if let Some(starter) = message.filter(|text| !text.trim().is_empty()) {
             let Some(config) = super::slack_turn::installed() else {
                 return Ok(SlashReply::public(format!(
-                    "❌ Created thread {link} but could not start a session: the omo app-server is not configured"
+                    "❌ Created thread {link} but could not start a session: mhc RPC is not configured"
                 )));
             };
             let admitted = super::slack_turn::Admitted {

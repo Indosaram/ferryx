@@ -2,8 +2,8 @@
 //!
 //! A native job is `script` / `command` / `shell`, an agent `prompt` or `brief_file`,
 //! or both. A Hermes job also carries `schedule`, `skills` / `skill`, `no_agent`,
-//! and `monitor_script` / `monitor_url`. The agent turn goes to the omo app-server
-//! (`ws://127.0.0.1:19742`, override `FERRYX_HUB_OMO_URL`). Skill files are read from
+//! and `monitor_script` / `monitor_url`. Agent turns run through mhc JSONL RPC.
+//! Skill files are read from
 //! the Hermes skills root and prepended to that turn. `[SILENT]` and `wakeAgent: false`
 //! suppress delivery.
 use std::path::{Path, PathBuf};
@@ -15,8 +15,6 @@ use sha2::{Digest, Sha256};
 use crate::error::{HubError, Result};
 use crate::lanes::kibitzer::ModelTurn;
 use crate::schedule::script_from_payload;
-
-pub const OMO_APP_SERVER: &str = "ws://127.0.0.1:19742";
 
 /// Payload key holding the model the owner picked for one job. It is separate from the
 /// imported omo `model` key, which stays ignored so stored data cannot move a job off the

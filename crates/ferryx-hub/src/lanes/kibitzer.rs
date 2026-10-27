@@ -170,8 +170,7 @@ pub async fn ensure_lead(pool: &SqlitePool, lead: &str) -> Result<()> {
     Ok(())
 }
 
-/// One omo app-server turn. The production backend is the websocket client in
-/// `meta::backend::UrlModel`.
+/// One mhc RPC turn. The production backend is `meta::backend::RpcModel`.
 #[async_trait]
 pub trait ModelTurn: Send + Sync {
     async fn complete(&self, prompt: &str) -> Result<String>;

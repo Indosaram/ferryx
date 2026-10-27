@@ -13,7 +13,11 @@ impl SupervisorPanePreset {
         Self {
             title: "supervisor".into(),
             cwd,
-            command,
+            command: if command.is_empty() {
+                vec![super::supervisor::mhc_bin()]
+            } else {
+                command
+            },
         }
     }
 }
@@ -26,9 +30,9 @@ mod tests {
     fn the_preset_is_named_supervisor() {
         let preset = SupervisorPanePreset::from_parts(
             PathBuf::from("/tmp"),
-            vec!["omo".into(), "app-server".into()],
+            vec!["mhc".into()],
         );
         assert_eq!(preset.title, "supervisor");
-        assert_eq!(preset.command[0], "omo");
+        assert_eq!(preset.command[0], "mhc");
     }
 }

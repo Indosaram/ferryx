@@ -1,6 +1,6 @@
 //! End-to-end checks of the omo-gateway behaviours ported onto the 1022.8 Slack turn path:
 //! approval cards, dashboard chat, channel context, attachments, forwarded messages and the
-//! missed-message backfill. Slack and the omo app-server are loopback stand-ins.
+//! missed-message backfill. Slack is a loopback stand-in; mhc is an executable JSONL peer.
 use serde_json::{json, Value};
 
 use super::session::SessionKey;
@@ -9,16 +9,71 @@ use super::slack_turn::{
     admit, prepare_prompt_in, run_dashboard_turn, run_session_turn, AllowBots, SessionTurn,
     SlackTurnConfig,
 };
-use super::slack_web::mock::{serve_scripted, Calls};
-use crate::meta::omo_client::mock::{serve, MockLog, Script};
+use super::slack_web::mock::Calls;
 use crate::meta::omo_client::{OmoClientConfig, FULL_ACCESS_TEST};
 
+use crate::meta::rpc_mock::{serve, MockLog, Script};
+
 const PUSH: &str = "git push origin main";
+
+fn slack_changes() -> &'static tokio::sync::watch::Sender<u64> {
+    static CHANGES: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
+        std::sync::OnceLock::new();
+    CHANGES.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
+async fn wait_calls(calls: &Calls, predicate: impl Fn(&[(String, Value)]) -> bool) {
+    let mut changes = slack_changes().subscribe();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if predicate(&calls.lock().unwrap()) {
+                return;
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("expected Slack call");
+}
+
+// Notify only after the underlying mock has recorded a request. This lets tests subscribe
+// before checking the log, without fixed sleeps or polling for asynchronous side effects.
+async fn serve_scripted(bot: &str, script: Vec<(&str, Vec<Value>)>) -> (String, Calls) {
+    let (upstream, calls) = super::slack_web::mock::serve_scripted(bot, script).await;
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let upstream = upstream.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+            let response = reqwest::Client::new()
+                .request(parts.method, format!("{upstream}{}", parts.uri))
+                .headers(parts.headers)
+                .body(bytes)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = response.bytes().await.unwrap();
+            slack_changes().send_modify(|version| *version += 1);
+            let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
+            *response.status_mut() = status;
+            *response.headers_mut() = headers;
+            response
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (base, calls)
+}
 
 fn config(omo_url: String) -> SlackTurnConfig {
     SlackTurnConfig {
         omo: OmoClientConfig::new(omo_url),
-        token_path: None,
+
         allowed_users: vec!["UOWNER".into()],
         free_channels: vec!["CHOME".into()],
         default_model: None,
@@ -34,15 +89,8 @@ fn config(omo_url: String) -> SlackTurnConfig {
 fn script(messages: &[&str], approval: bool) -> Script {
     Script {
         messages: messages.iter().map(|m| (*m).to_owned()).collect(),
-        resume_error: None,
         approval,
-        approval_command: approval.then(|| PUSH.to_owned()),
-        thread_id: "thr-parity".into(),
-        queued_ticks: 0,
-        tick: std::time::Duration::ZERO,
-        no_ack: false,
-        switch_error: None,
-        silent_first_turn: false,
+        live: false,
     }
 }
 
@@ -61,33 +109,36 @@ fn approval_answer(log: &MockLog) -> Option<Value> {
         .lock()
         .unwrap()
         .iter()
-        .find(|f| f.get("id") == Some(&json!(77)) && f.get("result").is_some())
+        .find(|f| f["id"] == "77" && f["type"] == "extension_ui_response")
         .cloned()
 }
 
 /// Waits for the approval card; returns (card ts, button value for `choice`).
 async fn wait_card(calls: &Calls, choice: &str) -> (String, String) {
-    for _ in 0..200 {
-        let found = calls
-            .lock()
+    wait_calls(calls, |calls| {
+        calls
+            .iter()
+            .any(|(m, b)| m == "chat.postMessage" && b.get("blocks").is_some())
+    })
+    .await;
+    let found = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .find(|(_, (m, b))| m == "chat.postMessage" && b.get("blocks").is_some())
+        .map(|(index, (_, body))| (index, body.clone()));
+    if let Some((index, card)) = found {
+        let value = card["blocks"]
+            .as_array()
             .unwrap()
             .iter()
-            .enumerate()
-            .find(|(_, (m, b))| m == "chat.postMessage" && b.get("blocks").is_some())
-            .map(|(index, (_, body))| (index, body.clone()));
-        if let Some((index, card)) = found {
-            let value = card["blocks"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|block| block["elements"].as_array().cloned().unwrap_or_default())
-                .filter_map(|element| element["value"].as_str().map(str::to_owned))
-                .find(|value| value.ends_with(&format!(":{choice}")))
-                .expect("card has the button");
-            // The mock numbers a posted message by its position in the call log.
-            return (format!("1700000000.{:06}", index + 1), value);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            .flat_map(|block| block["elements"].as_array().cloned().unwrap_or_default())
+            .filter_map(|element| element["value"].as_str().map(str::to_owned))
+            .find(|value| value.ends_with(&format!(":{choice}")))
+            .expect("card has the button");
+        // The mock numbers a posted message by its position in the call log.
+        return (format!("1700000000.{:06}", index + 1), value);
     }
     panic!("no approval card: {:?}", calls.lock().unwrap());
 }
@@ -127,7 +178,7 @@ async fn e2e_full_access_off_posts_an_approval_card_and_waits_for_the_owner() {
         FULL_ACCESS_TEST
             .scope(false, async {
                 assert!(crate::meta::omo_client::approval_verdict(
-                    &json!({"method": "item/commandExecution/requestApproval", "params": {"command": PUSH}}),
+                    &json!({"type":"extension_ui_request", "id":"77", "method":"confirm", "title":"Run command", "message":PUSH}),
                     None
                 )
                 .is_some());
@@ -158,7 +209,7 @@ async fn e2e_full_access_off_posts_an_approval_card_and_waits_for_the_owner() {
     .await;
     assert_eq!(reply.as_deref(), Some("pushed"));
     let answer = approval_answer(&log).expect("omo got an answer");
-    assert_eq!(answer["result"]["decision"], "accept", "{answer}");
+    assert_eq!(answer["confirmed"], true, "{answer}");
 
     let card = calls_of(&calls, "chat.postMessage")
         .into_iter()
@@ -202,8 +253,7 @@ async fn e2e_a_denied_card_declines_and_always_allow_skips_the_next_card() {
     })
     .await;
     let answer = approval_answer(&log).unwrap();
-    assert_eq!(answer["result"]["decision"], "decline");
-    assert!(answer.to_string().contains("denied by the owner"));
+    assert_eq!(answer["confirmed"], false);
 
     // Always allow: stored in the ledger, so the next identical request gets no card.
     calls.lock().unwrap().clear();
@@ -225,10 +275,7 @@ async fn e2e_a_denied_card_declines_and_always_allow_skips_the_next_card() {
             .await
     })
     .await;
-    assert_eq!(
-        approval_answer(&log).unwrap()["result"]["decision"],
-        "accept"
-    );
+    assert_eq!(approval_answer(&log).unwrap()["confirmed"], true);
     calls.lock().unwrap().clear();
     let (omo_url, log) = serve(script(&["pushed again"], true)).await;
     let third = config(omo_url);
@@ -239,10 +286,7 @@ async fn e2e_a_denied_card_declines_and_always_allow_skips_the_next_card() {
     })
     .await;
     assert_eq!(reply.as_deref(), Some("pushed again"));
-    assert_eq!(
-        approval_answer(&log).unwrap()["result"]["decision"],
-        "accept"
-    );
+    assert_eq!(approval_answer(&log).unwrap()["confirmed"], true);
     assert!(calls_of(&calls, "chat.postMessage")
         .iter()
         .all(|b| b.get("blocks").is_none()));
@@ -260,16 +304,14 @@ async fn an_unanswered_card_expires_and_a_stale_click_clears_it() {
         Some("100.1".into()),
     );
     approver.timeout = std::time::Duration::from_millis(100);
-    let frame = json!({"method": "item/commandExecution/requestApproval", "id": 5, "params": {"command": PUSH}});
+    let frame = json!({"type":"extension_ui_request", "method":"confirm", "id":"5", "title":"Run command", "message":PUSH});
     let answer = with_test_api(base.clone(), "xoxb-test".into(), async {
         let answer = approver.ask(&frame, None, "needs approval").await;
         let (ts, once) = wait_card(&calls, "once").await;
-        for _ in 0..100 {
-            if !calls_of(&calls, "chat.update").is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        wait_calls(&calls, |calls| {
+            calls.iter().any(|(m, _)| m == "chat.update")
+        })
+        .await;
         assert!(
             super::turn_approval::handle_click(
                 &click("UOWNER", &ts, &once, ""),
@@ -322,13 +364,10 @@ async fn e2e_dashboard_chat_runs_an_omo_turn_for_web_and_slack_sessions() {
         .lock()
         .unwrap()
         .iter()
-        .find(|f| f["method"] == "turn/start")
+        .find(|f| f["type"] == "prompt")
         .cloned()
         .unwrap();
-    assert_eq!(
-        turn_start["params"]["input"][0]["text"],
-        "summarise the repo"
-    );
+    assert_eq!(turn_start["message"], "summarise the repo");
 
     // A Slack session typed into from the dashboard answers in its Slack thread.
     let (omo_url, _log) = serve(script(&["on it", "replied"], false)).await;
@@ -384,7 +423,7 @@ async fn e2e_a_mention_carries_topic_channel_context_forwards_and_attachments() 
         "attachments": [{"is_share": true, "author_name": "Kim", "text": "deploy failed at step 3"}]
     });
     let payload = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": event});
-    let admitted = admit(&config("ws://127.0.0.1:9".into()), &payload, "UBOT", false).unwrap();
+    let admitted = admit(&config("unused-mhc".into()), &payload, "UBOT", false).unwrap();
     let dir = std::env::temp_dir().join(format!("ferryx-ingress-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let prompt = with_test_api(base.clone(), "xoxb-test".into(), async {
@@ -411,7 +450,7 @@ async fn e2e_a_mention_carries_topic_channel_context_forwards_and_attachments() 
     // A reply in an unknown thread quotes its root.
     let reply_event = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
         "type": "message", "user": "UOWNER", "channel": "CHOME", "ts": "7.2", "thread_ts": "7.1", "text": "and this?"}});
-    let reply = admit(&config("ws://x".into()), &reply_event, "UBOT", false).unwrap();
+    let reply = admit(&config("unused-mhc".into()), &reply_event, "UBOT", false).unwrap();
     let (base2, _calls2) = serve_scripted(
         "UBOT",
         vec![
@@ -434,27 +473,27 @@ async fn e2e_a_mention_carries_topic_channel_context_forwards_and_attachments() 
     let file_only = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
         "type": "message", "subtype": "file_share", "user": "UOWNER", "channel": "CHOME", "ts": "5.1", "text": "",
         "files": [{"id": "F9", "name": "a.png", "url_private": "https://files/a.png"}]}});
-    assert!(admit(&config("ws://x".into()), &file_only, "UBOT", false).is_some());
+    assert!(admit(&config("unused-mhc".into()), &file_only, "UBOT", false).is_some());
     let bot = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
         "type": "message", "subtype": "bot_message", "bot_id": "B1", "channel": "CHOME", "ts": "5.2", "text": "hi"}});
-    assert!(admit(&config("ws://x".into()), &bot, "UBOT", false).is_none());
-    let mut mentions = config("ws://x".into());
+    assert!(admit(&config("unused-mhc".into()), &bot, "UBOT", false).is_none());
+    let mut mentions = config("unused-mhc".into());
     mentions.allow_bots = AllowBots::Mentions;
     mentions.allow_all_users = true;
     let bot_mention = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
         "type": "app_mention", "bot_id": "B1", "channel": "CHOME", "ts": "5.3", "text": "<@UBOT> hi"}});
     assert!(admit(&mentions, &bot_mention, "UBOT", false).is_some());
-    let mut scoped = config("ws://x".into());
+    let mut scoped = config("unused-mhc".into());
     scoped.ignored_channels = vec!["CHOME".into()];
     let plain = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
         "type": "message", "user": "UOWNER", "channel": "CHOME", "ts": "5.4", "text": "hi"}});
     assert!(admit(&scoped, &plain, "UBOT", false).is_none());
-    let mut no_auto = config("ws://x".into());
+    let mut no_auto = config("unused-mhc".into());
     no_auto.auto_thread = false;
     let top = admit(&no_auto, &plain, "UBOT", false).unwrap();
     assert_eq!(top.key.thread_id, None);
     assert_eq!(top.reply_thread.as_deref(), Some("5.4"));
-    let mut strict = config("ws://x".into());
+    let mut strict = config("unused-mhc".into());
     strict.free_channels.clear();
     strict.thread_require_mention = true;
     let thread_reply = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
@@ -510,13 +549,8 @@ async fn e2e_messages_missed_while_down_are_answered_once_after_restart() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|f| f["method"] == "turn/start")
-        .map(|f| {
-            f["params"]["input"][0]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        })
+        .filter(|f| f["type"] == "prompt")
+        .map(|f| f["message"].as_str().unwrap_or_default().to_owned())
         .collect();
     assert_eq!(turn_texts.len(), 2, "{turn_texts:?}");
     assert!(turn_texts[0].ends_with("] first"), "{turn_texts:?}");
@@ -573,18 +607,13 @@ async fn e2e_a_cron_delivery_rides_on_the_next_turn_of_its_thread_once() {
             .lock()
             .unwrap()
             .iter()
-            .find(|f| f["method"] == "turn/start")
-            .map(|f| {
-                f["params"]["input"][0]["text"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_owned()
-            })
+            .find(|f| f["type"] == "prompt")
+            .map(|f| f["message"].as_str().unwrap_or("").to_owned())
             .unwrap()
     };
 
     // The thread's session exists after one turn.
-    let (omo_url, _) = serve(script(&["hello"], false)).await;
+    let (omo_url, _first_peer) = serve(script(&["hello"], false)).await;
     let first = config(omo_url);
     with_test_api(base.clone(), "xoxb-test".into(), async {
         run_session_turn(&first, &pool, slack_turn("hi")).await
@@ -659,8 +688,14 @@ async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
                     .scope(false, async {
                         let clicker = async {
                             let (ts, allow) = wait_card(&calls, "once").await;
-                            // The owner answers after a few status intervals.
-                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                            // Answer after observing the status edit, not after a guessed delay.
+                            wait_calls(&calls, |calls| {
+                                calls.iter().any(|(m, b)| {
+                                    m == "chat.update"
+                                        && b["text"].as_str().unwrap_or("").starts_with("작업 중:")
+                                })
+                            })
+                            .await;
                             super::turn_approval::handle_click(
                                 &click("UOWNER", &ts, &allow, &response_url),
                                 &owners,
@@ -700,7 +735,7 @@ async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
 #[tokio::test]
 async fn e2e_a_reply_claim_is_stripped_then_remeasured_and_corrected() {
     let marker = r#"빌드 결과는 3줄이에요. [[measure ["echo","4"] expect~"^3$"]]"#;
-    let (omo_url, _) = serve(script(&[marker], false)).await;
+    let (omo_url, _peer) = serve(script(&[marker], false)).await;
     let config = config(omo_url);
     let pool = crate::storage::memory().await.unwrap();
     let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
@@ -708,12 +743,14 @@ async fn e2e_a_reply_claim_is_stripped_then_remeasured_and_corrected() {
         super::report_claims::DELAY_OVERRIDE
             .scope(std::time::Duration::from_millis(50), async {
                 let reply = run_session_turn(&config, &pool, slack_turn("빌드 어때?")).await;
-                for _ in 0..200 {
-                    if calls_of(&calls, "chat.postMessage").len() >= 2 {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
+                wait_calls(&calls, |calls| {
+                    calls
+                        .iter()
+                        .filter(|(m, _)| m == "chat.postMessage")
+                        .count()
+                        >= 2
+                })
+                .await;
                 reply
             })
             .await
@@ -735,4 +772,24 @@ async fn e2e_a_reply_claim_is_stripped_then_remeasured_and_corrected() {
     .await
     .unwrap();
     assert!(!stored.contains("[[measure"), "{stored}");
+}
+
+#[tokio::test]
+async fn provider_503_runs_exactly_one_luna_fallback() {
+    let (binary, log) = serve(script(&["__provider503__"], false)).await;
+    let mut config = config(binary);
+    config.default_model = Some("mahoquot/gpt-6-astra".into());
+    let pool = crate::storage::memory().await.unwrap();
+    let mut turn = slack_turn("hello");
+    turn.reply_channel = None;
+    let result = run_session_turn(&config, &pool, turn).await.unwrap();
+    assert_eq!(result, "recovered");
+    let frames = log.frames.lock().unwrap();
+    assert_eq!(frames.iter().filter(|f| f["type"] == "prompt").count(), 2);
+    let models: Vec<_> = frames
+        .iter()
+        .filter(|f| f["type"] == "set_model")
+        .map(|f| f["modelId"].as_str().unwrap())
+        .collect();
+    assert_eq!(models, vec!["gpt-6-astra", "gpt-6-luna"]);
 }

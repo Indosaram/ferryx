@@ -247,18 +247,15 @@ fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
-/// The hub's omo app-server, as cron turns use it. Tests get none, so a failed jev call there
+/// The hub's mhc RPC backend. Tests get none, so a failed jev call there
 /// answers conservatively without reaching for a daemon.
 fn default_fallback() -> Option<Arc<dyn crate::lanes::kibitzer::ModelTurn>> {
     if cfg!(test) {
         return None;
     }
-    let url = crate::hub_env::var("FERRYX_HUB_OMO_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| crate::cron_exec::OMO_APP_SERVER.to_owned());
-    Some(Arc::new(crate::meta::backend::UrlModel::new(url)))
+    Some(Arc::new(crate::meta::backend::RpcModel::new(
+        crate::meta::supervisor::mhc_bin(),
+    )))
 }
 
 fn kst_today() -> NaiveDate {

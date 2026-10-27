@@ -1429,13 +1429,8 @@ pub async fn drive_due_now(pool: &SqlitePool) -> Result<Vec<DueDelivery>> {
     drive_due_with(pool, Utc::now(), &model, skills.as_deref()).await
 }
 
-fn cron_model() -> crate::meta::backend::UrlModel {
-    let url = crate::hub_env::var("FERRYX_HUB_OMO_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| crate::cron_exec::OMO_APP_SERVER.to_owned());
-    crate::meta::backend::UrlModel::for_cron(url)
+fn cron_model() -> crate::meta::backend::RpcModel {
+    crate::meta::backend::RpcModel::for_cron(crate::meta::supervisor::mhc_bin())
 }
 
 fn skills_root_from_env() -> Option<std::path::PathBuf> {

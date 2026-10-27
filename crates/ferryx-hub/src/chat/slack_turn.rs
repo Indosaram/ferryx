@@ -1,4 +1,4 @@
-//! Slack message → omo app-server turn → threaded Slack reply, the path omo-gateway served.
+//! Slack message → mhc RPC turn → threaded Slack reply.
 //!
 //! Admission mirrors omo-gateway's `map_event`: only allowed users (`SLACK_ALLOWED_USERS`, the
 //! hub owner, or omo's default owner); DMs always; in channels, an `app_mention`, any message in a
@@ -23,8 +23,6 @@ const PLATFORM: &str = "slack";
 #[derive(Debug, Clone)]
 pub struct SlackTurnConfig {
     pub omo: OmoClientConfig,
-    /// Re-read before each turn so a restarted app-server's new token is picked up.
-    pub token_path: Option<std::path::PathBuf>,
     pub allowed_users: Vec<String>,
     pub free_channels: Vec<String>,
     pub default_model: Option<String>,
@@ -79,8 +77,7 @@ fn split_list(raw: Option<String>) -> Vec<String> {
 
 impl SlackTurnConfig {
     pub fn from_env(
-        url: &str,
-        token_path: Option<std::path::PathBuf>,
+        binary: &str,
         owner: Option<&str>,
     ) -> Self {
         let var = |name: &str| crate::hub_env::var(name).ok();
@@ -99,11 +96,10 @@ impl SlackTurnConfig {
                 free_channels.push(channel);
             }
         }
-        let mut omo = OmoClientConfig::new(url).with_env_timeouts();
+        let mut omo = OmoClientConfig::new(binary).with_env_timeouts();
         omo.workspace = omo_client::slack_workspace();
         Self {
             omo,
-            token_path,
             allowed_users,
             free_channels,
             default_model: var("OMON_DEFAULT_MODEL")
@@ -582,10 +578,7 @@ pub async fn run_session_turn(
     if state.system_prompt.is_none() {
         state.system_prompt = inherited_system_prompt(pool, &turn.key).await;
     }
-    let mut omo = config.omo.clone();
-    if let Some(path) = &config.token_path {
-        omo.token = omo_client::token_from_file(path);
-    }
+    let omo = config.omo.clone();
     let mut request = TurnRequest {
         thread_id: state
             .metadata
@@ -660,7 +653,7 @@ pub async fn run_session_turn(
             }
         }
     });
-    tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), "session turn started on omo app-server");
+    tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), "session turn started on mhc RPC");
     let started = std::time::Instant::now();
     // omo's status message for the owner's long turns.
     let status_message = match &turn.reply_channel {
@@ -701,7 +694,7 @@ pub async fn run_session_turn(
     });
     let channel = turn.reply_channel.clone().unwrap_or_default();
     let registration = super::turns::begin(&storage_key, &channel);
-    // Boxed: the app-server turn plus the approval wrapper is a large future, and an unboxed
+    // Boxed: the RPC turn plus the approval wrapper is a large future, and an unboxed
     // copy on each await level overflowed a 2 MiB worker stack in debug builds.
     let run = Box::pin(async {
         let first = omo_client::run_turn_recovering(&omo, &request, Some(progress.clone())).await;
@@ -1100,8 +1093,7 @@ mod tests {
 
     fn config() -> SlackTurnConfig {
         SlackTurnConfig {
-            omo: OmoClientConfig::new("ws://127.0.0.1:9"),
-            token_path: None,
+            omo: OmoClientConfig::new("mhc"),
             allowed_users: vec!["UOWNER".into()],
             free_channels: vec!["CHOME".into()],
             default_model: None,

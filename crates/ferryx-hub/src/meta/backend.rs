@@ -1,113 +1,27 @@
-//! Headless omo engine. A transport stands in for the websocket so tests do not spawn a daemon.
-use async_trait::async_trait;
-use serde_json::Value;
-
-use super::protocol::{self, Workspace};
+//! Background model turns through the same mhc RPC client as chat.
+#[cfg(feature = "hub-slack")]
+use super::protocol::Workspace;
 use crate::error::{HubError, Result};
+use async_trait::async_trait;
 
-#[async_trait]
-pub trait OmoTransport: Send + Sync {
-    async fn roundtrip(&self, frames: Vec<String>) -> Result<Vec<Value>>;
-}
-
-pub struct HeadlessEngine<T> {
-    transport: T,
-    workspace: Workspace,
-    system_prompt: Option<String>,
-    model: Option<String>,
-    toolsets: Vec<String>,
-}
-
-impl<T: OmoTransport> HeadlessEngine<T> {
-    pub fn new(transport: T, workspace: Workspace) -> Self {
-        Self {
-            transport,
-            workspace,
-            system_prompt: None,
-            model: None,
-            toolsets: Vec::new(),
-        }
-    }
-
-    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
-        self
-    }
-
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-
-    pub fn with_toolsets(mut self, toolsets: Vec<String>) -> Self {
-        self.toolsets = toolsets;
-        self
-    }
-
-    /// initialize, thread/start, turn/start. Assistant text is collected from events.
-    /// Approval requests are declined. The reply is the text the engine returns, not a screen scrape.
-    pub async fn turn(&self, prompt: &str) -> Result<String> {
-        let frames = vec![
-            protocol::initialize_request(),
-            protocol::thread_start_request(
-                self.system_prompt.as_deref(),
-                self.model.as_deref(),
-                Some(&self.workspace),
-                (!self.toolsets.is_empty()).then_some(self.toolsets.as_slice()),
-            ),
-            protocol::turn_start_request("pending", prompt, self.model.as_deref()),
-        ];
-        let events = self.transport.roundtrip(frames).await?;
-        let mut thread_id = None;
-        let mut parts = Vec::new();
-        for event in &events {
-            if event.get("method").and_then(Value::as_str) == Some("thread/start") {
-                thread_id = event
-                    .pointer("/result/threadId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-            }
-            if let Some(id) = event.pointer("/result/thread/id").and_then(Value::as_str) {
-                thread_id = Some(id.to_owned());
-            }
-            if let Some(text) = event.pointer("/params/item/text").and_then(Value::as_str) {
-                parts.push(text.to_owned());
-            }
-            if let Some(method) = event.get("method").and_then(Value::as_str) {
-                if protocol::is_approval_request(method) {
-                    let _ =
-                        protocol::approval_denial_response(event.get("id").unwrap_or(&Value::Null));
-                }
-            }
-        }
-        if parts.is_empty() {
-            return Err(HubError::message(format!(
-                "omo turn produced no assistant text (thread {thread_id:?})"
-            )));
-        }
-        Ok(parts.join("\n"))
-    }
-}
-
-/// Websocket client for the omo app-server. Kibitzer and `/omo-compress` call it
-/// when `FERRYX_HUB_OMO_URL` is set.
-pub struct UrlModel {
-    url: String,
+/// mhc RPC client for kibitzer, cron, judge, and compression turns.
+pub struct RpcModel {
+    binary: String,
     /// Overrides the whole-turn cap (cron turns use omo's tighter cron ceiling).
     total_timeout: Option<std::time::Duration>,
     #[cfg(feature = "hub-slack")]
     workspace: Workspace,
 }
 
-impl UrlModel {
-    pub fn new(url: impl Into<String>) -> Self {
+impl RpcModel {
+    pub fn new(binary: impl Into<String>) -> Self {
         #[cfg(feature = "hub-slack")]
         let cwd = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
             .display()
             .to_string();
         Self {
-            url: url.into(),
+            binary: binary.into(),
             total_timeout: None,
             #[cfg(feature = "hub-slack")]
             workspace: Workspace {
@@ -118,17 +32,10 @@ impl UrlModel {
     }
 }
 
-impl UrlModel {
-    /// omo-gateway's cron lane (`OmoConfig::cron_from_env`): `OMON_OMO_CRON_APPSERVER_URL`
-    /// overrides the app-server, and `OMON_OMO_CRON_TURN_TOTAL_TIMEOUT_SECS` caps the
-    /// whole turn (default 600s). An invalid value keeps the default and is logged.
-    pub fn for_cron(url: impl Into<String>) -> Self {
-        let url = crate::hub_env::var("OMON_OMO_CRON_APPSERVER_URL")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| url.into());
-        let mut model = Self::new(url);
+impl RpcModel {
+    /// Cron turns use a tighter whole-turn ceiling (default 600s).
+    pub fn for_cron(binary: impl Into<String>) -> Self {
+        let mut model = Self::new(binary);
         model.total_timeout = Some(cron_total_timeout(
             crate::hub_env::var("OMON_OMO_CRON_TURN_TOTAL_TIMEOUT_SECS")
                 .ok()
@@ -141,8 +48,8 @@ impl UrlModel {
         self.total_timeout
     }
 
-    pub fn url(&self) -> &str {
-        &self.url
+    pub fn binary(&self) -> &str {
+        &self.binary
     }
 }
 
@@ -165,7 +72,7 @@ pub fn cron_total_timeout(value: Option<&str>) -> std::time::Duration {
 }
 
 #[async_trait]
-impl crate::lanes::kibitzer::ModelTurn for UrlModel {
+impl crate::lanes::kibitzer::ModelTurn for RpcModel {
     async fn complete(&self, prompt: &str) -> Result<String> {
         self.complete_with(prompt, None, &[]).await
     }
@@ -176,24 +83,17 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
         model: Option<&str>,
         toolsets: &[String],
     ) -> Result<String> {
-        if self.url.trim().is_empty() {
-            return Err(HubError::message("omo model backend URL is not configured"));
+        if self.binary.trim().is_empty() {
+            return Err(HubError::message("mhc binary is not configured"));
         }
         #[cfg(feature = "hub-slack")]
         {
-            // Same sequence omo-gateway uses (each reply awaited, Bearer token from the
-            // supervised daemon's token file, events read until turn/completed).
             let mut config =
-                super::omo_client::OmoClientConfig::new(self.url.clone()).with_env_timeouts();
+                super::omo_client::OmoClientConfig::new(self.binary.clone()).with_env_timeouts();
             config.workspace = Some(self.workspace.clone());
             if let Some(total) = self.total_timeout {
                 config.total_timeout = total;
             }
-            config.token = super::supervisor::state_dir_from_home().and_then(|dir| {
-                let probe =
-                    super::supervisor::DaemonSupervisor::new(self.url.clone(), Vec::new(), dir);
-                super::omo_client::token_from_file(&probe.token_path())
-            });
             let request = super::omo_client::TurnRequest {
                 thread_id: None,
                 system_prompt: Some(prompt.to_owned()),
@@ -213,7 +113,7 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
         {
             let _ = (prompt, model, toolsets);
             Err(HubError::message(
-                "omo websocket transport is compiled with hub-slack",
+                "mhc RPC transport is compiled with hub-slack",
             ))
         }
     }
@@ -222,79 +122,34 @@ impl crate::lanes::kibitzer::ModelTurn for UrlModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    struct Scripted(Vec<Value>);
-
-    #[async_trait]
-    impl OmoTransport for Scripted {
-        async fn roundtrip(&self, frames: Vec<String>) -> Result<Vec<Value>> {
-            assert_eq!(frames.len(), 3);
-            assert!(frames[0].contains("initialize"));
-            assert!(frames[1].contains("thread/start"));
-            assert!(frames[2].contains("turn/start"));
-            Ok(self.0.clone())
-        }
-    }
-
-    #[tokio::test]
-    async fn a_turn_returns_assistant_text_from_events() {
-        let engine = HeadlessEngine::new(
-            Scripted(vec![json!({
-                "method": "item/agentMessage/delta",
-                "params": {"item": {"text": "ready"}}
-            })]),
-            Workspace {
-                cwd: "/tmp".into(),
-                roots: vec!["/tmp".into()],
-            },
-        );
-        let reply = engine.turn("hello").await.unwrap();
-        assert_eq!(reply, "ready");
-    }
 
     #[cfg(feature = "hub-slack")]
     #[tokio::test]
-    async fn url_model_runs_a_full_omo_turn() {
+    async fn rpc_model_runs_a_full_turn() {
         use crate::lanes::kibitzer::ModelTurn;
-        use crate::meta::omo_client::mock::{serve, Script};
+        use crate::meta::rpc_mock::{serve, Script};
         let decision_json = r#"{"wake":true,"reason":"r","suggested":"s","target_lane":null}"#;
         let (url, log) = serve(Script {
             messages: vec![decision_json.into()],
-            resume_error: None,
             approval: false,
-            approval_command: None,
-            thread_id: "thr-k".into(),
-            queued_ticks: 0,
-            tick: std::time::Duration::ZERO,
-            no_ack: false,
-            switch_error: None,
-            silent_first_turn: false,
+            live: false,
         })
         .await;
-        let model = UrlModel::new(url);
+        let model = RpcModel::new(url);
         let text = model.complete("state").await.unwrap();
         let decision = crate::lanes::kibitzer::parse_decision(&text).unwrap();
         assert!(decision.wake);
         let frames = log.frames.lock().unwrap().clone();
-        let methods: Vec<_> = frames
+        let rpc: Vec<_> = frames
             .iter()
-            .filter_map(|f| f.get("method").and_then(Value::as_str))
+            .filter(|f| f["type"] != "fixture_launch")
             .collect();
-        assert_eq!(
-            methods,
-            [
-                "initialize",
-                "thread/start",
-                "thread/settings/update",
-                "turn/start"
-            ]
-        );
-        assert_eq!(
-            frames[2]["params"]["model"],
-            crate::model_policy::background_model()
-        );
-        assert_eq!(frames[3]["params"]["threadId"], "thr-k");
+        assert_eq!(rpc[0]["type"], "get_state");
+        assert!(!frames.iter().any(|f| f["type"] == "open_session"));
+        let model = frames.iter().find(|f| f["type"] == "set_model").unwrap();
+        assert_eq!(model["provider"], "mahoquot");
+        assert_eq!(model["modelId"], "gpt-6-luna");
+        assert!(frames.iter().any(|f| f["type"] == "prompt"));
     }
 
     #[test]

@@ -477,8 +477,8 @@ fn submit_chat(pool: &SqlitePool, key: SessionKey, message: String) -> bool {
     }
 }
 
-/// omo `POST /api/sessions/{id}/chat`: runs the message as a turn of the session on the omo
-/// app-server. A Slack session answers in its thread; a web session answers into the transcript.
+/// omo `POST /api/sessions/{id}/chat`: runs the message as a session turn through
+/// mhc RPC. A Slack session answers in its thread; a web session answers into the transcript.
 pub async fn post_chat(
     State(state): State<HttpState>,
     UrlPath(id): UrlPath<String>,

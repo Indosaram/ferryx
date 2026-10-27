@@ -306,7 +306,7 @@ pub(crate) async fn apply_frame_routed(
         }
     }
     // With the omo turn path installed, a message no profile routes to a lane pane becomes an
-    // omo app-server turn answered in its Slack thread, as omo-gateway did. The meta pane is
+    // mhc RPC turn answered in its Slack thread, as omo-gateway did. The meta pane is
     // not used for it: no such pane exists unless the supervisor preset is launched.
     #[cfg(feature = "hub-slack")]
     if let (Some(turns), Some(pool)) = (turns, pool) {
@@ -337,13 +337,8 @@ pub(crate) async fn apply_frame_routed(
         }
     }
     if let (SlackFrame::Command(invocation), Some(pool)) = (&frame, pool) {
-        let url = crate::hub_env::var("FERRYX_HUB_OMO_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let model = url.as_deref().map(crate::meta::backend::UrlModel::new);
-        let model_ref = model
-            .as_ref()
-            .map(|model| model as &dyn crate::lanes::kibitzer::ModelTurn);
+        let model = crate::meta::backend::RpcModel::new(crate::meta::supervisor::mhc_bin());
+        let model_ref = Some(&model as &dyn crate::lanes::kibitzer::ModelTurn);
         let env = super::slash::SlashEnv {
             pool,
             owner_id,
@@ -1855,22 +1850,23 @@ mod tests {
     #[tokio::test]
     async fn e2e_a_slack_message_becomes_an_omo_turn_answered_in_its_thread() {
         use crate::chat::slack_turn::SlackTurnConfig;
-        use crate::meta::omo_client::mock::{serve, Script};
+        use crate::meta::rpc_mock::{serve, Script};
         use crate::meta::omo_client::OmoClientConfig;
         use std::sync::{Arc, Mutex};
 
         // Mock Slack Web API: records every method call and answers ok.
         #[derive(Clone)]
-        struct Calls(Arc<Mutex<Vec<(String, Value)>>>);
+        struct Calls(Arc<Mutex<Vec<(String, Value)>>>, tokio::sync::watch::Sender<u64>);
         async fn record(
             axum::extract::State(calls): axum::extract::State<Calls>,
             axum::extract::Path(method): axum::extract::Path<String>,
             axum::Json(body): axum::Json<Value>,
         ) -> axum::Json<Value> {
             calls.0.lock().unwrap().push((method, body));
+            calls.1.send_modify(|version| *version += 1);
             axum::Json(json!({"ok": true, "ts": "999.1"}))
         }
-        let calls = Calls(Arc::new(Mutex::new(Vec::new())));
+        let calls = Calls(Arc::new(Mutex::new(Vec::new())), tokio::sync::watch::channel(0).0);
         let app = axum::Router::new()
             .route("/{method}", axum::routing::post(record))
             .with_state(calls.clone());
@@ -1880,28 +1876,14 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        // Mock omo app-server with an approval request and two agent messages.
-        let (omo_url, omo) = serve(Script {
+        // An executable mhc JSONL peer produces interim and final assistant messages.
+        let (binary, omo) = serve(Script {
             messages: vec!["looking now".into(), "**All good**: 3 items".into()],
-            resume_error: None,
             approval: true,
-            approval_command: None,
-            thread_id: "thr-e2e".into(),
-            queued_ticks: 0,
-            tick: std::time::Duration::ZERO,
-            no_ack: false,
-            switch_error: None,
-            silent_first_turn: false,
-        })
-        .await;
-        let dir = std::env::temp_dir().join(format!("ferryx-e2e-turn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let token_path = dir.join("omo-appserver-1.token");
-        std::fs::write(&token_path, "tok-e2e\n").unwrap();
+            live: false,
+        }).await;
         let config: &'static SlackTurnConfig = Box::leak(Box::new(SlackTurnConfig {
-            omo: OmoClientConfig::new(omo_url),
-            token_path: Some(token_path),
+            omo: OmoClientConfig::new(binary),
             allowed_users: vec!["UOWNER".into()],
             free_channels: vec!["CHOME".into()],
             default_model: Some("model-x".into()),
@@ -1937,26 +1919,16 @@ mod tests {
         };
         let wait_posts = |n: usize| {
             let calls = calls.clone();
+            let mut changed = calls.1.subscribe();
             async move {
-                for _ in 0..100 {
-                    if posts(&calls).len() >= n
-                        && calls
-                            .0
-                            .lock()
-                            .unwrap()
-                            .iter()
-                            .filter(|(m, _)| m == "reactions.add")
-                            .count()
-                            >= n
-                    {
-                        return;
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if posts(&calls).len() >= n && calls.0.lock().unwrap().iter()
+                            .filter(|(m, b)| m == "reactions.add" && b["name"] == "white_check_mark")
+                            .count() >= n / 2 { return; }
+                        changed.changed().await.unwrap();
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                panic!(
-                    "slack replies did not arrive: {:?}",
-                    calls.0.lock().unwrap()
-                );
+                }).await.expect("Slack replies and completion reactions arrived");
             }
         };
 
@@ -1979,18 +1951,6 @@ mod tests {
                     .unwrap();
                     // Two posts (interim + final) and the eyes / check reactions.
                     wait_posts(2).await;
-                    for _ in 0..40 {
-                        if calls
-                            .0
-                            .lock()
-                            .unwrap()
-                            .iter()
-                            .any(|(m, b)| m == "reactions.add" && b["name"] == "white_check_mark")
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
                     let replies = posts(&calls);
                     assert_eq!(replies.len(), 2, "{replies:?}");
                     assert!(replies
@@ -2062,54 +2022,26 @@ mod tests {
             control.ops()
         );
         let frames = omo.frames.lock().unwrap().clone();
-        let methods: Vec<&str> = frames
-            .iter()
-            .filter_map(|f| f.get("method").and_then(Value::as_str))
-            .collect();
-        assert_eq!(
-            methods,
-            [
-                "initialize",
-                "thread/start",
-                "thread/settings/update",
-                "turn/start",
-                "initialize",
-                "thread/resume",
-                "thread/settings/update",
-                "turn/start"
-            ]
-        );
-        let resume = frames
-            .iter()
-            .find(|f| f["method"] == "thread/resume")
-            .unwrap();
-        assert_eq!(resume["params"]["threadId"], "thr-e2e");
-        let turn = frames.iter().find(|f| f["method"] == "turn/start").unwrap();
-        assert_eq!(turn["params"]["model"], "model-x");
-        // omo prefixes each Slack prompt with the message's own time (slack_ingress).
-        assert_eq!(
-            turn["params"]["input"][0]["text"],
-            "[Thu 1970-01-01 00:01:40 UTC] how are things?"
-        );
-        let approval = frames
-            .iter()
-            .find(|f| f.get("id") == Some(&json!(77)))
-            .unwrap();
-        assert_eq!(approval["result"]["decision"], "accept");
-        assert!(omo
-            .auth
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|a| a.as_deref() == Some("Bearer tok-e2e")));
+        assert_eq!(frames.iter().filter(|f| f["type"] == "get_state").count(), 2);
+        let launches: Vec<_> = frames.iter().filter(|f| f["type"] == "fixture_launch").collect();
+        let args = launches[1]["args"].as_array().unwrap();
+        let resume = args.iter().position(|arg| arg == "--session").unwrap();
+        assert_eq!(args[resume + 1], omo.session_file.to_string_lossy().as_ref());
+        assert!(frames.iter().all(|frame| frame.get("sessionId").is_none()));
+        let prompts: Vec<_> = frames.iter().filter(|f| f["type"] == "prompt").collect();
+        assert_eq!(prompts.len(), 2);
+        assert!(frames.iter().any(|f| f["type"] == "set_model" && f["modelId"] == "model-x"));
+        assert_eq!(prompts[0]["message"], "[Thu 1970-01-01 00:01:40 UTC] how are things?");
+        let approval = frames.iter().find(|f| f["type"] == "extension_ui_response").unwrap();
+        assert_eq!(approval["id"], "77");
+        assert_eq!(approval["confirmed"], true);
         let state: String = sqlx::query_scalar(
             "SELECT state_json FROM sessions WHERE channel_id = 'CHOME' AND thread_id = '100.1'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert!(state.contains("thr-e2e"));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(state.contains(omo.session_file.to_string_lossy().as_ref()));
     }
 
     #[cfg(feature = "hub-slack")]

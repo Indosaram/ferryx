@@ -17,9 +17,7 @@ pub struct HubConfig {
     /// Existing omo-gateway sqlite file. Read only when import is invoked.
     pub import_from: Option<PathBuf>,
     pub import_invoked: bool,
-    pub supervisor_command: Vec<String>,
     pub supervisor_cwd: Option<PathBuf>,
-    pub supervisor_listen_url: Option<String>,
     /// Launch the supervisor pane preset. The headless engine starts either way.
     pub supervisor_pane: bool,
     pub owner_slack_id: Option<String>,
@@ -85,9 +83,6 @@ impl HubConfig {
         config.home_platform = Some(
             home_platform(crate::hub_env::var("OMON_HOME_PLATFORM").ok().as_deref()).to_owned(),
         );
-        if let Ok(url) = crate::hub_env::var("FERRYX_HUB_OMO_URL") {
-            config.supervisor_listen_url = Some(url);
-        }
         Ok(config)
     }
 

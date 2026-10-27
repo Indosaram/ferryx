@@ -933,7 +933,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     if config.supervisor_pane {
         let preset = ferryx_hub::meta::pane::SupervisorPanePreset::from_parts(
             config.supervisor_cwd.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-            config.supervisor_command.clone(),
+            Vec::new(),
         );
         tracing::info!(title = %preset.title, "supervisor pane preset is armed");
         if !preset.command.is_empty() {
@@ -1107,94 +1107,42 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             tracing::warn!(%error, "hub http stopped");
         }
     }));
-    // The omo app-server answers Slack messages (one turn per Slack thread), as it did under
-    // omo-gateway. It is supervised unless the supervisor pane preset is used instead, or
-    // FERRYX_HUB_SLACK_TURNS=0 turns the path off.
-    let slack_turns = !launch.config.supervisor_pane
+    // Each Slack turn owns a short-lived mhc stdio RPC child. There is no shared
+    // app-server, token file, readiness probe, or supervisor restart loop.
+    #[cfg(feature = "hub-slack")]
+    if !launch.config.supervisor_pane
         && !matches!(
             ferryx_hub::hub_env::var("FERRYX_HUB_SLACK_TURNS").ok().as_deref().map(str::trim),
             Some("0" | "off" | "false" | "no")
+        )
+    {
+        let owner = launch.config.owner_slack_id.clone();
+        let binary = ferryx_hub::meta::supervisor::mhc_bin();
+        let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&binary, owner.as_deref());
+        tracing::info!(
+            binary = %binary,
+            workspace = config.omo.workspace.is_some(),
+            idle_secs = config.omo.idle_timeout.as_secs(),
+            total_secs = config.omo.total_timeout.as_secs(),
+            "slack turn path is armed (mhc RPC)"
         );
-    let omo_url = launch.config.supervisor_listen_url.clone().or_else(|| {
-        slack_turns.then(|| ferryx_hub::cron_exec::OMO_APP_SERVER.to_owned())
-    });
-    if let Some(url) = (!launch.config.supervisor_pane).then_some(omo_url).flatten() {
-        let state_dir = ferryx_hub::meta::supervisor::state_dir_from_home().unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
-        let probe = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url.clone(), Vec::new(), state_dir.clone());
-        let token_path = match probe.ensure_token_file() {
-            Ok(path) => Some(path),
-            Err(error) => {
-                tracing::warn!(%error, "omo app-server token file was not written");
-                None
-            }
-        };
-        let command = if !launch.config.supervisor_command.is_empty() {
-            launch.config.supervisor_command.clone()
-        } else if let Some(path) = &token_path {
-            ferryx_hub::meta::supervisor::app_server_command(&ferryx_hub::meta::supervisor::omo_bin(), &url, path)
-        } else {
-            Vec::new()
-        };
-        #[cfg(feature = "hub-slack")]
-        if slack_turns {
-            let owner = launch.config.owner_slack_id.clone();
-            let config = ferryx_hub::chat::slack_turn::SlackTurnConfig::from_env(&url, token_path.clone(), owner.as_deref());
-            tracing::info!(
-                url = %url,
-                workspace = config.omo.workspace.is_some(),
-                idle_secs = config.omo.idle_timeout.as_secs(),
-                total_secs = config.omo.total_timeout.as_secs(),
-                "slack turn path is armed (omo app-server)"
-            );
-            ferryx_hub::chat::slack_turn::install(config);
-            // omo's startup sweep: claims a restart left pending are never re-run.
-            match ferryx_hub::chat::report_claims::recover_stale(&launch.hub.pool).await {
-                Ok(0) => {}
-                Ok(swept) => tracing::info!(swept, "stale report claims marked unmeasurable"),
-                Err(error) => tracing::warn!(%error, "stale report claims were not swept"),
-            }
-            // omo's missed-message backfill: answer what arrived while the hub was down, then
-            // reconcile every few minutes. It reads with the bot token; Socket Mode is untouched.
-            if let Some(config) = ferryx_hub::chat::slack_turn::installed() {
-                if ferryx_hub::chat::slack::app_token().is_some() {
-                    tasks.push(tokio::spawn(ferryx_hub::chat::slack_backfill::run_forever(
-                        config,
-                        launch.hub.pool.clone(),
-                    )));
-                }
+        ferryx_hub::chat::slack_turn::install(config);
+        // omo's startup sweep: claims a restart left pending are never re-run.
+        match ferryx_hub::chat::report_claims::recover_stale(&launch.hub.pool).await {
+            Ok(0) => {}
+            Ok(swept) => tracing::info!(swept, "stale report claims marked unmeasurable"),
+            Err(error) => tracing::warn!(%error, "stale report claims were not swept"),
+        }
+        // omo's missed-message backfill: answer what arrived while the hub was down, then
+        // reconcile every few minutes. It reads with the bot token; Socket Mode is untouched.
+        if let Some(config) = ferryx_hub::chat::slack_turn::installed() {
+            if ferryx_hub::chat::slack::app_token().is_some() {
+                tasks.push(tokio::spawn(ferryx_hub::chat::slack_backfill::run_forever(
+                    config,
+                    launch.hub.pool.clone(),
+                )));
             }
         }
-        tasks.push(tokio::spawn(async move {
-            let supervisor = ferryx_hub::meta::supervisor::DaemonSupervisor::new(url, command, state_dir);
-            let mut announced = false;
-            let mut backoff = std::time::Duration::from_secs(5);
-            loop {
-                match supervisor.ensure().await {
-                    Ok(pid) => {
-                        if supervisor.wait_responsive(std::time::Duration::from_secs(60)).await {
-                            if !announced {
-                                tracing::info!(pid = ?pid, "omo app-server is ready");
-                                announced = true;
-                            }
-                            backoff = std::time::Duration::from_secs(5);
-                        } else {
-                            tracing::warn!(pid = ?pid, "omo app-server did not start listening");
-                            announced = false;
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "omo app-server was not started");
-                        announced = false;
-                    }
-                }
-                tokio::time::sleep(backoff).await;
-                if !supervisor.responsive().await {
-                    backoff = (backoff * 2).min(std::time::Duration::from_secs(300));
-                } else {
-                    backoff = std::time::Duration::from_secs(15);
-                }
-            }
-        }));
     }
     #[cfg(unix)]
     {
@@ -1336,19 +1284,14 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     {
         let pool = launch.hub.pool.clone();
         let (owner, fallback) = (lead_owner.clone(), lead_fallback.clone());
-        let url = launch
-            .config
-            .supervisor_listen_url
-            .clone()
-            .filter(|url| !url.trim().is_empty())
-            .unwrap_or_else(|| ferryx_hub::cron_exec::OMO_APP_SERVER.to_owned());
+        let binary = ferryx_hub::meta::supervisor::mhc_bin();
         tasks.push(tokio::spawn(async move {
             let lead = ferryx_hub::lanes::lead::resolve(&pool, &owner, &fallback).await;
             if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_lead(&pool, &lead).await {
                 tracing::warn!(%error, %lead, "kibitzer lead was not registered");
             }
             let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-            let model = ferryx_hub::meta::backend::UrlModel::new(url);
+            let model = ferryx_hub::meta::backend::RpcModel::new(binary);
             loop {
                 match ferryx_hub::lanes::kibitzer::evaluate(&pool, &lead, &judge, &model).await {
                     Ok(true) => tracing::info!(%lead, "kibitzer woke the owner lead"),

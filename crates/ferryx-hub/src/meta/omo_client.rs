@@ -1,50 +1,42 @@
-//! One omo app-server turn, speaking the same JSON-RPC sequence omo-gateway uses:
-//! connect (Bearer token when one is configured), `initialize` and wait for its reply,
-//! `thread/resume` (or `thread/start` when there is nothing to resume) and wait for its reply,
-//! `turn/start` and wait for the turn id, then read events until our `turn/completed`.
-//!
-//! Approval requests follow omo-gateway's policy: full access (the default, `OMON_FULL_ACCESS`
-//! unset) approves; `APPROVAL_MODE=always` without full access declines; otherwise local,
-//! reversible effects are approved and anything else is declined with omo's reason. Five
-//! declines abort the turn. `item/tool/requestUserInput` is cancelled because a chat turn has
-//! nobody to answer it mid-turn.
-use std::path::PathBuf;
-use std::time::Duration;
-
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::Message;
-
+//! One owned mhc stdio JSONL RPC process per hub turn.
 use super::protocol;
 use crate::effect::Effect;
 use crate::error::{HubError, Result};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc, oneshot};
 
-pub const DEFAULT_URL: &str = "ws://127.0.0.1:19742";
 pub const APPROVAL_DENIAL_TURN_LIMIT: u32 = 5;
 const DENIAL_REASON: &str =
     "denied by gateway policy - do not retry this tool; ask the user for the information instead";
-
+pub const TURN_START_ACK_WINDOW: Duration = Duration::from_secs(30);
+pub const TURN_START_ACK_TIMEOUT: &str =
+    "timeout waiting for mhc prompt acknowledgement; submission outcome unknown, do not resubmit";
 #[derive(Debug, Clone)]
 pub struct OmoClientConfig {
-    pub url: String,
-    pub token: Option<String>,
-    /// Longest silence from the engine before the turn is interrupted.
+    pub binary: String,
     pub idle_timeout: Duration,
-    /// Hard cap for the whole turn, connect included.
     pub total_timeout: Duration,
     pub connect_timeout: Duration,
     pub workspace: Option<protocol::Workspace>,
-    /// omo-gateway's rolling turn/start acknowledgement window (30s).
     pub ack_window: Duration,
 }
-
+impl Default for OmoClientConfig {
+    fn default() -> Self {
+        Self::new(super::supervisor::mhc_bin())
+    }
+}
 impl OmoClientConfig {
-    pub fn new(url: impl Into<String>) -> Self {
+    pub fn new(binary: impl Into<String>) -> Self {
         Self {
-            url: url.into(),
-            token: None,
+            binary: binary.into(),
             idle_timeout: Duration::from_secs(1800),
             total_timeout: Duration::from_secs(3600),
             connect_timeout: Duration::from_secs(15),
@@ -52,173 +44,44 @@ impl OmoClientConfig {
             ack_window: TURN_START_ACK_WINDOW,
         }
     }
-
-    /// Timeouts from `OMON_OMO_TURN_TIMEOUT_SECS` (idle, default 1800s) and
-    /// `OMON_OMO_TURN_TOTAL_TIMEOUT_SECS` (total, default 3600s), as omo-gateway reads them.
     pub fn with_env_timeouts(mut self) -> Self {
         let secs = |name: &str| {
             crate::hub_env::var(name)
                 .ok()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .filter(|value| *value > 0)
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|v| *v > 0)
                 .map(Duration::from_secs)
         };
-        if let Some(idle) = secs("OMON_OMO_TURN_TIMEOUT_SECS") {
-            self.idle_timeout = idle;
+        if let Some(v) = secs("OMON_OMO_TURN_TIMEOUT_SECS") {
+            self.idle_timeout = v;
         }
-        if let Some(total) = secs("OMON_OMO_TURN_TOTAL_TIMEOUT_SECS") {
-            self.total_timeout = total;
+        if let Some(v) = secs("OMON_OMO_TURN_TOTAL_TIMEOUT_SECS") {
+            self.total_timeout = v;
         }
         self
     }
 }
-
 #[derive(Debug, Clone, Default)]
 pub struct TurnRequest {
-    /// Engine thread to resume. `None`, or a thread the engine no longer has, starts a new one.
+    /// Opaque mhc sessionFile path, stored in legacy omo_thread_id metadata.
     pub thread_id: Option<String>,
     pub system_prompt: Option<String>,
     pub model: Option<String>,
-    /// `enabledToolsets` for a new thread.
     pub toolsets: Option<Vec<String>>,
     pub text: String,
-    /// The turn must run on `model`. A switch the engine refuses for context size starts a
-    /// fresh thread on it instead of falling back to the thread's current model.
     pub pin_model: bool,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnOutcome {
     pub thread_id: String,
     pub resumed: bool,
     pub turn_id: String,
-    /// Agent text produced after the last relayed status (reasoning tags removed).
     pub text: String,
     pub approvals_allowed: u32,
     pub approvals_denied: u32,
-    /// Interim status messages sent on `progress` during the turn.
     pub messages_delivered: usize,
     pub tool_calls: usize,
 }
-
-/// How often an interim narration may reach the user after the first one (omo-gateway: 180s).
-/// omo-gateway's rolling `turn/start` acknowledgement window.
-pub const TURN_START_ACK_WINDOW: Duration = Duration::from_secs(30);
-pub const TURN_START_ACK_TIMEOUT: &str = "timeout waiting for turn/start acknowledgement from omo app-server; submission outcome unknown, do not resubmit";
-
-fn frame_turn_id(frame: &Value) -> Option<&str> {
-    frame
-        .pointer("/params/turnId")
-        .or_else(|| frame.pointer("/params/turn/id"))
-        .and_then(Value::as_str)
-}
-
-fn is_turn_bearing(method: &str, frame: &Value) -> bool {
-    method.starts_with("turn/")
-        || method.starts_with("item/")
-        || method == "thread/status/changed"
-        || (method == "error"
-            && (frame.pointer("/params/turnId").is_some()
-                || frame.pointer("/params/turn").is_some()))
-}
-
-/// omo-gateway's `PreAckState`: turn boundaries seen before the acknowledgement and whether a
-/// busy refusal waits for the thread to go idle.
-#[derive(Default)]
-struct PreAckState {
-    events: Vec<(bool, String)>,
-    completed: std::collections::HashSet<String>,
-    refused: std::collections::HashSet<String>,
-    awaiting_idle: bool,
-    refusals: u32,
-    retry_at: Option<tokio::time::Instant>,
-}
-
-impl PreAckState {
-    fn note_refusal(&mut self, error: &str) -> bool {
-        if !is_thread_busy_error(error) {
-            return false;
-        }
-        self.refusals = self.refusals.saturating_add(1);
-        self.events.clear();
-        self.awaiting_idle = true;
-        let delay = Duration::from_secs(1 << self.refusals.saturating_sub(1).min(3));
-        self.retry_at = Some(tokio::time::Instant::now() + delay);
-        true
-    }
-
-    fn retry_due(&self, now: tokio::time::Instant) -> bool {
-        self.awaiting_idle && self.retry_at.is_some_and(|at| now >= at)
-    }
-
-    fn note_resubmitted(&mut self) {
-        self.awaiting_idle = false;
-        self.retry_at = None;
-        self.events.clear();
-    }
-
-    /// Folds one pre-acknowledgement frame of our thread. True when a fresh completion after a
-    /// refusal makes the resubmission due now.
-    fn observe(&mut self, frame: &Value, _thread_id: &str) -> bool {
-        let Some(turn) = frame_turn_id(frame) else {
-            return false;
-        };
-        if [
-            frame.pointer("/params/turn/error"),
-            frame.pointer("/params/error"),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|error| is_thread_busy_error(&error.to_string()))
-        {
-            self.refused.insert(turn.to_owned());
-            self.events.retain(|(_, id)| id != turn);
-        }
-        if self.refused.contains(turn) {
-            return false;
-        }
-        match frame.get("method").and_then(Value::as_str).unwrap_or("") {
-            "turn/started" => self.events.push((true, turn.to_owned())),
-            "turn/completed" => {
-                let fresh = self.completed.insert(turn.to_owned());
-                self.events.push((false, turn.to_owned()));
-                if self.awaiting_idle && fresh {
-                    self.retry_at = Some(tokio::time::Instant::now());
-                    return true;
-                }
-            }
-            _ => {}
-        }
-        false
-    }
-
-    #[cfg(test)]
-    fn clone_follow(&mut self, acked: &str) -> (String, bool) {
-        let events = self.events.clone();
-        let out = self.follow(acked.to_owned());
-        self.events = events;
-        out
-    }
-
-    /// The acknowledged id, or the successor when the run ahead of us completed under it.
-    /// The flag says the successor has not started yet.
-    fn follow(&mut self, acked: String) -> (String, bool) {
-        let taken_over_at = self
-            .events
-            .iter()
-            .position(|(is_start, id)| !is_start && *id == acked);
-        let successor = taken_over_at.and_then(|at| {
-            self.events[at + 1..]
-                .iter()
-                .rev()
-                .find(|(is_start, id)| *is_start && *id != acked)
-                .map(|(_, id)| id.clone())
-        });
-        let waiting = taken_over_at.is_some() && successor.is_none();
-        (successor.unwrap_or(acked), waiting)
-    }
-}
-
 pub const INTERIM_REPORT_INTERVAL: Duration = Duration::from_secs(180);
 
 /// omo-gateway's rule: the first narration is the acknowledgement, later ones only when the
@@ -301,7 +164,7 @@ pub fn final_reply(outcome: &TurnOutcome) -> Result<Option<String>> {
     Ok(Some(outcome.text.clone()))
 }
 
-/// The follow-up sent on the same thread when a turn ran tools but wrote no answer.
+/// Compatibility constant for consumers; this transport never submits a hidden follow-up.
 pub const FINAL_ANSWER_PROMPT: &str = "You ran tools but did not write a reply. Reply now with the final answer for the user's last message: what you did, the result, and anything left. Do not run more tools unless the answer needs them.";
 
 /// A turn that ran tools, wrote nothing and relayed nothing: the user has seen no answer.
@@ -314,7 +177,7 @@ pub fn needs_final_answer(result: &Result<TurnOutcome>) -> bool {
 
 /// The engine refused the requested model because the thread's live context does not fit
 /// that model's window ("Model ... cannot switch: target context window ... short").
-/// The turn never ran, so it is retried on the thread's current model.
+/// Kept for consumer compatibility; the transport never retries the model.
 pub fn is_model_switch_rejection(result: &Result<TurnOutcome>) -> bool {
     matches!(result, Err(error) if {
         let lower = error.to_string().to_lowercase();
@@ -334,14 +197,7 @@ pub fn fallback_eligible(result: &Result<TurnOutcome>) -> bool {
         Ok(outcome) => {
             outcome.text.is_empty() && outcome.tool_calls == 0 && outcome.messages_delivered == 0
         }
-        Err(error) => {
-            let lower = error.to_string().to_lowercase();
-            lower.contains("model update rejected")
-                || lower.contains("model not found")
-                || lower.contains("unknown model")
-                || lower.contains("invalid model")
-                || lower.contains("unsupported model")
-        }
+        Err(error) => error.to_string().contains("mhc fallback eligible:"),
     }
 }
 
@@ -471,307 +327,225 @@ pub async fn with_approver<F: std::future::Future>(
 pub const UNANSWERED_REASON: &str =
     "owner has not answered yet; continue with other work and mention the pending approval in your report";
 
-type Ws =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-async fn connect(config: &OmoClientConfig, deadline: tokio::time::Instant) -> Result<Ws> {
-    let connect_until = (tokio::time::Instant::now() + config.connect_timeout).min(deadline);
-    loop {
-        let mut request = config
-            .url
-            .as_str()
-            .into_client_request()
-            .map_err(|error| HubError::message(format!("omo app-server url: {error}")))?;
-        if let Some(token) = config.token.as_deref().filter(|token| !token.is_empty()) {
-            let value = format!("Bearer {token}")
-                .parse()
-                .map_err(|_| HubError::message("omo app-server token is not a valid header"))?;
-            request.headers_mut().insert("Authorization", value);
-        }
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio_tungstenite::connect_async(request),
-        )
-        .await;
-        let last_error = match result {
-            Ok(Ok((ws, _))) => return Ok(ws),
-            Ok(Err(error)) => error.to_string(),
-            Err(_) => "handshake timed out".to_owned(),
-        };
-        if tokio::time::Instant::now() + Duration::from_millis(500) >= connect_until {
-            return Err(HubError::message(format!(
-                "failed to connect to omo app-server at {}: {last_error}",
-                config.url
-            )));
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+pub const STOPPED: &str = "omo turn stopped by /omo-stop";
+struct Guidance {
+    text: String,
+    reply: oneshot::Sender<bool>,
+}
+type ActiveKey = (String, String);
+fn active() -> &'static Mutex<HashMap<ActiveKey, UnboundedSender<Guidance>>> {
+    static ACTIVE: OnceLock<Mutex<HashMap<ActiveKey, UnboundedSender<Guidance>>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+struct ActiveGuard(ActiveKey);
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        active()
+            .lock()
+            .expect("mhc active registry")
+            .remove(&self.0);
     }
 }
-
-async fn send(ws: &mut Ws, text: String) -> Result<()> {
-    ws.send(Message::text(text))
-        .await
-        .map_err(|error| HubError::message(format!("omo app-server send: {error}")))
-}
-
-/// Next JSON frame, or an error at `until`. Pings, pongs and binary frames are skipped.
-async fn next_frame(ws: &mut Ws, until: tokio::time::Instant, what: &str) -> Result<Value> {
-    next_frame_by(ws, until, what)
-        .await?
-        .ok_or_else(|| HubError::message(format!("timed out waiting for {what}")))
-}
-
-/// The next JSON frame, or `None` once `until` passes.
-async fn next_frame_by(
-    ws: &mut Ws,
-    until: tokio::time::Instant,
-    what: &str,
-) -> Result<Option<Value>> {
-    loop {
-        let message = match tokio::time::timeout_at(until, ws.next()).await {
-            Err(_) => return Ok(None),
-            Ok(None) => {
-                return Err(HubError::message(format!(
-                    "omo app-server closed the connection while waiting for {what}"
-                )))
-            }
-            Ok(Some(Err(error))) => {
-                return Err(HubError::message(format!("omo app-server read: {error}")))
-            }
-            Ok(Some(Ok(message))) => message,
-        };
-        let text = match message {
-            Message::Text(text) => text.to_string(),
-            Message::Close(_) => {
-                return Err(HubError::message(format!(
-                    "omo app-server closed the connection while waiting for {what}"
-                )))
-            }
-            _ => continue,
-        };
-        if let Ok(value) = serde_json::from_str::<Value>(&text) {
-            return Ok(Some(value));
-        }
-    }
-}
-
-fn is_response_to(frame: &Value, id: u64) -> bool {
-    frame.get("method").is_none() && frame.get("id").and_then(Value::as_u64) == Some(id)
-}
-
-fn rpc_error(frame: &Value) -> Option<String> {
-    let error = frame.get("error")?;
-    Some(
-        error
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| error.to_string()),
-    )
-}
-
-/// Answers a server request that arrives before the turn starts, so the engine never waits on us.
-async fn answer_server_request(
-    ws: &mut Ws,
-    frame: &Value,
-    cwd: Option<&str>,
-    allowed: &mut u32,
-    denied: &mut u32,
-) -> Result<bool> {
-    let (Some(method), Some(id)) = (frame.get("method").and_then(Value::as_str), frame.get("id"))
-    else {
+pub async fn steer(_: &OmoClientConfig, thread: &str, turn: &str, text: &str) -> Result<bool> {
+    let sender = active()
+        .lock()
+        .expect("mhc active registry")
+        .get(&(thread.into(), turn.into()))
+        .cloned();
+    let Some(sender) = sender else {
         return Ok(false);
     };
-    if let Some(reply) = protocol::user_input_cancellation(frame) {
-        send(ws, reply).await?;
-        return Ok(true);
+    let (reply, rx) = oneshot::channel();
+    if sender
+        .send(Guidance {
+            text: text.into(),
+            reply,
+        })
+        .is_err()
+    {
+        return Ok(false);
     }
-    if protocol::is_approval_request(method) {
-        if starts_retired_gateway(frame) {
-            tracing::warn!(%method, "declined a tool request that would start the retired omo-gateway");
-            *denied += 1;
-            send(
-                ws,
-                protocol::approval_denial_with_reason(id, RETIRED_GATEWAY_REASON),
-            )
-            .await?;
-            return Ok(true);
-        }
-        let mut verdict = approval_verdict(frame, cwd);
-        if let Some(reason) = verdict.clone() {
-            if let Ok(approver) = APPROVER.try_with(std::sync::Arc::clone) {
-                verdict = match approver.ask(frame, cwd, &reason).await {
-                    OwnerAnswer::Approve => None,
-                    OwnerAnswer::Deny => Some("denied by the owner".into()),
-                    OwnerAnswer::Unanswered => Some(UNANSWERED_REASON.into()),
-                };
-            }
-        }
-        match verdict {
-            None => {
-                *allowed += 1;
-                send(ws, protocol::approval_allow_response(id)).await?;
-            }
-            Some(reason) => {
-                if reason != UNANSWERED_REASON {
-                    *denied += 1;
-                }
-                send(ws, protocol::approval_denial_with_reason(id, &reason)).await?;
-            }
-        }
-        return Ok(true);
-    }
-    send(
-        ws,
-        json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("{method} is not supported by this client")}})
-            .to_string(),
-    )
-    .await?;
-    Ok(true)
+    Ok(tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(false))
 }
-
-/// Waits for the reply to request `id`, answering any server request on the way.
-async fn await_reply(
-    ws: &mut Ws,
-    id: u64,
-    until: tokio::time::Instant,
-    what: &str,
-    cwd: Option<&str>,
-    counters: (&mut u32, &mut u32),
-) -> Result<Value> {
-    let (allowed, denied) = counters;
-    loop {
-        let frame = next_frame(ws, until, what).await?;
-        if is_response_to(&frame, id) {
-            return Ok(frame);
-        }
-        answer_server_request(ws, &frame, cwd, allowed, denied).await?;
-    }
-}
-
-fn is_missing_thread_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("no rollout found")
-        || lower.contains("thread not found")
-        || lower.contains("unknown thread")
-}
-
-fn is_thread_busy_error(error: &str) -> bool {
-    error.to_ascii_lowercase().contains("already processing")
-}
-
-/// Runs one turn. Every completed agent message except the last is sent on `progress` as it
-/// lands, so a long turn shows its interim replies. The last one is the outcome text.
-/// The error a turn ends with when `/omo-stop` interrupted it.
-pub const STOPPED: &str = "omo turn stopped by /omo-stop";
-
-/// Injects guidance into a running turn (`turn/steer`, omo-gateway's instant steer) over a
-/// short-lived connection. False when the engine refused it (the turn ended or moved on).
-pub async fn steer(
-    config: &OmoClientConfig,
-    thread_id: &str,
-    turn_id: &str,
-    guidance: &str,
-) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut ws = connect(config, deadline).await?;
-    let (mut allowed, mut denied) = (0u32, 0u32);
-    send(&mut ws, protocol::initialize_request()).await?;
-    let reply = await_reply(
-        &mut ws,
-        1,
-        deadline,
-        "the initialize reply",
-        None,
-        (&mut allowed, &mut denied),
-    )
-    .await?;
-    if let Some(error) = rpc_error(&reply) {
-        return Err(HubError::message(format!("omo initialize failed: {error}")));
-    }
-    let request = json!({
-        "jsonrpc": "2.0", "id": 9_500, "method": "turn/steer",
-        "params": {
-            "threadId": thread_id,
-            "expectedTurnId": turn_id,
-            "input": [{"type": "text", "text": guidance}]
-        }
-    });
-    send(&mut ws, request.to_string()).await?;
-    let reply = await_reply(
-        &mut ws,
-        9_500,
-        deadline,
-        "the turn/steer reply",
-        None,
-        (&mut allowed, &mut denied),
-    )
-    .await;
-    let _ = ws.close(None).await;
-    match reply {
-        Ok(reply) => match rpc_error(&reply) {
-            None => Ok(true),
-            Some(error) => {
-                tracing::warn!(%error, "turn/steer rejected by the omo app-server");
-                Ok(false)
-            }
-        },
-        Err(error) => {
-            tracing::warn!(%error, "turn/steer got no answer");
-            Ok(false)
-        }
-    }
-}
-
-/// `run_turn` plus the two recoveries a chat turn needs before it reports to the owner:
-/// a model switch the engine refused for context size runs on the thread's current model
-/// (2026-10-24 23:15Z the owner got "응답을 만들지 못했어요" instead), and a turn that ran
-/// tools without writing a reply is asked once, on the same thread, for its final answer.
+/// Recovery belongs exclusively to the consumer's single fallback-model attempt.
 pub async fn run_turn_recovering(
-    config: &OmoClientConfig,
-    request: &TurnRequest,
-    progress: Option<UnboundedSender<String>>,
+    c: &OmoClientConfig,
+    r: &TurnRequest,
+    p: Option<UnboundedSender<String>>,
 ) -> Result<TurnOutcome> {
-    let mut first = run_turn(config, request, progress.clone()).await;
-    if is_model_switch_rejection(&first) && request.model.is_some() {
-        let retry = if request.pin_model {
-            tracing::warn!(error = ?first.as_ref().err().map(ToString::to_string), "model switch refused; retrying on a fresh thread with the pinned model");
-            TurnRequest {
-                thread_id: None,
-                ..request.clone()
-            }
-        } else {
-            tracing::warn!(error = ?first.as_ref().err().map(ToString::to_string), "model switch refused; retrying on the thread's current model");
-            TurnRequest {
-                model: None,
-                ..request.clone()
-            }
-        };
-        first = run_turn(config, &retry, progress.clone()).await;
+    run_turn(c, r, p).await
+}
+
+struct Rpc {
+    input: ChildStdin,
+    lines: tokio::io::Lines<BufReader<ChildStdout>>,
+    allowed: u32,
+    denied: u32,
+    eof: bool,
+}
+impl Rpc {
+    async fn send(&mut self, value: Value) -> Result<()> {
+        let mut bytes = serde_json::to_vec(&value).map_err(|e| HubError::message(e.to_string()))?;
+        bytes.push(b'\n');
+        self.input.write_all(&bytes).await?;
+        self.input.flush().await?;
+        Ok(())
     }
-    if !needs_final_answer(&first) {
-        return first;
-    }
-    let Ok(outcome) = &first else {
-        return first;
-    };
-    let ask = TurnRequest {
-        thread_id: Some(outcome.thread_id.clone()),
-        model: None,
-        text: FINAL_ANSWER_PROMPT.to_owned(),
-        ..request.clone()
-    };
-    match run_turn(config, &ask, progress).await {
-        Ok(answer) if !answer.text.trim().is_empty() || answer.messages_delivered > 0 => {
-            Ok(TurnOutcome {
-                tool_calls: outcome.tool_calls + answer.tool_calls,
-                ..answer
-            })
+    async fn read(&mut self) -> Result<Value> {
+        loop {
+            let Some(line) = self.lines.next_line().await? else {
+                self.eof = true;
+                return Err(HubError::message(
+                    "mhc RPC stdout closed before completing the turn",
+                ));
+            };
+            if !line.trim().is_empty() {
+                return serde_json::from_str(&line)
+                    .map_err(|e| HubError::message(format!("invalid mhc RPC JSONL: {e}")));
+            }
         }
-        Ok(_) => first,
-        Err(error) => {
-            tracing::warn!(%error, "final-answer follow-up failed");
-            first
+    }
+    async fn ui(&mut self, frame: &Value, cwd: Option<&str>) -> Result<()> {
+        if frame["type"] != "extension_ui_request" {
+            return Ok(());
+        }
+        if matches!(frame["method"].as_str(), Some("select" | "input")) {
+            // Approval cards provide a binary decision, not arbitrary text. Never fabricate
+            // a selection or input from that decision; close the native dialog explicitly.
+            return self
+                .send(json!({"type":"extension_ui_response","id":frame["id"],"cancelled":true}))
+                .await;
+        }
+        if let Some(response) = protocol::user_input_cancellation(frame) {
+            let response: Value =
+                serde_json::from_str(&response).map_err(|e| HubError::message(e.to_string()))?;
+            return self.send(response).await;
+        }
+        if frame["method"] != "confirm" {
+            return Ok(());
+        }
+        let id = frame
+            .get("id")
+            .ok_or_else(|| HubError::message("mhc confirm missing id"))?;
+        // Keep the raw title/message in the effect classifier and owner's approval card.
+        let policy_frame = json!({"method":"item/tool/requestApproval","id":id,"params":{"command":frame["message"].as_str().unwrap_or(""),"request":frame}});
+        let retired = starts_retired_gateway(&policy_frame);
+        let mut verdict = if retired {
+            Some(RETIRED_GATEWAY_REASON.into())
+        } else {
+            approval_verdict(&policy_frame, cwd)
+        };
+        if !retired {
+            if let Some(reason) = verdict.clone() {
+                if let Ok(approver) = APPROVER.try_with(std::sync::Arc::clone) {
+                    verdict = match approver.ask(&policy_frame, cwd, &reason).await {
+                        OwnerAnswer::Approve => None,
+                        OwnerAnswer::Deny => Some("denied by the owner".into()),
+                        OwnerAnswer::Unanswered => Some(UNANSWERED_REASON.into()),
+                    };
+                }
+            }
+        }
+        if verdict.is_none() {
+            self.allowed += 1;
+        } else if verdict.as_deref() != Some(UNANSWERED_REASON) {
+            self.denied += 1;
+        }
+        self.send(json!({"type":"extension_ui_response","id":id,"confirmed":verdict.is_none()}))
+            .await?;
+        if self.denied >= APPROVAL_DENIAL_TURN_LIMIT {
+            return Err(HubError::message("mhc approval denial limit reached"));
+        }
+        Ok(())
+    }
+    async fn request(&mut self, value: Value, cwd: Option<&str>) -> Result<Value> {
+        let id = value["id"].clone();
+        self.send(value).await?;
+        loop {
+            let f = self.read().await?;
+            if f["type"] == "response" && f["id"] == id {
+                if f["success"] != true {
+                    let error = format!("{}: {}", f["command"], f["error"]);
+                    return Err(if f["command"] == "set_model" {
+                        failure(error, false)
+                    } else {
+                        HubError::message(error)
+                    });
+                }
+                return Ok(f["data"].clone());
+            }
+            self.ui(&f, cwd).await?;
+        }
+    }
+}
+
+/// Stale paths and legacy IDs start a fresh session.
+fn resume_path(id: Option<&str>) -> Option<String> {
+    let path = std::path::Path::new(id?);
+    path.is_file().then(|| path.to_string_lossy().into_owned())
+}
+fn message_text(message: &Value) -> String {
+    if message["role"] != "assistant" {
+        return String::new();
+    }
+    let raw = match message.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter(|p| p["type"] == "text")
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    };
+    filter_reasoning(&raw)
+}
+fn message_error(message: &Value) -> Option<String> {
+    if message["role"] == "assistant"
+        && matches!(message["stopReason"].as_str(), Some("error" | "aborted"))
+    {
+        Some(
+            message["errorMessage"]
+                .as_str()
+                .unwrap_or("mhc turn interrupted")
+                .to_owned(),
+        )
+    } else {
+        None
+    }
+}
+fn failure(error: String, side_effects: bool) -> HubError {
+    let lower = error.to_ascii_lowercase();
+    let transient = [
+        "503",
+        "overload",
+        "429",
+        "quota",
+        "no available accounts",
+        "rate limit",
+        "model not found",
+        "unknown model",
+        "unsupported model",
+        "invalid model",
+    ]
+    .iter()
+    .any(|s| lower.contains(s));
+    HubError::message(if !side_effects && transient {
+        format!("mhc fallback eligible: {error}")
+    } else {
+        format!("mhc turn failed: {error}")
+    })
+}
+
+struct GuardDirectory(PathBuf);
+impl Drop for GuardDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            tracing::warn!(%error,"mhc temporary launchctl guard cleanup failed");
         }
     }
 }
@@ -781,398 +555,334 @@ pub async fn run_turn(
     request: &TurnRequest,
     progress: Option<UnboundedSender<String>>,
 ) -> Result<TurnOutcome> {
-    let deadline = tokio::time::Instant::now() + config.total_timeout;
-    let cwd = config
-        .workspace
-        .as_ref()
-        .map(|workspace| workspace.cwd.clone());
-    let cwd = cwd.as_deref();
-    let mut ws = connect(config, deadline).await?;
-    let mut allowed = 0u32;
-    let mut denied = 0u32;
-    let handshake_until = (tokio::time::Instant::now() + Duration::from_secs(60)).min(deadline);
-
-    send(&mut ws, protocol::initialize_request()).await?;
-    let reply = await_reply(
-        &mut ws,
-        1,
-        handshake_until,
-        "the initialize reply",
-        cwd,
-        (&mut allowed, &mut denied),
-    )
-    .await?;
-    if let Some(error) = rpc_error(&reply) {
-        return Err(HubError::message(format!("omo initialize failed: {error}")));
-    }
-
-    let mut resumed = false;
-    let mut thread_id = None;
-    if let Some(existing) = request.thread_id.as_deref().filter(|id| !id.is_empty()) {
-        send(&mut ws, protocol::thread_resume_request(existing)).await?;
-        let reply = await_reply(
-            &mut ws,
-            2,
-            handshake_until,
-            "the thread/resume reply",
-            cwd,
-            (&mut allowed, &mut denied),
-        )
-        .await?;
-        match rpc_error(&reply) {
-            None => {
-                resumed = true;
-                thread_id = Some(
-                    reply
-                        .pointer("/result/thread/id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(existing)
-                        .to_owned(),
-                );
-            }
-            Some(error) if is_missing_thread_error(&error) => {
-                tracing::info!("omo thread is gone; starting a fresh one");
-            }
-            Some(error) => {
-                return Err(HubError::message(format!(
-                    "omo thread/resume failed: {error}"
-                )))
-            }
-        }
-    }
-    let thread_id = match thread_id {
-        Some(id) => id,
-        None => {
-            send(
-                &mut ws,
-                protocol::thread_start_request(
-                    request.system_prompt.as_deref(),
-                    request.model.as_deref(),
-                    config.workspace.as_ref(),
-                    request.toolsets.as_deref(),
-                ),
-            )
-            .await?;
-            let reply = await_reply(
-                &mut ws,
-                2,
-                handshake_until,
-                "the thread/start reply",
-                cwd,
-                (&mut allowed, &mut denied),
-            )
-            .await?;
-            if let Some(error) = rpc_error(&reply) {
-                return Err(HubError::message(format!(
-                    "omo thread/start failed: {error}"
-                )));
-            }
-            reply
-                .pointer("/result/thread/id")
-                .or_else(|| reply.pointer("/result/threadId"))
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| HubError::message("failed to obtain thread id from thread/start"))?
-                .to_owned()
-        }
-    };
-
-    // omo-gateway awaits the custom-provider-aware settings RPC on every turn: a fresh thread
-    // otherwise runs on the engine default and a custom-provider model returns nothing.
-    if let Some(model) = request
-        .model
-        .as_deref()
-        .filter(|model| !model.trim().is_empty())
+    let stored_id = request.thread_id.clone();
+    let (child_path, _guard, session_path) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let path = crate::child_env::child_path().to_owned();
+        // A private guard must never write into the running user's ~/.ferryx/hub.
+        let dir = std::env::temp_dir().join(format!("ferryx-mhc-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir)?;
+        let guard = GuardDirectory(dir);
+        let bin = super::supervisor::install_launchctl_guard(&guard.0)?;
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&path));
+        let path = std::env::join_paths(paths).map_err(|e| HubError::message(e.to_string()))?;
+        Ok((path, guard, resume_path(stored_id.as_deref())))
+    })
+    .await
+    .map_err(|e| HubError::message(format!("mhc launch preparation failed: {e}")))??;
+    let mut cmd = crate::child_env::command(&config.binary);
+    cmd.env("PATH", child_path);
+    cmd.args(["--mode", "rpc", "--no-model-fallback"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    #[cfg(unix)]
     {
-        send(
-            &mut ws,
-            protocol::thread_settings_update_request(&thread_id, model),
-        )
-        .await?;
-        let reply = await_reply(
-            &mut ws,
-            4,
-            handshake_until,
-            "the thread/settings/update reply",
-            cwd,
-            (&mut allowed, &mut denied),
-        )
-        .await?;
-        if let Some(error) = rpc_error(&reply) {
-            return Err(HubError::message(format!(
-                "omo model update rejected: {error}"
-            )));
-        }
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
+    if let Some(dir) = super::supervisor::agent_dir() {
+        cmd.env("MAHO_CODING_AGENT_DIR", dir);
     }
 
-    // turn/start as omo-gateway submits it (`omo_backend.rs`): the app-server acknowledges only
-    // once our prompt is dequeued, so the wait is a 30s window that this thread's activity
-    // keeps extending. Until then the thread runs something else; its finished messages are
-    // relayed, and an explicit busy refusal resubmits after 1, 2, 4, 8s or the next completion.
-    let submit = protocol::turn_start_request(&thread_id, &request.text, request.model.as_deref());
-    send(&mut ws, submit.clone()).await?;
-    let mut ack_deadline = (tokio::time::Instant::now() + config.ack_window).min(deadline);
-    let mut pre_ack = PreAckState::default();
-    let (turn_id, mut awaiting_successor) = loop {
-        let now = tokio::time::Instant::now();
-        if pre_ack.awaiting_idle {
-            if now >= deadline {
-                return Err(HubError::message(
-                    "turn/start refused: the thread is still processing another turn; not resubmitted",
-                ));
+    cmd.env("NO_FALLBACK", "1");
+    if let Some(path) = session_path.as_deref() {
+        cmd.arg("--session").arg(path);
+    }
+    let mut instructions = request.system_prompt.clone().unwrap_or_default();
+    if let Some(w) = &config.workspace {
+        cmd.current_dir(&w.cwd);
+        instructions.push_str("\nAdditional workspace roots:\n");
+        instructions.push_str(&w.roots.join("\n"));
+    }
+    if !instructions.is_empty() {
+        cmd.arg("--append-system-prompt").arg(instructions);
+    }
+    if let Some(tools) = &request.toolsets {
+        cmd.arg("--tools").arg(tools.join(","));
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| HubError::message(format!("spawn mhc RPC: {e}")))?;
+    let mut rpc = Rpc {
+        input: child.stdin.take().expect("piped mhc stdin"),
+        lines: BufReader::new(child.stdout.take().expect("piped mhc stdout")).lines(),
+        allowed: 0,
+        denied: 0,
+        eof: false,
+    };
+    let process_group = child.id();
+    let key = crate::chat::turns::current_key();
+    let mut cancel = key.as_deref().and_then(crate::chat::turns::cancelled);
+    let work = run_owned(
+        &mut rpc,
+        config,
+        request,
+        progress,
+        key.as_deref(),
+        session_path,
+    );
+    let mut result = tokio::select! {
+        result = tokio::time::timeout(config.total_timeout,work) => result.unwrap_or_else(|_|Err(HubError::message("timed out waiting for the turn to finish"))),
+        _ = async {
+            match cancel.as_mut() {
+                Some(rx) => { if !*rx.borrow() { let _ = rx.changed().await; } }
+                None => std::future::pending::<()>().await,
             }
-            if pre_ack.retry_due(now) {
-                send(&mut ws, submit.clone()).await?;
-                pre_ack.note_resubmitted();
-                ack_deadline = (tokio::time::Instant::now() + config.ack_window).min(deadline);
-                tracing::info!(
-                    attempt = pre_ack.refusals,
-                    "resubmitted the prompt that turn/start refused"
-                );
+        } => Err(HubError::message(STOPPED)),
+    };
+    if rpc.eof {
+        // Only inspect exit after stdout is drained: racing wait() against reads can hide
+        // a successful final boundary already buffered in the pipe.
+        let status = match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+            Ok(Ok(status)) => status.to_string(),
+            Ok(Err(error)) => format!("status unavailable: {error}"),
+            Err(_) => "process still running after stdout EOF".to_owned(),
+        };
+        result = Err(HubError::message(format!(
+            "mhc RPC process exited before completing the turn ({status})"
+        )));
+    }
+    // No path may orphan the owned engine. Closing stdin first lets the host observe EOF;
+    // kill + wait bounds cleanup even when an extension or provider refuses cancellation.
+    if result.is_err() {
+        let abort = protocol::command("abort", "abort");
+        match tokio::time::timeout(Duration::from_secs(1), rpc.send(abort)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error,"mhc abort write failed"),
+            Err(error) => tracing::warn!(%error,"mhc abort write timed out"),
+        }
+    }
+    drop(rpc);
+    reap(&mut child, process_group).await;
+    result
+}
+async fn reap(child: &mut Child, process_group: Option<u32>) {
+    #[cfg(not(unix))]
+    let _ = process_group;
+    #[cfg(unix)]
+    if let Some(pid) = process_group {
+        // Tool subprocesses inherit the private group; stop them with their owned engine.
+        let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!(error=%std::io::Error::last_os_error(), "mhc RPC process group kill failed");
+        }
+    }
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if let Err(e) = child.kill().await {
+                tracing::warn!(error=%e,"mhc RPC child kill failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error=%e,"mhc RPC child status failed");
+            if let Err(error) = child.start_kill() {
+                tracing::warn!(%error,"mhc RPC child fallback kill failed");
+            }
+        }
+    }
+    if let Err(e) = child.wait().await {
+        tracing::warn!(error=%e,"mhc RPC child reap failed");
+    }
+}
+
+async fn run_owned(
+    rpc: &mut Rpc,
+    config: &OmoClientConfig,
+    request: &TurnRequest,
+    progress: Option<UnboundedSender<String>>,
+    key: Option<&str>,
+    path: Option<String>,
+) -> Result<TurnOutcome> {
+    let cwd = config.workspace.as_ref().map(|w| w.cwd.as_str());
+    let data = tokio::time::timeout(
+        config.connect_timeout,
+        rpc.request(protocol::command("state", "get_state"), cwd),
+    )
+    .await
+    .map_err(|_| HubError::message("timeout opening mhc session"))??;
+    let thread = data["sessionFile"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| HubError::message("mhc get_state missing sessionFile"))?
+        .to_owned();
+    // This native RPC persists retry.enabled=false in global agent settings. No supported
+    // CLI retry override exists; restoring it would race other sessions and reenable retry.
+    let mut retry = protocol::command("retry", "set_auto_retry");
+    retry["enabled"] = json!(false);
+    tokio::time::timeout(config.connect_timeout, rpc.request(retry, cwd))
+        .await
+        .map_err(|_| HubError::message("timeout disabling mhc auto retry"))??;
+    if let Some(model) = request.model.as_deref().filter(|s| !s.trim().is_empty()) {
+        let (provider, model_id) = model.split_once('/').unwrap_or(("", model));
+        let mut command = protocol::command("model", "set_model");
+        command["provider"] = json!(provider);
+        command["modelId"] = json!(model_id);
+        tokio::time::timeout(config.connect_timeout, rpc.request(command, cwd))
+            .await
+            .map_err(|_| HubError::message("timeout selecting mhc model"))??;
+    }
+    let mut thinking = protocol::command("thinking", "set_thinking_level");
+    thinking["level"] = json!(protocol::default_effort());
+    tokio::time::timeout(config.connect_timeout, rpc.request(thinking, cwd))
+        .await
+        .map_err(|_| HubError::message("timeout selecting mhc thinking level"))??;
+    let turn = uuid::Uuid::new_v4().to_string();
+    let (sender, mut guidance) = mpsc::unbounded_channel();
+    let active_key = (thread.clone(), turn.clone());
+    active()
+        .lock()
+        .expect("mhc active registry")
+        .insert(active_key.clone(), sender);
+    let _guard = ActiveGuard(active_key);
+    if let Some(key) = key {
+        crate::chat::turns::started(key, &thread, &turn);
+    }
+    let mut prompt = protocol::command("3", "prompt");
+    prompt["message"] = json!(request.text);
+    rpc.send(prompt).await?;
+    let mut acked = false;
+    let mut started = false;
+    let ack_until = tokio::time::Instant::now() + config.ack_window;
+    let mut idle_until = tokio::time::Instant::now() + config.idle_timeout;
+    let mut pending = String::new();
+    let mut delivered = 0;
+    let mut tools = 0;
+    let mut seen_messages = std::collections::HashSet::new();
+    let mut seen_tools = std::collections::HashSet::new();
+    let mut steer_id = 100u64;
+    let mut pending_steers: HashMap<String, oneshot::Sender<bool>> = HashMap::new();
+    loop {
+        let until = if acked || started {
+            idle_until
+        } else {
+            ack_until.min(idle_until)
+        };
+        let f = tokio::select! {
+            f = tokio::time::timeout_at(until,rpc.read()) => f.map_err(|_|HubError::message(if acked || started { "mhc no output within idle timeout" } else { TURN_START_ACK_TIMEOUT }))??,
+            Some(g) = guidance.recv() => {
+                steer_id += 1;
+                let id = steer_id.to_string();
+                let mut command = protocol::command(&id,"steer"); command["message"]=json!(g.text);
+                rpc.send(command).await?;
+                pending_steers.insert(id,g.reply);
                 continue;
             }
-        } else if now >= ack_deadline {
-            return Err(HubError::message(TURN_START_ACK_TIMEOUT));
-        }
-        let wait = if pre_ack.awaiting_idle {
-            pre_ack.retry_at.unwrap_or(deadline).min(deadline)
-        } else {
-            ack_deadline
         };
-        let Some(frame) = next_frame_by(&mut ws, wait, "the turn/start reply").await? else {
-            continue;
-        };
-        if is_response_to(&frame, 3) {
-            if let Some(error) = rpc_error(&frame) {
-                if pre_ack.note_refusal(&error) {
-                    tracing::warn!(
-                        attempt = pre_ack.refusals,
-                        "turn/start refused: the thread is still processing"
-                    );
+        idle_until = tokio::time::Instant::now() + config.idle_timeout;
+        if f["type"] == "response" {
+            if let Some(id) = f["id"].as_str() {
+                if let Some(reply) = pending_steers.remove(id) {
+                    let _ = reply.send(f["success"] == true);
                     continue;
                 }
-                return Err(HubError::message(format!("omo turn/start failed: {error}")));
             }
-            let acked = frame
-                .pointer("/result/turn/id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| HubError::message("turn/start acknowledgement missing turn id"))?
-                .to_owned();
-            break pre_ack.follow(acked);
-        }
-        if frame.get("id").is_some() && frame.get("method").is_some() {
-            answer_server_request(&mut ws, &frame, cwd, &mut allowed, &mut denied).await?;
-            continue;
-        }
-        let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
-        if !is_turn_bearing(method, &frame)
-            || frame.pointer("/params/threadId").and_then(Value::as_str) != Some(thread_id.as_str())
-        {
-            continue;
-        }
-        if pre_ack.refusals == 0 {
-            ack_deadline =
-                ack_deadline.max((tokio::time::Instant::now() + config.ack_window).min(deadline));
-        }
-        if pre_ack.observe(&frame, &thread_id)
-            || frame_turn_id(&frame).is_some_and(|id| pre_ack.refused.contains(id))
-        {
-            continue;
-        }
-        if method == "item/completed"
-            && frame.pointer("/params/item/type").and_then(Value::as_str) == Some("agentMessage")
-        {
-            let text = frame
-                .pointer("/params/item/text")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let scrubbed = filter_reasoning(text);
-            if !scrubbed.trim().is_empty() && !is_explicit_silence(&scrubbed) {
-                if let Some(progress) = progress.as_ref() {
-                    let _ = progress.send(scrubbed);
+            if f["id"] == "3" {
+                if f["success"] != true {
+                    return Err(failure(
+                        f["error"].as_str().unwrap_or("prompt rejected").to_owned(),
+                        tools > 0 || delivered > 0 || !pending.is_empty(),
+                    ));
                 }
-            }
-        }
-    };
-
-    // omo-gateway's buffer: deltas accumulate, a completed agent message replaces them, and a
-    // tool start relays (or drops) what accumulated as an interim status.
-    let mut content = String::new();
-    let mut delivered = 0usize;
-    let mut last_relay_at: Option<tokio::time::Instant> = None;
-    let mut tool_calls = 0usize;
-    let mut started_items: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut turn_id = turn_id;
-    let mut last_activity = tokio::time::Instant::now();
-    // `/omo-stop` and `/omo-steer` find this turn by its session (chat::turns).
-    let registry_key = crate::chat::turns::current_key();
-    if let Some(key) = &registry_key {
-        crate::chat::turns::started(key, &thread_id, &turn_id);
-    }
-    let mut cancel = registry_key
-        .as_deref()
-        .and_then(crate::chat::turns::cancelled);
-    loop {
-        let frame = {
-            {
-                let until = (last_activity + config.idle_timeout).min(deadline);
-                let next = match cancel.as_mut() {
-                    Some(cancel) => tokio::select! {
-                        frame = next_frame(&mut ws, until, "the turn to finish") => frame,
-                        Ok(_) = cancel.wait_for(|stop| *stop) => Err(HubError::message(STOPPED)),
-                    },
-                    None => next_frame(&mut ws, until, "the turn to finish").await,
-                };
-                match next {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        let interrupt = json!({
-                            "jsonrpc": "2.0", "id": 9_002, "method": "turn/interrupt",
-                            "params": {"threadId": thread_id, "turnId": turn_id}
-                        });
-                        let _ = send(&mut ws, interrupt.to_string()).await;
-                        let _ = ws.close(None).await;
-                        return Err(error);
-                    }
-                }
-            }
-        };
-        last_activity = tokio::time::Instant::now();
-        let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
-        if frame.get("id").is_some() && !method.is_empty() {
-            answer_server_request(&mut ws, &frame, cwd, &mut allowed, &mut denied).await?;
-            if denied >= APPROVAL_DENIAL_TURN_LIMIT {
-                let interrupt = json!({
-                    "jsonrpc": "2.0", "id": 9_002, "method": "turn/interrupt",
-                    "params": {"threadId": thread_id, "turnId": turn_id}
-                });
-                let _ = send(&mut ws, interrupt.to_string()).await;
-                let _ = ws.close(None).await;
-                return Err(HubError::message(format!(
-                    "tool approval denied {denied} times by gateway policy; turn aborted"
-                )));
+                acked = true;
             }
             continue;
         }
-        // omo-gateway follows only this thread and this turn id. When the run our prompt
-        // queued behind completed under our id, the next turn that starts carries our prompt.
-        if is_turn_bearing(method, &frame) {
-            if frame.pointer("/params/threadId").and_then(Value::as_str) != Some(thread_id.as_str())
-            {
-                continue;
-            }
-            if let Some(frame_turn) = frame_turn_id(&frame) {
-                if frame_turn != turn_id {
-                    if !(awaiting_successor
-                        && delivered == 0
-                        && content.is_empty()
-                        && method == "turn/started")
-                    {
-                        continue;
-                    }
-                    tracing::info!(successor = %frame_turn, "following the turn that took over our queued prompt");
-                    turn_id = frame_turn.to_owned();
-                    awaiting_successor = false;
+        rpc.ui(&f, cwd).await?;
+        match f["type"].as_str().unwrap_or("") {
+            "agent_start" => started = true,
+            "message_end" if started => {
+                let message = &f["message"];
+                if let Some(error) = message_error(message) {
+                    return Err(failure(
+                        error,
+                        tools > 0 || delivered > 0 || !pending.is_empty(),
+                    ));
+                }
+                if message["role"] != "assistant" {
+                    continue;
+                }
+                let identity = message
+                    .get("id")
+                    .filter(|v| !v.is_null())
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| message.to_string());
+                if !seen_messages.insert(identity) {
+                    continue;
+                }
+                let text = message_text(message);
+                if !text.is_empty() {
+                    relay(&mut pending, &progress, &mut delivered);
+                    pending = text;
                 }
             }
-        }
-        match method {
-            "item/agentMessage/delta" => {
-                if let Some(delta) = frame.pointer("/params/delta").and_then(Value::as_str) {
-                    content.push_str(delta);
+            "tool_execution_start" if started => {
+                let id = f["toolCallId"]
+                    .as_str()
+                    .ok_or_else(|| HubError::message("mhc tool start missing toolCallId"))?;
+                if seen_tools.insert(id.to_owned()) {
+                    tools += 1;
+                    relay(&mut pending, &progress, &mut delivered);
                 }
             }
-            "item/started" => {
-                let item_id = frame
-                    .pointer("/params/item/id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let item_type = frame
-                    .pointer("/params/item/type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let fresh = item_id.is_empty() || started_items.insert(item_id.to_owned());
-                if fresh && !matches!(item_type, "agentMessage" | "userMessage" | "reasoning" | "")
-                {
-                    tool_calls += 1;
-                    #[cfg(feature = "hub-slack")]
-                    if let Some(key) = crate::chat::turns::current_key() {
-                        crate::chat::turn_status::record_tool_activity(&key, item_type);
-                    }
-                    let now = tokio::time::Instant::now();
-                    if !content.trim().is_empty()
-                        && !should_relay_interim(delivered, last_relay_at, now)
-                    {
-                        content.clear();
-                    }
-                    if !content.trim().is_empty() {
-                        let scrubbed = filter_reasoning(&content);
-                        if !scrubbed.trim().is_empty() && !is_explicit_silence(&scrubbed) {
-                            if let Some(progress) = progress.as_ref() {
-                                if progress.send(scrubbed).is_ok() {
-                                    delivered += 1;
-                                    last_relay_at = Some(now);
-                                    content.clear();
-                                }
-                            } else {
-                                content.clear();
-                            }
-                        } else {
-                            content.clear();
+            "agent_end" if started => {
+                // mhc emits a raw boundary before its enriched retry decision.
+                if f["willRetry"].as_bool().is_none() {
+                    continue;
+                }
+                if f["aborted"] == true {
+                    return Err(HubError::message("mhc turn interrupted"));
+                }
+                if f["willRetry"] == true {
+                    continue;
+                }
+                if let Some(messages) = f["messages"].as_array() {
+                    for message in messages {
+                        if let Some(error) = message_error(message) {
+                            return Err(failure(
+                                error,
+                                tools > 0 || delivered > 0 || !pending.is_empty(),
+                            ));
                         }
                     }
                 }
+                return Ok(TurnOutcome {
+                    thread_id: thread,
+                    resumed: path.is_some(),
+                    turn_id: turn,
+                    text: pending,
+                    approvals_allowed: rpc.allowed,
+                    approvals_denied: rpc.denied,
+                    messages_delivered: delivered,
+                    tool_calls: tools,
+                });
             }
-            "item/completed" => {
-                if frame.pointer("/params/item/type").and_then(Value::as_str)
-                    == Some("agentMessage")
-                {
-                    if let Some(text) = frame.pointer("/params/item/text").and_then(Value::as_str) {
-                        content.clear();
-                        content.push_str(text);
-                    }
-                }
-            }
-            "turn/completed" if !awaiting_successor => {
-                let _ = ws.close(None).await;
-                let status = frame.pointer("/params/turn/status").and_then(Value::as_str);
-                return match status {
-                    Some("interrupted") => Err(HubError::message("omo turn interrupted")),
-                    Some("failed") => {
-                        let error = frame
-                            .pointer("/params/turn/error/message")
-                            .or_else(|| frame.pointer("/params/turn/error"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("turn failed");
-                        Err(HubError::message(format!("omo turn failed: {error}")))
-                    }
-                    _ => Ok(TurnOutcome {
-                        thread_id,
-                        resumed,
-                        turn_id,
-                        text: filter_reasoning(&content),
-                        approvals_allowed: allowed,
-                        approvals_denied: denied,
-                        messages_delivered: delivered,
-                        tool_calls,
-                    }),
-                };
+            "error" => {
+                return Err(failure(
+                    f["error"].as_str().unwrap_or("mhc RPC error").to_owned(),
+                    tools > 0 || delivered > 0 || !pending.is_empty(),
+                ))
             }
             _ => {}
         }
     }
 }
-
-/// Token for the app-server this hub supervises: the token file next to the hub state, when
-/// it exists. A daemon somebody else started without a token file is reached unauthenticated.
-pub fn token_from_file(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty())
+fn relay(pending: &mut String, progress: &Option<UnboundedSender<String>>, delivered: &mut usize) {
+    if pending.is_empty() || is_explicit_silence(pending) {
+        pending.clear();
+        return;
+    }
+    if let Some(sender) = progress {
+        let text = std::mem::take(pending);
+        if sender.send(text).is_ok() {
+            *delivered += 1;
+        }
+    } else {
+        pending.clear();
+    }
 }
-
 /// The workspace omo-gateway gives Slack turns: `<root>/agents/bot-<persona>` plus
 /// `<root>/shared`, where root is `OMON_WORKSPACE_ROOT` or `~/.ferryx/hub/workspace`. Absent when the
 /// directory does not exist, so the engine keeps its own default.
@@ -1203,730 +913,402 @@ pub fn slack_workspace() -> Option<protocol::Workspace> {
     })
 }
 
-#[cfg(test)]
-pub mod mock {
-    //! A scripted omo app-server: answers the handshake, then streams agent messages and a
-    //! `turn/completed`. It records every frame and the Authorization header it saw.
+#[cfg(all(test, unix))]
+mod rpc_tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use tokio::net::TcpListener;
-
-    #[derive(Clone, Default)]
-    pub struct MockLog {
-        pub frames: Arc<Mutex<Vec<Value>>>,
-        pub auth: Arc<Mutex<Vec<Option<String>>>>,
+    use std::os::unix::fs::PermissionsExt;
+    struct Script {
+        dir: PathBuf,
+        config: OmoClientConfig,
     }
-
-    #[derive(Clone)]
-    pub struct Script {
-        pub messages: Vec<String>,
-        pub resume_error: Option<String>,
-        pub approval: bool,
-        /// Command the approval request names (default `ls`).
-        pub approval_command: Option<String>,
-        pub thread_id: String,
-        /// Before acknowledging turn/start, run another turn on the thread for this many
-        /// ticks (one frame each), relaying one finished message.
-        pub queued_ticks: u32,
-        pub tick: std::time::Duration,
-        /// Never acknowledge turn/start.
-        pub no_ack: bool,
-        /// Refuse a turn/start that names a model with this error, as the engine does when the
-        /// thread's live context does not fit that model's window.
-        pub switch_error: Option<String>,
-        /// The first turn/start on a connection runs a tool and writes no reply.
-        pub silent_first_turn: bool,
+    impl Script {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("hub-mhc-rpc-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let binary = dir.join("mhc");
+            std::fs::write(&binary,r#"#!/usr/bin/env python3
+import json, sys, pathlib
+root = pathlib.Path(__file__).parent
+session = root / 'session.jsonl'
+log = root / 'commands.jsonl'
+scenario = ''
+def emit(v):
+    print(json.dumps(v),flush=True)
+def event(kind, **kw):
+    emit(dict(type=kind,**kw))
+def answer(c, data=None):
+    emit(dict(type='response',id=c['id'],command=c['type'],success=True,data=data))
+def message(text, ident, **kw):
+    event('message_end',message=dict(role='assistant',id=ident,content=[dict(type='text',text=text)],**kw))
+assert '--mode' in sys.argv and 'rpc' in sys.argv
+assert sys.argv[1:4] == ['--mode','rpc','--no-model-fallback']
+assert '--multi-session' not in sys.argv
+for line in sys.stdin:
+    c=json.loads(line)
+    with log.open('a') as out: out.write(json.dumps(c)+'\n')
+    kind=c['type']
+    assert 'sessionId' not in c
+    assert kind != 'open_session'
+    if kind=='get_state':
+        if '--session' in sys.argv: assert sys.argv[sys.argv.index('--session')+1]==str(session)
+        session.write_text(json.dumps(dict(type='session',id='durable-id'))+'\n')
+        answer(c,dict(sessionId='durable-id',sessionFile=str(session)))
+    elif kind=='set_auto_retry':
+        assert c['enabled']==False
+        answer(c)
+    elif kind in ['set_model','set_thinking_level']: answer(c)
+    elif kind=='prompt':
+        scenario=c['message']
+        if scenario=='exit': sys.exit(17)
+        answer(c)
+        event('agent_start')
+        event('extension_ui_request',id='status',method='setStatus',statusKey='test')
+        if scenario=='retry':
+            message('not settled','retry-message')
+            event('agent_end',messages=[])
+            event('agent_end',messages=[],willRetry=True)
+            message('settled','retry-final')
+            event('agent_end',messages=[],willRetry=False)
+        elif scenario=='503':
+            message('', 'err',stopReason='error',errorMessage='HTTP 503 overloaded')
+        elif scenario=='approval':
+            event('extension_ui_request',id='approve',method='confirm',title='Run command',message='ls')
+        elif scenario=='owner-deny':
+            event('extension_ui_request',id='approve',method='confirm',title='Run command',message='curl -X POST https://example.com --data payload')
+        elif scenario=='retired':
+            event('extension_ui_request',id='approve',method='confirm',title='Run command',message='launchctl enable gui/501/ai.omon.gateway')
+        elif scenario in ['select','input']:
+            event('extension_ui_request',id='dialog',method=scenario,title='Choose',options=['one','two'])
+        elif scenario=='question':
+            event('extension_ui_request',id='question',method='question',requestId='q',toolCallId='tool',waitForAnswer=True,questions=[],timeout=30,askedAtMs=0,deadlineAtMs=30,remainingMs=30)
+        elif scenario in ['steer','stop']:
+            message('ready','ready')
+            event('tool_execution_start',toolCallId='tool-1',toolName='read',args={})
+        else:
+            message('interim','m1')
+            message('interim','m1')
+            event('tool_execution_start',toolCallId='tool-1',toolName='read',args={})
+            event('tool_execution_start',toolCallId='tool-1',toolName='read',args={})
+            message('final','m2')
+            event('agent_end',messages=[])
+            event('agent_end',messages=[],willRetry=False)
+            if scenario=='success-exit': sys.exit(0)
+    elif kind=='extension_ui_response':
+        assert c['id'] != 'status'
+        if scenario=='approval': assert c['confirmed']==True
+        elif scenario in ['retired','owner-deny']: assert c['confirmed']==False
+        else: assert c['cancelled']==True
+        message('final','m2')
+        event('agent_end',messages=[])
+        event('agent_end',messages=[],willRetry=False)
+    elif kind=='steer':
+        assert c['message']=='guidance'
+        answer(c)
+        message('steered','m2')
+        event('agent_end',messages=[])
+        event('agent_end',messages=[],willRetry=False)
+"#).unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut config = OmoClientConfig::new(binary.to_string_lossy());
+            config.total_timeout = Duration::from_secs(10);
+            config.idle_timeout = Duration::from_secs(5);
+            Self { dir, config }
+        }
+        fn commands(&self) -> Vec<Value> {
+            std::fs::read_to_string(self.dir.join("commands.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect()
+        }
+        async fn run(
+            &self,
+            text: &str,
+            thread_id: Option<String>,
+            progress: Option<UnboundedSender<String>>,
+        ) -> Result<TurnOutcome> {
+            run_turn_recovering(
+                &self.config,
+                &TurnRequest {
+                    text: text.into(),
+                    thread_id,
+                    model: Some("mahoquot/gpt-6-luna".into()),
+                    ..Default::default()
+                },
+                progress,
+            )
+            .await
+        }
     }
-
-    #[allow(clippy::result_large_err)]
-    pub async fn serve(script: Script) -> (String, MockLog) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
-        let log = MockLog::default();
-        let served = log.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    return;
-                };
-                let log = served.clone();
-                let script = script.clone();
-                tokio::spawn(async move {
-                    let auth = Arc::new(Mutex::new(None));
-                    let seen = auth.clone();
-                    let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                                         resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                        *seen.lock().unwrap() = req
-                            .headers()
-                            .get("authorization")
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_owned);
-                        Ok(resp)
-                    };
-                    let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await
-                    else {
-                        return;
-                    };
-                    log.auth.lock().unwrap().push(auth.lock().unwrap().clone());
-                    let out = |value: Value| Message::text(value.to_string());
-                    while let Some(Ok(Message::Text(text))) = ws.next().await {
-                        let frame: Value = serde_json::from_str(&text).unwrap();
-                        log.frames.lock().unwrap().push(frame.clone());
-                        let id = frame.get("id").cloned().unwrap_or(Value::Null);
-                        match frame.get("method").and_then(Value::as_str) {
-                            Some("initialize") => {
-                                ws.send(out(
-                                    json!({"jsonrpc":"2.0","id":id,"result":{"userAgent":"mock"}}),
-                                ))
-                                .await
-                                .unwrap();
-                            }
-                            Some("thread/resume") => {
-                                let reply = match &script.resume_error {
-                                    Some(error) => {
-                                        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error}})
-                                    }
-                                    None => {
-                                        json!({"jsonrpc":"2.0","id":id,"result":{"thread":{"id":frame.pointer("/params/threadId")}}})
-                                    }
-                                };
-                                ws.send(out(reply)).await.unwrap();
-                            }
-                            Some("thread/settings/update") => {
-                                ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{}})))
-                                    .await
-                                    .unwrap();
-                            }
-                            Some("thread/start") => {
-                                // A notification before the reply: the client must keep waiting for id 2.
-                                ws.send(out(json!({"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":script.thread_id}}}))).await.unwrap();
-                                ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"thread":{"id":script.thread_id}}}))).await.unwrap();
-                            }
-                            Some("turn/start") => {
-                                let thread = frame
-                                    .pointer("/params/threadId")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_owned();
-                                if script.no_ack {
-                                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                                    continue;
-                                }
-                                if let Some(error) = &script.switch_error {
-                                    if frame.pointer("/params/model").is_some() {
-                                        ws.send(out(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error}}))).await.unwrap();
-                                        continue;
-                                    }
-                                }
-                                if script.silent_first_turn
-                                    && log
-                                        .frames
-                                        .lock()
-                                        .unwrap()
-                                        .iter()
-                                        .filter(|f| f["method"] == "turn/start")
-                                        .count()
-                                        == 1
-                                {
-                                    ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))).await.unwrap();
-                                    ws.send(out(json!({"jsonrpc":"2.0","method":"item/started","params":{"threadId":thread,"turnId":"turn-1","item":{"id":"tool-silent","type":"commandExecution"}}}))).await.unwrap();
-                                    ws.send(out(json!({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread,"turn":{"id":"turn-1","status":"completed"}}}))).await.unwrap();
-                                    continue;
-                                }
-                                if script.queued_ticks > 0 {
-                                    ws.send(out(json!({"jsonrpc":"2.0","method":"turn/started","params":{"threadId":thread,"turn":{"id":"turn-0"}}}))).await.unwrap();
-                                    for tick in 0..script.queued_ticks {
-                                        tokio::time::sleep(script.tick).await;
-                                        ws.send(out(json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":"turn-0","delta":format!("bg{tick} ")}}))).await.unwrap();
-                                    }
-                                    ws.send(out(json!({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread,"turnId":"turn-0","item":{"type":"agentMessage","text":"background run finished"}}}))).await.unwrap();
-                                    // Another thread's frame on the same socket is ignored.
-                                    ws.send(out(json!({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thr-other","turnId":"turn-9","item":{"type":"agentMessage","text":"not ours"}}}))).await.unwrap();
-                                    ws.send(out(json!({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread,"turn":{"id":"turn-0","status":"completed"}}}))).await.unwrap();
-                                }
-                                ws.send(out(json!({"jsonrpc":"2.0","id":id,"result":{"turn":{"id":"turn-1","status":"inProgress"}}}))).await.unwrap();
-                                if script.approval {
-                                    ws.send(out(json!({"jsonrpc":"2.0","id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":thread,"command":script.approval_command.clone().unwrap_or_else(|| "ls".into())}}))).await.unwrap();
-                                    // Wait for the answer before continuing.
-                                    if let Some(Ok(Message::Text(text))) = ws.next().await {
-                                        log.frames
-                                            .lock()
-                                            .unwrap()
-                                            .push(serde_json::from_str(&text).unwrap());
-                                    }
-                                }
-                                for (index, message) in script.messages.iter().enumerate() {
-                                    if index > 0 {
-                                        ws.send(out(json!({"jsonrpc":"2.0","method":"item/started","params":{"threadId":thread,"turnId":"turn-1","item":{"id":format!("tool-{index}"),"type":"commandExecution"}}}))).await.unwrap();
-                                    }
-                                    for chunk in message.as_bytes().chunks(4) {
-                                        ws.send(out(json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":thread,"turnId":"turn-1","delta":String::from_utf8_lossy(chunk)}}))).await.unwrap();
-                                    }
-                                    ws.send(out(json!({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread,"turnId":"turn-1","item":{"type":"agentMessage","text":message}}}))).await.unwrap();
-                                }
-                                ws.send(out(json!({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread,"turn":{"id":"turn-1","status":"completed"}}}))).await.unwrap();
-                            }
-                            _ => {}
-                        }
-                    }
-                });
-            }
-        });
-        (url, log)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::mock::*;
-    use super::*;
-
-    fn script(messages: &[&str]) -> Script {
-        Script {
-            messages: messages.iter().map(|m| (*m).to_owned()).collect(),
-            resume_error: None,
-            approval: false,
-            approval_command: None,
-            thread_id: "thr-new".into(),
-            queued_ticks: 0,
-            tick: Duration::ZERO,
-            no_ack: false,
-            switch_error: None,
-            silent_first_turn: false,
+    impl Drop for Script {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).unwrap();
         }
     }
 
-    /// 2026-10-23 05:06Z: a prompt queued behind another run on its thread failed after a
-    /// fixed 120s wait. omo-gateway keeps a 30s window open while the thread is active,
-    /// relays the earlier run's finished message, and gives up only after 30s of silence.
+    #[test]
+    fn only_existing_session_files_resume() {
+        let script = Script::new();
+        let file = script.dir.join("session.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        assert_eq!(
+            resume_path(file.to_str()),
+            Some(file.to_string_lossy().into_owned())
+        );
+        assert!(resume_path(Some("old-appserver-thread")).is_none());
+        std::fs::remove_file(&file).unwrap();
+        assert!(resume_path(file.to_str()).is_none());
+    }
     #[tokio::test]
-    async fn turn_start_waits_like_omo_while_the_thread_runs_another_turn() {
-        let (url, _log) = serve(Script {
-            queued_ticks: 6,
-            tick: Duration::from_millis(150),
-            ..script(&["our answer"])
-        })
-        .await;
-        let mut config = OmoClientConfig::new(url);
-        config.ack_window = Duration::from_millis(400);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = run_turn(
-            &config,
-            &TurnRequest {
-                text: "queued".into(),
-                ..Default::default()
-            },
-            Some(tx),
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.turn_id, "turn-1");
-        assert_eq!(outcome.text, "our answer");
-        assert_eq!(rx.recv().await.as_deref(), Some("background run finished"));
-        assert!(rx.try_recv().is_err(), "another thread's message leaked");
+    async fn starts_resumes_and_relays_completed_interim_exactly_once() {
+        let script = Script::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let first = script.run("normal", None, Some(tx)).await.unwrap();
+        assert!(!first.resumed);
+        assert_eq!(first.text, "final");
+        assert_eq!(first.messages_delivered, 1);
+        assert_eq!(first.tool_calls, 1);
+        assert_eq!(rx.try_recv().unwrap(), "interim");
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        let second = script
+            .run(
+                "normal",
+                Some(
+                    script
+                        .dir
+                        .join("session.jsonl")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(second.resumed);
+        assert_eq!(second.thread_id, first.thread_id);
+        let commands = script.commands();
+        assert_eq!(
+            commands.iter().filter(|c| c["type"] == "get_state").count(),
+            2
+        );
+        for prompt in commands
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c["type"] == "prompt")
+        {
+            assert!(commands[..prompt.0]
+                .iter()
+                .any(|c| c["type"] == "set_auto_retry" && c["enabled"] == false));
+        }
+    }
+    #[tokio::test]
+    async fn native_confirm_approvals_questions_and_retired_gateway_block() {
+        let script = Script::new();
+        let allowed = FULL_ACCESS_TEST
+            .scope(true, script.run("approval", None, None))
+            .await
+            .unwrap();
+        assert_eq!(allowed.approvals_allowed, 1);
+        let denied = FULL_ACCESS_TEST
+            .scope(true, script.run("retired", None, None))
+            .await
+            .unwrap();
+        assert_eq!(denied.approvals_denied, 1);
+        assert_eq!(
+            script.run("question", None, None).await.unwrap().text,
+            "final"
+        );
+    }
+    struct Deny;
+    #[async_trait::async_trait]
+    impl Approver for Deny {
+        async fn ask(&self, frame: &Value, _: Option<&str>, _: &str) -> OwnerAnswer {
+            assert!(!matches!(frame["method"].as_str(), Some("select" | "input")));
+            OwnerAnswer::Deny
+        }
+    }
+    #[tokio::test]
+    async fn nonlocal_confirmation_reaches_owner_approver() {
+        let script = Script::new();
+        // The nonlocal effect is declined by the owner when full access is off.
+        let result = FULL_ACCESS_TEST
+            .scope(
+                false,
+                with_approver(
+                    std::sync::Arc::new(Deny),
+                    script.run("owner-deny", None, None),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.approvals_denied, 1);
+        for method in ["select", "input"] {
+            assert_eq!(
+                with_approver(std::sync::Arc::new(Deny), script.run(method, None, None))
+                    .await
+                    .unwrap()
+                    .text,
+                "final"
+            );
+            let commands = script.commands();
+            let response = commands
+                .iter()
+                .rev()
+                .find(|frame| frame["type"] == "extension_ui_response")
+                .unwrap();
+            assert_eq!(response["id"], "dialog");
+            assert_eq!(response["cancelled"], true);
+        }
+    }
 
-        let (url, _log) = serve(Script {
-            no_ack: true,
-            ..script(&["never"])
-        })
-        .await;
-        let mut config = OmoClientConfig::new(url);
-        config.ack_window = Duration::from_millis(300);
-        let started = std::time::Instant::now();
-        let error = run_turn(&config, &TurnRequest::default(), None)
+    #[tokio::test]
+    async fn overload_is_eligible_but_no_hidden_retry_occurs() {
+        let script = Script::new();
+        let result = script.run("503", None, None).await;
+        assert!(fallback_eligible(&result));
+        assert_eq!(
+            script
+                .commands()
+                .iter()
+                .filter(|c| c["type"] == "prompt")
+                .count(),
+            1
+        );
+        assert_eq!(
+            script.run("normal", None, None).await.unwrap().text,
+            "final"
+        );
+        assert_eq!(
+            script
+                .commands()
+                .iter()
+                .filter(|c| c["type"] == "prompt")
+                .count(),
+            2
+        );
+        assert!(!fallback_eligible(&Err(failure(
+            "503 overloaded".into(),
+            true
+        ))));
+    }
+    #[tokio::test]
+    async fn retry_boundary_does_not_complete_the_turn() {
+        let script = Script::new();
+        assert_eq!(
+            script.run("retry", None, None).await.unwrap().text,
+            "settled"
+        );
+        assert_eq!(
+            script
+                .commands()
+                .iter()
+                .filter(|c| c["type"] == "prompt")
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn buffered_success_survives_immediate_process_exit() {
+        let script = Script::new();
+        let result = script.run("success-exit", None, None).await.unwrap();
+        assert_eq!(result.text, "final");
+    }
+    #[tokio::test]
+    async fn immediate_process_exit_is_reported() {
+        let script = Script::new();
+        let error = script
+            .run("exit", None, None)
             .await
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("submission outcome unknown, do not resubmit"),
-            "{error}"
-        );
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(error.contains("exited"), "{error}");
+        assert!(error.contains("17"), "{error}");
     }
-
-    #[test]
-    fn a_prompt_whose_turn_id_the_run_ahead_completed_follows_the_successor() {
-        let mut pre = PreAckState::default();
-        let frame = |method: &str, id: &str| json!({"method": method, "params": {"threadId": "t", "turn": {"id": id}}});
-        pre.observe(&frame("turn/started", "a"), "t");
-        pre.observe(&frame("turn/completed", "a"), "t");
-        assert_eq!(pre.clone_follow("a"), ("a".to_owned(), true));
-        pre.observe(&frame("turn/started", "b"), "t");
-        assert_eq!(pre.clone_follow("a"), ("b".to_owned(), false));
-        assert_eq!(pre.clone_follow("z"), ("z".to_owned(), false));
-        assert!(pre.note_refusal("thread is already processing a turn"));
-        assert!(pre.awaiting_idle);
-        assert!(pre.observe(&frame("turn/completed", "b"), "t"));
-    }
-
     #[tokio::test]
-    async fn a_turn_waits_for_each_reply_and_returns_the_last_message() {
-        let (url, log) = serve(Script {
-            approval: true,
-            approval_command: None,
-            ..script(&["first", "final answer"])
-        })
-        .await;
-        let mut config = OmoClientConfig::new(url);
-        config.token = Some("tok-123".into());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    async fn active_process_receives_steer_and_stop_without_polling() {
+        for scenario in ["steer", "stop"] {
+            let script = Script::new();
+            let key = format!("rpc-test-{}", uuid::Uuid::new_v4());
+            let _guard = crate::chat::turns::begin(&key, "test");
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let config = script.config.clone();
+            let task_key = key.clone();
+            let turn = tokio::spawn(crate::chat::turns::scope(task_key, async move {
+                run_turn(
+                    &config,
+                    &TurnRequest {
+                        text: scenario.into(),
+                        ..Default::default()
+                    },
+                    Some(tx),
+                )
+                .await
+            }));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("ready")
+            );
+            let (thread, id) = crate::chat::turns::ids(&key).unwrap();
+            if scenario == "steer" {
+                assert!(steer(&script.config, &thread, &id, "guidance")
+                    .await
+                    .unwrap());
+                assert_eq!(turn.await.unwrap().unwrap().text, "steered");
+            } else {
+                assert!(crate::chat::turns::stop(&key));
+                assert!(turn
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains(STOPPED));
+            }
+            assert!(!steer(&script.config, &thread, &id, "too late")
+                .await
+                .unwrap());
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires installed mhc and isolated agent credentials"]
+    async fn live_single_session_mhc_turn() {
+        let isolated =
+            std::env::var("FERRYX_RPC_LIVE_HOME").expect("run live test with isolated HOME");
+        assert_eq!(std::env::var("HOME").unwrap(), isolated);
+        assert_eq!(
+            super::super::supervisor::agent_dir().unwrap(),
+            PathBuf::from(&isolated).join("agent")
+        );
+        let config = OmoClientConfig {
+            total_timeout: Duration::from_secs(180),
+            ..Default::default()
+        };
         let outcome = run_turn(
             &config,
             &TurnRequest {
-                text: "hello".into(),
-                system_prompt: Some("sys".into()),
-                ..Default::default()
-            },
-            Some(tx),
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.thread_id, "thr-new");
-        assert_eq!(outcome.turn_id, "turn-1");
-        assert!(!outcome.resumed);
-        assert_eq!(outcome.text, "final answer");
-        assert_eq!(rx.recv().await.as_deref(), Some("first"));
-        assert_eq!(outcome.approvals_allowed, 1);
-        assert_eq!(
-            log.auth.lock().unwrap()[0].as_deref(),
-            Some("Bearer tok-123")
-        );
-        let frames = log.frames.lock().unwrap().clone();
-        let methods: Vec<_> = frames
-            .iter()
-            .filter_map(|f| f.get("method").and_then(Value::as_str))
-            .collect();
-        assert_eq!(methods, ["initialize", "thread/start", "turn/start"]);
-        assert_eq!(frames[1]["params"]["developerInstructions"], "sys");
-        assert_eq!(frames[2]["params"]["threadId"], "thr-new");
-        assert_eq!(frames[2]["params"]["input"][0]["text"], "hello");
-        let answer = frames
-            .iter()
-            .find(|f| f.get("id") == Some(&json!(77)))
-            .unwrap();
-        assert_eq!(answer["result"]["decision"], "accept");
-    }
-
-    #[test]
-    fn only_requests_that_would_start_the_retired_gateway_are_recognized() {
-        let frame = |command: &str| json!({"method":"item/commandExecution/requestApproval","params":{"command":command}});
-        for blocked in [
-            "launchctl enable gui/501/ai.omon.gateway",
-            "launchctl bootstrap gui/$(id -u) /Users/x/Library/LaunchAgents/ai.omon.gateway.plist 2>&1 | head -5",
-            "/bin/launchctl kickstart -k gui/501/ai.omon.gateway",
-            "launchctl load -w ~/Library/LaunchAgents/ai.omon.gateway-watchdog.plist",
-            "nohup /Users/x/.omon/bin/omo-gateway run &",
-            "/Users/x/.omon/bin/omo-gateway-launch",
-        ] {
-            assert!(starts_retired_gateway(&frame(blocked)), "{blocked}");
-        }
-        // A tool call whose arguments carry the command in another shape.
-        assert!(starts_retired_gateway(
-            &json!({"method":"item/tool/requestApproval","params":{"arguments":{"code":"subprocess.run([\"/Users/x/.omon/bin/omo-gateway\",\"run\"])"}}})
-        ));
-        for allowed in [
-            "launchctl print gui/501/ai.omon.gateway",
-            "launchctl list | grep ai.omon",
-            "launchctl bootout gui/501/ai.omon.gateway",
-            "launchctl disable gui/501/ai.omon.gateway",
-            "tail -n 50 ~/.omon/gateway.log",
-            "/Users/x/.omon/bin/omo-gateway autonomy outcome k --status failed",
-            "launchctl kickstart -k gui/501/ai.omon.tracker-proxy",
-        ] {
-            assert!(!starts_retired_gateway(&frame(allowed)), "{allowed}");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_request_to_start_the_retired_gateway_is_declined_even_with_full_access() {
-        let (url, log) = serve(Script {
-            approval: true,
-            approval_command: Some("launchctl enable gui/501/ai.omon.gateway".into()),
-            ..script(&["done"])
-        })
-        .await;
-        let outcome = run_turn(
-            &OmoClientConfig::new(url),
-            &TurnRequest {
-                text: "hello".into(),
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.approvals_allowed, 0);
-        assert_eq!(outcome.approvals_denied, 1);
-        let frames = log.frames.lock().unwrap().clone();
-        let answer = frames
-            .iter()
-            .find(|f| f.get("id") == Some(&json!(77)))
-            .unwrap();
-        assert_ne!(answer["result"]["decision"], "accept");
-        assert!(answer.to_string().contains("intentionally retired"));
-    }
-
-    /// 2026-10-24 23:15Z: turn/start refused the requested model for context size and the
-    /// owner got a failure line. The turn reruns on the thread's model and answers.
-    #[tokio::test]
-    async fn a_model_switch_refused_for_context_size_reruns_on_the_current_model() {
-        let (url, log) = serve(Script {
-            switch_error: Some("Model \"mahoquot/claude-opus-5-5\" cannot switch: target context window 400000 tokens is 1200 tokens short of the 401200-token requirement".into()),
-            ..script(&["answer on the current model"])
-        })
-        .await;
-        let outcome = run_turn_recovering(
-            &OmoClientConfig::new(url),
-            &TurnRequest {
-                text: "hello".into(),
-                model: Some("mahoquot/claude-opus-5-5".into()),
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.text, "answer on the current model");
-        let frames = log.frames.lock().unwrap().clone();
-        let starts: Vec<&Value> = frames
-            .iter()
-            .filter(|frame| frame["method"] == "turn/start")
-            .collect();
-        assert_eq!(starts.len(), 2);
-        assert!(starts[0].pointer("/params/model").is_some());
-        assert!(starts[1].pointer("/params/model").is_none());
-    }
-
-    /// A background turn pinned to its model never falls back to the thread's model: a refused
-    /// switch starts a fresh thread on the pinned model.
-    #[tokio::test]
-    async fn a_pinned_model_switch_refusal_starts_a_fresh_thread_on_that_model() {
-        let (url, log) = serve(Script {
-            switch_error: Some("Model \"mahoquot/gpt-6-luna\" cannot switch: target context window 272000 tokens is 84000 tokens short of the 356000-token requirement".into()),
-            ..script(&["unused"])
-        })
-        .await;
-        let _ = run_turn_recovering(
-            &OmoClientConfig::new(url),
-            &TurnRequest {
-                thread_id: Some("thr-old".into()),
-                text: "event".into(),
                 model: Some("mahoquot/gpt-6-luna".into()),
-                pin_model: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .await;
-        let frames = log.frames.lock().unwrap().clone();
-        let methods: Vec<&str> = frames
-            .iter()
-            .filter_map(|frame| frame["method"].as_str())
-            .collect();
-        assert_eq!(
-            methods
-                .iter()
-                .filter(|method| **method == "thread/resume")
-                .count(),
-            1
-        );
-        assert_eq!(
-            methods
-                .iter()
-                .filter(|method| **method == "thread/start")
-                .count(),
-            1
-        );
-        let starts: Vec<&Value> = frames
-            .iter()
-            .filter(|frame| frame["method"] == "turn/start")
-            .collect();
-        assert_eq!(starts.len(), 2);
-        for start in starts {
-            assert_eq!(start["params"]["model"], "mahoquot/gpt-6-luna");
-        }
-    }
-
-    /// A turn that ran tools and wrote no reply is asked for its answer on the same thread
-    /// instead of posting a bare "Done".
-    #[tokio::test]
-    async fn a_tool_only_turn_is_asked_for_its_final_answer() {
-        let (url, log) = serve(Script {
-            silent_first_turn: true,
-            ..script(&["here is what I found"])
-        })
-        .await;
-        let outcome = run_turn_recovering(
-            &OmoClientConfig::new(url),
-            &TurnRequest {
-                text: "check it".into(),
+                text: "Reply with exactly FERRYX_RPC_LIVE_OK. Do not call tools.".into(),
                 ..Default::default()
             },
             None,
         )
         .await
         .unwrap();
-        assert_eq!(outcome.text, "here is what I found");
-        assert_eq!(outcome.tool_calls, 1);
-        let frames = log.frames.lock().unwrap().clone();
-        let starts: Vec<&Value> = frames
-            .iter()
-            .filter(|frame| frame["method"] == "turn/start")
-            .collect();
-        assert_eq!(starts.len(), 2);
-        assert_eq!(
-            starts[1]
-                .pointer("/params/input/0/text")
-                .and_then(Value::as_str),
-            Some(FINAL_ANSWER_PROMPT)
-        );
-        let resumes = frames
-            .iter()
-            .filter(|frame| frame["method"] == "thread/resume")
-            .count();
-        assert_eq!(resumes, 1, "the follow-up resumes the same thread");
-    }
-
-    #[tokio::test]
-    async fn a_fresh_thread_gets_the_model_through_settings_update_like_omo() {
-        let (url, log) = serve(script(&["hi"])).await;
-        let outcome = run_turn(
-            &OmoClientConfig::new(url),
-            &TurnRequest {
-                text: "hello".into(),
-                model: Some("mahoquot/claude-opus-5-5".into()),
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.text, "hi");
-        let frames = log.frames.lock().unwrap().clone();
-        let methods: Vec<_> = frames
-            .iter()
-            .filter_map(|f| f.get("method").and_then(Value::as_str))
-            .collect();
-        assert_eq!(
-            methods,
-            [
-                "initialize",
-                "thread/start",
-                "thread/settings/update",
-                "turn/start"
-            ]
-        );
-        let update = &frames[2]["params"];
-        assert_eq!(update["threadId"], "thr-new");
-        assert_eq!(update["model"], "mahoquot/claude-opus-5-5");
-        assert!(update["effort"]
-            .as_str()
-            .is_some_and(|effort| !effort.is_empty()));
-    }
-
-    #[test]
-    fn an_empty_turn_falls_back_and_the_owner_sees_omos_korean_line() {
-        let empty = TurnOutcome {
-            thread_id: "t".into(),
-            resumed: false,
-            turn_id: "u".into(),
-            text: String::new(),
-            approvals_allowed: 0,
-            approvals_denied: 0,
-            messages_delivered: 0,
-            tool_calls: 0,
-        };
-        assert!(fallback_eligible(&Ok(empty.clone())));
-        let worked = TurnOutcome {
-            tool_calls: 1,
-            ..empty
-        };
-        assert!(!fallback_eligible(&Ok(worked)));
-        assert!(fallback_eligible(&Err(HubError::message(
-            "omo model update rejected: unknown model"
-        ))));
-        assert!(!fallback_eligible(&Err(HubError::message(
-            "omo turn failed: boom"
-        ))));
-        assert_eq!(
-            owner_failure_text("omo turn ended with no content (likely upstream LLM failure)"),
-            "⚠️ 응답을 만들지 못했어요 (처리 중 오류가 났어요). 같은 메시지를 다시 보내 주시면 이어서 할게요."
-        );
-        assert!(owner_failure_text("HTTP 429").contains("모델 사용량 한도에 걸렸어요"));
         assert!(
-            owner_failure_text("timed out waiting for the turn to finish")
-                .contains("턴 시간 제한을 넘겨 중단됐어요")
+            outcome.text.contains("FERRYX_RPC_LIVE_OK"),
+            "LIVE_SESSION_FILE={} LIVE_TEXT={}",
+            outcome.thread_id,
+            outcome.text
         );
-    }
-
-    #[tokio::test]
-    async fn a_known_thread_is_resumed_and_a_lost_one_starts_fresh() {
-        let (url, log) = serve(script(&["again"])).await;
-        let config = OmoClientConfig::new(url);
-        let outcome = run_turn(
-            &config,
-            &TurnRequest {
-                thread_id: Some("thr-old".into()),
-                text: "more".into(),
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(outcome.resumed);
-        assert_eq!(outcome.thread_id, "thr-old");
-        assert_eq!(log.auth.lock().unwrap()[0], None);
-
-        let (url, log) = serve(Script {
-            resume_error: Some("no rollout found for thread thr-old".into()),
-            ..script(&["fresh"])
-        })
-        .await;
-        let outcome = run_turn(
-            &OmoClientConfig::new(url),
-            &TurnRequest {
-                thread_id: Some("thr-old".into()),
-                text: "more".into(),
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(!outcome.resumed);
-        assert_eq!(outcome.thread_id, "thr-new");
-        let methods: Vec<String> = log
-            .frames
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|f| f.get("method").and_then(Value::as_str).map(str::to_owned))
-            .collect();
-        assert_eq!(
-            methods,
-            ["initialize", "thread/resume", "thread/start", "turn/start"]
-        );
-    }
-
-    #[test]
-    fn final_reply_and_silence_follow_omo_gateway() {
-        let outcome = |text: &str, delivered: usize, tools: usize| TurnOutcome {
-            thread_id: "t".into(),
-            resumed: false,
-            turn_id: "u".into(),
-            text: text.into(),
-            approvals_allowed: 0,
-            approvals_denied: 0,
-            messages_delivered: delivered,
-            tool_calls: tools,
-        };
-        assert_eq!(
-            final_reply(&outcome("hi", 0, 0)).unwrap().as_deref(),
-            Some("hi")
-        );
-        assert_eq!(final_reply(&outcome("[SILENT]", 0, 0)).unwrap(), None);
-        assert_eq!(final_reply(&outcome("NO_REPLY.", 0, 0)).unwrap(), None);
-        assert_eq!(
-            final_reply(&outcome("", 0, 2)).unwrap().as_deref(),
-            Some("⚠️ 작업은 실행됐지만(도구 2회) 최종 답변을 만들지 못했어요. \"결과 알려줘\"라고 보내 주시면 정리해 드릴게요.")
-        );
-        assert!(needs_final_answer(&Ok(outcome("", 0, 2))));
-        assert!(!needs_final_answer(&Ok(outcome("", 1, 2))));
-        assert!(!needs_final_answer(&Ok(outcome("hi", 0, 2))));
-        assert!(!needs_final_answer(&Ok(outcome("", 0, 0))));
-        assert!(is_model_switch_rejection(&Err(HubError::message(
-            "turn/start failed: Model \"x\" cannot switch: target context window 400000 tokens is 12 tokens short"
-        ))));
-        assert!(!is_model_switch_rejection(&Err(HubError::message(
-            "model not found"
-        ))));
-        assert_eq!(final_reply(&outcome("", 1, 2)).unwrap(), None);
-        assert!(final_reply(&outcome("", 0, 0)).is_err());
-        assert_eq!(filter_reasoning("<think>x</think> answer"), "answer");
-        assert!(!is_explicit_silence("silently fixed the build"));
-        let now = tokio::time::Instant::now();
-        assert!(should_relay_interim(0, None, now));
-        assert!(!should_relay_interim(
-            1,
-            Some(now),
-            now + Duration::from_secs(10)
-        ));
-        assert!(should_relay_interim(
-            1,
-            Some(now),
-            now + Duration::from_secs(181)
-        ));
-    }
-
-    /// Runs two turns (start, then resume) against a real omo app-server:
-    /// `OMO_REAL_URL=ws://127.0.0.1:PORT OMO_REAL_TOKEN_FILE=... cargo test -- --ignored real_omo`.
-    #[tokio::test]
-    #[ignore]
-    async fn real_omo_app_server_starts_and_resumes_a_thread() {
-        let url = std::env::var("OMO_REAL_URL").expect("OMO_REAL_URL");
-        let token_file = std::env::var("OMO_REAL_TOKEN_FILE").expect("OMO_REAL_TOKEN_FILE");
-        let mut config = OmoClientConfig::new(url);
-        config.token = token_from_file(std::path::Path::new(&token_file));
-        config.total_timeout = Duration::from_secs(600);
-        let mut request = TurnRequest {
-            thread_id: None,
-            system_prompt: None,
-            model: std::env::var("OMO_REAL_MODEL").ok(),
-            toolsets: None,
-            text: "Reply with exactly the word PONG and nothing else.".into(),
-            pin_model: false,
-        };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let first = run_turn(&config, &request, Some(tx))
-            .await
-            .expect("first turn");
-        while let Ok(interim) = rx.try_recv() {
-            eprintln!("interim: {} chars", interim.len());
-        }
-        eprintln!(
-            "first: thread={} resumed={} reply={:?} tools={}",
-            first.thread_id, first.resumed, first.text, first.tool_calls
-        );
-        assert!(!first.resumed);
-        assert!(first.text.to_uppercase().contains("PONG"));
-        request.thread_id = Some(first.thread_id.clone());
-        request.text = "Reply with exactly the word AGAIN and nothing else.".into();
-        let second = run_turn(&config, &request, None)
-            .await
-            .expect("second turn");
-        eprintln!(
-            "second: thread={} resumed={} reply={:?}",
-            second.thread_id, second.resumed, second.text
-        );
-        assert!(second.resumed);
-        assert_eq!(second.thread_id, first.thread_id);
-        let mut bad = config.clone();
-        bad.token = Some("wrong".into());
-        bad.connect_timeout = Duration::from_secs(2);
         assert!(
-            run_turn(&bad, &request, None).await.is_err(),
-            "a wrong token must be refused"
+            std::path::Path::new(&outcome.thread_id).is_file(),
+            "LIVE_SESSION_FILE={}",
+            outcome.thread_id
         );
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_server_fails_within_the_connect_window() {
-        let mut config = OmoClientConfig::new("ws://127.0.0.1:9");
-        config.connect_timeout = Duration::from_millis(600);
-        let started = std::time::Instant::now();
-        let error = run_turn(
-            &config,
-            &TurnRequest {
-                text: "x".into(),
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("failed to connect"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

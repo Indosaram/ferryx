@@ -1,7 +1,7 @@
 //! Hub settings that omo-gateway read from its launchd environment.
 //!
 //! omo's plist carried `OMON_GITHUB_SOURCE_ENABLED`, `OMON_DEFAULT_EFFORT`, `SLACK_HOME_CHANNEL`,
-//! `OMON_OMO_BIN` and friends in `EnvironmentVariables`. The ferryx daemon is started with its
+//! and related settings in `EnvironmentVariables`. The ferryx daemon is started with its
 //! own environment, so those settings are copied once into `~/.ferryx/hub/env` (mode 0600,
 //! `KEY=VALUE` lines) by `ferryx hub env import --from-plist <plist>`. The hub reads every
 //! setting through [`var`]: the daemon's own environment wins, then the file. Child processes
@@ -272,14 +272,14 @@ mod tests {
     #[test]
     fn env_file_lines_parse_with_exports_quotes_and_comments() {
         let parsed = parse_env_file(
-            "# comment\nexport OMON_GITHUB_SOURCE_ENABLED=1\nSLACK_HOME_CHANNEL=\"C1,C2\"\nOMON_DEFAULT_EFFORT='high'\n\nbad line\n9X=no\nOMON_OMO_BIN=/Users/me/.bun/bin/omo\n",
+            "# comment\nexport OMON_GITHUB_SOURCE_ENABLED=1\nSLACK_HOME_CHANNEL=\"C1,C2\"\nOMON_DEFAULT_EFFORT='high'\n\nbad line\n9X=no\nFERRYX_HUB_MHC_BIN=/Users/me/.local/bin/mhc\n",
         );
         assert_eq!(parsed.get("OMON_GITHUB_SOURCE_ENABLED").unwrap(), "1");
         assert_eq!(parsed.get("SLACK_HOME_CHANNEL").unwrap(), "C1,C2");
         assert_eq!(parsed.get("OMON_DEFAULT_EFFORT").unwrap(), "high");
         assert_eq!(
-            parsed.get("OMON_OMO_BIN").unwrap(),
-            "/Users/me/.bun/bin/omo"
+            parsed.get("FERRYX_HUB_MHC_BIN").unwrap(),
+            "/Users/me/.local/bin/mhc"
         );
         assert_eq!(parsed.len(), 4);
     }
@@ -302,11 +302,11 @@ mod tests {
     #[test]
     fn children_get_file_entries_the_daemon_does_not_set() {
         let mut file = BTreeMap::new();
-        file.insert("OMON_OMO_BIN".to_owned(), "/x/omo".to_owned());
+        file.insert("FERRYX_HUB_MHC_BIN".to_owned(), "/x/mhc".to_owned());
         file.insert("SLACK_HOME_CHANNEL".to_owned(), "C1".to_owned());
         file.insert("PATH".to_owned(), "/nope".to_owned());
         let env = child_env_from(&file, |key| key == "SLACK_HOME_CHANNEL");
-        assert_eq!(env, vec![("OMON_OMO_BIN".to_owned(), "/x/omo".to_owned())]);
+        assert_eq!(env, vec![("FERRYX_HUB_MHC_BIN".to_owned(), "/x/mhc".to_owned())]);
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
 <key>OMON_GITHUB_SOURCE_ENABLED</key><string>1</string>
 <key>OMON_DEFAULT_EFFORT</key><string>high</string>
 <key>SLACK_HOME_CHANNEL</key><string>CHOME</string>
-<key>OMON_OMO_BIN</key><string>/Users/me/.bun/bin/omo</string>
+<key>FERRYX_HUB_MHC_BIN</key><string>/Users/me/.local/bin/mhc</string>
 </dict></dict></plist>"#,
         )
         .unwrap();
@@ -338,10 +338,10 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "FERRYX_HUB_MHC_BIN",
                 "KEEP",
                 "OMON_DEFAULT_EFFORT",
                 "OMON_GITHUB_SOURCE_ENABLED",
-                "OMON_OMO_BIN",
                 "SLACK_HOME_CHANNEL"
             ]
         );
