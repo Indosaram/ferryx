@@ -755,6 +755,285 @@ async function runRemoteDelivery(ctx) {
   });
 }
 
+// Todo 12: recovery and capabilities.
+//
+// A hub restart is `ferryx-cli hub stop` + `hub start` against the isolated daemon: the hub
+// generation (dispatcher, wake scheduler, observer loop, engine) ends and a new one reconciles,
+// while the daemon and its worker PTYs keep running. Killing the daemon would kill the PTYs it
+// owns, which is the very thing the scenario must show never happens, so no boundary needs a
+// daemon kill or a product hook: each boundary is reached by observing the hub database (WAL
+// changes) and the fixture worker's own log before the stop.
+
+const RECOVERY_WORKSPACE_ID = 'qa-recovery';
+const NO_START_MARK = 'QA_NO_START_REPORT';
+
+/** Fixture repo + worker shell + owner setup + isolated daemon + workspace + MCP channel. */
+async function supervisedHub(ctx, { workspaceId, extraEnv = {}, label }) {
+  if (!POSIX) throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', `${label} needs the POSIX fixture worker shell`);
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, ADMISSION_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [step, args] of [['git-init', [...gitArgs, 'init', '-q', repo]], ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']]]) {
+    const result = await ctx.run(`${label}-${step}`, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${step} exited ${result.code}: ${result.stderr}`);
+  }
+  const workerLogs = join(data, 'workers');
+  mkdirSync(workerLogs, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)}\n`, { mode: 0o755 });
+  const env = typeof extraEnv === 'function'
+    ? await extraEnv({ SHELL: shell, FERRYX_HUB_WORKSPACE: workspaceId, OMON_LANE_AUTO_WORKTREE: '1' })
+    : ctx.productEnv({ SHELL: shell, FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${await freeLoopbackPort()}`, FERRYX_HUB_WORKSPACE: workspaceId, OMON_LANE_AUTO_WORKTREE: '1', ...extraEnv });
+  const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', ADMISSION_PROJECT, '--repo-identity', ADMISSION_REPO_IDENTITY,
+    '--host', ADMISSION_HOST, '--git-common-dir', realpathSync(join(repo, '.git')), '--json'], { label: `${label}-setup`, env });
+  ctx.assert('setup-created-identity-project-and-host', setup.code === 0 && setup.json?.ok === true, { code: setup.code, json: setup.json, stderr: setup.stderr });
+  if (!setup.json?.projectId) throw new HarnessError('SETUP_FAILED', 'supervisor setup returned no project');
+  const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  const socket = join(data, 'runtime', 'daemon.sock');
+  const registered = await registerWorkspace(ctx, socket, workspaceId, realpathSync(workspaceRoot));
+  ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+  const mcp = await ctx.spawn(`${label}-mcp`, config.ferryxCli, ['mcp'], { env, cwd: data, stdin: 'pipe', graceMs: 3_000 });
+  mcp.child.stdin.on('error', () => { /* the exit event decides */ });
+  let rpcId = 0;
+  const submit = async (step, sourceId, instruction) => {
+    rpcId += 1;
+    const id = rpcId;
+    const work = { ...ADMISSION_WORK, instruction };
+    const frame = { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'supervisor.request', arguments: { requestId: sourceId, action: 'submit', payload: { request: instruction, work } } } };
+    const cursor = ctx.journal.cursor();
+    ctx.evidence.appendJsonl('requests.jsonl', { label: step, surface: 'ferryx-cli mcp', frame, at: new Date().toISOString() });
+    mcp.child.stdin.write(`${JSON.stringify(frame)}\n`);
+    const reply = await ctx.waitFor(`mcp reply to ${step}`, (e) => e.source === `${label}-mcp` && e.kind === 'stdout' && e.json?.id === id, { after: cursor, deadlineMs: 30_000 });
+    let body = null;
+    try { body = JSON.parse(reply.json?.result?.content?.[0]?.text ?? 'null'); } catch { /* asserted by the caller */ }
+    ctx.evidence.appendJsonl('responses.jsonl', { label: step, reply: reply.json, body, at: new Date().toISOString() });
+    return body;
+  };
+  const hub = await openHubReader(dbPath);
+  const panes = async (step) => {
+    const listed = await ctx.cli(['agents', 'list'], { label: `${label}-panes-${step}`, env });
+    const ids = (listed.json?.sessions ?? []).map((session) => session.sessionId).filter(Boolean).sort();
+    ctx.evidence.appendJsonl('pty-census.jsonl', { step, ok: listed.json?.ok ?? null, ids, at: new Date().toISOString() });
+    return ids;
+  };
+  return { data, dbPath, env, daemon, hub, submit, panes, workerLogs };
+}
+
+const hubControl = async (ctx, env, op, step) => {
+  const result = await ctx.cli(['hub', op], { label: `hub-${op}-${step}`, env });
+  ctx.evidence.appendJsonl('boundaries.jsonl', { step, op, code: result.code, stdout: result.stdout, at: new Date().toISOString() });
+  // `ferryx-cli hub stop|start` exits 0 only on a `"status":"ok"` reply (hub_runtime control_exit_code).
+  return result.code === 0;
+};
+
+const goalRows = (hub, goalId) => ({
+  goal: hub.one('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId),
+  dispatches: hub.all('SELECT request_id, state, uncertain_code, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId),
+});
+
+const inputsWith = (workerLogs, needle) => readWorkerLogs(workerLogs)
+  .flatMap((worker) => worker.entries.filter((entry) => entry.kind === 'input' && entry.text.includes(needle)).map(() => worker.name));
+
+async function runRecovery(ctx) {
+  const log = [];
+  const note = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+  // The no-start dispatch must still be waiting for its start receipt when the hub stops.
+  const h = await supervisedHub(ctx, { workspaceId: RECOVERY_WORKSPACE_ID, label: 'recovery', extraEnv: { FERRYX_SUPERVISOR_TURN_START_MS: '240000' } });
+  const { hub, env, workerLogs } = h;
+  const hubDir = dirname(h.dbPath);
+  const transcript = (boundary, phase) => ctx.evidence.appendJsonl(`recovery/${boundary}.jsonl`, { phase, ...goalRows(hub, transcript.goals[boundary] ?? ''), workers: readWorkerLogs(workerLogs).length, at: new Date().toISOString() });
+  transcript.goals = {};
+  const census = [];
+  const take = async (step) => { const ids = await h.panes(step); census.push({ step, ids }); return ids; };
+  try {
+    // Boundary 1: before send. The hub is stopped, so the admission commits a ready intent that
+    // no dispatcher can claim; after the restart it runs exactly once.
+    ctx.assert('hub-stopped-before-send', await hubControl(ctx, env, 'stop', 'before-send'), {});
+    const marker1 = `QA_RECOVERY_BEFORE_SEND_${ctx.runId}`;
+    const first = await h.submit('before-send', `qa-recovery-1-${ctx.runId}`, `Create result.txt containing READY. ${marker1}`);
+    const goal1 = first?.receipt?.goal_id ?? null;
+    transcript.goals['before-send'] = goal1;
+    const rows1 = goalRows(hub, goal1 ?? '');
+    ctx.assert('before-send-admitted-while-stopped', first?.outcome === 'admitted' && rows1.goal?.run_state === 'ready'
+      && rows1.dispatches.length === 1 && rows1.dispatches[0].state === 'ready' && inputsWith(workerLogs, marker1).length === 0, rows1);
+    transcript('before-send', 'stopped');
+    const panesBefore = await take('before-send-restart');
+    ctx.assert('hub-restarted-before-send', await hubControl(ctx, env, 'start', 'before-send'), {});
+    const ran1 = await waitForChange(ctx, 'before-send dispatch after restart', hubDir, () => {
+      const rows = goalRows(hub, goal1);
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000);
+    transcript('before-send', 'restarted');
+    ctx.assert('before-send-runs-once-after-restart', ran1.goal?.run_state === 'running' && ran1.dispatches.length === 1
+      && ran1.dispatches[0].state === 'started' && inputsWith(workerLogs, marker1).length === 1, { ...ran1, inputs: inputsWith(workerLogs, marker1) });
+    note(`before-send goal=${goal1} panes-before=${panesBefore.length}`);
+
+    // Boundary 2: after send, before the start receipt. The worker logs the typed instruction
+    // and withholds its start report, so the dispatch stays claimed while its delivery waits.
+    const marker2 = `QA_RECOVERY_AFTER_SEND_${ctx.runId} ${NO_START_MARK}`;
+    const second = await h.submit('after-send', `qa-recovery-2-${ctx.runId}`, `Create result.txt containing READY. ${marker2}`);
+    const goal2 = second?.receipt?.goal_id ?? null;
+    transcript.goals['after-send'] = goal2;
+    const typed = await waitForChange(ctx, 'after-send instruction typed while claimed', workerLogs, () => {
+      const rows = goalRows(hub, goal2 ?? '');
+      return { done: inputsWith(workerLogs, marker2).length >= 1 && ['claimed', 'accepted'].includes(rows.dispatches[0]?.state), ...rows };
+    }, 120_000);
+    transcript('after-send', 'typed');
+    const typedState = typed.dispatches[0]?.state;
+    ctx.assert('after-send-instruction-typed-while-claimed', typed.dispatches.length === 1 && ['claimed', 'accepted'].includes(typedState), typed);
+    const panesMid = await take('after-send-restart');
+    await hubControl(ctx, env, 'stop', 'after-send');
+    await hubControl(ctx, env, 'start', 'after-send');
+    const held = await waitForChange(ctx, 'after-send reconciliation', hubDir, () => {
+      const rows = goalRows(hub, goal2);
+      return { done: rows.goal?.run_state === 'delivery_uncertain', ...rows };
+    }, 60_000);
+    transcript('after-send', 'restarted');
+    ctx.assert('after-send-held-uncertain-not-resent', held.dispatches.length === 1 && held.dispatches[0].state === 'uncertain'
+      && held.dispatches[0].uncertain_code === (typedState === 'claimed' ? 'CLAIM_UNCONFIRMED_AT_RESTART' : 'START_UNCONFIRMED_AT_RESTART')
+      && inputsWith(workerLogs, marker2).length === 1, { typedState, ...held, inputs: inputsWith(workerLogs, marker2) });
+    note(`after-send goal=${goal2} panes-before=${panesMid.length}`);
+
+    // Boundary 3: after start. The run is reattached (still running, same dispatch), never resent.
+    const marker3 = `QA_RECOVERY_AFTER_START_${ctx.runId}`;
+    const third = await h.submit('after-start', `qa-recovery-3-${ctx.runId}`, `Create result.txt containing READY. ${marker3}`);
+    const goal3 = third?.receipt?.goal_id ?? null;
+    transcript.goals['after-start'] = goal3;
+    const started = await waitForChange(ctx, 'after-start run started', hubDir, () => {
+      const rows = goalRows(hub, goal3 ?? '');
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000);
+    transcript('after-start', 'started');
+    ctx.assert('after-start-run-started', started.goal?.run_state === 'running' && started.dispatches[0]?.state === 'started', started);
+    const panesLate = await take('after-start-restart');
+    await hubControl(ctx, env, 'stop', 'after-start');
+    await hubControl(ctx, env, 'start', 'after-start');
+    // A live pane's run is left to the observer by the restart census, which writes nothing, so
+    // there is no commit to wait on. The state is read once the hub reports healthy and read again
+    // after the final pane census below (a later point than the census of this generation).
+    await ctx.cli(['hub', 'status', '--check'], { label: 'hub-status-after-start', env });
+    const after = goalRows(hub, goal3);
+    transcript('after-start', 'restarted');
+    ctx.assert('after-start-reattached-not-resent', after.goal?.run_state === 'running' && after.dispatches.length === 1
+      && after.dispatches[0].request_id === started.dispatches[0].request_id && after.dispatches[0].state === 'started'
+      && inputsWith(workerLogs, marker3).length === 1, { ...after, inputs: inputsWith(workerLogs, marker3) });
+    note(`after-start goal=${goal3} panes-before=${panesLate.length}`);
+
+    const final = await take('final');
+    const settledLate = goalRows(hub, goal3);
+    ctx.evidence.appendJsonl('recovery/after-start.jsonl', { phase: 'final', ...settledLate, at: new Date().toISOString() });
+    ctx.assert('after-start-still-running-at-end', settledLate.goal?.run_state === 'running' && settledLate.dispatches.length === 1
+      && settledLate.dispatches[0].state === 'started' && inputsWith(workerLogs, marker3).length === 1, settledLate);
+    const goals = hub.count('SELECT COUNT(*) AS n FROM supervisor_goals');
+    ctx.assert('no-goal-lost', goals === 3 && [goal1, goal2, goal3].every((goal) => goal && hub.one('SELECT goal_id FROM supervisor_goals WHERE goal_id = ?', goal)), { goals });
+    ctx.assert('pty-census-unchanged-across-restarts', census.every(({ ids }) => ids.every((id) => final.includes(id))) && final.length >= 3, { census, final });
+    const allInputs = readWorkerLogs(workerLogs).flatMap((worker) => worker.entries.filter((entry) => entry.kind === 'input' && entry.text.includes('QA_RECOVERY_')).map((entry) => entry.text));
+    ctx.assert('no-instruction-typed-twice', new Set(allInputs).size === allInputs.length, { allInputs });
+  } finally {
+    for (const worker of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${worker.name}`, worker.text);
+    ctx.evidence.writeText('task-12-recovery.log', `${log.join('\n')}\n`);
+  }
+}
+
+async function runCapabilities(ctx) {
+  // T6's engine fixtures (provider stub, isolated mhc profile, capability filter, engine status
+  // and assess through `ferryx-cli supervisor engine`). Loaded lazily: until T6 merges, only
+  // this scenario fails, with a named prerequisite.
+  let mhc;
+  try { mhc = await import('./mhc.mjs'); } catch (error) {
+    throw new HarnessError('PREREQUISITE_MISSING', `capabilities needs the T6 engine fixtures (scripts/qa/unified-supervisor/mhc.mjs, us/t6-qa): ${error?.message ?? error}`);
+  }
+  const { config } = ctx;
+  const log = [];
+  const note = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+  const stub = await mhc.startProviderStub(ctx);
+  try {
+    // The hub reads its env file once per process (hub_env FILE_ENV), so the engine binary
+    // cannot be swapped by a hub restart. The engine is instead a runner-owned wrapper that runs
+    // the real mhc while `dropFile` is empty and T6's capability filter once it names a
+    // capability; each engine launch reads it, and a hub restart relaunches the engine.
+    const binDir = join(realpathSync(ctx.paths.data), 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const dropFile = join(binDir, 'mhc-drop-capability');
+    const frames = join(binDir, 'mhc-filter-frames.jsonl');
+    const wrapper = join(binDir, 'mhc-switchable');
+    writeFileSync(dropFile, '');
+    writeFileSync(wrapper, [
+      '#!/bin/sh',
+      `drop=$(cat ${shellQuote(dropFile)} 2>/dev/null)`,
+      `[ -z "$drop" ] && exec ${shellQuote(config.mhcBin)} "$@"`,
+      `UNIFIED_SUPERVISOR_MHC_REAL=${shellQuote(config.mhcBin)}`,
+      'UNIFIED_SUPERVISOR_MHC_DROP_CAPABILITY="$drop"',
+      `UNIFIED_SUPERVISOR_MHC_FRAMES=${shellQuote(frames)}`,
+      'export UNIFIED_SUPERVISOR_MHC_REAL UNIFIED_SUPERVISOR_MHC_DROP_CAPABILITY UNIFIED_SUPERVISOR_MHC_FRAMES',
+      `exec ${shellQuote(process.execPath)} ${shellQuote(mhc.MHC_FILTER)} "$@"`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+    let engineEnv = null;
+    const h = await supervisedHub(ctx, {
+      workspaceId: 'qa-capabilities',
+      label: 'capabilities',
+      extraEnv: async (extra) => { engineEnv = await mhc.prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: wrapper, label: 'switchable', extra }); return engineEnv; },
+    });
+    const ready = await mhc.awaitEngine(ctx, engineEnv, 'ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', ready?.engine?.state === 'ready', ready?.engine ?? null);
+    // A worker pane the faults must leave alone.
+    const marker = `QA_CAPABILITIES_${ctx.runId}`;
+    const submitted = await h.submit('worker', `qa-capabilities-${ctx.runId}`, `Create result.txt containing READY. ${marker}`);
+    const goalId = submitted?.receipt?.goal_id ?? '';
+    const running = await waitForChange(ctx, 'worker pane started', dirname(h.dbPath), () => {
+      const rows = goalRows(h.hub, goalId);
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000);
+    ctx.assert('worker-pane-started', running.goal?.run_state === 'running', running);
+    const panesBefore = await h.panes('before-faults');
+
+    const fault = async (step, status, message) => {
+      stub.failNext(status, message);
+      const reply = await mhc.engineAssess(ctx, engineEnv, step, 'Assess: is the qa goal complete? Answer JSON.');
+      stub.succeed();
+      note(`${step}: code=${reply.json?.code ?? reply.code}`);
+      return reply;
+    };
+    const auth = await fault('auth', 401, 'invalid x-api-key qa-loopback-fixture');
+    ctx.assert('auth-fault-is-typed', auth.code !== 0 && auth.json?.code === 'MHC_AUTH', auth.json);
+    const quota = await fault('quota', 429, 'rate limit reached for qa');
+    ctx.assert('quota-fault-is-typed', quota.code !== 0 && quota.json?.code === 'MHC_QUOTA', quota.json);
+    const provider = await fault('provider', 400, 'qa stub refused the request');
+    ctx.assert('provider-fault-is-typed', provider.code !== 0 && provider.json?.code === 'MHC_PROVIDER', provider.json);
+
+    // Missing capability: the next engine launch hides one required capability; only the hub
+    // generation restarts (hub stop/start), never the daemon, so every PTY stays alive.
+    writeFileSync(dropFile, mhc.DROPPED_CAPABILITY);
+    note(`engine wrapper now drops ${mhc.DROPPED_CAPABILITY}; restarting the hub generation only`);
+    const providerBefore = stub.requests.length;
+    await hubControl(ctx, engineEnv, 'stop', 'capability');
+    await hubControl(ctx, engineEnv, 'start', 'capability');
+    const degraded = await mhc.awaitEngine(ctx, engineEnv, 'degraded', (json) => json?.engine?.state === 'degraded', 120_000);
+    ctx.assert('missing-capability-is-degraded', degraded?.engine?.faultCode === 'MHC_CAPABILITY_MISSING'
+      && JSON.stringify(degraded?.engine?.fault?.missing) === JSON.stringify([mhc.DROPPED_CAPABILITY]), degraded?.engine ?? null);
+    const refused = await mhc.engineAssess(ctx, engineEnv, 'degraded-refused', 'Assess again.');
+    const seen = mhc.readFrames(frames);
+    ctx.assert('degraded-engine-got-zero-sends', refused.json?.code === 'MHC_CAPABILITY_MISSING' && stub.requests.length === providerBefore
+      && seen.length >= 1 && seen.every((frame) => frame.type === 'get_protocol_info'), { frames: seen, providerRequests: stub.requests.length - providerBefore });
+    ctx.assert('no-fallback-canary-requests', stub.requests.every((entry) => entry.model !== mhc.CANARY_MODEL), { requests: stub.requests.length });
+    const panesAfter = await h.panes('after-faults');
+    const rows = goalRows(h.hub, goalId);
+    ctx.assert('worker-panes-preserved', panesBefore.every((id) => panesAfter.includes(id)) && inputsWith(h.workerLogs, marker).length === 1
+      && rows.dispatches.length === 1, { panesBefore, panesAfter, rows });
+  } finally {
+    await stub.close();
+    ctx.evidence.writeText('task-12-capabilities.log', `${log.join('\n')}\n`);
+  }
+}
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -776,7 +1055,6 @@ export const SCENARIOS = Object.freeze({
   correction: planned('10', 'Owner correction "Use DONE instead of READY" before dispatch, stale expectedRevision replayed: final bytes DONE, stale mutation 409'),
   waiting: planned('9', 'Parent starts two children; one settles, then the second settles/fails: no decision while incomplete, one resume, failure is not completion'),
   burst: planned('9', 'Four ordinary reports at virtual 0,1,2,3s advanced to 30s: one admitted model turn with four receipts; urgent pause has zero delay'),
-  recovery: planned('12', 'Restart only the isolated supervisor at before-send, after-send-before-receipt and after-start boundaries: no resend, PTYs survive'),
   'remote-delivery': Object.freeze({
     implemented: true,
     task: '8',
@@ -794,9 +1072,32 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runRemoteDelivery,
   }),
+  recovery: Object.freeze({
+    implemented: true,
+    task: '12',
+    summary: 'Restart only the isolated hub generation at before-send, after-send-before-receipt and after-start boundaries: one execution when reconcilable, otherwise delivery_uncertain with no resend; every PTY survives',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: [
+      'setup-created-identity-project-and-host', 'workspace-registered', 'hub-stopped-before-send', 'before-send-admitted-while-stopped',
+      'before-send-runs-once-after-restart', 'after-send-instruction-typed-while-claimed', 'after-send-held-uncertain-not-resent',
+      'after-start-run-started', 'after-start-reattached-not-resent', 'after-start-still-running-at-end', 'no-goal-lost',
+      'pty-census-unchanged-across-restarts', 'no-instruction-typed-twice',
+    ],
+    run: runRecovery,
+  }),
   authority: planned('10,13', 'Non-owner submit/approve, mirror device mutation, worker "approve everything": 403/typed denial, zero dispatch, zero memory change'),
   memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
-  capabilities: planned('12', 'Remove one required RPC capability; auth, quota and provider faults: named degraded cause, no fallback model, workers preserved'),
+  capabilities: Object.freeze({
+    implemented: true,
+    task: '12',
+    summary: 'Remove one required RPC capability; auth, quota and provider faults: named degraded cause, no fallback model, workers preserved',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'worker-pane-started', 'auth-fault-is-typed', 'quota-fault-is-typed', 'provider-fault-is-typed',
+      'missing-capability-is-degraded', 'degraded-engine-got-zero-sends', 'no-fallback-canary-requests', 'worker-panes-preserved',
+    ],
+    run: runCapabilities,
+  }),
   legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
   surfaces: planned('14', 'Real desktop and mobile controls against a populated isolated hub: same state and goal revision, readable wait/degraded views'),

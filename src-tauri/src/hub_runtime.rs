@@ -1939,8 +1939,13 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
                             if let Some(generation) = running.lock().await.take() {
-                                for task in generation.tasks {
+                                for task in &generation.tasks {
                                     task.abort();
+                                }
+                                // Wait for the aborted tasks to end, so a later `hub start`
+                                // reconciles only after the predecessor dispatcher stopped.
+                                for task in generation.tasks {
+                                    let _ = task.await;
                                 }
                             }
                             match persisted {

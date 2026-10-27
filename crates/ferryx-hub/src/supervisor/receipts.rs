@@ -512,6 +512,14 @@ pub async fn record_pty_settle(
 /// prompt of the bound pane in the current epoch therefore ends the predecessor's run, and it
 /// is settled instead of being left `running` forever. A reading of any other epoch is
 /// ignored. Nothing is ever sent.
+///
+/// Assumption: the idle reading cannot be restricted to a provider-reported or
+/// screen-detected idle. The daemon publishes its quiet-timer idle (a screen-only agent quiet
+/// for `ObserverTiming::quiet`) with the same `Screen` source as a detected idle
+/// (`src-tauri/src/agent_control/events.rs`, `classify_screen`), so the hub cannot tell them
+/// apart. A worker still streaming keeps its pane out of the quiet idle; one paused longer
+/// than the quiet window is settled early, as on the same-epoch path, and its later output
+/// arrives as ordinary progress.
 pub async fn record_pty_settle_across_restart(
     pool: &SqlitePool,
     host_id: &str,

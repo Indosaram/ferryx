@@ -14,13 +14,16 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 
-use crate::agent_control::{pty_run_id, AgentOp, FixedLauncher, RecordingControl};
+use crate::agent_control::{pty_run_id, AgentOp, FixedLauncher, RecordingControl, LOCAL_HOST_ID};
 use crate::goals::contract::RequirementSpec;
 use crate::supervisor::admission::{
     submit_work, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
 };
-use crate::supervisor::dispatcher::Dispatcher;
-use crate::supervisor::receipts::{record_pty_settle, record_pty_settle_across_restart, PtySettle};
+use crate::supervisor::dispatcher::{Dispatcher, PTY_RUN_LOST};
+use crate::supervisor::receipts::{
+    record_pty_settle, record_pty_settle_across_restart, PtySettle, SettleWatch,
+    PAIRED_SETTLE_UNOBSERVED,
+};
 use crate::supervisor::wakes::{report, Deferral, StateHandler, WakeAck, WakeHandler, WakeJudge, WakeScheduler, WakeTurn};
 use crate::supervisor::{
     advance_generation, bind_project_host, claim_dispatch, confirm_claim_before_transmit,
@@ -360,4 +363,175 @@ async fn a_degraded_goal_gets_no_model_call_over_an_hour_of_reports() {
     }
     assert_eq!(counting.judged.load(Ordering::SeqCst), 0, "no judge call while degraded");
     assert_eq!(counting.handled.load(Ordering::SeqCst), 0, "no decision turn while degraded");
+}
+
+/// The stranded-goal repair: a crash between `record_start`'s commit and anything after it
+/// cannot leave `dispatching` (start and move are one transaction), so a goal still
+/// `dispatching` with a started run is written as the crash would leave a raw store. It is
+/// repaired to `running`, not resent.
+#[tokio::test]
+async fn a_goal_stranded_dispatching_with_a_started_run_is_repaired_to_running() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = admit(&pool).await;
+    let control = Arc::new(RecordingControl::observing());
+    assert_eq!(restart(&pool, control.clone()).await, 1);
+    sqlx::query("UPDATE supervisor_goals SET run_state = 'dispatching' WHERE goal_id = ?")
+        .bind(&goal_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    reconcile_claims_after_restart(&pool).await.unwrap();
+    assert_eq!(goal_state(&pool, &goal_id).await, (RunState::Running, None));
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "started");
+    assert_eq!(sends(&control), 1, "never resent");
+}
+
+/// A goal `dispatching` with nothing in flight (its claim was released before transmission
+/// and the crash fell before the goal moved back) provably sent nothing: it returns to
+/// `ready` and its proven-unsent intent runs once.
+#[tokio::test]
+async fn a_goal_stranded_dispatching_with_nothing_in_flight_is_repaired_to_ready() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = admit(&pool).await;
+    let revision = goal_of(&pool, &goal_id).await.unwrap().unwrap().revision;
+    let generation = execution_binding_of(&pool, &goal_id).await.unwrap().unwrap().generation;
+    claim_dispatch(&pool, &request_id, revision, generation).await.unwrap();
+    sqlx::query("UPDATE supervisor_dispatches SET state = 'released' WHERE request_id = ?")
+        .bind(&request_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let next = crate::supervisor::enqueue_dispatch(&pool, &goal_id, revision, "Create result.txt again.")
+        .await
+        .unwrap();
+    reconcile_claims_after_restart(&pool).await.unwrap();
+    assert_eq!(goal_state(&pool, &goal_id).await, (RunState::Ready, None));
+    let control = Arc::new(RecordingControl::observing());
+    assert_eq!(restart(&pool, control.clone()).await, 1);
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "released", "never transmitted");
+    assert_eq!(dispatch_state(&pool, &next.request_id).await.0, "started");
+    assert_eq!(sends(&control), 1);
+}
+
+/// Starts a run on `host` (bound to `PANE`) through a first hub, then returns its goal and
+/// request ids. `host` other than the dispatcher's own is a paired host.
+async fn started_run(pool: &SqlitePool, dispatcher_host: &str) -> (String, String) {
+    let (goal_id, request_id) = admit(pool).await;
+    let generation = execution_binding_of(pool, &goal_id).await.unwrap().unwrap().generation;
+    crate::supervisor::attach_session(pool, &goal_id, generation, PANE).await.unwrap();
+    // The crashed hub's own settle watch for a paired run: its control answers every wait with
+    // `{"ok": true}` (no observer epoch), which is `Unreadable`, so with the default watch it
+    // retries on a 1s backoff and cannot act before the test's census; the test runtime then
+    // drops it. Only the census's watch, on its own control, is observed.
+    let first = Dispatcher::new(
+        pool.clone(),
+        Arc::new(RecordingControl::observing()),
+        Arc::new(FixedLauncher::new(PANE)),
+        dispatcher_host,
+    );
+    first.drain().await;
+    assert_eq!(goal_state(pool, &goal_id).await.0, RunState::Running);
+    (goal_id, request_id)
+}
+
+#[tokio::test]
+async fn the_restart_census_holds_a_local_run_whose_pane_is_gone_and_never_resends() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = started_run(&pool, HOST).await;
+    // The new daemon lists only another pane.
+    let control = Arc::new(RecordingControl::observing());
+    *control.result.lock().unwrap() = serde_json::json!({"sessions": [{"sessionId": "pane-other"}]});
+    let census = dispatcher(&pool, control.clone()).census_started_runs().await;
+    assert_eq!(census, 1);
+    let (state, detail) = goal_state(&pool, &goal_id).await;
+    assert_eq!(state, RunState::Degraded);
+    assert!(detail.as_deref().is_some_and(|detail| detail.starts_with(PTY_RUN_LOST)), "{detail:?}");
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "started", "never settled");
+    assert!(dispatcher(&pool, control.clone()).drain().await.is_empty());
+    assert_eq!(sends(&control), 0, "never resent");
+    assert!(no_pane_mutation_but_sends(&control));
+}
+
+#[tokio::test]
+async fn the_restart_census_leaves_a_local_run_whose_pane_lives_to_the_observer() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = started_run(&pool, HOST).await;
+    let control = Arc::new(RecordingControl::observing());
+    *control.result.lock().unwrap() = serde_json::json!({"sessions": [{"sessionId": PANE}]});
+    dispatcher(&pool, control.clone()).census_started_runs().await;
+    assert_eq!(goal_state(&pool, &goal_id).await.0, RunState::Running);
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "started");
+    assert_eq!(sends(&control), 0);
+}
+
+#[tokio::test]
+async fn the_restart_census_rewatches_a_paired_run_and_records_its_settle() {
+    let pool = owner_pool().await;
+    // A dispatcher on `local` makes HOST a paired host.
+    let (goal_id, request_id) = started_run(&pool, LOCAL_HOST_ID).await;
+    let control = Arc::new(RecordingControl::observing());
+    *control.result.lock().unwrap() = serde_json::json!({
+        "gap": false,
+        "instance": OLD_EPOCH,
+        "observation": {"sessionId": PANE, "state": "idle", "promptId": null, "sequence": 5},
+        "afterSequence": 5,
+    });
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+    let restarted = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        LOCAL_HOST_ID,
+    )
+    .with_settle_probe(probe_tx);
+    assert_eq!(restarted.census_started_runs().await, 1);
+    let noticed = timeout(DEADLINE, probe_rx.recv()).await.expect("settle probe");
+    assert_eq!(noticed.as_deref(), Some(request_id.as_str()));
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "settled");
+    let waits: Vec<_> = control
+        .ops()
+        .into_iter()
+        .filter(|(host, op)| host.as_deref() == Some(HOST) && matches!(op, AgentOp::Wait { .. }))
+        .collect();
+    assert_eq!(waits.len(), 1, "watched from the run's start on its own host");
+    assert_eq!(sends(&control), 0);
+    let _ = goal_id;
+}
+
+#[tokio::test]
+async fn the_restart_census_holds_a_paired_run_whose_host_observer_restarted() {
+    let pool = owner_pool().await;
+    let (goal_id, request_id) = started_run(&pool, LOCAL_HOST_ID).await;
+    let control = Arc::new(RecordingControl::observing());
+    // The paired host's daemon restarted too: its observer epoch differs from the run's.
+    *control.result.lock().unwrap() = serde_json::json!({
+        "gap": false,
+        "instance": NEW_EPOCH,
+        "afterSequence": 1,
+    });
+    let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+    let restarted = Dispatcher::new(
+        pool.clone(),
+        control.clone(),
+        Arc::new(FixedLauncher::new(PANE)),
+        LOCAL_HOST_ID,
+    )
+    .with_census_settle_watch(SettleWatch {
+        wait: Duration::from_millis(10),
+        backoff: Duration::ZERO,
+        failures: 3,
+        max: DEADLINE,
+    })
+    .with_settle_probe(probe_tx);
+    assert_eq!(restarted.census_started_runs().await, 1);
+    let noticed = timeout(DEADLINE, probe_rx.recv()).await.expect("unobserved probe");
+    assert_eq!(noticed.as_deref(), Some(request_id.as_str()));
+    let (state, detail) = goal_state(&pool, &goal_id).await;
+    assert_eq!(state, RunState::Degraded);
+    assert!(
+        detail.as_deref().is_some_and(|detail| detail.starts_with(PAIRED_SETTLE_UNOBSERVED)),
+        "{detail:?}"
+    );
+    assert_eq!(dispatch_state(&pool, &request_id).await.0, "started", "it may still run");
+    assert_eq!(sends(&control), 0, "never resent");
 }
