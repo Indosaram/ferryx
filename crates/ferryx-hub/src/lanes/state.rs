@@ -149,9 +149,46 @@ pub async fn transition(
     to: LaneStatus,
     reason: Option<&str>,
 ) -> Result<(), LaneTransitionError> {
+    apply_transition(pool, key, to, reason, false)
+        .await
+        .map(drop)
+}
+
+/// [`transition`] to `Working` for a legacy path that reopens an ended lane and then sends to
+/// its pane (an owner reply, a tracker move). The UPDATE itself also refuses a lane the
+/// supervisor owns ([`crate::supervisor::supervisor_owns_lane`]): false when it was refused
+/// and nothing changed. An adoption refuses, under its write lock, a lane that has not ended
+/// while a pane is attached, so of a racing adoption and a legacy reopen exactly one commits.
+pub async fn reopen_unless_supervised(
+    pool: &SqlitePool,
+    key: &str,
+    reason: Option<&str>,
+) -> Result<bool, LaneTransitionError> {
+    transition_unless_supervised(pool, key, LaneStatus::Working, reason).await
+}
+
+/// [`transition`] whose UPDATE also refuses a lane the supervisor owns, as
+/// [`reopen_unless_supervised`] does: false when it was refused and nothing changed.
+pub async fn transition_unless_supervised(
+    pool: &SqlitePool,
+    key: &str,
+    to: LaneStatus,
+    reason: Option<&str>,
+) -> Result<bool, LaneTransitionError> {
+    apply_transition(pool, key, to, reason, true).await
+}
+
+/// False only when `fence_supervisor` refused a lane the supervisor owns.
+async fn apply_transition(
+    pool: &SqlitePool,
+    key: &str,
+    to: LaneStatus,
+    reason: Option<&str>,
+    fence_supervisor: bool,
+) -> Result<bool, LaneTransitionError> {
     let allowed = to.allowed_from(reason);
     if allowed.is_empty() {
-        return illegal(pool, key, to, reason).await;
+        return illegal(pool, key, to, reason).await.map(|()| false);
     }
     let previous: Option<String> = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
         .bind(key)
@@ -159,8 +196,14 @@ pub async fn transition(
         .await
         .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
     let placeholders = allowed.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let fence = if fence_supervisor {
+        " AND NOT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = lanes.key)
+          AND NOT EXISTS(SELECT 1 FROM supervisor_requests WHERE source_message_id = ? || lanes.key)"
+    } else {
+        ""
+    };
     let sql = format!(
-        "UPDATE lanes SET status = ?, updated_at = ? WHERE key = ? AND status IN ({placeholders})"
+        "UPDATE lanes SET status = ?, updated_at = ? WHERE key = ? AND status IN ({placeholders}){fence}"
     );
     let mut query = sqlx::query(&sql)
         .bind(to.as_str())
@@ -169,12 +212,22 @@ pub async fn transition(
     for status in allowed {
         query = query.bind(status.as_str());
     }
+    if fence_supervisor {
+        query = query.bind(crate::supervisor::ADOPT_MESSAGE_PREFIX);
+    }
     let updated = query
         .execute(pool)
         .await
         .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
     if updated.rows_affected() == 0 {
-        return illegal(pool, key, to, reason).await;
+        if fence_supervisor
+            && crate::supervisor::supervisor_owns_lane(pool, key)
+                .await
+                .map_err(|error| LaneTransitionError::Storage(error.to_string()))?
+        {
+            return Ok(false);
+        }
+        return illegal(pool, key, to, reason).await.map(|()| false);
     }
     let reopened =
         to == LaneStatus::Working && matches!(previous.as_deref(), Some("closed" | "failed"));
@@ -194,7 +247,7 @@ pub async fn transition(
             .await
             .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
     }
-    Ok(())
+    Ok(true)
 }
 
 async fn illegal(

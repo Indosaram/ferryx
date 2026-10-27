@@ -8,13 +8,17 @@
 //! told), keeps the branch, and reports a branch that holds unmerged work. Reopening the lane
 //! restores the worktree from its branch. Each step re-checks the tree's state, so a close
 //! interrupted halfway resumes where it stopped.
+//!
+//! Git runs with `LC_ALL=C`, so the probe's "not a git repository" match does not depend on
+//! the host's language. Stored and launched paths carry the Windows verbatim prefix only when
+//! they have no plain form ([`without_verbatim_prefix`]).
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
 
 use super::state::{transition, LaneStatus};
 use crate::error::{HubError, Result};
-use crate::storage::now_rfc3339;
+use crate::storage::{now_rfc3339, WriteTx};
 
 pub fn auto_enabled() -> bool {
     crate::hub_env::var("OMON_LANE_AUTO_WORKTREE").map_or(true, |value| {
@@ -32,6 +36,9 @@ async fn git_raw(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
             .arg("-C")
             .arg(repo)
             .args(args)
+            // Messages in English whatever the host's locale: the probe matches them.
+            .env("LC_ALL", "C")
+            .env_remove("LANGUAGE")
             .kill_on_drop(true)
             .output(),
     )
@@ -55,11 +62,122 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
 async fn canonical(path: &str) -> Result<PathBuf> {
     tokio::fs::canonicalize(path)
         .await
+        .map(without_verbatim_prefix)
         .map_err(|error| HubError::message(format!("{path}: {error}")))
+}
+
+/// `canonicalize` returns a verbatim path on Windows (`\\?\C:\...`, `\\?\UNC\host\share\...`),
+/// which git and many shells reject as a working directory. A drive or UNC verbatim path is
+/// returned in its plain form (`C:\...`, `\\host\share\...`) when that form is shorter than
+/// `MAX_PATH`. A longer one, and every verbatim form without a plain equivalent
+/// (`\\?\Volume{GUID}\...`, `\\?\GLOBALROOT\...`), keeps its prefix, which it needs to stay
+/// valid. Any other path is returned unchanged.
+pub(crate) fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    /// Longest path Windows accepts without the verbatim prefix: `MAX_PATH` less its NUL.
+    const MAX_PLAIN_UTF16: usize = 259;
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        let mut parts = rest.split('\\');
+        let (Some(host), Some(share)) = (parts.next(), parts.next()) else {
+            return path;
+        };
+        if host.is_empty() || share.is_empty() {
+            return path;
+        }
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let drive = rest.as_bytes();
+        if !(drive.len() >= 3
+            && drive[0].is_ascii_alphabetic()
+            && drive[1] == b':'
+            && drive[2] == b'\\')
+        {
+            return path;
+        }
+        rest.to_owned()
+    } else {
+        return path;
+    };
+    if plain.encode_utf16().count() > MAX_PLAIN_UTF16 {
+        return path;
+    }
+    PathBuf::from(plain)
+}
+
+/// Pins the process environment the worktree tests depend on, once per test binary: an empty
+/// hub env file, auto worktrees on (set in the process environment, which wins over an env
+/// file another test may already have loaded), and no global or system git config, so a
+/// host's signing, hooks or templates cannot change the result.
+#[cfg(test)]
+pub(crate) fn isolate_test_env() {
+    static ISOLATED: std::sync::Once = std::sync::Once::new();
+    ISOLATED.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("ferryx-test-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "").unwrap();
+        std::env::set_var("FERRYX_HUB_ENV_FILE", &empty);
+        std::env::set_var("OMON_LANE_AUTO_WORKTREE", "1");
+        std::env::set_var("GIT_CONFIG_GLOBAL", &empty);
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    });
+}
+
+/// Deletes a lane branch this attempt created, if it exists. Best effort: a failure is logged.
+async fn discard_branch(repo: &Path, branch: &str) {
+    let reference = format!("refs/heads/{branch}");
+    let exists = git_raw(repo, &["rev-parse", "--verify", "--quiet", &reference])
+        .await
+        .is_ok_and(|output| output.status.success());
+    if exists {
+        if let Err(error) = git(repo, &["branch", "-D", branch]).await {
+            tracing::warn!(%error, branch, "an unrecorded lane branch was not deleted");
+        }
+    }
+}
+
+/// Records a created worktree and points the lane at it, in one transaction.
+async fn record(
+    pool: &SqlitePool,
+    key: &str,
+    target: &str,
+    top: &Path,
+    branch: &str,
+    start: &str,
+    origin_cwd: &str,
+) -> Result<String> {
+    let path = canonical(target).await?.to_string_lossy().into_owned();
+    let repo = top.to_string_lossy().into_owned();
+    let mut tx = pool.begin_write().await?;
+    sqlx::query(
+        "INSERT INTO lane_owned_worktrees(lane_key, path, state, repo, branch, start_commit, origin_cwd)
+         VALUES (?, ?, 'registered', ?, ?, ?, ?)",
+    )
+    .bind(key)
+    .bind(&path)
+    .bind(&repo)
+    .bind(branch)
+    .bind(start)
+    .bind(origin_cwd)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE lanes SET cwd = ?, updated_at = ? WHERE key = ?")
+        .bind(&path)
+        .bind(now_rfc3339())
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(path)
 }
 
 /// Creates the lane's worktree when its cwd qualifies and points the lane at it.
 /// Returns the new cwd, or None when the lane keeps its own cwd.
+///
+/// A tree and branch that were created but could not be recorded are removed again, so a
+/// later attempt does not fail on an existing `lane/<key>` branch.
 pub async fn create(pool: &SqlitePool, key: &str, cwd: &str) -> Result<Option<String>> {
     if !auto_enabled() {
         return Ok(None);
@@ -74,6 +192,13 @@ pub async fn create(pool: &SqlitePool, key: &str, cwd: &str) -> Result<Option<St
         return Ok(None);
     }
     let dir = Path::new(cwd);
+    // A missing directory (or a file) keeps its cwd, as git's "cannot change to" did.
+    if !tokio::fs::metadata(dir)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Ok(None);
+    }
     let probe = git_raw(
         dir,
         &[
@@ -134,29 +259,39 @@ pub async fn create(pool: &SqlitePool, key: &str, cwd: &str) -> Result<Option<St
     let path = lanes_dir.join(key);
     let branch = format!("lane/{key}");
     let target = path.to_string_lossy().into_owned();
-    git(&top, &["worktree", "add", "-b", &branch, &target, "HEAD"]).await?;
-    let path = canonical(&target).await?.to_string_lossy().into_owned();
-    let repo = top.to_string_lossy().into_owned();
-    sqlx::query(
-        "INSERT INTO lane_owned_worktrees(lane_key, path, state, repo, branch, start_commit, origin_cwd)
-         VALUES (?, ?, 'registered', ?, ?, ?, ?)",
-    )
-    .bind(key)
-    .bind(&path)
-    .bind(&repo)
-    .bind(&branch)
-    .bind(&start)
-    .bind(cwd)
-    .execute(pool)
-    .await?;
-    sqlx::query("UPDATE lanes SET cwd = ?, updated_at = ? WHERE key = ?")
-        .bind(&path)
-        .bind(now_rfc3339())
-        .bind(key)
-        .execute(pool)
-        .await?;
-    tracing::info!(key, path = %path, "auto worktree created");
-    Ok(Some(path))
+    let reference = format!("refs/heads/{branch}");
+    let branch_existed = git_raw(&top, &["rev-parse", "--verify", "--quiet", &reference])
+        .await?
+        .status
+        .success();
+    if let Err(error) = git(&top, &["worktree", "add", "-b", &branch, &target, "HEAD"]).await {
+        // `worktree add -b` creates the branch before it checks the tree out; one it made and
+        // left behind would make every later attempt fail with "already exists".
+        if !branch_existed {
+            discard_branch(&top, &branch).await;
+        }
+        return Err(error);
+    }
+    match record(pool, key, &target, &top, &branch, &start, cwd).await {
+        Ok(path) => {
+            tracing::info!(key, path = %path, "auto worktree created");
+            Ok(Some(path))
+        }
+        Err(error) => {
+            // Unrecorded, the tree and its branch would block every later attempt. Nothing
+            // has run in them yet, so both are removed.
+            if let Err(remove) = git(&top, &["worktree", "remove", "--force", &target]).await {
+                tracing::warn!(
+                    error = %remove,
+                    key,
+                    target = %target,
+                    "an unrecorded lane worktree was not removed"
+                );
+            }
+            discard_branch(&top, &branch).await;
+            Err(error)
+        }
+    }
 }
 
 type OwnedTree = (String, String, String, String, Option<String>);
@@ -179,6 +314,29 @@ async fn set_state(pool: &SqlitePool, key: &str, path: &str, state: &str) -> Res
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Marks the tree `removing` before a close removes it, in one statement that refuses a lane
+/// the supervisor owns ([`crate::supervisor::supervisor_owns_lane`]) and a tree a supervisor
+/// goal's lane runs in: false when it was refused and nothing changed. An adoption refuses,
+/// under its write lock, a lane with a tree `removing`, so of a racing adoption and close
+/// exactly one goes ahead and an adopted lane's working directory is never removed.
+async fn claim_removal(pool: &SqlitePool, key: &str, path: &str) -> Result<bool> {
+    let claimed = sqlx::query(
+        "UPDATE lane_owned_worktrees SET state = 'removing' WHERE lane_key = ? AND path = ?
+           AND NOT EXISTS(SELECT 1 FROM supervisor_goals WHERE lane_key = ?)
+           AND NOT EXISTS(SELECT 1 FROM supervisor_requests WHERE source_message_id = ?)
+           AND NOT EXISTS(SELECT 1 FROM supervisor_goals g JOIN lanes l ON l.key = g.lane_key
+                          WHERE l.cwd = ?)",
+    )
+    .bind(key)
+    .bind(path)
+    .bind(key)
+    .bind(format!("{}{key}", crate::supervisor::ADOPT_MESSAGE_PREFIX))
+    .bind(path)
+    .execute(pool)
+    .await?;
+    Ok(claimed.rows_affected() == 1)
 }
 
 async fn registered(repo: &Path, path: &str) -> Result<bool> {
@@ -259,6 +417,10 @@ async fn lane_event(pool: &SqlitePool, key: &str, kind: &str, body: &str) -> Res
 /// Closes a lane as omo's close intent does: remove its worktrees, report unmerged work,
 /// then move it to closed. `reason` is the transition reason (`forced: …` for a lane that
 /// is not verified). A failure leaves the lane in its status and tells the lead.
+///
+/// A tree is removed only after [`claim_removal`], so a lane the supervisor owns (adopted
+/// after the caller's own check, say) keeps its worktree and the close fails with
+/// `SUPERVISOR_OWNED`. A removal that fails (a dirty tree) releases the claim.
 pub async fn close(pool: &SqlitePool, key: &str, reason: Option<&str>) -> Result<()> {
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM lanes WHERE key = ?")
         .bind(key)
@@ -281,11 +443,26 @@ pub async fn close(pool: &SqlitePool, key: &str, reason: Option<&str>) -> Result
         for (path, state, repo, branch, start) in owned(pool, key).await? {
             let repo = PathBuf::from(repo);
             if state != "removed" {
-                set_state(pool, key, &path, "removing").await?;
-                let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
-                if exists || registered(&repo, &path).await? {
-                    // No --force: a dirty tree refuses, and the owner's work stays put.
-                    git(&repo, &["worktree", "remove", &path]).await?;
+                if !claim_removal(pool, key, &path).await? {
+                    return Err(HubError::message(format!(
+                        "{}: lane {key} belongs to a supervisor goal; its worktree {path} was not removed",
+                        crate::supervisor::SUPERVISOR_OWNED
+                    )));
+                }
+                let removed: Result<()> = async {
+                    let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+                    if exists || registered(&repo, &path).await? {
+                        // No --force: a dirty tree refuses, and the owner's work stays put.
+                        git(&repo, &["worktree", "remove", &path]).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = removed {
+                    // The tree is still in place: release the claim, so it does not block an
+                    // adoption that would continue the work in it.
+                    set_state(pool, key, &path, "registered").await?;
+                    return Err(error);
                 }
                 set_state(pool, key, &path, "removed").await?;
             }
