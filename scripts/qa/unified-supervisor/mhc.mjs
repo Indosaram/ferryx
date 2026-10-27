@@ -7,7 +7,7 @@
 // provider is a loopback openai-completions stub served by this runner, and the mhc memory home
 // (MAHO_MEMORY_HOME, memory-core/src/identity/layout.rs:11) under the run's memory root. No
 // production credentials or state are read.
-import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
@@ -400,6 +400,9 @@ const RUNTIME_HOST = 'local';
 /// maho-cli session_policy.rs:17,125-135).
 const MEMORY_BINDING_CUSTOM_TYPE = 'senpi-memory.session-binding';
 const SESSION_POLICY_CUSTOM_TYPE = 'maho.session-policy';
+/// TTSR rule activation entry (maho-ext-ttsr index.rs:30) and the rule the hub disables at launch.
+const RULE_ACTIVATION_CUSTOM_TYPE = 'rule-activation';
+const REPETITION_GUARD_RULE = 'repetitive-turns';
 /// Unit tests (ferryx-hub meta/mhc_supervisor/tests.rs) that cover what this scenario does not drive.
 const UNIT_COVERED = Object.freeze({
   command: 'cargo test --manifest-path crates/ferryx-hub/Cargo.toml mhc_supervisor',
@@ -701,6 +704,22 @@ async function runRuntime(ctx) {
     await realLegs();
     ctx.assert('no-fallback-canary-got-zero-requests', stub.requests.every((entry) => entry.model !== CANARY_MODEL),
       { canaryRequests: stub.requests.filter((entry) => entry.model === CANARY_MODEL) });
+    // The hub launches mhc with --ttsr-rules-disabled=repetitive-turns; an mhc that does not
+    // know the flag drops it silently in multi-session RPC mode (host_runtime.rs:785-786), so the
+    // engine's own session files must show that the guard never fired. Every session file under
+    // the run's agent dir is scanned, and the decision session the hub bound must be among them.
+    const sessionsDir = join(data, 'home', '.omo', 'agent', 'sessions');
+    let sessionFiles = [];
+    try {
+      sessionFiles = readdirSync(sessionsDir, { recursive: true }).map(String).filter((name) => name.endsWith('.jsonl')).map((name) => join(sessionsDir, name)).sort();
+    } catch { /* none written */ }
+    const activations = sessionFiles.flatMap((path) => readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    }).filter((entry) => entry?.type === 'custom' && entry?.customType === RULE_ACTIVATION_CUSTOM_TYPE
+      && entry?.data?.owner === REPETITION_GUARD_RULE).map((entry) => ({ path, at: entry.timestamp ?? null, data: entry.data })));
+    const boundFile = typeof lastBinding?.sessionFile === 'string' ? lastBinding.sessionFile : null;
+    ctx.assert('repetition-guard-never-fired', boundFile !== null && sessionFiles.includes(boundFile) && activations.length === 0,
+      { sessionsDir, sessionFiles, boundFile, activations });
 
     // 6. An engine without a required capability is refused: degraded, zero sends.
     await stop('relaunch with a capability-filtered engine');
@@ -757,6 +776,7 @@ export const RUNTIME_SCENARIO = Object.freeze({
     'provider-error-is-a-typed-fault',
     'engine-runs-without-model-fallback',
     'no-fallback-canary-got-zero-requests',
+    'repetition-guard-never-fired',
     'missing-capability-is-refused-as-degraded',
     'degraded-engine-got-zero-sends',
     'supervisor-identity-unchanged-across-restarts',
