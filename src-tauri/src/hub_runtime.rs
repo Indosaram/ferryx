@@ -221,10 +221,18 @@ impl TaskLauncher for DaemonBridge {
         })?;
         let shell = if command.is_empty() { None } else { Some(command.join(" ")) };
         self.client
-            .spawn_terminal(format!("hub-{}", std::process::id()), workspace, crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(cwd.to_owned()), cols: 100, rows: 32, shell })
+            .spawn_terminal(hub_spawn_request_id(), workspace, crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(cwd.to_owned()), cols: 100, rows: 32, shell })
             .await
             .map_err(|error| HubError::message(error.to_string()))
     }
+}
+
+/// A fresh daemon spawn request id for each pane the hub launches. The daemon treats a reused
+/// id as a retry of the same spawn (session_service `handle_spawn`): with the same options it
+/// returns the live pane it already made, with other options it refuses. One id per process
+/// therefore gave a second supervisor goal the first goal's pane, or refused its launch.
+fn hub_spawn_request_id() -> String {
+    format!("hub-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple())
 }
 
 /// `ferryx hub migrate [--from-omo <db>] [--dry-run]` copies live gateway state.
@@ -2164,6 +2172,15 @@ pub fn run_mcp() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_hub_pane_launch_gets_its_own_spawn_request_id() {
+        let first = hub_spawn_request_id();
+        let second = hub_spawn_request_id();
+        assert_ne!(first, second, "a reused id replays the earlier spawn's pane");
+        let prefix = format!("hub-{}-", std::process::id());
+        assert!(first.starts_with(&prefix) && second.starts_with(&prefix), "{first} {second}");
+    }
 
     #[test]
     fn a_persons_relayed_words_are_not_supervisor_input() {

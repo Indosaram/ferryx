@@ -123,8 +123,9 @@ export async function startProviderStub(ctx) {
       ctx.evidence.appendJsonl('runtime/provider-requests.jsonl', entry);
       ctx.journal.push({ source: 'provider-stub', kind: 'request', ...entry });
       if (state.failWith) {
-        response.writeHead(state.failWith.status, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ error: { message: state.failWith.message, type: 'qa_stub_error' } }));
+        const { status, message, code = null, headers = {} } = state.failWith;
+        response.writeHead(status, { 'content-type': 'application/json', ...headers });
+        response.end(JSON.stringify({ error: { message, type: 'qa_stub_error', ...(code ? { code } : {}) } }));
         return;
       }
       if (request.method === 'GET' && request.url?.replace(/\?.*$/, '').endsWith('/models')) {
@@ -159,7 +160,10 @@ export async function startProviderStub(ctx) {
   return {
     baseUrl,
     requests,
-    failNext(status, message) { state.failWith = { status, message }; },
+    // Every request fails with `status` until succeed(). `code` is the provider error code in
+    // the body (e.g. insufficient_quota) and `headers` extra response headers (e.g.
+    // x-should-retry: false, which mhc's transport retry honours before any backoff).
+    failNext(status, message, { code = null, headers = {} } = {}) { state.failWith = { status, message, code, headers }; },
     succeed() { state.failWith = null; },
     close: () => new Promise((resolveClose) => { server.closeAllConnections?.(); server.close(() => resolveClose()); }),
   };

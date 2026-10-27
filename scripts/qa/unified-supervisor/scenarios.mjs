@@ -919,6 +919,31 @@ async function runRecovery(ctx) {
   const hubDir = dirname(h.dbPath);
   const transcript = (boundary, phase) => ctx.evidence.appendJsonl(`recovery/${boundary}.jsonl`, { phase, ...goalRows(hub, transcript.goals[boundary] ?? ''), workers: readWorkerLogs(workerLogs).length, at: new Date().toISOString() });
   transcript.goals = {};
+  // Every wait of this scenario: on a timeout (or any failure) the state of every goal seen so
+  // far, its dispatches and the worker/pane counts are written to the evidence before the
+  // failure propagates, so a hang carries a snapshot even after the data root is cleaned up.
+  const snapshotOnFailure = async (label, wait) => {
+    try {
+      return await wait;
+    } catch (error) {
+      let snapshot;
+      try {
+        snapshot = {
+          label,
+          error: String(error?.message ?? error),
+          goals: Object.fromEntries(Object.entries(transcript.goals).map(([boundary, goalId]) => [boundary, { goalId, ...goalRows(hub, goalId ?? '') }])),
+          allDispatches: hub.all('SELECT goal_id, request_id, state, uncertain_code, run_id, provider_session_id, generation FROM supervisor_dispatches ORDER BY id'),
+          bindings: hub.all('SELECT goal_id, kind, host_id, generation, provider_session_id, run_id FROM supervisor_execution_bindings ORDER BY goal_id'),
+          workers: readWorkerLogs(workerLogs).map((worker) => ({ name: worker.name, sessionId: worker.sessionId, lines: worker.entries.length })),
+          at: new Date().toISOString(),
+        };
+      } catch (readError) {
+        snapshot = { label, error: String(error?.message ?? error), snapshotError: String(readError?.message ?? readError) };
+      }
+      ctx.evidence.appendJsonl('recovery/timeout-snapshots.jsonl', snapshot);
+      throw error;
+    }
+  };
   const census = [];
   const take = async (step) => { const ids = await h.panes(step); census.push({ step, ids }); return ids; };
   // One hub-generation restart: stop and start must each succeed, and the daemon and every
@@ -954,10 +979,10 @@ async function runRecovery(ctx) {
     ctx.assert('hub-restarted-before-send', await hubControl(ctx, env, 'start', 'before-send'), {});
     const childrenFirstAfter = await h.children('before-send-after');
     ctx.assert('children-survived-before-send', survived(childrenFirst, childrenFirstAfter), { before: childrenFirst, after: childrenFirstAfter });
-    const ran1 = await waitForChange(ctx, 'before-send dispatch after restart', hubDir, () => {
+    const ran1 = await snapshotOnFailure('before-send dispatch after restart', waitForChange(ctx, 'before-send dispatch after restart', hubDir, () => {
       const rows = goalRows(hub, goal1);
       return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
-    }, 120_000);
+    }, 120_000));
     transcript('before-send', 'restarted');
     ctx.assert('before-send-runs-once-after-restart', ran1.goal?.run_state === 'running' && ran1.dispatches.length === 1
       && ran1.dispatches[0].state === 'started' && inputsWith(workerLogs, marker1).length === 1, { ...ran1, inputs: inputsWith(workerLogs, marker1) });
@@ -969,19 +994,19 @@ async function runRecovery(ctx) {
     const second = await h.submit('after-send', `qa-recovery-2-${ctx.runId}`, `Create result.txt containing READY. ${marker2}`);
     const goal2 = second?.receipt?.goal_id ?? null;
     transcript.goals['after-send'] = goal2;
-    const typed = await waitForChange(ctx, 'after-send instruction typed while claimed', workerLogs, () => {
+    const typed = await snapshotOnFailure('after-send instruction typed while claimed', waitForChange(ctx, 'after-send instruction typed while claimed', workerLogs, () => {
       const rows = goalRows(hub, goal2 ?? '');
       return { done: inputsWith(workerLogs, marker2).length >= 1 && ['claimed', 'accepted'].includes(rows.dispatches[0]?.state), ...rows };
-    }, 120_000);
+    }, 120_000));
     transcript('after-send', 'typed');
     const typedState = typed.dispatches[0]?.state;
     ctx.assert('after-send-instruction-typed-while-claimed', typed.dispatches.length === 1 && ['claimed', 'accepted'].includes(typedState), typed);
     const panesMid = await take('after-send-restart');
     await restartHub('after-send');
-    const held = await waitForChange(ctx, 'after-send reconciliation', hubDir, () => {
+    const held = await snapshotOnFailure('after-send reconciliation', waitForChange(ctx, 'after-send reconciliation', hubDir, () => {
       const rows = goalRows(hub, goal2);
       return { done: rows.goal?.run_state === 'delivery_uncertain', ...rows };
-    }, 60_000);
+    }, 60_000));
     transcript('after-send', 'restarted');
     ctx.assert('after-send-held-uncertain-not-resent', held.dispatches.length === 1 && held.dispatches[0].state === 'uncertain'
       && held.dispatches[0].uncertain_code === (typedState === 'claimed' ? 'CLAIM_UNCONFIRMED_AT_RESTART' : 'START_UNCONFIRMED_AT_RESTART')
@@ -993,10 +1018,10 @@ async function runRecovery(ctx) {
     const third = await h.submit('after-start', `qa-recovery-3-${ctx.runId}`, `Create result.txt containing READY. ${marker3}`);
     const goal3 = third?.receipt?.goal_id ?? null;
     transcript.goals['after-start'] = goal3;
-    const started = await waitForChange(ctx, 'after-start run started', hubDir, () => {
+    const started = await snapshotOnFailure('after-start run started', waitForChange(ctx, 'after-start run started', hubDir, () => {
       const rows = goalRows(hub, goal3 ?? '');
       return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
-    }, 120_000);
+    }, 120_000));
     transcript('after-start', 'started');
     ctx.assert('after-start-run-started', started.goal?.run_state === 'running' && started.dispatches[0]?.state === 'started', started);
     const panesLate = await take('after-start-restart');
@@ -1009,10 +1034,11 @@ async function runRecovery(ctx) {
     const markerS = `QA_RECOVERY_SENTINEL_${ctx.runId}`;
     const sentinel = await h.submit('sentinel', `qa-recovery-s-${ctx.runId}`, `Create result.txt containing READY. ${markerS}`);
     const goalS = sentinel?.receipt?.goal_id ?? null;
-    const sentinelRan = await waitForChange(ctx, 'sentinel dispatch after the after-start restart', hubDir, () => {
+    transcript.goals.sentinel = goalS;
+    const sentinelRan = await snapshotOnFailure('sentinel dispatch after the after-start restart', waitForChange(ctx, 'sentinel dispatch after the after-start restart', hubDir, () => {
       const rows = goalRows(hub, goalS ?? '');
       return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
-    }, 120_000);
+    }, 120_000));
     ctx.assert('census-ran-sentinel-started', sentinel?.outcome === 'admitted' && sentinelRan.dispatches[0]?.state === 'started', sentinelRan);
     const after = goalRows(hub, goal3);
     transcript('after-start', 'restarted');
@@ -1033,6 +1059,10 @@ async function runRecovery(ctx) {
     const liveRuns = startedSessions(hub);
     ctx.assert('pty-census-unchanged-across-restarts', census.every(({ ids }) => ids.every((id) => final.includes(id)))
       && liveRuns.length >= 2 && liveRuns.every((id) => final.includes(id)), { census, final, liveRuns });
+    // Each goal launched its own pane: the hub never handed one goal's pane to another.
+    const panesByGoal = hub.all('SELECT goal_id, provider_session_id FROM supervisor_execution_bindings WHERE provider_session_id IS NOT NULL ORDER BY goal_id');
+    const boundPanes = panesByGoal.map((row) => row.provider_session_id);
+    ctx.assert('each-goal-owns-its-pane', boundPanes.length >= 4 && new Set(boundPanes).size === boundPanes.length, { panesByGoal });
     // One body per delivery; every submit's body carries its own marker, so a repeat is a resend.
     const allInputs = deliveries(workerLogs).map((delivery) => delivery.body).filter((body) => body.includes('QA_RECOVERY_'));
     ctx.assert('no-instruction-typed-twice', new Set(allInputs).size === allInputs.length, { allInputs });
@@ -1095,17 +1125,49 @@ async function runCapabilities(ctx) {
     ctx.assert('worker-pane-started', running.goal?.run_state === 'running', running);
     const panesBefore = await h.panes('before-faults');
 
-    const fault = async (step, status, message) => {
-      stub.failNext(status, message);
+    // One fault leg: the stub fails every request of the turn, then answers normally again.
+    // Before the next leg the engine must have ended this turn: a probe assessment (stub
+    // succeeding) is repeated, bounded, until it returns an answer. A turn the engine still
+    // runs keeps its decision session open (open_session refuses session_path_in_use), so
+    // without this a slow leg cascades into the next. Per-leg stub request counts are kept.
+    const legs = [];
+    const fault = async (step, status, message, options = {}) => {
+      const from = stub.requests.length;
+      stub.failNext(status, message, options);
       const reply = await mhc.engineAssess(ctx, engineEnv, step, 'Assess: is the qa goal complete? Answer JSON.');
       stub.succeed();
-      note(`${step}: code=${reply.json?.code ?? reply.code}`);
+      const faultRequests = stub.requests.length - from;
+      const settle = [];
+      const settleDeadline = performance.now() + 120_000;
+      for (let attempt = 1; ; attempt += 1) {
+        const probe = await mhc.engineAssess(ctx, engineEnv, `${step}-settled-${attempt}`, 'Assess: is the qa goal complete? Answer JSON.');
+        settle.push({ attempt, code: probe.code, faultCode: probe.json?.code ?? null });
+        if (probe.code === 0) break;
+        if (performance.now() >= settleDeadline) {
+          throw new HarnessError('DEADLINE_EXCEEDED', `the engine did not end the ${step} turn within 120s`, { settle });
+        }
+        if (ctx.signal.aborted) throw ctx.signal.reason;
+        await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(500 * attempt, 4_000)));
+      }
+      const leg = { step, status, options, code: reply.code, faultCode: reply.json?.code ?? null, message: reply.json?.message ?? null,
+        faultRequests, settleRequests: stub.requests.length - from - faultRequests, settle };
+      legs.push(leg);
+      ctx.evidence.writeJson('capabilities/fault-legs.json', legs);
+      note(`${step}: code=${leg.faultCode ?? reply.code} faultRequests=${faultRequests} settleAttempts=${settle.length}`);
       return reply;
     };
     const auth = await fault('auth', 401, 'invalid x-api-key qa-loopback-fixture');
     ctx.assert('auth-fault-is-typed', auth.code !== 0 && auth.json?.code === 'MHC_AUTH', auth.json);
-    const quota = await fault('quota', 429, 'rate limit reached for qa');
-    ctx.assert('quota-fault-is-typed', quota.code !== 0 && quota.json?.code === 'MHC_QUOTA', quota.json);
+    // An exhausted quota, as OpenAI reports it: 429 with code insufficient_quota and
+    // `x-should-retry: false`. mhc's transport retry stops on that header
+    // (maho-ai utils/provider_retry.rs is_retryable) and its turn retry treats the
+    // insufficient_quota text as non-retryable (utils/retry.rs NON_RETRYABLE_PROVIDER_ERROR_PATTERN),
+    // so the turn fails at once instead of backing off until the assessment times out. A
+    // plain 429 "rate limit" is a transient limit that mhc rightly retries.
+    const quota = await fault('quota', 429, 'You exceeded your current quota: insufficient_quota (qa)',
+      { code: 'insufficient_quota', headers: { 'x-should-retry': 'false' } });
+    ctx.assert('quota-fault-is-typed', quota.code !== 0 && quota.json?.code === 'MHC_QUOTA'
+      && legs.at(-1).faultRequests >= 1 && legs.at(-1).faultRequests <= 2, { reply: quota.json, leg: legs.at(-1) });
     const provider = await fault('provider', 400, 'qa stub refused the request');
     ctx.assert('provider-fault-is-typed', provider.code !== 0 && provider.json?.code === 'MHC_PROVIDER', provider.json);
 
@@ -1249,7 +1311,7 @@ export const SCENARIOS = Object.freeze({
       'after-send-held-uncertain-not-resent', 'after-start-run-started', 'hub-stopped-after-start', 'hub-started-after-start',
       'children-survived-after-start', 'hub-healthy-after-start-restart', 'census-ran-sentinel-started',
       'after-start-reattached-not-resent', 'after-start-still-running-at-end', 'no-goal-lost', 'pty-census-listed-final',
-      'pty-census-unchanged-across-restarts', 'no-instruction-typed-twice',
+      'pty-census-unchanged-across-restarts', 'each-goal-owns-its-pane', 'no-instruction-typed-twice',
     ],
     // No product surface advances an execution generation for a live goal (advance_generation is
     // called only from tests), so a predecessor's late completion cannot be provoked end to end.
