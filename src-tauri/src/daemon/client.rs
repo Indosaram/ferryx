@@ -736,6 +736,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
+        DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
     }
 }
 

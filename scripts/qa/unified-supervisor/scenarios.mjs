@@ -21,7 +21,9 @@ export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.met
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
 const PLANNED_DEADLINE_MS = 15 * 60_000;
 
-const planned = (task, summary) => Object.freeze({ implemented: false, task, summary, deadlineMs: PLANNED_DEADLINE_MS });
+// Task 6's `runtime` is implemented in mhc.mjs and replaces its planned entry here.
+const planned = (task, summary) => (task === RUNTIME_SCENARIO.task ? RUNTIME_SCENARIO
+  : Object.freeze({ implemented: false, task, summary, deadlineMs: PLANNED_DEADLINE_MS }));
 
 // ---------------------------------------------------------------------------
 // admission (plan task 7): setup -> isolated daemon -> owned `ferryx-cli mcp` -> submit,
@@ -968,3 +970,6 @@ export function resolveScenario(name, internal = false) {
   if (internal && Object.hasOwn(SELF_TEST_SCENARIOS, name)) return SELF_TEST_SCENARIOS[name];
   throw new HarnessError('UNKNOWN_SCENARIO', `unknown scenario ${name}; registered: ${Object.keys(SCENARIOS).join(', ')}`);
 }
+
+// ES imports are hoisted: RUNTIME_SCENARIO is bound before `planned` runs.
+import { RUNTIME_SCENARIO } from './mhc.mjs';

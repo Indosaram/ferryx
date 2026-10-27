@@ -1561,6 +1561,44 @@ impl MhcSupervisor {
         self.inner.health.subscribe()
     }
 
+    /// Read-only view of the engine for operators and QA: health, the profile cwd, the
+    /// persisted role bindings (durable session id and session file per role key) and the
+    /// session context a decision slot opens with. Sends nothing to the engine and never
+    /// launches it. It waits for the engine state lock, so it never shows half of a launch or
+    /// exit: every transition the engine logs under that lock (ready, degraded, exited) is
+    /// visible to a snapshot taken after the log line. `retryInMs` is how long until a
+    /// relaunch is allowed after a failed launch or an early exit.
+    pub async fn engine_snapshot(&self) -> Value {
+        let (retry_in_ms, health) = {
+            let state = self.inner.engine.lock().await;
+            let retry = state.retry_at.map(|at| {
+                u64::try_from(
+                    at.saturating_duration_since(tokio::time::Instant::now())
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX)
+            });
+            (retry, self.health())
+        };
+        let sessions = self.inner.store().sessions().clone();
+        let decision = self.inner.profile.role_spec(&SessionRole::Decision(0));
+        json!({
+            "state": health.state,
+            "generation": health.generation,
+            "pid": health.pid,
+            "capabilities": health.capabilities,
+            "serverVersion": health.server_version,
+            "faultCode": health.fault.as_ref().map(SupervisorFault::code),
+            "fault": health.fault,
+            "detail": health.detail,
+            "queuedDecisions": health.queued_decisions,
+            "retryInMs": retry_in_ms,
+            "profileCwd": self.inner.profile.cwd().to_string_lossy(),
+            "sessions": sessions,
+            "decisionContext": decision.context,
+        })
+    }
+
     /// Malformed engine lines the current transport skipped.
     pub async fn malformed_lines(&self) -> u64 {
         let state = self.inner.engine.lock().await;
@@ -1875,6 +1913,17 @@ pub fn install_with(make: impl FnOnce() -> MhcSupervisor) -> MhcSupervisor {
 
 pub fn installed() -> Option<MhcSupervisor> {
     INSTALLED.get().cloned()
+}
+
+/// [`MhcSupervisor::engine_snapshot`] of the engine installed in this process, or
+/// [`SupervisorFault::NotRunning`] when this process owns none.
+pub async fn installed_engine_snapshot() -> Result<Value, SupervisorFault> {
+    match installed() {
+        Some(supervisor) => Ok(supervisor.engine_snapshot().await),
+        None => Err(SupervisorFault::not_running(
+            "no mhc supervisor engine is installed in this process",
+        )),
+    }
 }
 
 /// The supervisor judge's model when the mhc supervisor is configured for this hub; `None`

@@ -777,6 +777,104 @@ pub async fn set_lane_paused(
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorGoal`.
 pub const SUPERVISOR_GOAL_CAPABILITY: &str = "supervisorGoalV1";
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorEngine`.
+pub const SUPERVISOR_ENGINE_CAPABILITY: &str = "supervisorEngineV1";
+
+/// Why a supervisor engine action was refused: the engine's typed fault (`MHC_*`, including
+/// `MHC_NOT_RUNNING` when this daemon owns no engine) or an unavailable judge.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorEngineError {
+    #[error("{0}")]
+    Fault(ferryx_hub::meta::mhc_fault::SupervisorFault),
+    /// The hub database is not open yet, so an assessment could not be recorded.
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    #[error("{0}")]
+    Judge(String),
+}
+
+impl SupervisorEngineError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Fault(fault) => fault.code(),
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::Judge(_) => "JUDGE_UNAVAILABLE",
+        }
+    }
+}
+
+impl From<ferryx_hub::goals::GoalError> for SupervisorEngineError {
+    fn from(error: ferryx_hub::goals::GoalError) -> Self {
+        match error {
+            ferryx_hub::goals::GoalError::SupervisorFault(fault) => Self::Fault(fault),
+            other => Self::Judge(other.to_string()),
+        }
+    }
+}
+
+/// The engine side of [`supervisor_engine`]: the installed engine's snapshot, and for
+/// `Assess` one structured judgment through the supervisor judge, which records its
+/// `judge_calls` row in `pool` (an assessment without the hub pool is refused, never left
+/// unrecorded). Only the installed mhc engine answers; with none installed the action is
+/// `MHC_NOT_RUNNING` and no other model is asked. Nothing is written to goals or dispatches
+/// and nothing is typed into a pane.
+async fn engine_view(
+    installed: Option<ferryx_hub::meta::mhc_supervisor::MhcSupervisor>,
+    pool: Option<ferryx_hub::goals::SqlitePool>,
+    action: crate::daemon::protocol::SupervisorEngineAction,
+) -> Result<Value, SupervisorEngineError> {
+    use crate::daemon::protocol::SupervisorEngineAction as Action;
+    let Some(supervisor) = installed else {
+        return Err(SupervisorEngineError::Fault(
+            ferryx_hub::meta::mhc_fault::SupervisorFault::not_running(
+                "no mhc supervisor engine is installed in this daemon",
+            ),
+        ));
+    };
+    let assessment = match action {
+        Action::Status => None,
+        Action::Assess { prompt } => {
+            let pool = pool.ok_or(SupervisorEngineError::Unavailable)?;
+            let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+                .with_fallback(Arc::new(supervisor.model()))
+                .with_pool(pool);
+            let reply = judge.structured(ferryx_hub::judge::Purpose::GapAssess, &prompt).await;
+            match reply {
+                Ok(reply) => Some(json!({ "purpose": "gap_assess", "reply": reply })),
+                Err(error) => {
+                    let error = SupervisorEngineError::from(error);
+                    tracing::warn!(code = error.code(), %error, "a supervisor engine assessment failed");
+                    return Err(error);
+                }
+            }
+        }
+    };
+    let mut view = json!({ "engine": supervisor.engine_snapshot().await });
+    if let (Some(assessment), Some(fields)) = (assessment, view.as_object_mut()) {
+        fields.insert("assessment".into(), assessment);
+    }
+    Ok(view)
+}
+
+/// Reads the retained mhc supervisor engine or asks it for one structured judgment, and adds
+/// the supervisor's recent pane input (`actions`, as in [`supervisor_snapshot`]) so a caller
+/// can see that nothing was typed. `hubOpen` says whether the hub database is open, which an
+/// assessment needs to record its `judge_calls` row.
+pub async fn supervisor_engine(
+    state: &RemoteGatewayState,
+    action: crate::daemon::protocol::SupervisorEngineAction,
+) -> Result<Value, SupervisorEngineError> {
+    let pool = SUPERVISOR_VIEW.get().map(|(hub, _)| hub.pool.clone());
+    let hub_open = pool.is_some();
+    let mut view = engine_view(ferryx_hub::meta::mhc_supervisor::installed(), pool, action).await?;
+    let actions = supervisor_snapshot(state).await.get("actions").cloned().unwrap_or_else(|| json!([]));
+    if let Some(fields) = view.as_object_mut() {
+        fields.insert("actions".into(), actions);
+        fields.insert("hubOpen".into(), json!(hub_open));
+    }
+    Ok(view)
+}
+
 /// Why a goal action was refused. Each maps to one wire code the CLI turns into an exit code.
 #[derive(Debug, thiserror::Error)]
 pub enum SupervisorGoalError {
@@ -2330,5 +2428,17 @@ mod tests {
             }
             other => panic!("expected an answer, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn an_engine_action_without_an_installed_engine_is_mhc_not_running() {
+        use crate::daemon::protocol::SupervisorEngineAction as Action;
+        assert_eq!(SUPERVISOR_ENGINE_CAPABILITY, "supervisorEngineV1");
+        for action in [Action::Status, Action::Assess { prompt: "grade this".into() }] {
+            let refused = engine_view(None, None, action).await.unwrap_err();
+            assert_eq!(refused.code(), "MHC_NOT_RUNNING");
+            assert!(refused.to_string().starts_with("MHC_NOT_RUNNING:"), "{refused}");
+        }
+        assert_eq!(SupervisorEngineError::Unavailable.code(), "SUPERVISOR_UNAVAILABLE");
     }
 }

@@ -635,6 +635,11 @@ impl SessionStore {
         self.file.sessions.get(key)
     }
 
+    /// Every persisted role binding, by role key.
+    pub fn sessions(&self) -> &BTreeMap<String, PersistedSession> {
+        &self.file.sessions
+    }
+
     /// Re-reads the store from disk: another supervisor process may have written it while it
     /// owned the profile.
     pub fn reload(&mut self) {

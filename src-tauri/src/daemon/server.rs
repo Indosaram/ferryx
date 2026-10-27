@@ -7225,6 +7225,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -7275,6 +7276,16 @@ impl DaemonServer {
                 Ok(DaemonRequest::SupervisorGoal { request }) => {
                     match crate::hub_runtime::supervisor_goal(self.remote_state(), request).await {
                         Ok(snapshot) => DaemonResponse::SupervisorGoalOk { snapshot },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorEngine { request }) => {
+                    match crate::hub_runtime::supervisor_engine(self.remote_state(), request).await {
+                        Ok(snapshot) => DaemonResponse::SupervisorEngineOk { snapshot },
                         Err(error) => DaemonResponse::Error {
                             message: error.to_string(),
                             code: Some(error.code().into()),

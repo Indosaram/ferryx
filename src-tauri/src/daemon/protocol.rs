@@ -587,6 +587,17 @@ impl SupervisorDispatchAction {
     }
 }
 
+/// Read the retained mhc supervisor engine, or ask it for one structured judgment. Gated by
+/// `supervisorEngineV1`. Neither action writes goals or dispatches, nor types into a pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorEngineAction {
+    /// Engine health, persisted role bindings and the supervisor's recent pane input.
+    Status,
+    /// One structured judgment through the supervisor judge (a `judge_calls` row).
+    Assess { prompt: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonRequest {
@@ -847,6 +858,10 @@ pub enum DaemonRequest {
     /// Show or steer one lane's goal contract. Gated by `supervisorGoalV1`.
     SupervisorGoal {
         request: SupervisorGoalAction,
+    },
+    /// Read or consult the retained mhc supervisor engine. Gated by `supervisorEngineV1`.
+    SupervisorEngine {
+        request: SupervisorEngineAction,
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
@@ -1336,6 +1351,11 @@ pub enum DaemonResponse {
     /// The supervisor snapshot after a `SupervisorGoal` action.
     #[serde(rename_all = "camelCase")]
     SupervisorGoalOk {
+        snapshot: serde_json::Value,
+    },
+    /// The engine snapshot after a `SupervisorEngine` action.
+    #[serde(rename_all = "camelCase")]
+    SupervisorEngineOk {
         snapshot: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
@@ -2020,6 +2040,36 @@ mod tests {
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorDispatchOk""#), "{text}");
         assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorDispatchOk { .. }));
+    }
+
+    #[test]
+    fn every_supervisor_engine_action_round_trips_on_the_daemon_wire() {
+        let cases = vec![
+            (
+                SupervisorEngineAction::Status,
+                serde_json::json!({"type":"supervisorEngine","request":{"action":"status"}}),
+            ),
+            (
+                SupervisorEngineAction::Assess { prompt: "grade this".into() },
+                serde_json::json!({"type":"supervisorEngine","request":{"action":"assess","prompt":"grade this"}}),
+            ),
+        ];
+        for (action, wire) in cases {
+            let request = DaemonRequest::SupervisorEngine { request: action.clone() };
+            assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+            match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
+                DaemonRequest::SupervisorEngine { request } => assert_eq!(request, action),
+                other => panic!("decoded as {other:?}"),
+            }
+        }
+        let refused = serde_json::from_value::<DaemonRequest>(serde_json::json!(
+            {"type":"supervisorEngine","request":{"action":"assess"}}
+        ));
+        assert!(refused.is_err(), "an assessment without a prompt is refused on the wire");
+        let ok = DaemonResponse::SupervisorEngineOk { snapshot: serde_json::json!({"engine": {"state": "ready"}}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorEngineOk""#), "{text}");
+        assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorEngineOk { .. }));
     }
 
     #[test]
