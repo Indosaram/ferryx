@@ -2506,6 +2506,7 @@ pub async fn record_receipt(
     match apply_receipt(&mut tx, request_id, generation, receipt).await? {
         AppliedReceipt::Recorded(dispatch) => {
             tx.commit().await?;
+            wakes::poke();
             Ok(*dispatch)
         }
         // The older dispatch's evidence is kept; the receipt itself is refused.
@@ -3029,6 +3030,9 @@ pub async fn record_wait_event(
         None
     };
     tx.commit().await?;
+    if wake.is_some() {
+        wakes::poke();
+    }
     Ok(WaitEventReceipt {
         inserted,
         wait,
