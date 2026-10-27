@@ -523,26 +523,28 @@ async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopI
     .await?;
     let mut out: Vec<LoopItem> = rows
         .into_iter()
-        .map(|(id, class, reason, source, author, title, snippet, link)| {
-            let text = item_text(&author, &title, &snippet);
-            let author = if author.trim().is_empty() {
-                "보낸 사람 없음".to_owned()
-            } else {
-                author.trim().to_owned()
-            };
-            let line = match readable_reason(&reason) {
-                Some(reason) => format!("{author}: {text} — {reason}"),
-                None => format!("{author}: {text}"),
-            };
-            LoopItem {
-                item_key: format!("inbox:{id}"),
-                kind: format!("inbox_{class}"),
-                source,
-                line,
-                link,
-                attempts: 1,
-            }
-        })
+        .map(
+            |(id, class, reason, source, author, title, snippet, link)| {
+                let text = item_text(&author, &title, &snippet);
+                let author = if author.trim().is_empty() {
+                    "보낸 사람 없음".to_owned()
+                } else {
+                    author.trim().to_owned()
+                };
+                let line = match readable_reason(&reason) {
+                    Some(reason) => format!("{author}: {text} — {reason}"),
+                    None => format!("{author}: {text}"),
+                };
+                LoopItem {
+                    item_key: format!("inbox:{id}"),
+                    kind: format!("inbox_{class}"),
+                    source,
+                    line,
+                    link,
+                    attempts: 1,
+                }
+            },
+        )
         .collect();
     let github: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT i.id, COALESCE(i.author, ''), COALESCE(i.title, ''), i.link FROM inbox_items i
@@ -1066,8 +1068,12 @@ mod tests {
             .bind(&old).bind(&old)
             .execute(&pool).await.unwrap();
         assert!(requeue_stale(&pool, now).await.unwrap().is_empty());
-        let status: String = sqlx::query_scalar("SELECT status FROM action_loop_outcomes WHERE item_key = 'inbox:stale'")
-            .fetch_one(&pool).await.unwrap();
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM action_loop_outcomes WHERE item_key = 'inbox:stale'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(status, "failed");
     }
 

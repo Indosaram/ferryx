@@ -471,10 +471,9 @@ async fn call_tool(
         // existing contract is never overwritten here: changes go through the revision guard.
         "lane_goal_set" => {
             let key = required(args, "key")?;
-            let requirements: Vec<crate::goals::contract::RequirementSpec> = serde_json::from_value(
-                args.get("requirements").cloned().unwrap_or(Value::Null),
-            )
-            .map_err(|error| format!("requirements: {error}"))?;
+            let requirements: Vec<crate::goals::contract::RequirementSpec> =
+                serde_json::from_value(args.get("requirements").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| format!("requirements: {error}"))?;
             let existing = crate::goals::contract::contract_of(&context.pool, &key)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -507,15 +506,23 @@ async fn call_tool(
                     .unwrap_or(crate::goals::GoalMode::Supervised),
             };
             let turn_limit = match args.get("turnLimit").and_then(Value::as_u64) {
-                Some(limit) => u32::try_from(limit).map_err(|_| "turnLimit is too large".to_string())?,
+                Some(limit) => {
+                    u32::try_from(limit).map_err(|_| "turnLimit is too large".to_string())?
+                }
                 None => existing
                     .as_ref()
                     .map(|contract| contract.turn_limit)
                     .unwrap_or(GOAL_DEFAULT_TURN_LIMIT),
             };
-            crate::goals::contract::set_contract(&context.pool, &key, &requirements, mode, turn_limit)
-                .await
-                .map_err(|error| error.to_string())?;
+            crate::goals::contract::set_contract(
+                &context.pool,
+                &key,
+                &requirements,
+                mode,
+                turn_limit,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             let view = crate::lanes::supervised::goal_view(&context.pool, &key)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -523,10 +530,13 @@ async fn call_tool(
         }
         "lane_goal_approve" => {
             let key = required(args, "key")?;
-            let outcome =
-                crate::goals::r#loop::approve_proposal(&context.pool, context.control.as_ref(), &key)
-                    .await
-                    .map_err(|error| error.to_string())?;
+            let outcome = crate::goals::r#loop::approve_proposal(
+                &context.pool,
+                context.control.as_ref(),
+                &key,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             Ok(json!(outcome))
         }
         "tracker.issues" => {
@@ -657,7 +667,10 @@ mod tests {
         };
         let refused = dispatch(&context, &send("pane-1")).await;
         assert!(refused.to_string().contains(LANE_PAUSED), "{refused}");
-        assert!(control.ops.lock().unwrap().is_empty(), "nothing reached the pane");
+        assert!(
+            control.ops.lock().unwrap().is_empty(),
+            "nothing reached the pane"
+        );
         let sent = dispatch(&context, &send("pane-2")).await;
         assert!(!sent.to_string().contains(LANE_PAUSED), "{sent}");
         assert_eq!(control.ops.lock().unwrap().len(), 1);
@@ -706,7 +719,10 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
             .collect();
         for name in ["lane_goal_show", "lane_goal_set", "lane_goal_approve"] {
-            assert!(names.iter().any(|known| known == name), "{name} missing from {names:?}");
+            assert!(
+                names.iter().any(|known| known == name),
+                "{name} missing from {names:?}"
+            );
         }
     }
 
@@ -723,13 +739,14 @@ mod tests {
             meta_session_id: "meta".into(),
             tracker_token: "t".into(),
         };
-        let call = |name: &str, arguments: Value| {
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": arguments}})
-        };
+        let call = |name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": arguments}});
         let set = dispatch(
             &context,
-            &call("lane_goal_set", json!({"key": "ledger", "mode": "full", "turnLimit": 3,
-                "requirements": [{"id": "r1", "text": "tests pass", "verifier": "cargo test"}]})),
+            &call(
+                "lane_goal_set",
+                json!({"key": "ledger", "mode": "full", "turnLimit": 3,
+                "requirements": [{"id": "r1", "text": "tests pass", "verifier": "cargo test"}]}),
+            ),
         )
         .await;
         assert!(set.get("error").is_none(), "{set}");
@@ -739,12 +756,17 @@ mod tests {
         assert_eq!(body["goalContract"]["mode"], "full");
         assert_eq!(body["goalContract"]["turnLimit"], 3);
         assert_eq!(body["goalContract"]["requirements"][0]["id"], "r1");
-        let approve = dispatch(&context, &call("lane_goal_approve", json!({"key": "ledger"}))).await;
+        let approve = dispatch(
+            &context,
+            &call("lane_goal_approve", json!({"key": "ledger"})),
+        )
+        .await;
         assert!(approve.get("error").is_some(), "{approve}");
     }
 
     #[tokio::test]
-    async fn lane_goal_set_on_an_existing_contract_requires_an_owner_quote_and_creates_a_pending_revision() {
+    async fn lane_goal_set_on_an_existing_contract_requires_an_owner_quote_and_creates_a_pending_revision(
+    ) {
         let pool = crate::storage::memory().await.unwrap();
         crate::lanes::state::insert_lane(
             &pool,
@@ -763,9 +785,7 @@ mod tests {
             meta_session_id: "meta".into(),
             tracker_token: "t".into(),
         };
-        let call = |arguments: Value| {
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": "lane_goal_set", "arguments": arguments}})
-        };
+        let call = |arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": "lane_goal_set", "arguments": arguments}});
         let first = dispatch(
             &context,
             &call(json!({"key": "ledger",
@@ -773,7 +793,8 @@ mod tests {
         )
         .await;
         assert!(first.get("error").is_none(), "{first}");
-        let replacement = json!([{"id": "r2", "text": "reconcile runs", "verifier": "cargo test reconcile"}]);
+        let replacement =
+            json!([{"id": "r2", "text": "reconcile runs", "verifier": "cargo test reconcile"}]);
         let unquoted = dispatch(
             &context,
             &call(json!({"key": "ledger", "requirements": replacement.clone()})),
@@ -797,12 +818,18 @@ mod tests {
         let text = quoted["result"]["content"][0]["text"].as_str().unwrap();
         let body: Value = serde_json::from_str(text).unwrap();
         assert_eq!(body["proposedRevision"]["state"], "proposed");
-        assert_eq!(body["proposedRevision"]["instruction_quote"], "reconcile nightly");
+        assert_eq!(
+            body["proposedRevision"]["instruction_quote"],
+            "reconcile nightly"
+        );
         let contract = crate::goals::contract::contract_of(&pool, "ledger")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(contract.requirements.len(), 1);
-        assert_eq!(contract.requirements[0].id, "r1", "active requirements untouched");
+        assert_eq!(
+            contract.requirements[0].id, "r1",
+            "active requirements untouched"
+        );
     }
 }

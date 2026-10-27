@@ -449,7 +449,10 @@ impl Judge {
                 ("failed", Err(GoalError::JudgeUnavailable))
             }
             Err(_) => {
-                tracing::warn!(purpose = purpose.as_str(), "structured judge turn timed out");
+                tracing::warn!(
+                    purpose = purpose.as_str(),
+                    "structured judge turn timed out"
+                );
                 ("timeout", Err(GoalError::JudgeUnavailable))
             }
         };

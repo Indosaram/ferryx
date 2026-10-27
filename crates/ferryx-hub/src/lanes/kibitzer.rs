@@ -394,7 +394,14 @@ async fn state_document(pool: &SqlitePool, lead: &str) -> Result<String> {
 }
 
 /// (source, conversation, title, author, snippet, received_at) of one open owner item.
-type OwnerItemRow = (String, String, Option<String>, Option<String>, String, String);
+type OwnerItemRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
 
 /// Open owner inbox items grouped per conversation, newest first. `rows` arrive newest first.
 fn owner_items_section(rows: &[OwnerItemRow]) -> String {
@@ -407,7 +414,10 @@ fn owner_items_section(rows: &[OwnerItemRow]) -> String {
             None => groups.push((key, index, 1)),
         }
     }
-    let mut section = format!("Open owner items:\nTotal open owner items: {}\n", rows.len());
+    let mut section = format!(
+        "Open owner items:\nTotal open owner items: {}\n",
+        rows.len()
+    );
     for ((source, _), newest, count) in groups.into_iter().take(15) {
         let (_, _, title, author, snippet, received_at) = &rows[newest];
         let name = title
@@ -486,7 +496,10 @@ mod tests {
         async fn complete(&self, prompt: &str) -> Result<String> {
             assert!(prompt.contains("Open lanes"));
             for needle in self.expect {
-                assert!(prompt.contains(needle), "prompt lacks {needle:?}:\n{prompt}");
+                assert!(
+                    prompt.contains(needle),
+                    "prompt lacks {needle:?}:\n{prompt}"
+                );
             }
             for needle in self.reject {
                 assert!(!prompt.contains(needle), "prompt has {needle:?}:\n{prompt}");
@@ -560,9 +573,30 @@ mod tests {
         ensure_schema(&pool).await.unwrap();
         ensure_lead(&pool, "meta").await.unwrap();
         for (id, thread, title, snippet, received, status) in [
-            ("o1", "t1", "Contract", "first draft", "2026-10-21T01:00:00Z", "open"),
-            ("o2", "t1", "Contract", "please\nsign today", "2026-10-21T01:30:00Z", "open"),
-            ("o3", "t2", "Old invoice", "already handled", "2026-10-21T01:40:00Z", "dismissed"),
+            (
+                "o1",
+                "t1",
+                "Contract",
+                "first draft",
+                "2026-10-21T01:00:00Z",
+                "open",
+            ),
+            (
+                "o2",
+                "t1",
+                "Contract",
+                "please\nsign today",
+                "2026-10-21T01:30:00Z",
+                "open",
+            ),
+            (
+                "o3",
+                "t2",
+                "Old invoice",
+                "already handled",
+                "2026-10-21T01:40:00Z",
+                "dismissed",
+            ),
         ] {
             sqlx::query(
                 "INSERT INTO inbox_items(id, source, source_ref, thread_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?, 'mail', ?, ?, 'boss', ?, ?, ?, 'h', ?)",
@@ -600,8 +634,10 @@ mod tests {
             ],
             reject: &["Old invoice", "already handled"],
         };
-        assert!(evaluate_at(&pool, "meta", &Judge::forced("wake"), &model, now)
-            .await
-            .unwrap());
+        assert!(
+            evaluate_at(&pool, "meta", &Judge::forced("wake"), &model, now)
+                .await
+                .unwrap()
+        );
     }
 }

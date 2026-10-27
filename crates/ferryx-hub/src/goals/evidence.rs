@@ -44,7 +44,10 @@ pub struct EvidenceBundle {
 
 impl EvidenceBundle {
     pub fn refs(&self) -> Vec<String> {
-        self.items.iter().map(|item| item.reference.clone()).collect()
+        self.items
+            .iter()
+            .map(|item| item.reference.clone())
+            .collect()
     }
 
     /// Every ref Ferryx attests; `agent_claim` items are excluded.
@@ -259,7 +262,10 @@ mod tests {
         let control = reading_control();
         let bundle = collect(&pool, &control, "lane-a").await.unwrap();
         let source_of = |reference: &str| bundle.get(reference).map(|item| item.source);
-        assert_eq!(source_of("observer:state"), Some(EvidenceSource::FerryxObserver));
+        assert_eq!(
+            source_of("observer:state"),
+            Some(EvidenceSource::FerryxObserver)
+        );
         assert_eq!(source_of("screen:r7"), Some(EvidenceSource::FerryxScreen));
         assert_eq!(source_of("sig:0"), Some(EvidenceSource::FerryxSignal));
         assert_eq!(source_of("git:clean"), Some(EvidenceSource::FerryxGit));
