@@ -14,7 +14,10 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 
-use crate::agent_control::{AgentControl, AgentOp, FixedLauncher, RecordingControl, TaskLauncher};
+use crate::agent_control::{
+    pty_run_id, AgentControl, AgentOp, Delivery, FixedLauncher, RecordingControl, StartReceipt,
+    TaskLauncher, WorkerSend,
+};
 use crate::goals::contract::{
     contract_of, set_contract, set_mode, set_proposal_state, RequirementSpec,
 };
@@ -29,6 +32,7 @@ use crate::supervisor::admission::{
 };
 use crate::supervisor::dispatcher::{
     DispatchResult, Dispatcher, DISPATCH_FAILED, GRANT_REVOKED, OWNER_APPROVAL_REQUIRED,
+    SEND_REFUSED,
 };
 use crate::supervisor::{
     admit_request, admit_request_with, bind_project_host, claim_dispatch, create_project,
@@ -369,12 +373,13 @@ impl TaskLauncher for BreakingLauncher {
     }
 }
 
-/// Reports every transmitted request id on a channel the test awaits.
+/// Reports every transmitted request id on a channel the test awaits, and answers with the
+/// target's start receipt for exactly that request.
 struct SignalControl {
     sent: mpsc::UnboundedSender<String>,
 }
 
-/// A transport that refuses every send: a person is typing in the pane.
+/// A transport that refuses every send: a person is typing in the pane. Nothing is typed.
 struct RefusingControl;
 
 #[async_trait]
@@ -383,6 +388,12 @@ impl AgentControl for RefusingControl {
         Err(crate::error::HubError::message(
             "CONTROL_CONFLICT a person typed in this pane",
         ))
+    }
+
+    async fn deliver(&self, _send: &WorkerSend) -> Delivery {
+        Delivery::Refused {
+            code: "CONTROL_CONFLICT".into(),
+        }
     }
 }
 
@@ -393,6 +404,15 @@ impl AgentControl for SignalControl {
             let _ = self.sent.send(request_id);
         }
         Ok(json!({"ok": true}))
+    }
+
+    async fn deliver(&self, send: &WorkerSend) -> Delivery {
+        let _ = self.sent.send(send.request_id.clone());
+        Delivery::Started(StartReceipt {
+            request_id: send.request_id.clone(),
+            session_id: send.session_id.clone(),
+            run_id: pty_run_id(&send.session_id, RecordingControl::EPOCH, 1),
+        })
     }
 }
 
@@ -424,7 +444,7 @@ async fn one_request_admits_one_goal_and_starts_one_worker_without_a_drive_call(
     );
     assert!(crate::goals::turns::records_own_turn(Some(&request_id)));
 
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let launcher = Arc::new(FixedLauncher::new(PANE));
     let dispatcher = dispatcher(&pool, control.clone(), launcher.clone());
     assert_eq!(
@@ -448,7 +468,11 @@ async fn one_request_admits_one_goal_and_starts_one_worker_without_a_drive_call(
         .unwrap()
         .unwrap();
     assert_eq!(binding.provider_session_id.as_deref(), Some(PANE));
-    assert_eq!(binding.run_id.as_deref(), Some(request_id.as_str()));
+    assert_eq!(
+        binding.run_id,
+        Some(pty_run_id(PANE, RecordingControl::EPOCH, 1)),
+        "the run is the one the target's start receipt named, not the request id"
+    );
     assert_eq!(dispatch_state(&pool, &request_id).await, "started");
     let (status, pane): (String, Option<String>) =
         sqlx::query_as("SELECT status, omo_thread_id FROM lanes WHERE key = ?")
@@ -472,7 +496,7 @@ async fn one_request_admits_one_goal_and_starts_one_worker_without_a_drive_call(
 async fn a_replayed_source_message_returns_the_same_receipt_and_starts_no_second_worker() {
     let pool = owner_pool().await;
     let first = admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let launcher = Arc::new(FixedLauncher::new(PANE));
     let dispatcher = dispatcher(&pool, control.clone(), launcher.clone());
 
@@ -496,7 +520,7 @@ async fn a_replayed_source_message_returns_the_same_receipt_and_starts_no_second
 async fn a_changed_body_for_the_same_source_is_a_conflict_and_starts_nothing() {
     let pool = owner_pool().await;
     admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, control.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert_eq!(dispatcher.drain().await.len(), 1);
 
@@ -608,7 +632,7 @@ async fn two_goals_on_one_project_start_in_their_own_worktrees_not_the_checkout(
             .unwrap(),
     );
 
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let launcher = Arc::new(SequenceLauncher::default());
     let results = dispatcher(&pool, control.clone(), launcher.clone()).drain().await;
     assert_eq!(results.len(), 2, "{results:?}");
@@ -656,7 +680,7 @@ async fn two_goals_on_one_project_start_in_their_own_worktrees_not_the_checkout(
 async fn a_store_error_after_the_claim_releases_it_and_sends_nothing() {
     let pool = owner_pool().await;
     let work = admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let launcher = Arc::new(BreakingLauncher { pool: pool.clone() });
     let results = dispatcher(&pool, control.clone(), launcher).drain().await;
     assert!(
@@ -689,7 +713,7 @@ async fn an_ordinary_question_creates_no_goal() {
     assert!(!is_ordinary_question("Can you fix the build?"));
     assert!(!is_ordinary_question("Why is CI red? Fix it?"));
 
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     assert!(dispatcher(&pool, control.clone(), Arc::new(FixedLauncher::new(PANE)))
         .drain()
         .await
@@ -731,7 +755,7 @@ async fn a_scope_beyond_the_grant_waits_for_the_owner_and_dispatches_nothing() {
         .unwrap();
     assert!(matches!(outcome, SubmitOutcome::AwaitingOwner(_)), "{outcome:?}");
 
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let launcher = Arc::new(FixedLauncher::new(PANE));
     let dispatcher = dispatcher(&pool, control.clone(), launcher.clone());
     assert!(dispatcher.drain().await.is_empty());
@@ -769,7 +793,7 @@ async fn a_scope_beyond_the_grant_waits_for_the_owner_and_dispatches_nothing() {
 async fn an_owner_pause_between_claim_and_transmit_sends_nothing() {
     let pool = owner_pool().await;
     let work = admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let launcher = Arc::new(PausingLauncher {
         pool: pool.clone(),
         goal_id: work.receipt.goal_id.clone(),
@@ -795,7 +819,7 @@ async fn an_owner_pause_between_claim_and_transmit_sends_nothing() {
 async fn a_committed_ready_intent_is_drained_exactly_once_across_dispatchers() {
     let pool = owner_pool().await;
     let work = admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let launcher = Arc::new(FixedLauncher::new(PANE));
     let first = dispatcher(&pool, control.clone(), launcher.clone());
     let second = dispatcher(&pool, control.clone(), launcher.clone());
@@ -820,15 +844,16 @@ async fn a_refused_send_is_held_for_the_owner_and_never_resent() {
     let pool = owner_pool().await;
     let work = admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
     let refusing = dispatcher(&pool, Arc::new(RefusingControl), Arc::new(FixedLauncher::new(PANE)));
-    assert_eq!(
-        refusing.drain().await,
-        vec![DispatchResult::Transmitted {
-            request_id: work.receipt.dispatch_request_id.clone(),
-            outcome: SendOutcome::Refused {
-                code: "CONTROL_CONFLICT".into()
-            },
-        }]
+    let results = refusing.drain().await;
+    assert!(
+        matches!(
+            &results[..],
+            [DispatchResult::Held { state: RunState::AwaitingOwner, detail, .. }]
+                if detail.starts_with(SEND_REFUSED) && detail.contains("CONTROL_CONFLICT")
+        ),
+        "{results:?}"
     );
+    // Nothing was typed, so the claim is given back, not left uncertain.
     let (state, code): (String, Option<String>) = sqlx::query_as(
         "SELECT state, uncertain_code FROM supervisor_dispatches WHERE request_id = ?",
     )
@@ -836,12 +861,9 @@ async fn a_refused_send_is_held_for_the_owner_and_never_resent() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        (state.as_str(), code.as_deref()),
-        ("uncertain", Some("SEND_REFUSED:CONTROL_CONFLICT"))
-    );
+    assert_eq!((state.as_str(), code.as_deref()), ("released", None));
     assert_eq!(run_state(&pool, &work.receipt.goal_id).await, RunState::AwaitingOwner);
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let again = dispatcher(&pool, control.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert!(again.drain().await.is_empty());
     assert!(sends(&control).is_empty(), "a refused dispatch waits for the owner's resolution");
@@ -934,7 +956,7 @@ async fn a_claim_left_by_a_stopped_dispatcher_is_held_uncertain_and_never_resent
         (state.as_str(), code.as_deref()),
         ("uncertain", Some(CLAIM_UNCONFIRMED_AT_RESTART))
     );
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let again = dispatcher(&pool, control.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert!(again.drain().await.is_empty());
     assert!(sends(&control).is_empty());
@@ -1004,7 +1026,7 @@ async fn adopting_a_legacy_lane_keeps_its_terms_and_happens_once() {
         .unwrap_err();
     assert_eq!(error.code(), "INVALID_REQUEST");
 
-    let control = Arc::new(RecordingControl::default());
+    let control = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, control.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert!(dispatcher.drain().await.is_empty(), "a held adoption is not dispatched");
     assert!(sends(&control).is_empty());
@@ -1396,7 +1418,7 @@ async fn an_adoption_during_a_legacy_launch_wins_and_the_legacy_drive_sends_noth
 
     // The adopting goal is the one worker.
     let adopted = launcher.adopted.lock().unwrap().take().expect("the adoption committed");
-    let worker = Arc::new(RecordingControl::default());
+    let worker = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert_eq!(dispatcher.drain().await.len(), 1);
     assert_eq!(
@@ -1531,7 +1553,7 @@ async fn an_adopted_lane_is_not_reopened_or_sent_to_by_the_legacy_paths() {
     assert_eq!(lane_goal_snapshot(&pool, "nightly").await, before);
 
     // The adopting goal is the one worker.
-    let worker = Arc::new(RecordingControl::default());
+    let worker = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert_eq!(dispatcher.drain().await.len(), 1);
     assert_eq!(
@@ -1717,7 +1739,7 @@ async fn a_legacy_goal_pass_never_sends_to_a_lane_adopted_during_its_judge_call(
     }
     assert!(sends(&legacy).is_empty(), "nothing reached a legacy pane");
 
-    let worker = Arc::new(RecordingControl::default());
+    let worker = Arc::new(RecordingControl::observing());
     let dispatcher = dispatcher(&pool, worker.clone(), Arc::new(FixedLauncher::new(PANE)));
     assert_eq!(dispatcher.drain().await.len(), 2);
     let panes: Vec<String> = sends(&worker)

@@ -1775,6 +1775,87 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
 }
 
 #[test]
+fn a_delivery_rides_the_send_route_only_to_a_host_with_receipts() {
+    use crate::agent_control::AgentControlOp;
+    let deliver = Operation::AgentControl {
+        op: AgentControlOp::Deliver {
+            session_id: "s-1".into(),
+            text: "hi".into(),
+            request_id: "sv-goal-r1-d1".into(),
+            observe_ms: 20_000,
+        },
+    };
+    assert!(deliver.is_mutation());
+    assert_eq!(deliver.agent_control_mutation_id().as_deref(), Some("sv-goal-r1-d1"));
+    let route = deliver.route().expect("delivery route");
+    assert_eq!(route.capability, Some("agentControlReceiptsV1"));
+    assert_eq!(
+        route.segments,
+        vec!["agent-control", "sessions", "s-1", "send"]
+    );
+    assert_eq!(route.method, Method::POST);
+    assert!(route.request_id.is_none());
+    // The host's readiness wait (10s), submit deadline (45s), the start wait (20s) and a margin.
+    assert_eq!(route.budget_secs, Some(90));
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({"text": "hi", "requestId": "sv-goal-r1-d1", "observeMs": 20_000})
+    );
+}
+
+/// The capability gate on the real client path: a supervisor delivery to a host that does not
+/// advertise `agentControlReceiptsV1` never reaches the host, and the hub holds it as a
+/// capability hold with the claim released.
+#[tokio::test]
+async fn a_delivery_to_a_host_without_receipts_reaches_nothing_and_is_a_capability_hold() {
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = hits.clone();
+    let send_route = Router::new().route(
+        "/host/a/api/v1/agent-control/sessions/s-1/send",
+        post(move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(json!({"delivery": {"stage": "started"}}))
+            }
+        }),
+    );
+    // The fixture host advertises neither agent-control capability.
+    let (root, service, host, task) = fixture(send_route).await;
+    let error = MachineClient::new()
+        .execute(
+            &service,
+            request(
+                &host,
+                Operation::AgentControl {
+                    op: crate::agent_control::AgentControlOp::Deliver {
+                        session_id: "s-1".into(),
+                        text: "next step".into(),
+                        request_id: "sv-goal-r1-d1".into(),
+                        observe_ms: 20_000,
+                    },
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+    cleanup(root, task).await;
+    assert_eq!(error.code, "PAIRED_HOST_CAPABILITY_UNAVAILABLE");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing was sent to the host, so nothing was typed"
+    );
+    assert_eq!(
+        ferryx_hub::agent_control::Delivery::from_error_code(Some(error.code.as_str())),
+        ferryx_hub::agent_control::Delivery::Unsupported {
+            code: "PAIRED_HOST_CAPABILITY_UNAVAILABLE".into()
+        }
+    );
+}
+
+#[test]
 fn discover_repos_route_and_desktop_id_rewrite() {
     let op = Operation::DiscoverRepos {
         path: Some("~/src".into()),

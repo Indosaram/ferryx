@@ -6243,6 +6243,8 @@ impl DaemonServer {
                     }
                 },
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if self.serves_paired_here(&session_id) => {
+                    // Raw input: marked before it is written, so no supervisor delivery claims its turn.
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
                         Ok(op) => match op.await {
                             Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
@@ -6259,6 +6261,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     match (!self.terminal_service.remote().contains(&session_id))
                         .then(|| self.session_service.router().find_legacy_peer_for_session(&session_id))
                         .flatten()
@@ -6547,6 +6550,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
                             Ok(()) => {
@@ -6568,6 +6572,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     #[cfg(feature = "local-split-qa")]
                     let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "write", &data);
                     if self.session_router.is_local_session(&session_id) {
@@ -6608,6 +6613,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::PasteWrite { session_id, paste_id, data, final_chunk }) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     let served_here = self.serves_paired_here(&session_id);
                     if served_here || self.session_router.is_local_session(&session_id) {
                         let result = if served_here {
@@ -7215,6 +7221,7 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }

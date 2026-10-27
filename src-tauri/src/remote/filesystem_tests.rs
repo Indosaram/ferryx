@@ -632,7 +632,8 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 "terminalStreamV1",
                 "dagStreamingV1",
                 "agentControlV1",
-                "agentControlRemoteV1"
+                "agentControlRemoteV1",
+                "agentControlReceiptsV1"
             ])
         );
         // Subscribe before triggering work; revocation must win while enumeration is blocked.

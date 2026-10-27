@@ -2886,6 +2886,7 @@ async fn handle_terminal_socket(
     let session_id_clone = session_id.clone();
     let can_control = device.permission == DevicePermission::Control;
     let recv_recovery_state = Arc::clone(&recovery_state);
+    let input_marks = Arc::clone(&state.agent_events);
 
     let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
@@ -2900,6 +2901,7 @@ async fn handle_terminal_socket(
                         )
                     });
                     if can_control && !is_outage && !is_ssh {
+                        agent_control_service::note_raw_write(&input_marks, &session_id_clone);
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                         // A chat submit right behind these keys waits for the pane to read them.
                         reference_chat_runtime()
@@ -2910,6 +2912,9 @@ async fn handle_terminal_socket(
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
+                            if can_control && matches!(ctrl, ClientControlMessage::RemoteWrite { .. }) {
+                                agent_control_service::note_raw_write(&input_marks, &session_id_clone);
+                            }
                             let ok = ssh_control(
                                 &session_backend,
                                 &session_id_clone,
@@ -3398,6 +3403,7 @@ async fn handle_terminal_grid_socket(
     let recv_mirror = Arc::clone(&mirror);
     let recv_tx = outbound_tx.clone();
     let recv_recovery_state = Arc::clone(&recovery_state);
+    let input_marks = Arc::clone(&state.agent_events);
 
     let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
@@ -3412,6 +3418,7 @@ async fn handle_terminal_grid_socket(
                         )
                     });
                     if can_control && !is_outage && !is_ssh {
+                        agent_control_service::note_raw_write(&input_marks, &session_id_clone);
                         let _ = session_backend.write_input(&session_id_clone, &bytes).await;
                         // A chat submit right behind these keys waits for the pane to read them.
                         reference_chat_runtime()
@@ -3422,6 +3429,9 @@ async fn handle_terminal_grid_socket(
                 Message::Text(text) => {
                     if let Ok(ctrl) = serde_json::from_str::<ClientControlMessage>(&text) {
                         if is_ssh {
+                            if can_control && matches!(ctrl, ClientControlMessage::RemoteWrite { .. }) {
+                                agent_control_service::note_raw_write(&input_marks, &session_id_clone);
+                            }
                             let ok = ssh_control(
                                 &session_backend,
                                 &session_id_clone,
@@ -3904,6 +3914,7 @@ async fn get_capabilities(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
             }
@@ -6840,7 +6851,13 @@ pub(crate) async fn reference_chat_submit_with_clock(
         };
         let registry_id = body.registry_id.as_deref();
         let probe = || reference_chat_blocked_prompt(&state, &target, registry_id);
-        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        // Marks the pane's input ledger as each byte goes out, so no supervisor delivery
+        // attributes this message's turn to itself.
+        let writer = reference_input::ReferenceSessionWriter::new(
+            state.session_backend.as_ref(),
+            &state.agent_events,
+            &body.request_id,
+        );
         let outcome = runtime
             .input
             .submit_with_probe(&submit, probe, &writer, clock.as_ref())
@@ -6894,7 +6911,11 @@ async fn reference_chat_stop(
         authorize: &*authorize,
         alive: &alive,
     };
-    let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+    let writer = reference_input::ReferenceSessionWriter::new(
+        state.session_backend.as_ref(),
+        &state.agent_events,
+        &body.request_id,
+    );
     let outcome = runtime.input.stop(&stop, &writer).await;
     reference_chat_input_response(&body.request_id, outcome)
 }
@@ -6951,7 +6972,11 @@ pub(crate) async fn reference_chat_answer(
         let screen = ReferenceGatewayScreenReader {
             backend: Arc::clone(&state.session_backend),
         };
-        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        let writer = reference_input::ReferenceSessionWriter::new(
+            state.session_backend.as_ref(),
+            &state.agent_events,
+            &body.request_id,
+        );
         let clock = reference_input::SystemReferenceClock;
         runtime
             .answers
