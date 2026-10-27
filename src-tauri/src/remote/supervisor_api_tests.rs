@@ -206,11 +206,10 @@ const OWNER: &str = "desktop:qa-owner";
 async fn populate(gateway: &Gateway) -> (ferryx_hub::goals::SqlitePool, String, String) {
     use ferryx_hub::supervisor as sv;
     let pool = ferryx_hub::storage::memory().await.expect("hub db");
-    let identity = sv::ensure_identity(&pool, OWNER).await.expect("identity");
-    let project = sv::create_project(&pool, &identity.supervisor_id, "qa-supervisor", "github.com/example/qa")
-        .await
-        .expect("project");
-    sv::bind_project_host(&pool, &project.project_id, "local", "/qa/repo/.git").await.expect("host");
+    let (identity, project, _) =
+        sv::provision_owner(&pool, OWNER, "qa-supervisor", "github.com/example/qa", "local", "/qa/repo/.git")
+            .await
+            .expect("owner setup");
     let request = sv::AdmitRequest {
         supervisor_id: identity.supervisor_id.clone(),
         owner_principal: OWNER.into(),
@@ -355,5 +354,25 @@ async fn memory_without_an_engine_and_a_closed_hub_are_503() {
     let (status, _, body) = gateway.post_to("/api/v1/supervisor/memory", &token, teach).await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"]["code"], "MEMORY_UNAVAILABLE");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn the_legacy_pause_route_pauses_a_supervisor_goal_through_the_shared_service() {
+    let gateway = Gateway::start().await;
+    let (pool, goal_id, _) = populate(&gateway).await;
+    let lane_key = ferryx_hub::supervisor::goal_of(&pool, &goal_id).await.unwrap().unwrap().lane_key;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let pause = serde_json::json!({"laneKey": lane_key, "paused": true}).to_string();
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/pause", &token, &pause).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["changed"], true, "the legacy answer shape is kept");
+    assert_eq!(goal_row(&pool, &goal_id).await, ("paused".into(), 2), "revision bump and paused run state");
+    let (_, _, again) = gateway.post_to("/api/v1/supervisor/pause", &token, &pause).await;
+    assert_eq!(again["changed"], false);
+    let resume = serde_json::json!({"laneKey": lane_key, "paused": false}).to_string();
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/pause", &token, &resume).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(goal_row(&pool, &goal_id).await, ("ready".into(), 2));
     gateway.stop().await;
 }

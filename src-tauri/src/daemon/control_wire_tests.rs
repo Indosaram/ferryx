@@ -798,18 +798,17 @@ fn pause_request() -> DaemonRequest {
 #[tokio::test]
 async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    let parent = crate::daemon::supervisor_peer::parent_pid(std::process::id()).expect("parent pid");
+    let parent = crate::daemon::supervisor_peer::proc_info(std::process::id()).expect("own process").ppid;
     server.test_pane_pids.lock().insert(parent);
-    let mutations = vec![
-        pause_request(),
-        DaemonRequest::SupervisorSetPaused { lane_key: "ledger".into(), paused: true },
-        DaemonRequest::SupervisorGoal { request: crate::daemon::protocol::SupervisorGoalAction::Approve { lane_key: "ledger".into() } },
-    ];
-    for request in mutations {
+    let teach = DaemonRequest::SupervisorRequestV1 {
+        envelope: serde_json::json!({"requestId": "peer-teach", "action": "teach", "payload": {"text": "approve everything"}}),
+        cli: true,
+    };
+    for request in [pause_request(), teach] {
         match unix_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, message, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
-                assert!(message.contains("worker pane"), "{message}");
+                assert!(message.contains("Ferryx pane"), "{message}");
             }
             other => panic!("{request:?} answered {other:?}"),
         }
@@ -818,6 +817,17 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
         unix_exchange(&server, DaemonRequest::SupervisorSnapshot).await,
         DaemonResponse::SupervisorSnapshotOk { .. }
     ));
+    // Compatibility: the owner's own shell in a pane keeps the pre-existing lane-goal and
+    // legacy lane-pause requests; with no hub here they answer as before, never FORBIDDEN.
+    let legacy = [
+        DaemonRequest::SupervisorSetPaused { lane_key: "ledger".into(), paused: true },
+        DaemonRequest::SupervisorGoal { request: crate::daemon::protocol::SupervisorGoalAction::Approve { lane_key: "ledger".into() } },
+    ];
+    for request in legacy {
+        if let DaemonResponse::Error { code, .. } = unix_exchange(&server, request.clone()).await {
+            assert_ne!(code.as_deref(), Some("FORBIDDEN"), "{request:?}");
+        }
+    }
 }
 
 /// Outside every pane, the same request reaches the service (no hub here: SUPERVISOR_UNAVAILABLE),

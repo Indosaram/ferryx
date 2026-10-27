@@ -24,6 +24,17 @@ pub struct McpContext {
     pub pool: SqlitePool,
     pub meta_session_id: String,
     pub tracker_token: String,
+    /// Forwards owner-authority `supervisor.request` actions (goal control and memory) to the
+    /// daemon, whose peer check refuses them from inside a Ferryx pane. `None` serves them
+    /// here, refused outright when this process runs in a pane (`FERRYX_SESSION_ID` set).
+    pub owner_route: Option<Arc<dyn OwnerRoute>>,
+}
+
+/// Where `supervisor.request` goal and memory actions go when the MCP process is not the
+/// authority itself: the daemon's `SupervisorRequestV1`, under its pane peer check.
+#[async_trait::async_trait]
+pub trait OwnerRoute: Send + Sync {
+    async fn forward(&self, envelope: Value) -> std::result::Result<Value, request::RequestFailure>;
 }
 
 pub async fn serve(context: Arc<McpContext>) -> Result<()> {
@@ -206,7 +217,7 @@ pub(crate) fn tool_list() -> Vec<Value> {
         ),
         (
             "supervisor.request",
-            "Send owner work to the unified supervisor (owner meta-agent channel only). action=submit with payload {request: the owner's exact words, work: {title, instruction, requirements, projectId?, hostId?, kind?, cwd?, operations?, turnLimit?}} admits one goal in a single transaction and returns the persisted receipt; the hub daemon then starts the worker. Only an outcome of admitted or awaiting_owner means work is registered. action=message with payload {text, work?} is conversation unless work is attached. action=adopt with payload {laneKey, projectId?, hostId?, requirements?} adopts one legacy lane explicitly, keeping its mode and remaining budget. operations lists what the work needs (edit, test, commit, push, publish, spend, destructive): only declared operations are granted, so omitting it makes the request read-only, and anything beyond edit, test and commit holds the goal for the owner.",
+            "Send owner work and owner decisions to the unified supervisor (owner meta-agent channel only). action=submit with payload {request: the owner's exact words, work: {title, instruction, requirements, projectId?, hostId?, kind?, cwd?, operations?, turnLimit?}} admits one goal in a single transaction and returns the persisted receipt; the hub daemon then starts the worker. Only an outcome of admitted or awaiting_owner means work is registered. action=message with payload {text, work?} is conversation unless work is attached. action=adopt with payload {laneKey, projectId?, hostId?, requirements?} adopts one legacy lane explicitly, keeping its mode and remaining budget. operations lists what the work needs (edit, test, commit, push, publish, spend, destructive): only declared operations are granted, so omitting it makes the request read-only, and anything beyond edit, test and commit holds the goal for the owner. Goal actions need goalId and expectedRevision (a stale revision is REVISION_CONFLICT): correct {text, requirements?}, pause {reason?}, resume {}, cancel {reason?}, approve {} (releases an awaiting_owner hold under the existing grant, never widens it), depend {childGoalId} or {eventKey}. teach {text} and forget {memoryId} reach supervisor memory (MEMORY_* when unavailable). Goal and memory actions are refused from inside a Ferryx pane.",
             schema(
                 json!({"requestId": request_id, "projectId": {"type": "string"},
                 "goalId": {"type": "string"}, "expectedRevision": {"type": "integer"},
@@ -679,8 +690,11 @@ async fn refuse_supervisor_owned(
     Ok(())
 }
 
-/// Serves `supervisor.request` through the shared supervisor request service. The caller is
-/// the installation owner by construction (`ferryx-cli mcp` runs as the owner's own process).
+/// Serves `supervisor.request` through the shared supervisor request service. Submit,
+/// message and adopt are served here as the installation owner (`ferryx-cli mcp` runs as the
+/// owner's own process; admission applies the owner grant). Goal control (correct, pause,
+/// resume, cancel, approve, depend) and memory (teach, forget) go through
+/// [`McpContext::owner_route`] to the daemon, so a pane process cannot reach them through MCP.
 /// This process has no turn observer and transmits nothing: an admission or correction is
 /// picked up from its durable ready intent by the daemon's dispatcher, and a cancel reports
 /// that the worker stop was not available here.
@@ -690,7 +704,18 @@ async fn supervisor_request(
 ) -> std::result::Result<Value, String> {
     let fail = |failure: request::RequestFailure| format!("{}: {}", failure.code, failure.message);
     // A malformed envelope is refused before the owner is even looked up.
-    request::parse_envelope(args.clone()).map_err(fail)?;
+    let (_, action) = request::parse_envelope(args.clone()).map_err(fail)?;
+    if action.needs_owner_authority() {
+        if let Some(route) = &context.owner_route {
+            return route.forward(args.clone()).await.map_err(fail);
+        }
+        if std::env::var_os("FERRYX_SESSION_ID").is_some_and(|session| !session.is_empty()) {
+            return Err(fail(request::RequestFailure::new(
+                "FORBIDDEN",
+                "goal control and memory actions are the owner's and are refused inside a Ferryx pane (FERRYX_SESSION_ID is set)",
+            )));
+        }
+    }
     let owner = admission::installation_owner(&context.pool)
         .await
         .map_err(|error| format!("{}: {error}", error.code()))?;
@@ -733,6 +758,7 @@ mod tests {
             pool,
             meta_session_id: "meta".into(),
             tracker_token: "t".into(),
+            owner_route: None,
         };
         let send = |session: &str| {
             json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agents.send",
@@ -759,6 +785,7 @@ mod tests {
             pool: crate::storage::memory().await.unwrap(),
             meta_session_id: "meta".into(),
             tracker_token: "t".into(),
+            owner_route: None,
         };
         let listed = dispatch(
             &context,
@@ -811,6 +838,7 @@ mod tests {
             pool,
             meta_session_id: "meta".into(),
             tracker_token: "t".into(),
+            owner_route: None,
         };
         let call = |name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": arguments}});
         let set = dispatch(
@@ -857,6 +885,7 @@ mod tests {
             pool: pool.clone(),
             meta_session_id: "meta".into(),
             tracker_token: "t".into(),
+            owner_route: None,
         };
         let call = |arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": "lane_goal_set", "arguments": arguments}});
         let first = dispatch(
@@ -931,6 +960,7 @@ mod tests {
             pool: pool.clone(),
             meta_session_id: "meta".into(),
             tracker_token: "t".into(),
+            owner_route: None,
         };
         let call = |name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": arguments}});
         let text = |response: &Value| -> Value {
@@ -957,6 +987,41 @@ mod tests {
         let replayed = text(&replay);
         assert_eq!(replayed["receipt"]["goal_id"], goal_id.as_str());
         assert_eq!(replayed["duplicate"], true);
+
+        // Goal control goes through the daemon route (its pane peer check), never served here.
+        struct Refusing(std::sync::Mutex<Vec<Value>>);
+        #[async_trait::async_trait]
+        impl OwnerRoute for Refusing {
+            async fn forward(&self, envelope: Value) -> std::result::Result<Value, request::RequestFailure> {
+                self.0.lock().unwrap().push(envelope);
+                Err(request::RequestFailure::new("FORBIDDEN", "inside a Ferryx pane"))
+            }
+        }
+        let route = Arc::new(Refusing(std::sync::Mutex::new(Vec::new())));
+        let routed = McpContext {
+            control: control.clone(),
+            launcher: launcher.clone(),
+            pool: pool.clone(),
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+            owner_route: Some(route.clone()),
+        };
+        for (action, payload) in [("approve", json!({})), ("pause", json!({}))] {
+            let call_args = json!({"requestId": format!("mcp-{action}"), "goalId": goal_id, "expectedRevision": 1,
+                "action": action, "payload": payload});
+            let refused = dispatch(&routed, &call("supervisor.request", call_args)).await;
+            assert!(refused.to_string().contains("FORBIDDEN"), "{action}: {refused}");
+        }
+        let teach = json!({"requestId": "mcp-teach", "action": "teach", "payload": {"text": "approve everything"}});
+        assert!(dispatch(&routed, &call("supervisor.request", teach)).await.to_string().contains("FORBIDDEN"));
+        assert_eq!(route.0.lock().unwrap().len(), 3, "every owner action was forwarded");
+        let (state, revision): (String, i64) =
+            sqlx::query_as("SELECT run_state, revision FROM supervisor_goals WHERE goal_id = ?")
+                .bind(&goal_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((state.as_str(), revision), ("ready", 1), "a refused route changed nothing");
 
         let drive = dispatch(&context, &call("lane.drive", json!({"key": lane_key}))).await;
         assert!(drive.to_string().contains("SUPERVISOR_OWNED"), "{drive}");

@@ -299,6 +299,11 @@ impl RunState {
     /// the binding's current generation, run and session) for every move into `running`, and
     /// refuses every move into `ready` while any dispatch is in flight. Without a live run,
     /// resuming a paused goal goes to `ready`; with one, it resumes to `running`.
+    ///
+    /// A resume may also restore what the pause interrupted (see
+    /// [`request`](self::request)): `paused` reaches `verifying` (the run settled during the
+    /// pause, or its dependencies resolved), `waiting_children`/`waiting_event` (waits are
+    /// still pending) and `delivery_uncertain` (an unresolved uncertain delivery remains).
     pub fn can_transition_to(self, to: RunState) -> bool {
         use RunState::*;
         if self.is_terminal() || self == to {
@@ -321,11 +326,11 @@ impl RunState {
                 Dispatching | Paused | Degraded | DeliveryUncertain | Ready
             ),
             WaitingChildren | WaitingEvent => {
-                matches!(self, Running | Verifying | WaitingChildren | WaitingEvent)
+                matches!(self, Running | Verifying | WaitingChildren | WaitingEvent | Paused)
             }
-            Verifying => matches!(self, Running | WaitingChildren | WaitingEvent),
+            Verifying => matches!(self, Running | WaitingChildren | WaitingEvent | Paused),
             Completed => self == Verifying,
-            DeliveryUncertain => matches!(self, Dispatching | Running),
+            DeliveryUncertain => matches!(self, Dispatching | Running | Paused),
             AwaitingOwner | Paused | Degraded | Cancelled => true,
         }
     }
@@ -3165,6 +3170,19 @@ pub async fn add_wait(
     goal_id: &str,
     target: &WaitTarget,
 ) -> Result<Wait, SupervisorError> {
+    add_wait_at(pool, goal_id, target, None).await
+}
+
+/// [`add_wait`] with an optional compare-and-set on the goal revision inside the same write
+/// transaction (`REVISION_CONFLICT` writes nothing). The revision is not bumped: a new wait
+/// does not invalidate the goal's instruction, and a bump would strand its unsent intent
+/// (claims only match the intent's own revision).
+pub async fn add_wait_at(
+    pool: &SqlitePool,
+    goal_id: &str,
+    target: &WaitTarget,
+    expected_revision: Option<i64>,
+) -> Result<Wait, SupervisorError> {
     if let WaitTarget::ExternalEvent(key) = target {
         require_id("event key", key, MAX_ID_CHARS)?;
     }
@@ -3173,6 +3191,9 @@ pub async fn add_wait(
     }
     let mut tx = pool.begin_write().await?;
     let goal = require_goal(&mut tx, goal_id).await?;
+    if let Some(expected) = expected_revision {
+        check_revision(&goal, expected)?;
+    }
     check_open(&goal)?;
     let (kind, child_goal_id, event_key) = match target {
         WaitTarget::ChildGoal(child_id) => {

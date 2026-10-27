@@ -309,6 +309,15 @@ async fn correct_revises_and_queues_the_correction_and_refuses_stale_revisions()
     .unwrap();
     assert_eq!(states[0].1, "superseded", "the old dispatch can never be sent");
     assert_eq!(states[1], (request_id.to_owned(), "ready".to_owned()));
+    assert_eq!(corrected["carriedOriginal"], true);
+    let instruction: String = sqlx::query_scalar("SELECT instruction FROM supervisor_dispatches WHERE request_id = ?")
+        .bind(request_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(instruction.starts_with("Do c1."), "the never-sent task is kept: {instruction}");
+    assert!(instruction.contains("Use DONE instead of READY"), "{instruction}");
+    assert!(instruction.contains("result.txt contains DONE"), "{instruction}");
     let lane: String = sqlx::query_scalar("SELECT lane_key FROM supervisor_goals WHERE goal_id = ?")
         .bind(&goal_id)
         .fetch_one(&fixture.pool)
@@ -493,10 +502,180 @@ fn wire_codes_map_to_the_contract_statuses() {
         ("NOT_FOUND", 404),
         ("REVISION_CONFLICT", 409),
         ("GOAL_CLOSED", 409),
+        ("DISPATCH_IN_FLIGHT", 409),
+        ("TURN_LIMIT", 409),
+        ("SUPERVISOR_OWNED", 409),
         ("SUPERVISOR_UNAVAILABLE", 503),
+        ("JUDGE_UNAVAILABLE", 503),
+        ("STORAGE", 500),
+        ("SOMETHING_NEW", 500),
         ("MHC_NOT_RUNNING", 503),
         ("MEMORY_UNAVAILABLE", 503),
     ] {
         assert_eq!(status_for_code(code), status, "{code}");
     }
+}
+
+
+async fn ready_instructions(pool: &SqlitePool, goal_id: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT instruction FROM supervisor_dispatches WHERE goal_id = ? AND state = 'ready'")
+        .bind(goal_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// Claims the ready intent so the goal is `dispatching`, without transmitting it.
+async fn claim(pool: &SqlitePool, goal_id: &str) -> String {
+    let (_, revision) = state(pool, goal_id).await;
+    let request_id: String = sqlx::query_scalar(
+        "SELECT request_id FROM supervisor_dispatches WHERE goal_id = ? AND state = 'ready'",
+    )
+    .bind(goal_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    attach_session(pool, goal_id, 1, "pane-1").await.unwrap();
+    claim_dispatch(pool, &request_id, revision, 1).await.unwrap();
+    request_id
+}
+
+async fn settle(pool: &SqlitePool, request_id: &str) {
+    let settled = Receipt::Settled { run_id: "run-1".into(), provider_session_id: "pane-1".into() };
+    record_receipt(pool, request_id, 1, &settled).await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_after_the_run_settled_during_the_pause_goes_to_verifying() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "s1").await;
+    let request_id = start_run(&fixture.pool, &goal_id).await;
+    let (_, revision) = state(&fixture.pool, &goal_id).await;
+    handle(&fixture.pool, &context(OWNER), goal_call("pause", &goal_id, revision, json!({}))).await.unwrap();
+    settle(&fixture.pool, &request_id).await;
+    let resumed = handle(&fixture.pool, &context(OWNER), goal_call("resume", &goal_id, revision + 1, json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resumed["runState"], "verifying", "{resumed}");
+    assert_eq!(resumed["restored"], "verifying");
+    assert_eq!(resumed["stateDetail"], "TURN_SETTLED");
+    assert!(ready_instructions(&fixture.pool, &goal_id).await.is_empty(), "a settled run is not resent");
+    let held: Option<String> = sqlx::query_scalar("SELECT held_from FROM supervisor_goals WHERE goal_id = ?")
+        .bind(&goal_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(held, None, "the pre-pause state is cleared on resume");
+}
+
+#[tokio::test]
+async fn resume_with_pending_waits_returns_to_waiting() {
+    let fixture = fixture().await;
+    let parent = admit(&fixture, "w-parent").await;
+    let child = admit(&fixture, "w-child").await;
+    let request_id = start_run(&fixture.pool, &parent).await;
+    let (_, revision) = state(&fixture.pool, &parent).await;
+    handle(&fixture.pool, &context(OWNER), goal_call("depend", &parent, revision, json!({"childGoalId": child})))
+        .await
+        .unwrap();
+    handle(&fixture.pool, &context(OWNER), goal_call("pause", &parent, revision, json!({}))).await.unwrap();
+    settle(&fixture.pool, &request_id).await;
+    let resumed = handle(&fixture.pool, &context(OWNER), goal_call("resume", &parent, revision + 1, json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resumed["runState"], "waiting_children", "{resumed}");
+    assert!(resumed["stateDetail"].as_str().unwrap().starts_with("WAITING_ON"));
+}
+
+#[tokio::test]
+async fn resume_requeues_an_intent_whose_claim_was_released_by_the_pause() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "r1").await;
+    let request_id = claim(&fixture.pool, &goal_id).await;
+    handle(&fixture.pool, &context(OWNER), goal_call("pause", &goal_id, 1, json!({}))).await.unwrap();
+    // The dispatcher's pre-transmit check sees the moved revision and releases the claim.
+    assert!(confirm_claim_before_transmit(&fixture.pool, &request_id).await.is_err());
+    let released: String = sqlx::query_scalar("SELECT state FROM supervisor_dispatches WHERE request_id = ?")
+        .bind(&request_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(released, "released");
+    let resumed = handle(&fixture.pool, &context(OWNER), goal_call("resume", &goal_id, 2, json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resumed["runState"], "ready");
+    assert_eq!(ready_instructions(&fixture.pool, &goal_id).await, vec!["Do r1.".to_owned()]);
+}
+
+#[tokio::test]
+async fn approve_requeues_a_released_send_refused_intent_and_a_stale_approve_changes_nothing() {
+    let fixture = fixture().await;
+    let held = request(&fixture, "a4", OWNER, &fixture.supervisor_id, &fixture.project_id);
+    let goal_id = admit_request(&fixture.pool, &AdmitRequest { mode: GoalMode::Supervised, ..held })
+        .await
+        .unwrap()
+        .receipt
+        .goal_id;
+    let request_id = claim(&fixture.pool, &goal_id).await;
+    transition_goal(&fixture.pool, &goal_id, 1, RunState::Dispatching, RunState::AwaitingOwner,
+        Some("SEND_REFUSED: pane busy")).await.unwrap();
+    assert!(confirm_claim_before_transmit(&fixture.pool, &request_id).await.is_err());
+
+    let before = fingerprint(&fixture.pool).await;
+    let stale = handle(&fixture.pool, &context(OWNER), goal_call("approve", &goal_id, 1, json!({})))
+        .await
+        .unwrap_err();
+    assert_eq!((stale.code.as_str(), stale.status), ("REVISION_CONFLICT", 409));
+    assert_eq!(fingerprint(&fixture.pool).await, before);
+    let lane: String = sqlx::query_scalar("SELECT lane_key FROM supervisor_goals WHERE goal_id = ?")
+        .bind(&goal_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(contract_of(&fixture.pool, &lane).await.unwrap().unwrap().mode, GoalMode::Supervised);
+
+    let approved = handle(&fixture.pool, &context(OWNER), goal_call("approve", &goal_id, 2, json!({})))
+        .await
+        .unwrap();
+    assert_eq!(approved["runState"], "ready");
+    assert_eq!(approved["modeChanged"], true);
+    assert_eq!(ready_instructions(&fixture.pool, &goal_id).await, vec!["Do a4.".to_owned()]);
+}
+
+#[tokio::test]
+async fn an_oversized_correction_is_refused_before_any_write() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "c3").await;
+    let before = fingerprint(&fixture.pool).await;
+    let text = "x".repeat(63_990);
+    let refused = handle(&fixture.pool, &context(OWNER), goal_call("correct", &goal_id, 1, json!({"text": text,
+        "requirements": [{"id": "r1", "text": "t", "verifier": "v"}]})))
+        .await
+        .unwrap_err();
+    assert_eq!((refused.code.as_str(), refused.status), ("INVALID_REQUEST", 400), "{refused}");
+    assert_eq!(fingerprint(&fixture.pool).await, before);
+}
+
+#[tokio::test]
+async fn a_stale_depend_writes_no_wait() {
+    let fixture = fixture().await;
+    let parent = admit(&fixture, "d-parent").await;
+    let child = admit(&fixture, "d-child").await;
+    let before = fingerprint(&fixture.pool).await;
+    let stale = handle(&fixture.pool, &context(OWNER), goal_call("depend", &parent, 7, json!({"childGoalId": child})))
+        .await
+        .unwrap_err();
+    assert_eq!((stale.code.as_str(), stale.status), ("REVISION_CONFLICT", 409));
+    // The compare-and-set inside the wait's own transaction refuses the same way.
+    let inner = crate::supervisor::wakes::add_dependency_at(
+        &fixture.pool,
+        &parent,
+        &crate::supervisor::WaitTarget::ChildGoal(child.clone()),
+        Some(7),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(inner.http_status(), 409);
+    assert_eq!(fingerprint(&fixture.pool).await, before);
 }

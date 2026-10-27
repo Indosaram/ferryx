@@ -110,8 +110,26 @@ pub async fn set_contract(
     turn_limit: u32,
 ) -> Result<Contract, GoalError> {
     validate(requirements, turn_limit)?;
-    let now = now_rfc3339();
     let mut tx = pool.begin_write().await?;
+    set_contract_in(&mut tx, lane_key, requirements, mode, turn_limit).await?;
+    tx.commit().await?;
+    contract_of(pool, lane_key)
+        .await?
+        .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))
+}
+
+/// [`set_contract`]'s checks and writes inside the caller's write transaction, so a supervisor
+/// correction can replace the requirements under its own goal-revision compare-and-set.
+/// Nothing is committed here; a refusal leaves the caller's transaction to roll back.
+pub(crate) async fn set_contract_in(
+    conn: &mut sqlx::SqliteConnection,
+    lane_key: &str,
+    requirements: &[RequirementSpec],
+    mode: GoalMode,
+    turn_limit: u32,
+) -> Result<(), GoalError> {
+    validate(requirements, turn_limit)?;
+    let now = now_rfc3339();
     let written = sqlx::query(
         "INSERT INTO lane_goal(lane_key, mode, turn_limit, updated_at) VALUES(?,?,?,?)
          ON CONFLICT(lane_key) DO UPDATE SET
@@ -140,14 +158,14 @@ pub async fn set_contract(
     .bind(mode.as_str())
     .bind(i64::from(turn_limit))
     .bind(&now)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     if written.rows_affected() == 0 {
         return Err(GoalError::TurnInFlight(lane_key.to_owned()));
     }
     sqlx::query("DELETE FROM lane_goal_requirements WHERE lane_key = ?")
         .bind(lane_key)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     for requirement in requirements {
         sqlx::query(
@@ -159,13 +177,10 @@ pub async fn set_contract(
         .bind(&requirement.text)
         .bind(&requirement.verifier)
         .bind(&now)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
-    tx.commit().await?;
-    contract_of(pool, lane_key)
-        .await?
-        .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))
+    Ok(())
 }
 
 type GoalRow = (
@@ -455,6 +470,24 @@ pub async fn set_mode(
     contract_of(pool, lane_key)
         .await?
         .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))
+}
+
+/// [`set_mode`] inside the caller's write transaction; nothing is committed here.
+pub(crate) async fn set_mode_in(
+    conn: &mut sqlx::SqliteConnection,
+    lane_key: &str,
+    mode: GoalMode,
+) -> Result<(), GoalError> {
+    let updated = sqlx::query("UPDATE lane_goal SET mode = ?, updated_at = ? WHERE lane_key = ?")
+        .bind(mode.as_str())
+        .bind(now_rfc3339())
+        .bind(lane_key)
+        .execute(&mut *conn)
+        .await?;
+    if updated.rows_affected() == 0 {
+        return Err(GoalError::NoContract(lane_key.to_owned()));
+    }
+    Ok(())
 }
 
 /// Counts one more supervisor turn. Refuses once `turn_limit` turns were used.

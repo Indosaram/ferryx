@@ -81,6 +81,7 @@ fn pause_refusal(error: &LanePauseError) -> Response {
         LanePauseError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
         LanePauseError::Ended(_) => (StatusCode::CONFLICT, SUPERVISOR_INVALID_STATE_CODE),
         LanePauseError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
+        LanePauseError::Supervisor(failure) => return service_refusal(failure),
     };
     machine_error_with_details(status, code, &message, serde_json::Map::new())
 }

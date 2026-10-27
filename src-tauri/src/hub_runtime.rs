@@ -740,6 +740,18 @@ pub enum LanePauseError {
     Ended(&'static str),
     #[error("{0}")]
     Storage(String),
+    /// The lane is a supervisor goal's: the shared supervisor service answered (FORBIDDEN from
+    /// a pane, a revision conflict, SUPERVISOR_OWNED for an adopted lane, ...).
+    #[error("{0}")]
+    Supervisor(ferryx_hub::supervisor::request::RequestFailure),
+}
+
+/// What the transport knows about a lane-pause caller. `peer_refusal` is the daemon's pane
+/// peer check; it applies only when the lane is a supervisor goal's, so a legacy lane pause
+/// keeps its pre-existing semantics everywhere.
+#[derive(Debug, Clone, Default)]
+pub struct PauseGate {
+    pub peer_refusal: Option<String>,
 }
 
 /// A person pauses or resumes one lane. `by` names who: `desktop`, or `remote:<deviceId>` for
@@ -750,7 +762,54 @@ pub async fn set_lane_paused(
     paused: bool,
     by: &str,
 ) -> Result<bool, LanePauseError> {
+    set_lane_paused_gated(state, lane_key, paused, by, PauseGate::default()).await
+}
+
+/// [`set_lane_paused`] behind the transport's peer gate. A supervisor goal's lane is paused or
+/// resumed through the shared supervisor service (revision bump, `paused` run state); every
+/// other lane keeps the legacy lane pause.
+pub async fn set_lane_paused_gated(
+    state: &RemoteGatewayState,
+    lane_key: &str,
+    paused: bool,
+    by: &str,
+    gate: PauseGate,
+) -> Result<bool, LanePauseError> {
     use ferryx_hub::lanes::state::LaneStatus;
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    if let Ok((pool, owner, control)) = supervisor_service(state).await {
+        let owned = ferryx_hub::supervisor::supervisor_owns_lane(&pool, lane_key)
+            .await
+            .map_err(|error| LanePauseError::Storage(error.to_string()))?;
+        if owned {
+            if let Some(message) = gate.peer_refusal {
+                return Err(LanePauseError::Supervisor(RequestFailure::new("FORBIDDEN", message)));
+            }
+            let owner = owner.ok_or_else(|| {
+                LanePauseError::Supervisor(RequestFailure::new(
+                    "UNAUTHORIZED",
+                    "this installation has no single supervisor owner",
+                ))
+            })?;
+            let adapter = if by.starts_with("remote:") {
+                ferryx_hub::supervisor::ChannelProvider::Phone
+            } else {
+                ferryx_hub::supervisor::ChannelProvider::Desktop
+            };
+            let context = RequestContext { principal: owner, adapter, channel_binding_id: None, control, memory: None };
+            match request::lane_pause(&pool, &context, lane_key, paused).await {
+                Ok(Some(changed)) => {
+                    crate::remote::server::agent_control_service::publish_supervisor_changed(
+                        state,
+                        json!({ "laneKey": lane_key, "by": by }),
+                    );
+                    return Ok(changed);
+                }
+                Ok(None) => {}
+                Err(failure) => return Err(LanePauseError::Supervisor(failure)),
+            }
+        }
+    }
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
         return Err(LanePauseError::Unavailable);
     };
@@ -2252,6 +2311,34 @@ async fn on_agent_event(
     Ok(())
 }
 
+/// Forwards `supervisor.request` goal and memory actions from `ferryx-cli mcp` to the daemon's
+/// `SupervisorRequestV1`, where the peer check sees this MCP process: run from inside a Ferryx
+/// pane it is refused `FORBIDDEN`, exactly like the CLI.
+struct DaemonOwnerRoute;
+
+#[async_trait]
+impl ferryx_hub::mcp::OwnerRoute for DaemonOwnerRoute {
+    async fn forward(
+        &self,
+        envelope: Value,
+    ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+        use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+        use ferryx_hub::supervisor::request::RequestFailure;
+        let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true };
+        match crate::cli::supervisor_goal::exchange_once(SUPERVISOR_REQUEST_CAPABILITY, request, true).await {
+            Ok(DaemonResponse::SupervisorRequestV1Ok { receipt }) => Ok(receipt),
+            Ok(DaemonResponse::Error { code, message, .. }) => {
+                Err(RequestFailure::new(code.as_deref().unwrap_or("INTERNAL"), message))
+            }
+            Ok(other) => Err(RequestFailure::new("INTERNAL", format!("unexpected daemon response: {other:?}"))),
+            Err((value, _)) => Err(RequestFailure::new(
+                value["code"].as_str().unwrap_or("SUPERVISOR_UNAVAILABLE"),
+                value["message"].as_str().unwrap_or("the daemon could not be reached").to_owned(),
+            )),
+        }
+    }
+}
+
 /// `ferryx-cli mcp` — a stdio MCP server over this machine's daemon.
 pub fn run_mcp() -> i32 {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -2283,6 +2370,7 @@ pub fn run_mcp() -> i32 {
             pool,
             meta_session_id: config.meta_session_id.unwrap_or_else(|| "meta".into()),
             tracker_token: config.tracker_owner_token.unwrap_or_default(),
+            owner_route: Some(Arc::new(DaemonOwnerRoute)),
         });
         if let Err(error) = ferryx_hub::mcp::serve(context).await {
             eprintln!("ferryx mcp: {error}");

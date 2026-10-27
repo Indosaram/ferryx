@@ -5924,25 +5924,41 @@ impl DaemonServer {
     #[cfg(unix)]
     pub async fn handle_unix_client(self: Arc<Self>, stream: tokio::net::UnixStream) {
         use std::os::unix::io::AsRawFd;
-        let origin = match super::supervisor_peer::peer_pid(stream.as_raw_fd()) {
-            Some(pid) => super::supervisor_peer::PeerOrigin::Pid(pid),
-            None => super::supervisor_peer::PeerOrigin::Unknown,
-        };
+        let pid = super::supervisor_peer::peer_pid(stream.as_raw_fd());
+        // The pid is bound to its process start time now, so a reused pid is noticed later.
+        let origin = tokio::task::spawn_blocking(move || super::supervisor_peer::identify(pid))
+            .await
+            .unwrap_or(super::supervisor_peer::PeerOrigin::Unknown);
         self.handle_client_with_origin(stream, origin).await
     }
 
-    /// Why this connection's peer may not change the supervisor, or `None`.
-    fn supervisor_peer_refusal(&self, origin: super::supervisor_peer::PeerOrigin) -> Option<String> {
+    /// Why this connection's peer may not change the supervisor, or `None`. The process-table
+    /// reads run on a blocking thread, never on a Tokio worker.
+    async fn supervisor_peer_refusal(&self, origin: super::supervisor_peer::PeerOrigin) -> Option<String> {
+        use super::supervisor_peer::PeerOrigin;
+        if matches!(origin, PeerOrigin::TokenAuthenticated | PeerOrigin::Unknown) {
+            return super::supervisor_peer::refusal(
+                origin,
+                &super::supervisor_peer::PaneSet::default(),
+                &super::supervisor_peer::SystemProcs,
+            );
+        }
         #[allow(unused_mut)]
-        let mut panes: std::collections::HashSet<u32> = self
+        let mut pane_pids: Vec<u32> = self
             .terminal_service
             .list_sessions()
             .into_iter()
             .filter_map(|id| self.terminal_service.get_session(&id)?.pid())
             .collect();
         #[cfg(test)]
-        panes.extend(self.test_pane_pids.lock().iter().copied());
-        super::supervisor_peer::refusal(origin, &panes, super::supervisor_peer::parent_pid)
+        pane_pids.extend(self.test_pane_pids.lock().iter().copied());
+        tokio::task::spawn_blocking(move || {
+            let table = super::supervisor_peer::SystemProcs;
+            let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
+            super::supervisor_peer::refusal(origin, &panes, &table)
+        })
+        .await
+        .unwrap_or_else(|error| Some(format!("the peer check failed: {error}")))
     }
 
     pub async fn handle_client_with_origin<S>(
@@ -6031,18 +6047,23 @@ impl DaemonServer {
                     // While a commit is decided (HandoverStatus::Committing) a new request is not
                     // admitted: it is answered HANDOVER_BUSY, retryable, and never half-served.
                     let mut busy_refusal = None;
-                    // A worker pane may read the supervisor but never change it.
-                    let supervisor_mutation = matches!(
-                        req.as_ref(),
-                        Ok(DaemonRequest::SupervisorSetPaused { .. })
-                            | Ok(DaemonRequest::SupervisorRequestV1 { .. })
-                    ) || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorGoal { request }) if request.mutates());
-                    let peer_refusal = if supervisor_mutation {
-                        self.supervisor_peer_refusal(origin).map(|message| DaemonResponse::Error {
+                    // A pane process may read the supervisor but never make the owner's
+                    // decisions. Gated: every unified request (SupervisorRequestV1). A lane
+                    // pause is checked here and applied only when it targets a supervisor
+                    // goal (hub_runtime::set_lane_paused); the legacy lane-goal requests keep
+                    // their pre-existing semantics for the owner's own shell in a pane, and a
+                    // supervisor goal's lane refuses them SUPERVISOR_OWNED anyway.
+                    let peer_refusal = if matches!(req.as_ref(), Ok(DaemonRequest::SupervisorRequestV1 { .. })) {
+                        self.supervisor_peer_refusal(origin).await.map(|message| DaemonResponse::Error {
                             code: Some(super::supervisor_peer::FORBIDDEN.into()),
                             message,
                             details: None,
                         })
+                    } else {
+                        None
+                    };
+                    let pause_peer_refusal = if matches!(req.as_ref(), Ok(DaemonRequest::SupervisorSetPaused { .. })) {
+                        self.supervisor_peer_refusal(origin).await
                     } else {
                         None
                     };
@@ -7331,8 +7352,14 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
-                    match crate::hub_runtime::set_lane_paused(self.remote_state(), &lane_key, paused, "desktop").await {
+                    let gate = crate::hub_runtime::PauseGate { peer_refusal: pause_peer_refusal.clone() };
+                    match crate::hub_runtime::set_lane_paused_gated(self.remote_state(), &lane_key, paused, "desktop", gate).await {
                         Ok(_) => DaemonResponse::SupervisorSetPausedOk { paused },
+                        Err(crate::hub_runtime::LanePauseError::Supervisor(failure)) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
                         Err(error) => DaemonResponse::Error {
                             message: error.to_string(),
                             code: Some("SUPERVISOR_UNAVAILABLE".into()),

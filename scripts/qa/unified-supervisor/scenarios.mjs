@@ -755,6 +755,219 @@ async function runRemoteDelivery(ctx) {
   });
 }
 
+// authority (plan task 13): one owner goal is provisioned through the product, then every
+// non-owner path is tried against it and must change nothing; finally the owner's own device
+// changes it once. Real surfaces only: `ferryx-cli supervisor setup|request`, the daemon socket
+// (also raw, from inside a real pane) and the isolated daemon's remote gateway over HTTP.
+// http.jsonl holds HTTP exchanges only; socket and pane replies go to socket.jsonl.
+
+const AUTHORITY_WORKSPACE_ID = 'qa-authority';
+const AUTHORITY_PROJECT = 'qa-authority';
+const AUTHORITY_REPO_IDENTITY = 'qa:qa-authority';
+// Operations beyond edit/test/commit hold the goal for the owner, so nothing is ever dispatched
+// and every dispatch row stays as admitted.
+const AUTHORITY_WORK = Object.freeze({
+  title: 'Publish result.txt',
+  instruction: 'Create result.txt containing READY and publish it.',
+  requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test', 'publish'],
+});
+
+function listTree(root) {
+  const out = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      const stat = statSync(path);
+      out.push(`${relative(root, path)}:${stat.isDirectory() ? 'dir' : stat.size}:${stat.mtimeMs}`);
+      if (stat.isDirectory()) walk(path);
+    }
+  };
+  if (existsSync(root)) walk(root);
+  return out;
+}
+
+async function runAuthority(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'the pane peer check is POSIX (peer pid, session, terminal, parent chain); Windows uses the documented token fallback and is not asserted here');
+  }
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the authority fixture project is a git repository');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `hub database ${dbPath} is outside the run root`);
+  const runtimeDir = join(data, 'runtime');
+  const socket = join(runtimeDir, 'daemon.sock');
+  const work = join(data, 'authority');
+  const repo = join(data, 'ws', AUTHORITY_PROJECT);
+  mkdirSync(work, { recursive: true });
+  mkdirSync(repo, { recursive: true });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [['git-init', [...gitArgs, 'init', '-q', repo]], ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']]]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const env = ctx.productEnv();
+  const memoryBefore = listTree(ctx.paths.memory);
+  const socketLog = (entry) => ctx.evidence.appendJsonl('socket.jsonl', { at: new Date().toISOString(), ...entry });
+  const httpLog = (entry) => ctx.evidence.appendJsonl('http.jsonl', { at: new Date().toISOString(), ...entry });
+  const exchange = async (label, request) => {
+    const replies = await daemonExchange(socket, [{ type: 'handshake', version: DAEMON_PROTOCOL_VERSION }, request], 30_000);
+    socketLog({ label, peer: 'runner', request, replies });
+    return replies.at(-1) ?? null;
+  };
+
+  // 1. The owner: setup, isolated daemon, one held goal submitted through the owner CLI.
+  const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', AUTHORITY_PROJECT,
+    '--repo-identity', AUTHORITY_REPO_IDENTITY, '--host', 'local', '--git-common-dir', realpathSync(join(repo, '.git')), '--json'], { label: 'supervisor-setup', env });
+  if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${setup.stdout} ${setup.stderr}`);
+  const projectId = setup.json.projectId;
+  await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  const registered = await exchange('register-workspace', { type: 'registerWorkspace', workspaceId: AUTHORITY_WORKSPACE_ID, repoRoot: realpathSync(join(data, 'ws')) });
+  ctx.assert('workspace-registered', registered?.type === 'registerWorkspaceOk', registered);
+  const submitFile = join(work, 'owner-submit.json');
+  writeFileSync(submitFile, JSON.stringify({ requestId: `qa-authority-${ctx.runId}`, projectId, action: 'submit',
+    payload: { request: AUTHORITY_WORK.instruction, work: AUTHORITY_WORK } }));
+  const submitted = await ctx.cli(['supervisor', 'request', '--json', submitFile], { label: 'owner-submit', env });
+  const goalId = submitted.json?.receipt?.receipt?.goal_id ?? null;
+  ctx.assert('owner-goal-held-for-the-owner', submitted.code === 0 && typeof goalId === 'string' && submitted.json?.receipt?.outcome === 'awaiting_owner',
+    { code: submitted.code, json: submitted.json, stderr: submitted.stderr });
+  if (!goalId) throw new HarnessError('ADMISSION_FAILED', 'the owner submit returned no goal; the refusals would prove nothing');
+  const hub = await openHubReader(dbPath);
+  const goalRow = () => hub.one('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId);
+  const dispatchRows = () => hub.all('SELECT request_id, state FROM supervisor_dispatches ORDER BY id');
+  const counts = () => ({
+    goals: hub.count('SELECT COUNT(*) AS n FROM supervisor_goals'),
+    requests: hub.count('SELECT COUNT(*) AS n FROM supervisor_requests'),
+    waits: hub.count('SELECT COUNT(*) AS n FROM supervisor_waits'),
+  });
+  const before = { goal: goalRow(), dispatches: dispatchRows(), counts: counts() };
+  ctx.announce({ authority: 'owner goal', goalId, goal: before.goal });
+
+  // 2. The remote gateway of the isolated daemon (loopback listener) and three paired devices.
+  const configured = await exchange('remote-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: 0, allowControl: true } });
+  const status = await exchange('remote-status', { type: 'remoteGetStatus' });
+  const bound = status?.status?.boundAddress ?? null;
+  if (configured?.type !== 'remoteConfigureOk' || !bound) {
+    throw new HarnessError('GATEWAY_UNAVAILABLE', `the isolated daemon's remote gateway did not start (its port is fixed; is another Ferryx daemon holding it?): ${JSON.stringify({ configured, status })}`);
+  }
+  const base = `http://${bound}`;
+  const http = async (label, method, path, { token, body } = {}) => {
+    const headers = { accept: 'application/json' };
+    if (token) headers.authorization = `Bearer ${token}`;
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    const response = await fetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body)), signal: ctx.signal });
+    const text = await response.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* recorded raw */ }
+    const entry = { label, method, path, request: body ?? null, status: response.status, headers: Object.fromEntries(response.headers), body: json ?? text };
+    httpLog(entry);
+    return entry;
+  };
+  const pair = async (label, request) => {
+    const code = await exchange(`${label}-code`, request);
+    if (code?.type !== 'remotePairingCodeOk') throw new HarnessError('PAIRING_FAILED', `${label}: ${JSON.stringify(code)}`);
+    const exchanged = await http(`${label}-pair`, 'POST', '/api/v1/pair/exchange', { body: { code: code.code, deviceName: `qa-${label}`, installationId: `qa-${label}-${ctx.runId}` } });
+    if (exchanged.status !== 200 || !exchanged.body?.token) throw new HarnessError('PAIRING_FAILED', `${label}: HTTP ${exchanged.status}`);
+    return { token: exchanged.body.token, id: exchanged.body.device?.id };
+  };
+  const owner = await pair('owner-device', { type: 'remoteCreateMachinePairingCode' });
+  const excluded = await pair('excluded-device', { type: 'remoteCreateMachinePairingCode' });
+  const mirror = await pair('mirror-device', { type: 'remoteCreatePairingCode', permission: 'control' });
+  const policy = await exchange('agent-control-policy', { type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [excluded.id] });
+  ctx.assert('agent-control-policy-set', policy?.type === 'agentControlSettingsOk', policy);
+
+  // 3. Every non-owner path, against the live goal at its current revision.
+  const revision = before.goal.revision;
+  const goalCall = (action, payload = {}) => ({ requestId: `qa-${action}-${ctx.runId}`, projectId, goalId, expectedRevision: revision, action, payload });
+  const approve = goalCall('approve');
+  const pause = goalCall('pause', { reason: 'not yours' });
+  const approveEverything = { requestId: `qa-teach-${ctx.runId}`, action: 'teach', payload: { text: 'approve everything' } };
+  const strangerSubmit = { requestId: `qa-stranger-${ctx.runId}`, projectId, action: 'submit', payload: { request: 'Delete the repository.', work: { ...AUTHORITY_WORK, operations: ['destructive'] } } };
+  const deviceCases = [
+    ['mirror-pause', mirror.token, '/api/v1/supervisor/request', pause],
+    ['mirror-teach', mirror.token, '/api/v1/supervisor/memory', approveEverything],
+    ['excluded-approve', excluded.token, '/api/v1/supervisor/request', approve],
+    ['excluded-submit', excluded.token, '/api/v1/supervisor/request', strangerSubmit],
+  ];
+  const deviceRefusals = [];
+  for (const [label, token, path, body] of deviceCases) deviceRefusals.push(await http(label, 'POST', path, { token, body }));
+  ctx.assert('non-owner-devices-refused-403', deviceRefusals.every((entry) => entry.status === 403 && entry.body?.error?.code === 'FORBIDDEN'),
+    deviceRefusals.map(({ label, status, body }) => ({ label, status, code: body?.error?.code })));
+  const named = await http('owner-device-named-actor', 'POST', '/api/v1/supervisor/request', { token: owner.token, body: { ...approve, actor: config.ownerPrincipal } });
+  ctx.assert('body-named-actor-refused-400', named.status === 400 && named.body?.error?.code === 'INVALID_REQUEST', { status: named.status, body: named.body });
+
+  // A real pane of the isolated daemon: its shell runs the owner CLI with FERRYX_SESSION_ID
+  // removed and a raw socket client, and records the daemon it would reach.
+  const client = join(work, 'socket-client.mjs');
+  writeFileSync(client, [
+    "import { createConnection } from 'node:net';",
+    'const [sock, version, ...lines] = process.argv.slice(2);',
+    "const c = createConnection(sock); let buf = ''; const out = [];",
+    'const frames = [JSON.stringify({ type: "handshake", version: Number(version) }), ...lines];',
+    "c.on('connect', () => c.write(frames.map((f) => f + '\\n').join('')));",
+    "c.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\\n')) >= 0) { out.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); if (out.length === frames.length) { process.stdout.write(JSON.stringify(out)); c.end(); } } });",
+    "c.on('error', (e) => { process.stdout.write(JSON.stringify({ error: String(e) })); process.exit(2); });",
+  ].join('\n'));
+  const approveFile = join(work, 'approve.json');
+  writeFileSync(approveFile, JSON.stringify(approve));
+  const wire = (envelope) => JSON.stringify({ type: 'supervisorRequestV1', envelope, cli: true });
+  const spawned = await exchange('spawn-pane', { type: 'spawn', clientRequestId: `qa-authority-pane-${ctx.runId}`, workspaceId: AUTHORITY_WORKSPACE_ID, worktree: null, cwd: work, cols: 80, rows: 24, shell: '/bin/sh' });
+  const sessionId = spawned?.sessionId ?? null;
+  if (!sessionId) throw new HarnessError('PANE_SPAWN_FAILED', `could not spawn the pane: ${JSON.stringify(spawned)}`);
+  const cliOut = join(work, 'pane-cli.json');
+  const sockOut = join(work, 'pane-socket.json');
+  const envOut = join(work, 'pane-env.txt');
+  const done = [cliOut, sockOut].map((path) => ctx.waitForPath(path, { deadlineMs: 60_000, label: `pane result ${basenameOf(path)}` }));
+  done.forEach((promise) => promise.catch(() => {}));
+  const script = [
+    `printf '%s' "$FERRYX_RUNTIME_DIR" > ${shellQuote(envOut)}`,
+    `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} supervisor request --json ${shellQuote(approveFile)} > ${shellQuote(`${cliOut}.tmp`)} 2>&1; mv ${shellQuote(`${cliOut}.tmp`)} ${shellQuote(cliOut)}`,
+    `${shellQuote(process.execPath)} ${shellQuote(client)} ${shellQuote(socket)} ${DAEMON_PROTOCOL_VERSION} ${shellQuote(wire(approve))} ${shellQuote(wire(approveEverything))} ${shellQuote(wire(strangerSubmit))} > ${shellQuote(`${sockOut}.tmp`)} 2>&1; mv ${shellQuote(`${sockOut}.tmp`)} ${shellQuote(sockOut)}`,
+  ].join('; ') + '\n';
+  const typed = await exchange('pane-write', { type: 'write', sessionId, data: Buffer.from(script).toString('base64') });
+  ctx.assert('pane-script-written', typed?.type !== 'error', typed);
+  await Promise.all(done);
+  const paneRuntime = existsSync(envOut) ? readFileSync(envOut, 'utf8') : null;
+  ctx.assert('pane-inherits-the-isolated-daemon-env', paneRuntime === runtimeDir || (paneRuntime && realpathSync(paneRuntime) === realpathSync(runtimeDir)), { paneRuntime, runtimeDir });
+  let paneCli = null; let paneSock = null;
+  try { paneCli = JSON.parse(readFileSync(cliOut, 'utf8')); } catch { /* asserted below */ }
+  try { paneSock = JSON.parse(readFileSync(sockOut, 'utf8')); } catch { /* asserted below */ }
+  socketLog({ label: 'pane-cli-approve', peer: 'pane', reply: paneCli });
+  socketLog({ label: 'pane-raw-socket', peer: 'pane', replies: paneSock });
+  ctx.assert('pane-cli-approve-forbidden', paneCli?.ok === false && paneCli?.code === 'FORBIDDEN', paneCli);
+  const paneReplies = Array.isArray(paneSock) ? paneSock.slice(1) : [];
+  ctx.assert('pane-socket-approve-teach-submit-forbidden', paneReplies.length === 3 && paneReplies.every((reply) => reply?.type === 'error' && reply?.code === 'FORBIDDEN'), paneSock);
+
+  // 4. Nothing changed: the goal, every dispatch, the request/wait counts and the memory root.
+  const afterRefusals = { goal: goalRow(), dispatches: dispatchRows(), counts: counts() };
+  ctx.assert('goal-unchanged-after-refusals', JSON.stringify(afterRefusals.goal) === JSON.stringify(before.goal), { before: before.goal, after: afterRefusals.goal });
+  ctx.assert('zero-dispatch-after-refusals', JSON.stringify(afterRefusals.dispatches) === JSON.stringify(before.dispatches)
+    && afterRefusals.dispatches.every((row) => row.state === 'ready' || row.state === 'superseded'), { before: before.dispatches, after: afterRefusals.dispatches });
+  ctx.assert('no-request-or-wait-written', JSON.stringify(afterRefusals.counts) === JSON.stringify(before.counts), { before: before.counts, after: afterRefusals.counts });
+  ctx.assert('memory-root-unchanged', JSON.stringify(listTree(ctx.paths.memory)) === JSON.stringify(memoryBefore), { entries: memoryBefore.length });
+
+  // 5. The owner's device: authorized 200 (the same pause changes the goal once), the same
+  //    decision replayed at the old revision 409, memory receipts 503.
+  const snapshot = await http('owner-snapshot', 'GET', '/api/v1/supervisor', { token: owner.token });
+  const listed = snapshot.body?.supervisor?.goals?.find?.((goal) => goal.goalId === goalId) ?? null;
+  ctx.assert('authorized-snapshot-200-lists-the-goal', snapshot.status === 200 && listed?.revision === revision && listed?.runState === before.goal.run_state, { status: snapshot.status, listed });
+  const paused = await http('owner-pause', 'POST', '/api/v1/supervisor/request', { token: owner.token, body: pause });
+  ctx.assert('authorized-pause-200', paused.status === 200 && paused.headers['cache-control'] === 'no-store' && paused.body?.runState === 'paused'
+    && paused.body?.revision === revision + 1, { status: paused.status, body: paused.body });
+  const stale = await http('owner-pause-stale', 'POST', '/api/v1/supervisor/request', { token: owner.token, body: { ...pause, requestId: `${pause.requestId}-again` } });
+  ctx.assert('stale-revision-409', stale.status === 409 && stale.body?.error?.code === 'REVISION_CONFLICT', { status: stale.status, body: stale.body });
+  const receipts = await http('owner-memory-receipts', 'GET', '/api/v1/supervisor/memory', { token: owner.token });
+  ctx.assert('memory-receipts-unavailable-503', receipts.status === 503 && receipts.body?.error?.code === 'MEMORY_RECEIPTS_UNAVAILABLE', { status: receipts.status, body: receipts.body });
+  const final = { goal: goalRow(), dispatches: dispatchRows() };
+  ctx.assert('only-the-owner-changed-the-goal', final.goal?.run_state === 'paused' && final.goal?.revision === revision + 1
+    && final.dispatches.every((row) => row.state === 'ready' || row.state === 'superseded'), final);
+  ctx.evidence.writeJson('authority.json', { goalId, projectId, before, afterRefusals, final, devices: { owner: owner.id, excluded: excluded.id, mirror: mirror.id }, paneSessionId: sessionId, paneRuntime });
+}
+
+function basenameOf(path) { return path.slice(path.lastIndexOf('/') + 1); }
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -797,90 +1010,13 @@ export const SCENARIOS = Object.freeze({
   authority: Object.freeze({
     implemented: true,
     task: '13',
-    summary: 'Worker-pane peers (CLI with FERRYX_SESSION_ID unset, and a raw daemon-socket client sending pause and "approve everything") are refused FORBIDDEN; outside callers get typed refusals; zero goals, zero dispatches, memory root unchanged. HTTP 200/409/403/503 is covered by supervisor_api_tests',
+    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
     deadlineMs: 5 * 60_000,
-    requiredAssertions: ['pane-cli-forbidden', 'pane-socket-forbidden', 'outside-typed-refusal', 'outside-malformed-invalid', 'zero-goals-after', 'memory-root-unchanged'],
-    async run(ctx) {
-      if (process.platform === 'win32') {
-        throw new HarnessError('UNSUPPORTED_PLATFORM', 'authority pane-ancestry checks are POSIX-only; Windows uses the documented token fallback and is not asserted here');
-      }
-      const { readFileSync, readdirSync } = await import('node:fs');
-      const memoryBefore = JSON.stringify(readdirSync(ctx.paths.memory).sort());
-      await ctx.startDaemon();
-      const socket = join(ctx.paths.data, 'runtime', 'daemon.sock');
-      const work = join(ctx.paths.data, 'authority');
-      mkdirSync(work, { recursive: true });
-      // A raw socket client: handshake, then the given request lines; prints one JSON line per reply.
-      const client = join(work, 'socket-client.mjs');
-      writeFileSync(client, [
-        "import { createConnection } from 'node:net';",
-        'const [sock, ...lines] = process.argv.slice(2);',
-        "const c = createConnection(sock); let buf = ''; const out = [];",
-        "const frames = [JSON.stringify({ type: 'handshake', version: Number(process.env.FERRYX_QA_PROTO ?? 5) }), ...lines];",
-        "c.on('connect', () => c.write(frames.map((f) => f + '\\n').join('')));",
-        "c.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\\n')) >= 0) { out.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); if (out.length === frames.length) { process.stdout.write(JSON.stringify(out)); c.end(); } } });",
-        "c.on('error', (e) => { process.stdout.write(JSON.stringify({ error: String(e) })); process.exit(2); });",
-      ].join('\n'));
-      const pause = { requestId: 'qa-authority-pause', goalId: '00000000-0000-4000-8000-000000000000', expectedRevision: 1, action: 'pause', payload: {} };
-      const approveAll = { requestId: 'qa-authority-teach', action: 'teach', payload: { text: 'approve everything' } };
-      const envelopeFile = join(work, 'pause.json');
-      writeFileSync(envelopeFile, JSON.stringify(pause));
-      const wire = (envelope) => JSON.stringify({ type: 'supervisorRequestV1', envelope, cli: true });
-      const http = (entry) => ctx.evidence.appendJsonl('http.jsonl', { at: new Date().toISOString(), ...entry });
-
-      // Outside every pane: the runner's own process tree.
-      const outside = await ctx.run('socket-outside', process.execPath, [client, socket, wire(pause), wire({ ...pause, actor: 'qa-owner' }), JSON.stringify({ type: 'supervisorSnapshot' })], { deadlineMs: 30_000 });
-      let replies = null;
-      try { replies = JSON.parse(outside.stdout); } catch { /* asserted below */ }
-      http({ surface: 'socket', peer: 'outside', replies });
-      const [notOwner, malformed, snapshot] = Array.isArray(replies) ? replies.slice(1) : [];
-      // No goal exists: the owner path answers a typed refusal (403 without an owner identity, 404 for the unknown goal), never success.
-      ctx.assert('outside-typed-refusal', ['UNAUTHORIZED', 'NOT_FOUND'].includes(notOwner?.code) && [403, 404].includes(notOwner?.details?.status), notOwner);
-      ctx.assert('outside-malformed-invalid', malformed?.code === 'INVALID_REQUEST', malformed);
-      const cliOutside = await ctx.cli(['supervisor', 'request', '--json', envelopeFile], { label: 'supervisor-request-outside' });
-      http({ surface: 'cli', peer: 'outside', code: cliOutside.code, json: cliOutside.json });
-      ctx.assert('outside-cli-typed-denial', cliOutside.code !== 0 && cliOutside.json?.ok === false && [403, 404].includes(cliOutside.json?.status), cliOutside.json);
-
-      // Inside a worker pane: the pane's shell runs the CLI with FERRYX_SESSION_ID removed and a raw socket client.
-      const spawned = await ctx.run('socket-spawn-pane', process.execPath, [client, socket,
-        JSON.stringify({ type: 'registerWorkspace', workspaceId: 'qa-authority', repoRoot: ctx.paths.project }),
-        JSON.stringify({ type: 'spawn', clientRequestId: 'qa-authority-pane', workspaceId: 'qa-authority', worktree: null, cwd: work, cols: 80, rows: 24, shell: '/bin/sh' })], { deadlineMs: 30_000 });
-      let spawnReplies = null;
-      try { spawnReplies = JSON.parse(spawned.stdout); } catch { /* asserted below */ }
-      const sessionId = Array.isArray(spawnReplies) ? spawnReplies[2]?.sessionId : null;
-      if (!sessionId) throw new HarnessError('PANE_SPAWN_FAILED', `could not spawn the worker pane: ${spawned.stdout} ${spawned.stderr}`);
-      const cliOut = join(work, 'pane-cli.json');
-      const sockOut = join(work, 'pane-socket.json');
-      const cliDone = ctx.waitForPath(cliOut, { deadlineMs: 60_000, label: 'pane CLI result' });
-      const sockDone = ctx.waitForPath(sockOut, { deadlineMs: 60_000, label: 'pane socket result' });
-      cliDone.catch(() => {}); sockDone.catch(() => {});
-      const q = (s) => `'${s.replaceAll("'", "'\\''")}'`;
-      const script = [
-        `env -u FERRYX_SESSION_ID ${q(ctx.config.ferryxCli)} supervisor request --json ${q(envelopeFile)} > ${q(cliOut)}.tmp 2>&1; mv ${q(cliOut)}.tmp ${q(cliOut)}`,
-        `${q(process.execPath)} ${q(client)} ${q(socket)} ${q(wire(pause))} ${q(wire(approveAll))} > ${q(sockOut)}.tmp 2>&1; mv ${q(sockOut)}.tmp ${q(sockOut)}`,
-      ].join('; ') + '\n';
-      const typed = await ctx.run('socket-pane-write', process.execPath, [client, socket,
-        JSON.stringify({ type: 'write', sessionId, data: Buffer.from(script).toString('base64') })], { deadlineMs: 30_000 });
-      http({ surface: 'socket', peer: 'runner', step: 'pane-write', stdout: typed.stdout });
-      await cliDone; await sockDone;
-      let paneCli = null; let paneSock = null;
-      try { paneCli = JSON.parse(readFileSync(cliOut, 'utf8')); } catch { /* asserted below */ }
-      try { paneSock = JSON.parse(readFileSync(sockOut, 'utf8')); } catch { /* asserted below */ }
-      http({ surface: 'cli', peer: 'pane', json: paneCli });
-      http({ surface: 'socket', peer: 'pane', replies: paneSock });
-      ctx.assert('pane-cli-forbidden', paneCli?.ok === false && paneCli?.code === 'FORBIDDEN', paneCli);
-      const paneReplies = Array.isArray(paneSock) ? paneSock.slice(1) : [];
-      ctx.assert('pane-socket-forbidden', paneReplies.length === 2 && paneReplies.every((reply) => reply?.code === 'FORBIDDEN'), paneSock);
-
-      // Read-only receipts: no goal or dispatch exists, and the memory root is untouched.
-      const after = await ctx.run('socket-snapshot-after', process.execPath, [client, socket, JSON.stringify({ type: 'supervisorSnapshot' })], { deadlineMs: 30_000 });
-      let afterReplies = null;
-      try { afterReplies = JSON.parse(after.stdout); } catch { /* asserted below */ }
-      const goals = afterReplies?.[1]?.snapshot?.supervisor?.goals;
-      http({ surface: 'socket', peer: 'outside', step: 'snapshot-after', supervisor: afterReplies?.[1]?.snapshot?.supervisor ?? null, before: snapshot?.snapshot?.supervisor ?? null });
-      ctx.assert('zero-goals-after', Array.isArray(goals) && goals.length === 0, { goals });
-      ctx.assert('memory-root-unchanged', JSON.stringify(readdirSync(ctx.paths.memory).sort()) === memoryBefore, { before: memoryBefore });
-    },
+    requiredAssertions: ['owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
+      'pane-cli-approve-forbidden', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
+      'no-request-or-wait-written', 'memory-root-unchanged', 'authorized-snapshot-200-lists-the-goal', 'authorized-pause-200', 'stale-revision-409',
+      'memory-receipts-unavailable-503', 'only-the-owner-changed-the-goal'],
+    run: runAuthority,
   }),
   memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
   capabilities: planned('12', 'Remove one required RPC capability; auth, quota and provider faults: named degraded cause, no fallback model, workers preserved'),

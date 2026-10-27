@@ -56,7 +56,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, Notify};
 
 use super::{
-    add_wait, enqueue_wake, execution_binding_of, goal_of, in_flight_dispatch, record_wait_event,
+    add_wait_at, enqueue_wake, execution_binding_of, goal_of, in_flight_dispatch, record_wait_event,
     sha256_hex, transition_goal, wake_from_row, PendingWake, RunState, SupervisorError,
     SupervisorGoal, Wait, WaitEventReceipt, WaitKind, WaitOutcome, WaitTarget, WakeCause, WakeRow,
     WAKE_COLUMNS,
@@ -296,7 +296,18 @@ pub async fn add_dependency(
     goal_id: &str,
     target: &WaitTarget,
 ) -> Result<Wait, DependencyError> {
-    let wait = add_wait(pool, goal_id, target).await?;
+    add_dependency_at(pool, goal_id, target, None).await
+}
+
+/// [`add_dependency`] under a compare-and-set on the goal revision, checked inside the wait's
+/// write transaction (`REVISION_CONFLICT`, nothing written). The owner request API uses it.
+pub async fn add_dependency_at(
+    pool: &SqlitePool,
+    goal_id: &str,
+    target: &WaitTarget,
+    expected_revision: Option<i64>,
+) -> Result<Wait, DependencyError> {
+    let wait = add_wait_at(pool, goal_id, target, expected_revision).await?;
     if let WaitTarget::ChildGoal(child_id) = target {
         if let Some(child) = goal_of(pool, child_id).await? {
             if child.run_state.is_terminal() {
