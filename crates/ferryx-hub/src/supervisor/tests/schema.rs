@@ -151,6 +151,20 @@ async fn admit(fixture: &Fixture, message_id: &str) -> AdmissionReceipt {
         .receipt
 }
 
+fn started(run_id: &str, session: &str) -> Receipt {
+    Receipt::Started {
+        run_id: run_id.into(),
+        provider_session_id: session.into(),
+    }
+}
+
+fn settled(run_id: &str, session: &str) -> Receipt {
+    Receipt::Settled {
+        run_id: run_id.into(),
+        provider_session_id: session.into(),
+    }
+}
+
 async fn count(pool: &SqlitePool, sql: &str) -> i64 {
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
@@ -429,7 +443,7 @@ async fn a_stale_revision_is_a_revision_conflict_and_changes_nothing() {
     );
 
     let stale = [
-        transition_goal(pool, goal_id, 1, RunState::Paused, None)
+        transition_goal(pool, goal_id, 1, RunState::Ready, RunState::Paused, None)
             .await
             .map(|_| ()),
         revise_goal(pool, goal_id, 1).await.map(|_| ()),
@@ -655,7 +669,7 @@ async fn unknown_vocabulary_and_malformed_input_are_refused() {
 
     let goal_id = admitted.goal_id.as_str();
     assert!(matches!(
-        transition_goal(pool, goal_id, 1, RunState::Completed, None).await,
+        transition_goal(pool, goal_id, 1, RunState::Ready, RunState::Completed, None).await,
         Err(SupervisorError::IllegalTransition {
             from: RunState::Ready,
             to: RunState::Completed,
@@ -663,29 +677,31 @@ async fn unknown_vocabulary_and_malformed_input_are_refused() {
         })
     ));
     assert!(matches!(
-        transition_goal(pool, goal_id, 1, RunState::Dispatching, None).await,
+        transition_goal(pool, goal_id, 1, RunState::Ready, RunState::Dispatching, None).await,
         Err(SupervisorError::Invalid(_))
     ));
-    transition_goal(
+    let cancelled = transition_goal(
         pool,
         goal_id,
         1,
+        RunState::Ready,
         RunState::Cancelled,
         Some("owner cancelled"),
     )
     .await
     .unwrap();
+    assert_eq!(cancelled.revision, 2, "an owner hold bumps the revision");
     assert_eq!(
         ready_intents(pool).await,
         0,
         "cancelling supersedes the unsent intent"
     );
     assert!(matches!(
-        transition_goal(pool, goal_id, 1, RunState::Ready, None).await,
+        transition_goal(pool, goal_id, 2, RunState::Cancelled, RunState::Ready, None).await,
         Err(SupervisorError::IllegalTransition { .. })
     ));
     assert_eq!(
-        revise_goal(pool, goal_id, 1).await.unwrap_err().code(),
+        revise_goal(pool, goal_id, 2).await.unwrap_err().code(),
         "GOAL_CLOSED"
     );
 }
@@ -835,15 +851,6 @@ async fn dispatch_receipts_keep_accepted_started_settled_and_uncertain_apart() {
             ..
         })
     ));
-    transition_goal(pool, goal_id, 1, RunState::Paused, Some("owner paused"))
-        .await
-        .unwrap();
-    let paused = claim_dispatch(pool, request_id, 1, 1).await.unwrap_err();
-    assert_eq!(paused.code(), "NOT_CLAIMABLE", "pause gates unsent work");
-    assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
-    transition_goal(pool, goal_id, 1, RunState::Ready, None)
-        .await
-        .unwrap();
     claim_dispatch(pool, request_id, 1, 1).await.unwrap();
 
     attach_session(pool, goal_id, 1, "pane-7").await.unwrap();
@@ -863,40 +870,45 @@ async fn dispatch_receipts_keep_accepted_started_settled_and_uncertain_apart() {
         .await
         .unwrap();
     assert_eq!(repeated, accepted);
-    let early_settle = Receipt::Settled {
-        run_id: "run-1".into(),
-    };
+    let early_settle = settled("run-1", "pane-7");
     assert!(matches!(
         record_receipt(pool, request_id, 1, &early_settle).await,
         Err(SupervisorError::ReceiptOutOfOrder { .. })
     ));
+    let other_session = record_receipt(pool, request_id, 1, &started("run-1", "pane-8"))
+        .await
+        .unwrap_err();
+    assert_eq!(other_session.code(), "SESSION_MISMATCH", "{other_session}");
+    assert_eq!(
+        transition_goal(pool, goal_id, 1, RunState::Dispatching, RunState::Running, None)
+            .await
+            .unwrap_err()
+            .code(),
+        "NO_LIVE_RUN",
+        "acceptance alone is not a running worker"
+    );
 
-    let started = record_receipt(
-        pool,
-        request_id,
-        1,
-        &Receipt::Started {
-            run_id: "run-1".into(),
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(started.state, DispatchState::Started);
-    assert_eq!(started.run_id.as_deref(), Some("run-1"));
-    assert_eq!(started.accepted_at, accepted.accepted_at);
+    let start = record_receipt(pool, request_id, 1, &started("run-1", "pane-7"))
+        .await
+        .unwrap();
+    assert_eq!(start.state, DispatchState::Started);
+    assert_eq!(start.run_id.as_deref(), Some("run-1"));
+    assert_eq!(start.provider_session_id.as_deref(), Some("pane-7"));
+    assert_eq!(start.accepted_at, accepted.accepted_at);
+    let repeated_start = record_receipt(pool, request_id, 1, &started("run-1", "pane-7"))
+        .await
+        .unwrap();
+    assert_eq!(repeated_start, start);
     let binding = execution_binding_of(pool, goal_id).await.unwrap().unwrap();
     assert_eq!(binding.run_id.as_deref(), Some("run-1"));
     assert_eq!(binding.provider_session_id.as_deref(), Some("pane-7"));
-    let wrong_run = record_receipt(
-        pool,
-        request_id,
-        1,
-        &Receipt::Settled {
-            run_id: "run-2".into(),
-        },
-    )
-    .await
-    .unwrap_err();
+    let running = transition_goal(pool, goal_id, 1, RunState::Dispatching, RunState::Running, None)
+        .await
+        .unwrap();
+    assert_eq!((running.run_state, running.revision), (RunState::Running, 1));
+    let wrong_run = record_receipt(pool, request_id, 1, &settled("run-2", "pane-7"))
+        .await
+        .unwrap_err();
     assert_eq!(wrong_run.code(), "RUN_MISMATCH", "{wrong_run}");
 
     let advanced = advance_generation(pool, goal_id, 1, Some("pane-9"))
@@ -916,14 +928,184 @@ async fn dispatch_receipts_keep_accepted_started_settled_and_uncertain_apart() {
             .code(),
         "STALE_GENERATION"
     );
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM supervisor_dispatches ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    assert_eq!(states, ["started"], "stale receipts changed nothing");
+}
 
-    let other = admit(&fixture, "msg-2").await;
-    claim_dispatch(pool, &other.dispatch_request_id, 1, 1)
+#[tokio::test]
+async fn an_owner_pause_fences_stale_run_state_writes_and_blocks_dispatch() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let paused = transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Ready,
+        RunState::Paused,
+        Some("owner paused"),
+    )
+    .await
+    .unwrap();
+    assert_eq!((paused.run_state, paused.revision), (RunState::Paused, 2));
+    assert_eq!(
+        ready_intents(pool).await,
+        0,
+        "the hold supersedes the intent decided before it"
+    );
+
+    // Decisions made before the pause, against revision 1.
+    for (from, to) in [
+        (RunState::Ready, RunState::AwaitingOwner),
+        (RunState::Paused, RunState::Ready),
+        (RunState::Dispatching, RunState::Running),
+    ] {
+        let error = transition_goal(pool, goal_id, 1, from, to, None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "REVISION_CONFLICT", "{from} -> {to}: {error}");
+    }
+    // The current revision but a stale state.
+    let stale_state = transition_goal(
+        pool,
+        goal_id,
+        2,
+        RunState::Ready,
+        RunState::AwaitingOwner,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            stale_state,
+            SupervisorError::StateConflict {
+                expected: RunState::Ready,
+                actual: RunState::Paused,
+                ..
+            }
+        ),
+        "{stale_state}"
+    );
+    assert_eq!(stale_state.code(), "REVISION_CONFLICT");
+    let stale_claim = claim_dispatch(pool, &admitted.dispatch_request_id, 1, 1)
+        .await
+        .unwrap_err();
+    assert_eq!(stale_claim.code(), "REVISION_CONFLICT", "{stale_claim}");
+    let superseded = claim_dispatch(pool, &admitted.dispatch_request_id, 2, 1)
+        .await
+        .unwrap_err();
+    assert_eq!(superseded.code(), "NOT_CLAIMABLE", "{superseded}");
+    let goal = goal_of(pool, goal_id).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (RunState::Paused, 2));
+
+    // No worker was ever started, so resuming cannot claim a running one.
+    let no_run = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Running, None)
+        .await
+        .unwrap_err();
+    assert_eq!(no_run.code(), "NO_LIVE_RUN", "{no_run}");
+
+    let resumed = transition_goal(pool, goal_id, 2, RunState::Paused, RunState::Ready, None)
         .await
         .unwrap();
+    assert_eq!((resumed.run_state, resumed.revision), (RunState::Ready, 2));
+    assert!(
+        ready_dispatches(pool, 10).await.unwrap().is_empty(),
+        "the pre-pause intent stays superseded after resuming"
+    );
+    let fresh = enqueue_dispatch(pool, goal_id, 2, "Continue after the pause.")
+        .await
+        .unwrap();
+    assert_eq!(fresh.goal_revision, 2);
+    let claimed = claim_dispatch(pool, &fresh.request_id, 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed.state, DispatchState::Claimed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_run_state_writes_at_one_revision_have_one_winner() {
+    let (pool, dir) = file_pool().await;
+    let fixture = fixture_on(pool).await;
+    let goal_id = admit(&fixture, "msg-1").await.goal_id;
+
+    // Two owner holds decided against revision 1 in state ready.
+    let holds: Vec<_> = [RunState::Paused, RunState::AwaitingOwner]
+        .into_iter()
+        .map(|to| {
+            let pool = fixture.pool.clone();
+            let goal_id = goal_id.clone();
+            tokio::spawn(
+                async move { transition_goal(&pool, &goal_id, 1, RunState::Ready, to, None).await },
+            )
+        })
+        .collect();
+    let mut outcomes = Vec::new();
+    for hold in holds {
+        outcomes.push(hold.await.unwrap());
+    }
+    let winners: Vec<RunState> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().ok().map(|goal| goal.run_state))
+        .collect();
+    assert_eq!(winners.len(), 1);
+    let conflicts: Vec<&str> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().err().map(SupervisorError::code))
+        .collect();
+    assert_eq!(conflicts, ["REVISION_CONFLICT"]);
+    let held = winners[0];
+    let goal = goal_of(&fixture.pool, &goal_id).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (held, 2));
+    assert_eq!(ready_intents(&fixture.pool).await, 0);
+
+    // Two moves that keep the revision, decided against the same state: the state is the fence.
+    let moves: Vec<_> = [RunState::Ready, RunState::Degraded]
+        .into_iter()
+        .map(|to| {
+            let pool = fixture.pool.clone();
+            let goal_id = goal_id.clone();
+            tokio::spawn(async move { transition_goal(&pool, &goal_id, 2, held, to, None).await })
+        })
+        .collect();
+    let mut outcomes = Vec::new();
+    for other in moves {
+        outcomes.push(other.await.unwrap());
+    }
+    let winners: Vec<RunState> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().ok().map(|goal| goal.run_state))
+        .collect();
+    assert_eq!(winners.len(), 1);
+    let conflicts: Vec<&str> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().err().map(SupervisorError::code))
+        .collect();
+    assert_eq!(conflicts, ["REVISION_CONFLICT"]);
+    let goal = goal_of(&fixture.pool, &goal_id).await.unwrap().unwrap();
+    assert_eq!((goal.run_state, goal.revision), (winners[0], 2));
+
+    fixture.pool.close().await;
+    tokio::fs::remove_dir_all(&dir).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_uncertain_dispatch_reconciles_to_the_run_that_happened() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    let goal_id = admitted.goal_id.as_str();
+    let request_id = admitted.dispatch_request_id.as_str();
+    claim_dispatch(pool, request_id, 1, 1).await.unwrap();
+    attach_session(pool, goal_id, 1, "pane-7").await.unwrap();
     let uncertain = record_receipt(
         pool,
-        &other.dispatch_request_id,
+        request_id,
         1,
         &Receipt::Uncertain {
             code: "SEND_TIMEOUT".into(),
@@ -932,24 +1114,154 @@ async fn dispatch_receipts_keep_accepted_started_settled_and_uncertain_apart() {
     .await
     .unwrap();
     assert_eq!(uncertain.state, DispatchState::Uncertain);
-    assert_eq!(uncertain.uncertain_code.as_deref(), Some("SEND_TIMEOUT"));
     assert_eq!(uncertain.started_at, None);
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::Dispatching,
+        RunState::DeliveryUncertain,
+        Some("SEND_TIMEOUT"),
+    )
+    .await
+    .unwrap();
+
+    // A late receipt must name this dispatch's generation and the bound session.
+    let wrong_session = record_receipt(pool, request_id, 1, &started("run-1", "pane-8"))
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_session.code(), "SESSION_MISMATCH", "{wrong_session}");
+    let wrong_generation = record_receipt(pool, request_id, 2, &started("run-1", "pane-7"))
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_generation.code(), "STALE_GENERATION", "{wrong_generation}");
+    let not_yet = transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::DeliveryUncertain,
+        RunState::Running,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(not_yet.code(), "NO_LIVE_RUN", "{not_yet}");
+
+    let reconciled = record_receipt(pool, request_id, 1, &started("run-1", "pane-7"))
+        .await
+        .unwrap();
+    assert_eq!(reconciled.state, DispatchState::Started);
+    assert_eq!(reconciled.run_id.as_deref(), Some("run-1"));
+    assert_eq!(reconciled.provider_session_id.as_deref(), Some("pane-7"));
+    assert!(reconciled.started_at.is_some());
+    assert_eq!(reconciled.accepted_at, None, "no acceptance was ever seen");
+    assert_eq!(reconciled.uncertain_code.as_deref(), Some("SEND_TIMEOUT"));
+    assert_eq!(reconciled.uncertain_at, uncertain.uncertain_at);
+    transition_goal(
+        pool,
+        goal_id,
+        1,
+        RunState::DeliveryUncertain,
+        RunState::Running,
+        None,
+    )
+    .await
+    .unwrap();
+    let done = record_receipt(pool, request_id, 1, &settled("run-1", "pane-7"))
+        .await
+        .unwrap();
+    assert_eq!(done.state, DispatchState::Settled);
+    assert_eq!(done.started_at, reconciled.started_at);
+    let facts: (Option<String>, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT accepted_at, started_at, settled_at, uncertain_at FROM supervisor_dispatches
+         WHERE request_id = ?",
+    )
+    .bind(request_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert!(facts.0.is_none() && facts.1.is_some() && facts.2.is_some() && facts.3.is_some());
+
+    // An uncertain dispatch whose start was never seen can still settle on its run.
+    let other = admit(&fixture, "msg-2").await;
+    claim_dispatch(pool, &other.dispatch_request_id, 1, 1)
+        .await
+        .unwrap();
+    attach_session(pool, &other.goal_id, 1, "pane-8")
+        .await
+        .unwrap();
+    record_receipt(
+        pool,
+        &other.dispatch_request_id,
+        1,
+        &Receipt::Uncertain {
+            code: "TURN_NOT_OBSERVED".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let direct = record_receipt(pool, &other.dispatch_request_id, 1, &settled("run-9", "pane-8"))
+        .await
+        .unwrap();
+    assert_eq!(direct.state, DispatchState::Settled);
+    assert_eq!(direct.run_id.as_deref(), Some("run-9"));
+    assert_eq!(direct.started_at, None, "a start that was never observed is not invented");
+    assert_eq!(direct.uncertain_code.as_deref(), Some("TURN_NOT_OBSERVED"));
     assert!(matches!(
-        record_receipt(
-            pool,
-            &other.dispatch_request_id,
-            1,
-            &Receipt::Started {
-                run_id: "run-x".into()
-            }
-        )
-        .await,
+        record_receipt(pool, &other.dispatch_request_id, 1, &started("run-9", "pane-8")).await,
         Err(SupervisorError::ReceiptOutOfOrder { .. })
     ));
-    let states: Vec<String> =
-        sqlx::query_scalar("SELECT state FROM supervisor_dispatches ORDER BY id")
-            .fetch_all(pool)
+    assert_eq!(ready_intents(pool).await, 0, "reconciliation never resends");
+}
+
+#[tokio::test]
+async fn a_goal_owner_is_pinned_to_its_supervisor_identity() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let admitted = admit(&fixture, "msg-1").await;
+    ensure_identity(pool, STRANGER).await.unwrap();
+    for sql in [
+        "UPDATE supervisor_goals SET owner_principal = ?",
+        "UPDATE supervisor_requests SET owner_principal = ?",
+    ] {
+        let refused = sqlx::query(sql).bind(STRANGER).execute(pool).await;
+        assert!(refused.is_err(), "{sql}");
+    }
+    let foreign_binding = sqlx::query(
+        "INSERT INTO supervisor_channel_bindings(binding_id, supervisor_id, provider, channel_id,
+                owner_principal, created_at, updated_at)
+         VALUES(?, ?, 'slack', 'C1', ?, 't', 't')",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&fixture.identity.supervisor_id)
+    .bind(STRANGER)
+    .execute(pool)
+    .await;
+    assert!(foreign_binding.is_err());
+
+    let address = ChannelAddress {
+        provider: ChannelProvider::Slack,
+        workspace_id: "T1".into(),
+        account_id: "B1".into(),
+        channel_id: "D1".into(),
+        thread_id: String::new(),
+        owner_principal: OWNER.into(),
+    };
+    let binding = bind_channel(
+        pool,
+        &fixture.identity.supervisor_id,
+        &address,
+        Some(&fixture.project.project_id),
+        Some(&admitted.goal_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(binding.address.owner_principal, OWNER);
+    let owner: String =
+        sqlx::query_scalar("SELECT owner_principal FROM supervisor_goals WHERE goal_id = ?")
+            .bind(&admitted.goal_id)
+            .fetch_one(pool)
             .await
             .unwrap();
-    assert_eq!(states, ["started", "uncertain"]);
+    assert_eq!(owner, OWNER);
 }

@@ -5,15 +5,20 @@
 --
 -- Requirements stay in lane_goal_requirements and turns in lane_turns; a supervisor goal
 -- references its lane_goal instead of copying them. supervisor_goals.revision is the
--- authoritative revision of the new path (owner corrections bump it); lane_goal.revision keeps
--- counting requirement-set changes for evidence writes.
+-- authoritative revision of the new path (owner corrections and owner holds bump it);
+-- lane_goal.revision keeps counting requirement-set changes for evidence writes.
+--
+-- Every row that names an owner principal carries it with its supervisor id, and a composite
+-- foreign key pins the pair to supervisor_identity: no goal, request or channel binding can
+-- name an owner other than its supervisor's.
 
 CREATE TABLE IF NOT EXISTS supervisor_identity (
     supervisor_id TEXT PRIMARY KEY CHECK(length(supervisor_id) = 36),
     owner_principal TEXT NOT NULL UNIQUE CHECK(length(owner_principal) BETWEEN 1 AND 256),
     -- The native mhc memory name. It is never a machine or chat-thread id.
     memory_name TEXT NOT NULL DEFAULT 'ferryx-supervisor' CHECK(memory_name = 'ferryx-supervisor'),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE(supervisor_id, owner_principal)
 );
 
 CREATE TABLE IF NOT EXISTS supervisor_projects (
@@ -39,7 +44,7 @@ CREATE TABLE IF NOT EXISTS supervisor_project_hosts (
 
 CREATE TABLE IF NOT EXISTS supervisor_channel_bindings (
     binding_id TEXT PRIMARY KEY CHECK(length(binding_id) = 36),
-    supervisor_id TEXT NOT NULL REFERENCES supervisor_identity(supervisor_id),
+    supervisor_id TEXT NOT NULL,
     provider TEXT NOT NULL CHECK(provider IN ('slack','discord','desktop','phone','cli','mcp')),
     workspace_id TEXT NOT NULL DEFAULT '',
     account_id TEXT NOT NULL DEFAULT '',
@@ -51,6 +56,8 @@ CREATE TABLE IF NOT EXISTS supervisor_channel_bindings (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(provider, workspace_id, account_id, channel_id, thread_id, owner_principal),
+    FOREIGN KEY(supervisor_id, owner_principal)
+        REFERENCES supervisor_identity(supervisor_id, owner_principal),
     FOREIGN KEY(supervisor_id, project_id) REFERENCES supervisor_projects(supervisor_id, project_id),
     FOREIGN KEY(supervisor_id, goal_id) REFERENCES supervisor_goals(supervisor_id, goal_id)
 );
@@ -58,7 +65,7 @@ CREATE TABLE IF NOT EXISTS supervisor_channel_bindings (
 -- Persisted run state, separate from lanes.status (which is projected, never scheduled from).
 CREATE TABLE IF NOT EXISTS supervisor_goals (
     goal_id TEXT PRIMARY KEY CHECK(length(goal_id) = 36),
-    supervisor_id TEXT NOT NULL REFERENCES supervisor_identity(supervisor_id),
+    supervisor_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     lane_key TEXT NOT NULL UNIQUE REFERENCES lane_goal(lane_key),
     owner_principal TEXT NOT NULL CHECK(length(owner_principal) BETWEEN 1 AND 256),
@@ -68,6 +75,8 @@ CREATE TABLE IF NOT EXISTS supervisor_goals (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(supervisor_id, goal_id),
+    FOREIGN KEY(supervisor_id, owner_principal)
+        REFERENCES supervisor_identity(supervisor_id, owner_principal),
     FOREIGN KEY(supervisor_id, project_id) REFERENCES supervisor_projects(supervisor_id, project_id)
 );
 CREATE INDEX IF NOT EXISTS idx_supervisor_goals_ready
@@ -89,6 +98,8 @@ CREATE TABLE IF NOT EXISTS supervisor_requests (
     admitted_revision INTEGER NOT NULL CHECK(admitted_revision >= 1),
     created_at TEXT NOT NULL,
     UNIQUE(source_adapter, source_message_id),
+    FOREIGN KEY(supervisor_id, owner_principal)
+        REFERENCES supervisor_identity(supervisor_id, owner_principal),
     FOREIGN KEY(supervisor_id, goal_id) REFERENCES supervisor_goals(supervisor_id, goal_id)
 );
 CREATE INDEX IF NOT EXISTS idx_supervisor_requests_goal ON supervisor_requests(goal_id, id);
@@ -109,7 +120,10 @@ CREATE INDEX IF NOT EXISTS idx_supervisor_execution_session
     WHERE provider_session_id IS NOT NULL;
 
 -- One dispatch intent and its delivery receipts. accepted/started/settled/uncertain are
--- separate facts with separate timestamps; acceptance is never read as a start.
+-- separate facts with separate timestamps; acceptance is never read as a start. A start or
+-- settle names the run and the provider session that observed it. A dispatch held
+-- `uncertain` may still be resolved to started/settled by a receipt that names its request,
+-- generation and session (restart reconciliation); uncertain_code/uncertain_at stay as history.
 CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     goal_id TEXT NOT NULL REFERENCES supervisor_goals(goal_id),
@@ -121,6 +135,7 @@ CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     instruction TEXT NOT NULL CHECK(length(instruction) >= 1),
     state TEXT NOT NULL CHECK(state IN ('ready','claimed','accepted','started','settled','uncertain','superseded')),
     run_id TEXT,
+    provider_session_id TEXT,
     uncertain_code TEXT,
     claimed_at TEXT,
     accepted_at TEXT,
@@ -130,7 +145,7 @@ CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(goal_id, goal_revision, ordinal),
-    CHECK(state <> 'started' OR run_id IS NOT NULL),
+    CHECK(state NOT IN ('started','settled') OR (run_id IS NOT NULL AND provider_session_id IS NOT NULL)),
     CHECK(state <> 'uncertain' OR uncertain_code IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_supervisor_dispatches_ready

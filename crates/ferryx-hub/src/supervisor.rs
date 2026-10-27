@@ -11,7 +11,10 @@
 //! explicit adoption. Requirements stay in `lane_goal_requirements`; a supervisor goal
 //! references its `lane_goal` rather than copying them. `supervisor_goals.revision` is the
 //! authoritative revision of this path: every goal mutation names the revision it was decided
-//! against, and a stale one is refused with `REVISION_CONFLICT`.
+//! against (run-state moves also name the state), and a stale one is refused with
+//! `REVISION_CONFLICT`. Owner corrections and owner holds (pause, await-owner, cancel) bump the
+//! revision and supersede unsent intents of older revisions, so nothing decided before them
+//! can dispatch.
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -52,6 +55,14 @@ pub enum SupervisorError {
         expected: i64,
         actual: i64,
     },
+    #[error("goal {goal_id} is {actual}, not {expected}")]
+    StateConflict {
+        goal_id: String,
+        expected: RunState,
+        actual: RunState,
+    },
+    #[error("goal {goal_id} has no live run on its current execution generation")]
+    NoLiveRun { goal_id: String },
     #[error(
         "{source_adapter} message {source_message_id} was already admitted as goal {goal_id} with a different body"
     )]
@@ -87,6 +98,12 @@ pub enum SupervisorError {
         expected: Option<String>,
         actual: String,
     },
+    #[error("dispatch {request_id} receipt names session {actual}, the binding has {expected:?}")]
+    SessionMismatch {
+        request_id: String,
+        expected: Option<String>,
+        actual: String,
+    },
     #[error("{kind} {id} not found")]
     NotFound { kind: &'static str, id: String },
     #[error("{0} belongs to a different owner")]
@@ -110,6 +127,8 @@ impl SupervisorError {
     pub fn code(&self) -> &'static str {
         match self {
             SupervisorError::RevisionConflict { .. } => "REVISION_CONFLICT",
+            SupervisorError::StateConflict { .. } => "REVISION_CONFLICT",
+            SupervisorError::NoLiveRun { .. } => "NO_LIVE_RUN",
             SupervisorError::RequestBodyChanged { .. } => "REQUEST_CONFLICT",
             SupervisorError::IllegalTransition { .. } => "ILLEGAL_TRANSITION",
             SupervisorError::GoalClosed { .. } => "GOAL_CLOSED",
@@ -118,6 +137,7 @@ impl SupervisorError {
             SupervisorError::NotClaimable { .. } => "NOT_CLAIMABLE",
             SupervisorError::ReceiptOutOfOrder { .. } => "RECEIPT_OUT_OF_ORDER",
             SupervisorError::RunMismatch { .. } => "RUN_MISMATCH",
+            SupervisorError::SessionMismatch { .. } => "SESSION_MISMATCH",
             SupervisorError::NotFound { .. } => "NOT_FOUND",
             SupervisorError::CrossOwner(_) => "CROSS_OWNER",
             SupervisorError::SelfWait(_) | SupervisorError::WaitCycle { .. } => "WAIT_CYCLE",
@@ -202,9 +222,23 @@ impl RunState {
         matches!(self, RunState::Completed | RunState::Cancelled)
     }
 
+    /// Owner holds. Entering one bumps the goal revision and supersedes older unsent intents.
+    pub fn is_owner_hold(self) -> bool {
+        matches!(
+            self,
+            RunState::Paused | RunState::AwaitingOwner | RunState::Cancelled
+        )
+    }
+
     /// The transition table. `submit -> ready -> dispatching -> running`; only verification
     /// reaches `completed`; owner holds (`awaiting_owner`, `paused`), `degraded` and `cancelled`
     /// are reachable from every live state. Staying in the same state is not a transition.
+    ///
+    /// `running` is listed from `paused`, `degraded` and `delivery_uncertain` because a pause
+    /// never stops a worker and a restart may find one still running; [`transition_goal`]
+    /// additionally requires a live run (a started, unsettled dispatch on the binding's current
+    /// generation, run and session) for every move into `running`. Without one, resuming a
+    /// paused goal goes to `ready`.
     pub fn can_transition_to(self, to: RunState) -> bool {
         use RunState::*;
         if self.is_terminal() || self == to {
@@ -390,6 +424,8 @@ pub struct Dispatch {
     pub instruction: String,
     pub state: DispatchState,
     pub run_id: Option<String>,
+    /// Provider session that observed the start or settle.
+    pub provider_session_id: Option<String>,
     pub uncertain_code: Option<String>,
     pub claimed_at: Option<String>,
     pub accepted_at: Option<String>,
@@ -496,12 +532,20 @@ pub struct Admission {
     pub duplicate: bool,
 }
 
-/// A delivery receipt for a claimed dispatch. Started and settled name the run they observed.
+/// A delivery receipt for a claimed dispatch. Started and settled name the run and the
+/// provider session that observed it, so a receipt identifies its target, not just a
+/// generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Receipt {
     Accepted,
-    Started { run_id: String },
-    Settled { run_id: String },
+    Started {
+        run_id: String,
+        provider_session_id: String,
+    },
+    Settled {
+        run_id: String,
+        provider_session_id: String,
+    },
     Uncertain { code: String },
 }
 
@@ -516,11 +560,28 @@ impl Receipt {
     }
 
     fn allowed_from(&self) -> &'static [DispatchState] {
+        use DispatchState::*;
         match self {
-            Receipt::Accepted => &[DispatchState::Claimed],
-            Receipt::Started { .. } => &[DispatchState::Claimed, DispatchState::Accepted],
-            Receipt::Settled { .. } => &[DispatchState::Started],
-            Receipt::Uncertain { .. } => &[DispatchState::Claimed, DispatchState::Accepted],
+            Receipt::Accepted => &[Claimed],
+            // An uncertain dispatch may still be shown to have run (restart reconciliation).
+            Receipt::Started { .. } => &[Claimed, Accepted, Uncertain],
+            Receipt::Settled { .. } => &[Started, Uncertain],
+            Receipt::Uncertain { .. } => &[Claimed, Accepted],
+        }
+    }
+
+    /// The run and provider session a start or settle observed.
+    fn run(&self) -> Option<(&str, &str)> {
+        match self {
+            Receipt::Started {
+                run_id,
+                provider_session_id,
+            }
+            | Receipt::Settled {
+                run_id,
+                provider_session_id,
+            } => Some((run_id.as_str(), provider_session_id.as_str())),
+            Receipt::Accepted | Receipt::Uncertain { .. } => None,
         }
     }
 }
@@ -745,64 +806,49 @@ async fn require_binding(
 }
 
 const DISPATCH_COLUMNS: &str = "id, goal_id, goal_revision, ordinal, request_id, generation, \
-     instruction, state, run_id, uncertain_code, claimed_at, accepted_at, started_at, \
-     settled_at, uncertain_at, created_at";
+     instruction, state, run_id, provider_session_id, uncertain_code, claimed_at, accepted_at, \
+     started_at, settled_at, uncertain_at, created_at";
 
-type DispatchRow = (
-    i64,
-    String,
-    i64,
-    i64,
-    String,
-    i64,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    String,
-);
+#[derive(sqlx::FromRow)]
+struct DispatchRow {
+    id: i64,
+    goal_id: String,
+    goal_revision: i64,
+    ordinal: i64,
+    request_id: String,
+    generation: i64,
+    instruction: String,
+    state: String,
+    run_id: Option<String>,
+    provider_session_id: Option<String>,
+    uncertain_code: Option<String>,
+    claimed_at: Option<String>,
+    accepted_at: Option<String>,
+    started_at: Option<String>,
+    settled_at: Option<String>,
+    uncertain_at: Option<String>,
+    created_at: String,
+}
 
 fn dispatch_from_row(row: DispatchRow) -> Result<Dispatch, SupervisorError> {
-    let (
-        id,
-        goal_id,
-        goal_revision,
-        ordinal,
-        request_id,
-        generation,
-        instruction,
-        state,
-        run_id,
-        uncertain_code,
-        claimed_at,
-        accepted_at,
-        started_at,
-        settled_at,
-        uncertain_at,
-        created_at,
-    ) = row;
     Ok(Dispatch {
-        id,
-        goal_id,
-        goal_revision,
-        ordinal,
-        request_id,
-        generation,
-        instruction,
-        state: state.parse()?,
-        run_id,
-        uncertain_code,
-        claimed_at,
-        accepted_at,
-        started_at,
-        settled_at,
-        uncertain_at,
-        created_at,
+        id: row.id,
+        goal_id: row.goal_id,
+        goal_revision: row.goal_revision,
+        ordinal: row.ordinal,
+        request_id: row.request_id,
+        generation: row.generation,
+        instruction: row.instruction,
+        state: row.state.parse()?,
+        run_id: row.run_id,
+        provider_session_id: row.provider_session_id,
+        uncertain_code: row.uncertain_code,
+        claimed_at: row.claimed_at,
+        accepted_at: row.accepted_at,
+        started_at: row.started_at,
+        settled_at: row.settled_at,
+        uncertain_at: row.uncertain_at,
+        created_at: row.created_at,
     })
 }
 
@@ -866,6 +912,7 @@ async fn insert_dispatch(
         instruction: instruction.to_owned(),
         state: DispatchState::Ready,
         run_id: None,
+        provider_session_id: None,
         uncertain_code: None,
         claimed_at: None,
         accepted_at: None,
@@ -1542,13 +1589,32 @@ pub async fn execution_binding_of(
     load_binding(&mut conn, goal_id).await
 }
 
-/// Moves a goal's run state when it is still at `expected_revision` and the table allows the
-/// move. `dispatching` is entered only by [`claim_dispatch`]. Cancelling supersedes the
-/// goal's unsent intent and cancels its pending waits in the same transaction.
+/// True when the goal has a started, unsettled dispatch on its binding's current generation,
+/// run and provider session.
+async fn has_live_run(conn: &mut SqliteConnection, goal_id: &str) -> Result<bool, SupervisorError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM supervisor_dispatches d
+            JOIN supervisor_execution_bindings b ON b.goal_id = d.goal_id
+            WHERE d.goal_id = ? AND d.state = 'started' AND d.generation = b.generation
+              AND d.run_id = b.run_id AND d.provider_session_id = b.provider_session_id)",
+    )
+    .bind(goal_id)
+    .fetch_one(&mut *conn)
+    .await?)
+}
+
+/// Compare-and-set of a goal's run state: moves it only when the goal is still at
+/// `expected_revision` and in `expected_state` (otherwise `REVISION_CONFLICT`) and the table
+/// allows the move. `dispatching` is entered only by [`claim_dispatch`]; `running` only with a
+/// live run. Entering an owner hold (`paused`, `awaiting_owner`, `cancelled`) bumps the
+/// revision and supersedes every unsent intent of an older revision, so a decision made before
+/// the hold can never dispatch; cancelling also cancels pending waits. All in one transaction.
 pub async fn transition_goal(
     pool: &SqlitePool,
     goal_id: &str,
     expected_revision: i64,
+    expected_state: RunState,
     to: RunState,
     detail: Option<&str>,
 ) -> Result<SupervisorGoal, SupervisorError> {
@@ -1560,6 +1626,13 @@ pub async fn transition_goal(
     let mut tx = pool.begin_write().await?;
     let goal = require_goal(&mut tx, goal_id).await?;
     check_revision(&goal, expected_revision)?;
+    if goal.run_state != expected_state {
+        return Err(SupervisorError::StateConflict {
+            goal_id: goal_id.to_owned(),
+            expected: expected_state,
+            actual: goal.run_state,
+        });
+    }
     if !goal.run_state.can_transition_to(to) {
         return Err(SupervisorError::IllegalTransition {
             goal_id: goal_id.to_owned(),
@@ -1567,26 +1640,49 @@ pub async fn transition_goal(
             to,
         });
     }
+    if to == RunState::Running && !has_live_run(&mut tx, goal_id).await? {
+        return Err(SupervisorError::NoLiveRun {
+            goal_id: goal_id.to_owned(),
+        });
+    }
+    let revision = if to.is_owner_hold() {
+        goal.revision + 1
+    } else {
+        goal.revision
+    };
     let now = now_rfc3339();
-    sqlx::query(
-        "UPDATE supervisor_goals SET run_state = ?, state_detail = ?, updated_at = ?
-         WHERE goal_id = ?",
+    let moved = sqlx::query(
+        "UPDATE supervisor_goals SET run_state = ?, state_detail = ?, revision = ?, updated_at = ?
+         WHERE goal_id = ? AND revision = ? AND run_state = ?",
     )
     .bind(to.as_str())
     .bind(detail)
+    .bind(revision)
     .bind(&now)
     .bind(goal_id)
+    .bind(expected_revision)
+    .bind(expected_state.as_str())
     .execute(&mut *tx)
     .await?;
-    if to == RunState::Cancelled {
+    if moved.rows_affected() != 1 {
+        return Err(SupervisorError::RevisionConflict {
+            goal_id: goal_id.to_owned(),
+            expected: expected_revision,
+            actual: goal.revision,
+        });
+    }
+    if to.is_owner_hold() {
         sqlx::query(
             "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
-             WHERE goal_id = ? AND state = 'ready'",
+             WHERE goal_id = ? AND state = 'ready' AND goal_revision < ?",
         )
         .bind(&now)
         .bind(goal_id)
+        .bind(revision)
         .execute(&mut *tx)
         .await?;
+    }
+    if to == RunState::Cancelled {
         sqlx::query(
             "UPDATE supervisor_waits SET state = 'cancelled', resolved_at = ?
              WHERE goal_id = ? AND state = 'pending'",
@@ -1600,6 +1696,7 @@ pub async fn transition_goal(
     Ok(SupervisorGoal {
         run_state: to,
         state_detail: detail.map(str::to_owned),
+        revision,
         updated_at: now,
         ..goal
     })
@@ -1766,22 +1863,24 @@ pub async fn claim_dispatch(
 }
 
 /// Records one delivery receipt for a claimed intent. Accepted, started, settled and
-/// uncertain are separate facts: acceptance never implies a start, a start and a settle must
-/// name the run, and a receipt from a stale generation is refused. Repeating the receipt
-/// already recorded is a no-op. Goal run-state moves are the caller's, through
-/// [`transition_goal`].
+/// uncertain are separate facts: acceptance never implies a start, and a receipt from a stale
+/// generation is refused. A start or settle must name the binding's current provider session
+/// and, once a run is recorded, that run. An `uncertain` dispatch can still be resolved to
+/// started or settled by such a receipt, so restart reconciliation records a run that really
+/// happened; its uncertain code and time stay as history. Repeating the receipt already
+/// recorded is a no-op. Goal run-state moves are the caller's, through [`transition_goal`].
 pub async fn record_receipt(
     pool: &SqlitePool,
     request_id: &str,
     generation: i64,
     receipt: &Receipt,
 ) -> Result<Dispatch, SupervisorError> {
-    match receipt {
-        Receipt::Started { run_id } | Receipt::Settled { run_id } => {
-            require_id("run id", run_id, MAX_ID_CHARS)?;
-        }
-        Receipt::Uncertain { code } => require_id("uncertain code", code, 128)?,
-        Receipt::Accepted => {}
+    if let Some((run_id, session)) = receipt.run() {
+        require_id("run id", run_id, MAX_ID_CHARS)?;
+        require_id("provider session id", session, MAX_ID_CHARS)?;
+    }
+    if let Receipt::Uncertain { code } = receipt {
+        require_id("uncertain code", code, 128)?;
     }
     let mut tx = pool.begin_write().await?;
     let dispatch = require_dispatch(&mut tx, request_id).await?;
@@ -1791,12 +1890,18 @@ pub async fn record_receipt(
     let to = receipt.state();
     if dispatch.state == to {
         let same = match receipt {
-            Receipt::Started { run_id } | Receipt::Settled { run_id } => {
-                dispatch.run_id.as_deref() == Some(run_id.as_str())
+            Receipt::Started {
+                run_id,
+                provider_session_id,
             }
-            Receipt::Uncertain { code } => {
-                dispatch.uncertain_code.as_deref() == Some(code.as_str())
+            | Receipt::Settled {
+                run_id,
+                provider_session_id,
+            } => {
+                dispatch.run_id.as_ref() == Some(run_id)
+                    && dispatch.provider_session_id.as_ref() == Some(provider_session_id)
             }
+            Receipt::Uncertain { code } => dispatch.uncertain_code.as_ref() == Some(code),
             Receipt::Accepted => true,
         };
         if same {
@@ -1810,19 +1915,73 @@ pub async fn record_receipt(
             to,
         });
     }
-    if let Receipt::Settled { run_id } = receipt {
-        if dispatch.run_id.as_deref() != Some(run_id.as_str()) {
-            return Err(SupervisorError::RunMismatch {
+    if let Some((run_id, session)) = receipt.run() {
+        if binding.provider_session_id.as_deref() != Some(session) {
+            return Err(SupervisorError::SessionMismatch {
                 request_id: request_id.to_owned(),
-                expected: dispatch.run_id,
-                actual: run_id.clone(),
+                expected: binding.provider_session_id,
+                actual: session.to_owned(),
             });
+        }
+        if let Some(recorded) = dispatch.run_id.as_deref() {
+            if recorded != run_id {
+                return Err(SupervisorError::RunMismatch {
+                    request_id: request_id.to_owned(),
+                    expected: dispatch.run_id.clone(),
+                    actual: run_id.to_owned(),
+                });
+            }
         }
     }
     let now = now_rfc3339();
     let mut updated = dispatch;
     updated.state = to;
     match receipt {
+        Receipt::Started {
+            run_id,
+            provider_session_id,
+        }
+        | Receipt::Settled {
+            run_id,
+            provider_session_id,
+        } => {
+            let observed_at = if to == DispatchState::Started {
+                "started_at"
+            } else {
+                "settled_at"
+            };
+            let sql = format!(
+                "UPDATE supervisor_dispatches SET state = ?, run_id = ?, provider_session_id = ?,
+                        {observed_at} = ?, updated_at = ?
+                 WHERE id = ?"
+            );
+            sqlx::query(&sql)
+                .bind(to.as_str())
+                .bind(run_id)
+                .bind(provider_session_id)
+                .bind(&now)
+                .bind(&now)
+                .bind(updated.id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "UPDATE supervisor_execution_bindings SET run_id = ?, updated_at = ?
+                 WHERE goal_id = ? AND generation = ?",
+            )
+            .bind(run_id)
+            .bind(&now)
+            .bind(&updated.goal_id)
+            .bind(generation)
+            .execute(&mut *tx)
+            .await?;
+            updated.run_id = Some(run_id.clone());
+            updated.provider_session_id = Some(provider_session_id.clone());
+            if to == DispatchState::Started {
+                updated.started_at = Some(now);
+            } else {
+                updated.settled_at = Some(now);
+            }
+        }
         Receipt::Accepted => {
             sqlx::query(
                 "UPDATE supervisor_dispatches SET state = 'accepted', accepted_at = ?,
@@ -1835,43 +1994,6 @@ pub async fn record_receipt(
             .execute(&mut *tx)
             .await?;
             updated.accepted_at = Some(now);
-        }
-        Receipt::Started { run_id } => {
-            sqlx::query(
-                "UPDATE supervisor_dispatches SET state = 'started', run_id = ?, started_at = ?,
-                        updated_at = ?
-                 WHERE id = ?",
-            )
-            .bind(run_id)
-            .bind(&now)
-            .bind(&now)
-            .bind(updated.id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "UPDATE supervisor_execution_bindings SET run_id = ?, updated_at = ?
-                 WHERE goal_id = ? AND generation = ?",
-            )
-            .bind(run_id)
-            .bind(&now)
-            .bind(&updated.goal_id)
-            .bind(generation)
-            .execute(&mut *tx)
-            .await?;
-            updated.run_id = Some(run_id.clone());
-            updated.started_at = Some(now);
-        }
-        Receipt::Settled { .. } => {
-            sqlx::query(
-                "UPDATE supervisor_dispatches SET state = 'settled', settled_at = ?, updated_at = ?
-                 WHERE id = ?",
-            )
-            .bind(&now)
-            .bind(&now)
-            .bind(updated.id)
-            .execute(&mut *tx)
-            .await?;
-            updated.settled_at = Some(now);
         }
         Receipt::Uncertain { code } => {
             sqlx::query(
