@@ -1,0 +1,13 @@
+{
+  "$schema": "./config.schema.json",
+  "$comment": "Example for omarchy. Task 1 writes the real .qa/unified-supervisor.json on each remote host from discovered binaries/ports/host ids with apply_patch. Every path must be absolute and task-owned; production roots such as ~/.ferryx or any hub.sqlite are refused. slackChannel stays null until a QA channel is approved in the execution session.",
+  "ferryxCli": "/home/indo/code/ferryx-wt/.target/debug/ferryx-cli",
+  "ferryxApp": "/home/indo/code/ferryx-wt/.target/debug/ferryx",
+  "mhcBin": "/home/indo/code/mhc-wt/unified-supervisor-20261027/target/debug/mhc",
+  "dataRoot": "/home/indo/code/ferryx-wt/.qa-state/unified-supervisor-20261027/data",
+  "memoryRoot": "/home/indo/code/ferryx-wt/.qa-state/unified-supervisor-20261027/memory",
+  "projectRoot": "/home/indo/code/ferryx-wt/.qa-state/unified-supervisor-20261027/project",
+  "pairedHostId": "maho-mac",
+  "ownerPrincipal": "qa-owner",
+  "slackChannel": null
+}
