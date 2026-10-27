@@ -295,6 +295,8 @@ enum CronDisposition {
 fn owner_dm_worthy(kind: &str, body: &str) -> bool {
     match kind {
         "inbox_urgent" | "owner_reply_failed" | "dead" | "launch_failed" | "startup_error" => true,
+        // The kibitzer already judged that the owner should act now.
+        "kibitzer" => true,
         "cron_problem" => body.contains("needs_owner"),
         _ => false,
     }
@@ -305,7 +307,7 @@ fn critical(kind: &str, body: &str) -> bool {
     match kind {
         "done_claimed" | "dead" | "not_done" | "inbox_urgent" | "owner_reply_failed"
         | "cron_report" | "unmerged_branch" | "launch_failed" | "startup_error" => true,
-        "action_loop" | "no_progress" => true,
+        "action_loop" | "no_progress" | "kibitzer" => true,
         "cron_problem" => body.contains("needs_owner"),
         _ => false,
     }
@@ -526,6 +528,43 @@ mod tests {
         .unwrap();
         assert_eq!(admitted, 1);
         assert!(seen.lock().unwrap().contains("needs_owner"));
+        let reason: String = sqlx::query_scalar("SELECT delivery_reason FROM lane_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(reason, "lead_turn");
+    }
+
+    #[tokio::test]
+    async fn a_kibitzer_wake_reaches_the_owner_dm_without_a_second_judgment() {
+        let pool = crate::storage::memory().await.unwrap();
+        let dm = SessionKey::new("slack", None::<String>, "D0DM", None::<String>, "U0OWNER")
+            .with_bot_id("U0BOT")
+            .storage_key();
+        let now = chrono::Utc::now();
+        sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(NULL, ?, 'kibitzer', ?, ?)")
+            .bind(&dm)
+            .bind(r#"{"wake":true,"reason":"r","suggested":"sign the contract","target_lane":null}"#)
+            .bind(now.to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A wake judgment of 0.0 would skip any non-critical event.
+        let judge = crate::judge::Judge::forced_noul(0.0);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let record = seen.clone();
+        let admitted = dispatch_tick(&pool, &judge, now, move |key, text| {
+            record.lock().unwrap().push((key.storage_key(), text));
+            async { true }
+        })
+        .await
+        .unwrap();
+        assert_eq!(admitted, 1);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, dm);
+        assert!(seen[0].1.contains("kibitzer"));
+        assert!(seen[0].1.contains("sign the contract"));
         let reason: String = sqlx::query_scalar("SELECT delivery_reason FROM lane_events")
             .fetch_one(&pool)
             .await

@@ -983,8 +983,6 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let watch_hub = Arc::clone(&launch.hub);
     let watch_bridge = launch.bridge.clone();
     let watch_server = Arc::clone(&launch.server);
-    let model_url = launch.config.supervisor_listen_url.clone();
-    let lead = launch.config.meta_session_id.clone().unwrap_or_else(|| "meta".into());
     // The omo session poller reports omo panes (by omo session id, on every host), so the pane
     // observer leaves them to it instead of sending a second notice under the pane id.
     let omo_polled = ferryx_hub::sessions::omo_poll::enabled() && ferryx_hub::sessions::omo_poll::binary().is_some();
@@ -1010,15 +1008,6 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                     let run = state_run(&mut runs, &observation);
                     if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut agents, omo_polled, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
-                    }
-                    if idle {
-                        if let Some(url) = model_url.clone().filter(|url| !url.trim().is_empty()) {
-                            let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-                            let model = ferryx_hub::meta::backend::UrlModel::new(url);
-                            if let Err(error) = ferryx_hub::lanes::kibitzer::evaluate(&watch_hub.pool, &lead, &judge, &model).await {
-                                tracing::debug!(%error, "kibitzer evaluation failed");
-                            }
-                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1258,6 +1247,34 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             let lead = ferryx_hub::lanes::lead::resolve(&action_pool, &owner, &fallback).await;
             if let Err(error) = ferryx_hub::autonomy::serve(action_pool, lead).await {
                 tracing::warn!(%error, "action loop stopped");
+            }
+        }));
+    }
+    // The kibitzer wakes the owner DM lead on its own clock; evaluate() enforces arming,
+    // spacing, the daily cap and quiet hours, so a tick is cheap when nothing is due.
+    {
+        let pool = launch.hub.pool.clone();
+        let (owner, fallback) = (lead_owner.clone(), lead_fallback.clone());
+        let url = launch
+            .config
+            .supervisor_listen_url
+            .clone()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| ferryx_hub::cron_exec::OMO_APP_SERVER.to_owned());
+        tasks.push(tokio::spawn(async move {
+            let lead = ferryx_hub::lanes::lead::resolve(&pool, &owner, &fallback).await;
+            if let Err(error) = ferryx_hub::lanes::kibitzer::ensure_lead(&pool, &lead).await {
+                tracing::warn!(%error, %lead, "kibitzer lead was not registered");
+            }
+            let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
+            let model = ferryx_hub::meta::backend::UrlModel::new(url);
+            loop {
+                match ferryx_hub::lanes::kibitzer::evaluate(&pool, &lead, &judge, &model).await {
+                    Ok(true) => tracing::info!(%lead, "kibitzer woke the owner lead"),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, %lead, "kibitzer evaluation failed"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
             }
         }));
     }
