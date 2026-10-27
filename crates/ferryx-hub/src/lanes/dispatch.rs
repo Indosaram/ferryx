@@ -152,9 +152,19 @@ where
         let parsed_at = chrono::DateTime::parse_from_rfc3339(&created_at)
             .map(|at| at.with_timezone(&chrono::Utc))
             .unwrap_or(now);
-        // A supervisor-owned lane reports to its goal's wake service, never to a second lead.
-        // A failed hand-over stays queued without blocking other events.
-        match hand_to_supervisor(pool, id, lane_key.as_deref(), parsed_at, &stamp).await {
+        // A supervisor-owned lane reports to its goal's wake service, never to a second lead;
+        // an owner-urgent kind also keeps its owner DM notice. A failed hand-over stays queued
+        // without blocking other events.
+        let handed = hand_to_supervisor(
+            pool,
+            id,
+            lane_key.as_deref(),
+            owner_dm_worthy(&kind, &body),
+            parsed_at,
+            &stamp,
+        )
+        .await;
+        match handed {
             Ok(true) => continue,
             Ok(false) => {}
             Err(error) => {
@@ -212,7 +222,7 @@ where
             continue;
         }
         let last: Option<String> = sqlx::query_scalar(
-            "SELECT MAX(delivered_at) FROM lane_events WHERE lead_session_key = ? AND delivered_at IS NOT NULL AND (delivery_reason IS NULL OR delivery_reason NOT IN ('jev_skip', 'duplicate'))",
+            "SELECT MAX(delivered_at) FROM lane_events WHERE lead_session_key = ? AND delivered_at IS NOT NULL AND (delivery_reason IS NULL OR delivery_reason NOT IN ('jev_skip', 'duplicate', 'supervisor_wake'))",
         )
         .bind(&target)
         .fetch_one(pool)
@@ -395,11 +405,13 @@ async fn supervisor_goal_of_lane(pool: &SqlitePool, lane_key: &str) -> Result<Op
 /// A report from a lane a supervisor goal owns goes to that goal's wake service
 /// ([`crate::supervisor::wakes::report`]) instead of a lead turn: one goal/wake path, batched
 /// by the same 30s policy. The wake is keyed by the lane event id, so a re-run of this tick
-/// after a crash before the receipt is the same wake. True when the event was handed over.
+/// after a crash before the receipt is the same wake. True when the event was handed over
+/// and receipted; an `owner_urgent` event is woken but left for the owner DM (false).
 async fn hand_to_supervisor(
     pool: &SqlitePool,
     id: i64,
     lane_key: Option<&str>,
+    owner_urgent: bool,
     created_at: chrono::DateTime<chrono::Utc>,
     stamp: &str,
 ) -> Result<bool> {
@@ -411,6 +423,9 @@ async fn hand_to_supervisor(
     };
     crate::supervisor::wakes::report(pool, &goal_id, &format!("lane_event:{id}"), created_at)
         .await?;
+    if owner_urgent {
+        return Ok(false);
+    }
     receipt(pool, &[id], stamp, SUPERVISOR_WAKE).await?;
     Ok(true)
 }
@@ -873,7 +888,10 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(admitted_turns, 0, "no lead turn for a supervisor-owned lane");
+        assert_eq!(
+            admitted_turns, 0,
+            "no lead turn for a supervisor-owned lane"
+        );
         assert_eq!(turns.load(std::sync::atomic::Ordering::SeqCst), 0);
         let reason: Option<String> =
             sqlx::query_scalar("SELECT delivery_reason FROM lane_events WHERE id = ?")
@@ -901,5 +919,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pending_wakes(&pool, due, 10).await.unwrap().len(), 1);
+
+        // An owner-urgent kind wakes the goal and still reaches the owner DM.
+        let dead: i64 = sqlx::query_scalar(
+            "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at)
+             VALUES(?, ?, 'dead', 'worker exited', ?) RETURNING id",
+        )
+        .bind(&lane_key)
+        .bind(&lead)
+        .bind(old.to_rfc3339())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let record = seen.clone();
+        let later = chrono::Utc::now() + chrono::Duration::minutes(2);
+        let lead_turns = dispatch_tick(&pool, &judge, later, move |key, text| {
+            record.lock().unwrap().push((key.storage_key(), text));
+            async { true }
+        })
+        .await
+        .unwrap();
+        assert_eq!(lead_turns, 1, "the owner still hears that the worker died");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].0, lead);
+        let wakes = pending_wakes(&pool, due, 10).await.unwrap();
+        assert!(
+            wakes
+                .iter()
+                .any(|wake| wake.event_id == format!("lane_event:{dead}")),
+            "{wakes:?}"
+        );
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT delivery_reason FROM lane_events WHERE id = ?")
+                .bind(dead)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(reason.as_deref(), Some(SUPERVISOR_WAKE));
     }
 }

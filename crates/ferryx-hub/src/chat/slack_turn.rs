@@ -386,7 +386,7 @@ pub(crate) fn session_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     locks.entry(key.to_owned()).or_default().clone()
 }
 
-async fn load_state(pool: &SqlitePool, key: &SessionKey) -> Option<SessionState> {
+pub(crate) async fn load_state(pool: &SqlitePool, key: &SessionKey) -> Option<SessionState> {
     let raw: Option<String> =
         sqlx::query_scalar("SELECT state_json FROM sessions WHERE session_key = ?")
             .bind(key.storage_key())
@@ -424,7 +424,11 @@ pub fn omo_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
 }
 
-async fn save_state(pool: &SqlitePool, key: &SessionKey, state: &SessionState) -> Result<()> {
+pub(crate) async fn save_state(
+    pool: &SqlitePool,
+    key: &SessionKey,
+    state: &SessionState,
+) -> Result<()> {
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".into());
     sqlx::query(
         "INSERT INTO sessions (session_key, platform, guild_id, channel_id, thread_id, user_id, state_json, updated_at)
@@ -562,6 +566,69 @@ async fn status(turn: &SessionTurn, name: &str, add: bool) {
     }
 }
 
+/// omo's status message for the owner's long turns: posted and edited on its interval while
+/// the turn runs, closed by [`TurnStatus::finish`]. Shared by the omo and supervisor turns.
+pub(crate) struct TurnStatus {
+    driver: Arc<tokio::sync::Mutex<Option<super::turn_status::StatusMessage>>>,
+    ticker: tokio::task::JoinHandle<()>,
+}
+
+impl TurnStatus {
+    /// `None` unless the turn replies in Slack, status messages are on and the session is the
+    /// owner's lead (owner DM or home channel).
+    pub(crate) fn start(
+        config: &SlackTurnConfig,
+        key: &SessionKey,
+        channel: Option<&str>,
+        thread: Option<&str>,
+        text: &str,
+    ) -> Option<Self> {
+        let channel = channel?;
+        if !super::turn_status::enabled()
+            || !config
+                .allowed_users
+                .first()
+                .is_some_and(|owner| super::turn_status::is_owner_lead(key, owner))
+        {
+            return None;
+        }
+        let driver = Arc::new(tokio::sync::Mutex::new(Some(
+            super::turn_status::StatusMessage::new(
+                &key.storage_key(),
+                channel,
+                thread,
+                text,
+                chrono::Utc::now(),
+                super::turn_status::interval(),
+            ),
+        )));
+        let ticking = driver.clone();
+        let ticker = super::slack::spawn_carrying_test_api(async move {
+            loop {
+                let due = match ticking.lock().await.as_ref() {
+                    Some(message) => message.next_due(),
+                    None => return,
+                };
+                let wait = (due - chrono::Utc::now()).to_std().unwrap_or_default();
+                tokio::time::sleep(wait).await;
+                if let Some(message) = ticking.lock().await.as_mut() {
+                    message.tick(chrono::Utc::now()).await;
+                }
+            }
+        });
+        Some(Self { driver, ticker })
+    }
+
+    /// Stops the ticker and closes the message with the turn's outcome.
+    pub(crate) async fn finish(self, outcome: std::result::Result<(), String>) {
+        self.ticker.abort();
+        let _ = self.ticker.await;
+        if let Some(message) = self.driver.lock().await.take() {
+            message.finish(chrono::Utc::now(), outcome).await;
+        }
+    }
+}
+
 /// Runs one message through the session's omo thread, as omo-gateway's multiplexer did: the
 /// user message and the final reply land in the session transcript, the reply goes to the
 /// session's Slack thread (or the dashboard), and the engine thread id is kept for resume.
@@ -663,42 +730,13 @@ pub async fn run_session_turn(
     tracing::info!(session = %storage_key, resume = request.thread_id.is_some(), "session turn started on omo app-server");
     let started = std::time::Instant::now();
     // omo's status message for the owner's long turns.
-    let status_message = match &turn.reply_channel {
-        Some(channel)
-            if super::turn_status::enabled()
-                && config
-                    .allowed_users
-                    .first()
-                    .is_some_and(|owner| super::turn_status::is_owner_lead(&turn.key, owner)) =>
-        {
-            Some(std::sync::Arc::new(tokio::sync::Mutex::new(Some(
-                super::turn_status::StatusMessage::new(
-                    &storage_key,
-                    channel,
-                    turn.reply_thread.as_deref(),
-                    &turn.text,
-                    chrono::Utc::now(),
-                    super::turn_status::interval(),
-                ),
-            ))))
-        }
-        _ => None,
-    };
-    let status_ticker = status_message.clone().map(|driver| {
-        super::slack::spawn_carrying_test_api(async move {
-            loop {
-                let due = match driver.lock().await.as_ref() {
-                    Some(message) => message.next_due(),
-                    None => return,
-                };
-                let wait = (due - chrono::Utc::now()).to_std().unwrap_or_default();
-                tokio::time::sleep(wait).await;
-                if let Some(message) = driver.lock().await.as_mut() {
-                    message.tick(chrono::Utc::now()).await;
-                }
-            }
-        })
-    });
+    let status_message = TurnStatus::start(
+        config,
+        &turn.key,
+        turn.reply_channel.as_deref(),
+        turn.reply_thread.as_deref(),
+        &turn.text,
+    );
     let channel = turn.reply_channel.clone().unwrap_or_default();
     let registration = super::turns::begin(&storage_key, &channel);
     // Boxed: the app-server turn plus the approval wrapper is a large future, and an unboxed
@@ -745,23 +783,17 @@ pub async fn run_session_turn(
     };
     drop(registration);
     let _ = relay.await;
-    if let Some(ticker) = status_ticker {
-        ticker.abort();
-        let _ = ticker.await;
-    }
-    if let Some(driver) = status_message {
-        if let Some(message) = driver.lock().await.take() {
-            let outcome = match &result {
-                Ok(outcome) => omo_client::final_reply(outcome)
-                    .map(|_| ())
-                    .map_err(|error| error.to_string()),
-                Err(error) if error.to_string().contains(omo_client::STOPPED) => {
-                    Err("stopped by the owner".to_owned())
-                }
-                Err(error) => Err(error.to_string()),
-            };
-            message.finish(chrono::Utc::now(), outcome).await;
-        }
+    if let Some(status_message) = status_message {
+        let outcome = match &result {
+            Ok(outcome) => omo_client::final_reply(outcome)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Err(error) if error.to_string().contains(omo_client::STOPPED) => {
+                Err("stopped by the owner".to_owned())
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        status_message.finish(outcome).await;
     }
     status(&turn, "eyes", false).await;
     if matches!(&result, Err(error) if error.to_string().contains(omo_client::STOPPED)) {
