@@ -381,6 +381,269 @@ async function runAdmission(ctx) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// remote-delivery (plan task 8): a paired target pane accepts the dispatched bytes. With a
+// start receipt the run starts; with the receipt suppressed the dispatch stays accepted and
+// uncertain, never started or complete, and is never resent, also after the paired transport
+// reconnects. Two isolated daemons on this machine are paired through a loopback ferryx-relay:
+// the hub daemon (supervisor + dispatcher) and the target daemon (panes only, hub off). Every
+// product effect goes through the product CLI (`supervisor setup|submit|dispatch status`,
+// `agents read`) and the daemon protocol the GUI uses (pairing, workspace, spawn); the hub
+// database is only read, read-only. A wrong (foreign) receipt is covered by the scoped Rust
+// test crates/ferryx-hub/src/supervisor/tests/receipts.rs and listed as notCovered here.
+
+const REMOTE_WORKSPACE_ID = 'qa-remote';
+const REMOTE_BODY = 'Create result.txt containing READY. Run the verifier.';
+const REMOTE_WORK = Object.freeze({
+  title: 'Write result.txt',
+  instruction: 'Create result.txt containing READY. Run the verifier.',
+  requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+// The product forces the gateway onto this loopback port (src-tauri/src/remote/state.rs); only
+// the target daemon binds it (relay mode), the hub daemon's gateway stays off.
+const GATEWAY_PORT = 43821;
+const TURN_START_MS = 6_000;
+
+function portIsFree(port) {
+  return new Promise((resolvePort) => {
+    const server = createServer();
+    server.unref();
+    server.once('error', () => resolvePort(false));
+    server.listen(port, '127.0.0.1', () => server.close(() => resolvePort(true)));
+  });
+}
+
+// One request on a fresh connection after a handshake; a protocolMismatch retries once with
+// the daemon's own version. Logged to requests.jsonl / responses.jsonl.
+async function daemonCall(ctx, socketPath, label, request, deadlineMs = 30_000) {
+  let version = DAEMON_PROTOCOL_VERSION;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const frames = [{ type: 'handshake', version }, request];
+    ctx.evidence.appendJsonl('requests.jsonl', { label, surface: 'daemon-socket', socket: socketPath, frames, at: new Date().toISOString() });
+    const replies = await daemonExchange(socketPath, frames, deadlineMs);
+    ctx.evidence.appendJsonl('responses.jsonl', { label, replies, at: new Date().toISOString() });
+    const mismatch = replies.find((reply) => reply?.type === 'protocolMismatch');
+    if (mismatch && attempt === 0 && Number.isInteger(mismatch.expectedVersion)) { version = mismatch.expectedVersion; continue; }
+    return replies.at(-1) ?? null;
+  }
+  return null;
+}
+
+function countLines(path, needle) {
+  if (!existsSync(path)) return 0;
+  return readFileSync(path, 'utf8').split('\n').filter((line) => line.includes(needle)).length;
+}
+
+async function runRemoteDelivery(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'remote-delivery runs POSIX fixture worker panes (the Windows pane shell is pwsh/powershell and ignores SHELL); this scenario runs on Linux or macOS');
+  }
+  const { config } = ctx;
+  if (typeof config.ferryxRelay !== 'string' || config.ferryxRelay === '') {
+    throw new HarnessError('CONFIG_INVALID', 'remote-delivery needs ferryxRelay: the absolute path of the ferryx-relay binary built from the same revision');
+  }
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the remote fixture project is a git repository');
+  if (!(await portIsFree(GATEWAY_PORT))) {
+    throw new HarnessError('PREREQUISITE_MISSING', `127.0.0.1:${GATEWAY_PORT} is in use; the target daemon's gateway must bind it (the product fixes the port) and nothing else is stopped to free it`);
+  }
+  const data = realpathSync(ctx.paths.data);
+  const transcript = (line) => ctx.evidence.appendText('task-8-delivery.log', `${new Date().toISOString()} ${line}\n`);
+  const hubDb = join(data, 'hub', 'hub.sqlite');
+  // The target daemon's own isolated root inside the run root ("t" keeps its socket short).
+  const target = join(data, 't');
+  const targetSocket = join(target, 'runtime', 'daemon.sock');
+  const hubSocket = join(data, 'runtime', 'daemon.sock');
+  if (Buffer.byteLength(targetSocket) > 100) throw new HarnessError('CONFIG_INVALID', `target daemon socket ${targetSocket} exceeds 100 bytes; choose a shorter dataRoot`);
+  for (const path of [hubDb, targetSocket]) {
+    if (!isInside(path, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${path} is outside the run root`);
+  }
+
+  // Fixture project and worker panes on the target. The pane shell is the fixture worker; a
+  // mode file read at pane start makes the next pane report its turn start or stay silent.
+  const workspaceRoot = join(data, 'rws');
+  const repo = join(workspaceRoot, 'qa-supervisor');
+  mkdirSync(repo, { recursive: true });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [['git-init', [...gitArgs, 'init', '-q', repo]], ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']]]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const gitCommonDir = realpathSync(join(repo, '.git'));
+  const workerLogs = join(data, 'workers');
+  mkdirSync(workerLogs, { recursive: true });
+  const modeFile = join(data, 'bin', 'pane-mode');
+  const shell = join(data, 'bin', 'qa-remote-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nif [ "$(cat ${shellQuote(modeFile)} 2>/dev/null)" = silent ]; then\n  exec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --no-report\nfi\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)}\n`, { mode: 0o755 });
+  chmodSync(shell, 0o755);
+
+  const relayPort = await freeLoopbackPort();
+  const relayUrl = `http://127.0.0.1:${relayPort}`;
+  const machineToken = `qa-${ctx.runId}-${relayPort}`;
+  const trackerPort = await freeLoopbackPort();
+  const isolated = (root) => ({
+    HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'), FERRYX_DATA_DIR: join(root, 'data'), FERRYX_RUNTIME_DIR: join(root, 'runtime'),
+    FERRYX_HUB_DB: join(root, 'hub', 'hub.sqlite'),
+  });
+  for (const dir of [join(target, 'home'), join(target, 'tmp'), join(target, 'runtime')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const relayEnv = ctx.productEnv({ FERRYX_DEPLOYMENT_MODE: 'selfhost', FERRYX_RELAY_MACHINE_TOKENS: machineToken, FERRYX_ACCOUNT_DATA_DIR: join(data, 'relay-account'), RUST_LOG: 'info' });
+  const targetEnv = ctx.productEnv({
+    ...isolated(target), FERRYX_HUB: 'off', SHELL: shell, FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_MACHINE_TOKEN: machineToken,
+    FERRYX_RELAY_URL: relayUrl, FERRYX_SUPERVISOR_TURN_START_MS: String(TURN_START_MS),
+  });
+  const hubEnv = ctx.productEnv({
+    FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${trackerPort}`, FERRYX_HUB_WORKSPACE: REMOTE_WORKSPACE_ID,
+    FERRYX_SUPERVISOR_TURN_START_MS: String(TURN_START_MS),
+  });
+  // The hub daemon's gateway stays off so only the target binds the fixed gateway port.
+  mkdirSync(join(hubEnv.FERRYX_DATA_DIR, 'remote'), { recursive: true });
+  writeFileSync(join(hubEnv.FERRYX_DATA_DIR, 'remote', 'remote-config.json'), `${JSON.stringify({ mode: 'off' })}\n`);
+  ctx.announce({ remoteDelivery: 'fixture', relayUrl, repo, gitCommonDir, hubDb, targetSocket });
+  transcript(`fixture relay=${relayUrl} repo=${repo} hubDb=${hubDb} targetSocket=${targetSocket}`);
+
+  // 1. Loopback relay, then the target daemon in relay mode with agent control on.
+  const startRelay = async (label) => {
+    const cursor = ctx.journal.cursor();
+    const handle = await ctx.spawn(label, config.ferryxRelay, ['--port', String(relayPort)], { env: relayEnv, cwd: data, graceMs: 5_000 });
+    await ctx.waitFor(`${label} listening`, (e) => e.source === label && (e.kind === 'stdout' || e.kind === 'stderr') && String(e.line ?? '').includes('ferryx-relay listening'), { after: cursor, deadlineMs: 30_000 });
+    transcript(`${label} pid=${handle.pid} listening on ${relayPort}`);
+    return handle;
+  };
+  let relay = await startRelay('relay');
+  const targetLog = join(targetEnv.FERRYX_DATA_DIR, 'logs', 'daemon.log');
+  const relayConnected = (min, label) => waitForChange(ctx, label, dirname(targetLog), () => ({ done: countLines(targetLog, 'relay control channel connected') >= min, connected: countLines(targetLog, 'relay control channel connected') }), 60_000);
+  const targetReady = waitForPath(targetSocket, { deadlineMs: 60_000, signal: ctx.signal, label: 'target daemon socket' });
+  const targetDaemon = await ctx.spawn('target-daemon', config.ferryxCli, ['--daemon'], { env: targetEnv, cwd: target, graceMs: 10_000 });
+  await targetReady;
+  transcript(`target daemon pid=${targetDaemon.pid} socket=${targetSocket}`);
+  const control = await daemonCall(ctx, targetSocket, 'target-agent-control-on', { type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
+  const configured = await daemonCall(ctx, targetSocket, 'target-relay-mode', { type: 'remoteConfigure', config: { mode: 'relay', port: GATEWAY_PORT, allowControl: true, relayUrl } });
+  await relayConnected(1, 'target relay control channel');
+  const code = await daemonCall(ctx, targetSocket, 'target-pairing-code', { type: 'remoteCreateMachinePairingCode' });
+  ctx.assert('target-ready-for-pairing', control?.type === 'agentControlSettingsOk' && configured?.type === 'remoteConfigureOk'
+    && code?.type === 'remotePairingCodeOk' && typeof code.code === 'string', { control, configured, code: code && { type: code.type, machineId: code.machineId, relayUrl: code.relayUrl } });
+  if (code?.type !== 'remotePairingCodeOk') throw new HarnessError('PAIRING_FAILED', 'the target daemon issued no machine pairing code');
+
+  // 2. The hub daemon pairs with the target through the relay.
+  await ctx.startDaemon({ env: hubEnv, deadlineMs: 60_000 });
+  const paired = await daemonCall(ctx, hubSocket, 'hub-pair-target', { type: 'pairedHostPair', request: { relayOrigin: relayUrl, pin: code.code, displayLabel: 'qa-target' } }, 60_000);
+  const hostId = paired?.host?.hostId ?? null;
+  ctx.assert('hub-paired-with-target', paired?.type === 'pairedHostPairOk' && typeof hostId === 'string' && paired.host.grantScope !== undefined,
+    { paired: paired && { type: paired.type, host: paired.host ?? null, error: paired.error ?? paired.message ?? null } });
+  if (!hostId) throw new HarnessError('PAIRING_FAILED', 'the hub daemon did not pair with the target');
+  transcript(`paired hostId=${hostId}`);
+
+  // 3. Owner set-up on the hub with the project mapped on the paired host (`--remote`: the
+  //    target's realpath'd <repo>/.git, stored as given; the hub cannot resolve it).
+  const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', 'qa-supervisor', '--repo-identity', 'qa:qa-supervisor',
+    '--host', hostId, '--git-common-dir', gitCommonDir, '--remote', '--json'], { label: 'supervisor-setup-paired', env: hubEnv });
+  ctx.assert('project-mapped-on-paired-host', setup.code === 0 && setup.json?.ok === true && setup.json?.hostId === hostId
+    && setup.json?.gitCommonDir === gitCommonDir, { code: setup.code, json: setup.json, stderr: setup.stderr });
+  if (setup.code !== 0) throw new HarnessError('SETUP_FAILED', `the project could not be mapped on paired host ${hostId}: ${setup.json?.code ?? setup.code}`);
+
+  // 4. Two worker panes on the target: one reports its turn start, one stays silent.
+  const registered = await daemonCall(ctx, targetSocket, 'target-register-workspace', { type: 'registerWorkspace', workspaceId: REMOTE_WORKSPACE_ID, repoRoot: realpathSync(workspaceRoot) });
+  const spawnPane = async (mode) => {
+    writeFileSync(modeFile, `${mode}\n`);
+    const reply = await daemonCall(ctx, targetSocket, `target-spawn-${mode}`, { type: 'spawn', clientRequestId: `qa-${mode}-${ctx.runId}`, workspaceId: REMOTE_WORKSPACE_ID, worktree: null, cwd: repo, cols: 100, rows: 30 }, 60_000);
+    const sessionId = reply?.type === 'spawnOk' ? reply.sessionId : null;
+    if (!sessionId) throw new HarnessError('FIXTURE_FAILED', `the ${mode} pane was not spawned: ${JSON.stringify(reply)}`);
+    await waitForChange(ctx, `${mode} worker ready`, workerLogs, () => ({ done: readWorkerLogs(workerLogs).some((entry) => entry.sessionId === sessionId) }), 30_000);
+    transcript(`pane ${mode} sessionId=${sessionId}`);
+    return sessionId;
+  };
+  ctx.assert('target-workspace-registered', registered?.type === 'registerWorkspaceOk', { registered });
+  const reportingPane = await spawnPane('report');
+  const silentPane = await spawnPane('silent');
+  const workerOf = (sessionId) => readWorkerLogs(workerLogs).find((entry) => entry.sessionId === sessionId) ?? null;
+  const inputsOf = (sessionId) => (workerOf(sessionId)?.entries ?? []).filter((entry) => entry.kind === 'input' && entry.text.includes(REMOTE_WORK.instruction)).length;
+
+  const hub = await openHubReader(hubDb);
+  const submit = async (label, sessionId) => {
+    const file = join(data, `${label}.request.json`);
+    writeFileSync(file, `${JSON.stringify({ messageId: `qa-${label}-${ctx.runId}`, body: REMOTE_BODY, work: REMOTE_WORK })}\n`);
+    return ctx.cli(['supervisor', 'submit', '--host', hostId, '--session', sessionId, '--request-file', file, '--json'], { label: `submit-${label}`, env: hubEnv });
+  };
+  const status = (label, goalId) => ctx.cli(['supervisor', 'dispatch', 'status', '--goal', goalId, '--json'], { label: `status-${label}`, env: hubEnv });
+  const settledDispatch = (label, goalId, done) => waitForChange(ctx, label, dirname(hubDb), () => {
+    const goal = hub.one('SELECT run_state, state_detail FROM supervisor_goals WHERE goal_id = ?', goalId);
+    const dispatches = hub.all('SELECT request_id, state, run_id, uncertain_code, accepted_at, started_at FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId);
+    return { done: done(goal, dispatches), goal, dispatches };
+  }, 4 * TURN_START_MS + 60_000);
+
+  // 5. Positive receipt: the reporting pane starts the run from its own report.
+  const positive = await submit('positive', reportingPane);
+  const positiveGoal = positive.json?.receipt?.goal_id ?? null;
+  ctx.assert('positive-admitted-bound-to-paired-pane', positive.code === 0 && positive.json?.outcome === 'admitted' && typeof positiveGoal === 'string',
+    { code: positive.code, json: positive.json, stderr: positive.stderr });
+  if (!positiveGoal) throw new HarnessError('ADMISSION_FAILED', 'the positive submit returned no goal');
+  await settledDispatch('positive dispatch', positiveGoal, (goal, rows) => rows.some((row) => row.state === 'started' || row.state === 'uncertain') || HELD_STATES.has(goal?.run_state));
+  const positiveStatus = await status('positive', positiveGoal);
+  const positiveRow = positiveStatus.json?.dispatches?.[0] ?? null;
+  ctx.assert('positive-receipt-started-the-run', positiveStatus.code === 0 && positiveStatus.json?.binding?.hostId === hostId
+    && positiveStatus.json?.binding?.providerSessionId === reportingPane && positiveStatus.json?.dispatches?.length === 1
+    && positiveRow?.state === 'started' && typeof positiveRow?.runId === 'string' && typeof positiveRow?.startedAt === 'string'
+    && positiveRow?.requestId === positive.json?.receipt?.dispatch_request_id && inputsOf(reportingPane) === 1,
+  { status: positiveStatus.json, inputs: inputsOf(reportingPane) });
+  transcript(`positive goal=${positiveGoal} dispatch=${JSON.stringify(positiveRow)}`);
+
+  // 6. Missing receipt: the silent pane takes the bytes but never shows a turn start.
+  const missing = await submit('missing', silentPane);
+  const missingGoal = missing.json?.receipt?.goal_id ?? null;
+  ctx.assert('missing-admitted-bound-to-paired-pane', missing.code === 0 && missing.json?.outcome === 'admitted' && typeof missingGoal === 'string',
+    { code: missing.code, json: missing.json, stderr: missing.stderr });
+  if (!missingGoal) throw new HarnessError('ADMISSION_FAILED', 'the missing-receipt submit returned no goal');
+  await settledDispatch('missing-receipt dispatch', missingGoal, (goal, rows) => rows.some((row) => row.state !== 'ready' && row.state !== 'claimed') && goal?.run_state !== 'dispatching');
+  const missingStatus = await status('missing', missingGoal);
+  const missingRow = missingStatus.json?.dispatches?.[0] ?? null;
+  const acceptedNotStarted = (body, row) => body?.goal?.runState === 'delivery_uncertain' && body?.dispatches?.length === 1 && row?.state === 'uncertain'
+    && typeof row?.acceptedAt === 'string' && row?.startedAt === null && row?.settledAt === null && row?.runId === null
+    && ['TURN_NOT_OBSERVED', 'START_RECEIPT_MISSING'].includes(row?.uncertainCode) && body?.binding?.runId === null;
+  ctx.assert('missing-receipt-accepted-never-started', missingStatus.code === 0 && acceptedNotStarted(missingStatus.json, missingRow)
+    && missingStatus.json?.binding?.providerSessionId === silentPane && inputsOf(silentPane) === 1,
+  { status: missingStatus.json, inputs: inputsOf(silentPane), worker: workerOf(silentPane)?.entries ?? null });
+  const missingRead = await ctx.cli(['agents', 'read', silentPane, '--host', hostId, '--json'], { label: 'read-silent-pane', env: hubEnv });
+  ctx.evidence.writeJson('silent-pane-read.json', missingRead.json);
+  transcript(`missing goal=${missingGoal} dispatch=${JSON.stringify(missingRow)} paneRead=${missingRead.code}`);
+
+  // 7. Double binding of the started pane is refused and writes nothing.
+  const goalsBefore = hub.count('SELECT COUNT(*) AS n FROM supervisor_goals');
+  const doubled = await submit('double', reportingPane);
+  ctx.assert('double-binding-refused', doubled.code === 4 && doubled.json?.code === 'SESSION_ALREADY_BOUND'
+    && hub.count('SELECT COUNT(*) AS n FROM supervisor_goals') === goalsBefore, { code: doubled.code, json: doubled.json, goalsBefore });
+
+  // 8. Reconnect: the relay (recorded PID) is stopped and restarted on the same port; the
+  //    target's control channel reconnects and the hub reaches the pane again. Nothing is
+  //    resent and the uncertain delivery stays accepted, never started.
+  const connectedBefore = countLines(targetLog, 'relay control channel connected');
+  await ctx.terminate(relay, 'reconnect');
+  transcript(`relay pid=${relay.pid} stopped for reconnect`);
+  relay = await startRelay('relay-2');
+  await relayConnected(connectedBefore + 1, 'target relay control channel reconnect');
+  const reread = await ctx.cli(['agents', 'read', silentPane, '--host', hostId, '--json'], { label: 'read-silent-pane-after-reconnect', env: hubEnv, deadlineMs: 60_000 });
+  const afterStatus = await status('missing-after-reconnect', missingGoal);
+  const afterPositive = await status('positive-after-reconnect', positiveGoal);
+  ctx.assert('reconnected-without-resend', reread.code === 0 && afterStatus.code === 0 && acceptedNotStarted(afterStatus.json, afterStatus.json?.dispatches?.[0])
+    && afterStatus.json?.dispatches?.[0]?.requestId === missingRow?.requestId && afterPositive.json?.dispatches?.length === 1
+    && inputsOf(silentPane) === 1 && inputsOf(reportingPane) === 1
+    && hub.count("SELECT COUNT(*) AS n FROM supervisor_dispatches WHERE state = 'ready'") === 0,
+  { reread: { code: reread.code, json: reread.json }, missing: afterStatus.json, positive: afterPositive.json, inputs: { silent: inputsOf(silentPane), reporting: inputsOf(reportingPane) } });
+  transcript(`reconnect: relay-2 pid=${relay.pid} silentInputs=${inputsOf(silentPane)} reportingInputs=${inputsOf(reportingPane)} missingState=${afterStatus.json?.dispatches?.[0]?.state}`);
+
+  for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+  if (existsSync(targetLog)) ctx.evidence.writeText('target-daemon.log', readFileSync(targetLog, 'utf8'));
+  ctx.evidence.writeJson('remote-delivery.json', {
+    worker: { kind: 'fixture', note: 'Target panes run fixture-worker.mjs; the reporting pane reports agentState working on its first typed line, the silent pane (--no-report) never does. Neither is a real provider worker.' },
+    hostId, panes: { reporting: reportingPane, silent: silentPane },
+    positive: { goalId: positiveGoal, admitted: positive.json, status: positiveStatus.json },
+    missing: { goalId: missingGoal, admitted: missing.json, status: missingStatus.json, afterReconnect: afterStatus.json },
+    doubleBinding: doubled.json,
+    notCovered: ['wrong-receipt: crates/ferryx-hub/src/supervisor/tests/receipts.rs'],
+  });
+}
+
 export const SCENARIOS = Object.freeze({
   runtime: planned('6', 'Real mhc: one structured assessment, restart the owned engine, resume the saved session from another cwd; missing capability refused'),
   admission: Object.freeze({
@@ -402,7 +665,22 @@ export const SCENARIOS = Object.freeze({
   waiting: planned('9', 'Parent starts two children; one settles, then the second settles/fails: no decision while incomplete, one resume, failure is not completion'),
   burst: planned('9', 'Four ordinary reports at virtual 0,1,2,3s advanced to 30s: one admitted model turn with four receipts; urgent pause has zero delay'),
   recovery: planned('12', 'Restart only the isolated supervisor at before-send, after-send-before-receipt and after-start boundaries: no resend, PTYs survive'),
-  'remote-delivery': planned('8', 'Target accepts bytes but suppresses the start receipt, then reconnects: never started/complete from acceptance, no duplicate input'),
+  'remote-delivery': Object.freeze({
+    implemented: true,
+    task: '8',
+    summary: 'Paired target pane: start receipt starts the run; suppressed receipt stays accepted/uncertain, never started, never resent across a relay reconnect',
+    deadlineMs: 8 * 60_000,
+    requiredAssertions: [
+      'target-ready-for-pairing', 'hub-paired-with-target', 'project-mapped-on-paired-host', 'target-workspace-registered',
+      'positive-admitted-bound-to-paired-pane', 'positive-receipt-started-the-run', 'missing-admitted-bound-to-paired-pane',
+      'missing-receipt-accepted-never-started', 'double-binding-refused', 'reconnected-without-resend',
+    ],
+    // Listed in assertions.json, never counted toward PASS.
+    notCovered: [
+      { clause: 'wrong-receipt', reason: 'a start receipt naming another request or session is produced only by a scripted target', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/receipts.rs' },
+    ],
+    run: runRemoteDelivery,
+  }),
   authority: planned('10,13', 'Non-owner submit/approve, mirror device mutation, worker "approve everything": 403/typed denial, zero dispatch, zero memory change'),
   memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
   capabilities: planned('12', 'Remove one required RPC capability; auth, quota and provider faults: named degraded cause, no fallback model, workers preserved'),

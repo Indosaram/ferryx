@@ -732,6 +732,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::AgentControlSettingsSet { .. } => "agentControlSettingsSet",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
+        DaemonRequest::SupervisorDispatch { .. } => "supervisorDispatch",
         DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",

@@ -562,6 +562,30 @@ impl SupervisorGoalAction {
     }
 }
 
+/// Submit owner work bound to an existing pane, or read one goal's dispatch status. Gated by
+/// `supervisorDispatchV1`; carried only on the owner socket. `status` writes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorDispatchAction {
+    /// Admit `work` as the installation owner (adapter `cli`, dedupe id `message_id`). With
+    /// `session_id` the goal is bound at admission to that existing pane on `host_id`.
+    Submit {
+        message_id: String,
+        body: String,
+        host_id: Option<String>,
+        session_id: Option<String>,
+        work: ferryx_hub::supervisor::admission::SubmitWork,
+    },
+    /// The goal's state, binding and every dispatch with its receipts.
+    Status { goal_id: String },
+}
+
+impl SupervisorDispatchAction {
+    pub fn mutates(&self) -> bool {
+        matches!(self, Self::Submit { .. })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonRequest {
@@ -808,6 +832,11 @@ pub enum DaemonRequest {
     },
     /// What the supervisor drives and watches, and the input it recently typed.
     SupervisorSnapshot,
+    /// Submit owner work to a chosen pane, or read a goal's dispatches. Gated by
+    /// `supervisorDispatchV1`.
+    SupervisorDispatch {
+        request: SupervisorDispatchAction,
+    },
     /// A person pauses or resumes one supervised lane; the supervisor stops typing into it.
     #[serde(rename_all = "camelCase")]
     SupervisorSetPaused {
@@ -1289,6 +1318,11 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     AgentIntegrationOk {
         enabled: bool,
+    },
+    /// The admission outcome (`submit`) or the dispatch status (`status`).
+    #[serde(rename_all = "camelCase")]
+    SupervisorDispatchOk {
+        result: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
     SupervisorSnapshotOk {
@@ -1949,6 +1983,42 @@ mod tests {
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorGoalOk""#), "{text}");
         assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorGoalOk { .. }));
+    }
+
+    #[test]
+    fn supervisor_dispatch_actions_round_trip_on_the_daemon_wire() {
+        let status = DaemonRequest::SupervisorDispatch {
+            request: SupervisorDispatchAction::Status { goal_id: "g-1".into() },
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({"type":"supervisorDispatch","request":{"action":"status","goalId":"g-1"}})
+        );
+        let wire = serde_json::json!({"type":"supervisorDispatch","request":{
+            "action":"submit","messageId":"m-1","body":"Create result.txt","hostId":"paired-1","sessionId":"pane-1",
+            "work":{"title":"t","instruction":"i","requirements":[{"id":"r1","text":"x","verifier":"v"}]}
+        }});
+        match serde_json::from_value::<DaemonRequest>(wire.clone()).unwrap() {
+            DaemonRequest::SupervisorDispatch { request } => {
+                assert!(request.mutates());
+                assert!(matches!(&request, SupervisorDispatchAction::Submit { session_id: Some(session), host_id: Some(host), .. }
+                    if session == "pane-1" && host == "paired-1"));
+                let back = DaemonRequest::SupervisorDispatch { request };
+                assert_eq!(serde_json::to_value(&back).unwrap()["request"]["sessionId"], "pane-1");
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        assert!(!SupervisorDispatchAction::Status { goal_id: "g".into() }.mutates());
+        // The pane is the owner's choice on the request, never a field of the model's work.
+        let smuggled = serde_json::json!({"type":"supervisorDispatch","request":{
+            "action":"submit","messageId":"m-1","body":"b",
+            "work":{"title":"t","instruction":"i","requirements":[],"sessionId":"pane-1"}
+        }});
+        assert!(serde_json::from_value::<DaemonRequest>(smuggled).is_err());
+        let ok = DaemonResponse::SupervisorDispatchOk { result: serde_json::json!({"goal": null}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorDispatchOk""#), "{text}");
+        assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorDispatchOk { .. }));
     }
 
     #[test]
