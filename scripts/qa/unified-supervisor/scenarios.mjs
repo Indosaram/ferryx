@@ -15,7 +15,7 @@ import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync,
 import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HarnessError, isInside, POSIX } from './harness.mjs';
+import { HarnessError, isInside, POSIX, waitForPath } from './harness.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
