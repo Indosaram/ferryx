@@ -1,6 +1,6 @@
 //! Offline real-production pipeline QA/measurement. No daemon, socket, GUI, or GPU is started.
 //! cargo run --offline --locked --manifest-path src-tauri/Cargo.toml --example perf_terminal_pipeline -- search
-//! Modes: qa, search, history, all. Run the identical source/profile on both revisions.
+//! Modes: qa, search, history, reconstruct64, reconstruct8m, all. Run the identical source/profile on both revisions.
 //! Timings exclude fixture preparation unless named; RSS is the process lifetime high-water mark,
 //! not live heap size or a phase delta. CPU is process user+system time (Unix only).
 
@@ -218,6 +218,125 @@ fn history_measurements() {
     }
 }
 
+// Focused follow-up for the small 64 KiB reconstruction movement. This preserves
+// the original fixture and timed operation, but amortizes clock/CPU probes across
+// 100 reconstructions per sample. Run paired, alternating binaries on an idle host.
+fn reconstruction_64k_measurements() {
+    const COMMAND: &[u8] = b"\x1b_Ga=p,i=1,p=1,q=2;\x1b\\";
+    const MARKER: &[u8] = b"RETAINED-TEXT\r\n";
+    const BATCH: usize = 100;
+    const SAMPLES: usize = 30;
+    const WARMUP_BATCHES: usize = 3;
+    let image_budget = 64 * 1024;
+    let groups = image_budget / COMMAND.len();
+    let hub = TerminalOutputHub::new_with_retention(512 * 1024,
+        RetentionBudget { text_bytes: 512 * 1024, image_bytes: image_budget });
+    drop(hub.register_session("measure"));
+    publish(&hub, "measure", MARKER);
+    publish(&hub, "measure", b"\x1b_Ga=T,f=24,s=1,v=1,i=1,p=1,q=2;/wAA\x1b\\");
+    for _ in 0..groups { hub.publish("measure", COMMAND.to_vec()).unwrap(); }
+    // The original history mode runs two warmups and five 512-publish samples
+    // before freezing this snapshot. Keep that preparation identical, untimed.
+    for _ in 0..(2 + RUNS) * 512 { hub.publish("measure", COMMAND.to_vec()).unwrap(); }
+    let snapshot = hub.subscribe_with_sequence("measure", None).unwrap().snapshot;
+    let expected = [MARKER, COMMAND.repeat(groups).as_slice()].concat();
+    assert_eq!(snapshot.history.as_slice(), expected.as_slice());
+    let mut fixture_fnv1a64 = 0xcbf29ce484222325u64;
+    for &byte in &snapshot.history {
+        fixture_fnv1a64 ^= u64::from(byte);
+        fixture_fnv1a64 = fixture_fnv1a64.wrapping_mul(0x100000001b3);
+    }
+    println!("{}", json!({"fixture":"original_65536_reconstruction", "bytes":snapshot.history.len(),
+        "retained_groups":groups, "command_bytes":COMMAND.len(), "fnv1a64":format!("{fixture_fnv1a64:016x}"),
+        "batch":BATCH, "samples":SAMPLES, "warmup_batches":WARMUP_BATCHES,
+        "operation":"new+resize+feed+render_snapshot+row_text_assert+drop; no search or hub work timed"}));
+    let operation = || {
+        let mut reconstructed = terminal(80, 24);
+        reconstructed.feed(black_box(&snapshot.history)).unwrap();
+        assert!(reconstructed.render_snapshot().unwrap().row_text(0).contains("RETAINED-TEXT"));
+        snapshot.history.len()
+    };
+    for _ in 0..WARMUP_BATCHES * BATCH { black_box(operation()); }
+    for sample in 0..SAMPLES {
+        let before = resources();
+        let start = Instant::now();
+        for _ in 0..BATCH { assert_eq!(black_box(operation()), expected.len()); }
+        let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let after = resources();
+        println!("{}", json!({"phase":"ghostty_reconstruct_65536_batched", "sample":sample,
+            "iterations":BATCH, "wall_total_ms":wall_ms, "wall_ms":wall_ms / BATCH as f64,
+            "cpu_ms":(after.cpu_ms-before.cpu_ms) / BATCH as f64,
+            "process_peak_rss_kib":after.max_rss_kib, "checksum":expected.len()}));
+    }
+}
+
+// Run in a separate process BEFORE isolated timing: compare every byte against
+// the original hub pipeline, including its exact publish preconditioning count.
+fn verify_8m_fixture() {
+    const COMMAND: &[u8] = b"\x1b_Ga=p,i=1,p=1,q=2;\x1b\\";
+    const MARKER: &[u8] = b"RETAINED-TEXT\r\n";
+    let image_budget = 8 * 1024 * 1024;
+    let groups = image_budget / COMMAND.len();
+    let hub = TerminalOutputHub::new_with_retention(512 * 1024,
+        RetentionBudget { text_bytes: 512 * 1024, image_bytes: image_budget });
+    drop(hub.register_session("measure"));
+    publish(&hub, "measure", MARKER);
+    publish(&hub, "measure", b"\x1b_Ga=T,f=24,s=1,v=1,i=1,p=1,q=2;/wAA\x1b\\");
+    for _ in 0..groups { hub.publish("measure", COMMAND.to_vec()).unwrap(); }
+    for _ in 0..(2 + RUNS) * 512 { hub.publish("measure", COMMAND.to_vec()).unwrap(); }
+    let snapshot = hub.subscribe_with_sequence("measure", None).unwrap().snapshot;
+    let expected = [MARKER, COMMAND.repeat(groups).as_slice()].concat();
+    assert_eq!(snapshot.history.as_slice(), expected.as_slice(), "full original snapshot bytes differ");
+    let mut fnv = 0xcbf29ce484222325u64;
+    for &byte in &snapshot.history { fnv ^= u64::from(byte); fnv = fnv.wrapping_mul(0x100000001b3); }
+    println!("{}", json!({"qa":"original_8m_snapshot_full_byte_equality", "status":"PASS",
+        "bytes":snapshot.history.len(), "groups":groups, "fnv1a64":format!("{fnv:016x}"),
+        "preconditioning_publishes":(2 + RUNS) * 512}));
+}
+
+// Follow-up for the distinct 8 MiB signal; do not infer this result from 64 KiB.
+fn reconstruction_8m_isolated_measurements() {
+    const COMMAND: &[u8] = b"\x1b_Ga=p,i=1,p=1,q=2;\x1b\\";
+    const MARKER: &[u8] = b"RETAINED-TEXT\r\n";
+    const BATCH: usize = 5;
+    const SAMPLES: usize = 10;
+    const WARMUP_BATCHES: usize = 6;
+    let image_budget = 8 * 1024 * 1024;
+    let groups = image_budget / COMMAND.len();
+    // Exactly the original retained bytes, but no hub publish/snapshot preconditioning.
+    // This isolates reconstruction; it does not reproduce the original full pipeline.
+    let history = [MARKER, COMMAND.repeat(groups).as_slice()].concat();
+    assert_eq!(history.len(), 8_388_612);
+    assert_eq!(groups, 399_457);
+    let mut fixture_fnv1a64 = 0xcbf29ce484222325u64;
+    for &byte in &history {
+        fixture_fnv1a64 ^= u64::from(byte);
+        fixture_fnv1a64 = fixture_fnv1a64.wrapping_mul(0x100000001b3);
+    }
+    println!("{}", json!({"fixture":"original_8388608_reconstruction_isolated", "bytes":history.len(),
+        "retained_groups":groups, "command_bytes":COMMAND.len(), "fnv1a64":format!("{fixture_fnv1a64:016x}"),
+        "preconditioning":"direct identical buffer; no hub publish or snapshot", "batch":BATCH, "samples":SAMPLES, "warmup_batches":WARMUP_BATCHES,
+        "operation":"new+resize+feed+render_snapshot+row_text_assert+drop; no search or hub work timed"}));
+    let operation = || {
+        let mut reconstructed = terminal(80, 24);
+        reconstructed.feed(black_box(&history)).unwrap();
+        assert!(reconstructed.render_snapshot().unwrap().row_text(0).contains("RETAINED-TEXT"));
+        history.len()
+    };
+    for _ in 0..WARMUP_BATCHES * BATCH { black_box(operation()); }
+    for sample in 0..SAMPLES {
+        let before = resources();
+        let start = Instant::now();
+        for _ in 0..BATCH { assert_eq!(black_box(operation()), history.len()); }
+        let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let after = resources();
+        println!("{}", json!({"phase":"ghostty_reconstruct_8388608_isolated_batched", "sample":sample,
+            "iterations":BATCH, "wall_total_ms":wall_ms, "wall_ms":wall_ms / BATCH as f64,
+            "cpu_ms":(after.cpu_ms-before.cpu_ms) / BATCH as f64,
+            "process_peak_rss_kib":after.max_rss_kib, "checksum":history.len()}));
+    }
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "qa".into());
     println!("{}", json!({"harness":"real-terminal-pipeline", "mode":mode,
@@ -229,7 +348,10 @@ fn main() {
         "qa" => {},
         "search" => search_measurements(),
         "history" => history_measurements(),
+        "reconstruct64" => reconstruction_64k_measurements(),
+        "reconstruct8m" => reconstruction_8m_isolated_measurements(),
+        "reconstruct8m-verify" => verify_8m_fixture(),
         "all" => { search_measurements(); history_measurements(); },
-        _ => panic!("expected qa, search, history, or all"),
+        _ => panic!("expected qa, search, history, reconstruct64, reconstruct8m, reconstruct8m-verify, or all"),
     }
 }

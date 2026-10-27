@@ -308,8 +308,12 @@ mod tests {
     fn test_cell_underline_produces_rect_in_lower_cell() {
         let gpu = match GpuContext::new() {
             Ok(gpu) => gpu,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
         let base = CellSnapshot {
@@ -356,8 +360,12 @@ mod tests {
     fn test_cell_strikethrough_produces_rect_in_vertical_middle() {
         let gpu = match GpuContext::new() {
             Ok(gpu) => gpu,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
         let mut strike = CellSnapshot {
@@ -390,8 +398,12 @@ mod tests {
     fn test_cell_overline_produces_rect_at_cell_top() {
         let gpu = match GpuContext::new() {
             Ok(gpu) => gpu,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
         let mut over = CellSnapshot {
@@ -423,8 +435,12 @@ mod tests {
     fn test_cell_invisible_produces_zero_glyph_instances() {
         let gpu = match GpuContext::new() {
             Ok(gpu) => gpu,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
         let mut invis = CellSnapshot {
@@ -455,8 +471,12 @@ mod tests {
     fn test_cell_faint_glyph_color_differs_from_non_faint() {
         let gpu = match GpuContext::new() {
             Ok(gpu) => gpu,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = test_config();
         let normal = CellSnapshot {

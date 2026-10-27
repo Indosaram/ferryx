@@ -1,0 +1,262 @@
+{
+  "seed": 20261027,
+  "order": [
+    [
+      "head",
+      "baseline"
+    ],
+    [
+      "head",
+      "baseline"
+    ],
+    [
+      "head",
+      "baseline"
+    ],
+    [
+      "baseline",
+      "head"
+    ],
+    [
+      "head",
+      "baseline"
+    ],
+    [
+      "baseline",
+      "head"
+    ],
+    [
+      "baseline",
+      "head"
+    ],
+    [
+      "head",
+      "baseline"
+    ],
+    [
+      "baseline",
+      "head"
+    ],
+    [
+      "baseline",
+      "head"
+    ]
+  ],
+  "binary_sha256": {
+    "baseline": "e447c3704cb17477479566e0f8632b899e645bc1d313057870b615dc13e494c4",
+    "head": "3d9f77d145789f34d9572c286c68b3d23dfac38cc5307b6e32694226f55d430a"
+  },
+  "mode": "reconstruct8m",
+  "binaries": {
+    "baseline": "/workspace/scratch/c4efaab78d82/ferryx-wt/.evidence/pr24-complete-local-20261027/performance-reconstruction-8m/pipeline-baseline",
+    "head": "/workspace/scratch/c4efaab78d82/ferryx-wt/.evidence/pr24-complete-local-20261027/performance-reconstruction-8m/pipeline-head"
+  },
+  "pairs": [
+    {
+      "pair": 0,
+      "order": [
+        "head",
+        "baseline"
+      ],
+      "head_median_ms": 73.2543232,
+      "head_cpu_median_ms": 73.25019999999995,
+      "head_process_peak_rss_kib": 40404,
+      "head_process_seconds": 6.183301596000092,
+      "head_raw_sha256": "d50403a026e4b6a7f3dceb2bb1b32a5b3184665fb5a15d544ffde3a8f569e572",
+      "baseline_median_ms": 78.59092190000001,
+      "baseline_cpu_median_ms": 78.59049999999996,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.386698554000759,
+      "baseline_raw_sha256": "e1d109fb61752b7d0a2577b4178858a95aca054f9db508d23b12645f2181223b"
+    },
+    {
+      "pair": 1,
+      "order": [
+        "head",
+        "baseline"
+      ],
+      "head_median_ms": 76.6364784,
+      "head_cpu_median_ms": 76.63099999999994,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.1332638519998,
+      "head_raw_sha256": "7a8707462024210962c63c5210f588b9c1bc5534a97db670d67e40b2e4f12916",
+      "baseline_median_ms": 74.2185231,
+      "baseline_cpu_median_ms": 74.21640000000006,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.036065205997147,
+      "baseline_raw_sha256": "a0e8c355deced61c617f07bc72d3206cc4fdd4a3b7279072108050ff08add6d5"
+    },
+    {
+      "pair": 2,
+      "order": [
+        "head",
+        "baseline"
+      ],
+      "head_median_ms": 74.56044059999999,
+      "head_cpu_median_ms": 74.54569999999994,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.033350978999806,
+      "head_raw_sha256": "1f438f56155a6b2715dc9aea5875c7dae3483aaadabe0e96e52bc6b9903692ed",
+      "baseline_median_ms": 73.358495,
+      "baseline_cpu_median_ms": 73.35250000000005,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.036413416000869,
+      "baseline_raw_sha256": "c6d16f186a53bca3cf227d0634daa3a39eb706cea655b33bd57e097e5c6e39fc"
+    },
+    {
+      "pair": 3,
+      "order": [
+        "baseline",
+        "head"
+      ],
+      "baseline_median_ms": 77.9528075,
+      "baseline_cpu_median_ms": 77.94400000000002,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.333946842998557,
+      "baseline_raw_sha256": "7c6ddf7f11834b192807c8b5fab1c5c90d0b1751c5460307620fbfa751f66adb",
+      "head_median_ms": 76.27458430000001,
+      "head_cpu_median_ms": 76.25280000000004,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.234424887999921,
+      "head_raw_sha256": "c292775e6ed423d4a3fd4899234b0d9c05903473a8fe013f68da8f65df6d78d7"
+    },
+    {
+      "pair": 4,
+      "order": [
+        "head",
+        "baseline"
+      ],
+      "head_median_ms": 77.701253,
+      "head_cpu_median_ms": 77.69070000000006,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.234337731999403,
+      "head_raw_sha256": "806be5bba133606acdf0fed28c033ad4a92d9dd32c43dc77d6c6c57e6bdf7900",
+      "baseline_median_ms": 87.5329839,
+      "baseline_cpu_median_ms": 87.52880000000005,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.937629539999762,
+      "baseline_raw_sha256": "388ba9fb130479ed37f3f636ac67272b5def949d29e97bce4a0ee9a789bc3f10"
+    },
+    {
+      "pair": 5,
+      "order": [
+        "baseline",
+        "head"
+      ],
+      "baseline_median_ms": 79.61046040000001,
+      "baseline_cpu_median_ms": 79.6,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.537295425001503,
+      "baseline_raw_sha256": "564f15be4eb4c186d1c62a01391a9f1f91699445cf882ade5c89b3731bd40479",
+      "head_median_ms": 75.38375199999999,
+      "head_cpu_median_ms": 75.37200000000003,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.284846369999286,
+      "head_raw_sha256": "a1770f517d7c2e1937354af7fd9118c42059d91775036b338ffbe354c1a3e5ca"
+    },
+    {
+      "pair": 6,
+      "order": [
+        "baseline",
+        "head"
+      ],
+      "baseline_median_ms": 79.1642419,
+      "baseline_cpu_median_ms": 79.15290000000005,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.334382149998419,
+      "baseline_raw_sha256": "5411807ee2d553483e69d9ce6e2a291f2ba84c478722df589444b835acf646b7",
+      "head_median_ms": 77.21439670000001,
+      "head_cpu_median_ms": 77.21200000000003,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.285822522000672,
+      "head_raw_sha256": "ca1d0558de0a68fda0f4567083c0b574684b1595934f172e9ca7986228739dbb"
+    },
+    {
+      "pair": 7,
+      "order": [
+        "head",
+        "baseline"
+      ],
+      "head_median_ms": 73.72443469999999,
+      "head_cpu_median_ms": 73.72060000000002,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 5.88315995299854,
+      "head_raw_sha256": "5a540a9105750895bac81f131cc5eb90e349791218505a25142357aa8076bd95",
+      "baseline_median_ms": 76.0917136,
+      "baseline_cpu_median_ms": 76.08620000000002,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.245185314997798,
+      "baseline_raw_sha256": "3d78c565f3575d42c1a5ed2b10e67289045de18cbf685c3eafde35e5310998e9"
+    },
+    {
+      "pair": 8,
+      "order": [
+        "baseline",
+        "head"
+      ],
+      "baseline_median_ms": 80.8150174,
+      "baseline_cpu_median_ms": 80.81230000000005,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 6.638426958001219,
+      "baseline_raw_sha256": "5c75d550d0a89f35af7821f50505417f87c3fb922162f1ba39938a3f135acbe0",
+      "head_median_ms": 75.9882504,
+      "head_cpu_median_ms": 75.97160000000008,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.23576651500116,
+      "head_raw_sha256": "9fed02726d367bd6c1146fe9f66498ed962acc9a80f55fca7e8ad99cf1b49c00"
+    },
+    {
+      "pair": 9,
+      "order": [
+        "baseline",
+        "head"
+      ],
+      "baseline_median_ms": 86.0730853,
+      "baseline_cpu_median_ms": 85.95569999999998,
+      "baseline_process_peak_rss_kib": 40532,
+      "baseline_process_seconds": 7.087543419998838,
+      "baseline_raw_sha256": "eac252d305f5ae49429f0d5c8896aacebfc0e262fc4d1699dca43c01693c3aa1",
+      "head_median_ms": 78.7780331,
+      "head_cpu_median_ms": 78.77380000000002,
+      "head_process_peak_rss_kib": 40532,
+      "head_process_seconds": 6.4346780859996215,
+      "head_raw_sha256": "b3d4d39c3a3f438332ff50fcc3333fa827288a6163d8752b8b17b283cfd1a9cf"
+    }
+  ],
+  "status": "MEASURED_NOT_A_GUI_OR_FULL_APP_PASS",
+  "scope": "real Ghostty reconstruction only, no UI/PTY/GPU",
+  "fixture": {
+    "fixture": "original_8388608_reconstruction_isolated",
+    "bytes": 8388612,
+    "retained_groups": 399457,
+    "command_bytes": 21,
+    "fnv1a64": "629def158f5ffe56",
+    "preconditioning": "direct identical buffer; no hub publish or snapshot",
+    "batch": 5,
+    "samples": 10,
+    "warmup_batches": 6,
+    "operation": "new+resize+feed+render_snapshot+row_text_assert+drop; no search or hub work timed"
+  },
+  "summary": {
+    "process_pairs": 10,
+    "head_over_baseline_geomean_ratio": 0.9584709624998115,
+    "paired_bootstrap_95pct_ratio": [
+      0.9327719705762096,
+      0.9851217754599021
+    ],
+    "pair_ratio_min_max": [
+      0.8876797012742986,
+      1.032578865746791
+    ],
+    "baseline_process_median_range_ms": [
+      73.358495,
+      87.5329839
+    ],
+    "head_process_median_range_ms": [
+      73.2543232,
+      78.7780331
+    ],
+    "unit": "per reconstruction milliseconds; >1 ratio means head slower",
+    "uncertainty_scope": "paired process-block resampling, conditional on this machine/profile/order; not whole-app performance"
+  }
+}

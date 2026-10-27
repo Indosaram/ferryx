@@ -162,3 +162,142 @@ rendering and interactive desktop acceptance. **They do not establish a current 
 GUI pass**, on Linux or macOS. Later QA-only script/workflow changes do not change the
 measured production/build/harness sources; exact revision equivalence is recorded in
 metadata without relabeling the binary's actually compiled revision.
+
+## Paired follow-up of the 64 KiB reconstruction signal — 2026-10-27
+
+The earlier +4–7% movement was **not reproduced in this run**, but a same-binary
+control also moved by several percent. This does **not** establish equivalence or
+rule out a small regression; no production performance change was made on this evidence.
+
+Compared exact baseline `eab2e8e4712e60fa155cf794ad5885afff943244` with restored local
+head `c748cd83e1a301f5037bbdf3871bc5898571d701`, before the subsequent font changes.
+Both used the identical extended harness, Rust 1.99.1, pinned Ghostty, Cargo.lock,
+default features, and original `opt-level=0/debug=0/incremental=0/jobs=1` profile.
+See [exact source, binary, and toolchain hashes](evidence/reconstruction-20261027/provenance.json).
+
+The new `reconstruct64` mode asserts the original **65,535-byte** retained buffer
+(3,120 placement commands plus text marker), including the original untimed hub
+preparation. It times the same native terminal creation/resize/feed/snapshot/text
+assertion/destruction operation, batched 100 times per sample, with 30 samples after
+300 warmup operations. No retention or search operation is inside this timed phase.
+Ten fresh-process pairs used a seeded balanced AB/BA order, with no competing build
+or benchmark; four further A/A pairs used the **same immutable head binary** twice.
+All 28 processes exited successfully: 84,000 timed operations plus 8,400 warmups.
+
+| Comparison | Process pairs | Baseline-label median ms¹ | Head-label median ms¹ | Paired geometric head/baseline ratio | Nominal paired bootstrap range² |
+|---|---:|---:|---:|---:|---:|
+| c748 / eab2 | 10 | 1.026 | 1.044 | 0.9961 | 0.9461–1.0425 |
+| c748 / identical c748 control | 4 | 1.075 | 1.025 | 0.9518 | 0.9219–0.9975 |
+
+¹ Median of each process's 30 batch means, then median across processes; these
+marginal summaries are not the paired ratio estimator. Each batch mean is milliseconds
+per reconstruction. CPU deltas and lifetime RSS are retained in the raw samples.
+
+² 20,000 seeded bootstrap resamples of **process pairs**, not of the correlated inner
+samples. The nominal 95% range is conditional and **not a calibrated acceptance
+bound**: the A/A range excludes identity despite identical binaries. Thus the A/B
+upper endpoint must not be used to claim that a 6% regression has been excluded.
+Process/order/environment variation remains material. A/B individual pair ratios
+ranged 0.847–1.097. RSS includes launch/setup/QA and warmups, not reconstruction heap;
+CPU deltas include the small post-timer resource-query overhead.
+
+Source review finds identical `NativeTerminal`, lifecycle, feed/snapshot and history
+stream implementations along this phase's direct call path. The changed retention
+eviction runs during **untimed preparation**, and search is not called in reconstruction.
+This argues against a direct changed-algorithm cause, but cannot exclude indirect code
+layout, allocation-state, or environment effects. It is not evidence about whole-app
+performance, PTY delivery, GPU rendering, or input latency.
+
+Raw evidence: [paired results and order](evidence/reconstruction-20261027/paired/result.json),
+[A/A control](evidence/reconstruction-20261027/aa-control/result.json), and their sibling
+JSONL files. Both results, including the unstable control, are retained without
+selective reruns. The [runner](paired_reconstruction.py) supports explicit binary paths;
+use `--baseline`, `--head`, `--pairs 10`, and a fresh `--output` directory. For the
+separate control, pass the same head path twice and `--pairs 4`. Its three unit tests
+validate statistics helpers only, not runtime performance.
+
+### Final font-fix head, same predeclared experiment
+
+After the separately verified font correction, the same design was run **once** on
+`675f452a66270bee21832dbaacae0ced9d159886`, with the original immutable eab2 baseline
+binary. The newly compiled head's harness hash remained
+`17eb1ce371480bf5dec0d14c2faba30ae81223a78a88d134e0e374a9c0e805c1`;
+[final provenance](evidence/reconstruction-20261027/final-675-provenance.json) records
+its binary SHA-256 and unchanged reconstruction-path source hashes. No competing
+build or benchmark ran during these measurements.
+
+| Comparison | Process pairs | Baseline-label median ms¹ | Head-label median ms¹ | Paired geometric head/baseline ratio | Nominal paired bootstrap range² |
+|---|---:|---:|---:|---:|---:|
+| 675 / eab2 | 10 | 1.074 | 1.097 | 1.0040 | 0.9875–1.0195 |
+| 675 / identical 675 control | 4 | 1.108 | 1.076 | 0.9706 | 0.9069–1.0333 |
+
+The same qualifications above apply. The final paired point estimate is **+0.40%**,
+not the original +6–7% signal; identical-binary controls still show material variation.
+This is **not a formal exclusion or equivalence claim**, and the initial unstable A/A
+result is retained rather than hidden. There is no evidence-backed production
+reconstruction fix to make from these measurements. Indirect layout/allocation and
+environment effects remain possible despite identical direct-path implementations.
+
+All 28 final-head processes exited successfully (another 84,000 timed operations and
+8,400 warmups). Raw [final paired results](evidence/reconstruction-20261027/paired-675/result.json)
+and [final A/A control](evidence/reconstruction-20261027/aa-control-675/result.json)
+include every process order and raw-file hash. These are still dev-profile component
+measurements, not optimized application or interactive desktop acceptance.
+
+### Scope correction and isolated 8 MiB reconstruction follow-up
+
+The preceding 64 KiB experiments **do not resolve the separate 8 MiB signal**.
+The earlier delivered report's 10 fresh-process history pairs recorded
+`ghostty_reconstruct_8388608` head/baseline geometric ratio **1.0599**, with an
+exploratory pair-bootstrap interval **1.0107–1.1016** (8/10 pairs slower).
+That observation remains preserved, not replaced by the 64 KiB results.
+
+The `reconstruct8m` follow-up isolates the same reconstruction operation using
+exactly the old retained bytes: `RETAINED-TEXT\r\n` followed by 399,457 identical
+21-byte placement commands, totaling 8,388,612 bytes. It directly builds this
+buffer instead of running hub publishing first. This intentionally removes the
+original unequal publish preconditioning (roughly 1.6 seconds per baseline
+publish sample versus 1.4 milliseconds in head); it therefore investigates the
+reconstruction component, **not equivalence of the original full history
+pipeline or proof that preconditioning caused the difference**. Existing
+untimed search/image QA still runs before the isolated mode in both binaries.
+
+Predeclared design: same default-feature dev profile and identical harness on
+original `eab2e8e` baseline and current production source; 30 reconstruction
+warmups per fresh process, then 10 samples of 5 operations, divided by 5 to
+report per-operation milliseconds. Run 10 balanced, shuffled AB/BA process
+pairs followed by 4 balanced A/A same-head pairs, using
+`paired_reconstruction.py --mode reconstruct8m`. Keep every raw result and
+report process-pair ratios with the same control/uncertainty caveats above.
+Before timing, run `reconstruct8m-verify` in a separate process for each binary.
+It executes the original hub preparation, then asserts full byte-for-byte
+equality with the direct fixture; record its output and the expected buffer
+SHA256. The historic numeric `checksum` is only a length, not a byte hash.
+Results (all raw observations retained in
+[`evidence/reconstruction-8m-20261027`](evidence/reconstruction-8m-20261027)):
+
+| Experiment | Paired geometric ratio head/base | Nominal pair-bootstrap 95% range | Marginal median baseline / head (ms) |
+|---|---:|---:|---:|
+| eab2 baseline vs current production source | 0.95847 | 0.93277–0.98512 | 78.878 / 76.131 |
+| Same-head A/A control | 0.99908 | 0.96862–1.03429 | 76.255 / 74.229 |
+
+Both separate verification processes passed full original-hub snapshot byte
+equality. All 28 timed processes exited 0: 1,400 measured reconstructions and
+840 warmups; every raw-file SHA256 was verified after copying. Baseline process
+medians ranged 73.358–87.533 ms; head 73.254–78.778 ms. Paired ratios ranged
+0.88768–1.03258. Binary/input/harness/source hashes and the initial baseline
+missing-UI-resource build failure are documented in provenance; the same built
+UI resources were supplied to satisfy Tauri, not run by this component example.
+
+**The original roughly 6% 8 MiB slowdown was not reproduced in this isolated
+current-head run.** This is not a rerun of the historical head or original
+publisher-preconditioned history pipeline, nor proof that preconditioning
+caused the original difference. The observed ratio below 1 is not a claimed
+new optimization: there is no production reconstruction change justified by
+this experiment. Small-process-count bootstrap ranges remain conditional,
+uncalibrated evidence, especially given the earlier 64 KiB A/A instability.
+These are default-feature **dev-profile component measurements**, not release
+build, whole-app or input-to-screen latency results. CPU includes resource-query
+overhead; RSS is process lifetime highwater including QA, setup and warmups,
+not reconstruction-only memory. All earlier adverse observations remain valid
+records and are not erased by this separate isolation experiment.

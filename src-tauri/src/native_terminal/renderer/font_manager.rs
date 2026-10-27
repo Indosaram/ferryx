@@ -220,6 +220,19 @@ impl FontManager {
         };
         let effective_font_size = self.font_size() * scale;
 
+        // Linux's scalar FreeType path cannot shape combining marks, selectors or ZWJ.
+        // Keep ASCII/CJK atlas misses on that existing fast path; shape full clusters
+        // and emoji with PangoCairo, including color bitmap strike selection.
+        #[cfg(target_os = "linux")]
+        if text.chars().nth(1).is_some() || is_color_glyph_candidate(text)
+            || text.chars().next().is_some_and(is_secondary_color_candidate) {
+            if let Some(glyph) = super::linux_cluster_raster::rasterize(
+                &self.font_family, text, width, height, effective_font_size, bold, italic,
+            ) {
+                return glyph;
+            }
+        }
+
         // Step 1: Primary emoji color candidate path
         if is_color_glyph_candidate(text) {
             if let Some(color_bytes) =
@@ -836,6 +849,24 @@ mod resolution_tests {
                 "no face rasterized any pixels for box-drawing glyph {ch:?}"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_manager_routes_clusters_and_secondary_emoji_without_changing_ascii() {
+        let manager = FontManager::new_with_family_and_size("DejaVu Sans Mono", 20.0);
+        for text in ["🦀", "👩‍💻", "🏁", "⌚", "⏰", "❤\u{fe0f}"] {
+            assert!(manager.rasterize_glyph(text, 40, 40, false, false).is_color(),
+                "{text:?} must reach the Linux color cluster path (requires Noto Color Emoji)");
+        }
+        assert!(!manager.rasterize_glyph("❤\u{fe0e}", 40, 40, false, false).is_color());
+        assert_ne!(manager.rasterize_glyph("e\u{301}", 20, 30, false, false),
+            manager.rasterize_glyph("e", 20, 30, false, false));
+        let mut scalar = vec![0; 20 * 30];
+        super::super::freetype_raster::rasterize_to_alpha_buffer(
+            "DejaVu Sans Mono", "A", &mut scalar, (20, 30), 20.0, false, false);
+        assert_eq!(manager.rasterize_glyph("A", 20, 30, false, false),
+            RasterizedGlyph::Alpha(scalar), "ASCII must retain the exact FreeType path");
     }
 
     #[test]

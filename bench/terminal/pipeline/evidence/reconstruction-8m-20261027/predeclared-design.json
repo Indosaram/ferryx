@@ -1,0 +1,18 @@
+{
+  "design": "10 balanced shuffled AB/BA pairs plus 4 same-head AA pairs; seed20261027; once only",
+  "sample_operations": 5,
+  "samples_per_process": 10,
+  "warmup_operations": 30,
+  "total_timed_operations": 1400,
+  "total_warmup_operations": 840,
+  "fixture_bytes": 8388612,
+  "retained_groups": 399457,
+  "phase": "new+resize+feed+render_snapshot+row_text_assert+drop",
+  "difference_from_original": "direct frozen identical buffer, not unequal hub publish preconditioning; initial untimed QA remains",
+  "baseline": "eab2e8e4712e60fa155cf794ad5885afff943244",
+  "head_production_source": "675f452a66270bee21832dbaacae0ced9d159886; source remains unchanged in9c3a91fd",
+  "profile": "defaultfeatures devopt0 debug0 incremental0 jobs1 locked offline",
+  "fixture_sha256": "98fd959d4908bb928a7d4ae8cc026b6f9b738b08bf811cac09f7583f2c1097d3",
+  "harness_sha256": "740e3359706b68e287029d8177b9387a8cc6440f9c861f694467232fbebb8b65",
+  "verification": "separate reconstruct8m-verify process per binary; actual original hub snapshot byte equality to direct frozen fixture, no verification in timed process"
+}

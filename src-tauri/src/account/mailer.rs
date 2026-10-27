@@ -696,14 +696,27 @@ mod tests {
             "FERRYX_MAIL_WEBHOOK_URL",
             "FERRYX_MAIL_WEBHOOK_TOKEN",
         ];
-        let saved: Vec<(&'static str, Option<String>)> =
-            KEYS.iter().map(|&k| (k, std::env::var(k).ok())).collect();
-        for (k, v) in &saved {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
+        // Never select a real provider inherited from the developer's environment.
+        // Keep the guard alive through every assertion, including panic unwinding.
+        let _env_lock = lock_mail_dir_env();
+        struct RestoreProviderEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreProviderEnv {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
             }
         }
+        let _restore = RestoreProviderEnv(
+            KEYS.iter().map(|&key| (key, std::env::var_os(key))).collect(),
+        );
+        for key in KEYS {
+            std::env::remove_var(key);
+        }
+        assert!(KEYS.iter().all(|key| std::env::var_os(key).is_none()));
 
         let temp_dir =
             std::env::temp_dir().join(format!("ferryx-test-prod-mail-{}", uuid::Uuid::new_v4()));
@@ -724,11 +737,5 @@ mod tests {
         assert_eq!(content, url);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
-        for (k, v) in saved {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
-        }
     }
 }

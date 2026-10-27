@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, renderHook } from "@testing-library/react";
 
 import { saveBrowserSettings } from "../lib/browserSettings";
 import type { BrowserTab } from "../lib/types";
@@ -46,6 +46,9 @@ function workspaceWithBrowser(tab: BrowserTab): WorkspaceState {
 }
 
 describe("browser session hydration", () => {
+  // Vitest globals are disabled, so RTL cannot register global auto-cleanup.
+  afterEach(cleanup);
+
   beforeEach(() => {
     localStorage.clear();
     browserMocks.ensureBrowser.mockClear();
