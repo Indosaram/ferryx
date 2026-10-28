@@ -93,6 +93,7 @@ type SidebarProps = {
   onCreateWorktree: (project?: RegisteredProject) => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
   onResetAgentState?: (worktree: Worktree) => void;
+  onShowChanges?: (worktree: Worktree) => void;
   onManageDisk?: (project: RegisteredProject) => void;
   onOpenHistory?: (project: RegisteredProject) => void;
   onOpenCommandPalette?: () => void;
@@ -139,6 +140,7 @@ export function Sidebar({
   onCreateWorktree,
   onDeleteWorktree = noop,
   onResetAgentState,
+  onShowChanges,
   onManageDisk,
   onOpenHistory,
   onOpenSettings,
@@ -340,6 +342,7 @@ export function Sidebar({
           onCreateWorktree: canCreateWorktree(project) ? () => onCreateWorktree(project) : undefined,
           onDelete: onDeleteWorktree,
           onResetAgentState,
+          onShowChanges,
           sortableWorkspaceId: node.groupId,
           agentsByPath,
         })}

@@ -1,10 +1,12 @@
 import {
   createBrowserPaneContent,
+  createChangesPaneContent,
   createDagPaneContent,
   createFilePaneContent,
   createTerminalPaneContent,
   isTerminalTab,
   type BrowserPaneState,
+  type ChangesPaneContent,
   type DagPaneState,
   type LayoutState,
   type PaneContent,
@@ -166,7 +168,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
           tabs,
           activeTabId: action.activate === false ? state.activeTabId : action.tab.id,
           returnTabIdByTabId:
-            !exists && action.activate !== false && (action.tab.kind === "file" || action.tab.kind === "browser") && state.activeTabId
+            !exists && action.activate !== false && (action.tab.kind === "file" || action.tab.kind === "browser" || action.tab.kind === "changes") && state.activeTabId
               ? { ...state.returnTabIdByTabId, [action.tab.id]: state.activeTabId }
               : state.returnTabIdByTabId,
           layoutsByTabId,
@@ -483,6 +485,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
         !sourceTab ||
         sourceTab.kind === "browser" ||
         sourceTab.kind === "file" ||
+        sourceTab.kind === "changes" ||
         !sourceLayout ||
         !sourceGroup ||
         state.tabs.some((tab) => tab.id === action.newTab.id)
@@ -492,7 +495,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const leafIds = collectLeafIds(sourceLayout.root);
       if (leafIds.length <= 1 || !leafIds.includes(action.leafId)) return state;
       const movedSessionId = sourceLayout.sessionIdsByLeafId[action.leafId];
-      if (!movedSessionId || action.newTab.kind === "browser" || action.newTab.kind === "file") return state;
+      if (!movedSessionId || !isTerminalTab(action.newTab)) return state;
       const movedContent = sourceLayout.contentsByLeafId?.[action.leafId] ?? createTerminalPaneContent(movedSessionId);
 
       const nextRoot = removeLeaf(sourceLayout.root, action.leafId);
@@ -768,6 +771,16 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
         previewId: file.previewId ?? "",
       });
     }
+    if (item.kind === "changes") {
+      const changes = item as Partial<ChangesPaneContent>;
+      if (changes.workspaceId && changes.worktreePath && changes.worktree) {
+        return createChangesPaneContent({
+          workspaceId: changes.workspaceId,
+          worktreePath: changes.worktreePath,
+          worktree: changes.worktree,
+        });
+      }
+    }
     if (item.kind === "dag") {
       const dagState: DagPaneState = (item as { dag?: DagPaneState }).dag
         ? { runId: (item as { dag?: DagPaneState }).dag?.runId ?? (item as { runId?: string | null }).runId ?? null }
@@ -802,11 +815,14 @@ export function defaultContentForTab(tab: WorkspaceTab, sessionIdOverride?: stri
       previewId: tab.previewId,
     });
   }
+  if (tab.kind === "changes") {
+    return createChangesPaneContent({ workspaceId: tab.workspaceId, worktreePath: tab.worktreePath, worktree: tab.worktree });
+  }
   return createTerminalPaneContent(sessionIdOverride ?? tab.sessionId);
 }
 
 export function getTabPaneLayout(layout: LayoutState, tab: WorkspaceTab): TabPaneLayout {
-  const isNonTerminalTab = tab.kind === "browser" || tab.kind === "file";
+  const isNonTerminalTab = !isTerminalTab(tab);
   const fallbackLeafId = `leaf-default-${tab.id}`;
   const defaultContent = defaultContentForTab(tab);
   return layout.layoutsByTabId?.[tab.id] ?? {
@@ -874,12 +890,12 @@ function normalizeLayoutInternal(state: LayoutState, force: boolean): LayoutStat
         if (existing.contentsByLeafId && Object.prototype.hasOwnProperty.call(existing.contentsByLeafId, leafId)) {
           const content = toPaneContent(
             existing.contentsByLeafId[leafId],
-            existing.sessionIdsByLeafId?.[leafId] ?? (tab.kind === "browser" || tab.kind === "file" ? "" : tab.sessionId),
+            existing.sessionIdsByLeafId?.[leafId] ?? (isTerminalTab(tab) ? tab.sessionId : ""),
           );
           contentsByLeafId[leafId] = content;
           sessionIdsByLeafId[leafId] = content.kind === "terminal" ? content.sessionId : "";
         } else if (existing.sessionIdsByLeafId && Object.prototype.hasOwnProperty.call(existing.sessionIdsByLeafId, leafId)) {
-          if (tab.kind === "browser" || tab.kind === "file") {
+          if (!isTerminalTab(tab)) {
             contentsByLeafId[leafId] = defaultContent;
             sessionIdsByLeafId[leafId] = "";
           } else {

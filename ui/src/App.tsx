@@ -814,6 +814,7 @@ function WorkspaceApp({
     openTab,
     createBrowserTab,
     openFilePreviewTab,
+    openChangesTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab,
@@ -2397,7 +2398,7 @@ function WorkspaceApp({
       const currentState = stateRef.current;
       const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
-      if (tab.kind === "browser" || tab.kind === "file") {
+      if (!isTerminalTab(tab)) {
         activateTab(tabId);
         return;
       }
@@ -3085,6 +3086,30 @@ function WorkspaceApp({
     setIsCreateOpen(false);
     setCreateTargetProject(null);
   }, []);
+  const handleShowChanges = useCallback(
+    (worktree: Worktree) => {
+      if (activeRemoteHostRef.current) return;
+      const ownerId = resolveWorktreeOwnerId(worktree, projectsRef.current, activeProjectRef.current.workspaceId);
+      const owner = projectsRef.current.find((project) => project.workspaceId === ownerId);
+      if (!owner || (owner.target && owner.target.kind !== "local") || !worktreeIdentity(worktree)) return;
+      if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
+        // Tabs live in the owning project's store; switch there first, then open Changes again.
+        handleSelectWorktree(worktree);
+        return;
+      }
+      openChangesTab(worktree, owner.workspaceId);
+    },
+    [handleSelectWorktree, openChangesTab],
+  );
+  const activeWorktreeCanShowChanges = Boolean(
+    activeWorktree &&
+      worktreeIdentity(activeWorktree) &&
+      (!activeProject.target || activeProject.target.kind === "local"),
+  );
+  const handleShowActiveWorktreeChanges = useCallback(() => {
+    const worktree = activeWorktreeRef.current;
+    if (worktree) handleShowChanges(worktree);
+  }, [handleShowChanges]);
   const handleOpenCommandPalette = useCallback(() => {
     if (activeRemoteHostRef.current) return;
     setIsCommandPaletteOpen(true);
@@ -3966,6 +3991,7 @@ function WorkspaceApp({
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={handleDeleteWorktree}
           onResetAgentState={handleResetWorktreeAgentState}
+          onShowChanges={handleShowChanges}
           onManageDisk={setDiskManageProject}
           onOpenHistory={setHistoryProject}
           onOpenSettings={handleOpenSettings}
@@ -4131,6 +4157,7 @@ function WorkspaceApp({
           tabs={state.layout.tabs}
           onSelectWorktree={handleSelectWorktree}
           onSelectTab={handleSelectTerminalTab}
+          onShowChanges={activeWorktreeCanShowChanges ? handleShowActiveWorktreeChanges : undefined}
           onClose={handleCloseCommandPalette}
         />
       ) : null}
