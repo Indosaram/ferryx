@@ -87,6 +87,7 @@ fn paste_encoding_tracks_bracketed_paste_mode() {
     assert_eq!(plain, b"hello");
     assert!(term.paste_is_safe("hello"));
     assert!(!term.paste_is_safe("hello\nworld"));
+    assert!(!term.paste_is_safe("ls\rrm -rf x"));
 
     term.feed_str("\x1b[?2004h")
         .expect("enable bracketed paste mode");
