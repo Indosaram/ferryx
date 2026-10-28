@@ -2072,9 +2072,12 @@ async function runWaiting(ctx) {
     // 8. The last dependency completes: the parent resumes exactly once and completes.
     const callsBeforeResume = modelCalls.length;
     release('hold-b');
-    const resumed = await waitForChange(ctx, 'parent to complete or hold', hubDir, () => {
+    // The goal can reach completed inside the resume turn, before that turn settles: wait for
+    // the turn to settle too, or a turn stuck pending fails on the deadline instead of a race.
+    const resumed = await waitForChange(ctx, 'parent to complete or hold and its turn to settle', hubDir, () => {
       const goal = goalOf('parent');
-      return { done: HELD_STATES.has(goal?.run_state), goal };
+      const turns = wakeState('parent').turns;
+      return { done: HELD_STATES.has(goal?.run_state) && turns.every((turn) => turn.state !== 'pending'), goal, turns };
     }, 6 * 60_000);
     ctx.assert('child-b-completed', goalOf('b')?.run_state === 'completed', goalOf('b'));
     const parentFinal = wakeState('parent');
