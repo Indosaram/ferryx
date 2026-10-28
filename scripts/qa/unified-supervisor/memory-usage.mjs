@@ -260,6 +260,15 @@ export async function runUsage(ctx, deps) {
 
     // Zero calls during a subscribed wait: goal A depends on goal B. While B is unresolved the
     // scheduler handles A's wait and wakes, and no provider request or model-call row appears.
+    // A's first dispatch must have started first: an owner resume of a goal whose dispatch is
+    // still claimed (typed, no start receipt yet) is refused DISPATCH_IN_FLIGHT by design
+    // (request.rs release_target), and a refused resume moves nothing, so it has no wake.
+    const startedA = await untilChange(ctx, 'goal A dispatch started', hubDir, () => {
+      const goal = h.hub.one('SELECT run_state FROM supervisor_goals WHERE goal_id = ?', goalA);
+      return { done: goal?.run_state !== 'dispatching', goal };
+    }, 120_000);
+    ctx.evidence.writeJson('usage/goal-a-started.json', startedA);
+    if (startedA.goal?.run_state !== 'running') throw new HarnessError('DISPATCH_NOT_STARTED', `goal A left dispatching as ${startedA.goal?.run_state}`, startedA);
     const revisionA = h.hub.one('SELECT revision FROM supervisor_goals WHERE goal_id = ?', goalA)?.revision;
     // Provider arrivals are counted by the stub as they happen. A model-call row is written just
     // after its turn; a late row of an earlier turn could only fail this check, never pass it.
@@ -275,6 +284,8 @@ export async function runUsage(ctx, deps) {
     const ownerWake = async (step, action, payload) => {
       const before = deliveredTurns();
       const reply = await request(step, { requestId: `qa-usage-${step}-${run}`, projectId, goalId: goalA, expectedRevision: current(), action, payload });
+      // A refused owner action changes no state and enqueues no wake: fail now, not at the deadline.
+      if (reply?.type !== 'supervisorRequestV1Ok') throw new HarnessError('OWNER_REQUEST_REFUSED', `${step} was refused`, { reply });
       const seen = await untilChange(ctx, `${step} wake delivered`, hubDir, () => ({ done: deliveredTurns() > before, delivered: deliveredTurns() }), 120_000);
       return { reply, seen };
     };
