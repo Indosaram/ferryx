@@ -1,10 +1,12 @@
 // Adapters from the account's machine connections to useRemoteSupervisor inputs. Each machine
-// answers over its relay tunnel (the active connection or a pooled discovery tunnel). Change frames come from the one events
-// socket RemoteApp already owns, relayed per machine through a small frame bus.
-import { useCallback, useMemo, useRef } from "react";
+// answers over its relay tunnel (the active connection or a pooled discovery tunnel). Change
+// frames reach a small per-machine frame bus from the active connection's events socket, which
+// RemoteApp owns, and from one events socket per other reachable machine
+// (useMachineEventSockets).
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import type { AccountMachineView } from "../accountSession";
-import type { TunnelTransport } from "../attachTunnel";
+import type { TunnelTransport, TunnelWebSocket } from "../attachTunnel";
 import type { RemoteSupervisorMachine, SupervisorFetch, SupervisorHttpResponse } from "../remoteSupervisor";
 
 type FrameHandler = (frame: unknown) => void;
@@ -133,4 +135,95 @@ export function useMachineSupervisorSources(input: SupervisorSourceInput): Super
   const fetchFor = useCallback((machineId: string) => value.fetches.get(machineId) ?? null, [value.fetches]);
 
   return { sources: value.sources, unlinked: value.unlinked, fetchFor, resync };
+}
+
+/** Opens one machine's `/api/v1/events` socket over its own relay tunnel. */
+export type MachineEventsOpener = (machine: AccountMachineView, deviceToken: string) => Promise<Pick<TunnelWebSocket, "close" | "onmessage" | "onclose" | "onerror">>;
+
+export type MachineEventSocketsInput = {
+  readonly enabled: boolean;
+  readonly machines: readonly AccountMachineView[];
+  readonly linkFor: (machineId: string) => MachineLink | null;
+  /** The machine whose events the active connection's socket already carries. */
+  readonly skip: string | null;
+  readonly open: MachineEventsOpener;
+  readonly bus: SupervisorFrameBus;
+};
+
+/** Longest wait before reopening a machine's events socket after it closed or failed. */
+export const MACHINE_EVENTS_RETRY_MAX_MS = 10_000;
+
+/**
+ * Keeps one events socket open per reachable machine that no active connection covers, and
+ * relays its frames to the bus. Without it a signed-in account that has not opened a worktree
+ * (the phone home, the wide Supervisor tab) never hears `supervisorChanged`: a goal another
+ * surface admitted, or the dispatcher moved, would stay stale until the next manual action.
+ * The daemon opens each subscription with an `inventoryInvalidated {reason: subscribe}`
+ * boundary, which makes every view refetch once.
+ */
+export function useMachineEventSockets({ enabled, machines, linkFor, skip, open, bus }: MachineEventSocketsInput): void {
+  const openRef = useRef(open);
+  openRef.current = open;
+  const targets = enabled
+    ? machines.flatMap((machine) => {
+        if (machine.online === false || machine.machineId === skip) return [];
+        const link = linkFor(machine.machineId);
+        return link ? [{ machine, deviceToken: link.deviceToken }] : [];
+      })
+    : [];
+  const targetsRef = useRef(targets);
+  targetsRef.current = targets;
+  const key = targets.map(({ machine, deviceToken }) => `${machine.machineId}:${machine.enrollmentEpoch}:${deviceToken}`).join("|");
+
+  useEffect(() => {
+    const cleanups: Array<() => void> = [];
+    for (const { machine, deviceToken } of targetsRef.current) {
+      let disposed = false;
+      let socket: Awaited<ReturnType<MachineEventsOpener>> | null = null;
+      let retry: ReturnType<typeof setTimeout> | null = null;
+      let attempt = 0;
+      const reconnect = () => {
+        if (disposed) return;
+        retry = setTimeout(connect, Math.min(MACHINE_EVENTS_RETRY_MAX_MS, 1000 * 2 ** attempt));
+        attempt = Math.min(attempt + 1, 4);
+      };
+      const connect = async () => {
+        retry = null;
+        let current: Awaited<ReturnType<MachineEventsOpener>>;
+        try {
+          current = await openRef.current(machine, deviceToken);
+        } catch {
+          reconnect();
+          return;
+        }
+        if (disposed) {
+          current.close();
+          return;
+        }
+        socket = current;
+        current.onmessage = (event) => {
+          if (disposed) return;
+          attempt = 0;
+          const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
+          bus.emit(machine.machineId, text);
+        };
+        current.onerror = () => {};
+        current.onclose = () => {
+          if (disposed || socket !== current) return;
+          socket = null;
+          reconnect();
+        };
+      };
+      void connect();
+      cleanups.push(() => {
+        disposed = true;
+        if (retry) clearTimeout(retry);
+        socket?.close();
+        socket = null;
+      });
+    }
+    return () => {
+      for (const cleanup of cleanups) cleanup();
+    };
+  }, [key, bus]);
 }
