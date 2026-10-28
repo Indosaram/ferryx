@@ -944,7 +944,9 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
         ))
         .await
         .is_some(),
-        None => false,
+        // After a cutover the owner's messages belong to the supervisor; with no engine they
+        // get an explicit unavailable reply, never a silent legacy turn.
+        None => super::slack_supervisor::refuse_without_engine(pool, &admitted).await,
     };
     if !supervised {
         Box::pin(run_session_turn(
