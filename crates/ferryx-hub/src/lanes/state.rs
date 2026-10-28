@@ -286,6 +286,38 @@ pub async fn set_pane(
     Ok(())
 }
 
+/// The paired host a lane runs on; `None` is this machine.
+pub async fn lane_host(pool: &SqlitePool, key: &str) -> Result<Option<String>, LaneTransitionError> {
+    let host: Option<Option<String>> = sqlx::query_scalar("SELECT host_id FROM lanes WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    Ok(host.flatten().filter(|host| !host.is_empty()))
+}
+
+pub async fn set_host(pool: &SqlitePool, key: &str, host: &str) -> Result<(), LaneTransitionError> {
+    sqlx::query("UPDATE lanes SET host_id = ?, updated_at = ? WHERE key = ?")
+        .bind(host)
+        .bind(now_rfc3339())
+        .bind(key)
+        .execute(pool)
+        .await
+        .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    Ok(())
+}
+
+/// Lanes holding a pane on this machine, for the launch guard's lane budget.
+pub async fn local_active_lanes(pool: &SqlitePool) -> Result<u64, LaneTransitionError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM lanes WHERE status IN ('working','blocked','done_claimed','not_done') AND (host_id IS NULL OR host_id = '')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    Ok(count.max(0) as u64)
+}
+
 pub async fn set_claim(
     pool: &SqlitePool,
     key: &str,

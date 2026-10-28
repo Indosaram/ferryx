@@ -134,9 +134,12 @@ async fn apply(
         super::worktree::restore(pool, key).await?;
     }
     if let Some(session_id) = pane.filter(|pane| !pane.is_empty()) {
+        let host = super::state::lane_host(pool, key)
+            .await
+            .map_err(|error| crate::error::HubError::message(error.to_string()))?;
         control
             .execute(
-                None,
+                host.as_deref(),
                 AgentOp::Send {
                     session_id: session_id.to_owned(),
                     text: format!(

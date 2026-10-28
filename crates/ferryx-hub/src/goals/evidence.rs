@@ -123,7 +123,16 @@ pub async fn collect<C: AgentControl + ?Sized>(
     };
     let mut items = Vec::new();
     match session_id.filter(|id| !id.is_empty()) {
-        Some(session_id) => match control.execute(None, AgentOp::Read { session_id }).await {
+        Some(session_id) => match control
+            .execute(
+                crate::lanes::state::lane_host(pool, lane_key)
+                    .await
+                    .map_err(|error| GoalError::Hub(crate::error::HubError::message(error.to_string())))?
+                    .as_deref(),
+                AgentOp::Read { session_id },
+            )
+            .await
+        {
             Ok(value) => items.extend(read_items(&value)),
             Err(error) => items.push(EvidenceItem {
                 reference: "observer:unreadable".into(),

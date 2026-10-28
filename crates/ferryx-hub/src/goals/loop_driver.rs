@@ -166,9 +166,10 @@ async fn dispatch<C: AgentControl + ?Sized>(
             contract.turns_used
         )
     });
+    let host = state::lane_host(pool, lane_key).await.map_err(hub_error)?;
     let outcome = control
         .send_confirmed(
-            None,
+            host.as_deref(),
             session_id,
             &wrap_instruction(&proposal.text),
             &request_id,

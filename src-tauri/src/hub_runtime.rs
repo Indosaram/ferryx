@@ -162,8 +162,135 @@ impl AgentControl for DaemonBridge {
     }
 }
 
+/// A git remote URL in a form two checkouts of one repository share.
+fn remote_key(url: &str) -> String {
+    let url = url.trim().trim_end_matches('/');
+    url.strip_suffix(".git").unwrap_or(url).to_ascii_lowercase()
+}
+
+impl DaemonBridge {
+    async fn paired(
+        &self,
+        host: &crate::paired_host::inventory::HostView,
+        operation: crate::paired_host::client::Operation,
+    ) -> Result<crate::paired_host::client::OperationResult, HubError> {
+        let request = crate::paired_host::client::OperationRequest {
+            host_id: host.host_id.clone(),
+            generation: host.generation,
+            operation,
+        };
+        self.client
+            .paired_host_operation(request)
+            .await
+            .map(|response| response.result)
+            .map_err(|error| HubError::message(format!("{} paired host {}", error.code, host.host_id)))
+    }
+}
+
 #[async_trait]
 impl TaskLauncher for DaemonBridge {
+    async fn remote_hosts(&self) -> Result<Vec<String>, HubError> {
+        use crate::paired_host::inventory::{AuthStatus, GrantScope};
+        let hosts = self
+            .client
+            .paired_host_list()
+            .await
+            .map_err(|error| HubError::message(error.message))?;
+        Ok(hosts
+            .into_iter()
+            .filter(|host| {
+                host.grant_scope == GrantScope::Machine
+                    && host.auth_status == AuthStatus::Paired
+                    && host.online
+                    && host.unavailable_reason.is_none()
+            })
+            .map(|host| host.host_id)
+            .collect())
+    }
+
+    async fn launch_remote_pane(
+        &self,
+        host_id: &str,
+        cwd: &str,
+        lane_key: &str,
+    ) -> Result<ferryx_hub::agent_control::RemotePane, HubError> {
+        use crate::paired_host::client::{Operation, OperationResult};
+        use crate::remote::machine_protocol as m;
+        let output = ferryx_hub::child_env::command("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["config", "--get", "remote.origin.url"])
+            .output()
+            .await
+            .map_err(|error| HubError::message(error.to_string()))?;
+        let origin = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || origin.is_empty() {
+            return Err(HubError::message(format!("{cwd} has no origin remote to match on a paired host")));
+        }
+        let host = self
+            .client
+            .paired_host_list()
+            .await
+            .map_err(|error| HubError::message(error.message))?
+            .into_iter()
+            .find(|host| host.host_id == host_id)
+            .ok_or_else(|| HubError::message(format!("no paired host is named {host_id}")))?;
+        let OperationResult::Projects(projects) = self.paired(&host, Operation::Projects).await? else {
+            return Err(HubError::message("the paired host answered projects with another result"));
+        };
+        let wanted = remote_key(&origin);
+        let workspace_id = projects
+            .projects
+            .iter()
+            .find(|project| {
+                project.metadata.availability == m::Availability::Ready
+                    && project.metadata.git_remote.as_deref().is_some_and(|url| remote_key(url) == wanted)
+            })
+            .map(|project| project.remote_workspace_id.clone())
+            .ok_or_else(|| HubError::message(format!("{host_id} has no ready project for {origin}")))?;
+        let worktree = m::WorktreeIdentity { ws_id: workspace_id.clone(), slug: format!("lane-{lane_key}") };
+        let created = self
+            .paired(
+                &host,
+                Operation::CreateWorktree {
+                    request: m::CreateWorktreeRequest {
+                        request_id: uuid::Uuid::new_v4().to_string(),
+                        workspace_id: workspace_id.clone(),
+                        worktree: worktree.clone(),
+                        base_ref: None,
+                    },
+                },
+            )
+            .await;
+        // A lane relaunched after a failed start reuses the worktree it already has.
+        if let Err(error) = created {
+            if !error.to_string().starts_with("WORKTREE_EXISTS") {
+                return Err(error);
+            }
+        }
+        let OperationResult::CreateSession(session) = self
+            .paired(
+                &host,
+                Operation::CreateSession {
+                    request: m::CreateSessionRequest {
+                        request_id: uuid::Uuid::new_v4().to_string(),
+                        workspace_id,
+                        worktree: Some(worktree),
+                        cols: 100,
+                        rows: 32,
+                        inherit_from_session_id: None,
+                        cwd_relative: None,
+                        startup: m::Startup::Shell,
+                    },
+                },
+            )
+            .await?
+        else {
+            return Err(HubError::message("the paired host answered create session with another result"));
+        };
+        Ok(ferryx_hub::agent_control::RemotePane { session_id: session.target.session_id, cwd: session.cwd })
+    }
+
     async fn launch_pane(&self, cwd: &str, command: &[String]) -> Result<String, HubError> {
         let workspace = ferryx_hub::hub_env::var("FERRYX_HUB_WORKSPACE").map_err(|_| {
             HubError::config("FERRYX_HUB_WORKSPACE is required before the hub can launch a pane")

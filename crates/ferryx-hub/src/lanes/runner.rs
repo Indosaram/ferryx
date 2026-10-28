@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 
 use super::guard::{GuardThresholds, HostLoad};
 use super::settle::settle;
-use super::state::{self, set_claim, set_pane, transition, LaneStatus};
+use super::state::{self, set_claim, set_host, set_pane, transition, LaneStatus};
 use crate::agent_control::{AgentControl, AgentOp, TaskLauncher};
 use crate::error::{HubError, Result};
 use crate::judge::Judge;
@@ -44,17 +44,35 @@ impl LaneRunner {
         }
         let mut session_id = pane.unwrap_or_default();
         let mut cwd = cwd;
+        let mut host = state::lane_host(&self.pool, key).await?;
         if status == "queued" {
-            if !self.load.admit(&self.thresholds) {
-                return Err(HubError::message(format!(
-                    "guard refused to launch lane {key}"
-                )));
+            if self.load.admit(&self.thresholds) {
+                // omo's auto worktree: a lane at a repository root gets its own checkout.
+                if let Some(tree) = super::worktree::create(&self.pool, key, &cwd).await? {
+                    cwd = tree;
+                }
+                session_id = self.launcher.launch_pane(&cwd, &[]).await?;
+            } else {
+                // This machine is full: hand the lane to the least busy paired host, in a new
+                // worktree there. Signals that read local files or run commands keep it here.
+                let target = if super::placement::portable(&done_signals) {
+                    let hosts = self.launcher.remote_hosts().await?;
+                    super::placement::idle_host(self.control.as_ref(), &hosts, self.thresholds.lanes_max).await
+                } else {
+                    None
+                };
+                let Some(target) = target else {
+                    return Err(HubError::message(format!(
+                        "guard refused to launch lane {key}"
+                    )));
+                };
+                let remote = self.launcher.launch_remote_pane(&target, &cwd, key).await?;
+                set_host(&self.pool, key, &target).await?;
+                tracing::info!(lane = key, host = %target, "lane placed on a paired host");
+                session_id = remote.session_id;
+                cwd = remote.cwd;
+                host = Some(target);
             }
-            // omo's auto worktree: a lane at a repository root gets its own checkout.
-            if let Some(tree) = super::worktree::create(&self.pool, key, &cwd).await? {
-                cwd = tree;
-            }
-            session_id = self.launcher.launch_pane(&cwd, &[]).await?;
             set_pane(&self.pool, key, &session_id).await?;
             transition(&self.pool, key, LaneStatus::Working, Some("launched")).await?;
             // A lane with a brief file (cron remediation) sends the brief with the title.
@@ -70,7 +88,7 @@ impl LaneRunner {
             );
             self.control
                 .execute(
-                    None,
+                    host.as_deref(),
                     AgentOp::Send {
                         session_id: session_id.clone(),
                         text,
@@ -78,14 +96,14 @@ impl LaneRunner {
                     },
                 )
                 .await?;
-        } else {
+        } else if host.is_none() {
             // A reopened lane gets its removed worktree back before the pane is read.
             super::worktree::restore(&self.pool, key).await?;
         }
         let reading = self
             .control
             .execute(
-                None,
+                host.as_deref(),
                 AgentOp::Read {
                     session_id: session_id.clone(),
                 },
@@ -216,5 +234,88 @@ mod tests {
         assert!(ops.iter().any(|(_, op)| matches!(op, AgentOp::Send { .. })));
         assert!(ops.iter().any(|(_, op)| matches!(op, AgentOp::Read { .. })));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opens remote panes on whichever host it is asked for and records the requests.
+    #[derive(Default)]
+    struct RemoteLauncher {
+        remote: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskLauncher for RemoteLauncher {
+        async fn launch_pane(&self, _cwd: &str, _command: &[String]) -> Result<String> {
+            Err(HubError::message("this machine is full"))
+        }
+        async fn remote_hosts(&self) -> Result<Vec<String>> {
+            Ok(vec!["mac".into(), "linux".into()])
+        }
+        async fn launch_remote_pane(
+            &self,
+            host_id: &str,
+            _cwd: &str,
+            lane_key: &str,
+        ) -> Result<crate::agent_control::RemotePane> {
+            self.remote.lock().unwrap().push((host_id.into(), lane_key.into()));
+            Ok(crate::agent_control::RemotePane {
+                session_id: "remote-pane".into(),
+                cwd: "/remote/lane".into(),
+            })
+        }
+    }
+
+    fn full_runner(pool: SqlitePool, control: Arc<RecordingControl>, launcher: Arc<RemoteLauncher>) -> LaneRunner {
+        LaneRunner {
+            pool,
+            control,
+            launcher,
+            judge: Judge::fallback_yes(),
+            load: HostLoad { load: 0.1, mem_free_pct: 50, disk_free_gb: 100, active_lanes: 4 },
+            thresholds: GuardThresholds { load_alert: 10.0, mem_free_min_pct: 10, disk_free_min_gb: 1, lanes_max: 4 },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_lane_runs_on_a_paired_host_and_is_driven_there() {
+        let pool = crate::storage::memory().await.unwrap();
+        state::insert_lane(&pool, "lane-r", "ship it", "lead", "/repo", "merged acme/app#12")
+            .await
+            .unwrap();
+        let control = Arc::new(RecordingControl::default());
+        *control.result.lock().unwrap() = json!({"sessions": []});
+        control.fail_hosts.lock().unwrap().insert("mac".into());
+        let launcher = Arc::new(RemoteLauncher::default());
+        let runner = full_runner(pool.clone(), control.clone(), launcher.clone());
+        let report = runner.drive("lane-r").await.unwrap();
+        assert_eq!(report.session_id, "remote-pane");
+        assert_eq!(report.status, LaneStatus::Working);
+        assert_eq!(*launcher.remote.lock().unwrap(), vec![("linux".to_owned(), "lane-r".to_owned())]);
+        assert_eq!(state::lane_host(&pool, "lane-r").await.unwrap().as_deref(), Some("linux"));
+        // The brief and the read both go to the host the lane runs on.
+        let ops = control.ops();
+        for (host, op) in &ops {
+            if matches!(op, AgentOp::Send { .. } | AgentOp::Read { .. }) {
+                assert_eq!(host.as_deref(), Some("linux"), "{op:?}");
+            }
+        }
+        assert!(ops.iter().any(|(_, op)| matches!(op, AgentOp::Send { .. })));
+        assert!(ops.iter().any(|(_, op)| matches!(op, AgentOp::Read { .. })));
+        assert_eq!(state::local_active_lanes(&pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lane_with_local_signals_is_refused_instead_of_moved() {
+        let pool = crate::storage::memory().await.unwrap();
+        state::insert_lane(&pool, "lane-f", "write it", "lead", "/repo", "file marker")
+            .await
+            .unwrap();
+        let control = Arc::new(RecordingControl::default());
+        let launcher = Arc::new(RemoteLauncher::default());
+        let runner = full_runner(pool.clone(), control.clone(), launcher.clone());
+        let error = runner.drive("lane-f").await.unwrap_err();
+        assert!(error.to_string().contains("guard refused"), "{error}");
+        assert!(launcher.remote.lock().unwrap().is_empty());
+        assert!(control.ops().is_empty());
+        assert_eq!(state::status_of(&pool, "lane-f").await.unwrap(), Some(LaneStatus::Queued));
     }
 }

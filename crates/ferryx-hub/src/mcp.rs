@@ -450,7 +450,11 @@ async fn call_tool(
                 control: Arc::clone(&context.control),
                 launcher: Arc::clone(&context.launcher),
                 judge: crate::judge::Judge::from_config(crate::judge::typesafe_from_env()),
-                load: crate::lanes::guard::HostLoad::sample(0),
+                load: crate::lanes::guard::HostLoad::sample(
+                    state::local_active_lanes(&context.pool)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                ),
                 thresholds: crate::lanes::guard::GuardThresholds::default(),
             };
             let report = runner

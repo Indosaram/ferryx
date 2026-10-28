@@ -162,11 +162,36 @@ impl AgentControl for RecordingControl {
     }
 }
 
+/// A pane opened on a paired host: its host-side session id and working directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePane {
+    pub session_id: String,
+    pub cwd: String,
+}
+
 /// Launches a pane and returns its daemon session id. The lane runner uses this
 /// instead of the gateway's SSH/tmux runner.
 #[async_trait]
 pub trait TaskLauncher: Send + Sync {
     async fn launch_pane(&self, cwd: &str, command: &[String]) -> Result<String>;
+
+    /// Paired hosts that can take a lane now (machine grant, paired, online).
+    async fn remote_hosts(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Opens a lane pane on `host_id` in a new worktree of the project whose git remote
+    /// matches the repository at the local `cwd`.
+    async fn launch_remote_pane(
+        &self,
+        host_id: &str,
+        _cwd: &str,
+        _lane_key: &str,
+    ) -> Result<RemotePane> {
+        Err(HubError::message(format!(
+            "this launcher cannot open a pane on {host_id}"
+        )))
+    }
 }
 
 #[derive(Debug, Default)]
