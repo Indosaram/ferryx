@@ -2278,6 +2278,48 @@ pub async fn transition_goal(
     Ok(goal)
 }
 
+/// Holds a goal `degraded` with `detail` only while `run_id` is still the live run of the
+/// started dispatch `request_id` and the goal is still `running`, checked and moved in one
+/// write transaction so a settle or owner action committed meanwhile is never overwritten.
+/// Returns whether the goal was held; nothing is written otherwise.
+pub async fn hold_live_run(
+    pool: &SqlitePool,
+    goal_id: &str,
+    request_id: &str,
+    run_id: &str,
+    detail: &str,
+) -> Result<bool, SupervisorError> {
+    let mut tx = pool.begin_write().await?;
+    let live: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT state, run_id FROM supervisor_dispatches WHERE request_id = ?")
+            .bind(request_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let is_live = matches!(
+        &live,
+        Some((state, live_run)) if state == "started" && live_run.as_deref() == Some(run_id)
+    );
+    if !is_live {
+        return Ok(false);
+    }
+    let goal = require_goal(&mut tx, goal_id).await?;
+    if goal.run_state != RunState::Running {
+        return Ok(false);
+    }
+    transition_goal_in(
+        &mut tx,
+        goal_id,
+        goal.revision,
+        RunState::Running,
+        RunState::Degraded,
+        Some(detail),
+    )
+    .await?;
+    tx.commit().await?;
+    wakes::poke();
+    Ok(true)
+}
+
 /// [`transition_goal`]'s checks and writes, inside the caller's transaction. Nothing is
 /// written when it refuses.
 async fn transition_goal_in(
@@ -2620,6 +2662,10 @@ pub async fn confirm_claim_before_transmit(
 /// `uncertain_code` of a dispatch that restart reconciliation found still `claimed`.
 pub const CLAIM_UNCONFIRMED_AT_RESTART: &str = "CLAIM_UNCONFIRMED_AT_RESTART";
 
+/// `uncertain_code` of a dispatch that restart reconciliation found `accepted`: the target
+/// took the bytes, but no start was recorded before the restart.
+pub const START_UNCONFIRMED_AT_RESTART: &str = "START_UNCONFIRMED_AT_RESTART";
+
 /// The owner's resolution of an uncertain delivery: every unresolved `uncertain` dispatch of
 /// the goal is marked resolved (row and evidence kept), so it no longer counts as in flight
 /// and a resend may be claimed. From `delivery_uncertain` the goal moves to `ready`; from an
@@ -2716,25 +2762,37 @@ pub async fn resolve_uncertain_delivery(
 /// Restart reconciliation, run once before any dispatcher starts: a `claimed` row cannot tell
 /// whether its bytes left before the restart, so every one becomes `uncertain` with
 /// [`CLAIM_UNCONFIRMED_AT_RESTART`] (still in flight until the owner resolves it or a real
-/// receipt arrives), and its goal moves from `dispatching` to `delivery_uncertain`. Returns the
-/// dispatches it changed.
+/// receipt arrives), and its goal moves from `dispatching` to `delivery_uncertain`. An
+/// `accepted` row (the target took the bytes, no start was recorded) becomes `uncertain` with
+/// [`START_UNCONFIRMED_AT_RESTART`] the same way; neither is ever resent. A goal still
+/// `dispatching` after that (the crash fell between a receipt and the goal's move) is moved
+/// on from what its dispatches prove: `running` with a started one, `delivery_uncertain` with
+/// an unresolved uncertain one, and `ready` when nothing is in flight, since then nothing can
+/// have been transmitted. Returns the dispatches it changed.
 pub async fn reconcile_claims_after_restart(
     pool: &SqlitePool,
 ) -> Result<Vec<Dispatch>, SupervisorError> {
     let mut tx = pool.begin_write().await?;
-    let sql =
-        format!("SELECT {DISPATCH_COLUMNS} FROM supervisor_dispatches WHERE state = 'claimed'");
+    let sql = format!(
+        "SELECT {DISPATCH_COLUMNS} FROM supervisor_dispatches
+         WHERE state IN ('claimed','accepted') ORDER BY id"
+    );
     let rows: Vec<DispatchRow> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
     let now = now_rfc3339();
     let mut changed = Vec::with_capacity(rows.len());
     for row in rows {
         let mut dispatch = dispatch_from_row(row)?;
+        let code = if dispatch.state == DispatchState::Claimed {
+            CLAIM_UNCONFIRMED_AT_RESTART
+        } else {
+            START_UNCONFIRMED_AT_RESTART
+        };
         sqlx::query(
             "UPDATE supervisor_dispatches SET state = 'uncertain', uncertain_code = ?,
                     uncertain_at = ?, updated_at = ?
-             WHERE id = ? AND state = 'claimed'",
+             WHERE id = ? AND state IN ('claimed','accepted')",
         )
-        .bind(CLAIM_UNCONFIRMED_AT_RESTART)
+        .bind(code)
         .bind(&now)
         .bind(&now)
         .bind(dispatch.id)
@@ -2745,15 +2803,50 @@ pub async fn reconcile_claims_after_restart(
                     updated_at = ?
              WHERE goal_id = ? AND run_state = 'dispatching'",
         )
-        .bind(CLAIM_UNCONFIRMED_AT_RESTART)
+        .bind(code)
         .bind(&now)
         .bind(&dispatch.goal_id)
         .execute(&mut *tx)
         .await?;
         dispatch.state = DispatchState::Uncertain;
-        dispatch.uncertain_code = Some(CLAIM_UNCONFIRMED_AT_RESTART.to_owned());
+        dispatch.uncertain_code = Some(code.to_owned());
         dispatch.uncertain_at = Some(now.clone());
         changed.push(dispatch);
+    }
+    let stranded: Vec<String> = sqlx::query_scalar(
+        "SELECT goal_id FROM supervisor_goals WHERE run_state = 'dispatching' ORDER BY goal_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for goal_id in stranded {
+        let flight: Option<(String, Option<String>)> = sqlx::query_as(&format!(
+            "SELECT d.state, d.uncertain_code FROM supervisor_dispatches d
+             JOIN supervisor_execution_bindings b
+               ON b.goal_id = d.goal_id AND b.generation = d.generation
+             WHERE d.goal_id = ? AND {IN_FLIGHT}
+             ORDER BY d.id LIMIT 1"
+        ))
+        .bind(&goal_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (to, detail) = match flight {
+            Some((state, _)) if state == "started" => ("running", None),
+            Some((_, code)) => (
+                "delivery_uncertain",
+                Some(code.unwrap_or_else(|| CLAIM_UNCONFIRMED_AT_RESTART.to_owned())),
+            ),
+            None => ("ready", None),
+        };
+        sqlx::query(
+            "UPDATE supervisor_goals SET run_state = ?, state_detail = ?, updated_at = ?
+             WHERE goal_id = ? AND run_state = 'dispatching'",
+        )
+        .bind(to)
+        .bind(detail)
+        .bind(&now)
+        .bind(&goal_id)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(changed)
