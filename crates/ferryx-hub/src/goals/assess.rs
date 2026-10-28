@@ -496,4 +496,23 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn the_gap_assessment_prefix_is_the_same_across_differing_goals() {
+        let one = gap_assess_prompt(&contract(), &evidence(), &turns());
+        let mut other_contract = contract();
+        other_contract.lane_key = "lane-other".into();
+        other_contract.revision = 42;
+        other_contract.requirements.truncate(1);
+        let other = gap_assess_prompt(&other_contract, &evidence(), &[]);
+        assert_ne!(one, other);
+        let (prefix_one, _) = crate::usage::split_prompt(&one).unwrap();
+        let (prefix_other, _) = crate::usage::split_prompt(&other).unwrap();
+        assert_eq!(prefix_one, prefix_other);
+        assert_eq!(prefix_one, super::super::prompts::gap_assess_prefix());
+        assert!(one.starts_with("<ferryx-review-ownership>"));
+        // A retry keeps the prefix: it appends to the delta.
+        let retry = retry_prompt(&one, "bad json");
+        assert_eq!(crate::usage::split_prompt(&retry).unwrap().0, prefix_one);
+    }
 }

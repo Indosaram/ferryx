@@ -111,22 +111,26 @@ impl ConvergeInput {
     }
 }
 
-/// Builds the convergence prompt from [`ConvergeInput`] alone.
-pub fn build_prompt(input: &ConvergeInput) -> String {
-    let input = serde_json::to_string_pretty(input).unwrap_or_default();
-    format!(
-        "You independently check whether a coding lane's goal is complete. You see only the requirements, their verifiers and the evidence Ferryx collected.\n\
+/// The stable instruction prefix of every convergence check: the role, the rules and the
+/// reply format. Byte-identical for every goal; the input follows
+/// [`crate::usage::DELTA_MARKER`].
+pub const CONVERGE_PREFIX: &str = "You independently check whether a coding lane's goal is complete. You see only the requirements, their verifiers and the evidence Ferryx collected.\n\
 Rules:\n\
 1. Set met to true only when a cited evidence ref with attested true and passed not false shows the verifier holds.\n\
 2. An unattested ref (an agent claim) never proves a requirement.\n\
 3. Cite only refs listed in the evidence. Never invent refs.\n\
 4. Return one entry per requirement, each requirement exactly once.\n\
 \n\
-Input:\n{input}\n\
-\n\
 Reply with strict JSON only, no prose and no code fence:\n\
-{{\"requirements\": [{{\"req_id\": \"<id>\", \"met\": true, \"evidence_refs\": [\"<ref>\"]}}]}}\n"
-    )
+{\"requirements\": [{\"req_id\": \"<id>\", \"met\": true, \"evidence_refs\": [\"<ref>\"]}]}\n\
+\n\
+The input of this check follows.";
+
+/// Builds the convergence prompt from [`ConvergeInput`] alone: [`CONVERGE_PREFIX`], then the
+/// input as the delta payload.
+pub fn build_prompt(input: &ConvergeInput) -> String {
+    let input = serde_json::to_string_pretty(input).unwrap_or_default();
+    crate::usage::with_delta(CONVERGE_PREFIX, &format!("Input:\n{input}\n"))
 }
 
 fn strip_fence(text: &str) -> &str {
@@ -602,5 +606,21 @@ mod tests {
             .map(|verdict| verdict.req_id.as_str())
             .collect();
         assert_eq!(ids, ["r1", "r2"]);
+    }
+
+    #[test]
+    fn the_instruction_prefix_is_the_same_across_differing_goals() {
+        let one = build_prompt(&ConvergeInput::new(&contract(&["r1"]), &evidence()));
+        let mut other_contract = contract(&["r1", "r2", "r3"]);
+        other_contract.lane_key = "lane-b".into();
+        other_contract.revision = 9;
+        let other = build_prompt(&ConvergeInput::new(&other_contract, &evidence()));
+        assert_ne!(one, other);
+        let (prefix_one, delta_one) = crate::usage::split_prompt(&one).unwrap();
+        let (prefix_other, delta_other) = crate::usage::split_prompt(&other).unwrap();
+        assert_eq!(prefix_one, CONVERGE_PREFIX);
+        assert_eq!(prefix_one, prefix_other);
+        assert_ne!(delta_one, delta_other);
+        assert!(!prefix_one.contains("lane-a") && !prefix_one.contains("r1"));
     }
 }

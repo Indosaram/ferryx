@@ -1278,6 +1278,36 @@ impl WakeScheduler {
             // Another scheduler settled this exact turn; its wakes were consumed with it.
             return Ok(true);
         }
+        // Every model call this wake turn makes (the judge, a decision the handler runs) is
+        // attributed to the turn: its causes, its id and the event ids it merged.
+        let attribution = crate::usage::CallCause {
+            cause: format!("wake:{}", causes.trim_matches(|c| c == '[' || c == ']').replace('"', "")),
+            purpose: None,
+            goal_id: Some(goal.goal_id.clone()),
+            goal_revision: Some(goal.revision),
+            wake_turn_id: Some(turn_id),
+            merged_event_ids: batch.wakes.iter().map(|wake| wake.event_id.clone()).collect(),
+        };
+        crate::usage::with_cause(
+            attribution,
+            self.deliver_turn(goal, generation, batch, turn_id, cached, &ids, now, report),
+        )
+        .await
+    }
+
+    /// The judged and handled part of [`Self::deliver`] for one open turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver_turn(
+        &self,
+        goal: &SupervisorGoal,
+        generation: i64,
+        batch: Batch,
+        turn_id: i64,
+        cached: Option<f64>,
+        ids: &[i64],
+        now: DateTime<Utc>,
+        report: &mut TickReport,
+    ) -> Result<bool, SupervisorError> {
         if let Some(judge) = self.judge.as_ref().filter(|_| batch.judged) {
             let score = match cached {
                 Some(score) => score,
@@ -1310,7 +1340,7 @@ impl WakeScheduler {
                 }
             };
             if score < JUDGE_THRESHOLD {
-                settle_wakes(&self.pool, Some((turn_id, "skipped")), &ids, now).await?;
+                settle_wakes(&self.pool, Some((turn_id, "skipped")), ids, now).await?;
                 report.skipped.push(turn_id);
                 return Ok(true);
             }
@@ -1326,7 +1356,7 @@ impl WakeScheduler {
         };
         let consumed = match self.handler.handle(&turn).await {
             WakeAck::Done => {
-                settle_wakes(&self.pool, Some((turn_id, "delivered")), &ids, now).await?;
+                settle_wakes(&self.pool, Some((turn_id, "delivered")), ids, now).await?;
                 report.delivered.push(turn_id);
                 true
             }
