@@ -2097,6 +2097,9 @@ pub struct DaemonServer {
     /// RetirementGuard drops, the handler notifies .0 ("parked") and waits on .1 ("release").
     #[cfg(test)]
     close_park: std::sync::OnceLock<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
+    /// Test-only pane child pids counted alongside the live sessions' (`supervisor_peer`).
+    #[cfg(test)]
+    pub(crate) test_pane_pids: Mutex<std::collections::HashSet<u32>>,
 }
 
 #[cfg(test)]
@@ -3939,6 +3942,8 @@ impl DaemonServer {
             _catalog_fixture: catalog_fixture,
             #[cfg(test)]
             close_park: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            test_pane_pids: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -5868,6 +5873,9 @@ impl DaemonServer {
                         .note_accept(crate::daemon::handover::AuthorityListenerRole::Canonical);
                     let server = Arc::clone(&self);
                     tokio::spawn(async move {
+                        #[cfg(unix)]
+                        server.handle_unix_client(stream).await;
+                        #[cfg(not(unix))]
                         server.handle_client(stream).await;
                     });
                 }
@@ -5900,6 +5908,67 @@ impl DaemonServer {
 
     pub async fn handle_client<S>(self: Arc<Self>, stream: S)
     where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        // A transport without a peer pid: on unix that is an in-process pair, which may not
+        // change the supervisor; on the loopback TCP transport the token check below stands in.
+        #[cfg(unix)]
+        let origin = super::supervisor_peer::PeerOrigin::Unknown;
+        #[cfg(not(unix))]
+        let origin = super::supervisor_peer::PeerOrigin::TokenAuthenticated;
+        self.handle_client_with_origin(stream, origin).await
+    }
+
+    /// Serves one owner-socket connection whose peer pid the kernel reported, so supervisor
+    /// mutations from a process inside a worker pane are refused (`supervisor_peer`).
+    #[cfg(unix)]
+    pub async fn handle_unix_client(self: Arc<Self>, stream: tokio::net::UnixStream) {
+        use std::os::unix::io::AsRawFd;
+        let pid = super::supervisor_peer::peer_pid(stream.as_raw_fd());
+        // The pid is bound to its process start time now, so a reused pid is noticed later.
+        let origin = tokio::task::spawn_blocking(move || super::supervisor_peer::identify(pid))
+            .await
+            .unwrap_or(super::supervisor_peer::PeerOrigin::Unknown);
+        self.handle_client_with_origin(stream, origin).await
+    }
+
+    /// Why this connection's peer may not change the supervisor, or `None`. The process-table
+    /// reads run on a blocking thread, never on a Tokio worker.
+    async fn supervisor_peer_refusal(
+        &self,
+        origin: super::supervisor_peer::PeerOrigin,
+    ) -> Option<String> {
+        use super::supervisor_peer::PeerOrigin;
+        if matches!(origin, PeerOrigin::TokenAuthenticated | PeerOrigin::Unknown) {
+            return super::supervisor_peer::refusal(
+                origin,
+                &super::supervisor_peer::PaneSet::default(),
+                &super::supervisor_peer::SystemProcs,
+            );
+        }
+        #[allow(unused_mut)]
+        let mut pane_pids: Vec<u32> = self
+            .terminal_service
+            .list_sessions()
+            .into_iter()
+            .filter_map(|id| self.terminal_service.get_session(&id)?.pid())
+            .collect();
+        #[cfg(test)]
+        pane_pids.extend(self.test_pane_pids.lock().iter().copied());
+        tokio::task::spawn_blocking(move || {
+            let table = super::supervisor_peer::SystemProcs;
+            let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
+            super::supervisor_peer::refusal(origin, &panes, &table)
+        })
+        .await
+        .unwrap_or_else(|error| Some(format!("the peer check failed: {error}")))
+    }
+
+    pub async fn handle_client_with_origin<S>(
+        self: Arc<Self>,
+        stream: S,
+        origin: super::supervisor_peer::PeerOrigin,
+    ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         // QaFixtureKind::DaemonListenerStall (QA builds only): accepted, handshake not answered until released.
@@ -5981,6 +6050,30 @@ impl DaemonServer {
                     // While a commit is decided (HandoverStatus::Committing) a new request is not
                     // admitted: it is answered HANDOVER_BUSY, retryable, and never half-served.
                     let mut busy_refusal = None;
+                    // A pane process may read the supervisor but never make the owner's
+                    // decisions. Gated: every unified request (SupervisorRequestV1) and a
+                    // mutating SupervisorDispatch (submit: owner work into a chosen pane);
+                    // its read-only `status` stays allowed. A lane
+                    // pause is checked here and applied only when it targets a supervisor
+                    // goal (hub_runtime::set_lane_paused); the legacy lane-goal requests keep
+                    // their pre-existing semantics for the owner's own shell in a pane, and a
+                    // supervisor goal's lane refuses them SUPERVISOR_OWNED anyway.
+                    let owner_decision = matches!(req.as_ref(), Ok(DaemonRequest::SupervisorRequestV1 { .. }))
+                        || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorDispatch { request }) if request.mutates());
+                    let peer_refusal = if owner_decision {
+                        self.supervisor_peer_refusal(origin).await.map(|message| DaemonResponse::Error {
+                            code: Some(super::supervisor_peer::FORBIDDEN.into()),
+                            message,
+                            details: None,
+                        })
+                    } else {
+                        None
+                    };
+                    let pause_peer_refusal = if matches!(req.as_ref(), Ok(DaemonRequest::SupervisorSetPaused { .. })) {
+                        self.supervisor_peer_refusal(origin).await
+                    } else {
+                        None
+                    };
                     let retirement_guard = if holds_retirement_guard {
                         match self
                             .handover_manager
@@ -6003,6 +6096,7 @@ impl DaemonServer {
 
                     let resp = match req {
                 _ if busy_refusal.is_some() => busy_refusal.take().expect("checked above"),
+                _ if peer_refusal.is_some() => peer_refusal.expect("checked above"),
                 // A committed predecessor never serves a local session it transferred: the
                 // successor is that session's only owner (todo 8).
                 Ok(ref request) if request_session_id(request)
@@ -7224,6 +7318,7 @@ impl DaemonServer {
                     capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
@@ -7264,8 +7359,14 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
-                    match crate::hub_runtime::set_lane_paused(self.remote_state(), &lane_key, paused, "desktop").await {
+                    let gate = crate::hub_runtime::PauseGate { peer_refusal: pause_peer_refusal.clone() };
+                    match crate::hub_runtime::set_lane_paused_gated(self.remote_state(), &lane_key, paused, "desktop", gate).await {
                         Ok(_) => DaemonResponse::SupervisorSetPausedOk { paused },
+                        Err(crate::hub_runtime::LanePauseError::Supervisor(failure)) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
                         Err(error) => DaemonResponse::Error {
                             message: error.to_string(),
                             code: Some("SUPERVISOR_UNAVAILABLE".into()),
@@ -7290,6 +7391,23 @@ impl DaemonServer {
                             message: error.to_string(),
                             code: Some(error.code().into()),
                             details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorRequestV1 { envelope, cli, mcp }) => {
+                    let caller = if mcp {
+                        crate::hub_runtime::SupervisorCaller::Mcp
+                    } else if cli {
+                        crate::hub_runtime::SupervisorCaller::Cli
+                    } else {
+                        crate::hub_runtime::SupervisorCaller::Desktop
+                    };
+                    match crate::hub_runtime::supervisor_request(self.remote_state(), caller, envelope).await {
+                        Ok(receipt) => DaemonResponse::SupervisorRequestV1Ok { receipt },
+                        Err(failure) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
                         },
                     }
                 }
@@ -7920,7 +8038,7 @@ impl DaemonServer {
             while let Ok((stream, _)) = listener.accept().await {
                 let s = Arc::clone(&self);
                 tokio::spawn(async move {
-                    s.handle_client(stream).await;
+                    s.handle_unix_client(stream).await;
                 });
             }
         });
@@ -8124,7 +8242,7 @@ impl DaemonServer {
             while let Ok((stream, _)) = listener.accept().await {
                 let s = Arc::clone(&self);
                 tokio::spawn(async move {
-                    s.handle_client(stream).await;
+                    s.handle_unix_client(stream).await;
                 });
             }
         });
@@ -8210,7 +8328,7 @@ impl DaemonServer {
                     Ok((stream, _)) => {
                         let server = Arc::clone(&self);
                         tokio::spawn(async move {
-                            server.handle_client(stream).await;
+                            server.handle_unix_client(stream).await;
                         });
                     }
                     Err(error) => {
@@ -8477,7 +8595,7 @@ impl DaemonServer {
             while let Ok((stream, _)) = listener.accept().await {
                 let s = Arc::clone(&self);
                 tokio::spawn(async move {
-                    s.handle_client(stream).await;
+                    s.handle_unix_client(stream).await;
                 });
             }
         });

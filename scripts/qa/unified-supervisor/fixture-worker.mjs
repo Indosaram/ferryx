@@ -7,12 +7,19 @@
 // extension does. Everything it sees is appended to <logDir>/worker-<pid>.jsonl, which the
 // runner reads; it never decides PASS. It is a fixture standing in for an agent extension's
 // self-report, not a real provider worker. It exits when its input closes (the pane is gone).
-//   argv: <logDir> [--max-lifetime-ms=N] [--no-report]   (leak guard, default 600000)
+//   argv: <logDir> [--max-lifetime-ms=N] [--no-report] [--multi-turn]   (leak guard, default 600000)
 // With --no-report it logs its input but never reports a state: a target that accepts the
 // typed bytes and never shows a turn start (remote-delivery's suppressed receipt).
+// With --multi-turn (autonomy) every delivered instruction is one turn: the worker reports
+// `working`, writes result.txt in its cwd (`NOT READY` on its first turn, exactly `READY`
+// after), runs the runner-committed verify.sh, prints its exit code to the pane, then reports
+// `idle` so the run settles. It turns bracketed paste on (ESC[?2004h) at start, as an agent
+// TUI does, so a delivery arrives as one paste whose lines are CR-joined; the following Enter
+// ends the turn. A plain line outside a paste is one turn too.
 // An instruction containing QA_NO_START_REPORT is logged but never reported: the `recovery`
 // scenario uses it to hold a dispatch between "typed" and "start recorded".
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -21,6 +28,7 @@ const [logDir, ...rest] = process.argv.slice(2);
 const lifetimeArg = rest.find((arg) => arg.startsWith('--max-lifetime-ms='));
 const lifetimeMs = Number(lifetimeArg?.slice('--max-lifetime-ms='.length) ?? 600_000);
 const silent = rest.includes('--no-report');
+const multiTurn = rest.includes('--multi-turn');
 if (!logDir) process.exit(2);
 mkdirSync(logDir, { recursive: true });
 const logFile = join(logDir, `worker-${process.pid}.jsonl`);
@@ -46,13 +54,49 @@ function report(state) {
   });
 }
 
-record({ kind: 'ready', sessionId, hasSocket: Boolean(socket), silent, cwd: process.cwd(), argv: process.argv.slice(2) });
+record({ kind: 'ready', sessionId, hasSocket: Boolean(socket), silent, multiTurn, cwd: process.cwd(), argv: process.argv.slice(2) });
 setTimeout(() => { record({ kind: 'lifetime-exceeded', lifetimeMs }); process.exit(97); }, lifetimeMs);
-process.stdout.write('qa-worker ready\n');
+process.stdout.write(multiTurn ? '\u001b[?2004hqa-worker ready\n' : 'qa-worker ready\n');
 
+// One turn of --multi-turn, run strictly one after another.
+let turns = 0;
+let queue = Promise.resolve();
+function turn(instruction) {
+  queue = queue.then(async () => {
+    turns += 1;
+    const index = turns;
+    record({ kind: 'instruction', turn: index, text: instruction });
+    await report('working');
+    const bytes = index === 1 ? 'NOT READY' : 'READY';
+    writeFileSync('result.txt', bytes);
+    const verify = spawnSync('/bin/sh', ['verify.sh'], { encoding: 'utf8', timeout: 20_000 });
+    const code = verify.status ?? -1;
+    record({ kind: 'turn', turn: index, wrote: bytes, verifyExit: code, stderr: verify.stderr ?? '' });
+    process.stdout.write(`turn ${index}: wrote result.txt, verify.sh exited ${code}\n`);
+    await report('idle');
+  });
+}
+
+// Bracketed paste of the current delivery, when one is open.
+let paste = null;
 let reported = false;
 const lines = createInterface({ input: process.stdin, terminal: false });
 lines.on('line', (raw) => {
+  if (multiTurn) {
+    record({ kind: 'input', text: raw.replace(/\r/g, '\n') });
+    let text = raw;
+    if (text.includes('\u001b[200~')) { paste = ''; text = text.slice(text.indexOf('\u001b[200~') + 6); }
+    if (paste !== null) {
+      const end = text.indexOf('\u001b[201~');
+      if (end < 0) { paste += `${text}\n`; return; }
+      paste += text.slice(0, end);
+      text = paste;
+      paste = null;
+    }
+    const instruction = text.replace(/\r/g, '\n').trim();
+    if (instruction !== '') turn(instruction);
+    return;
+  }
   const text = raw.replace(/\r/g, '');
   record({ kind: 'input', text });
   if (reported || text.trim() === '') return;

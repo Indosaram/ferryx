@@ -2637,6 +2637,11 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // Supervisor view. The lane key rides in the pause body, never in the path.
             | ("GET", ["supervisor"])
             | ("POST", ["supervisor", "pause"])
+            // Unified supervisor API (todo 13). The machine authorizes the device and derives
+            // the actor; the relay only admits the route shape.
+            | ("POST", ["supervisor", "request"])
+            | ("GET", ["supervisor", "conversation"])
+            | ("GET" | "POST", ["supervisor", "memory"])
             | ("GET", ["attach"])
     )
 }
@@ -2731,6 +2736,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
         ["agent-control", "events"] => &["after"],
+        ["supervisor", "conversation"] => &["projectId", "after"],
         ["agent-control", "sessions", _, "wait"] => &["until", "after", "timeoutMs", "revision"],
         _ => &[],
     };
@@ -4947,6 +4953,15 @@ mod tests {
         ));
         assert!(allowed_http_route(&Method::GET, "supervisor"));
         assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/request"));
+        assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));
+        assert!(allowed_http_route(&Method::GET, "supervisor/memory"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/memory"));
+        assert!(
+            validate_http_query("supervisor/conversation", Some("projectId=p&after=3")).is_ok()
+        );
+        assert!(validate_http_query("supervisor/conversation", Some("actor=x")).is_err());
+        assert!(validate_http_query("supervisor/request", Some("actor=x")).is_err());
         for (method, path) in [
             (Method::GET, "reference-chat/session-1"),
             (Method::GET, "reference-chat/x/secret"),
@@ -4960,6 +4975,10 @@ mod tests {
             (Method::POST, "supervisor/x/y"),
             (Method::GET, "supervisor/x/y"),
             (Method::POST, "supervisor/lane-1/pause"),
+            (Method::GET, "supervisor/request"),
+            (Method::DELETE, "supervisor/memory"),
+            (Method::POST, "supervisor/conversation"),
+            (Method::POST, "supervisor/request/x"),
         ] {
             assert!(
                 !allowed_http_route(&method, path),

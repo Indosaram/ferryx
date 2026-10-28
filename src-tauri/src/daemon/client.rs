@@ -737,6 +737,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
+        DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
     }
 }
 
@@ -934,6 +935,8 @@ const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration
 fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        // A cancel stops the worker's pane before it answers.
+        DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }

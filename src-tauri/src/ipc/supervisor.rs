@@ -67,7 +67,48 @@ pub async fn cmd_supervisor_goal(
     daemon_client: tauri::State<'_, Arc<DaemonClient>>,
     request: SupervisorGoalAction,
 ) -> Result<serde_json::Value, IpcError> {
-    goal_from(daemon_client.send_request(DaemonRequest::SupervisorGoal { request }).await?)
+    goal_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorGoal { request })
+            .await?,
+    )
+}
+
+fn receipt_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorRequestV1Ok { receipt } => Ok(receipt),
+        DaemonResponse::Error {
+            message,
+            code,
+            details,
+        } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal(
+            "Unexpected daemon supervisor request response",
+        )),
+    }
+}
+
+/// One unified supervisor request envelope; the daemon derives the actor.
+#[tauri::command]
+pub async fn cmd_supervisor_request(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    envelope: serde_json::Value,
+) -> Result<serde_json::Value, IpcError> {
+    receipt_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorRequestV1 {
+                envelope,
+                cli: false,
+                mcp: false,
+            })
+            .await?,
+    )
 }
 
 #[cfg(test)]
@@ -76,29 +117,66 @@ mod tests {
 
     #[test]
     fn an_untyped_error_means_the_daemon_is_older() {
-        let old = DaemonResponse::Error { message: "unknown variant".into(), code: None, details: None };
-        assert_eq!(snapshot_from(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
+        let old = DaemonResponse::Error {
+            message: "unknown variant".into(),
+            code: None,
+            details: None,
+        };
+        assert_eq!(
+            snapshot_from(old).unwrap_err().code,
+            IpcErrorCode::DaemonUpgradeRequired
+        );
         let typed = DaemonResponse::Error {
             message: "the supervisor hub is not open in this daemon".into(),
             code: Some("SUPERVISOR_UNAVAILABLE".into()),
             details: None,
         };
-        assert_ne!(paused_from(typed).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
+        assert_ne!(
+            paused_from(typed).unwrap_err().code,
+            IpcErrorCode::DaemonUpgradeRequired
+        );
         assert!(paused_from(DaemonResponse::SupervisorSetPausedOk { paused: true }).unwrap());
     }
 
     #[test]
     fn a_goal_reply_carries_the_snapshot_and_a_conflict_stays_typed() {
-        let ok = DaemonResponse::SupervisorGoalOk { snapshot: serde_json::json!({"lanes": []}) };
+        let ok = DaemonResponse::SupervisorGoalOk {
+            snapshot: serde_json::json!({"lanes": []}),
+        };
         assert_eq!(goal_from(ok).unwrap(), serde_json::json!({"lanes": []}));
         let conflict = DaemonResponse::Error {
             message: "lane ledger has no proposal awaiting approval".into(),
             code: Some("REQUEST_CONFLICT".into()),
             details: None,
         };
-        assert_eq!(goal_from(conflict).unwrap_err().code, IpcErrorCode::RequestConflict);
+        assert_eq!(
+            goal_from(conflict).unwrap_err().code,
+            IpcErrorCode::RequestConflict
+        );
         let request: SupervisorGoalAction =
-            serde_json::from_value(serde_json::json!({"action": "approve", "laneKey": "ledger"})).unwrap();
-        assert_eq!(request, SupervisorGoalAction::Approve { lane_key: "ledger".into() });
+            serde_json::from_value(serde_json::json!({"action": "approve", "laneKey": "ledger"}))
+                .unwrap();
+        assert_eq!(
+            request,
+            SupervisorGoalAction::Approve {
+                lane_key: "ledger".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_supervisor_request_reply_carries_the_receipt_and_a_refusal_keeps_its_details() {
+        let ok = DaemonResponse::SupervisorRequestV1Ok {
+            receipt: serde_json::json!({"goalId": "g", "revision": 2}),
+        };
+        assert_eq!(receipt_from(ok).unwrap()["revision"], 2);
+        let stale = DaemonResponse::Error {
+            message: "goal g revision changed".into(),
+            code: Some("REVISION_CONFLICT".into()),
+            details: Some(serde_json::json!({"code": "REVISION_CONFLICT", "status": 409})),
+        };
+        let error = receipt_from(stale).unwrap_err();
+        assert_ne!(error.code, IpcErrorCode::DaemonUpgradeRequired);
+        assert_eq!(error.details.unwrap()["status"], 409);
     }
 }

@@ -299,6 +299,13 @@ impl RunState {
     /// the binding's current generation, run and session) for every move into `running`, and
     /// refuses every move into `ready` while any dispatch is in flight. Without a live run,
     /// resuming a paused goal goes to `ready`; with one, it resumes to `running`.
+    ///
+    /// A resume may also restore what the pause interrupted (see
+    /// [`request`](self::request)): `paused` reaches `verifying` (the run settled during the
+    /// pause, or its dependencies resolved), `waiting_children`/`waiting_event` (waits are
+    /// still pending) and `delivery_uncertain` (an unresolved uncertain delivery remains). An
+    /// owner approval releases `awaiting_owner` the same way (a hold placed at verify time goes
+    /// back to `verifying`), so those moves are listed from `awaiting_owner` too.
     pub fn can_transition_to(self, to: RunState) -> bool {
         use RunState::*;
         if self.is_terminal() || self == to {
@@ -318,14 +325,20 @@ impl RunState {
             Dispatching => self == Ready,
             Running => matches!(
                 self,
-                Dispatching | Paused | Degraded | DeliveryUncertain | Ready
+                Dispatching | Paused | Degraded | DeliveryUncertain | Ready | AwaitingOwner
             ),
             WaitingChildren | WaitingEvent => {
-                matches!(self, Running | Verifying | WaitingChildren | WaitingEvent)
+                matches!(
+                    self,
+                    Running | Verifying | WaitingChildren | WaitingEvent | Paused | AwaitingOwner
+                )
             }
-            Verifying => matches!(self, Running | WaitingChildren | WaitingEvent),
+            Verifying => matches!(
+                self,
+                Running | WaitingChildren | WaitingEvent | Paused | AwaitingOwner
+            ),
             Completed => self == Verifying,
-            DeliveryUncertain => matches!(self, Dispatching | Running),
+            DeliveryUncertain => matches!(self, Dispatching | Running | Paused | AwaitingOwner),
             AwaitingOwner | Paused | Degraded | Cancelled => true,
         }
     }
@@ -2395,6 +2408,7 @@ async fn transition_goal_in(
         .bind(revision)
         .execute(&mut *conn)
         .await?;
+        revoke_claimed(conn, goal_id).await?;
     }
     if to == RunState::Cancelled {
         sqlx::query(
@@ -2425,17 +2439,43 @@ pub async fn revise_goal(
     expected_revision: i64,
 ) -> Result<SupervisorGoal, SupervisorError> {
     let mut tx = pool.begin_write().await?;
-    let goal = require_goal(&mut tx, goal_id).await?;
+    let goal = revise_goal_in(&mut tx, goal_id, expected_revision).await?;
+    tx.commit().await?;
+    wakes::poke();
+    Ok(goal)
+}
+
+/// [`revise_goal`]'s checks and writes inside the caller's write transaction, so an owner
+/// correction commits its contract, revision bump and corrected intent together. Every
+/// owner correction goes through here, so this is the one place a claimed send of the goal
+/// is revoked in the typing fence ([`revoke_claimed`]); the claimed row itself is left to the
+/// dispatcher, whose pre-transmit check sees the moved revision and releases it untransmitted.
+pub(crate) async fn revise_goal_in(
+    conn: &mut SqliteConnection,
+    goal_id: &str,
+    expected_revision: i64,
+) -> Result<SupervisorGoal, SupervisorError> {
+    let goal = require_goal(conn, goal_id).await?;
     check_revision(&goal, expected_revision)?;
     check_open(&goal)?;
     let revision = goal.revision + 1;
     let now = now_rfc3339();
-    sqlx::query("UPDATE supervisor_goals SET revision = ?, updated_at = ? WHERE goal_id = ?")
-        .bind(revision)
-        .bind(&now)
-        .bind(goal_id)
-        .execute(&mut *tx)
-        .await?;
+    let moved = sqlx::query(
+        "UPDATE supervisor_goals SET revision = ?, updated_at = ? WHERE goal_id = ? AND revision = ?",
+    )
+    .bind(revision)
+    .bind(&now)
+    .bind(goal_id)
+    .bind(expected_revision)
+    .execute(&mut *conn)
+    .await?;
+    if moved.rows_affected() != 1 {
+        return Err(SupervisorError::RevisionConflict {
+            goal_id: goal_id.to_owned(),
+            expected: expected_revision,
+            actual: goal.revision,
+        });
+    }
     sqlx::query(
         "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
          WHERE goal_id = ? AND state = 'ready' AND goal_revision < ?",
@@ -2443,15 +2483,28 @@ pub async fn revise_goal(
     .bind(&now)
     .bind(goal_id)
     .bind(revision)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-    tx.commit().await?;
-    wakes::poke();
+    revoke_claimed(conn, goal_id).await?;
     Ok(SupervisorGoal {
         revision,
         updated_at: now,
         ..goal
     })
+}
+
+/// An owner hold or correction landed while a dispatch of `goal_id` is claimed: that claim
+/// may already be past its confirm call and waiting for the pane, so it is revoked in the
+/// in-process typing fence ([`delivery::check_before_typing`]) and nothing of it is typed.
+async fn revoke_claimed(conn: &mut SqliteConnection, goal_id: &str) -> Result<(), SupervisorError> {
+    let claimed: Vec<String> = sqlx::query_scalar(
+        "SELECT request_id FROM supervisor_dispatches WHERE goal_id = ? AND state = 'claimed'",
+    )
+    .bind(goal_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    delivery::revoke(claimed);
+    Ok(())
 }
 
 /// Writes the goal's next ready dispatch intent at `expected_revision` and the binding's
@@ -3258,6 +3311,19 @@ pub async fn add_wait(
     goal_id: &str,
     target: &WaitTarget,
 ) -> Result<Wait, SupervisorError> {
+    add_wait_at(pool, goal_id, target, None).await
+}
+
+/// [`add_wait`] with an optional compare-and-set on the goal revision inside the same write
+/// transaction (`REVISION_CONFLICT` writes nothing). The revision is not bumped: a new wait
+/// does not invalidate the goal's instruction, and a bump would strand its unsent intent
+/// (claims only match the intent's own revision).
+pub async fn add_wait_at(
+    pool: &SqlitePool,
+    goal_id: &str,
+    target: &WaitTarget,
+    expected_revision: Option<i64>,
+) -> Result<Wait, SupervisorError> {
     if let WaitTarget::ExternalEvent(key) = target {
         require_id("event key", key, MAX_ID_CHARS)?;
     }
@@ -3266,6 +3332,9 @@ pub async fn add_wait(
     }
     let mut tx = pool.begin_write().await?;
     let goal = require_goal(&mut tx, goal_id).await?;
+    if let Some(expected) = expected_revision {
+        check_revision(&goal, expected)?;
+    }
     check_open(&goal)?;
     let (kind, child_goal_id, event_key) = match target {
         WaitTarget::ChildGoal(child_id) => {
@@ -3538,6 +3607,10 @@ pub async fn attach_legacy_pane(
 mod tests;
 
 pub mod admission;
+pub mod answers;
+pub mod completion;
+pub mod delivery;
 pub mod dispatcher;
 pub mod receipts;
+pub mod request;
 pub mod wakes;
