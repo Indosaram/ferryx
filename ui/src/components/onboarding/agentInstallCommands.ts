@@ -20,10 +20,13 @@ export const AGENT_INSTALL_COMMANDS: Readonly<Record<string, AgentInstallCommand
     default: "curl -fsSL https://opencode.ai/install | bash",
     windows: "npm install -g opencode-ai",
   },
-  aider: { default: "python -m pip install aider-install && aider-install" },
+  aider: {
+    default: "python -m pip install aider-install && aider-install",
+    windows: 'powershell -ExecutionPolicy ByPass -c "irm https://aider.chat/install.ps1 | iex"',
+  },
   "cursor-agent": {
     default: "curl https://cursor.com/install -fsS | bash",
-    windows: null,
+    windows: "irm 'https://cursor.com/install?win32=true' | iex",
   },
   droid: {
     default: "curl -fsSL https://app.factory.ai/cli | sh",

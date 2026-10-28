@@ -346,6 +346,14 @@ describe("AgentsCliStep", () => {
     );
   });
 
+  it("has native Windows commands for cursor-agent and aider", () => {
+    expect(getAgentInstallCommand("cursor-agent", "windows")).not.toBeNull();
+    expect(getAgentInstallCommand("aider", "windows")).not.toBeNull();
+    expect(getAgentInstallCommand("aider", "windows")).not.toBe(
+      getAgentInstallCommand("aider", "macos"),
+    );
+  });
+
   it("re-runs detection on Check again and moves the agent once it is available", () => {
     const { rerender } = renderStep({
       agents: [agent("claude", false), agent("codex", true)],
