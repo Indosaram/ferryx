@@ -156,7 +156,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("hub.sqlite");
-        let (a, b, c, d) = tokio::join!(connect(&path), connect(&path), connect(&path), connect(&path));
+        let (a, b, c, d) = tokio::join!(
+            connect(&path),
+            connect(&path),
+            connect(&path),
+            connect(&path)
+        );
         for pool in [a, b, c, d] {
             let pool = pool.expect("every concurrent opener migrates");
             let held: i64 = sqlx::query_scalar(

@@ -1775,26 +1775,37 @@ async fn a_generation_abort_and_engine_restart_end_only_the_owned_engine_child()
     assert_eq!(supervisor.decide("first").await.unwrap(), "answer:first");
     // Engine restart: the owned child exits on its own; the next use relaunches it.
     harness.peer.disconnect();
-    tokio::time::timeout(WAIT, health.wait_for(|health| health.state != HealthState::Ready))
-        .await
-        .expect("the exit is observed")
-        .unwrap();
+    tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state != HealthState::Ready),
+    )
+    .await
+    .expect("the exit is observed")
+    .unwrap();
     tokio::time::advance(MIN_BACKOFF).await;
     assert_eq!(supervisor.decide("second").await.unwrap(), "answer:second");
     // Hub generation abort (hub stop or handover).
     generation.abort();
-    tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Stopped))
-        .await
-        .expect("the aborted generation stops the engine")
-        .unwrap();
+    tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state == HealthState::Stopped),
+    )
+    .await
+    .expect("the aborted generation stops the engine")
+    .unwrap();
     harness.peer.wait_ended(2).await;
 
     let children = launcher.children.lock().unwrap().clone();
     assert_eq!(children.len(), 2, "one owned child per launch");
     assert!(
-        children.iter().all(|(_, killed)| killed.load(Ordering::SeqCst)),
+        children
+            .iter()
+            .all(|(_, killed)| killed.load(Ordering::SeqCst)),
         "each recorded owned child was ended through its own kill switch"
     );
     assert!(supervisor.health().pid.is_none());
-    assert!(supervisor.profile().owned_pid().is_none(), "no owned pid record is left");
+    assert!(
+        supervisor.profile().owned_pid().is_none(),
+        "no owned pid record is left"
+    );
 }
