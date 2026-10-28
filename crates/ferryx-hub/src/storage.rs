@@ -68,8 +68,36 @@ pub async fn memory() -> Result<SqlitePool> {
 
 pub(crate) async fn migrate(pool: &SqlitePool) -> Result<()> {
     // Embedded at build time: an installed binary has no source tree to read them from.
-    sqlx::migrate!("./migrations").run(pool).await?;
-    Ok(())
+    let migrator = sqlx::migrate!("./migrations");
+    // sqlx's SQLite migrator takes no lock (its `lock()` is a no-op): two processes opening a
+    // fresh or older hub database at once (the daemon's hub start and a `ferryx-cli supervisor`
+    // command) both read the applied list, and the one that loses the write lock then re-runs
+    // a migration the other committed ("duplicate column name", a duplicate version row) and
+    // the hub does not open. A failed run is retried while the applied count still grows (the
+    // winner's commits, or this run's own progress); a failure with no progress is a real one.
+    // Bounded: the count cannot exceed the number of migrations.
+    let mut applied = applied_migrations(pool).await;
+    loop {
+        match migrator.run(pool).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let now = applied_migrations(pool).await;
+                if now <= applied {
+                    return Err(error.into());
+                }
+                tracing::info!(%error, applied = now, "another process migrated the hub database concurrently; migrating again");
+                applied = now;
+            }
+        }
+    }
+}
+
+/// Rows in sqlx's migration table; 0 before the first migration created it.
+async fn applied_migrations(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
 }
 
 /// Every hub transaction writes, and most read first (next sequence number, existing row).
@@ -95,6 +123,29 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Several processes may open a fresh hub database at once (the daemon's hub start beside
+    /// a `ferryx-cli supervisor` command, 2026-10-28 q24): every opener gets the full schema.
+    #[tokio::test]
+    async fn concurrent_openers_of_a_fresh_database_all_migrate_it() {
+        let dir = std::env::temp_dir().join(format!("ferryx-hub-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hub.sqlite");
+        let (a, b, c, d) = tokio::join!(connect(&path), connect(&path), connect(&path), connect(&path));
+        for pool in [a, b, c, d] {
+            let pool = pool.expect("every concurrent opener migrates");
+            let held: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pragma_table_info('supervisor_goals') WHERE name = 'held_from'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(held, 1);
+            pool.close().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn a_file_database_uses_wal_and_waits_for_a_busy_writer() {

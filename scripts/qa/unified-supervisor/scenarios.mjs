@@ -264,6 +264,12 @@ async function runAdmission(ctx) {
   await ctx.startDaemon({ env, deadlineMs: 60_000 });
   const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), ADMISSION_WORKSPACE_ID, realpathSync(workspaceRoot));
   ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+  // FERRYX_DAEMON_READY precedes the hub: the first MCP submit waits until the hub answers.
+  const hubWaitStarted = Date.now();
+  const hubProbe = await hubOpen(ctx, env, 90_000);
+  ctx.evidence.appendJsonl('requests.jsonl', { label: 'hub-open-wait', waitedMs: Date.now() - hubWaitStarted, code: hubProbe?.code, reply: hubProbe?.json ?? null, at: new Date().toISOString() });
+  ctx.assert('hub-open-before-the-first-submit', hubProbe?.json?.code === 'NOT_FOUND', { code: hubProbe?.code, json: hubProbe?.json });
+  if (hubProbe?.json?.code !== 'NOT_FOUND') throw new HarnessError('HUB_UNAVAILABLE', `the isolated daemon's hub did not open: ${JSON.stringify(hubProbe?.json ?? null)}`);
 
   // 3. The owner's MCP channel, an owned stdio process.
   const mcp = await ctx.spawn('mcp', config.ferryxCli, ['mcp'], { env, cwd: data, stdin: 'pipe', graceMs: 3_000 });
@@ -940,7 +946,8 @@ async function runAuthority(ctx) {
     { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lane.list', arguments: {} } },
   ].map((line) => `${JSON.stringify(line)}\n`).join(''));
   const wire = (envelope) => JSON.stringify({ type: 'supervisorRequestV1', envelope, cli: true });
-  const spawned = await exchange('spawn-pane', { type: 'spawn', clientRequestId: `qa-authority-pane-${ctx.runId}`, workspaceId: AUTHORITY_WORKSPACE_ID, worktree: null, cwd: work, cols: 80, rows: 24, shell: '/bin/sh' });
+  // The pane runs inside the registered workspace root (`ws/`); its results go to `work` by absolute path.
+  const spawned = await exchange('spawn-pane', { type: 'spawn', clientRequestId: `qa-authority-pane-${ctx.runId}`, workspaceId: AUTHORITY_WORKSPACE_ID, worktree: null, cwd: repo, cols: 80, rows: 24, shell: '/bin/sh' });
   const sessionId = spawned?.sessionId ?? null;
   if (!sessionId) throw new HarnessError('PANE_SPAWN_FAILED', `could not spawn the pane: ${JSON.stringify(spawned)}`);
   const cliOut = join(work, 'pane-cli.json');
@@ -1030,7 +1037,7 @@ export const SCENARIOS = Object.freeze({
     summary: 'Submit the fixture request, replay the same source id, ask "What can you do?": one goal, one initial dispatch',
     deadlineMs: 6 * 60_000,
     requiredAssertions: [
-      'setup-created-identity-project-and-host', 'setup-rerun-returns-the-same-ids', 'setup-conflicting-rebind-refused', 'workspace-registered',
+      'setup-created-identity-project-and-host', 'setup-rerun-returns-the-same-ids', 'setup-conflicting-rebind-refused', 'workspace-registered', 'hub-open-before-the-first-submit',
       'submit-admitted-with-acknowledgment-naming-goal', 'initial-dispatch-started-without-drive-call', 'exactly-one-worker-started',
       'replay-returns-the-same-receipt', 'replay-created-no-second-dispatch', 'edited-replay-returns-request-conflict',
       'edited-replay-created-no-second-worker', 'question-is-conversational', 'question-created-no-goal-or-dispatch',
