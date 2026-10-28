@@ -169,4 +169,29 @@ mod tests {
         let json = serde_json::to_string(&seed).unwrap();
         assert_eq!(serde_json::from_str::<ScreenSeed>(&json).unwrap(), seed);
     }
+
+    /// A seed taken by the previous libghostty-vt pin (6a508fd) crosses a rolling handover into
+    /// this build's mirror. The fixture holds the rows, cursor and screen the old build saw; this
+    /// parser must rebuild exactly that screen from the old seed bytes.
+    #[test]
+    fn seed_from_fixture_replays_row_for_row() {
+        #[derive(Deserialize)]
+        struct Fixture {
+            seed: ScreenSeed,
+            rows: Vec<String>,
+            cursor: (u16, u16),
+            alternate_screen: bool,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../fixtures/terminal_protocol/screen_seed_6a508fd.json"
+        ))
+        .unwrap();
+        assert!(fixture.rows.len() > 200, "fixture carries the 200-line scrollback");
+        assert_eq!(fixture.cursor.1, 10, "fixture cursor sits on row 10");
+
+        let mirror = ScreenMirror::from_seed(&fixture.seed).unwrap();
+        assert_eq!(mirror_rows(&mirror), fixture.rows);
+        assert_eq!(mirror.terminal.cursor_position().unwrap(), fixture.cursor);
+        assert_eq!(mirror.is_alternate_screen(), fixture.alternate_screen);
+    }
 }
