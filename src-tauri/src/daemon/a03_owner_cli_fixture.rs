@@ -10,7 +10,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 #[path = "a13_issuer_repeat_fixture.rs"]
 mod issuer_repeat;
@@ -169,7 +169,7 @@ async fn handshake(socket: &Path, expected_capabilities: &[&str]) -> anyhow::Res
     ensure!(
         matches!(response, DaemonResponse::CapabilitiesOk { ref capabilities }
         if capabilities.as_slice() == expected_capabilities),
-        "local capabilities mismatch"
+        "local capabilities mismatch: expected {expected_capabilities:?}, got {response:?}"
     );
     write.write_all(b"{\"type\":\"ping\"}\n").await?;
     line.clear();
@@ -253,6 +253,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
+            capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY);
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;
@@ -302,6 +303,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         let expected_capabilities = if machine {
             let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", "pairedFileReadV1"];
             capabilities.push(crate::remote::repo_discovery::REPO_DISCOVERY_CAPABILITY);
+            capabilities.push(crate::remote::resources_api::RESOURCE_USAGE_CAPABILITY);
             if machine_terminal_ready { capabilities.push("terminalCreateV1"); capabilities.push("terminalStreamV1"); }
             // DAG streaming is advertised whenever the catalog that resolves remote
             // roots is readable, independent of terminal readiness.
@@ -310,9 +312,12 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            if crate::hub_runtime::supervisor_available() {
+                capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
+            }
             serde_json::json!(capabilities)
         } else { serde_json::json!([]) };
-        ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch");
+        ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch: expected {expected_capabilities}, got {}", value["capabilities"]);
         ensure!(!value.to_string().contains(&root.to_string_lossy().to_string()), "capability leaks private path");
         ensure!(client.get(&capability_url).bearer_auth("invalid-credential").send().await?.status() == 401,
             "malformed credential admitted");
@@ -445,9 +450,22 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
                 command.env(loader_path, libraries);
             }
             command.as_std_mut().process_group(0);
+            // Capture the child's output so a failure reports why the isolated
+            // scenario failed instead of only its exit status.
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut child = command.spawn()?;
             let pid = child.id().context("fixture child PID")?;
             let group = OwnedGroup(pid);
+            let mut child_stdout = child.stdout.take().context("fixture child stdout")?;
+            let mut child_stderr = child.stderr.take().context("fixture child stderr")?;
+            let stdout_task = tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                child_stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+            });
+            let stderr_task = tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                child_stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+            });
             let status = match tokio::time::timeout(Duration::from_secs(90), child.wait()).await {
                 Ok(status) => status?,
                 Err(error) => {
@@ -457,8 +475,14 @@ fn a03_private_owner_cli_surface() -> anyhow::Result<()> {
                 }
             };
             group.cleanup()?;
+            let child_stdout = String::from_utf8_lossy(&stdout_task.await??).into_owned();
+            let child_stderr = String::from_utf8_lossy(&stderr_task.await??).into_owned();
+            print!("{child_stdout}");
             println!("A03 CLEANUP exact_fixture_pid={pid} reaped=true exit={status}");
-            ensure!(status.success(), "isolated owner CLI scenario failed");
+            ensure!(
+                status.success(),
+                "isolated owner CLI scenario failed ({status})\n--- child stdout ---\n{child_stdout}\n--- child stderr ---\n{child_stderr}"
+            );
             Ok::<_, anyhow::Error>(())
         });
         root.close()?;
