@@ -220,7 +220,10 @@ pub fn requirement_check_ref(req_id: &str) -> String {
 pub fn verifier_signal(verifier: &str) -> Option<DoneSignal> {
     if let Ok(mut signals) = parse_signals(verifier) {
         if signals.len() == 1
-            && matches!(signals[0], DoneSignal::Command { .. } | DoneSignal::File { .. })
+            && matches!(
+                signals[0],
+                DoneSignal::Command { .. } | DoneSignal::File { .. }
+            )
         {
             return signals.pop();
         }
@@ -292,7 +295,9 @@ async fn pin_signal(
     };
     let script = argv[index].trim_start_matches("./").to_owned();
     if script.is_empty() || script.split('/').any(|part| part == "..") {
-        return Err(format!("{VERIFIER_UNPINNED}: {script} is not a path inside the worktree"));
+        return Err(format!(
+            "{VERIFIER_UNPINNED}: {script} is not a path inside the worktree"
+        ));
     }
     let Some(admitted) = admitted else {
         return Err(format!(
@@ -331,7 +336,8 @@ async fn pin_signal(
         Ok::<(), std::io::Error>(())
     }
     .await;
-    written.map_err(|error| format!("{VERIFIER_UNPINNED}: {script} was not materialized: {error}"))?;
+    written
+        .map_err(|error| format!("{VERIFIER_UNPINNED}: {script} was not materialized: {error}"))?;
     argv[index] = path.to_string_lossy().into_owned();
     Ok((DoneSignal::Command { argv, stdout_regex }, Some(pinned)))
 }
@@ -643,7 +649,10 @@ mod tests {
                 stdout_regex: None,
             })
         );
-        assert!(matches!(verifier_signal("file ok.txt"), Some(DoneSignal::File { .. })));
+        assert!(matches!(
+            verifier_signal("file ok.txt"),
+            Some(DoneSignal::File { .. })
+        ));
         for prose in [
             "the output looks right",
             "/etc/verify.sh exits 0",

@@ -190,14 +190,20 @@ impl CompletionDriver {
     }
 
     fn retry_due(&self, goal_id: &str) -> bool {
-        let retries = self.retries.lock().unwrap_or_else(|poison| poison.into_inner());
+        let retries = self
+            .retries
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         retries
             .get(goal_id)
             .is_none_or(|(_, due)| Instant::now() >= *due)
     }
 
     fn note_judge_failure(&self, goal_id: &str) {
-        let mut retries = self.retries.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut retries = self
+            .retries
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let failures = retries.get(goal_id).map_or(0, |(count, _)| *count) + 1;
         let delay = JUDGE_RETRY
             .saturating_mul(1u32 << (failures - 1).min(10))
@@ -362,7 +368,8 @@ impl CompletionDriver {
                 Ok(ConvergenceOutcome::Converged { verdicts }) => {
                     let unchecked = unproven_by_ferryx(&contract, &verdicts, &bundle);
                     if unchecked.is_empty() {
-                        self.finish(&goal, &binding, &run, &contract, &verdicts).await
+                        self.finish(&goal, &binding, &run, &contract, &verdicts)
+                            .await
                     } else {
                         self.correct(&goal, &verification_instruction(&unchecked), unchecked)
                             .await
@@ -406,7 +413,9 @@ impl CompletionDriver {
             .await;
         match read {
             Ok(value) => {
-                let state = value.pointer("/session/state").and_then(|state| state.as_str());
+                let state = value
+                    .pointer("/session/state")
+                    .and_then(|state| state.as_str());
                 let prompt = value
                     .pointer("/session/pending")
                     .is_some_and(|pending| !pending.is_null() && pending != &serde_json::json!([]));
@@ -511,11 +520,14 @@ impl CompletionDriver {
         let (code, detail) = match error {
             GoalError::JudgeUnavailable => (
                 JUDGE_UNAVAILABLE,
-                format!("{JUDGE_UNAVAILABLE}: the run could not be graded yet; it is not completed"),
+                format!(
+                    "{JUDGE_UNAVAILABLE}: the run could not be graded yet; it is not completed"
+                ),
             ),
-            GoalError::SupervisorFault(fault) => {
-                (SUPERVISOR_DEGRADED, format!("{SUPERVISOR_DEGRADED}: {fault}"))
-            }
+            GoalError::SupervisorFault(fault) => (
+                SUPERVISOR_DEGRADED,
+                format!("{SUPERVISOR_DEGRADED}: {fault}"),
+            ),
             other => return Err(SupervisorError::Goal(other)),
         };
         self.note_judge_failure(&goal.goal_id);
@@ -580,7 +592,8 @@ impl CompletionDriver {
         if let Some(request_id) = queued {
             // An instruction is already waiting at this revision (an owner's): it goes out
             // instead of a second one, and no turn is counted.
-            let detail = format!("{request_id} was already queued; it goes out instead of a correction");
+            let detail =
+                format!("{request_id} was already queued; it goes out instead of a correction");
             transition_goal_in(
                 &mut tx,
                 &goal.goal_id,
@@ -595,12 +608,11 @@ impl CompletionDriver {
             super::dispatcher::poke();
             return Ok(Verification::Resumed { request_id });
         }
-        let terms: Option<(String, i64, i64)> = sqlx::query_as(
-            "SELECT mode, turn_limit, turns_used FROM lane_goal WHERE lane_key = ?",
-        )
-        .bind(&goal.lane_key)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let terms: Option<(String, i64, i64)> =
+            sqlx::query_as("SELECT mode, turn_limit, turns_used FROM lane_goal WHERE lane_key = ?")
+                .bind(&goal.lane_key)
+                .fetch_optional(&mut *tx)
+                .await?;
         let unproven = if unmet.is_empty() {
             "the goal".to_owned()
         } else {
@@ -845,9 +857,21 @@ fn operation_words(operation: OperationClass) -> &'static [&'static str] {
     match operation {
         OperationClass::Edit | OperationClass::Test | OperationClass::Commit => &[],
         OperationClass::Push => &["push", "git push", "force-push"],
-        OperationClass::Publish => &["publish", "release", "deploy", "npm publish", "cargo publish"],
+        OperationClass::Publish => &[
+            "publish",
+            "release",
+            "deploy",
+            "npm publish",
+            "cargo publish",
+        ],
         OperationClass::Spend => &["purchase", "buy", "pay", "subscribe", "billing"],
-        OperationClass::Destructive => &["rm -rf", "force-push", "reset --hard", "drop table", "delete the branch"],
+        OperationClass::Destructive => &[
+            "rm -rf",
+            "force-push",
+            "reset --hard",
+            "drop table",
+            "delete the branch",
+        ],
     }
 }
 
@@ -869,7 +893,11 @@ fn withheld_named(instruction: &str, grant: &[OperationClass]) -> Vec<&'static s
     OperationClass::ALL
         .iter()
         .filter(|operation| !grant.contains(operation))
-        .filter(|operation| operation_words(**operation).iter().any(|phrase| names(phrase)))
+        .filter(|operation| {
+            operation_words(**operation)
+                .iter()
+                .any(|phrase| names(phrase))
+        })
         .map(|operation| operation.as_str())
         .collect()
 }
@@ -891,7 +919,10 @@ fn grant_text(cwd: &str, host_id: &str, grant: &[OperationClass]) -> String {
         "Scope: {cwd} on host {host_id}; work only inside your starting directory. Allowed operations: {allowed}."
     );
     if !withheld.is_empty() {
-        text.push_str(&format!(" Ask the owner before any of: {}.", withheld.join(", ")));
+        text.push_str(&format!(
+            " Ask the owner before any of: {}.",
+            withheld.join(", ")
+        ));
     }
     text
 }
@@ -927,8 +958,14 @@ impl WakeHandler for CompletionHandler {
             // Kept pending and re-offered: a paused lane until it resumes, a pane not idle
             // until it is, a judge failure until its backoff is due.
             Ok(Verification::Skipped { code })
-                if [LANE_PAUSED, PANE_NOT_IDLE, RETRY_NOT_DUE, JUDGE_UNAVAILABLE, SUPERVISOR_DEGRADED]
-                    .contains(&code.as_str()) =>
+                if [
+                    LANE_PAUSED,
+                    PANE_NOT_IDLE,
+                    RETRY_NOT_DUE,
+                    JUDGE_UNAVAILABLE,
+                    SUPERVISOR_DEGRADED,
+                ]
+                .contains(&code.as_str()) =>
             {
                 WakeAck::NotApplicable
             }

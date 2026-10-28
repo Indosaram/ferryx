@@ -509,9 +509,7 @@ pub fn hub_delivery_from_reply(result: &serde_json::Value) -> ferryx_hub::agent_
 /// (a pre-write `CONTROL_CONFLICT`) when an owner pause, cancel or correction revoked the
 /// request before its first byte; once the first byte is allowed, every later ask (the one
 /// before Enter) passes ([`ferryx_hub::supervisor::delivery::one_shot_fence`]).
-pub fn supervisor_fence(
-    request_id: &str,
-) -> Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> {
+pub fn supervisor_fence(request_id: &str) -> Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> {
     let check = ferryx_hub::supervisor::delivery::one_shot_fence(request_id.to_owned());
     Arc::new(move || {
         check().map_err(|code| ScopeError {
@@ -997,7 +995,10 @@ mod tests {
     async fn a_revoked_supervisor_request_types_nothing() {
         let session_id = "deliver-revoked";
         let request_id = "sv-goal-revoked-r1-d1";
-        let (backend, state) = pane(session_id, vec![draft(session_id, AgentControlState::Working)]);
+        let (backend, state) = pane(
+            session_id,
+            vec![draft(session_id, AgentControlState::Working)],
+        );
         ready_pane(&state, session_id);
         ferryx_hub::supervisor::delivery::revoke([request_id]);
 
@@ -1011,9 +1012,16 @@ mod tests {
         )
         .await;
         ferryx_hub::supervisor::delivery::forget(request_id);
-        assert_eq!(backend.write_attempts.load(Ordering::SeqCst), 0, "nothing was written");
+        assert_eq!(
+            backend.write_attempts.load(Ordering::SeqCst),
+            0,
+            "nothing was written"
+        );
         assert!(
-            matches!(hub_delivery(result), ferryx_hub::agent_control::Delivery::Refused { .. }),
+            matches!(
+                hub_delivery(result),
+                ferryx_hub::agent_control::Delivery::Refused { .. }
+            ),
             "a pre-write refusal"
         );
     }

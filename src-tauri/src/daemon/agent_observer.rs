@@ -319,9 +319,29 @@ async fn observe_session(
             update = agent_wait => {
                 match update {
                     Ok(update) if update.state.session_id == session_id => {
-                        dirty = true;
+                        // Each report is an edge of its own, published now from the report
+                        // itself. Sampling the retained state when the debounce fires instead
+                        // would fold a turn whose Working and Idle both arrive within one
+                        // debounce (a fast turn, or reports queued behind pane output) into a
+                        // single Idle, and a delivery would never see that turn start.
+                        let Some(service) = terminals.upgrade() else { break };
+                        sync_size(&service, &session_id, &mut engine);
+                        drop(service);
+                        let provider = ProviderReport {
+                            agent: update.state.agent.clone(),
+                            state: update.state.state.clone(),
+                            self_reported: update.state.origin.is_self_reported(),
+                            detail: update.state.detail.clone(),
+                        };
+                        publish_if_changed(
+                            &bus,
+                            &session_id,
+                            workspace_of.as_ref(),
+                            Some(&provider),
+                            &engine,
+                            false,
+                        );
                         quiet_done = false;
-                        debounce_at = tokio::time::Instant::now();
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -477,6 +497,101 @@ mod tests {
         );
         let reading = bus.latest(session).unwrap();
         assert_eq!(reading.state_source, AgentStateSource::Provider);
+        observers.unwatch(session);
+    }
+
+    fn report(session: &str, value: &str) -> AgentState {
+        AgentState {
+            session_id: session.into(),
+            state: value.into(),
+            agent: Some("omo".into()),
+            provider_session: None,
+            detail: None,
+            origin: AgentStateOrigin::Agent,
+        }
+    }
+
+    /// Waits, subscribed before the caller's trigger, for the reading after `after` that
+    /// matches `state`, under a bounded deadline.
+    async fn next_reading(
+        receiver: &mut broadcast::Receiver<crate::agent_control::events::AgentObservation>,
+        session: &str,
+        state: AgentControlState,
+    ) -> crate::agent_control::events::AgentObservation {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let reading = receiver.recv().await.expect("bus open");
+                if reading.session_id == session && reading.state == state {
+                    return reading;
+                }
+            }
+        })
+        .await
+        .expect("the reading was published")
+    }
+
+    /// A corrective (second) turn on a pane that already ran one: the agent reports Working and
+    /// Idle back to back, well inside one debounce. Each report is an edge, so the bus logs the
+    /// Working start between the two Idles, where a delivery's cursor finds it.
+    #[tokio::test]
+    async fn a_second_turn_faster_than_the_debounce_still_logs_its_start() {
+        let terminals = Arc::new(TerminalService::default());
+        let bus = Arc::new(AgentEventBus::new(32));
+        // A debounce far longer than the turn: sampling at the debounce would see only Idle.
+        let observers = Arc::new(AgentObserverHub::with_limits(
+            Arc::clone(&terminals),
+            Arc::clone(&bus),
+            4,
+            ObserverTiming {
+                debounce: Duration::from_millis(500),
+                quiet: Duration::from_secs(5),
+            },
+        ));
+        let states = Arc::new(AgentStateHub::default());
+        let session = "observer-fast-second-turn";
+        terminals.output_hub().register_session(session);
+        observers.attach(
+            Arc::clone(&states),
+            Arc::new(crate::remote::machine_events::MachineEvents::new(8)),
+        );
+        let mut readings = bus.subscribe();
+        assert!(observers.watch(session));
+
+        // The first turn, then the pane settles idle.
+        states.publish_canonical(report(session, "working"));
+        next_reading(&mut readings, session, AgentControlState::Working).await;
+        states.publish_canonical(report(session, "idle"));
+        let settled = next_reading(&mut readings, session, AgentControlState::Idle).await;
+
+        // The corrective delivery's cursor, then a sub-debounce Working -> Idle turn, with
+        // pane output in between (the typed instruction and the turn's own output).
+        let cursor = bus.head();
+        terminals
+            .output_hub()
+            .publish(session, b"corrective instruction\r\n".to_vec());
+        states.publish_canonical(report(session, "working"));
+        terminals
+            .output_hub()
+            .publish(session, b"turn 2: verify.sh exited 0\r\n".to_vec());
+        states.publish_canonical(report(session, "idle"));
+
+        let started = next_reading(&mut readings, session, AgentControlState::Working).await;
+        let ended = next_reading(&mut readings, session, AgentControlState::Idle).await;
+        assert!(started.sequence > cursor && started.sequence > settled.sequence);
+        assert!(ended.sequence > started.sequence);
+        let replay = bus.replay(cursor);
+        let crate::agent_control::events::AgentReplay::Events { events, .. } = replay else {
+            panic!("the cursor is inside the log");
+        };
+        let start_logged = events.iter().any(|reading| {
+            reading.session_id == session
+                && reading.sequence > cursor
+                && reading.state == AgentControlState::Working
+        });
+        assert!(
+            start_logged,
+            "the second turn's start is in the log after the delivery cursor: {events:?}"
+        );
         observers.unwatch(session);
     }
 }

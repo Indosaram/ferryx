@@ -22,7 +22,9 @@ pub const SEND_REVOKED: &str = "SEND_REVOKED";
 static REVOKED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
 fn revoked() -> std::sync::MutexGuard<'static, HashSet<String>> {
-    REVOKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    REVOKED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Revokes every request in `request_ids`: none of them may be typed from now on. Owner holds,
@@ -57,7 +59,9 @@ pub fn forget(request_id: &str) {
 /// asks it right before the first write and again before Enter; once the first ask passes,
 /// bytes are in the composer, and withholding Enter would only leave the instruction typed
 /// with an unknown outcome. So after the first `Ok` every later ask is `Ok`.
-pub fn one_shot_fence(request_id: impl Into<String>) -> impl Fn() -> Result<(), &'static str> + Send + Sync {
+pub fn one_shot_fence(
+    request_id: impl Into<String>,
+) -> impl Fn() -> Result<(), &'static str> + Send + Sync {
     let request_id = request_id.into();
     let passed = std::sync::atomic::AtomicBool::new(false);
     move || {
@@ -80,7 +84,11 @@ mod tests {
         revoke([revoked_early.clone()]);
         let early = one_shot_fence(revoked_early.clone());
         assert_eq!(early(), Err(SEND_REVOKED));
-        assert_eq!(early(), Err(SEND_REVOKED), "still refused: nothing was typed");
+        assert_eq!(
+            early(),
+            Err(SEND_REVOKED),
+            "still refused: nothing was typed"
+        );
         forget(&revoked_early);
 
         let revoked_late = format!("fence-late-{}", uuid::Uuid::new_v4());

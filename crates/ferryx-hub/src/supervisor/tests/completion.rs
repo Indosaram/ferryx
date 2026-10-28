@@ -68,8 +68,7 @@ const CONVERGED: &str =
 const FABRICATED: &str =
     r#"{"requirements":[{"req_id":"r1","met":true,"evidence_refs":["claim:latest","sig:7"]}]}"#;
 /// Only worker-controlled screen text and the observer state: attested prefixes, no check.
-const SCREEN_ONLY: &str =
-    r#"{"requirements":[{"req_id":"r1","met":true,"evidence_refs":["observer:state","screen:r1"]}]}"#;
+const SCREEN_ONLY: &str = r#"{"requirements":[{"req_id":"r1","met":true,"evidence_refs":["observer:state","screen:r1"]}]}"#;
 
 /// Answers judge turns from a script, recording every prompt. When `gate` is set, the first
 /// turn reports itself on `entered` and waits for the gate before answering.
@@ -200,7 +199,11 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
         .args(args)
         .output()
         .unwrap();
-    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
@@ -212,7 +215,11 @@ fn clean_repo(result: &str) -> (TempRepo, String) {
     std::fs::create_dir_all(&root).unwrap();
     let repo = TempRepo(root.clone());
     git(&root, &["init", "-q"]);
-    std::fs::write(root.join("verify.sh"), "test \"$(cat result.txt)\" = READY\n").unwrap();
+    std::fs::write(
+        root.join("verify.sh"),
+        "test \"$(cat result.txt)\" = READY\n",
+    )
+    .unwrap();
     git(&root, &["add", "verify.sh"]);
     git(&root, &["commit", "-q", "-m", "verifier"]);
     git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
@@ -266,7 +273,12 @@ fn idle_control() -> Arc<RecordingControl> {
 }
 
 fn dispatcher(pool: &SqlitePool, control: Arc<dyn AgentControl>, pane: &str) -> Dispatcher {
-    Dispatcher::new(pool.clone(), control, Arc::new(FixedLauncher::new(pane)), HOST)
+    Dispatcher::new(
+        pool.clone(),
+        control,
+        Arc::new(FixedLauncher::new(pane)),
+        HOST,
+    )
 }
 
 fn sends(control: &RecordingControl) -> Vec<String> {
@@ -293,7 +305,9 @@ fn sends_text(control: &RecordingControl) -> Vec<String> {
 
 /// The hub observer's idle reading of `pane` that ends its live run.
 async fn settle(pool: &SqlitePool, pane: &str, sequence: u64) {
-    let settled = record_pty_settle(pool, HOST, pane, EPOCH, sequence).await.unwrap();
+    let settled = record_pty_settle(pool, HOST, pane, EPOCH, sequence)
+        .await
+        .unwrap();
     assert!(matches!(settled, PtySettle::Settled(_)), "{settled:?}");
 }
 
@@ -345,7 +359,11 @@ async fn a_fabricated_done_never_completes_and_becomes_a_corrective_run() {
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, FABRICATED]);
     let scheduler = completion_scheduler(&pool, model.clone(), control.clone());
     let tick = scheduler.tick(epoch()).await.unwrap();
-    assert_eq!(tick.delivered.len(), 1, "the durable settle drives verification");
+    assert_eq!(
+        tick.delivered.len(),
+        1,
+        "the durable settle drives verification"
+    );
 
     let (state, detail) = goal_state(&pool, &goal).await;
     assert_eq!(state, RunState::Ready, "{detail}");
@@ -361,7 +379,11 @@ async fn a_fabricated_done_never_completes_and_becomes_a_corrective_run() {
     assert!(!prompts[1].contains("\"decision\""), "{}", prompts[1]);
     let ready = ready_dispatches(&pool, 10).await.unwrap();
     assert_eq!(ready.len(), 1, "one corrective run, without the owner");
-    assert!(ready[0].instruction.contains("r1"), "{}", ready[0].instruction);
+    assert!(
+        ready[0].instruction.contains("r1"),
+        "{}",
+        ready[0].instruction
+    );
     assert_eq!(turns_used(&pool, &lane).await, 1);
 }
 
@@ -378,11 +400,17 @@ async fn the_screen_and_observer_state_alone_never_prove_a_requirement() {
     settle(&pool, PANE, 1_000).await;
 
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, SCREEN_ONLY]);
-    completion_scheduler(&pool, model, control).tick(epoch()).await.unwrap();
+    completion_scheduler(&pool, model, control)
+        .tick(epoch())
+        .await
+        .unwrap();
     let (state, detail) = goal_state(&pool, &goal).await;
     assert_eq!(state, RunState::Ready, "{detail}");
     assert!(detail.starts_with(VERIFIER_FAILED), "{detail}");
-    assert_eq!(requirement_status(&pool, &lane).await.0, RequirementStatus::Pending);
+    assert_eq!(
+        requirement_status(&pool, &lane).await.0,
+        RequirementStatus::Pending
+    );
 }
 
 /// The judge cites the right check, but the check Ferryx ran failed (wrong bytes): no
@@ -405,27 +433,45 @@ async fn a_worker_rewritten_verifier_never_completes_the_goal() {
         .current_dir(&repo.0)
         .status()
         .unwrap();
-    assert!(rewritten.success(), "the worktree's own verify.sh now passes");
+    assert!(
+        rewritten.success(),
+        "the worktree's own verify.sh now passes"
+    );
     settle(&pool, PANE, 1_000).await;
 
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
-    completion_scheduler(&pool, model, control).tick(epoch()).await.unwrap();
+    completion_scheduler(&pool, model, control)
+        .tick(epoch())
+        .await
+        .unwrap();
     let (state, detail) = goal_state(&pool, &goal).await;
     assert_ne!(state, RunState::Completed, "{detail}");
     assert_eq!(state, RunState::Ready, "{detail}");
     assert!(detail.starts_with(VERIFIER_FAILED), "{detail}");
-    assert_eq!(requirement_status(&pool, &lane).await.0, RequirementStatus::Pending);
+    assert_eq!(
+        requirement_status(&pool, &lane).await.0,
+        RequirementStatus::Pending
+    );
     let bundle = crate::goals::evidence::collect_for_run(
         &pool,
         &RecordingControl::default(),
         &lane,
         None,
         None,
-        &contract_of(&pool, &lane).await.unwrap().unwrap().requirements,
+        &contract_of(&pool, &lane)
+            .await
+            .unwrap()
+            .unwrap()
+            .requirements,
     )
     .await
     .unwrap();
-    assert_eq!(bundle.get("sig:req:r1").unwrap().passed, Some(false), "{:?}", bundle.items);
+    assert_eq!(
+        bundle.get("sig:req:r1").unwrap().passed,
+        Some(false),
+        "{:?}",
+        bundle.items
+    );
 }
 
 /// A verifier the admitted revision does not have (the worker added it) is never run; a lane
@@ -437,17 +483,26 @@ async fn a_verifier_missing_from_the_admitted_revision_waits_for_the_owner() {
     let control = idle_control();
     dispatcher(&pool, control.clone(), PANE).drain().await;
     let repo = use_clean_repo(&pool, &lane, "READY").await;
-    sqlx::query("UPDATE lane_goal_requirements SET verifier = 'check.sh exits 0' WHERE lane_key = ?")
-        .bind(&lane)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE lane_goal_requirements SET verifier = 'check.sh exits 0' WHERE lane_key = ?",
+    )
+    .bind(&lane)
+    .execute(&pool)
+    .await
+    .unwrap();
     std::fs::write(repo.0.join("check.sh"), "exit 0\n").unwrap();
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
     let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control, HOST);
     let held = driver.verify(&goal).await.unwrap();
@@ -463,12 +518,20 @@ async fn a_verifier_missing_from_the_admitted_revision_waits_for_the_owner() {
         &lane,
         &[crate::goals::contract::Requirement {
             verifier: "verify.sh exits 0".into(),
-            ..contract_of(&pool, &lane).await.unwrap().unwrap().requirements[0].clone()
+            ..contract_of(&pool, &lane)
+                .await
+                .unwrap()
+                .unwrap()
+                .requirements[0]
+                .clone()
         }],
     )
     .await
     .unwrap();
-    assert!(unpinned.is_empty(), "verify.sh is in the admitted revision: {unpinned:?}");
+    assert!(
+        unpinned.is_empty(),
+        "verify.sh is in the admitted revision: {unpinned:?}"
+    );
     sqlx::query("DELETE FROM lane_owned_worktrees WHERE lane_key = ?")
         .bind(&lane)
         .execute(&pool)
@@ -477,11 +540,18 @@ async fn a_verifier_missing_from_the_admitted_revision_waits_for_the_owner() {
     let unpinned = crate::goals::evidence::unpinned_verifiers(
         &pool,
         &lane,
-        &contract_of(&pool, &lane).await.unwrap().unwrap().requirements,
+        &contract_of(&pool, &lane)
+            .await
+            .unwrap()
+            .unwrap()
+            .requirements,
     )
     .await
     .unwrap();
-    assert!(unpinned.len() == 1 && unpinned[0].starts_with(VERIFIER_UNPINNED), "{unpinned:?}");
+    assert!(
+        unpinned.len() == 1 && unpinned[0].starts_with(VERIFIER_UNPINNED),
+        "{unpinned:?}"
+    );
 }
 
 /// The judge cites the right check, but the check Ferryx ran failed (wrong bytes): no
@@ -496,7 +566,10 @@ async fn a_failing_ferryx_check_never_completes_even_when_cited() {
     settle(&pool, PANE, 1_000).await;
 
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
-    completion_scheduler(&pool, model, control).tick(epoch()).await.unwrap();
+    completion_scheduler(&pool, model, control)
+        .tick(epoch())
+        .await
+        .unwrap();
     let (state, detail) = goal_state(&pool, &goal).await;
     assert_eq!(state, RunState::Ready, "{detail}");
     assert!(detail.starts_with(VERIFIER_FAILED), "{detail}");
@@ -529,12 +602,21 @@ async fn a_verifier_failure_runs_a_correction_without_the_owner_and_stops_at_the
     assert!(sends(&control)[1] != sends(&control)[0]);
     // The correction carries the persisted grant, not just the judge's words.
     let correction = sends_text(&control).pop().unwrap();
-    assert!(correction.contains("Allowed operations: edit, test, commit"), "{correction}");
-    assert!(correction.contains("Ask the owner before any of: push"), "{correction}");
+    assert!(
+        correction.contains("Allowed operations: edit, test, commit"),
+        "{correction}"
+    );
+    assert!(
+        correction.contains("Ask the owner before any of: push"),
+        "{correction}"
+    );
 
     // Second failure with the budget spent: a visible hold, never success, nothing sent.
     settle(&pool, PANE, 2_000).await;
-    scheduler.tick(epoch() + chrono::Duration::seconds(1)).await.unwrap();
+    scheduler
+        .tick(epoch() + chrono::Duration::seconds(1))
+        .await
+        .unwrap();
     let (state, detail) = goal_state(&pool, &goal).await;
     assert_eq!(state, RunState::AwaitingOwner, "{detail}");
     assert!(detail.starts_with(TURN_LIMIT), "{detail}");
@@ -555,7 +637,10 @@ async fn a_correction_naming_a_withheld_operation_waits_for_the_owner() {
     let _repo = use_clean_repo(&pool, &lane, "NOT READY").await;
     settle(&pool, PANE, 1_000).await;
     let model = ScriptedModel::new(&[ASSESS_PUSH]);
-    completion_scheduler(&pool, model, control.clone()).tick(epoch()).await.unwrap();
+    completion_scheduler(&pool, model, control.clone())
+        .tick(epoch())
+        .await
+        .unwrap();
     let (state, detail) = goal_state(&pool, &goal).await;
     assert_eq!(state, RunState::AwaitingOwner, "{detail}");
     assert!(detail.starts_with(GRANT_EXCEEDED), "{detail}");
@@ -574,20 +659,44 @@ async fn a_run_that_outlived_a_pause_is_still_graded() {
     dispatcher(&pool, control.clone(), PANE).drain().await;
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    let paused = transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Paused, Some("owner paused"))
-        .await
-        .unwrap();
-    transition_goal(&pool, &goal, paused.revision, RunState::Paused, RunState::Running, Some("owner resumed"))
-        .await
-        .unwrap();
+    let paused = transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Paused,
+        Some("owner paused"),
+    )
+    .await
+    .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        paused.revision,
+        RunState::Paused,
+        RunState::Running,
+        Some("owner resumed"),
+    )
+    .await
+    .unwrap();
     settle(&pool, PANE, 1_000).await;
 
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
     let resumed = goal_of(&pool, &goal).await.unwrap().unwrap();
-    assert!(resumed.revision > running.revision, "the hold bumped the revision");
-    transition_goal(&pool, &goal, resumed.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    assert!(
+        resumed.revision > running.revision,
+        "the hold bumped the revision"
+    );
+    transition_goal(
+        &pool,
+        &goal,
+        resumed.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
     let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control, HOST);
     let graded = driver.verify(&goal).await.unwrap();
     assert!(matches!(graded, Verification::Completed(_)), "{graded:?}");
@@ -611,9 +720,16 @@ async fn an_approved_verify_time_hold_grades_the_settled_run() {
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    let verifying = transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    let verifying = transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
     let held = transition_goal(
         &pool,
         &goal,
@@ -624,7 +740,10 @@ async fn an_approved_verify_time_hold_grades_the_settled_run() {
     )
     .await
     .unwrap();
-    assert!(held.revision > verifying.revision, "the hold bumped the revision");
+    assert!(
+        held.revision > verifying.revision,
+        "the hold bumped the revision"
+    );
     // The approval: awaiting_owner -> verifying at the hold's revision, nothing queued.
     let approved = sqlx::query(
         "UPDATE supervisor_goals SET run_state = 'verifying', state_detail = 'OWNER_APPROVED: by owner'
@@ -638,7 +757,12 @@ async fn an_approved_verify_time_hold_grades_the_settled_run() {
     assert_eq!(approved.rows_affected(), 1);
 
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
-    let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control.clone(), HOST);
+    let driver = CompletionDriver::new(
+        pool.clone(),
+        judge(&pool, model.clone()),
+        control.clone(),
+        HOST,
+    );
     let graded = driver.verify(&goal).await.unwrap();
     let Verification::Completed(record) = &graded else {
         panic!("the settled run was not graded: {graded:?}");
@@ -661,26 +785,54 @@ async fn a_lane_pause_during_grading_writes_nothing() {
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
 
     let (entered_tx, mut entered) = mpsc::unbounded_channel();
     let gate = Arc::new(Notify::new());
-    let model = Arc::new(ScriptedModel::with(&[ASSESS_COMPLETE, CONVERGED], Some((entered_tx, gate.clone()))));
-    let driver = Arc::new(CompletionDriver::new(pool.clone(), judge(&pool, model), control, HOST));
+    let model = Arc::new(ScriptedModel::with(
+        &[ASSESS_COMPLETE, CONVERGED],
+        Some((entered_tx, gate.clone())),
+    ));
+    let driver = Arc::new(CompletionDriver::new(
+        pool.clone(),
+        judge(&pool, model),
+        control,
+        HOST,
+    ));
     let grading = {
         let driver = driver.clone();
         let goal = goal.clone();
         tokio::spawn(async move { driver.verify(&goal).await })
     };
-    timeout(DEADLINE, entered.recv()).await.expect("the judge was asked").unwrap();
-    assert!(crate::lanes::pause::pause(&pool, &lane, "owner").await.unwrap());
+    timeout(DEADLINE, entered.recv())
+        .await
+        .expect("the judge was asked")
+        .unwrap();
+    assert!(crate::lanes::pause::pause(&pool, &lane, "owner")
+        .await
+        .unwrap());
     gate.notify_one();
     let result = timeout(DEADLINE, grading).await.unwrap().unwrap().unwrap();
-    assert_eq!(result, Verification::Skipped { code: LANE_PAUSED.into() });
+    assert_eq!(
+        result,
+        Verification::Skipped {
+            code: LANE_PAUSED.into()
+        }
+    );
     assert_eq!(goal_state(&pool, &goal).await.0, RunState::Verifying);
-    assert_eq!(requirement_status(&pool, &lane).await.0, RequirementStatus::Pending);
+    assert_eq!(
+        requirement_status(&pool, &lane).await.0,
+        RequirementStatus::Pending
+    );
 }
 
 /// A lane pause that commits while the judge decides a correction: no corrective run, no
@@ -694,26 +846,54 @@ async fn a_lane_pause_during_a_correction_decision_writes_nothing() {
     let _repo = use_clean_repo(&pool, &lane, "NOT READY").await;
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
 
     let (entered_tx, mut entered) = mpsc::unbounded_channel();
     let gate = Arc::new(Notify::new());
-    let model = Arc::new(ScriptedModel::with(&[ASSESS_CONTINUE], Some((entered_tx, gate.clone()))));
-    let driver = Arc::new(CompletionDriver::new(pool.clone(), judge(&pool, model), control.clone(), HOST));
+    let model = Arc::new(ScriptedModel::with(
+        &[ASSESS_CONTINUE],
+        Some((entered_tx, gate.clone())),
+    ));
+    let driver = Arc::new(CompletionDriver::new(
+        pool.clone(),
+        judge(&pool, model),
+        control.clone(),
+        HOST,
+    ));
     let grading = {
         let driver = driver.clone();
         let goal = goal.clone();
         tokio::spawn(async move { driver.verify(&goal).await })
     };
-    timeout(DEADLINE, entered.recv()).await.expect("the judge was asked").unwrap();
-    assert!(crate::lanes::pause::pause(&pool, &lane, "owner").await.unwrap());
+    timeout(DEADLINE, entered.recv())
+        .await
+        .expect("the judge was asked")
+        .unwrap();
+    assert!(crate::lanes::pause::pause(&pool, &lane, "owner")
+        .await
+        .unwrap());
     gate.notify_one();
     let result = timeout(DEADLINE, grading).await.unwrap().unwrap().unwrap();
-    assert_eq!(result, Verification::Skipped { code: LANE_PAUSED.into() });
+    assert_eq!(
+        result,
+        Verification::Skipped {
+            code: LANE_PAUSED.into()
+        }
+    );
     assert_eq!(goal_state(&pool, &goal).await.0, RunState::Verifying);
-    assert!(ready_dispatches(&pool, 10).await.unwrap().is_empty(), "no corrective run");
+    assert!(
+        ready_dispatches(&pool, 10).await.unwrap().is_empty(),
+        "no corrective run"
+    );
     assert_eq!(turns_used(&pool, &lane).await, 0);
     assert_eq!(sends(&control).len(), 1);
 }
@@ -729,29 +909,55 @@ async fn a_run_of_an_old_generation_never_completes_the_goal() {
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
 
     let (entered_tx, mut entered) = mpsc::unbounded_channel();
     let gate = Arc::new(Notify::new());
-    let model = Arc::new(ScriptedModel::with(&[ASSESS_COMPLETE, CONVERGED], Some((entered_tx, gate.clone()))));
-    let driver = Arc::new(CompletionDriver::new(pool.clone(), judge(&pool, model), control, HOST));
+    let model = Arc::new(ScriptedModel::with(
+        &[ASSESS_COMPLETE, CONVERGED],
+        Some((entered_tx, gate.clone())),
+    ));
+    let driver = Arc::new(CompletionDriver::new(
+        pool.clone(),
+        judge(&pool, model),
+        control,
+        HOST,
+    ));
     let grading = {
         let driver = driver.clone();
         let goal = goal.clone();
         tokio::spawn(async move { driver.verify(&goal).await })
     };
-    timeout(DEADLINE, entered.recv()).await.expect("the judge was asked").unwrap();
+    timeout(DEADLINE, entered.recv())
+        .await
+        .expect("the judge was asked")
+        .unwrap();
     let binding = execution_binding_of(&pool, &goal).await.unwrap().unwrap();
     crate::supervisor::advance_generation(&pool, &goal, binding.generation, Some(PANE))
         .await
         .unwrap();
     gate.notify_one();
     let result = timeout(DEADLINE, grading).await.unwrap().unwrap().unwrap();
-    assert_eq!(result, Verification::Skipped { code: REVISION_CONFLICT.into() });
+    assert_eq!(
+        result,
+        Verification::Skipped {
+            code: REVISION_CONFLICT.into()
+        }
+    );
     assert_eq!(goal_state(&pool, &goal).await.0, RunState::Verifying);
-    assert_eq!(requirement_status(&pool, &lane).await.0, RequirementStatus::Pending);
+    assert_eq!(
+        requirement_status(&pool, &lane).await.0,
+        RequirementStatus::Pending
+    );
 }
 
 /// A requirement whose verifier Ferryx cannot run (prose) is never graded by the model alone:
@@ -763,16 +969,25 @@ async fn a_requirement_without_a_runnable_check_waits_for_the_owner() {
     let control = idle_control();
     dispatcher(&pool, control.clone(), PANE).drain().await;
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
-    sqlx::query("UPDATE lane_goal_requirements SET verifier = 'the output looks right' WHERE lane_key = ?")
-        .bind(&lane)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE lane_goal_requirements SET verifier = 'the output looks right' WHERE lane_key = ?",
+    )
+    .bind(&lane)
+    .execute(&pool)
+    .await
+    .unwrap();
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
     let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control, HOST);
     let held = driver.verify(&goal).await.unwrap();
@@ -781,7 +996,10 @@ async fn a_requirement_without_a_runnable_check_waits_for_the_owner() {
         "{held:?}"
     );
     assert!(model.prompts().is_empty());
-    assert_eq!(requirement_status(&pool, &lane).await.0, RequirementStatus::Pending);
+    assert_eq!(
+        requirement_status(&pool, &lane).await.0,
+        RequirementStatus::Pending
+    );
 }
 
 /// A run bound on another host gets no local git or local checks; with requirements to check
@@ -795,30 +1013,52 @@ async fn a_remote_run_is_never_checked_against_the_local_checkout() {
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
     // This driver is on another machine than the binding's host.
     let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
-    let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control, "hub-other");
+    let driver = CompletionDriver::new(
+        pool.clone(),
+        judge(&pool, model.clone()),
+        control,
+        "hub-other",
+    );
     let held = driver.verify(&goal).await.unwrap();
     assert!(
         matches!(&held, Verification::Held { state: RunState::AwaitingOwner, detail } if detail.starts_with(REMOTE_CHECK_UNAVAILABLE)),
         "{held:?}"
     );
-    assert!(model.prompts().is_empty(), "nothing graded from the wrong checkout");
+    assert!(
+        model.prompts().is_empty(),
+        "nothing graded from the wrong checkout"
+    );
     let bundle = crate::goals::evidence::collect_for_run(
         &pool,
         &RecordingControl::default(),
         &lane,
         Some(HOST),
         Some(PANE.into()),
-        &contract_of(&pool, &lane).await.unwrap().unwrap().requirements,
+        &contract_of(&pool, &lane)
+            .await
+            .unwrap()
+            .unwrap()
+            .requirements,
     )
     .await
     .unwrap();
     assert!(
-        bundle.items.iter().all(|item| !item.reference.starts_with("git:") && !item.reference.starts_with("sig:")),
+        bundle
+            .items
+            .iter()
+            .all(|item| !item.reference.starts_with("git:") && !item.reference.starts_with("sig:")),
         "{:?}",
         bundle.refs()
     );
@@ -835,13 +1075,25 @@ async fn an_early_settle_on_a_busy_pane_is_not_graded() {
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
     *control.result.lock().unwrap() = json!({"session": {"state": "working"}});
     let model = ScriptedModel::new(&[]);
     let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control, HOST);
-    assert_eq!(driver.verify(&goal).await.unwrap(), Verification::Skipped { code: PANE_NOT_IDLE.into() });
+    assert_eq!(
+        driver.verify(&goal).await.unwrap(),
+        Verification::Skipped {
+            code: PANE_NOT_IDLE.into()
+        }
+    );
     assert!(model.prompts().is_empty());
     assert_eq!(goal_state(&pool, &goal).await.0, RunState::Verifying);
 }
@@ -857,20 +1109,41 @@ async fn a_judge_failure_backs_off_instead_of_retrying_every_tick() {
     let _repo = use_clean_repo(&pool, &lane, "READY").await;
     settle(&pool, PANE, 1_000).await;
     let running = goal_of(&pool, &goal).await.unwrap().unwrap();
-    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &goal,
+        running.revision,
+        RunState::Running,
+        RunState::Verifying,
+        None,
+    )
+    .await
+    .unwrap();
     // No scripted answers: every judge turn fails, twice per assessment (one retry).
     let model = ScriptedModel::new(&[]);
     let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control, HOST);
-    assert_eq!(driver.verify(&goal).await.unwrap(), Verification::Skipped { code: JUDGE_UNAVAILABLE.into() });
+    assert_eq!(
+        driver.verify(&goal).await.unwrap(),
+        Verification::Skipped {
+            code: JUDGE_UNAVAILABLE.into()
+        }
+    );
     let asked = model.prompts().len();
     assert!(asked >= 1);
     let (state, detail) = goal_state(&pool, &goal).await;
     assert_eq!(state, RunState::Verifying);
     assert!(detail.starts_with(JUDGE_UNAVAILABLE), "{detail}");
-    assert_eq!(driver.verify(&goal).await.unwrap(), Verification::Skipped { code: RETRY_NOT_DUE.into() });
-    assert_eq!(model.prompts().len(), asked, "no judge call before the retry is due");
+    assert_eq!(
+        driver.verify(&goal).await.unwrap(),
+        Verification::Skipped {
+            code: RETRY_NOT_DUE.into()
+        }
+    );
+    assert_eq!(
+        model.prompts().len(),
+        asked,
+        "no judge call before the retry is due"
+    );
 }
 
 #[tokio::test]
@@ -930,7 +1203,11 @@ async fn a_stale_decision_cannot_overwrite_an_owner_correction() {
         }
     );
     let (state, _) = goal_state(&pool, &goal).await;
-    assert_eq!(state, RunState::Verifying, "the stale complete wrote nothing");
+    assert_eq!(
+        state,
+        RunState::Verifying,
+        "the stale complete wrote nothing"
+    );
     assert_eq!(
         requirement_status(&pool, &lane).await.0,
         RequirementStatus::Pending
@@ -958,7 +1235,9 @@ async fn independent_goals_complete_independently_with_attached_evidence() {
     let (first, first_lane) = admit(&pool, "m-1", None).await;
     dispatcher(&pool, control.clone(), PANE).drain().await;
     let (second, second_lane) = admit(&pool, "m-2", None).await;
-    dispatcher(&pool, control.clone(), "pane-sv-2").drain().await;
+    dispatcher(&pool, control.clone(), "pane-sv-2")
+        .drain()
+        .await;
     let _repo = use_clean_repo(&pool, &first_lane, "READY").await;
     settle(&pool, PANE, 1_000).await;
 
@@ -979,11 +1258,17 @@ async fn independent_goals_complete_independently_with_attached_evidence() {
     assert_eq!(record["projectId"], json!(goal.project_id));
     assert_eq!(record["hostId"], json!(HOST));
     assert_eq!(record["goalRevision"], json!(goal.revision));
-    assert!(record["runId"].as_str().unwrap().starts_with(&format!("pty:{PANE}:")));
+    assert!(record["runId"]
+        .as_str()
+        .unwrap()
+        .starts_with(&format!("pty:{PANE}:")));
     assert_eq!(record["evidenceRefs"], json!(["git:clean", "sig:req:r1"]));
     let (status, evidence) = requirement_status(&pool, &first_lane).await;
     assert_eq!(status, RequirementStatus::Met);
-    assert!(evidence.iter().any(|item| item.starts_with("run:")), "{evidence:?}");
+    assert!(
+        evidence.iter().any(|item| item.starts_with("run:")),
+        "{evidence:?}"
+    );
 
     assert_eq!(goal_state(&pool, &second).await.0, RunState::Running);
     assert_eq!(
@@ -1084,10 +1369,16 @@ async fn an_owner_pause_stops_a_claimed_send_that_waits_for_its_pane() {
         matches!(results.as_slice(), [DispatchResult::Released { code, .. }] if code == "SUPERSEDED"),
         "{results:?}"
     );
-    assert!(control.typed.lock().unwrap().is_empty(), "nothing was typed");
+    assert!(
+        control.typed.lock().unwrap().is_empty(),
+        "nothing was typed"
+    );
     assert_eq!(dispatch_state(&pool, &request_id).await, "released");
     assert_eq!(goal_state(&pool, &goal).await.0, RunState::Paused);
-    assert!(check_before_typing(&request_id).is_ok(), "the fence entry is dropped");
+    assert!(
+        check_before_typing(&request_id).is_ok(),
+        "the fence entry is dropped"
+    );
 }
 
 #[tokio::test]
@@ -1095,14 +1386,19 @@ async fn a_lane_pause_stops_a_claimed_send_that_waits_for_its_pane() {
     let pool = owner_pool().await;
     let (goal, lane) = admit(&pool, "m-1", None).await;
     let (control, ready, request_id, drain) = claimed_send_waiting_for_its_pane(&pool).await;
-    assert!(crate::lanes::pause::pause(&pool, &lane, "owner").await.unwrap());
+    assert!(crate::lanes::pause::pause(&pool, &lane, "owner")
+        .await
+        .unwrap());
     ready.notify_one();
     let results = timeout(DEADLINE, drain).await.unwrap().unwrap();
     assert!(
         matches!(results.as_slice(), [DispatchResult::Held { state: RunState::Paused, detail, .. }] if detail.starts_with(LANE_PAUSED)),
         "{results:?}"
     );
-    assert!(control.typed.lock().unwrap().is_empty(), "nothing was typed");
+    assert!(
+        control.typed.lock().unwrap().is_empty(),
+        "nothing was typed"
+    );
     assert_eq!(dispatch_state(&pool, &request_id).await, "released");
     assert_eq!(goal_state(&pool, &goal).await.0, RunState::Paused);
 }
@@ -1114,7 +1410,9 @@ async fn cancel_is_not_pause() {
     let (paused, paused_lane) = admit(&pool, "m-1", None).await;
     dispatcher(&pool, control.clone(), PANE).drain().await;
     let (cancelled, _) = admit(&pool, "m-2", None).await;
-    dispatcher(&pool, control.clone(), "pane-sv-2").drain().await;
+    dispatcher(&pool, control.clone(), "pane-sv-2")
+        .drain()
+        .await;
 
     // Pause gates new sends and decisions; the running worker is left alone and resumes.
     let running = goal_of(&pool, &paused).await.unwrap().unwrap();
@@ -1128,9 +1426,17 @@ async fn cancel_is_not_pause() {
     )
     .await
     .unwrap();
-    assert!(execution_binding_of(&pool, &paused).await.unwrap().unwrap().run_id.is_some());
+    assert!(execution_binding_of(&pool, &paused)
+        .await
+        .unwrap()
+        .unwrap()
+        .run_id
+        .is_some());
     assert!(
-        !control.ops().iter().any(|(_, op)| matches!(op, AgentOp::Stop { .. })),
+        !control
+            .ops()
+            .iter()
+            .any(|(_, op)| matches!(op, AgentOp::Stop { .. })),
         "a pause never stops a worker"
     );
     transition_goal(
@@ -1158,9 +1464,16 @@ async fn cancel_is_not_pause() {
     )
     .await
     .unwrap();
-    crate::lanes::pause::pause(&pool, &paused_lane, "owner").await.unwrap();
+    crate::lanes::pause::pause(&pool, &paused_lane, "owner")
+        .await
+        .unwrap();
     let model = ScriptedModel::new(&[]);
-    let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control.clone(), HOST);
+    let driver = CompletionDriver::new(
+        pool.clone(),
+        judge(&pool, model.clone()),
+        control.clone(),
+        HOST,
+    );
     assert_eq!(
         driver.verify(&paused).await.unwrap(),
         Verification::Skipped {
@@ -1191,7 +1504,10 @@ async fn cancel_is_not_pause() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(resume, SupervisorError::IllegalTransition { .. }), "{resume}");
+    assert!(
+        matches!(resume, SupervisorError::IllegalTransition { .. }),
+        "{resume}"
+    );
     assert_eq!(
         driver.verify(&cancelled).await.unwrap(),
         Verification::Skipped {
