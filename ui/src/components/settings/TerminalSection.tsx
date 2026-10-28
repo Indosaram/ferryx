@@ -36,6 +36,7 @@ export function TerminalSection({
   macosOptionAsAlt,
   shell = null,
   scrollback = 10_000,
+  scrollbackCompression = true,
   source,
   sourcePath,
   onFontFamily,
@@ -43,6 +44,7 @@ export function TerminalSection({
   onOptionAsAlt,
   onShell,
   onScrollback,
+  onScrollbackCompression,
   onUseImported,
 }: TerminalSectionProps) {
   const [familyDraft, setFamilyDraft] = useState(fontFamily);
@@ -290,6 +292,24 @@ export function TerminalSection({
           <p className="mt-1 text-[11px] text-muted-foreground">
             Maximum scrollback lines retained in memory (1,000 – 100,000).
           </p>
+        </div>
+        <div className="flex items-center justify-between gap-4 border-y border-border py-3 text-[11px]">
+          <div>
+            <Label
+              htmlFor="terminal-scrollback-compression"
+              className="font-medium text-foreground cursor-pointer"
+            >
+              Compress idle scrollback
+            </Label>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
+              Compresses older scrollback in memory while a terminal is idle. History stays fully searchable.
+            </div>
+          </div>
+          <Switch
+            id="terminal-scrollback-compression"
+            checked={scrollbackCompression}
+            onCheckedChange={onScrollbackCompression}
+          />
         </div>
         <div>
           <Label

@@ -9,6 +9,7 @@ use super::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
     SurfaceCompositionLayout, SurfacePresentationGeometry,
 };
+use super::compression::CompressionScheduler;
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
 use super::input::{cursor_style_for_focus, NativeTerminalInput};
@@ -65,13 +66,20 @@ const RESIZE_REDRAW_ARM_WINDOW: std::time::Duration = std::time::Duration::from_
 const RESIZE_REDRAW_ABSORB_MAX: std::time::Duration = std::time::Duration::from_secs(1);
 const OUTPUT_BATCH_MAX: usize = 64;
 
-/// The pump wakes on an idle stream only for timed work: a skipped trailing agent detection or
-/// an armed replay/redraw absorb window. Otherwise it blocks on the stream.
+/// The pump wakes on an idle stream only for timed work: a skipped trailing agent detection, an
+/// armed replay/redraw absorb window, or a due scrollback-compression step. It waits for the
+/// soonest of them; with none armed it blocks on the stream.
 fn pump_idle_wakeup(
     agent_detect_maybe_pending: bool,
     replay_absorb_armed: bool,
+    compression_due: Option<std::time::Duration>,
 ) -> Option<std::time::Duration> {
-    (agent_detect_maybe_pending || replay_absorb_armed).then_some(AGENT_DETECT_TRAILING_IDLE)
+    let trailing = (agent_detect_maybe_pending || replay_absorb_armed)
+        .then_some(AGENT_DETECT_TRAILING_IDLE);
+    match (trailing, compression_due) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Whether an output burst is still being absorbed. The window closes on the first gap longer
@@ -4493,6 +4501,10 @@ impl NativeTerminalSurfaceHostState {
             let mut deadline = None;
             let mut refresh_deadline = true;
             let mut agent_detect_maybe_pending = false;
+            // Idle scrollback compression. Output restarts its idle delay; steps run only from
+            // the idle-timeout branch below, under the session lock, never while a replay or
+            // redraw burst is being absorbed.
+            let mut compression = CompressionScheduler::default();
             // A non-output message drained while batching output is handled on the next turn.
             let mut carried: Option<DaemonStreamMessage<'static>> = None;
             loop {
@@ -4525,7 +4537,12 @@ impl NativeTerminalSurfaceHostState {
                         continue;
                     }
                     result = async {
-                        match pump_idle_wakeup(agent_detect_maybe_pending, replay_absorb.is_some()) {
+                        let compression_due = if replay_absorb.is_some() {
+                            None
+                        } else {
+                            compression.next_wakeup(std::time::Instant::now())
+                        };
+                        match pump_idle_wakeup(agent_detect_maybe_pending, replay_absorb.is_some(), compression_due) {
                             Some(idle) => tokio::time::timeout(idle, messages.recv()).await,
                             None => Ok(messages.recv().await),
                         }
@@ -4596,6 +4613,19 @@ impl NativeTerminalSurfaceHostState {
                                 schedule_render();
                             }
                         }
+                        let now = std::time::Instant::now();
+                        if replay_absorb.is_none() && compression.is_due(now) {
+                            let enabled = cached_terminal_preferences().scrollback_compression;
+                            match with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |sess| {
+                                compression.run_due_step(now, enabled, &mut sess.terminal)
+                            }) {
+                                Some(Ok(_)) => {}
+                                Some(Err(error)) => {
+                                    tracing::warn!(session_id = %session_id_owned, %error, "Scrollback compression step failed");
+                                }
+                                None => compression.disarm(),
+                            }
+                        }
                         continue;
                     }
                 };
@@ -4618,6 +4648,7 @@ impl NativeTerminalSurfaceHostState {
 
                         if session_exists {
                             agent_detect_maybe_pending = true;
+                            compression.mark_activity(std::time::Instant::now());
                             crate::ipc::debug::log_native_switch_debug(serde_json::json!({
                                 "event": "terminal.render.vt_consumed",
                                 "details": {
@@ -4791,6 +4822,7 @@ impl NativeTerminalSurfaceHostState {
                         if session_exists {
                             schedule_render();
                             update_sender.send_replace(());
+                            compression.mark_activity(std::time::Instant::now());
                         }
                     }
                     DaemonStreamMessage::Gap {
@@ -6921,10 +6953,22 @@ mod tests {
 
     #[test]
     fn idle_pump_blocks_without_pending_timed_work() {
-        assert_eq!(pump_idle_wakeup(false, false), None);
-        assert_eq!(pump_idle_wakeup(true, false), Some(AGENT_DETECT_TRAILING_IDLE));
-        assert_eq!(pump_idle_wakeup(false, true), Some(AGENT_DETECT_TRAILING_IDLE));
-        assert_eq!(pump_idle_wakeup(true, true), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(false, false, None), None);
+        assert_eq!(pump_idle_wakeup(true, false, None), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(false, true, None), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(true, true, None), Some(AGENT_DETECT_TRAILING_IDLE));
+    }
+
+    #[test]
+    fn idle_pump_waits_for_the_soonest_armed_compression_or_trailing_work() {
+        let compression = crate::native_terminal::compression::COMPRESSION_IDLE_DELAY;
+        assert_eq!(pump_idle_wakeup(false, false, Some(compression)), Some(compression));
+        assert_eq!(
+            pump_idle_wakeup(true, false, Some(compression)),
+            Some(AGENT_DETECT_TRAILING_IDLE)
+        );
+        let overdue = std::time::Duration::ZERO;
+        assert_eq!(pump_idle_wakeup(false, true, Some(overdue)), Some(overdue));
     }
 
     fn output_message(sequence: u64, data: &'static [u8]) -> DaemonStreamMessage<'static> {

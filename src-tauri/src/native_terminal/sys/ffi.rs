@@ -50,6 +50,17 @@ extern "C" {
     ) -> c_int;
     pub fn ghostty_terminal_vt_write(terminal: GhosttyTerminal, data: *const u8, len: usize);
     pub fn ghostty_terminal_get(terminal: GhosttyTerminal, data: c_int, out: *mut c_void) -> c_int;
+    // Scrollback compression matching `ghostty/vt/terminal.h`. Not thread-safe with any other
+    // access to the same terminal; callers serialize through the terminal's owner.
+    pub fn ghostty_terminal_compression_activity(
+        terminal: GhosttyTerminal,
+        out_activity: *mut u64,
+    ) -> c_int;
+    pub fn ghostty_terminal_compress(
+        terminal: GhosttyTerminal,
+        mode: c_int,
+        out_result: *mut c_int,
+    ) -> c_int;
     // Color scheme report encoding matching `ghostty/vt/color_scheme.h`.
     pub fn ghostty_color_scheme_report_encode(
         scheme: c_int,

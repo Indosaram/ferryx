@@ -1,11 +1,12 @@
 //! Offline real-production pipeline QA/measurement. No daemon, socket, GUI, or GPU is started.
 //! cargo run --offline --locked --manifest-path src-tauri/Cargo.toml --example perf_terminal_pipeline -- search
-//! Modes: qa, search, history, reconstruct64, reconstruct8m, all. Run the identical source/profile on both revisions.
+//! Modes: qa, search, history, reconstruct64, reconstruct8m, compress (or --compress), all.
+//! Run the identical source/profile on both revisions.
 //! Timings exclude fixture preparation unless named; RSS is the process lifetime high-water mark,
 //! not live heap size or a phase delta. CPU is process user+system time (Unix only).
 
 use base64::Engine;
-use ferryx_lib::native_terminal::{NativeTerminal, TerminalEngine};
+use ferryx_lib::native_terminal::{CompressionStep, MemoryUsage, NativeTerminal, TerminalEngine};
 use ferryx_lib::terminal::output_hub::{retained_history::RetentionBudget, TerminalOutputHub};
 use serde_json::json;
 use std::{hint::black_box, time::Instant};
@@ -337,6 +338,56 @@ fn reconstruction_8m_isolated_measurements() {
     }
 }
 
+fn memory_json(usage: &MemoryUsage) -> serde_json::Value {
+    json!({"compression_supported": usage.compression_supported,
+        "primary_pages": usage.primary_pages, "primary_virtual_bytes": usage.primary_virtual_bytes,
+        "primary_resident_bytes": usage.primary_resident_bytes,
+        "primary_compressed_pages": usage.primary_compressed_pages,
+        "primary_compressed_bytes": usage.primary_compressed_bytes})
+}
+
+// Idle scrollback compression on 50,000 retained lines. Reports libghostty-vt's own resident
+// figure (`memory_usage().primary_resident_bytes`), not process RSS: macOS reclaims memory freed
+// by compression lazily, so RSS can stay higher than the library figure.
+fn compression_measurements() {
+    const LINES: usize = 50_000;
+    let mut term = terminal(120, 40);
+    term.set_scrollback_limit_lines(Some(LINES)).unwrap();
+    let mut input = String::with_capacity(LINES * 96);
+    for i in 0..LINES {
+        input.push_str(&format!("{i:06} \x1b[32mok\x1b[0m cargo test --manifest-path src-tauri/Cargo.toml -- line {i}\r\n"));
+    }
+    term.feed_str(&input).unwrap();
+    let before = term.memory_usage().unwrap();
+    println!("{}", json!({"phase":"compress_before", "lines":LINES, "memory":memory_json(&before)}));
+
+    let start = Instant::now();
+    let mut steps = 0usize;
+    let outcome = loop {
+        steps += 1;
+        match term.compress_step().unwrap() {
+            CompressionStep::Pending => continue,
+            done => break done,
+        }
+    };
+    let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let after = term.memory_usage().unwrap();
+    let ratio = after.primary_resident_bytes as f64 / before.primary_resident_bytes.max(1) as f64;
+    println!("{}", json!({"phase":"compress_after", "outcome":format!("{outcome:?}"), "steps":steps,
+        "wall_ms":wall_ms, "memory":memory_json(&after), "resident_ratio":ratio}));
+
+    // Compressed history must stay readable: the oldest line is on the first compressed page.
+    assert_eq!(term.search_grid("000000 ", true).unwrap().len(), 1, "oldest line lost");
+    if after.compression_supported {
+        assert_eq!(outcome, CompressionStep::Complete);
+        assert!(ratio < 0.5, "resident bytes after compression must be < 0.5x before, got {ratio}");
+        println!("{}", json!({"qa":"compress", "status":"PASS", "resident_ratio":ratio}));
+    } else {
+        assert_eq!(outcome, CompressionStep::Unsupported);
+        println!("{}", json!({"qa":"compress", "status":"UNSUPPORTED"}));
+    }
+}
+
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "qa".into());
     println!("{}", json!({"harness":"real-terminal-pipeline", "mode":mode,
@@ -351,7 +402,8 @@ fn main() {
         "reconstruct64" => reconstruction_64k_measurements(),
         "reconstruct8m" => reconstruction_8m_isolated_measurements(),
         "reconstruct8m-verify" => verify_8m_fixture(),
+        "compress" | "--compress" => compression_measurements(),
         "all" => { search_measurements(); history_measurements(); },
-        _ => panic!("expected qa, search, history, reconstruct64, reconstruct8m, reconstruct8m-verify, or all"),
+        _ => panic!("expected qa, search, history, reconstruct64, reconstruct8m, reconstruct8m-verify, compress, or all"),
     }
 }

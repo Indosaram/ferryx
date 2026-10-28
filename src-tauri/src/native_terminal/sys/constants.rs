@@ -34,6 +34,15 @@ pub const GHOSTTY_STYLE_COLOR_RGB: c_int = 2;
 pub const GHOSTTY_TERMINAL_DATA_COLOR_PALETTE: c_int = 21;
 pub const GHOSTTY_TERMINAL_DATA_SELECTION: c_int = 31;
 pub const GHOSTTY_TERMINAL_DATA_MODE: c_int = 37;
+pub const GHOSTTY_TERMINAL_DATA_MEMORY_USAGE: c_int = 42;
+
+// GhosttyTerminalCompressionMode / GhosttyTerminalCompressionResult matching
+// `ghostty/vt/terminal.h`. FULL mode is deliberately not mirrored: it scans all scrollback
+// synchronously and Ferryx only runs bounded incremental steps.
+pub const GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL: c_int = 0;
+pub const GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED: c_int = 0;
+pub const GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING: c_int = 1;
+pub const GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE: c_int = 2;
 
 // GhosttyTerminalOption C integer constants matching `ghostty/vt/terminal.h`.
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: c_int = 0;
