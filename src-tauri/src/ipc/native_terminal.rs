@@ -34,8 +34,8 @@ use crate::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState, NativeTerminalSurfaceReceipt,
 };
 use crate::native_terminal::{
-    KeyModifiers, MouseAction, MouseEvent, MousePosition, MouseRendererSize, NativeTerminalError,
-    NativeTerminalInput, ScrollViewport, TerminalEngine, TerminalWheelOutcome,
+    KeyModifiers, MemoryUsage, MouseAction, MouseEvent, MousePosition, MouseRendererSize,
+    NativeTerminalError, NativeTerminalInput, ScrollViewport, TerminalEngine, TerminalWheelOutcome,
 };
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +153,31 @@ pub struct NativeTerminalCursorReceipt {
     /// Monotonic count of rows pruned from the top of the screen; stored screen rows
     /// shift up by the difference between two readings.
     pub scrollback_pruned_rows: u64,
+}
+
+/// Memory one native terminal holds, primary and alternate screens summed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalMemoryReceipt {
+    /// Whether idle scrollback compression can free memory on this platform.
+    pub compression_supported: bool,
+    /// Physical bytes the screen pages use now; a compressed page counts its compressed size.
+    pub resident_bytes: u64,
+    /// Bytes held by compressed pages.
+    pub compressed_bytes: u64,
+    /// Bytes held by Kitty images (not part of `resident_bytes`).
+    pub image_bytes: u64,
+}
+
+impl From<MemoryUsage> for NativeTerminalMemoryReceipt {
+    fn from(usage: MemoryUsage) -> Self {
+        Self {
+            compression_supported: usage.compression_supported,
+            resident_bytes: usage.primary_resident_bytes.saturating_add(usage.alternate_resident_bytes),
+            compressed_bytes: usage.primary_compressed_bytes.saturating_add(usage.alternate_compressed_bytes),
+            image_bytes: usage.primary_image_bytes.saturating_add(usage.alternate_image_bytes),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1706,6 +1731,15 @@ pub fn cursor_for_attached_native_terminal(
             scrollback_pruned_rows: term.scrollback_pruned_rows(),
         })
     })
+}
+
+/// Memory usage of an attached native session's terminal.
+pub fn memory_for_attached_native_terminal(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+) -> Result<NativeTerminalMemoryReceipt, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
+    state.with_session_terminal(session_id, |term| Ok(term.memory_usage()?.into()))
 }
 
 /// Search full-screen text grid for an attached native session.
@@ -4066,6 +4100,62 @@ mod tests {
             Err(NativeTerminalError::InvalidValue(_))
         ));
         state.teardown();
+    }
+
+    #[test]
+    fn memory_for_attached_native_terminal_reports_resident_bytes() {
+        // Given an attached session holding 1,000 lines.
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("memory", 1, None).unwrap();
+        state
+            .with_session_terminal("memory", |term| {
+                for i in 0..1_000 {
+                    term.feed(format!("memory line {i:04}\r\n").as_bytes())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // When diagnostics read its memory usage.
+        let receipt = memory_for_attached_native_terminal(&state, "memory").unwrap();
+
+        // Then the pages are resident, and a platform without compression reports none compressed.
+        assert!(receipt.resident_bytes > 0, "{receipt:?}");
+        if !receipt.compression_supported {
+            assert_eq!(receipt.compressed_bytes, 0, "{receipt:?}");
+        }
+        assert!(memory_for_attached_native_terminal(&state, "not-attached").is_err());
+        state.teardown();
+    }
+
+    #[test]
+    fn memory_receipt_sums_both_screens_in_camel_case() {
+        let usage = MemoryUsage {
+            compression_supported: true,
+            primary_resident_bytes: 100,
+            primary_compressed_bytes: 10,
+            primary_image_bytes: 1,
+            alternate_resident_bytes: 200,
+            alternate_compressed_bytes: 20,
+            alternate_image_bytes: 2,
+            ..MemoryUsage::default()
+        };
+        let receipt = NativeTerminalMemoryReceipt::from(usage);
+        assert_eq!(
+            receipt,
+            NativeTerminalMemoryReceipt {
+                compression_supported: true,
+                resident_bytes: 300,
+                compressed_bytes: 30,
+                image_bytes: 3,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap(),
+            serde_json::json!({
+                "compressionSupported": true, "residentBytes": 300, "compressedBytes": 30, "imageBytes": 3,
+            })
+        );
     }
 
     #[test]

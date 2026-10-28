@@ -9,7 +9,7 @@ use super::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
     SurfaceCompositionLayout, SurfacePresentationGeometry,
 };
-use super::compression::CompressionScheduler;
+use super::compression::{CompressionScheduler, CompressionStep};
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
 use super::input::{cursor_style_for_focus, NativeTerminalInput};
@@ -2766,6 +2766,23 @@ fn with_session_owned_by<T>(
     Some(f(&mut session))
 }
 
+/// Logs a terminal's memory once a compression pass completes.
+fn trace_compressed_memory(session_id: &str, terminal: &NativeTerminal) {
+    match terminal.memory_usage() {
+        Ok(usage) => {
+            let memory = crate::ipc::native_terminal::NativeTerminalMemoryReceipt::from(usage);
+            tracing::debug!(
+                session_id,
+                resident_bytes = memory.resident_bytes,
+                compressed_bytes = memory.compressed_bytes,
+                image_bytes = memory.image_bytes,
+                "Scrollback compression complete"
+            );
+        }
+        Err(error) => tracing::debug!(session_id, %error, "Scrollback memory usage unavailable"),
+    }
+}
+
 fn lock_replay_to_bottom(sessions: &SessionMap, session_id: &str, owner: (u64, &Arc<SnapshotSlot>)) {
     with_session_owned_by(sessions, session_id, owner, |session| {
         let _ = session.terminal.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
@@ -4621,7 +4638,11 @@ impl NativeTerminalSurfaceHostState {
                         if replay_absorb.is_none() && compression.is_due(now) {
                             let enabled = cached_terminal_preferences().scrollback_compression;
                             match with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |sess| {
-                                compression.run_due_step(now, enabled, &mut sess.terminal)
+                                let step = compression.run_due_step(now, enabled, &mut sess.terminal);
+                                if matches!(step, Ok(Some(CompressionStep::Complete))) {
+                                    trace_compressed_memory(&session_id_owned, &sess.terminal);
+                                }
+                                step
                             }) {
                                 Some(Ok(_)) => {}
                                 Some(Err(error)) => {
