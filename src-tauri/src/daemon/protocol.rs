@@ -19,6 +19,8 @@ pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `PasteWrite`/`CancelPaste`.
 pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
+/// Advertised in `GetCapabilities` by a daemon that serves `AgentPromptGet`/`AgentPromptAnswer`.
+pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
 /// Error code of a `PasteWrite` chunk that was refused or unwound by `CancelPaste`. Its
 /// details carry the exact `bytesWritten` of that chunk.
 pub const PASTE_CANCELLED_CODE: &str = "PASTE_CANCELLED";
@@ -820,6 +822,26 @@ pub enum DaemonRequest {
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
+    /// The prompt an agent pane is asking right now, read from its reconstructed screen.
+    /// `registry_id` names the pane's agent when the caller knows it; otherwise the daemon
+    /// identifies it the way agent control does. Gated by `agentPromptV1`.
+    #[serde(rename_all = "camelCase")]
+    AgentPromptGet {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry_id: Option<String>,
+    },
+    /// Answer the prompt read by `AgentPromptGet`. The screen is re-read and an answer whose
+    /// revision or prompt no longer matches is refused with nothing typed.
+    #[serde(rename_all = "camelCase")]
+    AgentPromptAnswer {
+        session_id: String,
+        prompt_id: String,
+        screen_revision: String,
+        answer: AgentPromptAnswerInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry_id: Option<String>,
+    },
     PairedHostList,
     /// Gated by `pairedHostReachabilityV1`; an older daemon never receives it.
     PairedHostReachabilityList,
@@ -1011,6 +1033,45 @@ pub enum DaemonRequest {
     },
 }
 
+/// What a prompt asks for: pick one of its options, approve or reject an action, or type text.
+/// An approval answer changes what the agent may do, so a client confirms it first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentPromptViewKind {
+    Choice,
+    Approval,
+    FreeText,
+}
+
+/// One option of a prompt. `key` is the option's index on the card, as the answer names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPromptViewOption {
+    pub key: String,
+    pub label: String,
+}
+
+/// The answer to an `AgentPromptView`: exactly one of an option's `key` or free `text`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPromptAnswerInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// The prompt an agent pane is asking, and the screen revision it was read from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPromptView {
+    pub prompt_id: String,
+    pub screen_revision: String,
+    pub question: String,
+    pub options: Vec<AgentPromptViewOption>,
+    pub kind: AgentPromptViewKind,
+}
+
 /// Authenticated identity of a paired DAG subscription. The desktop names the host
 /// and the host's own workspace id; the remote resolves the root itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1120,6 +1181,14 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     ResourceUsageOk {
         snapshot: crate::daemon::resource_usage::HostResourceSnapshot,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentPromptGetOk {
+        prompt: Option<AgentPromptView>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentPromptAnswerOk {
+        receipt: crate::scoped_contracts::DeliveryReceipt,
     },
     #[serde(rename_all = "camelCase")]
     ProtocolMismatch {

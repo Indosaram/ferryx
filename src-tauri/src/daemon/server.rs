@@ -6058,6 +6058,20 @@ impl DaemonServer {
                         Err(error) => daemon_error(format!("Resource sampling failed: {error}")),
                     }
                 }
+                Ok(DaemonRequest::AgentPromptGet { session_id, registry_id }) => {
+                    match crate::remote::server::agent_control_service::prompt_get(&self.remote_state, &session_id, registry_id).await {
+                        Ok(prompt) => DaemonResponse::AgentPromptGetOk { prompt },
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
+                Ok(DaemonRequest::AgentPromptAnswer { session_id, prompt_id, screen_revision, answer, registry_id }) => {
+                    match crate::remote::server::agent_control_service::prompt_answer(
+                        &self.remote_state, session_id, prompt_id, screen_revision, answer, registry_id,
+                    ).await {
+                        Ok(receipt) => DaemonResponse::AgentPromptAnswerOk { receipt },
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
@@ -7217,6 +7231,7 @@ impl DaemonServer {
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
