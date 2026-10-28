@@ -170,3 +170,7 @@ pub const GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_IMAGE: c_int = 1;
 // GhosttyTerminal continuation options matching `ghostty/vt/terminal.h`.
 pub const GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES: c_int = 31;
 pub const GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES: c_int = 36;
+
+// GhosttySearchOption / GhosttySearchData constants matching `ghostty/vt/search.h`.
+pub const GHOSTTY_SEARCH_OPT_NEEDLE: c_int = 0;
+pub const GHOSTTY_SEARCH_DATA_MATCHES: c_int = 5;

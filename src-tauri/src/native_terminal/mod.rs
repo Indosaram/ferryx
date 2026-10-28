@@ -83,6 +83,7 @@ pub use scroll::{
     native_wheel_dispatch, NativeWheelDispatch, ScrollbarOverlayState, ATTENTION_FRAME_COLOR,
     ATTENTION_FRAME_THICKNESS_LOGICAL_PX, ATTENTION_HALO_COLOR,
 };
+pub use search::ghostty_search_eligible;
 pub use snapshot::{CellSnapshot, CellWide, RenderSnapshot};
 pub use snapshot_codec::{
     decode_terminal_snapshot, encode_terminal_snapshot, encode_terminal_snapshot_buf,
