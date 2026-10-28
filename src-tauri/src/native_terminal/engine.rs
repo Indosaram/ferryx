@@ -1,6 +1,7 @@
 //! Public terminal engine trait hiding all Ghostty FFI details.
 
 use super::color::ColorRgb;
+use super::compression::{CompressionStep, MemoryUsage};
 use super::cursor::CursorState;
 use super::error::NativeTerminalError;
 use super::key::KeyEvent;
@@ -168,4 +169,15 @@ pub trait TerminalEngine {
 
     /// Resets and returns the cumulative BEL count.
     fn take_bell_count(&mut self) -> u64;
+
+    /// Opaque scrollback-compression activity token; only equality is meaningful. A change
+    /// means the terminal changed in a way that restarts the compression idle delay.
+    fn compression_activity(&self) -> Result<u64, NativeTerminalError>;
+
+    /// Run one bounded incremental scrollback-compression step. The caller must hold the
+    /// terminal exclusively; compressed history decompresses transparently on access.
+    fn compress_step(&mut self) -> Result<CompressionStep, NativeTerminalError>;
+
+    /// Memory held by the terminal's pages and Kitty images, per screen.
+    fn memory_usage(&self) -> Result<MemoryUsage, NativeTerminalError>;
 }

@@ -164,6 +164,7 @@ describe("terminal settings", () => {
       macosOptionAsAlt: null,
       shell: null,
       scrollback: 10_000,
+      scrollbackCompression: null,
     });
 
     act(() => result.current.updateSettings({ fontSize: 17 }));
@@ -174,6 +175,7 @@ describe("terminal settings", () => {
         macosOptionAsAlt: null,
         shell: null,
         scrollback: 10_000,
+        scrollbackCompression: null,
       }),
     );
 
@@ -185,6 +187,7 @@ describe("terminal settings", () => {
         macosOptionAsAlt: null,
         shell: "pwsh",
         scrollback: 10_000,
+        scrollbackCompression: null,
       }),
     );
 
@@ -309,6 +312,36 @@ describe("terminal settings", () => {
     act(() => result.current.updateSettings({ fontSize: 18 }));
     window.removeEventListener("orca:terminal-settings", events);
     expect(events).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves scrollback compression from the local override, then Ghostty, then on", () => {
+    expect(DEFAULT_TERMINAL_SETTINGS.scrollbackCompression).toBeNull();
+    expect(resolveTerminalSettings(DEFAULT_TERMINAL_SETTINGS, ghosttyPreferences).scrollbackCompression).toBe(true);
+    expect(resolveTerminalSettings(DEFAULT_TERMINAL_SETTINGS, {
+      ...ghosttyPreferences,
+      scrollbackCompression: false,
+    }).scrollbackCompression).toBe(false);
+    expect(resolveTerminalSettings(
+      { ...DEFAULT_TERMINAL_SETTINGS, scrollbackCompression: true },
+      { ...ghosttyPreferences, scrollbackCompression: false },
+    ).scrollbackCompression).toBe(true);
+  });
+
+  it("persists the scrollback compression toggle and pushes it to the native runtime", async () => {
+    const { result } = renderHook(() => useTerminalSettings());
+    await waitFor(() => expect(native.applyTerminalOverrides).toHaveBeenCalled());
+
+    act(() => result.current.updateSettings({ scrollbackCompression: false }));
+
+    expect(result.current.settings.scrollbackCompression).toBe(false);
+    expect(JSON.parse(localStorage.getItem(TERMINAL_SETTINGS_STORAGE_KEY)!)).toMatchObject({
+      scrollbackCompression: false,
+    });
+    await waitFor(() =>
+      expect(native.applyTerminalOverrides).toHaveBeenLastCalledWith(
+        expect.objectContaining({ scrollbackCompression: false }),
+      ),
+    );
   });
 
   it("reports a font-size-only override as a local override", () => {

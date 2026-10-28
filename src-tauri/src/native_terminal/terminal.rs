@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 
 use super::bell::TerminalContext;
 use super::color::ColorRgb;
+use super::compression::{CompressionStep, MemoryUsage};
 use super::cursor::CursorState;
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
@@ -34,12 +35,16 @@ use super::selection::{
 };
 use super::snapshot::RenderSnapshot;
 use super::sys::ffi::{
-    ghostty_terminal_get, ghostty_terminal_reset, ghostty_terminal_resize, ghostty_terminal_set,
+    ghostty_terminal_compress, ghostty_terminal_compression_activity, ghostty_terminal_get,
+    ghostty_terminal_reset, ghostty_terminal_resize, ghostty_terminal_set,
     ghostty_terminal_vt_write,
 };
 use super::sys::types::{
-    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalModeConfig,
-    GHOSTTY_MODE_SYNCHRONIZED_OUTPUT, GHOSTTY_TERMINAL_DATA_MODE,
+    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalMemoryUsage,
+    GhosttyTerminalModeConfig, GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
+    GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL, GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE,
+    GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING, GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED,
+    GHOSTTY_TERMINAL_DATA_MEMORY_USAGE, GHOSTTY_TERMINAL_DATA_MODE,
     GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
     GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
     GHOSTTY_TERMINAL_OPT_MODE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
@@ -733,12 +738,73 @@ impl TerminalEngine for NativeTerminal {
     fn take_bell_count(&mut self) -> u64 {
         self.context.bell_counter.swap(0, Ordering::Relaxed)
     }
+
+    fn compression_activity(&self) -> Result<u64, NativeTerminalError> {
+        let mut activity: u64 = 0;
+        // SAFETY: The owned terminal is live and `activity` is a valid writable u64.
+        let result = unsafe {
+            ghostty_terminal_compression_activity(self.handle.as_ptr(), &mut activity)
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_compression_activity")?;
+        Ok(activity)
+    }
+
+    fn compress_step(&mut self) -> Result<CompressionStep, NativeTerminalError> {
+        let mut raw = GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
+        // SAFETY: `&mut self` serializes this call with every other access to the live terminal,
+        // as the header requires; `raw` is a valid writable result slot.
+        let result = unsafe {
+            ghostty_terminal_compress(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL,
+                &mut raw,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_compress")?;
+        match raw {
+            GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED => Ok(CompressionStep::Unsupported),
+            GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING => Ok(CompressionStep::Pending),
+            GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE => Ok(CompressionStep::Complete),
+            other => Err(NativeTerminalError::InvalidValue(format!(
+                "ghostty_terminal_compress returned unknown result {other}"
+            ))),
+        }
+    }
+
+    fn memory_usage(&self) -> Result<MemoryUsage, NativeTerminalError> {
+        let mut raw = GhosttyTerminalMemoryUsage::default();
+        // SAFETY: The live terminal fills the sized struct whose `size` names this layout.
+        let result = unsafe {
+            ghostty_terminal_get(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_DATA_MEMORY_USAGE,
+                &mut raw as *mut GhosttyTerminalMemoryUsage as *mut c_void,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_get(MemoryUsage)")?;
+        Ok(MemoryUsage {
+            compression_supported: raw.compression_supported,
+            primary_pages: raw.primary_pages,
+            primary_virtual_bytes: raw.primary_virtual_bytes,
+            primary_resident_bytes: raw.primary_resident_bytes,
+            primary_compressed_pages: raw.primary_compressed_pages,
+            primary_compressed_bytes: raw.primary_compressed_bytes,
+            primary_image_bytes: raw.primary_image_bytes,
+            alternate_pages: raw.alternate_pages,
+            alternate_virtual_bytes: raw.alternate_virtual_bytes,
+            alternate_resident_bytes: raw.alternate_resident_bytes,
+            alternate_compressed_pages: raw.alternate_compressed_pages,
+            alternate_compressed_bytes: raw.alternate_compressed_bytes,
+            alternate_image_bytes: raw.alternate_image_bytes,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::NativeTerminal;
     use crate::native_terminal::color::ColorRgb;
+    use crate::native_terminal::compression::CompressionStep;
     use crate::native_terminal::engine::TerminalEngine;
     use crate::native_terminal::terminal::full_palette;
     use crate::native_terminal::{
@@ -1628,6 +1694,68 @@ mod tests {
         let shifted = row - u32::try_from(delta).unwrap();
         terminal.select_range((0, shifted), (9, shifted), false).unwrap();
         assert_eq!(terminal.selection_text().unwrap(), expected);
+    }
+
+    /// Writes `lines` numbered rows and drains incremental compression, returning the final step.
+    fn fill_and_compress(terminal: &mut NativeTerminal, lines: usize) -> CompressionStep {
+        terminal.set_scrollback_limit_lines(Some(50_000)).unwrap();
+        let mut input = String::with_capacity(lines * 48);
+        for i in 0..lines {
+            input.push_str(&format!("line {i:06} repeated and compressible terminal history\r\n"));
+        }
+        terminal.feed_str(&input).unwrap();
+        // Each step inspects a bounded number of pages, so a pass over 20,000 rows ends well
+        // inside this bound; reaching it means the pass never completes.
+        for _ in 0..100_000 {
+            match terminal.compress_step().unwrap() {
+                CompressionStep::Pending => continue,
+                done => return done,
+            }
+        }
+        panic!("incremental compression never completed");
+    }
+
+    #[test]
+    fn compress_step_compresses_idle_scrollback_where_supported() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        let fresh = terminal.memory_usage().unwrap();
+        assert_eq!(fresh.primary_compressed_pages, 0);
+        let activity_before = terminal.compression_activity().unwrap();
+
+        let step = fill_and_compress(&mut terminal, 20_000);
+        assert_ne!(
+            terminal.compression_activity().unwrap(),
+            activity_before,
+            "writing scrollback must change the compression activity token"
+        );
+
+        let usage = terminal.memory_usage().unwrap();
+        assert!(usage.primary_pages > fresh.primary_pages);
+        assert!(usage.primary_resident_bytes > 0);
+        if usage.compression_supported {
+            assert_eq!(step, CompressionStep::Complete);
+            assert!(usage.primary_compressed_pages > 0, "{usage:?}");
+            assert!(usage.primary_compressed_bytes > 0, "{usage:?}");
+            assert!(usage.primary_resident_bytes <= usage.primary_virtual_bytes, "{usage:?}");
+        } else {
+            assert_eq!(step, CompressionStep::Unsupported);
+            assert_eq!(usage.primary_compressed_pages, 0);
+            assert_eq!(usage.primary_compressed_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn search_grid_reads_through_compressed_scrollback() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        fill_and_compress(&mut terminal, 20_000);
+
+        // Line 0 lives on the oldest page, the first one compressed.
+        assert_eq!(terminal.search_grid("line 000000 ", true).unwrap(), vec![(0, 0, 11)]);
+        assert_eq!(
+            terminal.screen_row_text(1).unwrap().trim_end(),
+            "line 000001 repeated and compressible terminal history"
+        );
+        assert_eq!(terminal.search_grid("line 019999 ", true).unwrap().len(), 1);
     }
 
     #[test]

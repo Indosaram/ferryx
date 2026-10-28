@@ -12,6 +12,7 @@ pub mod child_surface;
 mod color;
 #[cfg(feature = "native-terminal")]
 pub mod composition;
+pub mod compression;
 mod cursor;
 mod engine;
 mod error;
@@ -59,6 +60,7 @@ mod vt_format;
 pub mod wheel;
 
 pub use color::ColorRgb;
+pub use compression::{CompressionScheduler, CompressionStep, MemoryUsage};
 #[cfg(feature = "native-terminal")]
 pub use composition::{
     CellMetrics, CompositorTargetKind, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
