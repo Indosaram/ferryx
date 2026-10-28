@@ -129,6 +129,18 @@ pub mod mock {
 
     pub type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
+    /// Counts every call any mock recorded. A test subscribes before it checks the log, then
+    /// re-checks on each change, so it waits on the call itself instead of polling.
+    pub fn recorded() -> tokio::sync::watch::Receiver<u64> {
+        changes().subscribe()
+    }
+
+    fn changes() -> &'static tokio::sync::watch::Sender<u64> {
+        static CHANGES: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> =
+            std::sync::OnceLock::new();
+        CHANGES.get_or_init(|| tokio::sync::watch::channel(0).0)
+    }
+
     #[derive(Clone)]
     struct State {
         calls: Calls,
@@ -164,6 +176,7 @@ pub mod mock {
             .lock()
             .unwrap()
             .push((method.clone(), body.clone()));
+        changes().send_modify(|count| *count += 1);
         let canned = {
             let mut scripted = state.scripted.lock().unwrap();
             scripted.get_mut(&method).map(|answers| {

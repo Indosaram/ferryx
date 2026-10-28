@@ -1906,6 +1906,12 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     });
     if let Some(runtime) = &mhc_supervisor {
         tracing::info!(cwd = %runtime.profile().cwd().display(), "mhc supervisor engine is configured");
+        // Slack owner conversations call the typed work tools; admission acts only for the
+        // authenticated Slack turn in flight for the calling scope.
+        #[cfg(feature = "hub-slack")]
+        runtime.set_work_handler(std::sync::Arc::new(
+            ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
+        ));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
     }
     #[cfg(unix)]
