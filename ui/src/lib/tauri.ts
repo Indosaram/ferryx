@@ -1,7 +1,7 @@
 import { isDesktopShell } from "./clientRuntime";
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import type { DagRunSnapshot } from "./dagTypes";
-import type { RunTarget } from "./scopedContracts";
+import type { DeliveryReceipt, RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
 import { invoke, isTauri as isTauriShell } from "@tauri-apps/api/core";
@@ -1164,6 +1164,40 @@ export async function resetAgentState(sessionId: string): Promise<void> {
   await invokeCommand<void>("cmd_agent_state_reset", {
     sessionId,
   });
+}
+
+export type AgentPromptKind = "choice" | "approval" | "freeText";
+
+/** The prompt an agent pane is asking now, read from its screen at `screenRevision`. */
+export interface AgentPrompt {
+  promptId: string;
+  screenRevision: string;
+  question: string;
+  /** `key` is the option's index on the card, as an answer names it. */
+  options: { key: string; label: string }[];
+  kind: AgentPromptKind;
+  /** An option answer goes out only after a confirm. Absent from older daemons: treat as true. */
+  needsConfirmation?: boolean;
+}
+
+/** Exactly one of an option's key or free text. */
+export type AgentPromptAnswer = { key: string } | { text: string };
+
+/** Null when the pane holds no prompt a reader knows. `sessionId` is the daemon's session id. */
+export async function getAgentPrompt(sessionId: string): Promise<AgentPrompt | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<AgentPrompt | null>("cmd_agent_prompt_get", { sessionId });
+}
+
+/** Refused with REQUEST_CONFLICT, nothing typed, when the screen moved since the prompt was read. */
+export async function answerAgentPrompt(request: {
+  sessionId: string;
+  promptId: string;
+  screenRevision: string;
+  answer: AgentPromptAnswer;
+}): Promise<DeliveryReceipt> {
+  if (!isTauri()) throw toIpcError(new Error("Agent prompts are answered only in the desktop app"));
+  return invokeCommand<DeliveryReceipt>("cmd_agent_prompt_answer", request);
 }
 
 export interface AgentIntegrationStatus {

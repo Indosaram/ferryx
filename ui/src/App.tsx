@@ -22,6 +22,7 @@ import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
 import { buildAttentionRows, liveActivityLookup, type AttentionRow } from "./features/ferryx/attention/attentionModel";
+import { desktopAttentionPrompts } from "./features/ferryx/attention/attentionPrompts";
 import { agentHistoryProviderLabel, type AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
@@ -2583,14 +2584,27 @@ function WorkspaceApp({
     for (const row of rows) markSessionActivitySeen(row.sessionId, row.workspaceId);
   }, [markSessionActivitySeen]);
 
+  // A needs-you row answers its pane's prompt on the daemon session behind that pane; once the
+  // answer is out the row is no longer waiting on the user, so it leaves the Inbox.
+  const attentionPrompts = useMemo(() => desktopAttentionPrompts(
+    (row) => {
+      const liveState = row.workspaceId === activeProjectRef.current.workspaceId
+        ? stateRef.current
+        : getHmrWorkspaceState(row.workspaceId) ?? getWorkspaceSnapshot(row.workspaceId);
+      return liveState?.sessions[row.sessionId]?.backendSessionId ?? null;
+    },
+    (row) => notificationCenterStore.dismissSession(row.workspaceId, row.sessionId),
+  ), []);
+
   const sidebarAttention = useMemo<SidebarAttention>(() => ({
     rows: attentionRows,
     onOpen: handleOpenAttentionRow,
     onDismiss: (row) => dismissAttentionRows([row]),
     onDismissAll: () => dismissAttentionRows(attentionRows),
+    prompts: attentionPrompts,
     inboxOpen: isInboxOpen,
     onInboxOpenChange: setIsInboxOpen,
-  }), [attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
+  }), [attentionPrompts, attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
