@@ -509,9 +509,16 @@ impl VtEngine {
 
     /// Runs one bounded incremental compression step over cold scrollback.
     /// `&mut self` serializes it with every other access, as the header requires.
+    /// A failed call reports `Unsupported`, so the caller stops compressing
+    /// instead of the session task panicking.
     pub fn compress_step(&mut self) -> CompressStep {
         let mut raw: c_int = COMPRESSION_RESULT_UNSUPPORTED;
-        unsafe { check(ghostty_terminal_compress(self.term, COMPRESSION_MODE_INCREMENTAL, &mut raw), "compress") };
+        let r = unsafe { ghostty_terminal_compress(self.term, COMPRESSION_MODE_INCREMENTAL, &mut raw) };
+        if r != SUCCESS {
+            // This crate carries no logging dependency; stderr is the host's log.
+            eprintln!("WARN ferryx-vt: libghostty-vt compress failed: {r}; idle compression stopped");
+            return CompressStep::Unsupported;
+        }
         match raw {
             COMPRESSION_RESULT_PENDING => CompressStep::Pending,
             COMPRESSION_RESULT_COMPLETE => CompressStep::Complete,

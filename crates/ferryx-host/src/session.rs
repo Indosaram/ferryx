@@ -841,6 +841,9 @@ impl Session {
                 let _ = self.master.resize(PtySize { rows: applied.rows, cols: applied.cols, pixel_width: 0, pixel_height: 0 });
                 let adv = self.term.resize(applied.cols, applied.rows);
                 self.publish(adv);
+                // A reflow may re-read all scrollback, restoring compressed pages.
+                let next = self.compress.on_output(Instant::now());
+                self.start_compress_timer(next);
                 self.reply(&conn, rid, Message::ResizeAck(ResizeAck { epoch: applied.epoch, seq: applied.seq, cols: applied.cols, rows: applied.rows }));
             }
             Err(ResizeError::StaleLease { current_epoch }) => self.reply_err(&conn, rid, ErrorDetail::StaleLease { scope: Scope::Resize, current_epoch, epoch_final_accepted: 0 }, "stale resize lease"),
