@@ -680,6 +680,63 @@ async fn gateway_refuses_to_mint_a_socket_ticket_without_a_valid_bearer() {
 async fn revoke_closes_all_event_sockets_only_for_that_device() {
     revocation_closes_device_sockets("/api/v1/events").await;
 }
+
+/// A prompt change on the agent bus reaches a connected events socket once: a reading whose
+/// prompt and screen did not move sends nothing.
+#[tokio::test]
+async fn a_new_prompt_on_the_agent_bus_pushes_one_prompt_changed_frame() {
+    use crate::agent_control::events::ObservationDraft;
+    use crate::agent_control::{AgentControlState, AgentStateSource, AgentTier};
+    let draft = |session: &str, state: AgentControlState, prompt: &str| ObservationDraft {
+        session_id: session.into(),
+        state,
+        state_source: AgentStateSource::Screen,
+        tier: AgentTier::Screen,
+        prompt_id: Some(prompt.into()),
+        kind: Some("question".into()),
+        screen_revision: Some(format!("rev-{prompt}")),
+        workspace_id: None,
+    };
+    let backend = SocketBackend::new(None);
+    let state = socket_state(Arc::clone(&backend));
+    let (token, _device) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+    let mut socket = open_ws_stream(server.addr, "/api/v1/events", Some(&token)).await;
+    // The selection snapshot is the first frame; the bus was subscribed before it was sent.
+    let ServerWebSocketFrame::Text(first) = frame(&mut socket).await else {
+        panic!("the events socket opens with the selection snapshot");
+    };
+    assert!(first.contains(REMOTE_ACTIVE_SELECTION_CHANGED_EVENT));
+
+    state
+        .agent_events
+        .publish(draft("session", AgentControlState::Blocked, "p1"));
+    let ServerWebSocketFrame::Text(pushed) = frame(&mut socket).await else {
+        panic!("a new prompt must push a text frame");
+    };
+    let pushed: serde_json::Value = serde_json::from_str(&pushed).unwrap();
+    assert_eq!(pushed["type"], "agentPromptChanged");
+    assert_eq!(pushed["sessionId"], "session");
+    assert_eq!(pushed["promptId"], "p1");
+    assert_eq!(pushed["screenRevision"], "rev-p1");
+
+    // Same prompt and screen, only the state moved: no frame. The next frame on the socket is
+    // therefore the other session's prompt, never a repeat for the first.
+    state
+        .agent_events
+        .publish(draft("session", AgentControlState::Working, "p1"));
+    state
+        .agent_events
+        .publish(draft("other", AgentControlState::Blocked, "p2"));
+    let ServerWebSocketFrame::Text(next) = frame(&mut socket).await else {
+        panic!("the second prompt must push a text frame");
+    };
+    let next: serde_json::Value = serde_json::from_str(&next).unwrap();
+    assert_eq!(next["sessionId"], "other");
+    assert_eq!(next["promptId"], "p2");
+    drop(socket);
+    server.stop().await;
+}
 #[tokio::test]
 async fn revoke_closes_all_raw_sockets_only_for_that_device() {
     revocation_closes_device_sockets("/api/v1/terminal/session").await;

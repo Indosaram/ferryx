@@ -19,6 +19,40 @@ use super::{derive_status, AgentControlState, AgentStateSource, AgentTier, Provi
 /// Machine-events type for one slim agent-control change.
 pub const AGENT_CONTROL_EVENT: &str = "agentControlChanged";
 
+/// Events-socket frame telling a remote client that a session's prompt card may have changed.
+pub const AGENT_PROMPT_CHANGED_FRAME: &str = "agentPromptChanged";
+
+/// Per-socket memory of the prompt and screen each session last showed, so a state-only change
+/// sends no frame. A session the socket has not seen yet always sends one: a spare refetch is
+/// cheaper than a card left open on another device.
+#[derive(Default)]
+pub struct PromptChangeFilter {
+    seen: HashMap<String, (Option<String>, Option<String>)>,
+}
+
+impl PromptChangeFilter {
+    /// The `agentPromptChanged` frame for this observation, if its prompt or screen moved.
+    pub fn frame(&mut self, observation: &AgentObservation) -> Option<String> {
+        let reading = (
+            observation.prompt_id.clone(),
+            observation.screen_revision.clone(),
+        );
+        if self.seen.get(&observation.session_id) == Some(&reading) {
+            return None;
+        }
+        self.seen.insert(observation.session_id.clone(), reading);
+        Some(
+            json!({
+                "type": AGENT_PROMPT_CHANGED_FRAME,
+                "sessionId": observation.session_id,
+                "promptId": observation.prompt_id,
+                "screenRevision": observation.screen_revision,
+            })
+            .to_string(),
+        )
+    }
+}
+
 /// How many observations the log retains. Older cursors come back as a gap.
 pub const AGENT_EVENT_RETAIN: usize = 256;
 

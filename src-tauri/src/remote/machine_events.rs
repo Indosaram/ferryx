@@ -155,6 +155,9 @@ pub(crate) async fn serve(
     let mut forwarded_targets =
         std::collections::HashMap::<String, tokio::sync::watch::Receiver<bool>>::new();
     let (owner_changed, mut owner_changes) = tokio::sync::mpsc::channel(64);
+    let mut agent_rx = state.agent_events.subscribe();
+    let mut agent_open = true;
+    let mut prompts = crate::agent_control::events::PromptChangeFilter::default();
     loop {
         // The cursor is read BEFORE inventory construction. Any overlapping commit
         // is therefore replayed, never discarded as already in this boundary.
@@ -346,6 +349,15 @@ pub(crate) async fn serve(
                     reason = "ownerUnavailable"; break;
                 },
                 _ = watch.changed() => { reason = "filesystem"; break; },
+                observation = agent_rx.recv(), if agent_open => match observation {
+                    Ok(observation) => {
+                        let Some(frame) = prompts.frame(&observation) else { continue };
+                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(10), socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) { return; }
+                    },
+                    // A lagged reader only loses pushes; the client's prompt poll still converges.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(broadcast::error::RecvError::Closed) => agent_open = false,
+                },
                 event = receiver.recv() => match event {
                     Ok(event) => {
                         if event["sequence"].as_str().and_then(|v| v.parse::<u64>().ok()).is_some_and(|v| v <= sequence) { continue; }

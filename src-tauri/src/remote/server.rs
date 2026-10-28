@@ -1785,11 +1785,12 @@ async fn ws_events_handler(
     // Subscribe before reading the snapshot: a desktop focus change in between
     // is then queued as a follow-up event, never missed by this client.
     let rx = state.event_tx.subscribe();
+    let agent_rx = state.agent_events.subscribe();
     let active_selection = state.active_selection();
     Ok(ws.on_upgrade(move |socket| async move {
         let _ = while_device_authorized(
             &mut revocation,
-            handle_events_socket(socket, rx, active_selection),
+            handle_events_socket(socket, rx, agent_rx, active_selection),
         )
         .await;
     }))
@@ -1812,6 +1813,7 @@ async fn while_device_authorized<T>(
 async fn handle_events_socket(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<String>,
+    mut agent_rx: broadcast::Receiver<crate::agent_control::events::AgentObservation>,
     active_selection: Option<RemoteActiveDesktopSelection>,
 ) {
     if let Some(selection) = active_selection {
@@ -1824,7 +1826,27 @@ async fn handle_events_socket(
             return;
         }
     }
-    while let Ok(msg) = rx.recv().await {
+    let mut prompts = crate::agent_control::events::PromptChangeFilter::default();
+    let mut agent_open = true;
+    loop {
+        let msg = tokio::select! {
+            event = rx.recv() => match event {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+            observation = agent_rx.recv(), if agent_open => match observation {
+                Ok(observation) => match prompts.frame(&observation) {
+                    Some(frame) => frame,
+                    None => continue,
+                },
+                // A lagged reader only loses pushes; the client's prompt poll still converges.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    agent_open = false;
+                    continue;
+                }
+            },
+        };
         if socket.send(Message::Text(msg.into())).await.is_err() {
             break;
         }
