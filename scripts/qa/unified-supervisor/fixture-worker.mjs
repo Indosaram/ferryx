@@ -20,6 +20,9 @@
 // `idle` so the run settles. It turns bracketed paste on (ESC[?2004h) at start, as an agent
 // TUI does, so a delivery arrives as one paste whose lines are CR-joined; the following Enter
 // ends the turn. A plain line outside a paste is one turn too.
+// With --obey-correction (--multi-turn only), a turn whose instruction contains an owner line
+// `Use <WORD> instead of <WORD>` writes the first word (the last such line wins) instead of
+// the turn's default bytes: the `correction` scenario's worker follows the owner correction.
 // An instruction containing QA_NO_START_REPORT is logged but never reported: the `recovery`
 // scenario uses it to hold a dispatch between "typed" and "start recorded".
 // With --hold-dir=DIR (--multi-turn only), a turn whose instruction names QA_HOLD:<token>
@@ -43,6 +46,7 @@ const lifetimeArg = rest.find((arg) => arg.startsWith('--max-lifetime-ms='));
 const lifetimeMs = Number(lifetimeArg?.slice('--max-lifetime-ms='.length) ?? 600_000);
 const silent = rest.includes('--no-report');
 const multiTurn = rest.includes('--multi-turn');
+const obeyCorrection = rest.includes('--obey-correction');
 const holdDir = rest.find((arg) => arg.startsWith('--hold-dir='))?.slice('--hold-dir='.length) || null;
 if (!logDir) process.exit(2);
 mkdirSync(logDir, { recursive: true });
@@ -146,7 +150,8 @@ function turn(instruction) {
       await released(hold);
       record({ kind: 'released', turn: index, token: hold });
     }
-    const bytes = index === 1 ? 'NOT READY' : 'READY';
+    const corrected = obeyCorrection ? [...instruction.matchAll(/Use ([A-Za-z0-9_]+) instead of ([A-Za-z0-9_]+)/g)].at(-1)?.[1] ?? null : null;
+    const bytes = corrected ?? (index === 1 ? 'NOT READY' : 'READY');
     writeFileSync('result.txt', bytes);
     const verify = spawnSync('/bin/sh', ['verify.sh'], { encoding: 'utf8', timeout: 20_000 });
     const code = verify.status ?? -1;
