@@ -1,15 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  appendHistory,
+  fetchPairedResources,
   formatBytes,
   formatDuration,
   formatPercent,
+  groupSessionsByWorktree,
+  resourceHosts,
+  RESOURCE_HISTORY_LIMIT,
   sessionsByCost,
   unavailableLabel,
   usageRatio,
   worktreeLabel,
+  type HostResourceSnapshot,
   type SessionResourceUsage,
 } from "./systemResources";
+import type { HostEndpoint } from "../state/remoteHostStore";
 
 function session(overrides: Partial<SessionResourceUsage>): SessionResourceUsage {
   return {
@@ -76,5 +83,69 @@ describe("systemResources", () => {
     expect(unavailableLabel(["disk", "swapTotalBytes"])).toBe(
       "This host could not report: disk, swapTotalBytes",
     );
+  });
+
+  const host = { hostId: "h1", generation: "4" };
+  const sample: HostResourceSnapshot = {
+    sampledAtMs: 1, platform: "linux", cpuCount: 8, cpuUtilization: 0.5, loadAverage1m: null,
+    memoryTotalBytes: 100, memoryUsedBytes: 25, swapTotalBytes: null, swapUsedBytes: null,
+    uptimeSeconds: null, diskTotalBytes: null, diskFreeBytes: null, processCount: null,
+    sessions: [], unavailable: [],
+  };
+
+  it("reads a paired host through the typed resources operation", async () => {
+    const call = vi.fn(async () => ({ hostId: "h1", generation: "4", result: { kind: "resources", data: sample } }));
+    await expect(fetchPairedResources(host, call)).resolves.toEqual({ status: "sampled", snapshot: sample });
+    expect(call).toHaveBeenCalledWith("paired_host_operation", {
+      request: { hostId: "h1", generation: "4", operation: { kind: "resources" } },
+    });
+  });
+
+  it("treats a missing capability as update-required and anything else as unreachable", async () => {
+    const refuse = (error: unknown) => vi.fn(async () => { throw error; });
+    await expect(fetchPairedResources(host, refuse({ code: "PAIRED_HOST_CAPABILITY_UNAVAILABLE" })))
+      .resolves.toEqual({ status: "update-required" });
+    await expect(fetchPairedResources(host, refuse({ code: "TRANSPORT" }))).resolves.toEqual({ status: "unreachable" });
+    await expect(fetchPairedResources(host, refuse("boom"))).resolves.toEqual({ status: "unreachable" });
+  });
+
+  it("rejects a cross-host or malformed answer instead of showing it", async () => {
+    const answer = (value: unknown) => vi.fn(async () => value);
+    await expect(fetchPairedResources(host, answer({ hostId: "other", result: { kind: "resources", data: sample } })))
+      .resolves.toEqual({ status: "unreachable" });
+    await expect(fetchPairedResources(host, answer({ hostId: "h1", result: { kind: "resources", data: { platform: 1 } } })))
+      .resolves.toEqual({ status: "unreachable" });
+    await expect(fetchPairedResources(host, answer(null))).resolves.toEqual({ status: "unreachable" });
+  });
+
+  it("lists only paired machine-grant hosts, by name", () => {
+    const make = (hostId: string, name: string, extra: Partial<HostEndpoint> = {}): HostEndpoint => ({
+      hostId, name, address: "", transport: "relay", authStatus: "paired", online: true, generation: "1", grantScope: "machine", ...extra,
+    });
+    const hosts = resourceHosts({
+      b: make("b", "zed"), a: make("a", "alpha"), m: make("m", "mirror", { grantScope: "mirror" }),
+      r: make("r", "revoked", { authStatus: "revoked" }), g: make("g", "nogen", { generation: undefined }),
+    });
+    expect(hosts.map((entry) => entry.hostId)).toEqual(["a", "b"]);
+  });
+
+  it("groups sessions by worktree and sums only known costs", () => {
+    const groups = groupSessionsByWorktree([
+      session({ sessionId: "a1", worktreePath: "/r/a", cpuPercent: 2, residentBytes: 100 }),
+      session({ sessionId: "a2", worktreePath: "/r/a", cpuPercent: null, residentBytes: 300 }),
+      session({ sessionId: "x", worktreePath: null, cpuPercent: null, residentBytes: null }),
+    ], "memory");
+    expect(groups.map((group) => [group.label, group.cpuPercent, group.residentBytes, group.sessions.map((s) => s.sessionId)])).toEqual([
+      ["a", 2, 400, ["a2", "a1"]],
+      ["Other sessions", null, null, ["x"]],
+    ]);
+  });
+
+  it("keeps a bounded history and records a missing reading as a gap", () => {
+    let history = appendHistory(undefined, sample);
+    history = appendHistory(history, { ...sample, cpuUtilization: null, memoryTotalBytes: null });
+    expect(history).toEqual({ cpu: [0.5, null], memory: [0.25, null] });
+    for (let i = 0; i < RESOURCE_HISTORY_LIMIT + 5; i += 1) history = appendHistory(history, sample);
+    expect(history.cpu).toHaveLength(RESOURCE_HISTORY_LIMIT);
   });
 });

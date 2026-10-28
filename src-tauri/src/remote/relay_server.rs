@@ -2599,7 +2599,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
     }
     matches!(
         (method.as_str(), parts.as_slice()),
-        ("GET", ["health" | "capabilities" | "sessions"])
+        ("GET", ["health" | "capabilities" | "sessions" | "resources"])
             | ("POST", ["sessions"])
             | ("GET" | "DELETE", ["sessions", _])
             | ("GET", ["fs", "directories"])
@@ -4654,6 +4654,13 @@ mod tests {
         assert!(!allowed_http_route(&Method::GET, "attach/../secret"));
         assert!(!allowed_http_route(&Method::GET, "api/v1/attach"));
         assert!(allowed_http_route(&Method::GET, "capabilities"));
+    }
+
+    #[test]
+    fn test_allowed_http_route_admits_resource_reads_only() {
+        assert!(allowed_http_route(&Method::GET, "resources"));
+        assert!(!allowed_http_route(&Method::POST, "resources"));
+        assert!(!allowed_http_route(&Method::GET, "resources/extra"));
     }
 
     #[test]

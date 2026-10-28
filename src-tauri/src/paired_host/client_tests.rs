@@ -773,6 +773,21 @@ fn operation_requires_machine_workspace_capability() {
 }
 
 #[test]
+fn resources_is_an_idempotent_read_gated_on_its_capability() {
+    let operation: Operation =
+        serde_json::from_value(serde_json::json!({"kind": "resources"})).unwrap();
+    assert!(matches!(operation, Operation::Resources));
+    assert!(!operation.is_mutation());
+    let route = operation.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("resourceUsageV1"));
+    assert_eq!(route.segments, vec!["resources"]);
+    assert_eq!(route.method, Method::GET);
+    assert_eq!(route.request_id, None);
+    assert!(route.idempotent);
+    assert!(route.body.is_none());
+}
+
+#[test]
 fn paste_upload_chunk_requires_machine_workspace_capability() {
     let operation = Operation::PasteUploadChunk {
         request: m::PasteUploadChunkRequest {

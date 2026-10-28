@@ -90,6 +90,8 @@ pub enum Operation {
     AgentControl {
         op: crate::agent_control::AgentControlOp,
     },
+    /// Host and per-session resource sample (`resourceUsageV1`); read-only.
+    Resources,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +121,7 @@ pub enum OperationResult {
     PasteUploadChunk(m::PasteUploadChunkResult),
     FileRead(m::FileReadResult),
     AgentControl(serde_json::Value),
+    Resources(crate::daemon::resource_usage::HostResourceSnapshot),
 }
 /// Desktop projection of [m::Repositories]: a registered row carries the desktop
 /// workspace id (`daemon:<sha256>`) next to the host's own id, so the caller can open
@@ -402,6 +405,10 @@ impl Operation {
         match self {
             Self::Capabilities => {
                 path = "capabilities";
+            }
+            Self::Resources => {
+                path = "resources";
+                r.capability = Some(crate::remote::resources_api::RESOURCE_USAGE_CAPABILITY);
             }
             Self::Directories {
                 path: p,
@@ -1839,6 +1846,7 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),
         Operation::AgentControl { .. } => OperationResult::AgentControl(decode(bytes)?),
+        Operation::Resources => OperationResult::Resources(decode(bytes)?),
     })
 }
 

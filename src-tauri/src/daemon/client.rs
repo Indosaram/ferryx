@@ -2368,6 +2368,7 @@ impl DaemonClient {
             | Operation::Session { .. }
             | Operation::DagStream { .. }
             | Operation::FileRead { .. }
+            | Operation::Resources
             | Operation::Operation { .. } => None,
             Operation::AgentControl { op } => op.mutation_request_id(),
         };
