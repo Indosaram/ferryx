@@ -25,7 +25,7 @@ use super::queries::{
     query_total_rows,
 };
 use super::render_pass::capture_render_snapshot;
-use super::search::search_grid;
+use super::search::{search_grid, search_with_ghostty};
 use super::selection;
 use super::selection::{
     apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at,
@@ -408,6 +408,17 @@ impl NativeTerminal {
     pub fn screen_row_text(&self, row: usize) -> Result<String, NativeTerminalError> {
         let row = u32::try_from(row).map_err(|_| NativeTerminalError::LimitExceeded)?;
         selection::screen_row_text(self.handle, row)
+    }
+
+    /// Search through libghostty-vt's `ghostty_search`. Accepts only queries for which
+    /// `ghostty_search_eligible` holds and then returns what `search_grid` returns.
+    /// Evaluation path: the production search still goes through `search_grid`.
+    pub fn search_with_ghostty(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Result<Vec<(u16, u16, u16)>, NativeTerminalError> {
+        search_with_ghostty(self.handle, query, case_sensitive)
     }
 }
 

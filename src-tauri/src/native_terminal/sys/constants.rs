@@ -175,3 +175,7 @@ pub const GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES: c_int = 36;
 
 // Kitty image storage limit read-back matching `ghostty/vt/terminal.h`.
 pub const GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT: c_int = 26;
+
+// GhosttySearchOption / GhosttySearchData constants matching `ghostty/vt/search.h`.
+pub const GHOSTTY_SEARCH_OPT_NEEDLE: c_int = 0;
+pub const GHOSTTY_SEARCH_DATA_MATCHES: c_int = 5;

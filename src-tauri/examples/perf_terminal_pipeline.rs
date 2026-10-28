@@ -1,11 +1,12 @@
 //! Offline real-production pipeline QA/measurement. No daemon, socket, GUI, or GPU is started.
 //! cargo run --offline --locked --manifest-path src-tauri/Cargo.toml --example perf_terminal_pipeline -- search
-//! Modes: qa, search, history, reconstruct64, reconstruct8m, all. Run the identical source/profile on both revisions.
+//! Modes: qa, search, ghostty-search (alias --search), history, reconstruct64, reconstruct8m, all.
+//! Run the identical source/profile on both revisions.
 //! Timings exclude fixture preparation unless named; RSS is the process lifetime high-water mark,
 //! not live heap size or a phase delta. CPU is process user+system time (Unix only).
 
 use base64::Engine;
-use ferryx_lib::native_terminal::{NativeTerminal, TerminalEngine};
+use ferryx_lib::native_terminal::{ghostty_search_eligible, NativeTerminal, TerminalEngine};
 use ferryx_lib::terminal::output_hub::{retained_history::RetentionBudget, TerminalOutputHub};
 use serde_json::json;
 use std::{hint::black_box, time::Instant};
@@ -34,7 +35,7 @@ fn resources() -> Resources {
 #[cfg(not(unix))]
 fn resources() -> Resources { Resources { cpu_ms: 0.0, max_rss_kib: 0 } }
 
-fn measure(name: &str, mut operation: impl FnMut() -> usize) {
+fn measure(name: &str, mut operation: impl FnMut() -> usize) -> f64 {
     // Keep setup/validation and two warm-up calls out of the reported latency/CPU samples.
     let expected = operation();
     assert_eq!(operation(), expected);
@@ -54,6 +55,7 @@ fn measure(name: &str, mut operation: impl FnMut() -> usize) {
     samples.sort_by(f64::total_cmp);
     println!("{}", json!({"phase": name, "samples": RUNS, "median_ms": samples[RUNS / 2],
         "min_ms": samples[0], "max_ms": samples[RUNS - 1]}));
+    samples[RUNS / 2]
 }
 
 fn terminal(cols: u16, rows: u16) -> NativeTerminal {
@@ -104,6 +106,55 @@ fn search_measurements() {
             "columns":240, "query_bytes":query.len(), "expected_matches":matches.len()}));
         measure(name, || term.search_grid(black_box(&query), sensitive).unwrap().len());
     }
+}
+
+/// Rows searched per corpus: search_grid scans at most u16::MAX + 1 rows and reports u16 rows,
+/// so a larger corpus would not compare like for like.
+const GHOSTTY_SEARCH_ROWS: usize = 65_536;
+
+/// Todo 14 of .omo/plans/ghostty-1-4-upgrade.md: time search_grid against ghostty_search on
+/// 65,536-row ASCII, CJK and emoji corpora and diff their results. Only queries that
+/// `ghostty_search_eligible` accepts are compared; every other query stays on search_grid.
+/// Adoption rule: ghostty_search median lower on all three corpora AND diff=0.
+fn ghostty_search_measurements() {
+    let corpora: [(&str, fn(usize) -> String, &str); 3] = [
+        ("ascii", |i| format!("{i:05} INFO build step ok; Error: retry {} done", i % 97), "error: retry 1"),
+        ("cjk", |i| format!("{i:05} 日志 界面 ERROR 处理 {} 完成 done", i % 89), "error"),
+        ("emoji", |i| format!("{i:05} 👩‍💻 build 🚀 Error ✅ e\u{301}tape {} done", i % 83), "error"),
+    ];
+    let mut all_identical = true;
+    let mut ghostty_faster_everywhere = true;
+    for (name, line, query) in corpora {
+        assert!(ghostty_search_eligible(query, false), "benchmark query {query:?} must be eligible");
+        let mut term = terminal(120, 24);
+        term.set_scrollback_limit_lines(Some(GHOSTTY_SEARCH_ROWS * 2)).unwrap();
+        let input = (0..GHOSTTY_SEARCH_ROWS).map(line).collect::<Vec<_>>().join("\r\n");
+        term.feed(input.as_bytes()).unwrap();
+        let total_rows = term.total_rows().unwrap();
+        assert!(total_rows >= GHOSTTY_SEARCH_ROWS, "corpus {name} holds only {total_rows} rows");
+        let grid = term.search_grid(query, false).unwrap();
+        let ghostty = term.search_with_ghostty(query, false).unwrap();
+        assert!(!grid.is_empty(), "corpus {name} query {query:?} must match");
+        let only_grid = grid.iter().filter(|&m| ghostty.binary_search(m).is_err()).count();
+        let only_ghostty = ghostty.iter().filter(|&m| grid.binary_search(m).is_err()).count();
+        let diff = only_grid + only_ghostty;
+        all_identical &= diff == 0;
+        println!("{}", json!({"fixture":format!("ghostty_search_{name}"), "bytes":input.len(),
+            "rows":total_rows, "columns":120, "query":query, "case_sensitive":false,
+            "search_grid_matches":grid.len(), "ghostty_search_matches":ghostty.len(),
+            "only_search_grid":only_grid, "only_ghostty_search":only_ghostty, "diff":diff}));
+        println!("diff={diff} corpus={name}");
+        let grid_ms = measure(&format!("search_grid_{name}"),
+            || term.search_grid(black_box(query), false).unwrap().len());
+        let ghostty_ms = measure(&format!("ghostty_search_{name}"),
+            || term.search_with_ghostty(black_box(query), false).unwrap().len());
+        ghostty_faster_everywhere &= ghostty_ms < grid_ms;
+        println!("{}", json!({"corpus":name, "search_grid_median_ms":grid_ms,
+            "ghostty_search_median_ms":ghostty_ms, "speedup":grid_ms / ghostty_ms}));
+    }
+    println!("{}", json!({"decision_inputs":"ghostty_search", "all_identical":all_identical,
+        "ghostty_faster_on_all_corpora":ghostty_faster_everywhere,
+        "adopt_fast_path":all_identical && ghostty_faster_everywhere}));
 }
 
 fn publish(hub: &TerminalOutputHub, session: &str, bytes: &[u8]) {
@@ -347,11 +398,12 @@ fn main() {
     match mode.as_str() {
         "qa" => {},
         "search" => search_measurements(),
+        "ghostty-search" | "--search" => ghostty_search_measurements(),
         "history" => history_measurements(),
         "reconstruct64" => reconstruction_64k_measurements(),
         "reconstruct8m" => reconstruction_8m_isolated_measurements(),
         "reconstruct8m-verify" => verify_8m_fixture(),
         "all" => { search_measurements(); history_measurements(); },
-        _ => panic!("expected qa, search, history, reconstruct64, reconstruct8m, reconstruct8m-verify, or all"),
+        _ => panic!("expected qa, search, ghostty-search, history, reconstruct64, reconstruct8m, reconstruct8m-verify, or all"),
     }
 }
