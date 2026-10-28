@@ -786,11 +786,16 @@ pub async fn try_handle(
 /// but no mhc engine runs in this daemon.
 pub const ENGINE_UNAVAILABLE_NOTICE: &str = "MHC_NOT_RUNNING: the supervisor engine is not running on this hub, so new work cannot be started. Earlier conversations stay readable; nothing was registered.";
 
-/// Answers an owner message the unified supervisor owns ([`route`]: cut over, the owner, a DM
+/// Answers an owner message the unified supervisor owns after an explicit cutover ([`route`]: the owner, a DM
 /// or bound channel) with [`ENGINE_UNAVAILABLE_NOTICE`] when no engine is installed. Returns
 /// false, touching nothing, for every other message, which keeps its legacy turn.
 pub async fn refuse_without_engine(pool: &SqlitePool, admitted: &Admitted) -> bool {
-    if route(pool, admitted).await.is_none() {
+    // Only an explicit cutover stopped the legacy turn; a fresh install keeps it.
+    let cut_over = matches!(
+        crate::supervisor::cutover::installation_intake(pool).await,
+        Ok(intake) if intake.legacy == crate::supervisor::cutover::LegacyIntake::Stopped
+    );
+    if !cut_over || route(pool, admitted).await.is_none() {
         return false;
     }
     let storage_key = admitted.key.storage_key();
