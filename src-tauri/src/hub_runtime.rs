@@ -1894,7 +1894,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         tracing::info!(cwd = %runtime.profile().cwd().display(), "mhc supervisor engine is configured");
         // Every engine call (decision, convergence, conversation, ingest) is recorded with its
         // cause and usage in this hub's `supervisor_model_calls`.
-        runtime.set_usage_sink(launch.hub.pool.clone());
+        runtime.set_usage_sink(launch.hub.pool.clone()).await;
         // Slack owner conversations call the typed work tools; admission acts only for the
         // authenticated Slack turn in flight for the calling scope.
         #[cfg(feature = "hub-slack")]

@@ -8,8 +8,10 @@
 //! dispatch status reader.
 //! `request` covers the shared request service behind every adapter (todo 13).
 //! `recovery` crashes the hub at every effect boundary and restarts it (todo 12).
+//! `memory` covers native owner memory: teach, forget, correct, provenance and learning (todo 15).
 mod admission;
 mod bound_session;
+mod memory;
 mod receipts;
 mod recovery;
 mod request;

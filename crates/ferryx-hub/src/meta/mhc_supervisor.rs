@@ -1847,9 +1847,9 @@ impl MhcSupervisor {
             .map_or(0, |engine| engine.client.malformed_lines())
     }
 
-    /// Records every engine call in `pool` (`supervisor_model_calls`) from now on, and the calls
-    /// made before a sink existed.
-    pub fn set_usage_sink(&self, pool: sqlx::SqlitePool) {
+    /// Records every engine call in `pool` (`supervisor_model_calls`) from now on. The calls
+    /// made before a sink existed are written before this returns.
+    pub async fn set_usage_sink(&self, pool: sqlx::SqlitePool) {
         let kept = std::mem::take(
             &mut *self
                 .inner
@@ -1861,9 +1861,11 @@ impl MhcSupervisor {
             .inner
             .usage
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(pool);
+            .unwrap_or_else(PoisonError::into_inner) = Some(pool.clone());
         for call in kept {
-            self.inner.meter(call);
+            if let Err(error) = crate::usage::record_call(&pool, &call).await {
+                tracing::warn!(%error, "a supervisor engine call was not recorded");
+            }
         }
     }
 

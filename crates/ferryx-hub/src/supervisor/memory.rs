@@ -514,6 +514,13 @@ where
         Ok(identity) => identity,
         Err(failure) => return json!({"state": "refused", "code": failure.code}),
     };
+    // A project-bound message is learned for the project's repository identity, never for a
+    // checkout path, so it applies in every worktree and on every host of the project.
+    let repo = match project_id {
+        Some(project) => project_identity(pool, &identity, project).await.ok(),
+        None => None,
+    };
+    let learnable = scoped_text(&learnable, repo.as_deref());
     let source_id = format!("{adapter}:{source_message_id}");
     if let Err(failure) = provenance(
         pool,
@@ -560,6 +567,63 @@ where
             json!({"state": "failed", "sourceId": source_id, "code": code})
         }
     }
+}
+
+/// Whether text that arrived through `adapter` may teach. Only adapters that authenticate the
+/// owner outside every worker pane learn: the desktop app, a paired phone, and the Slack and
+/// Discord owner bindings. MCP and the CLI are reachable from inside a worker's terminal, so
+/// text arriving through them is never learned implicitly (an explicit `teach` still works
+/// there, behind the daemon's pane gate).
+pub fn learns_from(adapter: ChannelProvider) -> bool {
+    matches!(
+        adapter,
+        ChannelProvider::Desktop
+            | ChannelProvider::Phone
+            | ChannelProvider::Slack
+            | ChannelProvider::Discord
+    )
+}
+
+/// Queues owner learning of one accepted request's owner text (a message, a submitted
+/// request, a correction) and returns its receipt for the caller's answer: `queued` with the
+/// source id, or `notLearned` with why. The engine turn runs in its own task, so the owner's
+/// request never waits on learning; the provenance row records what happened.
+pub fn learn_in_background(
+    pool: &SqlitePool,
+    context: &RequestContext,
+    request_id: &str,
+    project_id: Option<&str>,
+    owner_text: &str,
+) -> Value {
+    if !learns_from(context.adapter) {
+        return json!({"state": "notLearned", "reason": "adapter_not_owner_authenticated"});
+    }
+    let Some(memory) = context.memory.clone() else {
+        return json!({"state": "notLearned", "reason": "memory_unavailable"});
+    };
+    let (learnable, once) = split_task_only(owner_text);
+    if learnable.is_empty() {
+        return json!({"state": "notLearned", "reason": "task_only", "taskOnlyLines": once.len()});
+    }
+    let pool = pool.clone();
+    let principal = context.principal.clone();
+    let adapter = context.adapter;
+    let source = request_id.to_owned();
+    let project = project_id.map(str::to_owned);
+    let text = owner_text.to_owned();
+    tokio::spawn(async move {
+        ingest(
+            &pool,
+            memory.as_ref(),
+            &principal,
+            adapter,
+            &source,
+            project.as_deref(),
+            &text,
+        )
+        .await;
+    });
+    json!({"state": "queued", "sourceId": format!("{adapter}:{request_id}"), "taskOnlyLines": once.len()})
 }
 
 /// The latest owner-ingest provenance rows (newest first): what was sent for learning, from

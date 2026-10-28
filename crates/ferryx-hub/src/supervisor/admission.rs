@@ -965,6 +965,14 @@ fn worker_instruction(work: &SubmitWork, source_body: &str, scope: &Scope) -> St
             withheld.join(", ")
         ));
     }
+    // A task-only exception applies to this goal alone; it is never learned, so the next
+    // goal does not inherit it.
+    if let Some(block) =
+        super::memory::task_only_block(&super::memory::split_task_only(source_body).1)
+    {
+        text.push_str("\n\n");
+        text.push_str(&block);
+    }
     text.push_str("\n\nDone when:");
     for requirement in &work.requirements {
         text.push_str(&format!(

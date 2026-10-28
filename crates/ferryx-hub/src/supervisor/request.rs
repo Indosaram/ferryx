@@ -349,7 +349,9 @@ pub async fn handle(
     let (envelope, action) = parse_envelope(value)?;
     match action {
         Action::Message | Action::Submit | Action::Adopt => {
-            admit(pool, context, &envelope, action).await
+            let mut answer = admit(pool, context, &envelope, action).await?;
+            learn(pool, context, &envelope, action, &mut answer);
+            Ok(answer)
         }
         Action::Teach => {
             let teach: TeachPayload = payload(&envelope.payload)?;
@@ -381,7 +383,51 @@ pub async fn handle(
         | Action::Resume
         | Action::Cancel
         | Action::Approve
-        | Action::Depend => goal_action(pool, context, &envelope, action).await,
+        | Action::Depend => {
+            let mut answer = goal_action(pool, context, &envelope, action).await?;
+            learn(pool, context, &envelope, action, &mut answer);
+            Ok(answer)
+        }
+    }
+}
+
+/// The owner-authored text of an accepted request, when it is one the owner writes in words:
+/// a message, a submitted request or a correction. An adoption, a control action or a
+/// dependency carries none.
+fn owner_words(envelope: &Envelope, action: Action) -> Option<String> {
+    let field = match action {
+        Action::Message | Action::Correct => "text",
+        Action::Submit => "request",
+        _ => return None,
+    };
+    envelope
+        .payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Owner learning of an accepted request's words, reported on its answer as `learning`.
+fn learn(
+    pool: &SqlitePool,
+    context: &RequestContext,
+    envelope: &Envelope,
+    action: Action,
+    answer: &mut Value,
+) {
+    let Some(text) = owner_words(envelope, action) else {
+        return;
+    };
+    // A replayed request is the same source: the engine and the provenance row dedupe it.
+    let learning = super::memory::learn_in_background(
+        pool,
+        context,
+        &envelope.request_id,
+        envelope.project_id.as_deref(),
+        &text,
+    );
+    if let Some(fields) = answer.as_object_mut() {
+        fields.insert("learning".into(), learning);
     }
 }
 
@@ -1061,6 +1107,11 @@ fn corrected_instruction(
         "Owner correction at goal revision {revision} (verbatim):\n{}\n",
         correct.text.trim()
     ));
+    if let Some(block) =
+        super::memory::task_only_block(&super::memory::split_task_only(&correct.text).1)
+    {
+        text.push_str(&format!("\n{block}\n"));
+    }
     if let Some(requirements) = &correct.requirements {
         text.push_str("\nThe requirements are now:\n");
         for requirement in requirements {
