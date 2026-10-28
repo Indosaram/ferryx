@@ -163,18 +163,28 @@ async function openHubReader(dbPath) {
   };
 }
 
+// After a change event whose check found not-done: one trailing re-check this long after the
+// last event, re-armed by each new event. The watch can coalesce two writes a millisecond apart
+// into one event that fires before the second is readable; the trailing check reads that state.
+// It is not a poll: it runs once per quiet period after a change, never on its own.
+const CHANGE_SETTLE_MS = 100;
+
 // Subscribe to a directory (the hub directory: every SQLite commit writes the -wal file; the
 // worker log directory: every worker line is an append), then reconcile: `check` runs once now
-// and again after each change, until it returns { done: true } or the deadline passes.
+// and again after each change, until it returns { done: true } or the deadline passes. Each
+// change also re-arms one re-check CHANGE_SETTLE_MS after the last event, so a write landing in
+// or just after a check is never lost.
 function waitForChange(ctx, label, dir, check, deadlineMs) {
   return new Promise((resolveWait, rejectWait) => {
     let settled = false;
     let watcher = null;
     let last = null;
+    let trailing = null;
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(trailing);
       try { watcher?.close(); } catch { /* already closed */ }
       ctx.signal.removeEventListener('abort', onAbort);
       fn(value);
@@ -191,11 +201,19 @@ function waitForChange(ctx, label, dir, check, deadlineMs) {
         last = { error: String(error?.message ?? error) };
       }
     };
+    // A change: check now, as each event always did, and re-arm the trailing re-check behind
+    // the newest event.
+    const onChange = () => {
+      if (settled) return;
+      clearTimeout(trailing);
+      trailing = setTimeout(() => { trailing = null; evaluate(); }, CHANGE_SETTLE_MS);
+      evaluate();
+    };
     const timer = setTimeout(() => finish(rejectWait, new HarnessError('DEADLINE_EXCEEDED', `${label} was not observed within ${deadlineMs}ms`, { last })), deadlineMs);
     if (ctx.signal.aborted) { onAbort(); return; }
     ctx.signal.addEventListener('abort', onAbort, { once: true });
     try {
-      watcher = watch(dir, evaluate);
+      watcher = watch(dir, onChange);
       watcher.on?.('error', (error) => finish(rejectWait, new HarnessError('WATCH_FAILED', `${label}: ${error?.message ?? error}`)));
     } catch (error) {
       finish(rejectWait, new HarnessError('WATCH_FAILED', `${label}: ${error?.message ?? error}`));
