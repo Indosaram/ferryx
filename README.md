@@ -6,7 +6,7 @@
 
 # Ferryx
 
-### A native terminal for coding agents, like cmux but on macOS, Windows and Linux.
+### A native terminal for coding agents on macOS, Windows and Linux.
 
 Claude Code, Codex and any CLI agent keep running when you close the app, remote Linux boxes
 connect without SSH, and every tab shows which agent is waiting on you. Native Rust on Tauri v2
