@@ -215,7 +215,7 @@ mod tests {
         slot.consume().expect("submitted frame");
         assert!(presentations.borrow().is_none());
         let mut receipt = NativeTerminalSurfaceReceipt {
-            presented: false, render_deferred: true, render_suspended: false,
+            presented: false, render_deferred: true, render_suspended: false, renderer_released: false,
             cols: 80, rows: 24, rebuilt_rows: 0, reused_rows: 0,
             cursor_col: 0, cursor_row: 0, cell_width_px: 10, cell_height_px: 20,
             effective_scale_factor: Some(1.0),
@@ -289,7 +289,7 @@ mod tests {
         let bounds = LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
         let generation = slot.publish(layout, bounds, mock_input(), Some(active.clone()), None);
         let receipt = NativeTerminalSurfaceReceipt {
-            presented: true, render_deferred: false, render_suspended: false,
+            presented: true, render_deferred: false, render_suspended: false, renderer_released: false,
             cols: 80, rows: 24, rebuilt_rows: 0, reused_rows: 0,
             cursor_col: 0, cursor_row: 0, cell_width_px: 10, cell_height_px: 20,
             effective_scale_factor: Some(1.0),

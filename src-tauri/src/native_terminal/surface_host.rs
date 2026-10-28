@@ -181,6 +181,9 @@ pub struct NativeTerminalSurfaceReceipt {
     pub render_deferred: bool,
     /// The surface is not visible; no retry may be armed until visibility returns.
     pub render_suspended: bool,
+    /// The GPU renderer (pipelines, glyph atlas, image textures) was dropped because the surface
+    /// is suspended; it is rebuilt lazily on the next frame.
+    pub renderer_released: bool,
     pub cols: u16,
     pub rows: u16,
     pub rebuilt_rows: u16,
@@ -205,6 +208,7 @@ impl NativeTerminalSurfaceReceipt {
             presented: false,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols: layout.cols,
             rows: layout.rows,
             rebuilt_rows,
@@ -5904,6 +5908,7 @@ impl NativeTerminalSurfaceHostState {
             presented: false,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols: layout.cols,
             rows: layout.rows,
             rebuilt_rows: 0,
@@ -5946,6 +5951,7 @@ impl NativeTerminalSurfaceHostState {
             presented: false,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols,
             rows,
             rebuilt_rows: 0,
@@ -6439,6 +6445,14 @@ struct GpuLeg {
     initial_config: RendererConfig,
     format: wgpu::TextureFormat,
     size: PhysicalSize<u32>,
+    /// Set when the renderer was dropped on suspension, so the next build is logged as a rebuild.
+    renderer_released: bool,
+}
+
+/// An occluded (suspended) surface presents nothing until visibility returns, so its renderer's
+/// GPU resources are released; a plain dropped frame keeps them because it retries immediately.
+fn release_renderer_on_suspend(render_suspended: bool) -> bool {
+    render_suspended
 }
 
 /// Native WGPU surface, platform compositor child view, and renderer.
@@ -6535,6 +6549,7 @@ impl NativeSurfaceFrameTarget {
                 initial_config,
                 format: wgpu::TextureFormat::Bgra8Unorm,
                 size: PhysicalSize::new(0, 0),
+                renderer_released: false,
             }),
             cell_metrics: CellMetrics {
                 width_px: cell_metrics.width_px,
@@ -6598,6 +6613,13 @@ impl GpuLeg {
             self.renderer = Some(NativeTerminalRenderer::with_shared_surface_gpu(
                 self.initial_config,
             )?);
+            if self.renderer_released {
+                self.renderer_released = false;
+                tracing::debug!(
+                    session_id = _session_id,
+                    "native terminal renderer rebuilt after suspension"
+                );
+            }
         }
         let renderer = self.renderer.as_mut().expect("GPU renderer initialized");
         if let Some(bounds) = logical_bounds {
@@ -6695,6 +6717,19 @@ impl GpuLeg {
                 logical_bounds,
             );
             receipt.render_suspended = render_suspended;
+            if release_renderer_on_suspend(render_suspended) {
+                // Keep the latest config so the rebuilt renderer starts where this one stopped.
+                self.initial_config = *renderer.config();
+                self.renderer = None;
+                // Forces the size check to reconfigure the surface with the rebuilt renderer.
+                self.size = PhysicalSize::new(0, 0);
+                self.renderer_released = true;
+                receipt.renderer_released = true;
+                tracing::debug!(
+                    session_id = _session_id,
+                    "native terminal renderer_released on suspension"
+                );
+            }
             return Ok(receipt);
         };
         let view = frame
@@ -6752,6 +6787,16 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_surface_releases_the_renderer() {
+        assert!(release_renderer_on_suspend(true));
+    }
+
+    #[test]
+    fn visible_or_dropped_frame_keeps_the_renderer() {
+        assert!(!release_renderer_on_suspend(false));
+    }
 
     #[test]
     fn dom_overlay_input_ownership_is_shared_across_host_state_clones() {
@@ -12139,6 +12184,7 @@ mod qa_native_producer_tests {
             presented: true,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols: 80,
             rows: 24,
             rebuilt_rows: 24,
