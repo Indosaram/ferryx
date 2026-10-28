@@ -582,6 +582,25 @@ fn write_response(resp: DaemonResponse) -> Result<(), IpcError> {
     }
 }
 
+/// A daemon that serves the prompt requests types every failure, so an untyped error is a daemon
+/// that predates them.
+fn agent_prompt_failure(response: DaemonResponse) -> IpcError {
+    match response {
+        DaemonResponse::Error { message, code: Some(code), details } => {
+            let mut error = IpcError::new(IpcErrorCode::from_code_str(&code), message);
+            if details.is_some() {
+                error.details = details;
+            }
+            error
+        }
+        DaemonResponse::Error { .. } => IpcError::new(
+            IpcErrorCode::DaemonUpgradeRequired,
+            "The running Ferryx daemon predates agent prompt answers; they work after the daemon restarts",
+        ),
+        _ => IpcError::internal("Unexpected daemon agent prompt response"),
+    }
+}
+
 fn request_is_retry_safe(req: &DaemonRequest) -> bool {
     matches!(
         req,
@@ -596,6 +615,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::DescribeLiveSessions
             | DaemonRequest::SpawnOperationStatus { .. }
             | DaemonRequest::ResourceUsage
+            | DaemonRequest::AgentPromptGet { .. }
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::ResetAgentState { .. }
@@ -658,6 +678,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
         DaemonRequest::ResourceUsage => "resourceUsage",
+        DaemonRequest::AgentPromptGet { .. } => "agentPromptGet",
+        DaemonRequest::AgentPromptAnswer { .. } => "agentPromptAnswer",
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedHostReachabilityList => "pairedHostReachabilityList",
         DaemonRequest::PairedHostRouteList => "pairedHostRouteList",
@@ -4746,6 +4768,40 @@ impl DaemonClient {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
             _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
+    }
+
+    /// The prompt an agent pane is asking now, or `None` when its screen holds none.
+    pub async fn agent_prompt_get(
+        &self,
+        session_id: String,
+        registry_id: Option<String>,
+    ) -> Result<Option<crate::daemon::protocol::AgentPromptView>, IpcError> {
+        match self.send_request(DaemonRequest::AgentPromptGet { session_id, registry_id }).await? {
+            DaemonResponse::AgentPromptGetOk { prompt } => Ok(prompt),
+            other => Err(agent_prompt_failure(other)),
+        }
+    }
+
+    /// Answer the prompt `agent_prompt_get` returned. Never retried: an answer may have typed keys.
+    pub async fn agent_prompt_answer(
+        &self,
+        session_id: String,
+        prompt_id: String,
+        screen_revision: String,
+        answer: crate::daemon::protocol::AgentPromptAnswerInput,
+        registry_id: Option<String>,
+    ) -> Result<crate::scoped_contracts::DeliveryReceipt, IpcError> {
+        let request = DaemonRequest::AgentPromptAnswer {
+            session_id,
+            prompt_id,
+            screen_revision,
+            answer,
+            registry_id,
+        };
+        match self.send_request(request).await? {
+            DaemonResponse::AgentPromptAnswerOk { receipt } => Ok(receipt),
+            other => Err(agent_prompt_failure(other)),
         }
     }
 
