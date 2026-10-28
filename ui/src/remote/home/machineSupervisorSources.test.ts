@@ -146,6 +146,33 @@ describe("useMachineEventSockets", () => {
     expect(opened).toHaveLength(2);
   });
 
+  it("closes the tunnel of an open still in flight when disabled, and drops the late socket", async () => {
+    const bus = createSupervisorFrameBus();
+    const closeTunnel = vi.fn();
+    let finish!: (socket: FakeSocket) => void;
+    let alive: (() => boolean) | null = null;
+    const open = vi.fn((_machine: AccountMachineView, _token: string, control: { isAlive: () => boolean; onTunnel: (close: () => void) => void }) => {
+      alive = control.isAlive;
+      control.onTunnel(closeTunnel);
+      return new Promise<FakeSocket>((resolve) => { finish = resolve; });
+    });
+    const input: MachineEventSocketsInput = {
+      enabled: true, machines: [machine("studio")], linkFor: () => link("tok-studio"), skip: null, open, bus, onPlanLimit: vi.fn(),
+    };
+    const hook = renderHook((props: MachineEventSocketsInput) => useMachineEventSockets(props), { initialProps: input });
+    await act(async () => {});
+    expect(open).toHaveBeenCalledTimes(1);
+
+    hook.rerender({ ...input, enabled: false });
+    expect(closeTunnel).toHaveBeenCalledTimes(1);
+    expect(alive!()).toBe(false);
+
+    const late: FakeSocket = { closed: false, onmessage: null, onclose: null, onerror: null, close: () => { late.closed = true; } };
+    await act(async () => { finish(late); });
+    expect(late.closed).toBe(true);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
   it("opens nothing while disabled", async () => {
     const { open } = render({ enabled: false });
     await act(async () => {});

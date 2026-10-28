@@ -1351,23 +1351,43 @@ export interface OpenAccountWebSocketParams {
   deviceToken: string;
   pathAndQuery: string;
   attachKey?: AttachKeyPair | null;
+  /**
+   * Checked after each step that waits; once it returns false the open stops with
+   * CONNECTION_CLOSED, closing the tunnel it already has, so nothing opens for an owner that
+   * gave up (a closed connection, a suspended account).
+   */
+  isAlive?: () => boolean;
+  /**
+   * Receives the tunnel's close as soon as the tunnel is open, while the socket upgrade is still
+   * pending, so an owner that closes meanwhile can close it right away. Calling it more than
+   * once, or alongside the returned socket's close, closes the tunnel once.
+   */
+  onTunnel?: (closeTunnel: () => void) => void;
+}
+
+/** CONNECTION_CLOSED: the owner of an in-flight open gave up before it finished. */
+function connectionClosed(): AccountSessionError {
+  return new AccountSessionError("CONNECTION_CLOSED", "Account connection has been closed");
 }
 
 export async function openAccountWebSocket(
   params: OpenAccountWebSocketParams,
 ): Promise<TunnelWebSocket> {
+  const alive = params.isAlive ?? (() => true);
   const attachKey = params.attachKey ?? (await getOrCreateAttachKey());
   if (!attachKey) {
     throw new AccountSessionError("ATTACH_KEY_UNSUPPORTED", "Failed to get or create attach key");
   }
+  if (!alive()) throw connectionClosed();
 
   const session = await allocateSession(
     params.relayUrl,
     params.accountSessionToken,
     params.machine.machineId,
   );
+  if (!alive()) throw connectionClosed();
 
-  const tunnel = await openTunnel({
+  const opened = await openTunnel({
     relayOrigin: params.machine.relayOrigin || params.relayUrl,
     machineId: params.machine.machineId,
     enrollmentEpoch: params.machine.enrollmentEpoch,
@@ -1375,6 +1395,20 @@ export async function openAccountWebSocket(
     localKeyPair: attachKey,
     sessionId: session.sessionId,
   });
+  let tunnelClosed = false;
+  const tunnel = {
+    transport: opened.transport,
+    close: () => {
+      if (tunnelClosed) return;
+      tunnelClosed = true;
+      opened.close();
+    },
+  };
+  params.onTunnel?.(tunnel.close);
+  if (!alive() || tunnelClosed) {
+    tunnel.close();
+    throw connectionClosed();
+  }
 
   try {
     const ws = await tunnel.transport.openWebSocket(params.pathAndQuery, {
@@ -1480,6 +1514,9 @@ export function createAccountConnection(params: {
   attachKey?: AttachKeyPair | null;
 }): AccountConnection {
   const openSockets = new Set<TunnelWebSocket>();
+  // Tunnels of sockets still opening: close() reaches them too, so a socket whose upgrade
+  // resolves after the connection closed never leaves its tunnel open.
+  const pendingTunnels = new Set<() => void>();
   let isClosed = false;
 
   return {
@@ -1491,14 +1528,32 @@ export function createAccountConnection(params: {
       if (isClosed) {
         throw new AccountSessionError("CONNECTION_CLOSED", "Account connection has been closed");
       }
-      const ws = await openAccountWebSocket({
-        relayUrl: params.relayUrl,
-        accountSessionToken: params.accountSessionToken,
-        machine: params.machine,
-        deviceToken: params.deviceToken,
-        pathAndQuery,
-        attachKey: params.attachKey,
-      });
+      const pending: { closeTunnel: (() => void) | null } = { closeTunnel: null };
+      let ws: TunnelWebSocket;
+      try {
+        ws = await openAccountWebSocket({
+          relayUrl: params.relayUrl,
+          accountSessionToken: params.accountSessionToken,
+          machine: params.machine,
+          deviceToken: params.deviceToken,
+          pathAndQuery,
+          attachKey: params.attachKey,
+          isAlive: () => !isClosed,
+          onTunnel: (close) => {
+            pending.closeTunnel = close;
+            pendingTunnels.add(close);
+          },
+        });
+      } finally {
+        if (pending.closeTunnel) pendingTunnels.delete(pending.closeTunnel);
+      }
+      if (isClosed) {
+        // Closed while the upgrade was pending: close() already closed this tunnel.
+        try {
+          ws.close();
+        } catch {}
+        throw new AccountSessionError("CONNECTION_CLOSED", "Account connection has been closed");
+      }
       openSockets.add(ws);
       const prevClose = ws.close.bind(ws);
       let socketClosed = false;
@@ -1521,6 +1576,12 @@ export function createAccountConnection(params: {
         } catch {}
       }
       openSockets.clear();
+      for (const closeTunnel of Array.from(pendingTunnels)) {
+        try {
+          closeTunnel();
+        } catch {}
+      }
+      pendingTunnels.clear();
     },
     get isClosed(): boolean {
       return isClosed || params.httpTransport.isClosed === true;

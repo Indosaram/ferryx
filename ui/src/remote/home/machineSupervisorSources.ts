@@ -137,8 +137,16 @@ export function useMachineSupervisorSources(input: SupervisorSourceInput): Super
   return { sources: value.sources, unlinked: value.unlinked, fetchFor, resync };
 }
 
-/** Opens one machine's `/api/v1/events` socket over its own relay tunnel. */
-export type MachineEventsOpener = (machine: AccountMachineView, deviceToken: string) => Promise<Pick<TunnelWebSocket, "close" | "onmessage" | "onclose" | "onerror">>;
+/**
+ * Opens one machine's `/api/v1/events` socket over its own relay tunnel. `control` lets the
+ * hook stop an open it no longer wants: `isAlive` is checked between steps, and `onTunnel`
+ * hands over the tunnel's close while the upgrade is pending (openAccountWebSocket's options).
+ */
+export type MachineEventsOpener = (
+  machine: AccountMachineView,
+  deviceToken: string,
+  control: { readonly isAlive: () => boolean; readonly onTunnel: (closeTunnel: () => void) => void },
+) => Promise<Pick<TunnelWebSocket, "close" | "onmessage" | "onclose" | "onerror">>;
 
 export type MachineEventSocketsInput = {
   readonly enabled: boolean;
@@ -189,6 +197,8 @@ export function useMachineEventSockets({ enabled, machines, linkFor, skip, open,
     for (const { machine, deviceToken } of targetsRef.current) {
       let disposed = false;
       let socket: Awaited<ReturnType<MachineEventsOpener>> | null = null;
+      // The tunnel of an open in flight: cleanup closes it at once instead of when it resolves.
+      let pendingTunnel: (() => void) | null = null;
       let retry: ReturnType<typeof setTimeout> | null = null;
       let attempt = 0;
       const reconnect = () => {
@@ -200,7 +210,12 @@ export function useMachineEventSockets({ enabled, machines, linkFor, skip, open,
         retry = null;
         let current: Awaited<ReturnType<MachineEventsOpener>>;
         try {
-          current = await openRef.current(machine, deviceToken);
+          current = await openRef.current(machine, deviceToken, {
+            isAlive: () => !disposed,
+            onTunnel: (closeTunnel) => {
+              pendingTunnel = closeTunnel;
+            },
+          });
         } catch (error) {
           if (disposed) return;
           const limit = planLimitStateFromError(error);
@@ -210,6 +225,8 @@ export function useMachineEventSockets({ enabled, machines, linkFor, skip, open,
           }
           reconnect();
           return;
+        } finally {
+          pendingTunnel = null;
         }
         if (disposed) {
           current.close();
@@ -244,6 +261,8 @@ export function useMachineEventSockets({ enabled, machines, linkFor, skip, open,
         if (retry) clearTimeout(retry);
         socket?.close();
         socket = null;
+        pendingTunnel?.();
+        pendingTunnel = null;
       });
     }
     return () => {

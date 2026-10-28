@@ -2813,8 +2813,8 @@ export const RemoteHostConnection: React.FC<{
   // The events socket above runs only for the active connection; every other reachable machine
   // gets its own, so supervisor and sidebar changes reach a home that opened no worktree.
   const openMachineEvents = useCallback(
-    (machine: AccountMachineView, deviceToken: string) =>
-      openAccountWebSocket({ relayUrl, accountSessionToken: accountSessionToken ?? "", machine, deviceToken, pathAndQuery: "/api/v1/events" }),
+    (machine: AccountMachineView, deviceToken: string, control: { isAlive: () => boolean; onTunnel: (closeTunnel: () => void) => void }) =>
+      openAccountWebSocket({ relayUrl, accountSessionToken: accountSessionToken ?? "", machine, deviceToken, pathAndQuery: "/api/v1/events", ...control }),
     [relayUrl, accountSessionToken],
   );
   useMachineEventSockets({
