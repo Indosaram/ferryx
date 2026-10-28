@@ -1215,7 +1215,7 @@ pub async fn supervisor_read(
         SupervisorReadAction::Conversation { project_id, after } => {
             supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
         }
-        SupervisorReadAction::Memory => supervisor_memory(state).await,
+        SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
     }
 }
 
