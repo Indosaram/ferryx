@@ -18,8 +18,14 @@
 // ends the turn. A plain line outside a paste is one turn too.
 // An instruction containing QA_NO_START_REPORT is logged but never reported: the `recovery`
 // scenario uses it to hold a dispatch between "typed" and "start recorded".
+// With --hold-dir=DIR (--multi-turn only), a turn whose instruction names QA_HOLD:<token>
+// reports `working`, then waits until DIR/<token> exists before it writes, verifies and reports
+// `idle`: the `waiting` scenario decides when each run settles. A release file that already
+// exists lets the turn go on at once. A turn that also names QA_ECHO:<token> waits, after its
+// `idle`, until DIR/<token> exists and then reports `idle`, `working`, `idle` again: a
+// duplicate and out-of-order report of a run that already ended.
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, watch, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -29,8 +35,10 @@ const lifetimeArg = rest.find((arg) => arg.startsWith('--max-lifetime-ms='));
 const lifetimeMs = Number(lifetimeArg?.slice('--max-lifetime-ms='.length) ?? 600_000);
 const silent = rest.includes('--no-report');
 const multiTurn = rest.includes('--multi-turn');
+const holdDir = rest.find((arg) => arg.startsWith('--hold-dir='))?.slice('--hold-dir='.length) || null;
 if (!logDir) process.exit(2);
 mkdirSync(logDir, { recursive: true });
+if (holdDir) mkdirSync(holdDir, { recursive: true });
 const logFile = join(logDir, `worker-${process.pid}.jsonl`);
 const sessionId = process.env.FERRYX_SESSION_ID ?? null;
 const socket = process.env.FERRYX_AGENT_STATE_SOCKET ?? null;
@@ -58,6 +66,21 @@ record({ kind: 'ready', sessionId, hasSocket: Boolean(socket), silent, multiTurn
 setTimeout(() => { record({ kind: 'lifetime-exceeded', lifetimeMs }); process.exit(97); }, lifetimeMs);
 process.stdout.write(multiTurn ? '\u001b[?2004hqa-worker ready\n' : 'qa-worker ready\n');
 
+// Resolves once `token`'s release file exists: subscribed to the directory first, then checked.
+function released(token) {
+  const file = join(holdDir, token);
+  return new Promise((resolveRelease) => {
+    let watcher = null;
+    const check = () => {
+      if (!existsSync(file)) return;
+      try { watcher?.close(); } catch { /* already closed */ }
+      resolveRelease();
+    };
+    watcher = watch(holdDir, check);
+    check();
+  });
+}
+
 // One turn of --multi-turn, run strictly one after another.
 let turns = 0;
 let queue = Promise.resolve();
@@ -67,6 +90,12 @@ function turn(instruction) {
     const index = turns;
     record({ kind: 'instruction', turn: index, text: instruction });
     await report('working');
+    const hold = holdDir ? instruction.match(/QA_HOLD:([A-Za-z0-9_-]+)/)?.[1] ?? null : null;
+    if (hold) {
+      record({ kind: 'held', turn: index, token: hold });
+      await released(hold);
+      record({ kind: 'released', turn: index, token: hold });
+    }
     const bytes = index === 1 ? 'NOT READY' : 'READY';
     writeFileSync('result.txt', bytes);
     const verify = spawnSync('/bin/sh', ['verify.sh'], { encoding: 'utf8', timeout: 20_000 });
@@ -74,6 +103,14 @@ function turn(instruction) {
     record({ kind: 'turn', turn: index, wrote: bytes, verifyExit: code, stderr: verify.stderr ?? '' });
     process.stdout.write(`turn ${index}: wrote result.txt, verify.sh exited ${code}\n`);
     await report('idle');
+    const echo = holdDir ? instruction.match(/QA_ECHO:([A-Za-z0-9_-]+)/)?.[1] ?? null : null;
+    if (echo) {
+      await released(echo);
+      const states = ['idle', 'working', 'idle'];
+      const delivered = [];
+      for (const state of states) delivered.push(await report(state));
+      record({ kind: 'echoed', turn: index, token: echo, states, delivered });
+    }
   });
 }
 

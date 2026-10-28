@@ -1762,6 +1762,324 @@ async function runCapabilities(ctx) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// waiting (plan task 9): five owner submits through `ferryx-cli supervisor request` (parent,
+// fail, a, b, c), each run held open by its fixture worker until the runner writes its release
+// file. While every run is live the owner links parent -> a, b and fail -> a, c (`depend`); a
+// cycle and a self-dependency are refused 400 WAIT_CYCLE. The parents' runs then settle into
+// `waiting_children`; a completes (graded by the hub on the retained mhc engine, a loopback
+// stub), a's worker re-reports idle/working/idle after its end, c is cancelled (a failed
+// dependency) and the cancel is replayed stale; only then does b complete. The hub's own wake
+// scheduler decides everything: the parent makes no decision and no model call while b is
+// incomplete and resumes exactly once; fail is released to the owner, never completed. The
+// hub database is only read, read-only.
+
+const WAITING_WORKSPACE_ID = 'qa-waiting';
+const WAITING_PROJECT = 'qa-waiting';
+const WAITING_VERIFY = 'test -s result.txt\n';
+const WAITING_GOALS = Object.freeze(['parent', 'fail', 'a', 'b', 'c']);
+// parent waits on a and b (both complete); fail waits on a and c (c is cancelled).
+const WAITING_LINKS = Object.freeze([['parent', 'a'], ['parent', 'b'], ['fail', 'a'], ['fail', 'c']]);
+// In each goal's instruction and requirement text, so every model prompt that grades the goal
+// (gap assessment contract block, blind convergence requirements) names it.
+const waitingMarker = (name) => `[qa-goal:${name}]`;
+const waitingWork = (name) => Object.freeze({
+  title: `Waiting fixture ${name}`,
+  instruction: `Write result.txt and run verify.sh. ${waitingMarker(name)} QA_HOLD:hold-${name}${name === 'a' ? ' QA_ECHO:echo-a' : ''}`,
+  requirements: [{ id: 'r1', text: `result.txt is not empty ${waitingMarker(name)}`, verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+
+async function runWaiting(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'waiting runs POSIX fixture worker panes (the Windows pane shell ignores SHELL); this scenario runs on Linux or macOS');
+  }
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the waiting fixture project is a git repository');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `hub database ${dbPath} is outside the run root`);
+  const hubDir = dirname(dbPath);
+  const log = [];
+  const transcript = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+
+  // Fixture: a committed verify.sh in a workspace checkout; one hold directory the workers watch.
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, WAITING_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'verify.sh'), WAITING_VERIFY, { mode: 0o755 });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]],
+    ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
+    ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const gitCommonDir = realpathSync(join(repo, '.git'));
+  const workerLogs = join(data, 'workers');
+  const holdDir = join(data, 'holds');
+  const requestsDir = join(data, 'requests');
+  for (const dir of [workerLogs, holdDir, requestsDir]) mkdirSync(dir, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn ${shellQuote(`--hold-dir=${holdDir}`)}\n`, { mode: 0o755 });
+  const released = new Set();
+  const release = (token) => {
+    if (released.has(token)) return;
+    released.add(token);
+    writeFileSync(join(holdDir, token), `${new Date().toISOString()}\n`);
+    transcript(`released ${token}`);
+  };
+
+  // Every model request the hub makes, attributed to the goals its newest user message names
+  // (a retained decision session also resends earlier goals' prompts as history).
+  const modelCalls = [];
+  const stub = await startProviderStub(ctx, { answer: (json) => {
+    const user = [...(json?.messages ?? [])].reverse().find((message) => message?.role === 'user');
+    const text = promptTextOf({ messages: user ? [user] : [] });
+    const convergence = promptTextOf(json).includes(CONVERGENCE_MARKER);
+    modelCalls.push({ seq: modelCalls.length + 1, at: new Date().toISOString(), goals: WAITING_GOALS.filter((name) => text.includes(waitingMarker(name))), convergence });
+    return convergence ? AUTONOMY_CONVERGED : null;
+  } });
+  const callsNaming = (name) => modelCalls.filter((call) => call.goals.includes(name));
+  try {
+    const env = await prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: config.mhcBin, label: 'waiting', extra: {
+      SHELL: shell,
+      FERRYX_HUB_WORKSPACE: WAITING_WORKSPACE_ID,
+      OMON_LANE_AUTO_WORKTREE: '1',
+      OMON_INBOX_ENABLED: '0',
+    } });
+    ctx.announce({ waiting: 'fixture', workspaceRoot, repo, gitCommonDir, holdDir, hubHttp: env.FERRYX_HUB_TRACKER_ADDR, dbPath, provider: stub.baseUrl });
+
+    const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', WAITING_PROJECT, '--repo-identity', `qa:${WAITING_PROJECT}`,
+      '--host', ADMISSION_HOST, '--git-common-dir', gitCommonDir, '--json'], { label: 'supervisor-setup', env });
+    if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${JSON.stringify(setup.json)} ${setup.stderr}`);
+    const projectId = setup.json.projectId;
+    const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+    const engine = await awaitEngine(ctx, env, 'waiting-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', engine?.engine?.state === 'ready', { engine });
+    const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), WAITING_WORKSPACE_ID, realpathSync(workspaceRoot));
+    ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+
+    // The owner's channel: one envelope file per request through `ferryx-cli supervisor request`.
+    let requestSeq = 0;
+    const request = async (label, envelope) => {
+      requestSeq += 1;
+      const file = join(requestsDir, `${String(requestSeq).padStart(2, '0')}-${label}.json`);
+      writeFileSync(file, JSON.stringify(envelope));
+      ctx.evidence.appendJsonl('envelopes.jsonl', { seq: requestSeq, label, envelope, at: new Date().toISOString() });
+      const result = await ctx.cli(['supervisor', 'request', '--json', file], { label, env });
+      transcript(`${label}: exit ${result.code} ${JSON.stringify(result.json)}`);
+      return result;
+    };
+
+    // 1. Five owner submits; every run starts and stays live (held by its worker).
+    const goals = {};
+    const submits = {};
+    for (const name of WAITING_GOALS) {
+      const work = waitingWork(name);
+      const submitted = await request(`submit-${name}`, { requestId: `qa-waiting-${name}-${ctx.runId}`, projectId, action: 'submit', payload: { request: work.instruction, work } });
+      submits[name] = { code: submitted.code, json: submitted.json };
+      goals[name] = submitted.json?.receipt?.receipt?.goal_id ?? null;
+    }
+    ctx.assert('five-goals-admitted', WAITING_GOALS.every((name) => submits[name].code === 0 && submits[name].json?.receipt?.outcome === 'admitted' && typeof goals[name] === 'string')
+      && new Set(Object.values(goals)).size === WAITING_GOALS.length, { goals, submits });
+    if (!WAITING_GOALS.every((name) => typeof goals[name] === 'string')) throw new HarnessError('ADMISSION_FAILED', `not every waiting goal was admitted: ${JSON.stringify(goals)}`);
+    ctx.announce({ waiting: 'goals', goals });
+
+    const hub = await openHubReader(dbPath);
+    const goalOf = (name) => hub.one('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goals[name]);
+    const snapshot = () => hub.read((query) => Object.fromEntries(WAITING_GOALS.map((name) => [name, {
+      goal: query('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      dispatches: query('SELECT request_id, state, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goals[name]),
+    }])));
+    // One goal's wait/wake bookkeeping, from one snapshot.
+    const wakeState = (name) => hub.read((query) => ({
+      goal: query('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      waits: query('SELECT wait_id, child_goal_id, state FROM supervisor_waits WHERE goal_id = ? ORDER BY rowid', goals[name]),
+      waitEvents: query(`SELECT w.child_goal_id, e.event_id, e.outcome FROM supervisor_wait_events e JOIN supervisor_waits w ON w.wait_id = e.wait_id
+        WHERE w.goal_id = ? ORDER BY e.received_at, e.event_id`, goals[name]),
+      wakes: query('SELECT id, cause, event_id, consumed_at FROM supervisor_pending_wakes WHERE goal_id = ? ORDER BY id', goals[name]),
+      turns: query('SELECT id, state, causes, urgent FROM supervisor_wake_turns WHERE goal_id = ? ORDER BY id', goals[name]),
+      receipts: query(`SELECT r.wake_id, r.turn_id, r.disposition FROM supervisor_wake_receipts r JOIN supervisor_pending_wakes w ON w.id = r.wake_id
+        WHERE w.goal_id = ? ORDER BY r.wake_id`, goals[name]),
+      moves: query("SELECT seq, from_state, to_state, from_revision, to_revision FROM supervisor_state_events WHERE goal_id = ? AND source = 'goal' ORDER BY seq", goals[name]),
+    }));
+    const live = (rows, name) => rows[name].goal?.run_state === 'running' && rows[name].dispatches.length === 1 && rows[name].dispatches[0].state === 'started';
+    const started = await waitForChange(ctx, 'every waiting goal running', hubDir, () => {
+      const rows = snapshot();
+      return { done: WAITING_GOALS.every((name) => live(rows, name) || HELD_STATES.has(rows[name].goal?.run_state)), rows };
+    }, 180_000);
+    ctx.assert('every-run-started-and-held-live', WAITING_GOALS.every((name) => live(started.rows, name)), started.rows);
+    if (!WAITING_GOALS.every((name) => live(started.rows, name))) throw new HarnessError('DISPATCH_FAILED', 'not every waiting goal reached a live run; the dependency links would prove nothing');
+    const sessionOf = Object.fromEntries(WAITING_GOALS.map((name) => [name, started.rows[name].dispatches[0].provider_session_id]));
+    const workerOf = (name) => readWorkerLogs(workerLogs).find((entry) => entry.sessionId === sessionOf[name]) ?? null;
+
+    // 2. Dependencies, linked by the owner while every run is live; a cycle and a self link are 400.
+    const depend = (label, name, child) => request(label, { requestId: `qa-waiting-${label}-${ctx.runId}`, projectId, goalId: goals[name],
+      expectedRevision: goalOf(name)?.revision ?? 0, action: 'depend', payload: { childGoalId: goals[child] } });
+    const linked = [];
+    for (const [name, child] of WAITING_LINKS) {
+      const result = await depend(`depend-${name}-on-${child}`, name, child);
+      linked.push({ name, child, code: result.code, json: result.json });
+    }
+    ctx.assert('dependencies-linked-while-running', linked.every(({ child, code, json }) => code === 0 && json?.ok === true && typeof json?.receipt?.waitId === 'string'
+      && json.receipt.runState === 'running' && json.receipt.pendingWaits?.some((wait) => wait.childGoalId === goals[child])), linked);
+    const waitCount = () => hub.count('SELECT COUNT(*) AS n FROM supervisor_waits');
+    const waitsBefore = waitCount();
+    const cycle = await depend('depend-a-on-parent-cycle', 'a', 'parent');
+    const self = await depend('depend-parent-on-itself', 'parent', 'parent');
+    const waitsAfter = waitCount();
+    const refused400 = (result) => result.json?.ok === false && result.json?.code === 'WAIT_CYCLE' && result.json?.status === 400;
+    ctx.assert('cycle-refused-400', refused400(cycle), { code: cycle.code, json: cycle.json, stderr: cycle.stderr });
+    ctx.assert('self-dependency-refused-400', refused400(self), { code: self.code, json: self.json, stderr: self.stderr });
+    ctx.assert('refused-links-wrote-nothing', waitsBefore === WAITING_LINKS.length && waitsAfter === waitsBefore, { waitsBefore, waitsAfter });
+
+    // 3. The parents' own runs end: each parks in waiting_children, its settle kept, not decided.
+    release('hold-parent');
+    release('hold-fail');
+    const parked = await waitForChange(ctx, 'parent runs to settle into waiting', hubDir, () => {
+      const rows = snapshot();
+      return { done: ['parent', 'fail'].every((name) => rows[name].dispatches[0]?.state === 'settled' && rows[name].goal?.run_state !== 'running'), rows };
+    }, 120_000);
+    ctx.assert('parents-park-in-waiting-children', ['parent', 'fail'].every((name) => parked.rows[name].goal?.run_state === 'waiting_children'
+      && parked.rows[name].goal?.state_detail?.startsWith('WAITING_ON')), { parent: parked.rows.parent, fail: parked.rows.fail });
+
+    // 4. The first child completes; both parents record it and still decide nothing.
+    release('hold-a');
+    const childEndRecorded = (state) => state.waits.find((wait) => wait.child_goal_id === goals.a)?.state === 'satisfied';
+    const aEnded = await waitForChange(ctx, 'child a to end and reach its parents', hubDir, () => {
+      const goal = goalOf('a');
+      const done = HELD_STATES.has(goal?.run_state) && (goal.run_state !== 'completed' || (childEndRecorded(wakeState('parent')) && childEndRecorded(wakeState('fail'))));
+      return { done, goal };
+    }, 6 * 60_000);
+    ctx.assert('child-a-completed', aEnded.goal?.run_state === 'completed', aEnded.goal);
+    const undecided = (state) => state.goal?.run_state === 'waiting_children' && state.turns.length === 0
+      && state.wakes.filter((wake) => wake.cause === 'turn_settled' && wake.consumed_at === null).length === 1
+      && state.wakes.every((wake) => wake.consumed_at === null);
+    const parentMid = wakeState('parent');
+    const failMid = wakeState('fail');
+    // A was graded meanwhile: the scheduler and the judge ran during the wait, so silence about
+    // the parents is a decision withheld, not a stopped hub.
+    ctx.assert('no-decision-while-a-dependency-is-incomplete', undecided(parentMid) && undecided(failMid) && callsNaming('parent').length === 0
+      && callsNaming('fail').length === 0 && callsNaming('a').length > 0, { parent: parentMid, fail: failMid, modelCalls });
+    const onlyEnd = (state, child, outcome, ended) => {
+      const events = state.waitEvents.filter((event) => event.child_goal_id === goals[child]);
+      return events.length === 1 && events[0].outcome === outcome && events[0].event_id === `goal:${goals[child]}:${ended}`;
+    };
+    ctx.assert('first-child-end-recorded-once', ['parent', 'fail'].every((name) => {
+      const state = name === 'parent' ? parentMid : failMid;
+      return onlyEnd(state, 'a', 'satisfied', 'completed') && state.waits.filter((wait) => wait.state === 'pending').length === 1;
+    }), { parent: parentMid.waitEvents, fail: failMid.waitEvents });
+
+    // 5. Duplicate and out-of-order reports of the ended child: its worker reports idle, working,
+    //    idle again after its run settled and its goal completed.
+    release('echo-a');
+    const echoed = await waitForChange(ctx, 'child a echo reports', workerLogs, () => {
+      const entry = workerOf('a')?.entries.find((line) => line.kind === 'echoed') ?? null;
+      return { done: entry !== null, entry };
+    }, 30_000).then((result) => result.entry, (error) => { if (ctx.signal.aborted) throw error; return null; });
+    ctx.assert('child-a-reported-again-after-its-end', echoed?.delivered?.length === 3 && echoed.delivered.every(Boolean), { echoed });
+
+    // 6. The second child of `fail` fails (owner cancel): fail is released to the owner, not completed.
+    const cancelEnvelope = { requestId: `qa-waiting-cancel-c-${ctx.runId}`, projectId, goalId: goals.c, expectedRevision: goalOf('c')?.revision ?? 0,
+      action: 'cancel', payload: { reason: 'qa: child c fails' } };
+    const cancelled = await request('cancel-c', cancelEnvelope);
+    ctx.assert('child-c-cancelled', cancelled.code === 0 && cancelled.json?.receipt?.runState === 'cancelled', { code: cancelled.code, json: cancelled.json });
+    await waitForChange(ctx, 'fail released by its failed dependency', hubDir, () => {
+      const state = wakeState('fail');
+      return { done: state.goal?.run_state !== 'waiting_children' && state.turns.every((turn) => turn.state !== 'pending'), goal: state.goal };
+    }, 120_000);
+    const failReleased = wakeState('fail');
+    const failTurn = failReleased.turns[0] ?? null;
+    ctx.assert('failure-releases-parent-to-owner-not-completion', failReleased.goal?.run_state === 'awaiting_owner'
+      && failReleased.goal?.state_detail?.startsWith('DEPENDENCY_FAILED') && failReleased.goal.state_detail.includes(goals.c)
+      && !failReleased.moves.some((move) => ['verifying', 'completed'].includes(move.to_state)), { goal: failReleased.goal, moves: failReleased.moves });
+    ctx.assert('failure-resumed-once', failReleased.turns.length === 1 && failTurn?.state === 'delivered' && failTurn?.urgent === 1
+      && JSON.parse(failTurn.causes).includes('dependency_failed') && failReleased.wakes.filter((wake) => wake.cause === 'dependency_failed').length === 1
+      && onlyEnd(failReleased, 'c', 'failed', 'cancelled') && failReleased.waits.find((wait) => wait.child_goal_id === goals.c)?.state === 'failed',
+    { turns: failReleased.turns, wakes: failReleased.wakes, waits: failReleased.waits, waitEvents: failReleased.waitEvents });
+
+    // 7. The failure reported again (the same cancel, now stale): 409, and nothing is unblocked twice.
+    const replayed = await request('cancel-c-replay', cancelEnvelope);
+    ctx.assert('duplicate-failure-report-refused-409', replayed.json?.ok === false && replayed.json?.code === 'REVISION_CONFLICT' && replayed.json?.status === 409,
+      { code: replayed.code, json: replayed.json });
+    const parentStill = wakeState('parent');
+    ctx.assert('parent-still-waiting-after-duplicate-reports', undecided(parentStill) && callsNaming('parent').length === 0
+      && onlyEnd(parentStill, 'a', 'satisfied', 'completed'), { parent: parentStill, modelCalls });
+
+    // 8. The last dependency completes: the parent resumes exactly once and completes.
+    const callsBeforeResume = modelCalls.length;
+    release('hold-b');
+    const resumed = await waitForChange(ctx, 'parent to complete or hold', hubDir, () => {
+      const goal = goalOf('parent');
+      return { done: HELD_STATES.has(goal?.run_state), goal };
+    }, 6 * 60_000);
+    ctx.assert('child-b-completed', goalOf('b')?.run_state === 'completed', goalOf('b'));
+    const parentFinal = wakeState('parent');
+    const resumeTurn = parentFinal.turns[0] ?? null;
+    const resumeCauses = resumeTurn ? JSON.parse(resumeTurn.causes) : [];
+    ctx.assert('parent-resumed-once-and-completed', resumed.goal?.run_state === 'completed' && parentFinal.turns.length === 1 && resumeTurn?.state === 'delivered'
+      && resumeTurn.urgent === 1 && resumeCauses.includes('dependency_ready') && resumeCauses.includes('turn_settled')
+      && parentFinal.wakes.filter((wake) => wake.cause === 'dependency_ready').length === 1 && parentFinal.wakes.every((wake) => wake.consumed_at !== null)
+      && parentFinal.receipts.length === parentFinal.wakes.length && parentFinal.receipts.every((receipt) => receipt.turn_id === resumeTurn.id && receipt.disposition === 'delivered'),
+    { goal: resumed.goal, turns: parentFinal.turns, wakes: parentFinal.wakes, receipts: parentFinal.receipts });
+    ctx.assert('each-child-end-unblocked-the-parent-once', onlyEnd(parentFinal, 'a', 'satisfied', 'completed') && onlyEnd(parentFinal, 'b', 'satisfied', 'completed')
+      && parentFinal.waits.every((wait) => wait.state === 'satisfied') && !parentFinal.waitEvents.some((event) => event.outcome === 'failed'),
+    { waits: parentFinal.waits, waitEvents: parentFinal.waitEvents });
+    ctx.assert('parent-graded-only-after-it-resumed', callsNaming('parent').length > 0 && callsNaming('parent').every((call) => call.seq > callsBeforeResume),
+      { callsBeforeResume, parentCalls: callsNaming('parent') });
+    const failFinal = wakeState('fail');
+    ctx.assert('failed-parent-unchanged-by-later-events', failFinal.goal?.run_state === 'awaiting_owner' && failFinal.goal.revision === failReleased.goal.revision
+      && failFinal.turns.length === 1 && failFinal.wakes.filter((wake) => wake.cause === 'dependency_failed').length === 1 && callsNaming('fail').length === 0,
+    { goal: failFinal.goal, turns: failFinal.turns, wakes: failFinal.wakes, failCalls: callsNaming('fail') });
+    const finalRows = snapshot();
+    ctx.assert('child-a-unchanged-by-its-echo', finalRows.a.goal?.run_state === 'completed' && finalRows.a.dispatches.length === 1
+      && finalRows.a.dispatches[0].state === 'settled', finalRows.a);
+
+    // Cleanup: every hold released, the daemon stopped; every fixture worker must be gone.
+    release('hold-c');
+    const workerPids = readWorkerLogs(workerLogs).map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
+    const cleanExit = new Set(['stdin-closed', 'hangup', 'terminated']);
+    await ctx.terminate(daemon, 'worker-cleanup');
+    // The cancelled goal's worker may have been stopped by the cancel itself, without a log line.
+    const closed = await waitForChange(ctx, 'fixture worker exit', workerLogs, () => {
+      const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind))
+        && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
+      return { done: open.length === 0, open: open.map((entry) => entry.name) };
+    }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
+    const alive = workerPids.filter((pid) => pidAlive(pid));
+    ctx.assert('fixture-workers-gone', workerPids.length === WAITING_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
+
+    for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+    ctx.evidence.writeJson('waiting.json', {
+      worker: { kind: 'fixture', note: 'fixture-worker.mjs --multi-turn --hold-dir: each run reports working and stays live until the runner writes its release file; a re-reports idle/working/idle after its end. Not a real provider worker.' },
+      model: { kind: 'loopback stub', note: 'The stub always answers complete and cites sig:req:r1; the check Ferryx ran decides. Calls are attributed by the [qa-goal:NAME] marker in their prompt.' },
+      goals, links: WAITING_LINKS, sessions: sessionOf, refusals: { cycle: cycle.json, self: self.json, replay: replayed.json },
+      checkpoints: { parked: parked.rows, afterFirstChild: { parent: parentMid, fail: failMid }, afterFailure: failReleased, beforeResume: parentStill, final: { parent: parentFinal, fail: failFinal, rows: finalRows } },
+      modelCalls, callsBeforeResume,
+    });
+  } finally {
+    for (const name of WAITING_GOALS) {
+      try { release(`hold-${name}`); } catch { /* the run root may be gone */ }
+    }
+    await stub.close();
+    ctx.evidence.writeText('waiting-transcript.log', `${log.join('\n')}\n`);
+  }
+}
+
+// burst (plan task 9) is blocked on product seams a black-box runner cannot reach:
+// - no product path enqueues an ordinary report wake: supervisor/wakes.rs `report` (:383) has
+//   no caller outside tests (no CLI, MCP, HTTP or worker-report ingress turns a report into it);
+// - the running hub's scheduler uses SystemClock (src-tauri/src/hub_runtime.rs:1708
+//   `WakeScheduler::new(pool, handler)`, never `.with_clock`) and the 30s window is a const
+//   (lanes/dispatch.rs:18 BATCH_WINDOW_SECS), so virtual 0/1/2/3/30s cannot be driven.
+// The 0/1/2/3/30s schedule is covered only by crates/ferryx-hub/src/supervisor/tests/wakes.rs
+// reports_batch_on_the_oldest_and_an_owner_pause_skips_the_window, so burst stays planned.
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -1797,7 +2115,26 @@ export const SCENARIOS = Object.freeze({
     run: runAutonomy,
   }),
   correction: planned('10', 'Owner correction "Use DONE instead of READY" before dispatch, stale expectedRevision replayed: final bytes DONE, stale mutation 409'),
-  waiting: planned('9', 'Parent starts two children; one settles, then the second settles/fails: no decision while incomplete, one resume, failure is not completion'),
+  waiting: Object.freeze({
+    implemented: true,
+    task: '9',
+    summary: 'Parent waits on two live children, one completes, the other completes (or, for a second parent, fails): no decision or model call while incomplete, one resume, failure is not completion; duplicate/out-of-order child reports unblock nothing twice; a cycle is 400',
+    deadlineMs: 15 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'workspace-registered', 'five-goals-admitted', 'every-run-started-and-held-live', 'dependencies-linked-while-running',
+      'cycle-refused-400', 'self-dependency-refused-400', 'refused-links-wrote-nothing', 'parents-park-in-waiting-children', 'child-a-completed',
+      'no-decision-while-a-dependency-is-incomplete', 'first-child-end-recorded-once', 'child-a-reported-again-after-its-end', 'child-c-cancelled',
+      'failure-releases-parent-to-owner-not-completion', 'failure-resumed-once', 'duplicate-failure-report-refused-409',
+      'parent-still-waiting-after-duplicate-reports', 'child-b-completed', 'parent-resumed-once-and-completed', 'each-child-end-unblocked-the-parent-once',
+      'parent-graded-only-after-it-resumed', 'failed-parent-unchanged-by-later-events', 'child-a-unchanged-by-its-echo', 'fixture-workers-gone',
+    ],
+    notCovered: [
+      { clause: 'cross-owner-link', reason: 'an isolated installation has exactly one supervisor owner, so a second owner\'s goal cannot be created through the product', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs a_cycle_a_self_dependency_and_a_cross_owner_link_are_refused_as_400' },
+      { clause: 'restart-replay', reason: 'replaying the state log from a rewound cursor needs a database write; the runner only reads the hub database', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs a_restart_recovers_pending_ready_events_from_the_durable_cursor' },
+    ],
+    run: runWaiting,
+  }),
+  // Blocked on product seams: see the burst note above SCENARIOS.
   burst: planned('9', 'Four ordinary reports at virtual 0,1,2,3s advanced to 30s: one admitted model turn with four receipts; urgent pause has zero delay'),
   'remote-delivery': Object.freeze({
     implemented: true,
