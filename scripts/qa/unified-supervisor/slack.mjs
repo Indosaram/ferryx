@@ -15,11 +15,11 @@
 // a launcher that exits at once, so a message the supervisor does not own can never reach a
 // real omo app-server or model.
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { dirname, join } from 'node:path';
-import { HarnessError, isInside } from './harness.mjs';
+import { HarnessError, isInside, productEnv } from './harness.mjs';
 import { awaitEngine, engineStateDir, prepareEngineEnv, startDaemonFrom, STUB_ASSESSMENT, STUB_MODEL } from './mhc.mjs';
 
 const SUBMIT_TOOL = 'supervisor_submit_work';
@@ -290,12 +290,36 @@ async function startDecidingProvider(ctx, transcript) {
 const dmEvent = (user, channel, ts, text) => ({ type: 'message', channel_type: 'im', team: TEAM, user, channel, ts, text, event_ts: ts });
 
 /**
- * Runs the Slack leg against its own isolated daemon (the caller has stopped any other one of
- * this run). `setupCli(owner)` provisions the owner identity through `ferryx-cli supervisor
- * setup`; `hub` reads the isolated hub database read-only; `waitForChange` watches its
- * directory; `extraEnv` (the fixture pane SHELL) is passed to the daemon.
+ * The leg's own installation: a fresh data root (HOME, FERRYX_DATA_DIR, runtime dir, hub db)
+ * and memory root inside the run roots. An installation has exactly one supervisor owner
+ * (crates/ferryx-hub/src/supervisor.rs setup, SETUP_CONFLICT), and a Slack sender resolves only
+ * to a `slack:<team>:<user>` principal (chat/slack_supervisor.rs owner_principal), so the main
+ * leg's owner can never be the Slack owner; a fresh installation is what a Slack owner has.
  */
-export async function runSlackLeg(ctx, { setupCli, hub, dbPath, waitForChange, extraEnv = {} }) {
+function legContext(ctx, root) {
+  // The caller builds `root` from the realpath of the data root (the admission scenario does).
+  if (!isInside(root, ctx.paths.data) && !isInside(root, realpathSync(ctx.paths.data))) {
+    throw new HarnessError('PRODUCTION_PATH_REFUSED', `${root} is outside the run data root`);
+  }
+  const memory = join(ctx.paths.memory, 'slack-leg');
+  return {
+    ...ctx,
+    paths: Object.freeze({ ...ctx.paths, data: root, memory }),
+    productEnv: (extra = {}) => productEnv({ dataRun: root, extra }),
+  };
+}
+
+/**
+ * Runs the Slack leg against its own isolated daemon and installation under `root` (the caller
+ * has stopped any other daemon of this run). `setupCli(owner, env)` provisions the owner
+ * identity through `ferryx-cli supervisor setup`; `hub` reads `dbPath` (the leg's hub database)
+ * read-only; `waitForChange` watches its directory; `registerWorkspace(env)` registers the
+ * fixture workspace with the running leg daemon; `extraEnv` (the fixture pane SHELL) is passed
+ * to the daemon.
+ */
+export async function runSlackLeg(outer, { root, setupCli, hub, dbPath, waitForChange, registerWorkspace, extraEnv = {} }) {
+  const ctx = legContext(outer, root);
+  if (!isInside(dbPath, root)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${dbPath} is outside the Slack leg root ${root}`);
   const transcript = (line) => ctx.evidence.appendText('task-11-slack.log', `${new Date().toISOString()} ${line}\n`);
   const counts = () => ({
     goals: hub.count('SELECT COUNT(*) AS n FROM supervisor_goals'),
@@ -306,9 +330,6 @@ export async function runSlackLeg(ctx, { setupCli, hub, dbPath, waitForChange, e
   const provider = await startDecidingProvider(ctx, transcript);
   let daemon = null;
   try {
-    const setup = await setupCli(SLACK_OWNER_PRINCIPAL);
-    ctx.assert('slack-owner-identity-provisioned', setup.code === 0 && setup.json?.ok === true && setup.json?.ownerPrincipal === SLACK_OWNER_PRINCIPAL,
-      { code: setup.code, json: setup.json, stderr: setup.stderr });
     // The hub env file: the retained mhc engine plus the Slack adapter on the loopback API.
     const deadOmo = `ws://127.0.0.1:${await closedLoopbackPort()}`;
     const env = await prepareEngineEnv(ctx, {
@@ -322,6 +343,11 @@ export async function runSlackLeg(ctx, { setupCli, hub, dbPath, waitForChange, e
       },
     });
     transcript(`legacy omo app-server pinned to closed ${deadOmo} with launcher /usr/bin/false`);
+    transcript(`leg installation root=${root} hub=${env.FERRYX_HUB_DB} home=${env.HOME}`);
+    const setup = await setupCli(SLACK_OWNER_PRINCIPAL, env);
+    ctx.assert('slack-owner-identity-provisioned', setup.code === 0 && setup.json?.ok === true && setup.json?.ownerPrincipal === SLACK_OWNER_PRINCIPAL,
+      { code: setup.code, json: setup.json, stderr: setup.stderr, root });
+    if (setup.code !== 0) throw new HarnessError('SETUP_FAILED', `the Slack owner was not provisioned (exit ${setup.code}); no Slack turn can be supervised`, { json: setup.json });
     const before = counts();
     const startHub = async (id) => {
       const connected = ctx.journal.cursor();
@@ -329,6 +355,8 @@ export async function runSlackLeg(ctx, { setupCli, hub, dbPath, waitForChange, e
       await ctx.waitFor(`${id} socket mode connected`, (e) => e.source === 'slack-loopback' && e.kind === 'socket-open', { after: connected, deadlineMs: 60_000 });
       // The retained engine is up before a message needs it (T6's product status surface).
       const engine = await awaitEngine(ctx, env, id, (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+      const registered = await registerWorkspace(env);
+      if (registered.at(-1)?.type !== 'registerWorkspaceOk') throw new HarnessError('FIXTURE_FAILED', `${id} did not register the fixture workspace`, { replies: registered });
       transcript(`${id} pid=${daemon.pid} connected through apps.connections.open; engine ${engine?.engine?.state}`);
     };
     await startHub('daemon-slack');
@@ -350,7 +378,21 @@ export async function runSlackLeg(ctx, { setupCli, hub, dbPath, waitForChange, e
     await slack.inject('owner-dm', dmEvent(OWNER_USER, OWNER_DM, ownerTs, OWNER_WORK));
     const isReply = (e, text) => e.source === 'slack-loopback' && e.kind === 'web' && e.method === 'chat.postMessage'
       && e.fields?.channel === OWNER_DM && String(e.fields?.text ?? '').startsWith(text);
-    const answered = await ctx.waitFor('supervisor reply in the owner DM', (e) => isReply(e, FINAL_TEXT), { after: ownerCursor, deadlineMs: 180_000 });
+    // The expected reply, or the first sign the turn failed: the hub's failure reply
+    // (meta/omo_client.rs owner_failure_text, a "⚠️" line) or its `x` reaction on the message
+    // (slack_turn.rs, slack_supervisor.rs). A failure ends the wait at once.
+    const awaitOwnerReply = async (label, text, ts, cursor) => {
+      const failed = (e) => e.source === 'slack-loopback' && e.kind === 'web' && (
+        (e.method === 'chat.postMessage' && e.fields?.channel === OWNER_DM && String(e.fields?.text ?? '').startsWith('⚠️'))
+        || (e.method === 'reactions.add' && e.fields?.channel === OWNER_DM && e.fields?.timestamp === ts && e.fields?.name === 'x'));
+      const seen = await ctx.waitFor(label, (e) => isReply(e, text) || failed(e), { after: cursor, deadlineMs: 180_000 });
+      if (!isReply(seen, text)) {
+        transcript(`${label}: the hub reported a failed turn (${seen.method} ${String(seen.fields?.text ?? seen.fields?.name ?? '')})`);
+        throw new HarnessError('SLACK_TURN_FAILED', `${label}: the hub reported a failed turn instead of the expected reply`, { method: seen.method, fields: seen.fields });
+      }
+      return seen;
+    };
+    const answered = await awaitOwnerReply('supervisor reply in the owner DM', FINAL_TEXT, ownerTs, ownerCursor);
     const admitted = await waitForChange(ctx, 'slack goal admitted', dirname(dbPath), () => {
       const now = counts();
       return { done: now.slackGoals >= 1, now };
@@ -384,7 +426,7 @@ export async function runSlackLeg(ctx, { setupCli, hub, dbPath, waitForChange, e
       const sentinelTs = `${Math.floor(Date.now() / 1000)}.${sentinelSuffix}`;
       const sentinelCursor = ctx.journal.cursor();
       await slack.inject(`${label}-sentinel`, dmEvent(OWNER_USER, OWNER_DM, sentinelTs, SENTINEL));
-      await ctx.waitFor(`${label} sentinel answered`, (e) => isReply(e, SENTINEL_TEXT), { after: sentinelCursor, deadlineMs: 180_000 });
+      await awaitOwnerReply(`${label} sentinel answered`, SENTINEL_TEXT, sentinelTs, sentinelCursor);
       const now = counts();
       const ingestedNow = readIngested(ctx);
       const detail = { label, now, toolCalls: provider.toolCalls(), workReplies: replies(FINAL_TEXT), sentinelsBefore, sentinels: replies(SENTINEL_TEXT), ingested: ingestedNow };

@@ -383,11 +383,17 @@ async function runAdmission(ctx) {
 
   // 10. Slack leg (plan task 11): the same admission reached from an owner's Slack DM through
   //     the production Slack ingress adapter of a fresh hub generation (slack.mjs). The MCP
-  //     daemon is stopped first; the Slack owner is a second identity with its own project.
+  //     daemon is stopped first. The Slack owner gets its own installation (HOME, data dir,
+  //     runtime dir, hub db) under <data>/slack-leg: an installation has one owner, and the
+  //     main leg's `qa-owner` is no Slack principal.
   await ctx.terminate(mcp, 'slack leg');
   await ctx.terminate(daemon, 'slack leg');
-  const slackRepo = join(data, 'slack-ws', 'qa-slack');
+  const slackRoot = join(data, 'slack-leg');
+  const slackWorkspace = join(slackRoot, 'ws');
+  const slackRepo = join(slackWorkspace, 'qa-slack');
+  const slackDb = join(slackRoot, 'hub', 'hub.sqlite');
   mkdirSync(slackRepo, { recursive: true });
+  mkdirSync(dirname(slackDb), { recursive: true });
   for (const [label, args] of [
     ['git-init-slack', [...gitArgs, 'init', '-q', slackRepo]],
     ['git-commit-slack', [...gitArgs, '-C', slackRepo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']],
@@ -396,9 +402,11 @@ async function runAdmission(ctx) {
     if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
   }
   await runSlackLeg(ctx, {
-    setupCli: (owner) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', 'qa-slack', '--repo-identity', 'qa:qa-slack',
-      '--host', ADMISSION_HOST, '--git-common-dir', realpathSync(join(slackRepo, '.git')), '--json'], { label: 'supervisor-setup-slack', env }),
-    hub, dbPath, waitForChange,
+    root: slackRoot,
+    setupCli: (owner, legEnv) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', 'qa-slack', '--repo-identity', 'qa:qa-slack',
+      '--host', ADMISSION_HOST, '--git-common-dir', realpathSync(join(slackRepo, '.git')), '--json'], { label: 'supervisor-setup-slack', env: legEnv }),
+    hub: await openHubReader(slackDb), dbPath: slackDb, waitForChange,
+    registerWorkspace: (legEnv) => registerWorkspace(ctx, join(legEnv.FERRYX_RUNTIME_DIR, 'daemon.sock'), ADMISSION_WORKSPACE_ID, realpathSync(slackWorkspace)),
     // The fixture pane shell, so a dispatched Slack goal never launches a real agent.
     extraEnv: { SHELL: shell, FERRYX_HUB_WORKSPACE: ADMISSION_WORKSPACE_ID, OMON_LANE_AUTO_WORKTREE: '1' },
   });
