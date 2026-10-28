@@ -536,6 +536,16 @@ pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
     }
     let team = team_of(admitted);
     let principal = owner_principal(pool, team.as_deref(), &admitted.user).await?;
+    // Exactly one intake takes the owner's message: the supervisor once cut over, the legacy
+    // omo turn before a cutover and after a rollback.
+    match crate::supervisor::cutover::installation_intake(pool).await {
+        Ok(intake) if intake.unified_open => {}
+        Ok(_) => return None,
+        Err(error) => {
+            tracing::warn!(%error, "the supervisor intake was not read; the message keeps the legacy turn");
+            return None;
+        }
+    }
     let thread = admitted.key.thread_id.clone().unwrap_or_default();
     let binding: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT binding_id, project_id FROM supervisor_channel_bindings
@@ -770,6 +780,31 @@ pub async fn try_handle(
     let done = if failed { "x" } else { "white_check_mark" };
     super::slack_turn::react(&admitted.channel, &admitted.message_ts, done, true).await;
     Some(text)
+}
+
+/// Code and text of the reply an owner message gets when the supervisor owns it (cut over)
+/// but no mhc engine runs in this daemon.
+pub const ENGINE_UNAVAILABLE_NOTICE: &str = "MHC_NOT_RUNNING: the supervisor engine is not running on this hub, so new work cannot be started. Earlier conversations stay readable; nothing was registered.";
+
+/// Answers an owner message the unified supervisor owns after an explicit cutover ([`route`]: the owner, a DM
+/// or bound channel) with [`ENGINE_UNAVAILABLE_NOTICE`] when no engine is installed. Returns
+/// false, touching nothing, for every other message, which keeps its legacy turn.
+pub async fn refuse_without_engine(pool: &SqlitePool, admitted: &Admitted) -> bool {
+    // Only an explicit cutover stopped the legacy turn; a fresh install keeps it.
+    let cut_over = matches!(
+        crate::supervisor::cutover::installation_intake(pool).await,
+        Ok(intake) if intake.legacy == crate::supervisor::cutover::LegacyIntake::Stopped
+    );
+    if !cut_over || route(pool, admitted).await.is_none() {
+        return false;
+    }
+    let storage_key = admitted.key.storage_key();
+    persist_session(pool, &admitted.key).await;
+    if let Err(error) = super::transcript::record(pool, &storage_key, "assistant", ENGINE_UNAVAILABLE_NOTICE).await {
+        tracing::warn!(%error, "supervisor unavailable reply was not stored");
+    }
+    super::slack_turn::post(&admitted.channel, admitted.reply_thread.as_deref(), ENGINE_UNAVAILABLE_NOTICE).await;
+    true
 }
 
 #[cfg(test)]

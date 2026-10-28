@@ -15,10 +15,11 @@ import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync,
 import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
+import { awaitGone, HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
 import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
 import { runSlackLeg } from './slack.mjs';
 import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
+import { LEGACY_REQUIRED_ASSERTIONS } from './legacy.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -625,7 +626,7 @@ async function runAutonomy(ctx) {
       const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind)));
       return { done: open.length === 0, open: open.map((entry) => entry.name) };
     }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
-    const alive = workerPids.filter((pid) => pidAlive(pid));
+    const alive = await stillAlive(workerPids);
     ctx.assert('fixture-workers-gone', workerPids.length === 1 && closed && alive.length === 0, { workerPids, closed, alive });
 
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
@@ -688,6 +689,14 @@ export function portIsFree(port) {
 // True while `pid` exists (signal 0 probes without sending anything).
 export function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+// The worker pids still alive once each had `ms` to finish exiting. A worker logs its exit
+// line just before process.exit, so a single signal-0 probe right after that line can still see
+// it; this waits (bounded) for the process itself to be gone.
+async function stillAlive(pids, ms = 5_000) {
+  const gone = await Promise.all(pids.map((pid) => awaitGone({ pid, startStamp: null }, ms)));
+  return pids.filter((_, index) => !gone[index]);
 }
 
 // One request on a fresh connection after a handshake; a protocolMismatch retries once with
@@ -976,7 +985,7 @@ async function runRemoteDelivery(ctx) {
   // probe cannot fail. The receipt's per-descendant initial verdict can: a worker that had to
   // be reaped shows up as 'match'; one that exited by itself is absent or 'gone'.
   const reaped = (targetReceipt?.descendants ?? []).filter((entry) => workerPids.includes(entry.pid) && entry.initial !== 'gone');
-  const alive = workerPids.filter((pid) => pidAlive(pid));
+  const alive = await stillAlive(workerPids);
   ctx.evidence.writeJson('worker-cleanup.json', {
     workerPids, allExitedCleanly: closed, reaped, alive, descendantsObservable: targetReceipt?.descendantsObservable ?? null,
     workerDescendants: (targetReceipt?.descendants ?? []).filter((entry) => workerPids.includes(entry.pid))
@@ -2112,7 +2121,7 @@ async function runWaiting(ctx) {
         && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
       return { done: open.length === 0, open: open.map((entry) => entry.name) };
     }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
-    const alive = workerPids.filter((pid) => pidAlive(pid));
+    const alive = await stillAlive(workerPids);
     ctx.assert('fixture-workers-gone', workerPids.length === WAITING_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
 
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
@@ -2418,7 +2427,7 @@ async function runBurst(ctx) {
         && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
       return { done: open.length === 0, open: open.map((entry) => entry.name) };
     }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
-    const alive = workerPids.filter((pid) => pidAlive(pid));
+    const alive = await stillAlive(workerPids);
     ctx.assert('fixture-workers-gone', workerPids.length === BURST_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
 
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
@@ -2447,6 +2456,23 @@ const memoryUsageDeps = Object.freeze({
   work: (instruction) => ({ ...ADMISSION_WORK, instruction }),
 });
 const loadMemoryUsage = async () => import('./memory-usage.mjs');
+
+// The legacy scenario (task 16, legacy.mjs) reuses these helpers.
+const legacyDeps = Object.freeze({
+  supervisedHub,
+  hubControl,
+  hubStatusUntil,
+  goalRows,
+  inputsWith,
+  readWorkerLogs,
+  waitForChange,
+  survived,
+  shellQuote,
+  heldStates: HELD_STATES,
+  work: ADMISSION_WORK,
+  project: ADMISSION_PROJECT,
+});
+const loadLegacy = async () => import('./legacy.mjs');
 
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
@@ -2598,7 +2624,18 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runCapabilities,
   }),
-  legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),
+  legacy: Object.freeze({
+    implemented: true,
+    task: '16',
+    summary: 'Upgrade from an omo snapshot with historical closed/failed/blocked lanes, a legacy Slack session and cron jobs: nothing runs and new work is unavailable; cutover without an mhc capability is refused while the old conversation stays readable; cutover adopts one safe lane once (retry is duplicate); a rollback stops new scheduling and keeps receipts and panes; a second cutover recovers; cron jobs never change',
+    deadlineMs: 15 * 60_000,
+    requiredAssertions: LEGACY_REQUIRED_ASSERTIONS,
+    notCovered: [
+      { clause: 'session-adoption-untrusted-context', reason: 'the fixture worker does not show what it was told beyond the owner request line, so the fenced history is asserted on the stored dispatch instruction in the hub test', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/cutover.rs adopting_a_legacy_lane_or_session_happens_once_and_a_retry_is_a_duplicate' },
+      { clause: 'legacy-goal-loop-after-cutover', reason: 'a legacy goal turn needs a live legacy pane and a judge answer; the runner has no product surface that starts a legacy lane', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/cutover.rs a_cutover_stops_the_legacy_intake_before_the_unified_intake_opens' },
+    ],
+    run: (ctx) => loadLegacy().then((module) => module.runLegacy(ctx, legacyDeps)),
+  }),
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
   // Task 14, implemented in surfaces.mjs.
   surfaces: SURFACES_SCENARIO,

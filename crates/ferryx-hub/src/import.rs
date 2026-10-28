@@ -300,6 +300,8 @@ async fn import_into(pool: &SqlitePool, source: &Path) -> Result<ImportReport> {
     }
     store_imported_notify_mode(pool, source).await?;
     let copied = copy_state(&from, pool).await?;
+    // Imported legacy work keeps the legacy intake until an explicit cutover.
+    crate::supervisor::cutover::note_import(pool).await?;
     sqlx::query("INSERT OR REPLACE INTO hub_meta(key, value) VALUES('imported_from', ?)")
         .bind(source.to_string_lossy().as_ref())
         .execute(pool)

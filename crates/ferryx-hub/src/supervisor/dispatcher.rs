@@ -463,6 +463,11 @@ impl Dispatcher {
         if goal.run_state != RunState::Ready || goal.revision != dispatch.goal_revision {
             return Ok(skipped(request_id, "REVISION_CONFLICT"));
         }
+        // An upgrade not cut over yet, or a rollback: nothing is held, launched or sent, and
+        // the intent stays `ready` for the next cutover (the claim refuses it as well).
+        if !super::cutover::unified_open_for(&self.pool, &goal.supervisor_id).await? {
+            return Ok(skipped(request_id, super::cutover::SUPERVISOR_INTAKE_CLOSED));
+        }
         let Some(binding) = execution_binding_of(&self.pool, &goal.goal_id).await? else {
             return Ok(skipped(request_id, "NOT_FOUND"));
         };

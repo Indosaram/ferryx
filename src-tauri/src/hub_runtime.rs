@@ -278,6 +278,9 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
     match rest.next().map(String::as_str) {
         Some("stop") => return hub_control(ferryx_hub::control::ControlOp::Stop, false),
         Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start, false),
+        Some("cutover") => return hub_control(ferryx_hub::control::ControlOp::Cutover, false),
+        Some("rollback") => return hub_control(ferryx_hub::control::ControlOp::Rollback, false),
+        Some("intake") => return hub_control(ferryx_hub::control::ControlOp::Intake, false),
         Some("status") => {
             return match rest.next().map(String::as_str) {
                 None => hub_control(ferryx_hub::control::ControlOp::Status, false),
@@ -294,6 +297,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start | status [--check]");
+            eprintln!("       ferryx hub cutover | rollback | intake");
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
@@ -2406,6 +2410,40 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                                 }
                             }
                         }
+                        Ok(op @ (ferryx_hub::control::ControlOp::Cutover
+                        | ferryx_hub::control::ControlOp::Rollback
+                        | ferryx_hub::control::ControlOp::Intake)) => {
+                            use ferryx_hub::control::ControlOp;
+                            use ferryx_hub::supervisor::cutover;
+                            let pool = &launch.hub.pool;
+                            // The installed engine's health is the only capability evidence;
+                            // without an engine a cutover is refused (MHC_NOT_RUNNING).
+                            let health = ferryx_hub::meta::mhc_supervisor::installed().map(|engine| engine.health());
+                            let (name, result) = match op {
+                                ControlOp::Cutover => ("cutover", cutover::cutover(pool, health.as_ref()).await),
+                                ControlOp::Rollback => ("rollback", cutover::rollback(pool).await),
+                                _ => (
+                                    "intake",
+                                    cutover::installation_intake(pool)
+                                        .await
+                                        .map(|intake| cutover::Transition { intake, steps: Vec::new() })
+                                        .map_err(ferryx_hub::supervisor::SupervisorError::from),
+                                ),
+                            };
+                            let mut reply = ferryx_hub::control::intake_reply(name, result);
+                            if let (Some(fields), Some(health)) = (reply.as_object_mut(), health) {
+                                fields.insert("engine".into(), serde_json::to_value(health).unwrap_or(Value::Null));
+                            }
+                            if name != "intake" && reply["status"] == "ok" {
+                                crate::remote::server::agent_control_service::publish_supervisor_changed(
+                                    launch.server.remote_state(),
+                                    json!({ "intake": reply["intake"].clone() }),
+                                );
+                            }
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
                         Ok(ferryx_hub::control::ControlOp::Status) => {
                             let running_now = running.lock().await.is_some();
                             let report = ferryx_hub::control::status_report(
@@ -2417,7 +2455,7 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             let _ = stream.write_all(format!("{report}\n").as_bytes()).await;
                             return;
                         }
-                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, or status\"}\n",
+                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, status, cutover, rollback, or intake\"}\n",
                     };
                     let mut stream = reader.into_inner();
                     let _ = stream.write_all(reply.as_bytes()).await;

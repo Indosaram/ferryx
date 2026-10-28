@@ -1,5 +1,9 @@
 //! Hub control socket. `stop` drops chat, cron, and HTTP tasks. The daemon and its
 //! PTYs stay up. `start` is the signal to bind them again. `status` reports what is live.
+//! `cutover` moves the owner's supervision from the legacy intake to the unified supervisor
+//! (refused unless the mhc engine is ready with every required capability), `rollback` moves
+//! it back without touching receipts or PTYs, and `intake` reports which one is open
+//! ([`crate::supervisor::cutover`]).
 use serde_json::{json, Value};
 
 use crate::error::{HubError, Result};
@@ -9,6 +13,9 @@ pub enum ControlOp {
     Stop,
     Start,
     Status,
+    Cutover,
+    Rollback,
+    Intake,
 }
 
 pub fn parse_control(line: &str) -> Result<ControlOp> {
@@ -18,8 +25,11 @@ pub fn parse_control(line: &str) -> Result<ControlOp> {
         Some("stop") => Ok(ControlOp::Stop),
         Some("start") => Ok(ControlOp::Start),
         Some("status") => Ok(ControlOp::Status),
+        Some("cutover") => Ok(ControlOp::Cutover),
+        Some("rollback") => Ok(ControlOp::Rollback),
+        Some("intake") => Ok(ControlOp::Intake),
         _ => Err(HubError::message(
-            "hub control expected stop, start, or status",
+            "hub control expected stop, start, status, cutover, rollback, or intake",
         )),
     }
 }
@@ -66,6 +76,9 @@ pub fn control_line(op: ControlOp) -> &'static str {
         ControlOp::Stop => "{\"op\":\"stop\"}\n",
         ControlOp::Start => "{\"op\":\"start\"}\n",
         ControlOp::Status => "{\"op\":\"status\"}\n",
+        ControlOp::Cutover => "{\"op\":\"cutover\"}\n",
+        ControlOp::Rollback => "{\"op\":\"rollback\"}\n",
+        ControlOp::Intake => "{\"op\":\"intake\"}\n",
     }
 }
 
@@ -140,6 +153,10 @@ pub async fn status_report(pool: &sqlx::SqlitePool, live: &LiveHub) -> Value {
         "discord": {"configured": live.discord_configured},
         "cron": {"jobs": jobs, "enabled": enabled},
         "notify_mode": notify,
+        "supervisor_intake": crate::supervisor::cutover::installation_intake(pool)
+            .await
+            .ok()
+            .and_then(|intake| serde_json::to_value(intake).ok()),
         "inbox_watchers": watchers
             .iter()
             .map(|(source, status, updated_at)| json!({"source": source, "status": status, "updated_at": updated_at}))
@@ -167,6 +184,28 @@ pub fn reply_healthy(reply: &str) -> bool {
             .ok()
             .and_then(|value| value.get("healthy").and_then(Value::as_bool))
             .unwrap_or(false)
+}
+
+/// The reply to `cutover`, `rollback` or `intake`: the intake after the op and the steps it
+/// committed, or the typed refusal (`MHC_CAPABILITY_MISSING`, `MHC_NOT_RUNNING`, ...).
+pub fn intake_reply(
+    op: &str,
+    result: std::result::Result<crate::supervisor::cutover::Transition, crate::supervisor::SupervisorError>,
+) -> Value {
+    match result {
+        Ok(transition) => json!({
+            "status": "ok",
+            "op": op,
+            "intake": transition.intake,
+            "steps": transition.steps,
+        }),
+        Err(error) => json!({
+            "status": "failed",
+            "op": op,
+            "code": error.code(),
+            "error": error.to_string(),
+        }),
+    }
 }
 
 /// Writes one control line and reads the reply. The daemon process is not signaled.
@@ -214,6 +253,9 @@ mod tests {
             parse_control(control_line(ControlOp::Status)).unwrap(),
             ControlOp::Status
         );
+        for op in [ControlOp::Cutover, ControlOp::Rollback, ControlOp::Intake] {
+            assert_eq!(parse_control(control_line(op)).unwrap(), op);
+        }
         assert!(parse_control("{\"op\":\"restart-daemon\"}").is_err());
     }
 

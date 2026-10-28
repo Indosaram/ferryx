@@ -27,7 +27,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
-use super::admission::{self, ActorContext, AdmissionError, AdoptWork, OwnerChoices, SubmitWork};
+use super::admission::{
+    self, ActorContext, AdmissionError, AdoptSession, AdoptWork, OwnerChoices, SubmitWork,
+};
 use super::dispatcher::{GRANT_REVOKED, TURN_LIMIT};
 use super::memory::{ForgetPayload, TeachPayload};
 use super::wakes::{self, DependencyError};
@@ -117,7 +119,7 @@ pub fn status_for_code(code: &str) -> u16 {
         | admission::LEGACY_GOAL_OFF
         | TURN_LIMIT => 409,
         "STORAGE" | "INTERNAL" => 500,
-        "SUPERVISOR_UNAVAILABLE" | "JUDGE_UNAVAILABLE" => 503,
+        "SUPERVISOR_UNAVAILABLE" | "JUDGE_UNAVAILABLE" | super::cutover::SUPERVISOR_INTAKE_CLOSED => 503,
         code if code.starts_with("MHC_") || code.starts_with("MEMORY_") => 503,
         _ => 500,
     }
@@ -475,6 +477,14 @@ async fn admit(
                 with_project(&mut work.project_id, project)?;
             }
             admission::handle_message(pool, &actor(message.text), message.work.as_ref()).await?
+        }
+        // One owner action adopts one old channel session (`sessionKey`) or one old lane
+        // (`laneKey`) as one new goal contract.
+        _ if envelope.payload.get("sessionKey").is_some() => {
+            let mut adopt: AdoptSession = payload(&envelope.payload)?;
+            with_project(&mut adopt.project_id, project)?;
+            let body = format!("adopt session {}", adopt.session_key);
+            admission::adopt_session(pool, &actor(body), &adopt).await?
         }
         _ => {
             let mut adopt: AdoptWork = payload(&envelope.payload)?;
