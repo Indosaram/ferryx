@@ -609,19 +609,7 @@ async function runRemoteDelivery(ctx) {
   // read-only status request for a goal that cannot exist until the hub itself answers NOT_FOUND
   // (bounded backoff). Any other answer - unavailable, timeout, connect error - keeps polling,
   // and is the recorded failure if it is still the answer at the deadline.
-  const hubReadyBy = Date.now() + 90_000;
-  let hubProbe = null;
-  for (let attempt = 0, pauseMs = 250; ; attempt += 1, pauseMs = Math.min(pauseMs * 2, 2_000)) {
-    hubProbe = await ctx.cli(['supervisor', 'dispatch', 'status', '--goal', `qa-hub-ready-${attempt}`, '--json'], { label: `hub-ready-${attempt}`, env: hubEnv });
-    if (hubProbe.json?.code === 'NOT_FOUND') break;
-    if (Date.now() + pauseMs > hubReadyBy) break;
-    await new Promise((resolvePause, rejectPause) => {
-      if (ctx.signal.aborted) { rejectPause(ctx.signal.reason); return; }
-      const onAbort = () => { clearTimeout(timer); rejectPause(ctx.signal.reason); };
-      const timer = setTimeout(() => { ctx.signal.removeEventListener('abort', onAbort); resolvePause(); }, pauseMs);
-      ctx.signal.addEventListener('abort', onAbort, { once: true });
-    });
-  }
+  const hubProbe = await hubOpen(ctx, hubEnv, 90_000);
   ctx.assert('hub-open-on-the-hub-daemon', hubProbe?.json?.code === 'NOT_FOUND', { code: hubProbe?.code, json: hubProbe?.json });
 
   // 5. Positive receipt: the reporting pane starts the run from its own report.
@@ -787,6 +775,27 @@ function listTree(root) {
   return out;
 }
 
+// The daemon opens its hub after the socket is up and publishes no event for it, so ask the
+// read-only dispatch status for a goal that cannot exist until the hub itself answers NOT_FOUND
+// (bounded backoff). Any other answer - unavailable, timeout, connect error - keeps polling, and
+// is the recorded failure if it is still the answer at the deadline. Returns the last probe.
+async function hubOpen(ctx, env, deadlineMs) {
+  const readyBy = Date.now() + deadlineMs;
+  let probe = null;
+  for (let attempt = 0, pauseMs = 250; ; attempt += 1, pauseMs = Math.min(pauseMs * 2, 2_000)) {
+    probe = await ctx.cli(['supervisor', 'dispatch', 'status', '--goal', `qa-hub-ready-${attempt}`, '--json'], { label: `hub-ready-${attempt}`, env });
+    if (probe.json?.code === 'NOT_FOUND') break;
+    if (Date.now() + pauseMs > readyBy) break;
+    await new Promise((resolvePause, rejectPause) => {
+      if (ctx.signal.aborted) { rejectPause(ctx.signal.reason); return; }
+      const onAbort = () => { clearTimeout(timer); rejectPause(ctx.signal.reason); };
+      const timer = setTimeout(() => { ctx.signal.removeEventListener('abort', onAbort); resolvePause(); }, pauseMs);
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+  return probe;
+}
+
 async function runAuthority(ctx) {
   if (!POSIX) {
     throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'the pane peer check is POSIX (peer pid, session, terminal, parent chain); Windows uses the documented token fallback and is not asserted here');
@@ -824,6 +833,12 @@ async function runAuthority(ctx) {
   if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${setup.stdout} ${setup.stderr}`);
   const projectId = setup.json.projectId;
   await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  // FERRYX_DAEMON_READY precedes the hub: the owner submit waits until the hub answers.
+  const hubWaitStarted = Date.now();
+  const hubProbe = await hubOpen(ctx, env, 90_000);
+  socketLog({ label: 'hub-open-wait', waitedMs: Date.now() - hubWaitStarted, code: hubProbe?.code, reply: hubProbe?.json ?? null });
+  ctx.assert('hub-open-before-the-owner-submit', hubProbe?.json?.code === 'NOT_FOUND', { code: hubProbe?.code, json: hubProbe?.json });
+  if (hubProbe?.json?.code !== 'NOT_FOUND') throw new HarnessError('HUB_UNAVAILABLE', `the isolated daemon's hub did not open: ${JSON.stringify(hubProbe?.json ?? null)}`);
   const registered = await exchange('register-workspace', { type: 'registerWorkspace', workspaceId: AUTHORITY_WORKSPACE_ID, repoRoot: realpathSync(join(data, 'ws')) });
   ctx.assert('workspace-registered', registered?.type === 'registerWorkspaceOk', registered);
   const submitFile = join(work, 'owner-submit.json');
@@ -836,6 +851,7 @@ async function runAuthority(ctx) {
   if (!goalId) throw new HarnessError('ADMISSION_FAILED', 'the owner submit returned no goal; the refusals would prove nothing');
   const hub = await openHubReader(dbPath);
   const goalRow = () => hub.one('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId);
+  const goalLane = hub.one('SELECT lane_key FROM supervisor_goals WHERE goal_id = ?', goalId)?.lane_key ?? null;
   const dispatchRows = () => hub.all('SELECT request_id, state FROM supervisor_dispatches ORDER BY id');
   const counts = () => ({
     goals: hub.count('SELECT COUNT(*) AS n FROM supervisor_goals'),
@@ -918,8 +934,11 @@ async function runAuthority(ctx) {
     work: { ...AUTHORITY_WORK, operations: ['destructive'] } }));
   // `ferryx-cli mcp` from the pane: a `supervisor.request` submit, one JSON-RPC line on stdin.
   const mcpFile = join(work, 'mcp-submit.jsonl');
-  writeFileSync(mcpFile, `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'supervisor.request',
-    arguments: { ...strangerSubmit, requestId: `qa-pane-mcp-${ctx.runId}` } } })}\n`);
+  // Line 2 (`lane.list`) reads the MCP process's own hub pool: it proves which database it opened.
+  writeFileSync(mcpFile, [
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'supervisor.request', arguments: { ...strangerSubmit, requestId: `qa-pane-mcp-${ctx.runId}` } } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lane.list', arguments: {} } },
+  ].map((line) => `${JSON.stringify(line)}\n`).join(''));
   const wire = (envelope) => JSON.stringify({ type: 'supervisorRequestV1', envelope, cli: true });
   const spawned = await exchange('spawn-pane', { type: 'spawn', clientRequestId: `qa-authority-pane-${ctx.runId}`, workspaceId: AUTHORITY_WORKSPACE_ID, worktree: null, cwd: work, cols: 80, rows: 24, shell: '/bin/sh' });
   const sessionId = spawned?.sessionId ?? null;
@@ -932,7 +951,7 @@ async function runAuthority(ctx) {
   const done = [cliOut, sockOut, submitOut, mcpOut].map((path) => ctx.waitForPath(path, { deadlineMs: 60_000, label: `pane result ${basenameOf(path)}` }));
   done.forEach((promise) => promise.catch(() => {}));
   const script = [
-    `printf '%s' "$FERRYX_RUNTIME_DIR" > ${shellQuote(envOut)}`,
+    `printf '%s\\n%s' "$FERRYX_RUNTIME_DIR" "$FERRYX_HUB_DB" > ${shellQuote(envOut)}`,
     `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} supervisor request --json ${shellQuote(approveFile)} > ${shellQuote(`${cliOut}.tmp`)} 2>&1; mv ${shellQuote(`${cliOut}.tmp`)} ${shellQuote(cliOut)}`,
     `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} supervisor submit --request-file ${shellQuote(dispatchFile)} --json > ${shellQuote(`${submitOut}.tmp`)} 2>&1; mv ${shellQuote(`${submitOut}.tmp`)} ${shellQuote(submitOut)}`,
     `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} mcp < ${shellQuote(mcpFile)} > ${shellQuote(`${mcpOut}.tmp`)} 2>/dev/null; mv ${shellQuote(`${mcpOut}.tmp`)} ${shellQuote(mcpOut)}`,
@@ -941,10 +960,15 @@ async function runAuthority(ctx) {
   const typed = await exchange('pane-write', { type: 'write', sessionId, data: Buffer.from(script).toString('base64') });
   ctx.assert('pane-script-written', typed?.type !== 'error', typed);
   await Promise.all(done);
-  const paneRuntime = existsSync(envOut) ? readFileSync(envOut, 'utf8') : null;
+  const [paneRuntime = null, paneHubDb = null] = existsSync(envOut) ? readFileSync(envOut, 'utf8').split('\n') : [];
   ctx.assert('pane-inherits-the-isolated-daemon-env', paneRuntime === runtimeDir || (paneRuntime && realpathSync(paneRuntime) === realpathSync(runtimeDir)), { paneRuntime, runtimeDir });
   let paneCli = null; let paneSock = null; let paneSubmit = null; let paneMcp = null;
-  try { paneMcp = JSON.parse(readFileSync(mcpOut, 'utf8').trim().split('\n')[0]); } catch { /* asserted below */ }
+  let paneMcpLanes = null;
+  try {
+    const lines = readFileSync(mcpOut, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    paneMcp = lines.find((line) => line?.id === 1) ?? null;
+    paneMcpLanes = lines.find((line) => line?.id === 2) ?? null;
+  } catch { /* asserted below */ }
   try { paneCli = JSON.parse(readFileSync(cliOut, 'utf8')); } catch { /* asserted below */ }
   try { paneSubmit = JSON.parse(readFileSync(submitOut, 'utf8')); } catch { /* asserted below */ }
   try { paneSock = JSON.parse(readFileSync(sockOut, 'utf8')); } catch { /* asserted below */ }
@@ -958,6 +982,14 @@ async function runAuthority(ctx) {
   // The MCP server forwards every write to the daemon, whose peer gate sees the pane-run MCP process.
   ctx.assert('pane-mcp-submit-forbidden', paneMcp?.id === 1 && typeof paneMcp?.error?.message === 'string'
     && paneMcp.error.message.startsWith('FORBIDDEN'), paneMcp);
+  // The pane-run MCP opened the isolated hub (inherited FERRYX_HUB_DB), never the real data dir:
+  // its own lane list holds the lane of the goal admitted in this run's database.
+  let mcpLaneKeys = null;
+  try { mcpLaneKeys = JSON.parse(paneMcpLanes?.result?.content?.[0]?.text ?? 'null')?.map((lane) => lane.key) ?? null; } catch { /* asserted below */ }
+  socketLog({ label: 'pane-mcp-hub-db', peer: 'pane', paneHubDb, dbPath, goalLane, mcpLaneKeys });
+  const sameFile = (left, right) => left === right || (!!left && existsSync(left) && realpathSync(left) === right);
+  ctx.assert('pane-mcp-opens-the-isolated-hub-db', sameFile(paneHubDb, dbPath) && typeof goalLane === 'string'
+    && Array.isArray(mcpLaneKeys) && mcpLaneKeys.includes(goalLane), { paneHubDb, dbPath, goalLane, mcpLaneKeys, reply: paneMcpLanes });
   const paneReplies = Array.isArray(paneSock) ? paneSock.slice(1) : [];
   ctx.assert('pane-socket-approve-teach-submit-forbidden', paneReplies.length === 3 && paneReplies.every((reply) => reply?.type === 'error' && reply?.code === 'FORBIDDEN'), paneSock);
 
@@ -1033,8 +1065,8 @@ export const SCENARIOS = Object.freeze({
     task: '13',
     summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
     deadlineMs: 5 * 60_000,
-    requiredAssertions: ['owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
-      'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-mcp-submit-forbidden', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
+    requiredAssertions: ['hub-open-before-the-owner-submit', 'owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
+      'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-mcp-submit-forbidden', 'pane-mcp-opens-the-isolated-hub-db', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
       'no-request-or-wait-written', 'memory-root-unchanged', 'authorized-snapshot-200-lists-the-goal', 'authorized-pause-200', 'stale-revision-409',
       'memory-receipts-unavailable-503', 'only-the-owner-changed-the-goal'],
     run: runAuthority,

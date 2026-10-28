@@ -761,7 +761,7 @@ async fn release_target(
         to(RunState::Verifying, held_verifying.unwrap_or_else(|| wakes::TURN_SETTLED.to_owned()), false)
     } else {
         Release::Hold(format!(
-            "{OWNER_DECISION_NEEDED}: the goal has no unsent instruction and no settled run to verify (latest dispatch: {}); send a correction to continue",
+            "{OWNER_DECISION_NEEDED}: the goal has no unsent instruction and no settled run to verify (latest dispatch: {}); correct, then approve",
             latest.as_deref().unwrap_or("none")
         ))
     })
