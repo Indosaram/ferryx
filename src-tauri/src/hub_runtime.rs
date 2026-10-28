@@ -761,6 +761,32 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
     });
 }
 
+/// A worker's ordinary report for its own supervisor goal, from the daemon's agent-state
+/// socket (`supervisorReport`): handed to the goal's wake service through the hub's lane
+/// event path ([`ferryx_hub::lanes::dispatch::report_from_worker`]). The reply is one JSON
+/// value: `{ok:true, ...}` or `{ok:false, code, message}`.
+pub async fn supervisor_worker_report((session_id, event_id, body): (String, String, String)) -> Value {
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return json!({"ok": false, "code": "SUPERVISOR_UNAVAILABLE", "message": "the supervisor hub is not open in this daemon"});
+    };
+    match ferryx_hub::lanes::dispatch::report_from_worker(
+        &hub.pool,
+        ferryx_hub::agent_control::LOCAL_HOST_ID,
+        &session_id,
+        &event_id,
+        &body,
+    )
+    .await
+    {
+        Ok(report) => {
+            let mut value = json!(report);
+            value["ok"] = json!(true);
+            value
+        }
+        Err(error) => json!({"ok": false, "code": error.code(), "message": error.to_string()}),
+    }
+}
+
 /// True once this daemon opened the hub, so the Supervisor view has lanes to show.
 pub fn supervisor_available() -> bool {
     SUPERVISOR_VIEW.get().is_some()

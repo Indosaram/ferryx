@@ -11,7 +11,7 @@
 // The __selftest-* scenarios exist only for --self-test and are reachable only
 // through --internal-self-test-child, which the CLI accepts only with the
 // per-run nonce the self-test parent creates.
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, watch, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -163,18 +163,28 @@ export async function openHubReader(dbPath) {
   };
 }
 
+// After a change event whose check found not-done: one trailing re-check this long after the
+// last event, re-armed by each new event. The watch can coalesce two writes a millisecond apart
+// into one event that fires before the second is readable; the trailing check reads that state.
+// It is not a poll: it runs once per quiet period after a change, never on its own.
+const CHANGE_SETTLE_MS = 100;
+
 // Subscribe to a directory (the hub directory: every SQLite commit writes the -wal file; the
 // worker log directory: every worker line is an append), then reconcile: `check` runs once now
-// and again after each change, until it returns { done: true } or the deadline passes.
+// and again after each change, until it returns { done: true } or the deadline passes. Each
+// change also re-arms one re-check CHANGE_SETTLE_MS after the last event, so a write landing in
+// or just after a check is never lost.
 export function waitForChange(ctx, label, dir, check, deadlineMs) {
   return new Promise((resolveWait, rejectWait) => {
     let settled = false;
     let watcher = null;
     let last = null;
+    let trailing = null;
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(trailing);
       try { watcher?.close(); } catch { /* already closed */ }
       ctx.signal.removeEventListener('abort', onAbort);
       fn(value);
@@ -191,11 +201,19 @@ export function waitForChange(ctx, label, dir, check, deadlineMs) {
         last = { error: String(error?.message ?? error) };
       }
     };
+    // A change: check now, as each event always did, and re-arm the trailing re-check behind
+    // the newest event.
+    const onChange = () => {
+      if (settled) return;
+      clearTimeout(trailing);
+      trailing = setTimeout(() => { trailing = null; evaluate(); }, CHANGE_SETTLE_MS);
+      evaluate();
+    };
     const timer = setTimeout(() => finish(rejectWait, new HarnessError('DEADLINE_EXCEEDED', `${label} was not observed within ${deadlineMs}ms`, { last })), deadlineMs);
     if (ctx.signal.aborted) { onAbort(); return; }
     ctx.signal.addEventListener('abort', onAbort, { once: true });
     try {
-      watcher = watch(dir, evaluate);
+      watcher = watch(dir, onChange);
       watcher.on?.('error', (error) => finish(rejectWait, new HarnessError('WATCH_FAILED', `${label}: ${error?.message ?? error}`)));
     } catch (error) {
       finish(rejectWait, new HarnessError('WATCH_FAILED', `${label}: ${error?.message ?? error}`));
@@ -1795,6 +1813,633 @@ async function runCapabilities(ctx) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// waiting (plan task 9): five owner submits through `ferryx-cli supervisor request` (parent,
+// fail, a, b, c), each run held open by its fixture worker until the runner writes its release
+// file. While every run is live the owner links parent -> a, b and fail -> a, c (`depend`); a
+// cycle and a self-dependency are refused 400 WAIT_CYCLE. The parents' runs then settle into
+// `waiting_children`; a completes (graded by the hub on the retained mhc engine, a loopback
+// stub), a's worker re-reports idle/working/idle after its end, c is cancelled (a failed
+// dependency) and the cancel is replayed stale; only then does b complete. The hub's own wake
+// scheduler decides everything: the parent makes no decision and no model call while b is
+// incomplete and resumes exactly once; fail is released to the owner, never completed. The
+// hub database is only read, read-only.
+
+const WAITING_WORKSPACE_ID = 'qa-waiting';
+const WAITING_PROJECT = 'qa-waiting';
+const WAITING_VERIFY = 'test -s result.txt\n';
+const WAITING_GOALS = Object.freeze(['parent', 'fail', 'a', 'b', 'c']);
+// parent waits on a and b (both complete); fail waits on a and c (c is cancelled).
+const WAITING_LINKS = Object.freeze([['parent', 'a'], ['parent', 'b'], ['fail', 'a'], ['fail', 'c']]);
+// In each goal's instruction and requirement text, so every model prompt that grades the goal
+// (gap assessment contract block, blind convergence requirements) names it.
+const waitingMarker = (name) => `[qa-goal:${name}]`;
+const waitingWork = (name) => Object.freeze({
+  title: `Waiting fixture ${name}`,
+  instruction: `Write result.txt and run verify.sh. ${waitingMarker(name)} QA_HOLD:hold-${name}${name === 'a' ? ' QA_ECHO:echo-a' : ''}`,
+  requirements: [{ id: 'r1', text: `result.txt is not empty ${waitingMarker(name)}`, verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+
+async function runWaiting(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'waiting runs POSIX fixture worker panes (the Windows pane shell ignores SHELL); this scenario runs on Linux or macOS');
+  }
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the waiting fixture project is a git repository');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `hub database ${dbPath} is outside the run root`);
+  const hubDir = dirname(dbPath);
+  const log = [];
+  const transcript = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+
+  // Fixture: a committed verify.sh in a workspace checkout; one hold directory the workers watch.
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, WAITING_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'verify.sh'), WAITING_VERIFY, { mode: 0o755 });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]],
+    ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
+    ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const gitCommonDir = realpathSync(join(repo, '.git'));
+  const workerLogs = join(data, 'workers');
+  const holdDir = join(data, 'holds');
+  const requestsDir = join(data, 'requests');
+  for (const dir of [workerLogs, holdDir, requestsDir]) mkdirSync(dir, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn ${shellQuote(`--hold-dir=${holdDir}`)}\n`, { mode: 0o755 });
+  const released = new Set();
+  const release = (token) => {
+    if (released.has(token)) return;
+    released.add(token);
+    writeFileSync(join(holdDir, token), `${new Date().toISOString()}\n`);
+    transcript(`released ${token}`);
+  };
+
+  // Every model request the hub makes, attributed to the goals named by the request's own turn:
+  // the user messages after its last assistant message. The decision session retains earlier
+  // goals' prompts as history, and the engine appends reminder user messages (<omo-senpi-task>,
+  // <memory_notice>) after the prompt, so neither the whole body nor the newest message names
+  // the goal being graded.
+  const modelCalls = [];
+  const stub = await startProviderStub(ctx, { answer: (json) => {
+    const messages = Array.isArray(json?.messages) ? json.messages : [];
+    const lastAssistant = messages.map((message) => message?.role).lastIndexOf('assistant');
+    const text = promptTextOf({ messages: messages.slice(lastAssistant + 1).filter((message) => message?.role === 'user') });
+    const convergence = promptTextOf(json).includes(CONVERGENCE_MARKER);
+    modelCalls.push({ seq: modelCalls.length + 1, at: new Date().toISOString(), goals: WAITING_GOALS.filter((name) => text.includes(waitingMarker(name))), convergence });
+    return convergence ? AUTONOMY_CONVERGED : null;
+  } });
+  const callsNaming = (name) => modelCalls.filter((call) => call.goals.includes(name));
+  try {
+    const env = await prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: config.mhcBin, label: 'waiting', extra: {
+      SHELL: shell,
+      FERRYX_HUB_WORKSPACE: WAITING_WORKSPACE_ID,
+      OMON_LANE_AUTO_WORKTREE: '1',
+      OMON_INBOX_ENABLED: '0',
+    } });
+    ctx.announce({ waiting: 'fixture', workspaceRoot, repo, gitCommonDir, holdDir, hubHttp: env.FERRYX_HUB_TRACKER_ADDR, dbPath, provider: stub.baseUrl });
+
+    const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', WAITING_PROJECT, '--repo-identity', `qa:${WAITING_PROJECT}`,
+      '--host', ADMISSION_HOST, '--git-common-dir', gitCommonDir, '--json'], { label: 'supervisor-setup', env });
+    if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${JSON.stringify(setup.json)} ${setup.stderr}`);
+    const projectId = setup.json.projectId;
+    const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+    const engine = await awaitEngine(ctx, env, 'waiting-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', engine?.engine?.state === 'ready', { engine });
+    const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), WAITING_WORKSPACE_ID, realpathSync(workspaceRoot));
+    ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+
+    // The owner's channel: one envelope file per request through `ferryx-cli supervisor request`.
+    let requestSeq = 0;
+    const request = async (label, envelope) => {
+      requestSeq += 1;
+      const file = join(requestsDir, `${String(requestSeq).padStart(2, '0')}-${label}.json`);
+      writeFileSync(file, JSON.stringify(envelope));
+      ctx.evidence.appendJsonl('envelopes.jsonl', { seq: requestSeq, label, envelope, at: new Date().toISOString() });
+      const result = await ctx.cli(['supervisor', 'request', '--json', file], { label, env });
+      transcript(`${label}: exit ${result.code} ${JSON.stringify(result.json)}`);
+      return result;
+    };
+
+    // 1. Five owner submits; every run starts and stays live (held by its worker).
+    const goals = {};
+    const submits = {};
+    for (const name of WAITING_GOALS) {
+      const work = waitingWork(name);
+      const submitted = await request(`submit-${name}`, { requestId: `qa-waiting-${name}-${ctx.runId}`, projectId, action: 'submit', payload: { request: work.instruction, work } });
+      submits[name] = { code: submitted.code, json: submitted.json };
+      goals[name] = submitted.json?.receipt?.receipt?.goal_id ?? null;
+    }
+    ctx.assert('five-goals-admitted', WAITING_GOALS.every((name) => submits[name].code === 0 && submits[name].json?.receipt?.outcome === 'admitted' && typeof goals[name] === 'string')
+      && new Set(Object.values(goals)).size === WAITING_GOALS.length, { goals, submits });
+    if (!WAITING_GOALS.every((name) => typeof goals[name] === 'string')) throw new HarnessError('ADMISSION_FAILED', `not every waiting goal was admitted: ${JSON.stringify(goals)}`);
+    ctx.announce({ waiting: 'goals', goals });
+
+    const hub = await openHubReader(dbPath);
+    const goalOf = (name) => hub.one('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goals[name]);
+    const snapshot = () => hub.read((query) => Object.fromEntries(WAITING_GOALS.map((name) => [name, {
+      goal: query('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      dispatches: query('SELECT request_id, state, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goals[name]),
+    }])));
+    // One goal's wait/wake bookkeeping, from one snapshot.
+    const wakeState = (name) => hub.read((query) => ({
+      goal: query('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      waits: query('SELECT wait_id, child_goal_id, state FROM supervisor_waits WHERE goal_id = ? ORDER BY rowid', goals[name]),
+      waitEvents: query(`SELECT w.child_goal_id, e.event_id, e.outcome FROM supervisor_wait_events e JOIN supervisor_waits w ON w.wait_id = e.wait_id
+        WHERE w.goal_id = ? ORDER BY e.received_at, e.event_id`, goals[name]),
+      wakes: query('SELECT id, cause, event_id, consumed_at FROM supervisor_pending_wakes WHERE goal_id = ? ORDER BY id', goals[name]),
+      turns: query('SELECT id, state, causes, urgent FROM supervisor_wake_turns WHERE goal_id = ? ORDER BY id', goals[name]),
+      receipts: query(`SELECT r.wake_id, r.turn_id, r.disposition FROM supervisor_wake_receipts r JOIN supervisor_pending_wakes w ON w.id = r.wake_id
+        WHERE w.goal_id = ? ORDER BY r.wake_id`, goals[name]),
+      moves: query("SELECT seq, from_state, to_state, from_revision, to_revision FROM supervisor_state_events WHERE goal_id = ? AND source = 'goal' ORDER BY seq", goals[name]),
+    }));
+    const live = (rows, name) => rows[name].goal?.run_state === 'running' && rows[name].dispatches.length === 1 && rows[name].dispatches[0].state === 'started';
+    const started = await waitForChange(ctx, 'every waiting goal running', hubDir, () => {
+      const rows = snapshot();
+      return { done: WAITING_GOALS.every((name) => live(rows, name) || HELD_STATES.has(rows[name].goal?.run_state)), rows };
+    }, 180_000);
+    ctx.assert('every-run-started-and-held-live', WAITING_GOALS.every((name) => live(started.rows, name)), started.rows);
+    if (!WAITING_GOALS.every((name) => live(started.rows, name))) throw new HarnessError('DISPATCH_FAILED', 'not every waiting goal reached a live run; the dependency links would prove nothing');
+    const sessionOf = Object.fromEntries(WAITING_GOALS.map((name) => [name, started.rows[name].dispatches[0].provider_session_id]));
+    const workerOf = (name) => readWorkerLogs(workerLogs).find((entry) => entry.sessionId === sessionOf[name]) ?? null;
+
+    // 2. Dependencies, linked by the owner while every run is live; a cycle and a self link are 400.
+    const depend = (label, name, child) => request(label, { requestId: `qa-waiting-${label}-${ctx.runId}`, projectId, goalId: goals[name],
+      expectedRevision: goalOf(name)?.revision ?? 0, action: 'depend', payload: { childGoalId: goals[child] } });
+    const linked = [];
+    for (const [name, child] of WAITING_LINKS) {
+      const result = await depend(`depend-${name}-on-${child}`, name, child);
+      linked.push({ name, child, code: result.code, json: result.json });
+    }
+    ctx.assert('dependencies-linked-while-running', linked.every(({ child, code, json }) => code === 0 && json?.ok === true && typeof json?.receipt?.waitId === 'string'
+      && json.receipt.runState === 'running' && json.receipt.pendingWaits?.some((wait) => wait.childGoalId === goals[child])), linked);
+    const waitCount = () => hub.count('SELECT COUNT(*) AS n FROM supervisor_waits');
+    const waitsBefore = waitCount();
+    const cycle = await depend('depend-a-on-parent-cycle', 'a', 'parent');
+    const self = await depend('depend-parent-on-itself', 'parent', 'parent');
+    const waitsAfter = waitCount();
+    const refused400 = (result) => result.json?.ok === false && result.json?.code === 'WAIT_CYCLE' && result.json?.status === 400;
+    ctx.assert('cycle-refused-400', refused400(cycle), { code: cycle.code, json: cycle.json, stderr: cycle.stderr });
+    ctx.assert('self-dependency-refused-400', refused400(self), { code: self.code, json: self.json, stderr: self.stderr });
+    ctx.assert('refused-links-wrote-nothing', waitsBefore === WAITING_LINKS.length && waitsAfter === waitsBefore, { waitsBefore, waitsAfter });
+
+    // 3. The parents' own runs end: each parks in waiting_children, its settle kept, not decided.
+    release('hold-parent');
+    release('hold-fail');
+    const parked = await waitForChange(ctx, 'parent runs to settle into waiting', hubDir, () => {
+      const rows = snapshot();
+      return { done: ['parent', 'fail'].every((name) => rows[name].dispatches[0]?.state === 'settled' && rows[name].goal?.run_state !== 'running'), rows };
+    }, 120_000);
+    ctx.assert('parents-park-in-waiting-children', ['parent', 'fail'].every((name) => parked.rows[name].goal?.run_state === 'waiting_children'
+      && parked.rows[name].goal?.state_detail?.startsWith('WAITING_ON')), { parent: parked.rows.parent, fail: parked.rows.fail });
+
+    // 4. The first child completes; both parents record it and still decide nothing.
+    release('hold-a');
+    const childEndRecorded = (state) => state.waits.find((wait) => wait.child_goal_id === goals.a)?.state === 'satisfied';
+    const aEnded = await waitForChange(ctx, 'child a to end and reach its parents', hubDir, () => {
+      const goal = goalOf('a');
+      const done = HELD_STATES.has(goal?.run_state) && (goal.run_state !== 'completed' || (childEndRecorded(wakeState('parent')) && childEndRecorded(wakeState('fail'))));
+      return { done, goal };
+    }, 6 * 60_000);
+    ctx.assert('child-a-completed', aEnded.goal?.run_state === 'completed', aEnded.goal);
+    const undecided = (state) => state.goal?.run_state === 'waiting_children' && state.turns.length === 0
+      && state.wakes.filter((wake) => wake.cause === 'turn_settled' && wake.consumed_at === null).length === 1
+      && state.wakes.every((wake) => wake.consumed_at === null);
+    const parentMid = wakeState('parent');
+    const failMid = wakeState('fail');
+    // A was graded meanwhile: the scheduler and the judge ran during the wait, so silence about
+    // the parents is a decision withheld, not a stopped hub.
+    ctx.assert('no-decision-while-a-dependency-is-incomplete', undecided(parentMid) && undecided(failMid) && callsNaming('parent').length === 0
+      && callsNaming('fail').length === 0 && callsNaming('a').length > 0, { parent: parentMid, fail: failMid, modelCalls });
+    const onlyEnd = (state, child, outcome, ended) => {
+      const events = state.waitEvents.filter((event) => event.child_goal_id === goals[child]);
+      return events.length === 1 && events[0].outcome === outcome && events[0].event_id === `goal:${goals[child]}:${ended}`;
+    };
+    ctx.assert('first-child-end-recorded-once', ['parent', 'fail'].every((name) => {
+      const state = name === 'parent' ? parentMid : failMid;
+      return onlyEnd(state, 'a', 'satisfied', 'completed') && state.waits.filter((wait) => wait.state === 'pending').length === 1;
+    }), { parent: parentMid.waitEvents, fail: failMid.waitEvents });
+
+    // 5. Duplicate and out-of-order reports of the ended child: its worker reports idle, working,
+    //    idle again after its run settled and its goal completed.
+    // Subscribe before the release: the worker's three reports and its `echoed` line land within
+    // a millisecond of the release file, before a watch armed afterwards is live.
+    const echoWait = waitForChange(ctx, 'child a echo reports', workerLogs, () => {
+      const entry = workerOf('a')?.entries.find((line) => line.kind === 'echoed') ?? null;
+      return { done: entry !== null, entry };
+    }, 30_000);
+    release('echo-a');
+    const echoed = await echoWait.then((result) => result.entry, (error) => { if (ctx.signal.aborted) throw error; return null; });
+    ctx.assert('child-a-reported-again-after-its-end', echoed?.delivered?.length === 3 && echoed.delivered.every(Boolean), { echoed });
+
+    // 6. The second child of `fail` fails (owner cancel): fail is released to the owner, not completed.
+    const cancelEnvelope = { requestId: `qa-waiting-cancel-c-${ctx.runId}`, projectId, goalId: goals.c, expectedRevision: goalOf('c')?.revision ?? 0,
+      action: 'cancel', payload: { reason: 'qa: child c fails' } };
+    const cancelled = await request('cancel-c', cancelEnvelope);
+    ctx.assert('child-c-cancelled', cancelled.code === 0 && cancelled.json?.receipt?.runState === 'cancelled', { code: cancelled.code, json: cancelled.json });
+    await waitForChange(ctx, 'fail released by its failed dependency', hubDir, () => {
+      const state = wakeState('fail');
+      return { done: state.goal?.run_state !== 'waiting_children' && state.turns.every((turn) => turn.state !== 'pending'), goal: state.goal };
+    }, 120_000);
+    const failReleased = wakeState('fail');
+    const failTurn = failReleased.turns[0] ?? null;
+    ctx.assert('failure-releases-parent-to-owner-not-completion', failReleased.goal?.run_state === 'awaiting_owner'
+      && failReleased.goal?.state_detail?.startsWith('DEPENDENCY_FAILED') && failReleased.goal.state_detail.includes(goals.c)
+      && !failReleased.moves.some((move) => ['verifying', 'completed'].includes(move.to_state)), { goal: failReleased.goal, moves: failReleased.moves });
+    ctx.assert('failure-resumed-once', failReleased.turns.length === 1 && failTurn?.state === 'delivered' && failTurn?.urgent === 1
+      && JSON.parse(failTurn.causes).includes('dependency_failed') && failReleased.wakes.filter((wake) => wake.cause === 'dependency_failed').length === 1
+      && onlyEnd(failReleased, 'c', 'failed', 'cancelled') && failReleased.waits.find((wait) => wait.child_goal_id === goals.c)?.state === 'failed',
+    { turns: failReleased.turns, wakes: failReleased.wakes, waits: failReleased.waits, waitEvents: failReleased.waitEvents });
+
+    // 7. The failure reported again (the same cancel, now stale): 409, and nothing is unblocked twice.
+    const replayed = await request('cancel-c-replay', cancelEnvelope);
+    ctx.assert('duplicate-failure-report-refused-409', replayed.json?.ok === false && replayed.json?.code === 'REVISION_CONFLICT' && replayed.json?.status === 409,
+      { code: replayed.code, json: replayed.json });
+    const parentStill = wakeState('parent');
+    ctx.assert('parent-still-waiting-after-duplicate-reports', undecided(parentStill) && callsNaming('parent').length === 0
+      && onlyEnd(parentStill, 'a', 'satisfied', 'completed'), { parent: parentStill, modelCalls });
+
+    // 8. The last dependency completes: the parent resumes exactly once and completes.
+    const callsBeforeResume = modelCalls.length;
+    release('hold-b');
+    // The goal can reach completed inside the resume turn, before that turn settles: wait for
+    // the turn to settle too, or a turn stuck pending fails on the deadline instead of a race.
+    const resumed = await waitForChange(ctx, 'parent to complete or hold and its turn to settle', hubDir, () => {
+      const goal = goalOf('parent');
+      const turns = wakeState('parent').turns;
+      return { done: HELD_STATES.has(goal?.run_state) && turns.every((turn) => turn.state !== 'pending'), goal, turns };
+    }, 6 * 60_000);
+    ctx.assert('child-b-completed', goalOf('b')?.run_state === 'completed', goalOf('b'));
+    const parentFinal = wakeState('parent');
+    const resumeTurn = parentFinal.turns[0] ?? null;
+    const resumeCauses = resumeTurn ? JSON.parse(resumeTurn.causes) : [];
+    ctx.assert('parent-resumed-once-and-completed', resumed.goal?.run_state === 'completed' && parentFinal.turns.length === 1 && resumeTurn?.state === 'delivered'
+      && resumeTurn.urgent === 1 && resumeCauses.includes('dependency_ready') && resumeCauses.includes('turn_settled')
+      && parentFinal.wakes.filter((wake) => wake.cause === 'dependency_ready').length === 1 && parentFinal.wakes.every((wake) => wake.consumed_at !== null)
+      && parentFinal.receipts.length === parentFinal.wakes.length && parentFinal.receipts.every((receipt) => receipt.turn_id === resumeTurn.id && receipt.disposition === 'delivered'),
+    { goal: resumed.goal, turns: parentFinal.turns, wakes: parentFinal.wakes, receipts: parentFinal.receipts });
+    ctx.assert('each-child-end-unblocked-the-parent-once', onlyEnd(parentFinal, 'a', 'satisfied', 'completed') && onlyEnd(parentFinal, 'b', 'satisfied', 'completed')
+      && parentFinal.waits.every((wait) => wait.state === 'satisfied') && !parentFinal.waitEvents.some((event) => event.outcome === 'failed'),
+    { waits: parentFinal.waits, waitEvents: parentFinal.waitEvents });
+    ctx.assert('parent-graded-only-after-it-resumed', callsNaming('parent').length > 0 && callsNaming('parent').every((call) => call.seq > callsBeforeResume),
+      { callsBeforeResume, parentCalls: callsNaming('parent') });
+    const failFinal = wakeState('fail');
+    ctx.assert('failed-parent-unchanged-by-later-events', failFinal.goal?.run_state === 'awaiting_owner' && failFinal.goal.revision === failReleased.goal.revision
+      && failFinal.turns.length === 1 && failFinal.wakes.filter((wake) => wake.cause === 'dependency_failed').length === 1 && callsNaming('fail').length === 0,
+    { goal: failFinal.goal, turns: failFinal.turns, wakes: failFinal.wakes, failCalls: callsNaming('fail') });
+    const finalRows = snapshot();
+    ctx.assert('child-a-unchanged-by-its-echo', finalRows.a.goal?.run_state === 'completed' && finalRows.a.dispatches.length === 1
+      && finalRows.a.dispatches[0].state === 'settled', finalRows.a);
+
+    // Cleanup: every hold released, the daemon stopped; every fixture worker must be gone.
+    release('hold-c');
+    const workerPids = readWorkerLogs(workerLogs).map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
+    const cleanExit = new Set(['stdin-closed', 'hangup', 'terminated']);
+    await ctx.terminate(daemon, 'worker-cleanup');
+    // The cancelled goal's worker may have been stopped by the cancel itself, without a log line.
+    const closed = await waitForChange(ctx, 'fixture worker exit', workerLogs, () => {
+      const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind))
+        && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
+      return { done: open.length === 0, open: open.map((entry) => entry.name) };
+    }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
+    const alive = workerPids.filter((pid) => pidAlive(pid));
+    ctx.assert('fixture-workers-gone', workerPids.length === WAITING_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
+
+    for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+    ctx.evidence.writeJson('waiting.json', {
+      worker: { kind: 'fixture', note: 'fixture-worker.mjs --multi-turn --hold-dir: each run reports working and stays live until the runner writes its release file; a re-reports idle/working/idle after its end. Not a real provider worker.' },
+      model: { kind: 'loopback stub', note: 'The stub always answers complete and cites sig:req:r1; the check Ferryx ran decides. Calls are attributed by the [qa-goal:NAME] marker in their prompt.' },
+      goals, links: WAITING_LINKS, sessions: sessionOf, refusals: { cycle: cycle.json, self: self.json, replay: replayed.json },
+      checkpoints: { parked: parked.rows, afterFirstChild: { parent: parentMid, fail: failMid }, afterFailure: failReleased, beforeResume: parentStill, final: { parent: parentFinal, fail: failFinal, rows: finalRows } },
+      modelCalls, callsBeforeResume,
+    });
+  } finally {
+    for (const name of WAITING_GOALS) {
+      try { release(`hold-${name}`); } catch { /* the run root may be gone */ }
+    }
+    await stub.close();
+    ctx.evidence.writeText('waiting-transcript.log', `${log.join('\n')}\n`);
+  }
+}
+
+// burst (plan task 9): two owner submits (burst, other), each run held live by its fixture
+// worker. While burst's run is live its own worker sends four ordinary reports through the
+// product ingress (a `supervisorReport` line on the daemon's agent-state socket, the channel
+// its `agentState` reports use) at real 0, 1, 2 and 3s, then a retry of the newest and a replay
+// of the oldest; other's worker reports once; a session bound to no goal is refused. No clock
+// seam: the runner holds burst's run until the hub's own clock is past the oldest report plus
+// the 30s batch window, and asserts that until then no wake turn and no model call exists for
+// burst. Then the run settles: exactly one delivered turn carries every report, each receipted
+// once, at or after oldest + 30s. The hub database is only read, read-only.
+
+const BURST_WORKSPACE_ID = 'qa-burst';
+const BURST_PROJECT = 'qa-burst';
+const BURST_GOALS = Object.freeze(['burst', 'other']);
+// lanes/dispatch.rs BATCH_WINDOW_SECS.
+const BURST_WINDOW_MS = 30_000;
+// Real spacing of the four reports, from the first.
+const BURST_OFFSETS_MS = Object.freeze([0, 1_000, 2_000, 3_000]);
+// How far past oldest + window burst's run is held before it may settle.
+const BURST_HOLD_PAST_MS = 3_000;
+const burstWork = (name) => Object.freeze({
+  title: `Burst fixture ${name}`,
+  instruction: `Write result.txt and run verify.sh. ${waitingMarker(name)} QA_HOLD:hold-${name}`,
+  requirements: [{ id: 'r1', text: `result.txt is not empty ${waitingMarker(name)}`, verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+
+// Resolves after `ms` of real time; rejects when the run is aborted. Time is the behaviour
+// under test in burst (the report spacing and the batch window), so these pauses are its input.
+function pauseFor(ctx, ms) {
+  return new Promise((resolvePause, rejectPause) => {
+    if (ctx.signal.aborted) { rejectPause(ctx.signal.reason); return; }
+    const onAbort = () => { clearTimeout(timer); rejectPause(ctx.signal.reason); };
+    const timer = setTimeout(() => { ctx.signal.removeEventListener('abort', onAbort); resolvePause(); }, Math.max(0, ms));
+    ctx.signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+// One raw line on the agent-state socket, as a process that is not a goal's worker would send.
+function agentStateExchange(socketPath, line, deadlineMs = 10_000) {
+  return new Promise((resolveExchange) => {
+    let buffer = '';
+    let done = false;
+    const connection = createConnection(socketPath);
+    const finish = (value) => { if (done) return; done = true; clearTimeout(timer); connection.destroy(); resolveExchange(value); };
+    const timer = setTimeout(() => finish({ error: `no reply within ${deadlineMs}ms` }), deadlineMs);
+    connection.setEncoding('utf8');
+    connection.on('error', (error) => finish({ error: String(error?.message ?? error) }));
+    connection.on('connect', () => connection.write(`${line}\n`));
+    connection.on('data', (chunk) => {
+      buffer += chunk;
+      const end = buffer.indexOf('\n');
+      if (end < 0) return;
+      try { finish({ reply: JSON.parse(buffer.slice(0, end)) }); } catch { finish({ error: `unparsed reply ${buffer.slice(0, end)}` }); }
+    });
+  });
+}
+
+async function runBurst(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'burst runs POSIX fixture worker panes (the Windows pane shell ignores SHELL); this scenario runs on Linux or macOS');
+  }
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the burst fixture project is a git repository');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `hub database ${dbPath} is outside the run root`);
+  const hubDir = dirname(dbPath);
+  const log = [];
+  const transcript = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, BURST_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'verify.sh'), WAITING_VERIFY, { mode: 0o755 });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]],
+    ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
+    ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const gitCommonDir = realpathSync(join(repo, '.git'));
+  const workerLogs = join(data, 'workers');
+  const holdDir = join(data, 'holds');
+  const requestsDir = join(data, 'requests');
+  for (const dir of [workerLogs, holdDir, requestsDir]) mkdirSync(dir, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn ${shellQuote(`--hold-dir=${holdDir}`)}\n`, { mode: 0o755 });
+  const released = new Set();
+  const release = (token) => {
+    if (released.has(token)) return;
+    released.add(token);
+    writeFileSync(join(holdDir, token), `${new Date().toISOString()}\n`);
+    transcript(`released ${token}`);
+  };
+
+  // Model calls attributed to the goals named by the request's own turn (see runWaiting).
+  const modelCalls = [];
+  const stub = await startProviderStub(ctx, { answer: (json) => {
+    const messages = Array.isArray(json?.messages) ? json.messages : [];
+    const lastAssistant = messages.map((message) => message?.role).lastIndexOf('assistant');
+    const text = promptTextOf({ messages: messages.slice(lastAssistant + 1).filter((message) => message?.role === 'user') });
+    const convergence = promptTextOf(json).includes(CONVERGENCE_MARKER);
+    modelCalls.push({ seq: modelCalls.length + 1, at: new Date().toISOString(), goals: BURST_GOALS.filter((name) => text.includes(waitingMarker(name))), convergence });
+    return convergence ? AUTONOMY_CONVERGED : null;
+  } });
+  try {
+    const env = await prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: config.mhcBin, label: 'burst', extra: {
+      SHELL: shell,
+      FERRYX_HUB_WORKSPACE: BURST_WORKSPACE_ID,
+      OMON_LANE_AUTO_WORKTREE: '1',
+      OMON_INBOX_ENABLED: '0',
+    } });
+    ctx.announce({ burst: 'fixture', workspaceRoot, repo, gitCommonDir, holdDir, dbPath, provider: stub.baseUrl });
+
+    const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', BURST_PROJECT, '--repo-identity', `qa:${BURST_PROJECT}`,
+      '--host', ADMISSION_HOST, '--git-common-dir', gitCommonDir, '--json'], { label: 'supervisor-setup', env });
+    if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${JSON.stringify(setup.json)} ${setup.stderr}`);
+    const projectId = setup.json.projectId;
+    const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+    const engine = await awaitEngine(ctx, env, 'burst-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', engine?.engine?.state === 'ready', { engine });
+    const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), BURST_WORKSPACE_ID, realpathSync(workspaceRoot));
+    ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+
+    // 1. Two owner submits; both runs start and stay live.
+    const goals = {};
+    const submits = {};
+    for (const name of BURST_GOALS) {
+      const work = burstWork(name);
+      const file = join(requestsDir, `submit-${name}.json`);
+      const envelope = { requestId: `qa-burst-${name}-${ctx.runId}`, projectId, action: 'submit', payload: { request: work.instruction, work } };
+      writeFileSync(file, JSON.stringify(envelope));
+      ctx.evidence.appendJsonl('envelopes.jsonl', { label: `submit-${name}`, envelope, at: new Date().toISOString() });
+      const submitted = await ctx.cli(['supervisor', 'request', '--json', file], { label: `submit-${name}`, env });
+      transcript(`submit-${name}: exit ${submitted.code} ${JSON.stringify(submitted.json)}`);
+      submits[name] = { code: submitted.code, json: submitted.json };
+      goals[name] = submitted.json?.receipt?.receipt?.goal_id ?? null;
+    }
+    ctx.assert('two-goals-admitted', BURST_GOALS.every((name) => submits[name].code === 0 && submits[name].json?.receipt?.outcome === 'admitted'
+      && typeof goals[name] === 'string') && goals.burst !== goals.other, { goals, submits });
+    if (!BURST_GOALS.every((name) => typeof goals[name] === 'string')) throw new HarnessError('ADMISSION_FAILED', `not every burst goal was admitted: ${JSON.stringify(goals)}`);
+    ctx.announce({ burst: 'goals', goals });
+
+    const hub = await openHubReader(dbPath);
+    const snapshot = () => hub.read((query) => Object.fromEntries(BURST_GOALS.map((name) => [name, {
+      goal: query('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      dispatches: query('SELECT request_id, state, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goals[name]),
+    }])));
+    const wakeState = (name) => hub.read((query) => ({
+      goal: query('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      wakes: query('SELECT id, cause, event_id, due_at, consumed_at, created_at FROM supervisor_pending_wakes WHERE goal_id = ? ORDER BY id', goals[name]),
+      turns: query('SELECT id, state, causes, urgent, judge_score, created_at, settled_at FROM supervisor_wake_turns WHERE goal_id = ? ORDER BY id', goals[name]),
+      receipts: query(`SELECT r.wake_id, r.turn_id, r.disposition FROM supervisor_wake_receipts r JOIN supervisor_pending_wakes w ON w.id = r.wake_id
+        WHERE w.goal_id = ? ORDER BY r.wake_id, r.turn_id`, goals[name]),
+      laneEvents: query(`SELECT e.id, e.kind, e.source_event_id, e.created_at, e.delivered_at, e.delivery_reason FROM lane_events e
+        JOIN supervisor_goals g ON g.lane_key = e.lane_key WHERE g.goal_id = ? ORDER BY e.id`, goals[name]),
+    }));
+    const live = (rows, name) => rows[name].goal?.run_state === 'running' && rows[name].dispatches.length === 1 && rows[name].dispatches[0].state === 'started';
+    const started = await waitForChange(ctx, 'both burst goals running', hubDir, () => {
+      const rows = snapshot();
+      return { done: BURST_GOALS.every((name) => live(rows, name) || HELD_STATES.has(rows[name].goal?.run_state)), rows };
+    }, 180_000);
+    ctx.assert('both-runs-started-and-held-live', BURST_GOALS.every((name) => live(started.rows, name)), started.rows);
+    if (!BURST_GOALS.every((name) => live(started.rows, name))) throw new HarnessError('DISPATCH_FAILED', 'not every burst goal reached a live run; its worker could not report');
+    const sessionOf = Object.fromEntries(BURST_GOALS.map((name) => [name, started.rows[name].dispatches[0].provider_session_id]));
+    const workerOf = (name) => readWorkerLogs(workerLogs).find((entry) => entry.sessionId === sessionOf[name]) ?? null;
+    const repliesOf = (name) => (workerOf(name)?.entries ?? []).filter((line) => line.kind === 'supervisor-report');
+
+    // 2. Reports through the worker's own pane: the runner drops a report file; the worker sends
+    //    it. Written by rename, so the worker never reads half a file.
+    let reportSeq = 0;
+    const sendReport = (name, eventId) => {
+      reportSeq += 1;
+      const temp = join(holdDir, `.tmp-report-${reportSeq}`);
+      writeFileSync(temp, `${eventId}\n`);
+      renameSync(temp, join(holdDir, `report-${sessionOf[name]}-${String(reportSeq).padStart(3, '0')}`));
+      transcript(`report ${name} ${eventId} (#${reportSeq})`);
+    };
+    const awaitReplies = (name, count, label) => waitForChange(ctx, label, workerLogs, () => {
+      const replies = repliesOf(name);
+      return { done: replies.length >= count, replies };
+    }, 30_000);
+
+    const firstFour = awaitReplies('burst', 4, 'four burst report replies');
+    const t0 = Date.now();
+    for (const [index, offset] of BURST_OFFSETS_MS.entries()) {
+      await pauseFor(ctx, t0 + offset - Date.now());
+      sendReport('burst', `r-${index}`);
+    }
+    const originals = (await firstFour).replies.slice(0, 4);
+    ctx.assert('four-reports-accepted-for-their-own-goal', originals.length === 4 && originals.every((entry, index) => entry.eventId === `r-${index}`
+      && entry.reply?.ok === true && entry.reply.goalId === goals.burst && entry.reply.laneKey === started.rows.burst.goal?.lane_key && entry.reply.duplicate === false)
+      && new Set(originals.map((entry) => entry.reply?.laneEventId)).size === 4, { originals });
+
+    // A retry of the newest and an out-of-order replay of the oldest.
+    const repeats = awaitReplies('burst', 6, 'duplicate burst report replies');
+    sendReport('burst', 'r-3');
+    sendReport('burst', 'r-0');
+    const duplicates = (await repeats).replies.slice(4, 6);
+    const laneEventOf = (eventId) => originals.find((entry) => entry.eventId === eventId)?.reply?.laneEventId ?? null;
+    ctx.assert('duplicate-and-out-of-order-reports-are-the-same-events', duplicates.length === 2 && duplicates.every((entry) => entry.reply?.ok === true
+      && entry.reply.duplicate === true && entry.reply.goalId === goals.burst && entry.reply.laneEventId === laneEventOf(entry.eventId))
+      && duplicates.map((entry) => entry.eventId).join(',') === 'r-3,r-0', { duplicates, originals });
+
+    // An unrelated goal's worker reports once; a session bound to no goal is refused.
+    const otherReply = awaitReplies('other', 1, 'other goal report reply');
+    sendReport('other', 'r-0');
+    const otherReport = (await otherReply).replies[0] ?? null;
+    ctx.assert('unrelated-report-lands-on-its-own-goal', otherReport?.reply?.ok === true && otherReport.reply.goalId === goals.other
+      && otherReport.reply.duplicate === false, { otherReport });
+    const laneEventsBefore = hub.count('SELECT COUNT(*) AS n FROM lane_events');
+    const stranger = await agentStateExchange(join(env.FERRYX_RUNTIME_DIR, 'agent-state.sock'),
+      JSON.stringify({ type: 'supervisorReport', sessionId: `qa-not-a-worker-${ctx.runId}`, eventId: 'r-0', body: 'not a worker' }));
+    const laneEventsAfter = hub.count('SELECT COUNT(*) AS n FROM lane_events');
+    ctx.assert('report-from-an-unbound-session-refused', stranger.reply?.ok === false && stranger.reply.code === 'NOT_FOUND' && laneEventsAfter === laneEventsBefore,
+      { stranger, laneEventsBefore, laneEventsAfter });
+
+    // 3. The window, on the hub's own clock: the oldest report's lane event time.
+    const afterReports = wakeState('burst');
+    const reportEvents = afterReports.laneEvents.filter((event) => event.kind === 'worker_report');
+    const oldestMs = Math.min(...reportEvents.map((event) => Date.parse(event.created_at)));
+    const windowEndMs = oldestMs + BURST_WINDOW_MS;
+    const spanMs = Math.max(...reportEvents.map((event) => Date.parse(event.created_at))) - oldestMs;
+    ctx.assert('reports-spread-over-three-seconds-inside-the-window', reportEvents.length === 4 && Number.isFinite(oldestMs)
+      && spanMs >= 2_500 && spanMs < BURST_WINDOW_MS, { reportEvents, spanMs });
+    const expectedWakeIds = reportEvents.map((event) => `lane_event:${event.id}`).sort();
+    ctx.assert('each-report-handed-to-the-goal-once', reportEvents.every((event) => event.delivery_reason === 'supervisor_wake' && event.delivered_at !== null)
+      && JSON.stringify(afterReports.wakes.filter((wake) => wake.cause === 'report').map((wake) => wake.event_id).sort()) === JSON.stringify(expectedWakeIds),
+    { laneEvents: afterReports.laneEvents, wakes: afterReports.wakes });
+    ctx.announce({ burst: 'window', oldest: new Date(oldestMs).toISOString(), windowEnd: new Date(windowEndMs).toISOString() });
+
+    // Hold the run past the window end; then nothing may have been decided or asked for burst.
+    await pauseFor(ctx, windowEndMs + BURST_HOLD_PAST_MS - Date.now());
+    const atWindowEnd = wakeState('burst');
+    const callsInWindow = modelCalls.filter((call) => Date.parse(call.at) >= oldestMs && Date.parse(call.at) < windowEndMs);
+    ctx.assert('no-wake-turn-before-the-window-ends', atWindowEnd.turns.length === 0 && atWindowEnd.receipts.length === 0
+      && atWindowEnd.wakes.every((wake) => wake.consumed_at === null), { now: new Date().toISOString(), turns: atWindowEnd.turns, wakes: atWindowEnd.wakes });
+    ctx.assert('no-model-call-between-the-reports-and-the-window-end', callsInWindow.length === 0
+      && modelCalls.every((call) => !call.goals.includes('burst')), { callsInWindow, modelCalls });
+
+    // 4. The run settles: one turn takes every report with the settle.
+    const callsBeforeRelease = modelCalls.length;
+    release('hold-burst');
+    const ended = await waitForChange(ctx, 'burst to complete or hold', hubDir, () => {
+      const state = wakeState('burst');
+      return { done: HELD_STATES.has(state.goal?.run_state) && state.turns.every((turn) => turn.state !== 'pending'), goal: state.goal };
+    }, 6 * 60_000);
+    const final = wakeState('burst');
+    ctx.assert('burst-goal-completed', ended.goal?.run_state === 'completed', ended.goal);
+    const reportWakes = final.wakes.filter((wake) => wake.cause === 'report');
+    const turn = final.turns[0] ?? null;
+    const causes = turn ? JSON.parse(turn.causes) : [];
+    ctx.assert('exactly-one-wake-turn-delivered-once', final.turns.length === 1 && turn?.state === 'delivered' && causes.includes('report')
+      && final.turns.filter((row) => row.state === 'delivered').length === 1, { turns: final.turns });
+    ctx.assert('turn-at-or-after-oldest-report-plus-window', turn !== null && Date.parse(turn.created_at) >= windowEndMs,
+      { oldest: new Date(oldestMs).toISOString(), windowEnd: new Date(windowEndMs).toISOString(), turn });
+    ctx.assert('each-report-receipted-once', reportWakes.length === 4 && JSON.stringify(reportWakes.map((wake) => wake.event_id).sort()) === JSON.stringify(expectedWakeIds)
+      && reportWakes.every((wake) => wake.consumed_at !== null && final.receipts.filter((receipt) => receipt.wake_id === wake.id).length === 1
+        && final.receipts.find((receipt) => receipt.wake_id === wake.id)?.turn_id === turn?.id
+        && final.receipts.find((receipt) => receipt.wake_id === wake.id)?.disposition === 'delivered'),
+    { reportWakes, receipts: final.receipts, turn });
+    ctx.assert('duplicates-added-no-event-wake-or-turn', final.laneEvents.filter((event) => event.kind === 'worker_report').length === 4
+      && reportWakes.length === 4 && final.turns.length === 1, { laneEvents: final.laneEvents, wakes: final.wakes, turns: final.turns });
+    const otherState = wakeState('other');
+    const otherWakeIds = otherState.wakes.filter((wake) => wake.cause === 'report').map((wake) => wake.event_id);
+    ctx.assert('unrelated-report-does-not-wake-this-goal', otherWakeIds.length === 1 && otherWakeIds[0] === `lane_event:${otherReport?.reply?.laneEventId}`
+      && !final.wakes.some((wake) => otherWakeIds.includes(wake.event_id)) && otherState.turns.length === 0,
+    { otherWakes: otherState.wakes, otherTurns: otherState.turns, burstWakes: final.wakes });
+    ctx.assert('burst-graded-only-after-the-window', modelCalls.filter((call) => call.goals.includes('burst')).every((call) => call.seq > callsBeforeRelease
+      && Date.parse(call.at) >= windowEndMs), { callsBeforeRelease, burstCalls: modelCalls.filter((call) => call.goals.includes('burst')) });
+
+    // Cleanup: every hold released, the daemon stopped; every fixture worker must be gone.
+    release('hold-other');
+    const workerPids = readWorkerLogs(workerLogs).map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
+    const cleanExit = new Set(['stdin-closed', 'hangup', 'terminated']);
+    await ctx.terminate(daemon, 'worker-cleanup');
+    const closed = await waitForChange(ctx, 'fixture worker exit', workerLogs, () => {
+      const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind))
+        && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
+      return { done: open.length === 0, open: open.map((entry) => entry.name) };
+    }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
+    const alive = workerPids.filter((pid) => pidAlive(pid));
+    ctx.assert('fixture-workers-gone', workerPids.length === BURST_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
+
+    for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+    ctx.evidence.writeJson('burst.json', {
+      worker: { kind: 'fixture', note: 'fixture-worker.mjs --multi-turn --hold-dir: each run stays live until its release file; its reports are supervisorReport lines on the agent-state socket, one per runner-written report file. Not a real provider worker.' },
+      model: { kind: 'loopback stub', note: 'The stub always answers complete and cites sig:req:r1. Calls are attributed by the [qa-goal:NAME] marker in their own turn.' },
+      ingress: 'agent-state socket supervisorReport -> hub_runtime::supervisor_worker_report -> lanes::dispatch::report_from_worker -> hand_to_supervisor -> wakes::report',
+      window: { oldest: new Date(oldestMs).toISOString(), windowEnd: new Date(windowEndMs).toISOString(), spanMs, heldPastMs: BURST_HOLD_PAST_MS },
+      goals, sessions: sessionOf, replies: { originals, duplicates, other: otherReport, stranger },
+      checkpoints: { afterReports, atWindowEnd, final, other: otherState },
+      modelCalls, callsBeforeRelease,
+    });
+  } finally {
+    for (const name of BURST_GOALS) {
+      try { release(`hold-${name}`); } catch { /* the run root may be gone */ }
+    }
+    await stub.close();
+    ctx.evidence.writeText('burst-transcript.log', `${log.join('\n')}\n`);
+  }
+}
+
 // The memory and usage scenarios (task 15, memory-usage.mjs) reuse these helpers.
 const memoryUsageDeps = Object.freeze({
   supervisedHub,
@@ -1843,8 +2488,45 @@ export const SCENARIOS = Object.freeze({
     run: runAutonomy,
   }),
   correction: planned('10', 'Owner correction "Use DONE instead of READY" before dispatch, stale expectedRevision replayed: final bytes DONE, stale mutation 409'),
-  waiting: planned('9', 'Parent starts two children; one settles, then the second settles/fails: no decision while incomplete, one resume, failure is not completion'),
-  burst: planned('9', 'Four ordinary reports at virtual 0,1,2,3s advanced to 30s: one admitted model turn with four receipts; urgent pause has zero delay'),
+  waiting: Object.freeze({
+    implemented: true,
+    task: '9',
+    summary: 'Parent waits on two live children, one completes, the other completes (or, for a second parent, fails): no decision or model call while incomplete, one resume, failure is not completion; duplicate/out-of-order child reports unblock nothing twice; a cycle is 400',
+    deadlineMs: 15 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'workspace-registered', 'five-goals-admitted', 'every-run-started-and-held-live', 'dependencies-linked-while-running',
+      'cycle-refused-400', 'self-dependency-refused-400', 'refused-links-wrote-nothing', 'parents-park-in-waiting-children', 'child-a-completed',
+      'no-decision-while-a-dependency-is-incomplete', 'first-child-end-recorded-once', 'child-a-reported-again-after-its-end', 'child-c-cancelled',
+      'failure-releases-parent-to-owner-not-completion', 'failure-resumed-once', 'duplicate-failure-report-refused-409',
+      'parent-still-waiting-after-duplicate-reports', 'child-b-completed', 'parent-resumed-once-and-completed', 'each-child-end-unblocked-the-parent-once',
+      'parent-graded-only-after-it-resumed', 'failed-parent-unchanged-by-later-events', 'child-a-unchanged-by-its-echo', 'fixture-workers-gone',
+    ],
+    notCovered: [
+      { clause: 'cross-owner-link', reason: 'an isolated installation has exactly one supervisor owner, so a second owner\'s goal cannot be created through the product', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs a_cycle_a_self_dependency_and_a_cross_owner_link_are_refused_as_400' },
+      { clause: 'restart-replay', reason: 'replaying the state log from a rewound cursor needs a database write; the runner only reads the hub database', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs a_restart_recovers_pending_ready_events_from_the_durable_cursor' },
+    ],
+    run: runWaiting,
+  }),
+  burst: Object.freeze({
+    implemented: true,
+    task: '9',
+    summary: 'Four ordinary reports from a live run\'s own worker at real 0,1,2,3s, a retry and an out-of-order replay, another goal\'s report: no turn and no model call before oldest+30s, then exactly one delivered turn with each report receipted once',
+    deadlineMs: 12 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'workspace-registered', 'two-goals-admitted', 'both-runs-started-and-held-live', 'four-reports-accepted-for-their-own-goal',
+      'duplicate-and-out-of-order-reports-are-the-same-events', 'unrelated-report-lands-on-its-own-goal', 'report-from-an-unbound-session-refused',
+      'reports-spread-over-three-seconds-inside-the-window', 'each-report-handed-to-the-goal-once', 'no-wake-turn-before-the-window-ends',
+      'no-model-call-between-the-reports-and-the-window-end', 'burst-goal-completed', 'exactly-one-wake-turn-delivered-once',
+      'turn-at-or-after-oldest-report-plus-window', 'each-report-receipted-once', 'duplicates-added-no-event-wake-or-turn',
+      'unrelated-report-does-not-wake-this-goal', 'burst-graded-only-after-the-window', 'fixture-workers-gone',
+    ],
+    notCovered: [
+      { clause: 'report-only-window-on-an-idle-goal', reason: 'a worker reports only while its run is live, so the goal is busy and its reports wait for the settle; the runner holds the run past oldest+30s on the real clock. A report-only batch admitted by the window itself (and its judge call) is never reached through a live worker', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs reports_batch_on_the_oldest_and_an_owner_pause_skips_the_window' },
+      { clause: 'urgent-pause-zero-delay', reason: 'an owner pause skipping the window is a separate owner path', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs the_loop_recovers_at_start_and_delivers_an_owner_pause_without_delay' },
+      { clause: 'ended-goal-report', reason: 'a worker of an ended goal is gone with its pane, so a report for it cannot be sent through the product', coveredBy: 'crates/ferryx-hub/src/lanes/dispatch.rs a_worker_report_becomes_one_wake_on_its_own_goal' },
+    ],
+    run: runBurst,
+  }),
   'remote-delivery': Object.freeze({
     implemented: true,
     task: '8',
