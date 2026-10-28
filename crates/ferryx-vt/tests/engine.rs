@@ -103,6 +103,22 @@ fn device_queries_produce_replies_and_osc_produces_ui_events() {
 }
 
 #[test]
+fn clipboard_write_is_answered_through_the_reply_callback() {
+    // libghostty-vt 1.4 answers a committed OSC 5522 write with the status
+    // the clipboard_write callback replied; a callback that never replies
+    // is answered as EPERM.
+    let mut t = HostTerminal::new(40, 6, 100);
+    // Queued: text/plain "hello" is surfaced and replied SUCCESS -> DONE.
+    let a = t.feed(b"\x1b]5522;type=write:id=7\x1b\\\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\\x1b]5522;type=wdata\x1b\\");
+    assert!(a.ui_events.iter().any(|e| matches!(&e.kind, UiEventKind::ClipboardWrite { text, .. } if text == "hello")));
+    assert_eq!(a.vt_replies.concat(), b"\x1b]5522;type=write:status=DONE:id=7\x1b\\".to_vec());
+    // Denied: an empty commit has no text to queue, replied UNSUPPORTED -> ENOSYS.
+    let b = t.feed(b"\x1b]5522;type=write:id=8\x1b\\\x1b]5522;type=wdata\x1b\\");
+    assert!(b.ui_events.is_empty());
+    assert_eq!(b.vt_replies.concat(), b"\x1b]5522;type=write:status=ENOSYS:id=8\x1b\\".to_vec());
+}
+
+#[test]
 fn kitty_image_storage_limit_is_set_explicitly() {
     assert_eq!(KITTY_IMAGE_STORAGE_LIMIT, 64 * 1024 * 1024);
     let mut t = HostTerminal::new(40, 6, 100);
