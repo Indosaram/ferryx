@@ -6,10 +6,11 @@
 
 # Ferryx
 
-### Run Claude Code, Codex and any CLI agent side by side in one repo - each in its own worktree, alive when the app closes, steerable from your phone.
+### A native terminal for coding agents, like cmux but on macOS, Windows and Linux.
 
-A built-in supervisor answers routine agent prompts the way you would and sends only the risky
-ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electron.
+Claude Code, Codex and any CLI agent keep running when you close the app, remote Linux boxes
+connect without SSH, and every tab shows which agent is waiting on you. Native Rust on Tauri v2
+with a libghostty terminal core; no Electron. A lane supervisor is on `main` for the next release.
 
 [**Download**](https://github.com/Indosaram/ferryx/releases/latest) &nbsp;·&nbsp;
 [**Website**](https://ferryx.dev/) &nbsp;·&nbsp;
