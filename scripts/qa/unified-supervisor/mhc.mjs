@@ -74,6 +74,23 @@ export const ALWAYS_OFFERED_DECISION_TOOLS = Object.freeze(['read', 'grep']);
 /// (maho-ai api/openai_completions.rs:1103-1140), plus deferred tool lists carried on system
 /// messages (`messages[].tools`, :1078-1080). An entry without a name is kept as null so the
 /// scenario can fail on a shape it could not parse.
+/// What a chat request asked, for attributing it: the last user message's text (start and end,
+/// bounded) and the system prompt's first line. Fixture data only (the loopback stub's own
+/// requests); nothing here reaches a real provider.
+function promptOf(json) {
+  const messages = Array.isArray(json?.messages) ? json.messages : [];
+  const text = (message) => (typeof message?.content === 'string' ? message.content
+    : Array.isArray(message?.content) ? message.content.map((part) => part?.text ?? '').join('') : '');
+  const user = [...messages].reverse().find((message) => message?.role === 'user');
+  const userText = text(user);
+  const system = text(messages.find((message) => message?.role === 'system' || message?.role === 'developer'));
+  return {
+    messages: messages.length,
+    user: userText.length > 600 ? `${userText.slice(0, 400)} ... ${userText.slice(-200)}` : userText,
+    systemFirstLine: system.split('\n', 1)[0].slice(0, 200),
+  };
+}
+
 function toolNamesOf(json) {
   const nameOf = (tool) => {
     const name = tool?.function?.name ?? tool?.custom?.name ?? tool?.name;
@@ -124,7 +141,8 @@ export async function startProviderStub(ctx) {
       let json = null;
       try { json = JSON.parse(body); } catch { /* recorded raw */ }
       const tools = toolNamesOf(json);
-      const entry = { at: new Date().toISOString(), arrival, arrivedAt, method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools, failWith: state.failWith };
+      const entry = { at: new Date().toISOString(), arrival, arrivedAt, method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools,
+        prompt: promptOf(json), failWith: state.failWith };
       requests.push(entry);
       ctx.evidence.appendJsonl('runtime/provider-requests.jsonl', entry);
       ctx.journal.push({ source: 'provider-stub', kind: 'request', ...entry });

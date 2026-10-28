@@ -137,8 +137,24 @@ async function openHubReader(dbPath) {
     const db = new Database(dbPath, { readonly: true });
     try { return db.query(sql).all(...params); } finally { db.close(); }
   };
+  // Several reads from one snapshot: one connection inside one read transaction, so rows the
+  // hub commits together (e.g. a started dispatch and its goal's move to running, written in
+  // one transaction by supervisor.rs record_start) are never seen half applied. `all` opens a
+  // connection per query, so two `all` calls can straddle a commit.
+  const read = (fn) => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      db.exec('BEGIN');
+      try {
+        return fn((sql, ...params) => db.query(sql).all(...params));
+      } finally {
+        db.exec('COMMIT');
+      }
+    } finally { db.close(); }
+  };
   return {
     all,
+    read,
     one: (sql, ...params) => all(sql, ...params)[0] ?? null,
     count: (sql, ...params) => Number(Object.values(all(sql, ...params)[0] ?? { n: -1 })[0]),
   };
@@ -906,10 +922,11 @@ const deliveries = (workerLogs) => readWorkerLogs(workerLogs).flatMap((worker) =
     ? [{ worker: worker.name, body: inputs[index + 1].text }] : []));
 });
 
-const goalRows = (hub, goalId) => ({
-  goal: hub.one('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId),
-  dispatches: hub.all('SELECT request_id, state, uncertain_code, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId),
-});
+// The goal and its dispatches from one snapshot (see openHubReader `read`).
+const goalRows = (hub, goalId) => hub.read((query) => ({
+  goal: query('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId)[0] ?? null,
+  dispatches: query('SELECT request_id, state, uncertain_code, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId),
+}));
 
 /** Workers (one entry per delivery) whose delivered owner request carries `needle`. */
 const inputsWith = (workerLogs, needle) => deliveries(workerLogs)
@@ -1155,7 +1172,7 @@ async function runCapabilities(ctx) {
         await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(500 * attempt, 4_000)));
       }
       const leg = { step, status, options, code: reply.code, faultCode: reply.json?.code ?? null, message: reply.json?.message ?? null,
-        faultRequests, settleRequests: stub.requests.length - from - faultRequests, settle };
+        faultRequests, settleRequests: stub.requests.length - from - faultRequests, settle, lastArrival: stub.arrivals() };
       legs.push(leg);
       ctx.evidence.writeJson('capabilities/fault-legs.json', legs);
       note(`${step}: code=${leg.faultCode ?? reply.code} faultRequests=${faultRequests} settleAttempts=${settle.length}`);
@@ -1193,10 +1210,26 @@ async function runCapabilities(ctx) {
     const oldProbe = oldEngine ? await probeProcess(oldEngine) : null;
     const childrenBefore = await h.children('capability-before');
     ctx.assert('hub-stopped-capability', await hubControl(ctx, engineEnv, 'stop', 'capability'), {});
-    // Baseline by arrival, taken once the stop has returned: the stop ends the old engine with
-    // its generation, so a request arriving after this can only come from the new one. A
-    // request of an earlier leg that is still streaming arrived before, and is not counted.
+    // Baseline by arrival, taken once the old engine process is gone. `hub stop` returns when
+    // the generation's tasks are aborted; the engine's teardown is only spawned then
+    // (mhc_supervisor.rs StopOnDrop::drop -> stop_engine: stdin close, SHUTDOWN_GRACE 5s, kill),
+    // and during that graceful drain mhc's own shutdown work (e.g. the memory extension's
+    // shutdown evaluators) may still call the provider. Such a request is the old engine's,
+    // not a send of the degraded one, so the baseline waits for its exit (bounded) and every
+    // request arriving after it can only come from the new generation's engine.
+    const oldGoneDeadline = performance.now() + 30_000;
+    let oldExit = oldEngine ? await probeProcess(oldEngine) : null;
+    for (let attempt = 1; oldExit && oldExit.state === 'alive' && oldExit.startStamp === oldProbe?.startStamp; attempt += 1) {
+      if (performance.now() >= oldGoneDeadline) {
+        throw new HarnessError('DEADLINE_EXCEEDED', `the old engine ${oldEngine} did not exit within 30s of hub stop`, { oldProbe, oldExit });
+      }
+      if (ctx.signal.aborted) throw ctx.signal.reason;
+      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(100 * attempt, 1_000)));
+      oldExit = await probeProcess(oldEngine);
+    }
     const arrivalsBefore = stub.arrivals();
+    const shutdownRequests = stub.requests.filter((entry) => entry.arrival > (legs.at(-1)?.lastArrival ?? 0));
+    ctx.evidence.writeJson('capabilities/old-engine-shutdown.json', { oldEngine, oldProbe, oldExit, arrivalsBefore, shutdownRequests });
     const degradedSends = () => stub.requests.filter((entry) => entry.arrival > arrivalsBefore);
     ctx.assert('hub-started-capability', await hubControl(ctx, engineEnv, 'start', 'capability'), {});
     const degraded = await mhc.awaitEngine(ctx, engineEnv, 'degraded', (json) => json?.engine?.state === 'degraded', 120_000);
