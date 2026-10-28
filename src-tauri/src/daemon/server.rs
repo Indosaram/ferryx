@@ -5936,8 +5936,9 @@ impl DaemonServer {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        // A transport without a peer pid: on unix that is an in-process pair, which may not
-        // change the supervisor; on the loopback TCP transport the token check below stands in.
+        // A transport without a peer pid: on unix that is an in-process pair; on the loopback
+        // TCP transport the token check below admits the connection. Neither may change the
+        // supervisor (supervisor_peer::refusal).
         #[cfg(unix)]
         let origin = super::supervisor_peer::PeerOrigin::Unknown;
         #[cfg(not(unix))]
