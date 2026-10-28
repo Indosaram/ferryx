@@ -231,12 +231,38 @@ impl TaskLauncher for DaemonBridge {
         let workspace = ferryx_hub::hub_env::var("FERRYX_HUB_WORKSPACE").map_err(|_| {
             HubError::config("FERRYX_HUB_WORKSPACE is required before the hub can launch a pane")
         })?;
-        let shell = if command.is_empty() { None } else { Some(command.join(" ")) };
+        let shell = if command.is_empty() {
+            None
+        } else {
+            Some(command.join(" "))
+        };
         self.client
-            .spawn_terminal(format!("hub-{}", std::process::id()), workspace, crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(cwd.to_owned()), cols: 100, rows: 32, shell })
+            .spawn_terminal(
+                hub_spawn_request_id(),
+                workspace,
+                crate::daemon::session_service::SpawnOptions {
+                    worktree: None,
+                    cwd: Some(cwd.to_owned()),
+                    cols: 100,
+                    rows: 32,
+                    shell,
+                },
+            )
             .await
             .map_err(|error| HubError::message(error.to_string()))
     }
+}
+
+/// A fresh daemon spawn request id for each pane the hub launches. The daemon treats a reused
+/// id as a retry of the same spawn (session_service `handle_spawn`): with the same options it
+/// returns the live pane it already made, with other options it refuses. One id per process
+/// therefore gave a second supervisor goal the first goal's pane, or refused its launch.
+fn hub_spawn_request_id() -> String {
+    format!(
+        "hub-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// `ferryx hub migrate [--from-omo <db>] [--dry-run]` copies live gateway state.
@@ -1402,10 +1428,24 @@ fn settle_pty_run(
     let instance = instance.to_owned();
     let sequence = observation.sequence;
     tokio::spawn(async move {
-        use ferryx_hub::supervisor::receipts::{record_pty_settle, PtySettle};
-        match record_pty_settle(&pool, ferryx_hub::agent_control::LOCAL_HOST_ID, &session_id, &instance, sequence).await {
-            Ok(PtySettle::OtherEpoch { request_id, run_id }) => {
-                tracing::warn!(request_id = %request_id, run_id = %run_id, "a supervisor run started under an earlier daemon; its end is left to restart reconciliation");
+        use ferryx_hub::supervisor::receipts::{record_pty_settle_across_restart, PtySettle};
+        // A run that started under an earlier daemon is ended by an idle reading of this one.
+        match record_pty_settle_across_restart(
+            &pool,
+            ferryx_hub::agent_control::LOCAL_HOST_ID,
+            &session_id,
+            &instance,
+            sequence,
+        )
+        .await
+        {
+            Ok(PtySettle::Settled(dispatch))
+                if !dispatch
+                    .run_id
+                    .as_deref()
+                    .is_some_and(|run| run.contains(&format!(":{instance}:"))) =>
+            {
+                tracing::info!(request_id = %dispatch.request_id, "a supervisor run started under an earlier daemon was settled by this daemon's idle reading");
             }
             Ok(_) => {}
             Err(error) => {
@@ -1968,8 +2008,13 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
                             if let Some(generation) = running.lock().await.take() {
-                                for task in generation.tasks {
+                                for task in &generation.tasks {
                                     task.abort();
+                                }
+                                // Wait for the aborted tasks to end, so a later `hub start`
+                                // reconciles only after the predecessor dispatcher stopped.
+                                for task in generation.tasks {
+                                    let _ = task.await;
                                 }
                             }
                             match persisted {
@@ -2190,8 +2235,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_hub_pane_launch_gets_its_own_spawn_request_id() {
+        let first = hub_spawn_request_id();
+        let second = hub_spawn_request_id();
+        assert_ne!(
+            first, second,
+            "a reused id replays the earlier spawn's pane"
+        );
+        let prefix = format!("hub-{}-", std::process::id());
+        assert!(
+            first.starts_with(&prefix) && second.starts_with(&prefix),
+            "{first} {second}"
+        );
+    }
+
+    #[test]
     fn a_persons_relayed_words_are_not_supervisor_input() {
-        assert!(relayed_from_a_person(Some("slack-approval:local:pane-1:rev-42:prompt-9")));
+        assert!(relayed_from_a_person(Some(
+            "slack-approval:local:pane-1:rev-42:prompt-9"
+        )));
         assert!(relayed_from_a_person(Some("chat-lane:ledger-1700")));
         assert!(relayed_from_a_person(Some("lane-ledger-owner-msg7")));
         assert!(!relayed_from_a_person(Some("hub-auto-prompt-3")));

@@ -16,6 +16,8 @@
 // `idle` so the run settles. It turns bracketed paste on (ESC[?2004h) at start, as an agent
 // TUI does, so a delivery arrives as one paste whose lines are CR-joined; the following Enter
 // ends the turn. A plain line outside a paste is one turn too.
+// An instruction containing QA_NO_START_REPORT is logged but never reported: the `recovery`
+// scenario uses it to hold a dispatch between "typed" and "start recorded".
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
@@ -100,6 +102,10 @@ lines.on('line', (raw) => {
   if (reported || text.trim() === '') return;
   reported = true;
   if (silent) { record({ kind: 'report-suppressed', state: 'working' }); return; }
+  if (text.includes('QA_NO_START_REPORT')) {
+    record({ kind: 'report-withheld', state: 'working' });
+    return;
+  }
   report('working');
 });
 lines.on('close', () => {
