@@ -4957,7 +4957,9 @@ mod tests {
         assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));
         assert!(allowed_http_route(&Method::GET, "supervisor/memory"));
         assert!(allowed_http_route(&Method::POST, "supervisor/memory"));
-        assert!(validate_http_query("supervisor/conversation", Some("projectId=p&after=3")).is_ok());
+        assert!(
+            validate_http_query("supervisor/conversation", Some("projectId=p&after=3")).is_ok()
+        );
         assert!(validate_http_query("supervisor/conversation", Some("actor=x")).is_err());
         assert!(validate_http_query("supervisor/request", Some("actor=x")).is_err());
         for (method, path) in [

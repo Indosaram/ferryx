@@ -104,11 +104,21 @@ impl ProcTable for SystemProcs {
 pub fn peer_pid(fd: std::os::unix::io::RawFd) -> Option<u32> {
     #[cfg(target_os = "linux")]
     {
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         // SAFETY: cred and len are valid for the duration of the call.
         let ok = unsafe {
-            libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len)
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
         } == 0;
         return (ok && cred.pid > 0).then_some(cred.pid as u32);
     }
@@ -118,7 +128,13 @@ pub fn peer_pid(fd: std::os::unix::io::RawFd) -> Option<u32> {
         let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
         // SAFETY: pid and len are valid for the duration of the call.
         let ok = unsafe {
-            libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&mut pid as *mut libc::pid_t).cast(), &mut len)
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut len,
+            )
         } == 0;
         return (ok && pid > 0).then_some(pid as u32);
     }
@@ -132,7 +148,10 @@ pub fn peer_pid(fd: std::os::unix::io::RawFd) -> Option<u32> {
 /// The peer identity to keep for a connection: its pid bound to its start time, or `Unknown`.
 pub fn identify(pid: Option<u32>) -> PeerOrigin {
     match pid.map(|pid| (pid, proc_info(pid))) {
-        Some((pid, Ok(info))) => PeerOrigin::Process(PeerProcess { pid, start: info.start }),
+        Some((pid, Ok(info))) => PeerOrigin::Process(PeerProcess {
+            pid,
+            start: info.start,
+        }),
         _ => PeerOrigin::Unknown,
     }
 }
@@ -145,13 +164,19 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
             Ok(stat) => stat,
             // Under `hidepid` another uid's process has no /proc entry for us, so ENOENT alone
             // does not mean it exited: `kill(pid, 0)` (not affected by hidepid) tells them apart.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(absent_or_hidden(pid)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(absent_or_hidden(pid))
+            }
             Err(_) => return Err(ProcError::Unreadable),
         };
         // Fields after the command name: index n-3 is field n of proc(5).
         let (_, rest) = stat.rsplit_once(')').ok_or(ProcError::Unreadable)?;
         let fields: Vec<&str> = rest.split_whitespace().collect();
-        let field = |index: usize| fields.get(index).and_then(|value| value.parse::<i64>().ok());
+        let field = |index: usize| {
+            fields
+                .get(index)
+                .and_then(|value| value.parse::<i64>().ok())
+        };
         let ppid = field(1).ok_or(ProcError::Unreadable)?;
         let session = field(3).ok_or(ProcError::Unreadable)?;
         let tty = field(4).ok_or(ProcError::Unreadable)?;
@@ -170,11 +195,21 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
         let size = std::mem::size_of_val(&info) as i32;
         // SAFETY: info is a valid buffer of `size` bytes for the call.
         let read = unsafe {
-            libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
         };
         if read != size {
             let errno = std::io::Error::last_os_error().raw_os_error();
-            return Err(if errno == Some(libc::ESRCH) { ProcError::Vanished } else { ProcError::Unreadable });
+            return Err(if errno == Some(libc::ESRCH) {
+                ProcError::Vanished
+            } else {
+                ProcError::Unreadable
+            });
         }
         // SAFETY: getsid only reads the process table.
         let session = unsafe { libc::getsid(pid as libc::pid_t) };
@@ -183,7 +218,10 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
             ppid: info.pbi_ppid,
             session: (session > 0).then_some(session as u32),
             tty: (info.e_tdev != NODEV && info.e_tdev != 0).then_some(u64::from(info.e_tdev)),
-            start: info.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(info.pbi_start_tvusec),
+            start: info
+                .pbi_start_tvsec
+                .saturating_mul(1_000_000)
+                .saturating_add(info.pbi_start_tvusec),
         });
     }
     #[allow(unreachable_code)]
@@ -251,11 +289,16 @@ pub fn refusal(origin: PeerOrigin, panes: &PaneSet, table: &impl ProcTable) -> O
         Ok(_) => return Some(format!("process {pid} is not the process that connected (its pid was reused); it may not change the supervisor")),
         Err(_) => return Some(format!("process {pid} could not be read; it may not change the supervisor")),
     };
-    let inside = |why: String| Some(format!("process {pid} runs inside a Ferryx pane ({why}); a pane process may not change the supervisor"));
+    let inside = |why: String| {
+        Some(format!("process {pid} runs inside a Ferryx pane ({why}); a pane process may not change the supervisor"))
+    };
     if panes.pids.contains(&pid) {
         return inside(format!("pane process {pid}"));
     }
-    if let Some(session) = info.session.filter(|session| panes.sessions.contains(session)) {
+    if let Some(session) = info
+        .session
+        .filter(|session| panes.sessions.contains(session))
+    {
         return inside(format!("pane session {session}"));
     }
     if let Some(tty) = info.tty.filter(|tty| panes.ttys.contains(tty)) {
@@ -282,7 +325,9 @@ pub fn refusal(origin: PeerOrigin, panes: &PaneSet, table: &impl ProcTable) -> O
             }
         }
     }
-    Some(format!("the parent chain of process {pid} is deeper than {MAX_ANCESTRY}"))
+    Some(format!(
+        "the parent chain of process {pid} is deeper than {MAX_ANCESTRY}"
+    ))
 }
 
 #[cfg(test)]
@@ -310,14 +355,27 @@ mod tests {
         Table {
             procs: rows
                 .iter()
-                .map(|&(pid, ppid, session, tty)| (pid, ProcInfo { ppid, session: Some(session), tty, start: u64::from(pid) * 10 }))
+                .map(|&(pid, ppid, session, tty)| {
+                    (
+                        pid,
+                        ProcInfo {
+                            ppid,
+                            session: Some(session),
+                            tty,
+                            start: u64::from(pid) * 10,
+                        },
+                    )
+                })
                 .collect(),
             unreadable: HashSet::new(),
         }
     }
 
     fn peer(pid: u32) -> PeerOrigin {
-        PeerOrigin::Process(PeerProcess { pid, start: u64::from(pid) * 10 })
+        PeerOrigin::Process(PeerProcess {
+            pid,
+            start: u64::from(pid) * 10,
+        })
     }
 
     /// launchd(1) -> terminal(50, session 50, tty 7) -> shell(60) -> cli(70);
@@ -347,11 +405,27 @@ mod tests {
     fn a_reparented_pane_process_is_still_refused_by_session_or_terminal() {
         let mut procs = world();
         // `(cli &)`: the cli's parent exited and it was reparented to pid 1.
-        procs.procs.insert(230, ProcInfo { ppid: 1, session: Some(200), tty: Some(9), start: 2300 });
+        procs.procs.insert(
+            230,
+            ProcInfo {
+                ppid: 1,
+                session: Some(200),
+                tty: Some(9),
+                start: 2300,
+            },
+        );
         let panes = PaneSet::of([200], &procs);
         assert!(refusal(peer(230), &panes, &procs).is_some_and(|why| why.contains("session 200")));
         // `setsid` kept the pane terminal: refused by terminal.
-        procs.procs.insert(240, ProcInfo { ppid: 1, session: Some(240), tty: Some(9), start: 2400 });
+        procs.procs.insert(
+            240,
+            ProcInfo {
+                ppid: 1,
+                session: Some(240),
+                tty: Some(9),
+                start: 2400,
+            },
+        );
         assert!(refusal(peer(240), &panes, &procs).is_some_and(|why| why.contains("terminal 9")));
     }
 
@@ -372,18 +446,35 @@ mod tests {
         let mut procs = world();
         let panes = PaneSet::of([200], &procs);
         assert!(refusal(PeerOrigin::Unknown, &panes, &procs).is_some());
-        assert!(refusal(peer(999), &panes, &procs).is_some(), "a peer that is gone is refused");
+        assert!(
+            refusal(peer(999), &panes, &procs).is_some(),
+            "a peer that is gone is refused"
+        );
         procs.unreadable.insert(70);
-        assert!(refusal(peer(70), &panes, &procs).is_some(), "an unreadable peer is refused");
+        assert!(
+            refusal(peer(70), &panes, &procs).is_some(),
+            "an unreadable peer is refused"
+        );
         procs.unreadable.clear();
         // An unreadable ancestor (a root sshd) ends the walk outside the panes...
         procs.unreadable.insert(50);
         assert_eq!(refusal(peer(70), &panes, &procs), None);
         // ...and a pane process under a root `sudo` is still caught by its session.
-        procs.procs.insert(250, ProcInfo { ppid: 245, session: Some(200), tty: Some(9), start: 2500 });
+        procs.procs.insert(
+            250,
+            ProcInfo {
+                ppid: 245,
+                session: Some(200),
+                tty: Some(9),
+                start: 2500,
+            },
+        );
         procs.unreadable.insert(245);
         assert!(refusal(peer(250), &panes, &procs).is_some());
-        assert_eq!(refusal(PeerOrigin::TokenAuthenticated, &panes, &procs), None);
+        assert_eq!(
+            refusal(PeerOrigin::TokenAuthenticated, &panes, &procs),
+            None
+        );
     }
 
     /// hidepid: a live process without a /proc entry for us is unreadable (the walk ends
@@ -391,8 +482,14 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_hidden_live_process_is_unreadable_and_a_reaped_one_vanished() {
-        assert_eq!(absent_or_hidden(1), ProcError::Unreadable, "pid 1 always exists");
-        let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+        assert_eq!(
+            absent_or_hidden(1),
+            ProcError::Unreadable,
+            "pid 1 always exists"
+        );
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
         let pid = child.id();
         child.wait().expect("reap");
         assert_eq!(absent_or_hidden(pid), ProcError::Vanished);

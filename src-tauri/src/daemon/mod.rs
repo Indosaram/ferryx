@@ -51,9 +51,9 @@ pub mod supervisor_linux;
 pub mod update_pending;
 pub mod workspace_service;
 // Todo 13: refuse supervisor mutations from processes inside worker panes.
-pub mod supervisor_peer;
 #[cfg(test)]
 pub mod recovery_consistency_tests;
+pub mod supervisor_peer;
 
 /// Shared headless authority supplied only by the session-owning daemon.
 pub struct MachineServices {

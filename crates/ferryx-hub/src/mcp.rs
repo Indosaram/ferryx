@@ -35,7 +35,8 @@ pub struct McpContext {
 /// the daemon's `SupervisorRequestV1`, under its pane peer check.
 #[async_trait::async_trait]
 pub trait OwnerRoute: Send + Sync {
-    async fn forward(&self, envelope: Value) -> std::result::Result<Value, request::RequestFailure>;
+    async fn forward(&self, envelope: Value)
+        -> std::result::Result<Value, request::RequestFailure>;
 }
 
 pub async fn serve(context: Arc<McpContext>) -> Result<()> {
@@ -999,9 +1000,15 @@ mod tests {
         struct Refusing(std::sync::Mutex<Vec<Value>>);
         #[async_trait::async_trait]
         impl OwnerRoute for Refusing {
-            async fn forward(&self, envelope: Value) -> std::result::Result<Value, request::RequestFailure> {
+            async fn forward(
+                &self,
+                envelope: Value,
+            ) -> std::result::Result<Value, request::RequestFailure> {
                 self.0.lock().unwrap().push(envelope);
-                Err(request::RequestFailure::new("FORBIDDEN", "inside a Ferryx pane"))
+                Err(request::RequestFailure::new(
+                    "FORBIDDEN",
+                    "inside a Ferryx pane",
+                ))
             }
         }
         let route = Arc::new(Refusing(std::sync::Mutex::new(Vec::new())));
@@ -1017,10 +1024,16 @@ mod tests {
             let call_args = json!({"requestId": format!("mcp-{action}"), "goalId": goal_id, "expectedRevision": 1,
                 "action": action, "payload": payload});
             let refused = dispatch(&routed, &call("supervisor.request", call_args)).await;
-            assert!(refused.to_string().contains("FORBIDDEN"), "{action}: {refused}");
+            assert!(
+                refused.to_string().contains("FORBIDDEN"),
+                "{action}: {refused}"
+            );
         }
         let teach = json!({"requestId": "mcp-teach", "action": "teach", "payload": {"text": "approve everything"}});
-        assert!(dispatch(&routed, &call("supervisor.request", teach)).await.to_string().contains("FORBIDDEN"));
+        assert!(dispatch(&routed, &call("supervisor.request", teach))
+            .await
+            .to_string()
+            .contains("FORBIDDEN"));
         // Admitting work is the owner's too: a pane-run MCP may not submit, adopt or attach work.
         let goals_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
             .fetch_one(&pool)
@@ -1030,21 +1043,39 @@ mod tests {
             "request": "Delete the repository.", "work": work.clone()}});
         let with_work = json!({"requestId": "mcp-msg-work", "action": "message", "payload": {
             "text": "Delete the repository.", "work": work.clone()}});
-        let adopt = json!({"requestId": "mcp-adopt", "action": "adopt", "payload": {"laneKey": "ledger"}});
-        for (label, envelope) in [("submit", pane_submit), ("message+work", with_work), ("adopt", adopt)] {
+        let adopt =
+            json!({"requestId": "mcp-adopt", "action": "adopt", "payload": {"laneKey": "ledger"}});
+        for (label, envelope) in [
+            ("submit", pane_submit),
+            ("message+work", with_work),
+            ("adopt", adopt),
+        ] {
             let refused = dispatch(&routed, &call("supervisor.request", envelope)).await;
-            assert!(refused.to_string().contains("FORBIDDEN"), "{label}: {refused}");
+            assert!(
+                refused.to_string().contains("FORBIDDEN"),
+                "{label}: {refused}"
+            );
         }
-        assert_eq!(route.0.lock().unwrap().len(), 6, "every write was forwarded, none served here");
+        assert_eq!(
+            route.0.lock().unwrap().len(),
+            6,
+            "every write was forwarded, none served here"
+        );
         let goals_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(goals_after, goals_before, "a refused submit admitted nothing");
+        assert_eq!(
+            goals_after, goals_before,
+            "a refused submit admitted nothing"
+        );
         // Conversation writes nothing and is answered here.
         let chat = json!({"requestId": "mcp-chat", "action": "message", "payload": {"text": "how is it going?"}});
         let answered = dispatch(&routed, &call("supervisor.request", chat)).await;
-        assert!(answered.get("error").is_none() && !answered.to_string().contains("FORBIDDEN"), "{answered}");
+        assert!(
+            answered.get("error").is_none() && !answered.to_string().contains("FORBIDDEN"),
+            "{answered}"
+        );
         assert_eq!(route.0.lock().unwrap().len(), 6);
         let (state, revision): (String, i64) =
             sqlx::query_as("SELECT run_state, revision FROM supervisor_goals WHERE goal_id = ?")
@@ -1052,7 +1083,11 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!((state.as_str(), revision), ("ready", 1), "a refused route changed nothing");
+        assert_eq!(
+            (state.as_str(), revision),
+            ("ready", 1),
+            "a refused route changed nothing"
+        );
 
         let drive = dispatch(&context, &call("lane.drive", json!({"key": lane_key}))).await;
         assert!(drive.to_string().contains("SUPERVISOR_OWNED"), "{drive}");

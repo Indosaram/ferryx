@@ -5934,7 +5934,10 @@ impl DaemonServer {
 
     /// Why this connection's peer may not change the supervisor, or `None`. The process-table
     /// reads run on a blocking thread, never on a Tokio worker.
-    async fn supervisor_peer_refusal(&self, origin: super::supervisor_peer::PeerOrigin) -> Option<String> {
+    async fn supervisor_peer_refusal(
+        &self,
+        origin: super::supervisor_peer::PeerOrigin,
+    ) -> Option<String> {
         use super::supervisor_peer::PeerOrigin;
         if matches!(origin, PeerOrigin::TokenAuthenticated | PeerOrigin::Unknown) {
             return super::supervisor_peer::refusal(

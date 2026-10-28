@@ -31,7 +31,8 @@ use super::admission::{self, ActorContext, AdmissionError, AdoptWork, OwnerChoic
 use super::dispatcher::{GRANT_REVOKED, TURN_LIMIT};
 use super::wakes::{self, DependencyError};
 use super::{
-    execution_binding_of, goal_of, identity_of, waits_of, ChannelProvider, RunState, SupervisorError, SupervisorGoal, WaitState, WaitTarget,
+    execution_binding_of, goal_of, identity_of, waits_of, ChannelProvider, RunState,
+    SupervisorError, SupervisorGoal, WaitState, WaitTarget,
 };
 use crate::agent_control::{AgentControl, AgentOp, LOCAL_HOST_ID};
 use crate::goals::contract::{self, RequirementSpec};
@@ -239,7 +240,12 @@ impl Action {
     pub fn targets_goal(self) -> bool {
         matches!(
             self,
-            Self::Correct | Self::Pause | Self::Resume | Self::Cancel | Self::Approve | Self::Depend
+            Self::Correct
+                | Self::Pause
+                | Self::Resume
+                | Self::Cancel
+                | Self::Approve
+                | Self::Depend
         )
     }
 }
@@ -356,7 +362,9 @@ pub async fn handle(
 ) -> Result<Value, RequestFailure> {
     let (envelope, action) = parse_envelope(value)?;
     match action {
-        Action::Message | Action::Submit | Action::Adopt => admit(pool, context, &envelope, action).await,
+        Action::Message | Action::Submit | Action::Adopt => {
+            admit(pool, context, &envelope, action).await
+        }
         Action::Teach => teach(pool, context, &envelope).await,
         Action::Forget => {
             let forget: ForgetPayload = payload(&envelope.payload)?;
@@ -377,7 +385,10 @@ pub async fn handle(
 }
 
 /// Fills a work proposal's project from the envelope; a contradiction is refused.
-fn with_project(proposed: &mut Option<String>, envelope: Option<&str>) -> Result<(), RequestFailure> {
+fn with_project(
+    proposed: &mut Option<String>,
+    envelope: Option<&str>,
+) -> Result<(), RequestFailure> {
     match (proposed.as_deref(), envelope) {
         (Some(work), Some(envelope)) if work != envelope => Err(RequestFailure::invalid(format!(
             "projectId {envelope} contradicts the work's projectId {work}"
@@ -425,7 +436,8 @@ async fn admit(
             admission::adopt_work(pool, &actor(body), &adopt).await?
         }
     };
-    serde_json::to_value(&outcome).map_err(|error| RequestFailure::new("INTERNAL", error.to_string()))
+    serde_json::to_value(&outcome)
+        .map_err(|error| RequestFailure::new("INTERNAL", error.to_string()))
 }
 
 async fn owner_identity(
@@ -451,7 +463,9 @@ async fn owned_goal(
     let goal = goal_of(pool, goal_id)
         .await?
         .ok_or_else(|| RequestFailure::new("NOT_FOUND", format!("goal {goal_id} not found")))?;
-    if goal.supervisor_id != identity.supervisor_id || goal.owner_principal != identity.owner_principal {
+    if goal.supervisor_id != identity.supervisor_id
+        || goal.owner_principal != identity.owner_principal
+    {
         return Err(RequestFailure::new(
             "FORBIDDEN",
             format!("goal {goal_id} belongs to another owner"),
@@ -651,19 +665,27 @@ async fn resume(
     }
     let goal_id = goal.goal_id.as_str();
     let mut tx = pool.begin_write().await?;
-    let (held_from, held_detail): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT held_from, held_detail FROM supervisor_goals WHERE goal_id = ?",
-    )
-    .bind(goal_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let held_from = held_from.as_deref().map(str::parse::<RunState>).transpose()?;
+    let (held_from, held_detail): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT held_from, held_detail FROM supervisor_goals WHERE goal_id = ?")
+            .bind(goal_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let held_from = held_from
+        .as_deref()
+        .map(str::parse::<RunState>)
+        .transpose()?;
     let restore_hold = (held_from == Some(RunState::AwaitingOwner))
         .then(|| held_detail.clone().unwrap_or_else(|| detail.to_owned()));
-    let held_verifying = (held_from == Some(RunState::Verifying)).then(|| held_detail.clone()).flatten();
+    let held_verifying = (held_from == Some(RunState::Verifying))
+        .then(|| held_detail.clone())
+        .flatten();
     let (to, to_detail, requeue) =
         match release_target(&mut tx, goal_id, restore_hold, held_verifying, detail).await? {
-            Release::To { to, detail, requeue } => (to, detail, requeue),
+            Release::To {
+                to,
+                detail,
+                requeue,
+            } => (to, detail, requeue),
             // Nothing the goal could do next without the owner: held for an explicit decision.
             Release::Hold(why) => (RunState::AwaitingOwner, why, false),
         };
@@ -679,10 +701,12 @@ async fn resume(
     if requeue {
         requeue_unsent(&mut tx, goal_id, moved.revision).await?;
     }
-    sqlx::query("UPDATE supervisor_goals SET held_from = NULL, held_detail = NULL WHERE goal_id = ?")
-        .bind(goal_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE supervisor_goals SET held_from = NULL, held_detail = NULL WHERE goal_id = ?",
+    )
+    .bind(goal_id)
+    .execute(&mut *tx)
+    .await?;
     clear_lane_pause(&mut tx, &goal.lane_key).await?;
     tx.commit().await?;
     wakes::poke();
@@ -693,7 +717,11 @@ async fn resume(
 /// Where an owner release (resume, approve) takes a held goal.
 enum Release {
     /// Move to `to` with `detail`; `requeue` queues the never-transmitted instruction again.
-    To { to: RunState, detail: String, requeue: bool },
+    To {
+        to: RunState,
+        detail: String,
+        requeue: bool,
+    },
     /// Nothing can follow without an owner decision; why.
     Hold(String),
 }
@@ -735,7 +763,11 @@ async fn release_target(
     .fetch_all(&mut *conn)
     .await?;
     let latest = latest_dispatch_state(&mut *conn, goal_id).await?;
-    let to = |to: RunState, detail: String, requeue: bool| Release::To { to, detail, requeue };
+    let to = |to: RunState, detail: String, requeue: bool| Release::To {
+        to,
+        detail,
+        requeue,
+    };
     Ok(if super::has_live_run(&mut *conn, goal_id).await? {
         to(RunState::Running, detail.to_owned(), false)
     } else if uncertain {
@@ -756,9 +788,21 @@ async fn release_target(
         } else {
             RunState::WaitingEvent
         };
-        to(state, format!("{}: {} pending dependencies ({detail})", wakes::WAITING_ON, pending.len()), false)
+        to(
+            state,
+            format!(
+                "{}: {} pending dependencies ({detail})",
+                wakes::WAITING_ON,
+                pending.len()
+            ),
+            false,
+        )
     } else if latest.as_deref() == Some("settled") {
-        to(RunState::Verifying, held_verifying.unwrap_or_else(|| wakes::TURN_SETTLED.to_owned()), false)
+        to(
+            RunState::Verifying,
+            held_verifying.unwrap_or_else(|| wakes::TURN_SETTLED.to_owned()),
+            false,
+        )
     } else {
         Release::Hold(format!(
             "{OWNER_DECISION_NEEDED}: the goal has no unsent instruction and no settled run to verify (latest dispatch: {}); correct, then approve",
@@ -769,7 +813,10 @@ async fn release_target(
 
 /// Clears a legacy lane pause row on a supervisor goal's lane, with its history line, inside
 /// the caller's transaction. False (nothing written) when the lane is not paused.
-async fn clear_lane_pause(conn: &mut sqlx::SqliteConnection, lane_key: &str) -> Result<bool, RequestFailure> {
+async fn clear_lane_pause(
+    conn: &mut sqlx::SqliteConnection,
+    lane_key: &str,
+) -> Result<bool, RequestFailure> {
     let now = crate::storage::now_rfc3339();
     let cleared = sqlx::query(
         "UPDATE lane_pauses SET resumed_at = ? WHERE lane_key = ? AND resumed_at IS NULL",
@@ -852,7 +899,11 @@ async fn approve(
     let approved = format!("{OWNER_APPROVED}: by {by}");
     let (to, to_detail, requeue) =
         match release_target(&mut tx, &goal.goal_id, None, None, &approved).await? {
-            Release::To { to, detail, requeue } => (to, detail, requeue),
+            Release::To {
+                to,
+                detail,
+                requeue,
+            } => (to, detail, requeue),
             Release::Hold(why) => {
                 return Err(RequestFailure::new(
                     NOTHING_TO_RELEASE,
@@ -908,9 +959,18 @@ async fn requeue_unsent(
     if state != "superseded" && state != "released" {
         return Ok(());
     }
-    let generation = super::require_binding(&mut *conn, goal_id).await?.generation;
-    super::insert_dispatch(&mut *conn, goal_id, revision, generation, &instruction, &crate::storage::now_rfc3339())
-        .await?;
+    let generation = super::require_binding(&mut *conn, goal_id)
+        .await?
+        .generation;
+    super::insert_dispatch(
+        &mut *conn,
+        goal_id,
+        revision,
+        generation,
+        &instruction,
+        &crate::storage::now_rfc3339(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -986,7 +1046,11 @@ async fn correct_goal(
 
 /// The corrected worker instruction: the never-transmitted instruction it replaces (when
 /// there is one), the owner's correction verbatim, and the replacement requirements.
-fn corrected_instruction(original: Option<&str>, revision: i64, correct: &CorrectPayload) -> String {
+fn corrected_instruction(
+    original: Option<&str>,
+    revision: i64,
+    correct: &CorrectPayload,
+) -> String {
     let mut text = String::new();
     if let Some(original) = original {
         text.push_str(original.trim_end());
@@ -1113,7 +1177,9 @@ pub async fn lane_pause(
         if super::supervisor_owns_lane(pool, lane_key).await? {
             return Err(RequestFailure::new(
                 super::SUPERVISOR_OWNED,
-                format!("lane {lane_key} was adopted by a supervisor goal; pause that goal instead"),
+                format!(
+                    "lane {lane_key} was adopted by a supervisor goal; pause that goal instead"
+                ),
             ));
         }
         return Ok(None);
@@ -1228,9 +1294,17 @@ pub async fn conversation(
             .fetch_optional(pool)
             .await?;
     match owner {
-        None => return Err(RequestFailure::new("NOT_FOUND", format!("project {project_id} not found"))),
+        None => {
+            return Err(RequestFailure::new(
+                "NOT_FOUND",
+                format!("project {project_id} not found"),
+            ))
+        }
         Some(owner) if owner != identity.supervisor_id => {
-            return Err(RequestFailure::new("FORBIDDEN", format!("project {project_id} belongs to another owner")))
+            return Err(RequestFailure::new(
+                "FORBIDDEN",
+                format!("project {project_id} belongs to another owner"),
+            ))
         }
         Some(_) => {}
     }

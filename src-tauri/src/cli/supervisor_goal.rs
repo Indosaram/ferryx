@@ -519,20 +519,33 @@ pub(crate) async fn exchange_once(
     let stream = connect_daemon().await?;
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
-    async fn send<R, W>(reader: &mut BufReader<R>, writer: &mut W, request: &DaemonRequest) -> Result<DaemonResponse, String>
+    async fn send<R, W>(
+        reader: &mut BufReader<R>,
+        writer: &mut W,
+        request: &DaemonRequest,
+    ) -> Result<DaemonResponse, String>
     where
         R: tokio::io::AsyncRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
         let mut line = serde_json::to_string(request).map_err(|error| error.to_string())?;
         line.push('\n');
-        writer.write_all(line.as_bytes()).await.map_err(|error| error.to_string())?;
+        writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
         writer.flush().await.map_err(|error| error.to_string())?;
         let mut response = String::new();
-        if reader.read_line(&mut response).await.map_err(|error| error.to_string())? == 0 {
+        if reader
+            .read_line(&mut response)
+            .await
+            .map_err(|error| error.to_string())?
+            == 0
+        {
             return Err("the daemon closed the connection".into());
         }
-        serde_json::from_str(response.trim()).map_err(|error| format!("unreadable daemon response: {error}"))
+        serde_json::from_str(response.trim())
+            .map_err(|error| format!("unreadable daemon response: {error}"))
     }
     let handshake = DaemonRequest::Handshake {
         version: DAEMON_PROTOCOL_VERSION,
@@ -541,17 +554,40 @@ pub(crate) async fn exchange_once(
     match send(&mut reader, &mut write_half, &handshake).await {
         Ok(DaemonResponse::HandshakeOk { .. }) => {}
         Ok(DaemonResponse::ProtocolMismatch { .. }) => {
-            return Err(failure("UNSUPPORTED", "the daemon speaks another protocol version"))
+            return Err(failure(
+                "UNSUPPORTED",
+                "the daemon speaks another protocol version",
+            ))
         }
-        Ok(other) => return Err(failure("UNSUPPORTED", &format!("unexpected handshake response: {other:?}"))),
+        Ok(other) => {
+            return Err(failure(
+                "UNSUPPORTED",
+                &format!("unexpected handshake response: {other:?}"),
+            ))
+        }
         Err(message) => return Err(failure("INTERNAL", &message)),
     }
-    match send(&mut reader, &mut write_half, &DaemonRequest::GetCapabilities).await {
-        Ok(DaemonResponse::CapabilitiesOk { capabilities }) if capabilities.iter().any(|known| known == capability) => {}
+    match send(
+        &mut reader,
+        &mut write_half,
+        &DaemonRequest::GetCapabilities,
+    )
+    .await
+    {
+        Ok(DaemonResponse::CapabilitiesOk { capabilities })
+            if capabilities.iter().any(|known| known == capability) => {}
         Ok(DaemonResponse::CapabilitiesOk { .. }) => {
-            return Err(failure("UNSUPPORTED", &format!("this daemon does not advertise {capability}")))
+            return Err(failure(
+                "UNSUPPORTED",
+                &format!("this daemon does not advertise {capability}"),
+            ))
         }
-        Ok(other) => return Err(failure("INTERNAL", &format!("unexpected capabilities response: {other:?}"))),
+        Ok(other) => {
+            return Err(failure(
+                "INTERNAL",
+                &format!("unexpected capabilities response: {other:?}"),
+            ))
+        }
         Err(message) => return Err(failure("INTERNAL", &message)),
     }
     match send(&mut reader, &mut write_half, &request).await {

@@ -328,9 +328,15 @@ impl RunState {
                 Dispatching | Paused | Degraded | DeliveryUncertain | Ready | AwaitingOwner
             ),
             WaitingChildren | WaitingEvent => {
-                matches!(self, Running | Verifying | WaitingChildren | WaitingEvent | Paused | AwaitingOwner)
+                matches!(
+                    self,
+                    Running | Verifying | WaitingChildren | WaitingEvent | Paused | AwaitingOwner
+                )
             }
-            Verifying => matches!(self, Running | WaitingChildren | WaitingEvent | Paused | AwaitingOwner),
+            Verifying => matches!(
+                self,
+                Running | WaitingChildren | WaitingEvent | Paused | AwaitingOwner
+            ),
             Completed => self == Verifying,
             DeliveryUncertain => matches!(self, Dispatching | Running | Paused | AwaitingOwner),
             AwaitingOwner | Paused | Degraded | Cancelled => true,

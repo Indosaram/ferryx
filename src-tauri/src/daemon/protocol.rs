@@ -2085,22 +2085,41 @@ mod tests {
         let refused = serde_json::from_value::<DaemonRequest>(serde_json::json!(
             {"type":"supervisorEngine","request":{"action":"assess"}}
         ));
-        assert!(refused.is_err(), "an assessment without a prompt is refused on the wire");
-        let ok = DaemonResponse::SupervisorEngineOk { snapshot: serde_json::json!({"engine": {"state": "ready"}}) };
+        assert!(
+            refused.is_err(),
+            "an assessment without a prompt is refused on the wire"
+        );
+        let ok = DaemonResponse::SupervisorEngineOk {
+            snapshot: serde_json::json!({"engine": {"state": "ready"}}),
+        };
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorEngineOk""#), "{text}");
-        assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorEngineOk { .. }));
+        assert!(matches!(
+            serde_json::from_str::<DaemonResponse>(&text).unwrap(),
+            DaemonResponse::SupervisorEngineOk { .. }
+        ));
     }
 
     #[test]
     fn the_supervisor_request_envelope_round_trips_on_the_daemon_wire() {
         let envelope = serde_json::json!({"requestId": "r1", "goalId": "g1", "expectedRevision": 3,
             "action": "pause", "payload": {"reason": "lunch"}});
-        let request = DaemonRequest::SupervisorRequestV1 { envelope: envelope.clone(), cli: true, mcp: false };
+        let request = DaemonRequest::SupervisorRequestV1 {
+            envelope: envelope.clone(),
+            cli: true,
+            mcp: false,
+        };
         let wire = serde_json::to_value(&request).unwrap();
-        assert_eq!(wire, serde_json::json!({"type": "supervisorRequestV1", "envelope": envelope, "cli": true}));
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "supervisorRequestV1", "envelope": envelope, "cli": true})
+        );
         match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
-            DaemonRequest::SupervisorRequestV1 { envelope: decoded, cli, mcp } => {
+            DaemonRequest::SupervisorRequestV1 {
+                envelope: decoded,
+                cli,
+                mcp,
+            } => {
                 assert_eq!(decoded, envelope);
                 assert!(cli);
                 assert!(!mcp);
@@ -2108,20 +2127,33 @@ mod tests {
             other => panic!("decoded as {other:?}"),
         }
         // An MCP-forwarded request carries `mcp: true`; it round-trips.
-        let forwarded = DaemonRequest::SupervisorRequestV1 { envelope: envelope.clone(), cli: true, mcp: true };
+        let forwarded = DaemonRequest::SupervisorRequestV1 {
+            envelope: envelope.clone(),
+            cli: true,
+            mcp: true,
+        };
         let wire = serde_json::to_value(&forwarded).unwrap();
         assert_eq!(wire["mcp"], true);
         assert!(matches!(
             serde_json::from_value::<DaemonRequest>(wire).unwrap(),
-            DaemonRequest::SupervisorRequestV1 { cli: true, mcp: true, .. }
+            DaemonRequest::SupervisorRequestV1 {
+                cli: true,
+                mcp: true,
+                ..
+            }
         ));
         // `cli` defaults to the desktop.
         let desktop: DaemonRequest = serde_json::from_value(serde_json::json!(
             {"type": "supervisorRequestV1", "envelope": {"requestId": "r", "action": "message", "payload": {"text": "hi"}}}
         ))
         .unwrap();
-        assert!(matches!(desktop, DaemonRequest::SupervisorRequestV1 { cli: false, .. }));
-        let ok = DaemonResponse::SupervisorRequestV1Ok { receipt: serde_json::json!({"goalId": "g1", "revision": 4}) };
+        assert!(matches!(
+            desktop,
+            DaemonRequest::SupervisorRequestV1 { cli: false, .. }
+        ));
+        let ok = DaemonResponse::SupervisorRequestV1Ok {
+            receipt: serde_json::json!({"goalId": "g1", "revision": 4}),
+        };
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorRequestV1Ok""#), "{text}");
         assert!(matches!(

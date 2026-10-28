@@ -783,7 +783,10 @@ pub async fn set_lane_paused_gated(
             .map_err(|error| LanePauseError::Storage(error.to_string()))?;
         if owned {
             if let Some(message) = gate.peer_refusal {
-                return Err(LanePauseError::Supervisor(RequestFailure::new("FORBIDDEN", message)));
+                return Err(LanePauseError::Supervisor(RequestFailure::new(
+                    "FORBIDDEN",
+                    message,
+                )));
             }
             let owner = owner.ok_or_else(|| {
                 LanePauseError::Supervisor(RequestFailure::new(
@@ -796,7 +799,13 @@ pub async fn set_lane_paused_gated(
             } else {
                 ferryx_hub::supervisor::ChannelProvider::Desktop
             };
-            let context = RequestContext { principal: owner, adapter, channel_binding_id: None, control, memory: None };
+            let context = RequestContext {
+                principal: owner,
+                adapter,
+                channel_binding_id: None,
+                control,
+                memory: None,
+            };
             match request::lane_pause(&pool, &context, lane_key, paused).await {
                 Ok(Some(changed)) => {
                     crate::remote::server::agent_control_service::publish_supervisor_changed(
@@ -990,7 +999,14 @@ pub async fn supervisor_engine(
 /// devices the gateway already authorized, never a body-supplied actor.
 async fn supervisor_service(
     state: &RemoteGatewayState,
-) -> Result<(ferryx_hub::goals::SqlitePool, Option<String>, Option<Arc<dyn AgentControl>>), ferryx_hub::supervisor::request::RequestFailure> {
+) -> Result<
+    (
+        ferryx_hub::goals::SqlitePool,
+        Option<String>,
+        Option<Arc<dyn AgentControl>>,
+    ),
+    ferryx_hub::supervisor::request::RequestFailure,
+> {
     use ferryx_hub::supervisor::request::RequestFailure;
     #[cfg(test)]
     let test_hub = state.supervisor_test_hub.read().clone();
@@ -1005,7 +1021,9 @@ async fn supervisor_service(
             "the supervisor hub is not open in this daemon",
         ));
     };
-    let owner = ferryx_hub::supervisor::admission::installation_owner(&hub.pool).await.ok();
+    let owner = ferryx_hub::supervisor::admission::installation_owner(&hub.pool)
+        .await
+        .ok();
     Ok((hub.pool.clone(), owner, Some(Arc::clone(&hub.control))))
 }
 
@@ -1021,7 +1039,10 @@ pub async fn supervisor_request(
     request::parse_envelope(envelope.clone())?;
     let (pool, owner, control) = supervisor_service(state).await?;
     let owner = owner.ok_or_else(|| {
-        RequestFailure::new("UNAUTHORIZED", "this installation has no single supervisor owner")
+        RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        )
     })?;
     let context = RequestContext {
         principal: owner,
@@ -1031,7 +1052,8 @@ pub async fn supervisor_request(
         memory: ferryx_hub::meta::mhc_supervisor::installed(),
     };
     let answer = request::handle(&pool, &context, envelope).await?;
-    let mut payload = json!({ "supervisorRequest": answer.get("action").cloned().unwrap_or(Value::Null) });
+    let mut payload =
+        json!({ "supervisorRequest": answer.get("action").cloned().unwrap_or(Value::Null) });
     if let (Some(fields), Some(goal)) = (payload.as_object_mut(), answer.get("goalId")) {
         fields.insert("goalId".into(), goal.clone());
     }
@@ -1054,7 +1076,10 @@ pub async fn supervisor_conversation(
     use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
     let (pool, owner, _) = supervisor_service(state).await?;
     let owner = owner.ok_or_else(|| {
-        RequestFailure::new("UNAUTHORIZED", "this installation has no single supervisor owner")
+        RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        )
     })?;
     let context = RequestContext {
         principal: owner,
@@ -2332,9 +2357,19 @@ impl ferryx_hub::mcp::OwnerRoute for DaemonOwnerRoute {
     ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
         use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
         use ferryx_hub::supervisor::request::RequestFailure;
-        let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true, mcp: true };
-        let exchange = crate::cli::supervisor_goal::exchange_once(SUPERVISOR_REQUEST_CAPABILITY, request, true);
-        let Ok(answer) = tokio::time::timeout(crate::cli::supervisor_goal::GOAL_CLI_TIMEOUT, exchange).await else {
+        let request = DaemonRequest::SupervisorRequestV1 {
+            envelope,
+            cli: true,
+            mcp: true,
+        };
+        let exchange = crate::cli::supervisor_goal::exchange_once(
+            SUPERVISOR_REQUEST_CAPABILITY,
+            request,
+            true,
+        );
+        let Ok(answer) =
+            tokio::time::timeout(crate::cli::supervisor_goal::GOAL_CLI_TIMEOUT, exchange).await
+        else {
             return Err(RequestFailure::new(
                 "SUPERVISOR_UNAVAILABLE",
                 "the daemon did not answer the supervisor request in time",
@@ -2342,13 +2377,20 @@ impl ferryx_hub::mcp::OwnerRoute for DaemonOwnerRoute {
         };
         match answer {
             Ok(DaemonResponse::SupervisorRequestV1Ok { receipt }) => Ok(receipt),
-            Ok(DaemonResponse::Error { code, message, .. }) => {
-                Err(RequestFailure::new(code.as_deref().unwrap_or("INTERNAL"), message))
-            }
-            Ok(other) => Err(RequestFailure::new("INTERNAL", format!("unexpected daemon response: {other:?}"))),
+            Ok(DaemonResponse::Error { code, message, .. }) => Err(RequestFailure::new(
+                code.as_deref().unwrap_or("INTERNAL"),
+                message,
+            )),
+            Ok(other) => Err(RequestFailure::new(
+                "INTERNAL",
+                format!("unexpected daemon response: {other:?}"),
+            )),
             Err((value, _)) => Err(RequestFailure::new(
                 value["code"].as_str().unwrap_or("SUPERVISOR_UNAVAILABLE"),
-                value["message"].as_str().unwrap_or("the daemon could not be reached").to_owned(),
+                value["message"]
+                    .as_str()
+                    .unwrap_or("the daemon could not be reached")
+                    .to_owned(),
             )),
         }
     }
