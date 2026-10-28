@@ -1501,6 +1501,19 @@ impl Inner {
                 }
             },
         };
+        if let Err(rejection) = &reply {
+            if matches!(
+                rejection.code.as_str(),
+                "SUPERVISOR_WORK_STALE" | "SUPERVISOR_WORK_SCOPE"
+            ) {
+                tracing::info!(
+                    code = %rejection.code,
+                    conversation = owner.as_ref().map_or("-", |(key, _)| key.as_str()),
+                    request_id = %request_id,
+                    "a supervisor work request was refused"
+                );
+            }
+        }
         let Some(handle) = routed.or_else(|| owner.map(|(_, handle)| handle)) else {
             tracing::warn!("a supervisor work request names no session to answer");
             return;

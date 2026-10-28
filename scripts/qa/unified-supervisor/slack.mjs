@@ -38,6 +38,9 @@ const SUBMIT_ARGS = { title: 'Write result.txt', requirements: ['result.txt cont
 const FINAL_TEXT = 'Done: your request went through the supervisor.';
 const SENTINEL = 'What can you do?';
 const SENTINEL_TEXT = 'I can plan, dispatch and verify work in your projects.';
+/// The hub's own record that a redelivered message was refused by the persisted delivery
+/// record (crates/ferryx-hub/src/chat/slack_turn.rs `handle`).
+const NOT_REPLAYED_LOG = 'slack message already answered before a restart; not replayed';
 
 /// Tool names a chat request offers: `tools[]` and deferred lists on messages (as mhc.mjs).
 function offeredTools(json) {
@@ -398,7 +401,31 @@ export async function runSlackLeg(ctx, { setupCli, hub, dbPath, waitForChange, e
     daemon = null;
     await startHub('daemon-slack-restarted');
     const restarted = await redeliver('owner-dm-redelivered-after-restart', '000400');
-    ctx.assert('duplicate-delivery-yields-no-new-goal-and-no-learned-fact', live.ok && restarted.ok, { live: live.detail, restarted: restarted.detail });
+    // Positive evidence: the restarted hub logged that it refused the duplicate. Only then is
+    // the work reply count read again, so a duplicate turn that lost the session lock to the
+    // sentinel cannot post after the check.
+    const daemonLog = join(env.FERRYX_DATA_DIR, 'logs', 'daemon.log');
+    if (!isInside(daemonLog, ctx.paths.data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `${daemonLog} is outside the run data root`);
+    const notReplayedLines = () => {
+      try {
+        return readFileSync(daemonLog, 'utf8').split('\n').filter((line) => line.includes(NOT_REPLAYED_LOG) && line.includes(ownerTs));
+      } catch (error) {
+        if (error?.code === 'ENOENT') return [];
+        throw error;
+      }
+    };
+    const refusedLog = await waitForChange(ctx, 'hub log: duplicate not replayed after restart', dirname(daemonLog), () => {
+      const lines = notReplayedLines();
+      return { done: lines.length >= 1, lines };
+    }, 60_000).then((result) => result.lines, (error) => {
+      if (ctx.signal.aborted) throw error;
+      return notReplayedLines();
+    });
+    const workRepliesAfterLog = replies(FINAL_TEXT);
+    transcript(`restart duplicate refusal logged ${refusedLog.length}x; workReplies=${workRepliesAfterLog}`);
+    ctx.assert('duplicate-delivery-yields-no-new-goal-and-no-learned-fact', live.ok && restarted.ok && refusedLog.length >= 1
+      && workRepliesAfterLog === 1 && counts().slackGoals === 1,
+    { live: live.detail, restarted: restarted.detail, daemonLog, refusedLog, workRepliesAfterLog });
     const after = counts();
     const ingestedAfter = readIngested(ctx);
     // The foreign text never reached the engine, in any session, through the whole leg.

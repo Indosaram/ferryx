@@ -384,7 +384,7 @@ pub fn owner_authored_text(event: &Value, bot_user: &str) -> String {
                 fenced = !fenced;
             }
             let quote_prefix = line.starts_with('>') || line.starts_with("&gt;");
-            !(quote_prefix && !in_code)
+            (!quote_prefix || in_code)
                 && !(!line.is_empty() && quoted.iter().any(|quote| quote == line))
         })
         .collect::<Vec<_>>()
