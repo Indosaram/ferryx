@@ -1,4 +1,4 @@
-use ferryx_vt::{HostTerminal, DEFAULT_SCROLLBACK_LINES};
+use ferryx_vt::{HostTerminal, DEFAULT_SCROLLBACK_LINES, KITTY_IMAGE_STORAGE_LIMIT};
 use fxsh::types::{Color, UiEventKind};
 use proptest::prelude::*;
 use session_core::replica::{diff, Replica};
@@ -100,6 +100,16 @@ fn device_queries_produce_replies_and_osc_produces_ui_events() {
     assert!(kinds.iter().any(|k| matches!(k, UiEventKind::Notification { title, body } if title == "T" && body == "B")));
     let ids: Vec<u64> = b.ui_events.iter().map(|e| e.event_id).collect();
     assert_eq!(ids, (1..=ids.len() as u64).collect::<Vec<_>>());
+}
+
+#[test]
+fn kitty_image_storage_limit_is_set_explicitly() {
+    assert_eq!(KITTY_IMAGE_STORAGE_LIMIT, 64 * 1024 * 1024);
+    let mut t = HostTerminal::new(40, 6, 100);
+    assert_eq!(t.engine.kitty_image_storage_limit(), Some(67_108_864));
+    // The alternate screen has its own storage and carries the same limit.
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(t.engine.kitty_image_storage_limit(), Some(67_108_864));
 }
 
 #[test]
