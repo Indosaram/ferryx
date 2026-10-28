@@ -303,8 +303,10 @@ mod tests {
         }
         assert_eq!(mirror.compression_wakeup(now), None, "the pass must end");
 
-        assert_eq!(mirror.seed().unwrap(), before, "compression must not change the seed");
+        // Measure before taking the seed: the formatter reads every scrollback page, and reading a
+        // compressed page restores it, so a seed taken first would undo the pass being measured.
         let usage_after = mirror.terminal.memory_usage().unwrap();
+        assert_eq!(mirror.seed().unwrap(), before, "compression must not change the seed");
         if usage_after.compression_supported {
             assert_eq!(last, Some(CompressionStep::Complete));
             assert!(usage_after.primary_compressed_pages > 0, "{usage_after:?}");
