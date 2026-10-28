@@ -25,9 +25,15 @@ fn qa_history() -> bytes::Bytes {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
+    // `RUST_LOG=ferryx_lib::native_terminal=debug` exposes the renderer release/rebuild traces.
+    let filter: tracing_subscriber::filter::Targets = match std::env::var("RUST_LOG") {
+        Ok(directives) => format!("warn,{directives}").parse()?,
+        Err(_) => tracing_subscriber::filter::Targets::new()
+            .with_default(tracing::Level::WARN),
+    };
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_filter(filter))
         .init();
     let runtime = tokio::runtime::Runtime::new()?;
     tauri::async_runtime::set(runtime.handle().clone());
