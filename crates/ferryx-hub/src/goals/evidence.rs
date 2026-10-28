@@ -15,6 +15,15 @@ pub const SCREEN_EXCERPT_MAX_CHARS: usize = 4000;
 /// Ref id of the lane's latest agent claim. Never attested.
 pub const CLAIM_REF: &str = "claim:latest";
 
+/// A requirement's verifier script cannot be run as admitted: the lane has no admitted source
+/// revision, or the script is not in it. The worker could have written or rewritten it.
+pub const VERIFIER_UNPINNED: &str = "VERIFIER_UNPINNED";
+
+/// Interpreters whose first argument is the script a verifier runs.
+const SCRIPT_INTERPRETERS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "python", "python3", "node", "bun", "ruby", "perl",
+];
+
 const ATTESTED_PREFIXES: [&str; 4] = ["sig:", "git:", "screen:", "observer:"];
 
 /// True for a ref id Ferryx produced itself. Agent claims and unknown prefixes are not.
@@ -230,12 +239,141 @@ pub fn verifier_signal(verifier: &str) -> Option<DoneSignal> {
     })
 }
 
+/// Index of the argv element naming the verifier's script: a relative path run directly
+/// (`./verify.sh`), or an interpreter's first argument (`sh verify.sh`). A bare program name
+/// (`cargo test`) or an inline `sh -c` names no script.
+fn script_index(argv: &[String]) -> Option<usize> {
+    let program = argv.first()?;
+    if program.contains('/') && !program.starts_with('/') {
+        return Some(0);
+    }
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let script = argv.get(1)?;
+    (SCRIPT_INTERPRETERS.contains(&name) && !script.starts_with('-') && !script.starts_with('/'))
+        .then_some(1)
+}
+
+/// The source revision the lane's worker started from: the commit its task-owned worktree
+/// was created at, before any worker turn.
+async fn admitted_revision(pool: &SqlitePool, lane_key: &str) -> Result<Option<String>, GoalError> {
+    Ok(sqlx::query_scalar(
+        "SELECT start_commit FROM lane_owned_worktrees
+          WHERE lane_key = ? AND start_commit IS NOT NULL ORDER BY rowid LIMIT 1",
+    )
+    .bind(lane_key)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// A verifier script materialized from the admitted revision; its directory is removed on drop.
+struct PinnedScript(std::path::PathBuf);
+
+impl Drop for PinnedScript {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The check to run for `signal`: a command naming a script runs that script's bytes as they
+/// were at `admitted` (read with `git cat-file blob`, no replace objects or filters, into a
+/// run-owned temp file) in the worktree `cwd`, so a worker that rewrites the script changes
+/// nothing. `Err` is a [`VERIFIER_UNPINNED`] detail. Other signals are returned as they are.
+async fn pin_signal(
+    cwd: &str,
+    admitted: Option<&str>,
+    signal: DoneSignal,
+) -> Result<(DoneSignal, Option<PinnedScript>), String> {
+    let (mut argv, stdout_regex) = match signal {
+        DoneSignal::Command { argv, stdout_regex } => (argv, stdout_regex),
+        other => return Ok((other, None)),
+    };
+    let Some(index) = script_index(&argv) else {
+        return Ok((DoneSignal::Command { argv, stdout_regex }, None));
+    };
+    let script = argv[index].trim_start_matches("./").to_owned();
+    if script.is_empty() || script.split('/').any(|part| part == "..") {
+        return Err(format!("{VERIFIER_UNPINNED}: {script} is not a path inside the worktree"));
+    }
+    let Some(admitted) = admitted else {
+        return Err(format!(
+            "{VERIFIER_UNPINNED}: the lane has no admitted source revision to run {script} from"
+        ));
+    };
+    let read = crate::child_env::command("git")
+        .arg("--no-replace-objects")
+        .arg("-C")
+        .arg(cwd)
+        .args(["cat-file", "blob"])
+        .arg(format!("{admitted}:./{script}"))
+        .output()
+        .await
+        .map_err(|error| format!("{VERIFIER_UNPINNED}: git could not read {script}: {error}"))?;
+    if !read.status.success() {
+        return Err(format!(
+            "{VERIFIER_UNPINNED}: {script} is not in the admitted source revision {admitted}"
+        ));
+    }
+    let dir = std::env::temp_dir().join(format!("ferryx-verifier-{}", uuid::Uuid::new_v4()));
+    let pinned = PinnedScript(dir.clone());
+    let name = std::path::Path::new(&script)
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "verifier".into());
+    let path = dir.join(name);
+    let written = async {
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::write(&path, &read.stdout).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+    written.map_err(|error| format!("{VERIFIER_UNPINNED}: {script} was not materialized: {error}"))?;
+    argv[index] = path.to_string_lossy().into_owned();
+    Ok((DoneSignal::Command { argv, stdout_regex }, Some(pinned)))
+}
+
+/// The [`VERIFIER_UNPINNED`] details of the lane's non-waived requirements whose verifier
+/// script cannot be run as admitted. Empty when every script check can be pinned.
+pub async fn unpinned_verifiers(
+    pool: &SqlitePool,
+    lane_key: &str,
+    requirements: &[super::contract::Requirement],
+) -> Result<Vec<String>, GoalError> {
+    let cwd: Option<String> = sqlx::query_scalar("SELECT cwd FROM lanes WHERE key = ?")
+        .bind(lane_key)
+        .fetch_optional(pool)
+        .await?;
+    let Some(cwd) = cwd else {
+        return Ok(Vec::new());
+    };
+    let admitted = admitted_revision(pool, lane_key).await?;
+    let mut unpinned = Vec::new();
+    for requirement in requirements {
+        if requirement.status == super::types::RequirementStatus::Waived {
+            continue;
+        }
+        let Some(signal) = verifier_signal(&requirement.verifier) else {
+            continue;
+        };
+        if let Err(detail) = pin_signal(&cwd, admitted.as_deref(), signal).await {
+            unpinned.push(format!("{} ({})", detail, requirement.id));
+        }
+    }
+    Ok(unpinned)
+}
+
 /// A fresh evidence bundle for one supervisor run: the bound worker session read on its host
 /// (never `lanes.omo_thread_id`) and the latest claim; and, only when the run is on this
 /// machine (`host_id` is `None`), the lane's git state and one Ferryx-run check per
 /// requirement whose verifier names one ([`verifier_signal`], ref [`requirement_check_ref`]).
 /// A run on another host gets no local git and no local checks: this hub's checkout at the
 /// same path is not that host's. Waived requirements are not checked.
+/// A verifier script runs as it was at the lane's admitted source revision ([`pin_signal`]);
+/// one that cannot be pinned is a failed check.
 pub async fn collect_for_run<C: AgentControl + ?Sized>(
     pool: &SqlitePool,
     control: &C,
@@ -274,6 +412,7 @@ pub async fn collect_for_run<C: AgentControl + ?Sized>(
     }
     if host_id.is_none() {
         items.push(git_item(pool, lane_key, &cwd).await);
+        let admitted = admitted_revision(pool, lane_key).await?;
         for requirement in requirements {
             if requirement.status == super::types::RequirementStatus::Waived {
                 continue;
@@ -281,12 +420,21 @@ pub async fn collect_for_run<C: AgentControl + ?Sized>(
             let Some(signal) = verifier_signal(&requirement.verifier) else {
                 continue;
             };
-            let check = check_signals(std::slice::from_ref(&signal), std::path::Path::new(&cwd))
-                .await
-                .pop();
-            let (passed, detail) = match check {
-                Some(check) => (check.passed, format!("{}: {}", check.signal, check.detail)),
-                None => (false, "the check did not run".to_owned()),
+            let (passed, detail) = match pin_signal(&cwd, admitted.as_deref(), signal).await {
+                Err(detail) => (false, detail),
+                Ok((signal, pinned)) => {
+                    let check =
+                        check_signals(std::slice::from_ref(&signal), std::path::Path::new(&cwd))
+                            .await
+                            .pop();
+                    drop(pinned);
+                    match check {
+                        Some(check) => {
+                            (check.passed, format!("{}: {}", check.signal, check.detail))
+                        }
+                        None => (false, "the check did not run".to_owned()),
+                    }
+                }
             };
             items.push(EvidenceItem {
                 reference: requirement_check_ref(&requirement.id),

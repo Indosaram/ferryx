@@ -466,11 +466,13 @@ async function runAutonomy(ctx) {
     const mcp = await ctx.spawn('mcp', config.ferryxCli, ['mcp'], { env, cwd: data, stdin: 'pipe', graceMs: 3_000 });
     mcp.child.stdin.on('error', () => { /* the exit event decides */ });
     const sourceId = `qa-autonomy-${ctx.runId}`;
-    const toolsCalled = ['supervisor.request'];
+    // Every frame actually written to the MCP channel, as written.
+    const sentFrames = [];
+    const sendFrame = (value) => { sentFrames.push(JSON.parse(JSON.stringify(value))); mcp.child.stdin.write(`${JSON.stringify(value)}\n`); };
     const frame = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'supervisor.request', arguments: { requestId: sourceId, action: 'submit', payload: { request: AUTONOMY_BODY, work: AUTONOMY_WORK } } } };
     const cursor = ctx.journal.cursor();
     ctx.evidence.appendJsonl('requests.jsonl', { label: 'submit', surface: 'ferryx-cli mcp', frame, at: new Date().toISOString() });
-    mcp.child.stdin.write(`${JSON.stringify(frame)}\n`);
+    sendFrame(frame);
     const reply = await ctx.waitFor('mcp reply to submit', (e) => e.source === 'mcp' && e.kind === 'stdout' && e.json?.id === 1, { after: cursor, deadlineMs: 30_000 });
     let body = null;
     try { body = JSON.parse(reply.json?.result?.content?.[0]?.text ?? 'null'); } catch { /* asserted below */ }
@@ -518,9 +520,17 @@ async function runAutonomy(ctx) {
     // Every grading turn ran on the retained mhc engine (kind mhc_*, outcome ok); none on omo.
     ctx.assert('grading-ran-on-mhc', graded.length >= 4 && graded.every((call) => call.kind.startsWith('mhc_') && call.outcome === 'ok')
       && stub.requests.some((request) => request.path?.endsWith('/chat/completions')), { calls, providerRequests: stub.requests.length });
-    // The runner sent one MCP frame (the submit) and nothing else; the hub holds one request.
-    const requests = hub.all('SELECT source_message_id FROM supervisor_requests');
-    ctx.assert('only-submit-was-requested', requests.length === 1 && toolsCalled.length === 1, { requests, toolsCalled });
+    // What actually crossed the owner's channel: the frames written to MCP stdin, the
+    // JSON-RPC replies the MCP process emitted, and the requests the hub admitted. Exactly one
+    // supervisor.request submit, answered once, admitted once from MCP: no other tool call,
+    // no correct/approve/resume nudge.
+    const mcpCalls = sentFrames.map((sent) => ({ id: sent.id, method: sent.method, tool: sent.params?.name ?? null, action: sent.params?.arguments?.action ?? null }));
+    const replyIds = ctx.journal.events.filter((e) => e.source === 'mcp' && e.kind === 'stdout' && e.json && e.json.id !== undefined && e.json.id !== null).map((e) => e.json.id);
+    const requests = hub.all('SELECT source_adapter, source_message_id, goal_id FROM supervisor_requests ORDER BY id');
+    ctx.assert('only-submit-was-requested', mcpCalls.length === 1 && mcpCalls[0].method === 'tools/call' && mcpCalls[0].tool === 'supervisor.request' && mcpCalls[0].action === 'submit'
+      && JSON.stringify(replyIds) === JSON.stringify([mcpCalls[0].id])
+      && requests.length === 1 && requests[0].source_message_id === sourceId && requests[0].goal_id === goalId,
+    { mcpCalls, replyIds, requests });
 
     const workers = readWorkerLogs(workerLogs);
     const instructions = workers.flatMap((entry) => entry.entries.filter((line) => line.kind === 'instruction'));

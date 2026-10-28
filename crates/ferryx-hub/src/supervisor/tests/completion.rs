@@ -22,6 +22,7 @@ use crate::agent_control::{
 };
 use crate::error::{HubError, Result};
 use crate::goals::contract::{contract_of, RequirementSpec};
+use crate::goals::evidence::VERIFIER_UNPINNED;
 use crate::goals::types::RequirementStatus;
 use crate::judge::Judge;
 use crate::lanes::kibitzer::ModelTurn;
@@ -184,33 +185,67 @@ impl Drop for TempRepo {
     }
 }
 
-/// A clean git repository (no commits, untracked files only: `git:clean`) holding `result.txt`
-/// with `result` and the requirement's verifier `verify.sh`, which exits 0 only for READY.
-fn clean_repo(result: &str) -> TempRepo {
+fn git(root: &std::path::Path, args: &[&str]) -> String {
+    let output = crate::child_env::std_command("git")
+        .args([
+            "-c",
+            "user.name=qa",
+            "-c",
+            "user.email=qa@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+        ])
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// A clean git repository (`git:clean`: nothing uncommitted, its one commit on a remote
+/// branch) whose admitted commit holds the requirement's verifier `verify.sh`, which exits 0
+/// only for READY, and an untracked `result.txt` with `result`. Returns the admitted commit.
+fn clean_repo(result: &str) -> (TempRepo, String) {
     let root = std::env::temp_dir().join(format!("ferryx-hub-completion-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
-    let status = crate::child_env::std_command("git")
-        .arg("-C")
-        .arg(&root)
-        .arg("init")
-        .status()
-        .unwrap();
-    assert!(status.success());
-    std::fs::write(root.join("result.txt"), result).unwrap();
+    let repo = TempRepo(root.clone());
+    git(&root, &["init", "-q"]);
     std::fs::write(root.join("verify.sh"), "test \"$(cat result.txt)\" = READY\n").unwrap();
-    TempRepo(root)
+    git(&root, &["add", "verify.sh"]);
+    git(&root, &["commit", "-q", "-m", "verifier"]);
+    git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    std::fs::write(root.join("result.txt"), result).unwrap();
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    (repo, head)
 }
 
 /// Points the lane at a clean repository whose result.txt holds `result`, after its pane was
-/// launched. Keep the returned guard alive for the test.
+/// launched, recorded as the lane's task-owned worktree started at the admitted commit (as
+/// the dispatcher's auto worktree records it). Keep the returned guard alive for the test.
 async fn use_clean_repo(pool: &SqlitePool, lane: &str, result: &str) -> TempRepo {
-    let repo = clean_repo(result);
+    let (repo, head) = clean_repo(result);
+    let path = repo.0.to_string_lossy().into_owned();
     sqlx::query("UPDATE lanes SET cwd = ? WHERE key = ?")
-        .bind(repo.0.to_string_lossy().into_owned())
+        .bind(&path)
         .bind(lane)
         .execute(pool)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO lane_owned_worktrees(lane_key, path, state, repo, branch, start_commit, origin_cwd)
+         VALUES (?, ?, 'registered', ?, ?, ?, ?)",
+    )
+    .bind(lane)
+    .bind(&path)
+    .bind(&path)
+    .bind(format!("lane/{lane}"))
+    .bind(&head)
+    .bind(&path)
+    .execute(pool)
+    .await
+    .unwrap();
     repo
 }
 
@@ -348,6 +383,105 @@ async fn the_screen_and_observer_state_alone_never_prove_a_requirement() {
     assert_eq!(state, RunState::Ready, "{detail}");
     assert!(detail.starts_with(VERIFIER_FAILED), "{detail}");
     assert_eq!(requirement_status(&pool, &lane).await.0, RequirementStatus::Pending);
+}
+
+/// The judge cites the right check, but the check Ferryx ran failed (wrong bytes): no
+/// completion, a correction instead.
+/// The worker rewrites the verifier to `exit 0` (and commits it) instead of fixing the work.
+/// Ferryx runs verify.sh as it was at the admitted revision, so the check still fails on the
+/// wrong bytes and the goal never completes, however the judge reads it.
+#[tokio::test]
+async fn a_worker_rewritten_verifier_never_completes_the_goal() {
+    let pool = owner_pool().await;
+    let (goal, lane) = admit(&pool, "m-1", None).await;
+    let control = idle_control();
+    dispatcher(&pool, control.clone(), PANE).drain().await;
+    let repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    std::fs::write(repo.0.join("verify.sh"), "exit 0\n").unwrap();
+    git(&repo.0, &["commit", "-q", "-am", "make the check pass"]);
+    git(&repo.0, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let rewritten = std::process::Command::new("sh")
+        .arg("verify.sh")
+        .current_dir(&repo.0)
+        .status()
+        .unwrap();
+    assert!(rewritten.success(), "the worktree's own verify.sh now passes");
+    settle(&pool, PANE, 1_000).await;
+
+    let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
+    completion_scheduler(&pool, model, control).tick(epoch()).await.unwrap();
+    let (state, detail) = goal_state(&pool, &goal).await;
+    assert_ne!(state, RunState::Completed, "{detail}");
+    assert_eq!(state, RunState::Ready, "{detail}");
+    assert!(detail.starts_with(VERIFIER_FAILED), "{detail}");
+    assert_eq!(requirement_status(&pool, &lane).await.0, RequirementStatus::Pending);
+    let bundle = crate::goals::evidence::collect_for_run(
+        &pool,
+        &RecordingControl::default(),
+        &lane,
+        None,
+        None,
+        &contract_of(&pool, &lane).await.unwrap().unwrap().requirements,
+    )
+    .await
+    .unwrap();
+    assert_eq!(bundle.get("sig:req:r1").unwrap().passed, Some(false), "{:?}", bundle.items);
+}
+
+/// A verifier the admitted revision does not have (the worker added it) is never run; a lane
+/// with no admitted revision has nothing to pin it to. Both wait for the owner.
+#[tokio::test]
+async fn a_verifier_missing_from_the_admitted_revision_waits_for_the_owner() {
+    let pool = owner_pool().await;
+    let (goal, lane) = admit(&pool, "m-1", None).await;
+    let control = idle_control();
+    dispatcher(&pool, control.clone(), PANE).drain().await;
+    let repo = use_clean_repo(&pool, &lane, "READY").await;
+    sqlx::query("UPDATE lane_goal_requirements SET verifier = 'check.sh exits 0' WHERE lane_key = ?")
+        .bind(&lane)
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::write(repo.0.join("check.sh"), "exit 0\n").unwrap();
+    settle(&pool, PANE, 1_000).await;
+    let running = goal_of(&pool, &goal).await.unwrap().unwrap();
+    transition_goal(&pool, &goal, running.revision, RunState::Running, RunState::Verifying, None)
+        .await
+        .unwrap();
+    let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
+    let driver = CompletionDriver::new(pool.clone(), judge(&pool, model.clone()), control, HOST);
+    let held = driver.verify(&goal).await.unwrap();
+    assert!(
+        matches!(&held, Verification::Held { state: RunState::AwaitingOwner, detail } if detail.starts_with(VERIFIER_UNPINNED)),
+        "{held:?}"
+    );
+    assert!(model.prompts().is_empty(), "nothing graded");
+
+    // No admitted revision at all: the original verify.sh is not run as the worker left it.
+    let unpinned = crate::goals::evidence::unpinned_verifiers(
+        &pool,
+        &lane,
+        &[crate::goals::contract::Requirement {
+            verifier: "verify.sh exits 0".into(),
+            ..contract_of(&pool, &lane).await.unwrap().unwrap().requirements[0].clone()
+        }],
+    )
+    .await
+    .unwrap();
+    assert!(unpinned.is_empty(), "verify.sh is in the admitted revision: {unpinned:?}");
+    sqlx::query("DELETE FROM lane_owned_worktrees WHERE lane_key = ?")
+        .bind(&lane)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unpinned = crate::goals::evidence::unpinned_verifiers(
+        &pool,
+        &lane,
+        &contract_of(&pool, &lane).await.unwrap().unwrap().requirements,
+    )
+    .await
+    .unwrap();
+    assert!(unpinned.len() == 1 && unpinned[0].starts_with(VERIFIER_UNPINNED), "{unpinned:?}");
 }
 
 /// The judge cites the right check, but the check Ferryx ran failed (wrong bytes): no

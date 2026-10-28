@@ -292,6 +292,20 @@ impl CompletionDriver {
             );
             return self.hold(&goal, RunState::AwaitingOwner, detail).await;
         }
+        // A verifier script runs as it was at admission; one that cannot be (no admitted
+        // revision, or the script is not in it) is held, never run as the worker left it.
+        if host.is_none() {
+            let unpinned =
+                evidence::unpinned_verifiers(&self.pool, &goal.lane_key, &contract.requirements)
+                    .await?;
+            if !unpinned.is_empty() {
+                let detail = format!(
+                    "{}; the owner waives the requirement or commits its verifier",
+                    unpinned.join("; ")
+                );
+                return self.hold(&goal, RunState::AwaitingOwner, detail).await;
+            }
+        }
         // An early settle (a quiet-timer idle) is not graded: the pane must read idle now.
         if let Some(session_id) = run.provider_session_id.as_deref() {
             if !self.pane_idle(host, session_id).await {
