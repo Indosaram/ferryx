@@ -223,6 +223,28 @@ async fn revoke_self_and_control_management_keep_status_contract() {
 }
 
 #[tokio::test]
+async fn wrong_pin_response_reports_remaining_attempts() {
+    let state = state();
+    state
+        .auth_manager
+        .create_pairing_code(DevicePermission::View);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/v1/pair/exchange",
+            None,
+            Some(r#"{"code":"000000","deviceName":"guess"}"#),
+        )
+        .await;
+    assert_eq!(status, 400);
+    let body = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+    assert_eq!(body["code"], "INVALID_PIN");
+    assert_eq!(body["details"]["remainingAttempts"], 4);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn pairing_budget_is_global_atomic_and_rotation_cannot_reset_it() {
     let state = state();
     let code = state

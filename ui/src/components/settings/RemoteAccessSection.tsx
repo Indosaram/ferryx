@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Radio, Trash2 } from "lucide-react";
 
 import {
+  createPairingCode,
   disableRemoteGateway,
   enableRemoteGateway,
   getAgentControlSettings,
@@ -25,6 +26,7 @@ import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
+import { SegmentedControl } from "../ui/SegmentedControl";
 
 const DEFAULT_RELAY_PLACEHOLDER = DEFAULT_RELAY_ORIGIN;
 
@@ -42,6 +44,92 @@ function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error) return error.message;
   if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
   return fallback;
+}
+
+type PairingRole = "view" | "control";
+
+const ROLE_OPTIONS = [
+  { value: "view", label: "Watch only" },
+  { value: "control", label: "Can type" },
+] as const;
+
+function formatCountdown(seconds: number): string {
+  const s = Math.max(0, seconds);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Mints a one-time pairing code for the chosen role and counts down to its expiry. */
+function PairDeviceCard({ disabled }: { disabled: boolean }) {
+  const [role, setRole] = useState<PairingRole>("view");
+  const [pairing, setPairing] = useState<{ code: string; expiresAt: number; role: PairingRole } | null>(null);
+  const [remaining, setRemaining] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!pairing) return;
+    const tick = () => setRemaining(Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairing]);
+
+  const mint = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const minted = role;
+      const created = await createPairingCode(minted);
+      setPairing({ code: created.code, expiresAt: Date.now() + created.expiresInSeconds * 1000, role: minted });
+      setRemaining(created.expiresInSeconds);
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to create a pairing code"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const expired = pairing !== null && remaining <= 0;
+  const live = pairing !== null && !expired;
+
+  return (
+    <section aria-label="Pair a device" className="mt-8 space-y-3">
+      <h3 className="text-[12px] font-semibold">Pair a device</h3>
+      <Card className="space-y-3 rounded-lg border border-border bg-card p-3 shadow-none">
+        <p className="text-[11px] text-muted-foreground">
+          Open Ferryx on your phone or browser and enter this code. Choose what the device may do.
+        </p>
+        <SegmentedControl<PairingRole>
+          label="Device role"
+          value={role}
+          options={ROLE_OPTIONS}
+          onChange={setRole}
+          disabled={live || busy}
+          className="max-w-64"
+        />
+        {pairing && live ? (
+          <div className="flex items-baseline gap-3">
+            <span data-testid="pair-device-code" className="font-mono text-[22px] tracking-[0.3em] text-foreground">
+              {pairing.code}
+            </span>
+            <span data-testid="pair-device-countdown" role="timer" className="text-[11px] text-muted-foreground">
+              Expires in {formatCountdown(remaining)}
+            </span>
+            <span data-testid="pair-device-role" data-role={pairing.role} className="text-[11px] text-muted-foreground">
+              Grants: {ROLE_OPTIONS.find((option) => option.value === pairing.role)?.label}
+            </span>
+          </div>
+        ) : null}
+        {expired ? <p className="text-[11px] text-muted-foreground">This code has expired.</p> : null}
+        {error ? <p role="alert" className="text-[11px] text-destructive">{error}</p> : null}
+        {!pairing || expired ? (
+          <Button type="button" variant="outline" size="sm" disabled={disabled || busy} onClick={() => void mint()}>
+            {expired ? "New code" : "Pair a device"}
+          </Button>
+        ) : null}
+      </Card>
+    </section>
+  );
 }
 
 /** The agent-control switch, per-device exclusions and the newest audit lines. Hidden outside the desktop shell. */
@@ -374,6 +462,8 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
           </SettingRow>
         ) : null}
       </div>
+
+      <PairDeviceCard disabled={!status?.enabled || statusError} />
 
       <div className="mt-8 space-y-3">
         <h3 className="text-[12px] font-semibold">Authorized Devices</h3>

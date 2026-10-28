@@ -305,6 +305,48 @@ describe("RemoteAccessSection", () => {
     expect(screen.queryByText(/PIN:/i)).toBeNull();
   });
 
+  it("pairs a device for the chosen role and counts the code down to a new-code prompt", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 600 });
+    await act(async () => { render(<RemoteAccessSection />); });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Can type" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+
+    expect(createPairingCode).toHaveBeenCalledWith("control");
+    expect(screen.getByTestId("pair-device-code")).toHaveTextContent("482913");
+    expect(screen.getByTestId("pair-device-countdown")).toHaveTextContent("10:00");
+
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(screen.getByTestId("pair-device-countdown")).toHaveTextContent("9:59");
+    expect(screen.queryByRole("button", { name: "New code" })).toBeNull();
+
+    await act(async () => { vi.advanceTimersByTime(599_000); });
+    expect(screen.queryByTestId("pair-device-code")).toBeNull();
+    expect(screen.getByRole("button", { name: "New code" })).toBeInTheDocument();
+  });
+
+  it("binds the role to a live code and locks the role picker until the code expires", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 60 });
+    await act(async () => { render(<RemoteAccessSection />); });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Can type" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+
+    const watchOnly = screen.getByRole("tab", { name: "Watch only" });
+    expect(watchOnly).toBeDisabled();
+    expect(screen.getByRole("tab", { name: "Can type" })).toBeDisabled();
+    fireEvent.click(watchOnly);
+    expect(screen.getByRole("tab", { name: "Can type" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("pair-device-role")).toHaveAttribute("data-role", "control");
+    expect(createPairingCode).toHaveBeenCalledWith("control");
+
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(screen.queryByTestId("pair-device-role")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Watch only" })).toBeEnabled();
+  });
+
   it("retires Remote Access QR/PIN control: Generate QR button and PIN are absent while the remaining surface renders", async () => {
     render(<RemoteAccessSection />);
 

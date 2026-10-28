@@ -2,6 +2,18 @@ import React, { useState } from "react";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { suggestDeviceName } from "./deviceIdentity";
 
+/** Reads `details.remainingAttempts` from a structured pairing failure, if the gateway sent one. */
+async function remainingAttempts(res: Response): Promise<number | null> {
+  try {
+    const body: unknown = await res.json();
+    const details = body && typeof body === "object" ? (body as { details?: unknown }).details : undefined;
+    const value = details && typeof details === "object" ? (details as { remainingAttempts?: unknown }).remainingAttempts : undefined;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 type PairingPageProps = {
   onPaired: (token: string, metadata?: { machineId?: unknown; displayName?: unknown }) => void;
   transportUrl?: string;
@@ -33,6 +45,16 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       });
 
       if (!res.ok) {
+        if (res.status === 429) {
+          throw new Error("Too many attempts. Wait a moment, then request a new code in Ferryx Desktop.");
+        }
+        if (res.status === 401) {
+          throw new Error("Code expired. Ask for a new code in Ferryx Desktop settings.");
+        }
+        const remaining = await remainingAttempts(res);
+        if (remaining !== null) {
+          throw new Error(`Wrong code. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`);
+        }
         throw new Error(`Pairing failed (${res.status})`);
       }
 
@@ -50,7 +72,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       <div className="w-full max-w-sm bg-card border border-border rounded-lg p-6 shadow-xl">
         <h2 className="text-xl font-bold text-foreground mb-2">Pair Device</h2>
         <p className="text-xs text-muted-foreground mb-6">
-          Enter the 6-digit PIN from your Ferryx Desktop settings (valid for 1 minute).
+          Enter the 6-digit code shown in Ferryx Desktop settings.
         </p>
 
         {error && (

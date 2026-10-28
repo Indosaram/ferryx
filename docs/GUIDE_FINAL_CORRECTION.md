@@ -223,7 +223,7 @@ Dispositions use three categories:
 #### G:461-493 - Pair Exchange Response Schema
 * **Disposition:** Supported recommendation
 * **Authority:** `src-tauri/src/remote/server.rs:332-378`, `src-tauri/src/remote/auth.rs:208-227,469-573`
-* **Resolution:** Retained exchange request and response examples as illustrative schemas. Documented that authentication error responses return plain text.
+* **Resolution:** Retained exchange request and response examples as illustrative schemas. Documented that authentication error responses return JSON with `code`, `message` and `details.remainingAttempts`.
 
 #### G:495-508 - CLI Pre-approval and Relay Token Limitations
 * **Disposition:** Corrected
@@ -312,10 +312,10 @@ Dispositions use three categories:
 * **Authority:** `src-tauri/src/remote/state.rs:147-163,194-235`, `src-tauri/src/daemon/server.rs:1500-1515`
 * **Resolution:** Corrected causal assertions: lack of a default route does not force LAN failure because interface enumeration acts as a fallback; CGNAT detection in Tailscale mode checks address range (`100.64.0.0/10`) without verifying Tailscale service state. Documented that gateway restoration failure does not terminate the daemon and that warnings are silenced in headless mode.
 
-#### G:690-700 - Plain Text Authentication Errors and Expiration Windows
+#### G:690-700 - JSON Authentication Errors and Expiration Windows
 * **Disposition:** Corrected
-* **Authority:** `src-tauri/src/remote/server.rs:354-368`, `src-tauri/src/remote/auth.rs:196-199,269-286,446-467`
-* **Resolution:** Replaced JSON error examples with plain text error bodies (`Invalid pairing code` for HTTP 400, `Pairing code expired` for HTTP 401). Clarified that only HTTP 429 returns JSON. Noted that expired codes may be pruned before lookup, yielding HTTP 400. Documented that waiting 60 seconds allows the rate-limiting window to expire but does not revive an expired PIN.
+* **Authority:** `src-tauri/src/remote/server.rs:405-480`, `src-tauri/src/remote/auth.rs:196-199,269-286,446-467`
+* **Resolution:** Error bodies are JSON: `{code: INVALID_PIN, message: "Invalid pairing code", details: {remainingAttempts}}` for HTTP 400 and `{code: PIN_EXPIRED, message: "Pairing code expired", details: {remainingAttempts}}` for HTTP 401; HTTP 429 keeps its `pairing_rate_limited` envelope. Noted that expired codes may be pruned before lookup, yielding HTTP 400. Documented that waiting 60 seconds allows the rate-limiting window to expire but does not revive an expired PIN.
 
 #### G:702-709 - Readiness Signal Scheduling and Operator Timeouts
 * **Disposition:** Corrected
