@@ -17,6 +17,8 @@ import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
 import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
+import { runSlackLeg } from './slack.mjs';
+import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -278,7 +280,7 @@ async function runAdmission(ctx) {
   if (!setup.json?.projectId) throw new HarnessError('SETUP_FAILED', 'supervisor setup did not return a project; nothing further can be admitted');
 
   // 2. Isolated daemon (its hub runs the dispatcher) and the fixture workspace.
-  await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
   const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), ADMISSION_WORKSPACE_ID, realpathSync(workspaceRoot));
   ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
   // FERRYX_DAEMON_READY precedes the hub: the first MCP submit waits until the hub answers.
@@ -401,6 +403,36 @@ async function runAdmission(ctx) {
     },
     sourceId, goalId, receipt, setup: setup.json, binding: finalBinding, goal: finalGoal, dispatches: dispatched.dispatches,
     counts: { afterStart, afterReplay, afterEdited, afterQuestion, final: finalCounts }, toolsCalled, hubHttp: env.FERRYX_HUB_TRACKER_ADDR,
+  });
+
+  // 10. Slack leg (plan task 11): the same admission reached from an owner's Slack DM through
+  //     the production Slack ingress adapter of a fresh hub generation (slack.mjs). The MCP
+  //     daemon is stopped first. The Slack owner gets its own installation (HOME, data dir,
+  //     runtime dir, hub db) under <data>/slack-leg: an installation has one owner, and the
+  //     main leg's `qa-owner` is no Slack principal.
+  await ctx.terminate(mcp, 'slack leg');
+  await ctx.terminate(daemon, 'slack leg');
+  const slackRoot = join(data, 'slack-leg');
+  const slackWorkspace = join(slackRoot, 'ws');
+  const slackRepo = join(slackWorkspace, 'qa-slack');
+  const slackDb = join(slackRoot, 'hub', 'hub.sqlite');
+  mkdirSync(slackRepo, { recursive: true });
+  mkdirSync(dirname(slackDb), { recursive: true });
+  for (const [label, args] of [
+    ['git-init-slack', [...gitArgs, 'init', '-q', slackRepo]],
+    ['git-commit-slack', [...gitArgs, '-C', slackRepo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  await runSlackLeg(ctx, {
+    root: slackRoot,
+    setupCli: (owner, legEnv) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', 'qa-slack', '--repo-identity', 'qa:qa-slack',
+      '--host', ADMISSION_HOST, '--git-common-dir', realpathSync(join(slackRepo, '.git')), '--json'], { label: 'supervisor-setup-slack', env: legEnv }),
+    hub: await openHubReader(slackDb), dbPath: slackDb, waitForChange,
+    registerWorkspace: (legEnv) => registerWorkspace(ctx, join(legEnv.FERRYX_RUNTIME_DIR, 'daemon.sock'), ADMISSION_WORKSPACE_ID, realpathSync(slackWorkspace)),
+    // The fixture pane shell, so a dispatched Slack goal never launches a real agent.
+    extraEnv: { SHELL: shell, FERRYX_HUB_WORKSPACE: ADMISSION_WORKSPACE_ID, OMON_LANE_AUTO_WORKTREE: '1' },
   });
 }
 
@@ -1221,7 +1253,8 @@ async function runAuthority(ctx) {
   const stale = await http('owner-pause-stale', 'POST', '/api/v1/supervisor/request', { token: owner.token, body: { ...pause, requestId: `${pause.requestId}-again` } });
   ctx.assert('stale-revision-409', stale.status === 409 && stale.body?.error?.code === 'REVISION_CONFLICT', { status: stale.status, body: stale.body });
   const receipts = await http('owner-memory-receipts', 'GET', '/api/v1/supervisor/memory', { token: owner.token });
-  ctx.assert('memory-receipts-unavailable-503', receipts.status === 503 && receipts.body?.error?.code === 'MEMORY_RECEIPTS_UNAVAILABLE', { status: receipts.status, body: receipts.body });
+  // No mhc engine runs in this daemon: the native receipt listing is unavailable, never empty.
+  ctx.assert('memory-receipts-unavailable-503', receipts.status === 503 && receipts.body?.error?.code === 'MEMORY_UNAVAILABLE', { status: receipts.status, body: receipts.body });
   const final = { goal: goalRow(), dispatches: dispatchRows() };
   ctx.assert('only-the-owner-changed-the-goal', final.goal?.run_state === 'paused' && final.goal?.revision === revision + 1
     && final.dispatches.every((row) => row.state === 'ready' || row.state === 'superseded'), final);
@@ -1762,20 +1795,33 @@ async function runCapabilities(ctx) {
   }
 }
 
+// The memory and usage scenarios (task 15, memory-usage.mjs) reuse these helpers.
+const memoryUsageDeps = Object.freeze({
+  supervisedHub,
+  hubControl,
+  work: (instruction) => ({ ...ADMISSION_WORK, instruction }),
+});
+const loadMemoryUsage = async () => import('./memory-usage.mjs');
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
   admission: Object.freeze({
     implemented: true,
     task: '7',
-    summary: 'Submit the fixture request, replay the same source id, ask "What can you do?": one goal, one initial dispatch',
-    deadlineMs: 6 * 60_000,
+    summary: 'Submit the fixture request, replay the same source id, ask "What can you do?": one goal, one initial dispatch; then the owner\'s Slack DM through the production Slack adapter: one goal, foreign user and redelivery add nothing (task 11)',
+    deadlineMs: 14 * 60_000,
     requiredAssertions: [
       'setup-created-identity-project-and-host', 'setup-rerun-returns-the-same-ids', 'setup-conflicting-rebind-refused', 'workspace-registered', 'hub-open-before-the-first-submit',
       'submit-admitted-with-acknowledgment-naming-goal', 'initial-dispatch-started-without-drive-call', 'exactly-one-worker-started',
       'replay-returns-the-same-receipt', 'replay-created-no-second-dispatch', 'edited-replay-returns-request-conflict',
       'edited-replay-created-no-second-worker', 'question-is-conversational', 'question-created-no-goal-or-dispatch',
       'final-one-goal-one-dispatch-one-worker',
+      // Slack leg (task 11, slack.mjs).
+      'slack-owner-identity-provisioned', 'slack-adapter-connected-through-loopback-socket-mode',
+      'owner-dm-created-exactly-one-goal-through-common-admission', 'owner-reply-carries-the-persisted-acknowledgment',
+      'foreign-user-yields-no-goal-and-no-learned-fact', 'owner-text-learned-once', 'duplicate-delivery-yields-no-new-goal-and-no-learned-fact',
+      'foreign-text-never-reached-the-engine',
     ],
     run: runAdmission,
   }),
@@ -1839,7 +1885,7 @@ export const SCENARIOS = Object.freeze({
   authority: Object.freeze({
     implemented: true,
     task: '13',
-    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
+    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503 without an engine',
     deadlineMs: 5 * 60_000,
     requiredAssertions: ['hub-open-before-the-owner-submit', 'owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
       'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-mcp-submit-forbidden', 'pane-mcp-opens-the-isolated-hub-db', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
@@ -1847,7 +1893,14 @@ export const SCENARIOS = Object.freeze({
       'memory-receipts-unavailable-503', 'only-the-owner-changed-the-goal'],
     run: runAuthority,
   }),
-  memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
+  memory: Object.freeze({
+    implemented: true,
+    task: '15',
+    summary: 'Teach through the desktop adapter (receipt + provenance), recall in a new context, worker-injected MCP text never teaches, a one-time exception reaches only its goal and is absent next run, forget then daemon-hub restart and replay of the old message: the item never reaches the model again',
+    deadlineMs: 20 * 60_000,
+    requiredAssertions: MEMORY_REQUIRED_ASSERTIONS,
+    run: (ctx) => loadMemoryUsage().then((module) => module.runMemory(ctx, memoryUsageDeps)),
+  }),
   capabilities: Object.freeze({
     implemented: true,
     task: '12',
@@ -1867,7 +1920,14 @@ export const SCENARIOS = Object.freeze({
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
   // Task 14, implemented in surfaces.mjs.
   surfaces: SURFACES_SCENARIO,
-  usage: planned('15', 'Replay the same reports before/after the scheduling change: no idle calls, stable prefix hash, every call has a cause'),
+  usage: Object.freeze({
+    implemented: true,
+    task: '15',
+    summary: 'Two differing goals assessed through the engine share one prefix hash; every engine call has a cause and unreported usage is null; a goal waiting on a subscribed dependency makes zero provider requests and zero model-call rows across delivered owner wakes',
+    deadlineMs: 20 * 60_000,
+    requiredAssertions: USAGE_REQUIRED_ASSERTIONS,
+    run: (ctx) => loadMemoryUsage().then((module) => module.runUsage(ctx, memoryUsageDeps)),
+  }),
 });
 
 async function startSleeper(ctx, id, flags, graceMs, { extraEnv = {}, onLine, detached = false } = {}) {

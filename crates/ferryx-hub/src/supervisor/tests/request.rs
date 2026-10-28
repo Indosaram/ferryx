@@ -9,8 +9,7 @@ use crate::agent_control::{AgentOp, RecordingControl};
 use crate::goals::contract::{contract_of, RequirementSpec};
 use crate::goals::types::GoalMode;
 use crate::supervisor::request::{
-    handle, parse_envelope, status_for_code, RequestContext, MEMORY_FORGET_UNAVAILABLE,
-    MEMORY_UNAVAILABLE,
+    handle, parse_envelope, status_for_code, RequestContext, MEMORY_UNAVAILABLE,
 };
 use crate::supervisor::wakes::{StateHandler, WakeScheduler};
 use crate::supervisor::{
@@ -769,7 +768,7 @@ async fn memory_actions_without_an_engine_are_unavailable_and_change_nothing() {
         .unwrap_err();
     assert_eq!(
         (refused.code.as_str(), refused.status),
-        (MEMORY_FORGET_UNAVAILABLE, 503)
+        (MEMORY_UNAVAILABLE, 503)
     );
     assert_eq!(fingerprint(&fixture.pool).await, before);
 }
@@ -793,6 +792,8 @@ fn wire_codes_map_to_the_contract_statuses() {
         ("SOMETHING_NEW", 500),
         ("MHC_NOT_RUNNING", 503),
         ("MEMORY_UNAVAILABLE", 503),
+        ("MEMORY_CONTENT_RETAINED", 409),
+        ("MEMORY_REFUSED", 409),
     ] {
         assert_eq!(status_for_code(code), status, "{code}");
     }

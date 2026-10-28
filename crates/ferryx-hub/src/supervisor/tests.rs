@@ -9,9 +9,11 @@
 //! `completion` covers verified completion from settled runs and owner precedence (todo 10).
 //! `request` covers the shared request service behind every adapter (todo 13).
 //! `recovery` crashes the hub at every effect boundary and restarts it (todo 12).
+//! `memory` covers native owner memory: teach, forget, correct, provenance and learning (todo 15).
 mod admission;
 mod bound_session;
 mod completion;
+mod memory;
 mod receipts;
 mod recovery;
 mod request;

@@ -3628,6 +3628,7 @@ pub mod changes;
 pub mod completion;
 pub mod delivery;
 pub mod dispatcher;
+pub mod memory;
 pub mod receipts;
 pub mod request;
 pub mod wakes;

@@ -120,6 +120,21 @@ lines.on('close', () => {
   record({ kind: 'stdin-closed' });
   process.exit(0);
 });
+// A read from a pty whose master is gone fails with EIO (Linux) instead of ending: that is the
+// same terminal hang-up as SIGHUP, which may still be queued behind it. Any other input error,
+// and anything uncaught, is recorded as what it is (not a clean exit) instead of dying silently.
+process.stdin.on('error', (error) => {
+  if (error?.code === 'EIO' || error?.code === 'ENXIO') {
+    record({ kind: 'hangup', via: `stdin ${error.code}` });
+    process.exit(0);
+  }
+  record({ kind: 'stdin-error', error: String(error?.code ?? error?.message ?? error) });
+  process.exit(3);
+});
+process.on('uncaughtException', (error) => {
+  record({ kind: 'crashed', error: String(error?.stack ?? error) });
+  process.exit(4);
+});
 // The pane child is a session leader on its PTY: when the daemon exits the kernel hangs the
 // terminal up and sends SIGHUP, usually before readline sees the input close. Record it and exit.
 process.on('SIGHUP', () => { record({ kind: 'hangup' }); process.exit(0); });

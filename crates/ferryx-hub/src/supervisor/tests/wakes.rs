@@ -1371,3 +1371,44 @@ async fn an_owner_pause_reaches_the_loop_through_the_store_poke() {
     assert!(paused.urgent);
     task.abort();
 }
+
+/// Records the engine-call attribution its caller set (todo 15).
+struct CauseJudge(Mutex<Vec<Option<crate::usage::CallCause>>>);
+
+#[async_trait]
+impl WakeJudge for CauseJudge {
+    async fn score(&self, _state: &str) -> Result<f64, String> {
+        self.0.lock().unwrap().push(crate::usage::current_cause());
+        Ok(0.9)
+    }
+}
+
+/// A judged report batch attributes its model call to the wake turn: the causes, the turn id,
+/// the goal and revision, and every merged event id.
+#[tokio::test]
+async fn a_wake_turns_model_call_carries_its_cause_and_merged_event_ids() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let goal = admit(&fixture, "attributed").await;
+    let request = start_run(pool, &goal, "run-1").await;
+    settle_run(pool, &request, "run-1").await;
+    let handler = Recorder::plain();
+    let judge = Arc::new(CauseJudge(Mutex::new(Vec::new())));
+    let scheduler = WakeScheduler::new(pool.clone(), handler.clone()).with_judge(judge.clone());
+    scheduler.tick(epoch()).await.unwrap();
+    let t0 = epoch() + secs(100);
+    for (offset, event_id) in [(0, "rep-a"), (1, "rep-b")] {
+        report(pool, &goal, event_id, t0 + secs(offset)).await.unwrap();
+    }
+    let due = scheduler.tick(t0 + secs(30)).await.unwrap();
+    assert_eq!(due.delivered.len(), 1);
+    let turn = handler.last();
+    let seen = judge.0.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    let cause = seen[0].clone().expect("the judge call was attributed");
+    assert_eq!(cause.cause, "wake:report");
+    assert_eq!(cause.goal_id.as_deref(), Some(goal.as_str()));
+    assert_eq!(cause.goal_revision, Some(turn.goal_revision));
+    assert_eq!(cause.wake_turn_id, Some(turn.turn_id));
+    assert_eq!(cause.merged_event_ids, ["rep-a", "rep-b"]);
+}

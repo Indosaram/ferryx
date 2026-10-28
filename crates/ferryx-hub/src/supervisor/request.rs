@@ -29,6 +29,7 @@ use sqlx::SqlitePool;
 
 use super::admission::{self, ActorContext, AdmissionError, AdoptWork, OwnerChoices, SubmitWork};
 use super::dispatcher::{GRANT_REVOKED, TURN_LIMIT};
+use super::memory::{ForgetPayload, TeachPayload};
 use super::wakes::{self, DependencyError};
 use super::{
     execution_binding_of, goal_of, identity_of, waits_of, ChannelProvider, RunState,
@@ -37,15 +38,10 @@ use super::{
 use crate::agent_control::{AgentControl, AgentOp, LOCAL_HOST_ID};
 use crate::goals::contract::{self, RequirementSpec};
 use crate::goals::types::GoalMode;
-use crate::meta::mhc_supervisor::{IngestOutcome, MhcSupervisor};
+use crate::meta::mhc_supervisor::OwnerMemory;
 use crate::storage::WriteTx;
 
-/// No memory engine is reachable from this process (the MCP server and CLI never run one).
-pub const MEMORY_UNAVAILABLE: &str = "MEMORY_UNAVAILABLE";
-/// The hub has no native memory-forget/correct RPC yet (todo 15 completes it).
-pub const MEMORY_FORGET_UNAVAILABLE: &str = "MEMORY_FORGET_UNAVAILABLE";
-/// The hub has no native memory-receipt listing yet (todo 15 completes it).
-pub const MEMORY_RECEIPTS_UNAVAILABLE: &str = "MEMORY_RECEIPTS_UNAVAILABLE";
+pub use super::memory::MEMORY_UNAVAILABLE;
 /// `state_detail` prefix of an owner pause.
 pub const OWNER_PAUSED: &str = "OWNER_PAUSED";
 /// `state_detail` prefix of an owner cancel.
@@ -111,6 +107,8 @@ pub fn status_for_code(code: &str) -> u16 {
         | "SESSION_MISMATCH"
         | "TURN_IN_FLIGHT"
         | NOTHING_TO_RELEASE
+        | super::memory::MEMORY_CONTENT_RETAINED
+        | super::memory::MEMORY_REFUSED
         | super::SUPERVISOR_OWNED
         | super::SETUP_CONFLICT
         | admission::SCOPE_NEEDS_OWNER
@@ -177,8 +175,8 @@ pub struct RequestContext {
     /// Agent control for stopping a cancelled goal's live run. `None` in processes that never
     /// transmit (the MCP server).
     pub control: Option<Arc<dyn AgentControl>>,
-    /// The retained mhc supervisor, when this process runs one.
-    pub memory: Option<MhcSupervisor>,
+    /// The retained mhc supervisor's native owner memory, when this process runs one.
+    pub memory: Option<Arc<dyn OwnerMemory>>,
 }
 
 /// The request envelope. Unknown fields (an `actor`, say) are refused.
@@ -295,18 +293,6 @@ struct DependPayload {
     event_key: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TeachPayload {
-    text: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ForgetPayload {
-    memory_id: String,
-}
-
 fn payload<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, RequestFailure> {
     serde_json::from_value(value.clone()).map_err(RequestFailure::invalid)
 }
@@ -363,24 +349,85 @@ pub async fn handle(
     let (envelope, action) = parse_envelope(value)?;
     match action {
         Action::Message | Action::Submit | Action::Adopt => {
-            admit(pool, context, &envelope, action).await
+            let mut answer = admit(pool, context, &envelope, action).await?;
+            learn(pool, context, &envelope, action, &mut answer);
+            Ok(answer)
         }
-        Action::Teach => teach(pool, context, &envelope).await,
+        Action::Teach => {
+            let teach: TeachPayload = payload(&envelope.payload)?;
+            require_text("text", &teach.text)?;
+            if let Some(receipt) = &teach.replaces {
+                require_text("replaces", receipt)?;
+            }
+            super::memory::teach(
+                pool,
+                context,
+                &envelope.request_id,
+                envelope.project_id.as_deref(),
+                &teach,
+            )
+            .await
+        }
         Action::Forget => {
             let forget: ForgetPayload = payload(&envelope.payload)?;
             require_text("memoryId", &forget.memory_id)?;
-            owner_identity(pool, context).await?;
-            Err(RequestFailure::new(
-                MEMORY_FORGET_UNAVAILABLE,
-                "the hub has no native memory forget/correct operation yet; nothing was forgotten",
-            ))
+            if envelope.project_id.is_some() {
+                return Err(RequestFailure::invalid(
+                    "forget names a receipt, not a project",
+                ));
+            }
+            super::memory::forget(pool, context, &envelope.request_id, &forget).await
         }
         Action::Correct
         | Action::Pause
         | Action::Resume
         | Action::Cancel
         | Action::Approve
-        | Action::Depend => goal_action(pool, context, &envelope, action).await,
+        | Action::Depend => {
+            let mut answer = goal_action(pool, context, &envelope, action).await?;
+            learn(pool, context, &envelope, action, &mut answer);
+            Ok(answer)
+        }
+    }
+}
+
+/// The owner-authored text of an accepted request, when it is one the owner writes in words:
+/// a message, a submitted request or a correction. An adoption, a control action or a
+/// dependency carries none.
+fn owner_words(envelope: &Envelope, action: Action) -> Option<String> {
+    let field = match action {
+        Action::Message | Action::Correct => "text",
+        Action::Submit => "request",
+        _ => return None,
+    };
+    envelope
+        .payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Owner learning of an accepted request's words, reported on its answer as `learning`.
+fn learn(
+    pool: &SqlitePool,
+    context: &RequestContext,
+    envelope: &Envelope,
+    action: Action,
+    answer: &mut Value,
+) {
+    let Some(text) = owner_words(envelope, action) else {
+        return;
+    };
+    // A replayed request is the same source: the engine and the provenance row dedupe it.
+    let learning = super::memory::learn_in_background(
+        pool,
+        context,
+        &envelope.request_id,
+        envelope.project_id.as_deref(),
+        &text,
+    );
+    if let Some(fields) = answer.as_object_mut() {
+        fields.insert("learning".into(), learning);
     }
 }
 
@@ -1060,6 +1107,11 @@ fn corrected_instruction(
         "Owner correction at goal revision {revision} (verbatim):\n{}\n",
         correct.text.trim()
     ));
+    if let Some(block) =
+        super::memory::task_only_block(&super::memory::split_task_only(&correct.text).1)
+    {
+        text.push_str(&format!("\n{block}\n"));
+    }
     if let Some(requirements) = &correct.requirements {
         text.push_str("\nThe requirements are now:\n");
         for requirement in requirements {
@@ -1130,31 +1182,6 @@ async fn stop_worker(
     }
 }
 
-async fn teach(
-    pool: &SqlitePool,
-    context: &RequestContext,
-    envelope: &Envelope,
-) -> Result<Value, RequestFailure> {
-    let teach: TeachPayload = payload(&envelope.payload)?;
-    require_text("text", &teach.text)?;
-    owner_identity(pool, context).await?;
-    let Some(memory) = &context.memory else {
-        return Err(RequestFailure::new(
-            MEMORY_UNAVAILABLE,
-            "no native supervisor memory engine runs in this process; nothing was learned",
-        ));
-    };
-    let source = format!("{}:{}", context.adapter, envelope.request_id);
-    match memory.ingest_owner(&source, &teach.text).await {
-        // Accepted by the owner-ingest session; persisted/applied receipts are todo 15.
-        Ok(IngestOutcome::Learned { .. }) => Ok(json!({"action": "teach",
-            "memory": {"state": "accepted", "sourceMessageId": source, "duplicate": false}})),
-        Ok(IngestOutcome::Duplicate) => Ok(json!({"action": "teach",
-            "memory": {"state": "accepted", "sourceMessageId": source, "duplicate": true}})),
-        Err(fault) => Err(RequestFailure::new(fault.code(), fault.to_string())),
-    }
-}
-
 /// The legacy lane pause (`SupervisorSetPaused`, remote `POST /supervisor/pause`) as an
 /// adapter to this service. `Ok(None)`: the lane is not a supervisor goal's, the legacy lane
 /// pause applies unchanged. A supervisor goal's lane is paused or resumed through the goal
@@ -1212,12 +1239,12 @@ pub async fn lane_pause(
     Ok(Some(true))
 }
 
-/// The memory receipt listing the remote `GET /memory` serves: unavailable until todo 15.
-pub fn memory_receipts_unavailable() -> RequestFailure {
-    RequestFailure::new(
-        MEMORY_RECEIPTS_UNAVAILABLE,
-        "the hub has no native memory receipt listing yet",
-    )
+/// The owner's native memory receipts with their provenance, as `GET /memory` serves them.
+pub async fn memory_receipts(
+    pool: &SqlitePool,
+    context: &RequestContext,
+) -> Result<Value, RequestFailure> {
+    super::memory::receipts(pool, context, None).await
 }
 
 /// A goal's lane title and continuation budget (`mode`, `turn_limit`, `turns_used`), each
