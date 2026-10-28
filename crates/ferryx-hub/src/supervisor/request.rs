@@ -1220,6 +1220,10 @@ pub fn memory_receipts_unavailable() -> RequestFailure {
     )
 }
 
+/// A goal's lane title and continuation budget (`mode`, `turn_limit`, `turns_used`), each
+/// budget field null without a contract row.
+type LaneTerms = (String, Option<String>, Option<i64>, Option<i64>);
+
 /// One goal as every adapter reports it: identity, authoritative revision, run state, wait
 /// reason, pending waits and the next persisted trigger, plus what the Supervisor views show
 /// about it: the lane title, the continuation budget (`mode`, `turnLimit`, `turnsUsed`; null
@@ -1243,7 +1247,7 @@ pub async fn goal_receipt(pool: &SqlitePool, goal_id: &str) -> Result<Value, Req
     .bind(goal_id)
     .fetch_one(pool)
     .await?;
-    let lane: Option<(String, Option<String>, Option<i64>, Option<i64>)> = sqlx::query_as(
+    let lane: Option<LaneTerms> = sqlx::query_as(
         "SELECT l.title, g.mode, g.turn_limit, g.turns_used
          FROM lanes l LEFT JOIN lane_goal g ON g.lane_key = l.key WHERE l.key = ?",
     )
