@@ -214,7 +214,7 @@ impl SupervisorError {
             SupervisorError::SetupConflict(_) => SETUP_CONFLICT,
             SupervisorError::SessionAlreadyBound { .. } => SESSION_ALREADY_BOUND,
             SupervisorError::IntakeClosed(_) => cutover::SUPERVISOR_INTAKE_CLOSED,
-            SupervisorError::EngineUnavailable { code, .. } => code,
+            SupervisorError::EngineUnavailable { code, .. } => *code,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
             | SupervisorError::Goal(_) => "INVALID_REQUEST",

@@ -19,6 +19,7 @@ import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harn
 import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
 import { runSlackLeg } from './slack.mjs';
 import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
+import { LEGACY_REQUIRED_ASSERTIONS } from './legacy.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -2448,6 +2449,23 @@ const memoryUsageDeps = Object.freeze({
 });
 const loadMemoryUsage = async () => import('./memory-usage.mjs');
 
+// The legacy scenario (task 16, legacy.mjs) reuses these helpers.
+const legacyDeps = Object.freeze({
+  supervisedHub,
+  hubControl,
+  hubStatusUntil,
+  goalRows,
+  inputsWith,
+  readWorkerLogs,
+  waitForChange,
+  survived,
+  shellQuote,
+  heldStates: HELD_STATES,
+  work: ADMISSION_WORK,
+  project: ADMISSION_PROJECT,
+});
+const loadLegacy = async () => import('./legacy.mjs');
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -2598,7 +2616,18 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runCapabilities,
   }),
-  legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),
+  legacy: Object.freeze({
+    implemented: true,
+    task: '16',
+    summary: 'Upgrade from an omo snapshot with historical closed/failed/blocked lanes, a legacy Slack session and cron jobs: nothing runs and new work is unavailable; cutover without an mhc capability is refused while the old conversation stays readable; cutover adopts one safe lane once (retry is duplicate); a rollback stops new scheduling and keeps receipts and panes; a second cutover recovers; cron jobs never change',
+    deadlineMs: 15 * 60_000,
+    requiredAssertions: LEGACY_REQUIRED_ASSERTIONS,
+    notCovered: [
+      { clause: 'session-adoption-untrusted-context', reason: 'the fixture worker does not show what it was told beyond the owner request line, so the fenced history is asserted on the stored dispatch instruction in the hub test', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/cutover.rs adopting_a_legacy_lane_or_session_happens_once_and_a_retry_is_a_duplicate' },
+      { clause: 'legacy-goal-loop-after-cutover', reason: 'a legacy goal turn needs a live legacy pane and a judge answer; the runner has no product surface that starts a legacy lane', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/cutover.rs a_cutover_stops_the_legacy_intake_before_the_unified_intake_opens' },
+    ],
+    run: (ctx) => loadLegacy().then((module) => module.runLegacy(ctx, legacyDeps)),
+  }),
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
   // Task 14, implemented in surfaces.mjs.
   surfaces: SURFACES_SCENARIO,
