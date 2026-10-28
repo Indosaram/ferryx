@@ -42,8 +42,8 @@
 
 | Builder | OS / Arch | sccache Version | Cache Storage | Cargo Config Location | Persistent Release Path |
 |---|---|---|---|---|---|
-| **MacBook** | macOS arm64 | `0.17.0` | MinIO S3 (`100.126.171.58:9000/sccache`) via launchd daemon (`port 4226`) | `~/.cargo/config.toml` (`/opt/homebrew/bin/sccache`) | Persistent worktree or `CARGO_TARGET_DIR` |
-| **omaki** | Arch Linux x86_64 | `0.17.0` | Local NVMe (`/home/indo/.cache/sccache`, 50 GiB max) | `/home/indo/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/indo/ferryx-release` |
+| **MacBook** | macOS arm64 | `0.16.0` | MinIO S3 (`100.126.171.58:9000/sccache`) via launchd daemon (`port 4226`) | `~/.cargo/config.toml` (`/opt/homebrew/bin/sccache`) | Persistent worktree or `CARGO_TARGET_DIR` |
+| **omaki** | Arch Linux x86_64 | `0.16.0-3` | Local NVMe (`/home/indo/.cache/sccache`, 50 GiB max) | `/home/indo/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/indo/ferryx-release` |
 | **maho-win** | Windows 11 x86_64 | `0.17.0` | Local disk (`C:\Users\sook\.cache\maho\sccache`, 50 GiB max) | `C:\Users\sook\.cargo\config.toml` (`sccache.exe`) | `C:\Users\sook\ferryx-winbuild\ferryx-release` |
 
 ---
