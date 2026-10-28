@@ -312,6 +312,23 @@ function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+/** The events socket's push that a session's prompt card may have changed (answered elsewhere). */
+type AgentPromptChange = { sessionId: string; promptId: string | null };
+
+function parseAgentPromptChange(raw: string): AgentPromptChange | null {
+  let message: unknown;
+  try {
+    message = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const event = record(message);
+  if (event?.type !== "agentPromptChanged") return null;
+  const sessionId = optionalString(event.sessionId);
+  if (!sessionId) return null;
+  return { sessionId, promptId: optionalString(event.promptId) };
+}
+
 function parseActiveSelectionEvent(raw: unknown): RemoteActiveSelectionChange | null {
   if (typeof raw !== "string") return null;
   let message: unknown;
@@ -1249,6 +1266,8 @@ export const RemoteHostConnection: React.FC<{
   const chatPromptIdRef = useRef<string | null>(null);
   const chatPromptRevisionRef = useRef<string | null>(null);
   const chatPromptGenerationRef = useRef(0);
+  /** Set by the prompt lane: a pushed `agentPromptChanged` frame for a session re-reads its card. */
+  const chatPromptPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -2175,6 +2194,14 @@ export const RemoteHostConnection: React.FC<{
         : raw instanceof Uint8Array
         ? new TextDecoder().decode(raw)
         : String(raw ?? "");
+
+      const promptChange = parseAgentPromptChange(text);
+      if (promptChange) {
+        chatPromptPushRef.current?.(promptChange);
+        if (activeTunnelConnection) supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
+        else supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
+        return;
+      }
 
       if (activeTunnelConnection) {
         supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
@@ -3540,12 +3567,15 @@ export const RemoteHostConnection: React.FC<{
     }
     let cancelled = false;
     let fetching = false;
+    // A push that lands while a read is in flight: that read's answer may predate it.
+    let pushedDuringRead = false;
     const controller = new AbortController();
 
     const readPrompt = async () => {
       if (cancelled || fetching) return;
       if (typeof document !== "undefined" && document.hidden) return;
       fetching = true;
+      pushedDuringRead = false;
       try {
         const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, chatAgentType)}`;
         const response = await remoteFetch(transportBaseUrl, path, {
@@ -3563,6 +3593,7 @@ export const RemoteHostConnection: React.FC<{
           return;
         }
         const body: unknown = await response.json();
+        if (pushedDuringRead) return;
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
         const revision = prompt === null ? null : parseChatScreenRevision(body);
@@ -3589,6 +3620,7 @@ export const RemoteHostConnection: React.FC<{
         /* a transient prompt read keeps the card the user is looking at */
       } finally {
         fetching = false;
+        if (pushedDuringRead && !cancelled) void readPrompt();
       }
     };
 
@@ -3596,10 +3628,27 @@ export const RemoteHostConnection: React.FC<{
     const timer = setInterval(() => {
       void readPrompt();
     }, 3000);
+    // A card answered on another device closes here at once: the push drops a card the frame
+    // says is gone, then the read confirms the screen. The 3s poll stays as the fallback.
+    chatPromptPushRef.current = (change) => {
+      if (cancelled || change.sessionId !== sessionId) return;
+      if (chatPromptIdRef.current !== null && change.promptId !== chatPromptIdRef.current) {
+        chatPromptGenerationRef.current += 1;
+        chatPromptIdRef.current = null;
+        chatPromptRevisionRef.current = null;
+        setChatTypedAnswer(null);
+        setChatPromptError(null);
+        setChatPrompt(null);
+        setChatScreenRevision(null);
+      }
+      if (fetching) pushedDuringRead = true;
+      else void readPrompt();
+    };
     return () => {
       cancelled = true;
       controller.abort();
       clearInterval(timer);
+      chatPromptPushRef.current = null;
     };
   }, [chatAgentIsNative, chatAgentType, chatPromptRefresh, chatTargetKey, effectiveSessionId, token, transportBaseUrl, viewMode]);
 

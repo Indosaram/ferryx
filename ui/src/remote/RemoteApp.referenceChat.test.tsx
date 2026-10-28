@@ -1307,6 +1307,26 @@ describe("reference chat lane review fixes", () => {
     vi.unstubAllGlobals();
   });
 
+  it("ui-prompt-push-1: a pushed agentPromptChanged with no prompt closes the card without waiting for the poll", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let current: Record<string, unknown> = promptBody("A", false);
+    installLane(({ url }) => (url.includes("/prompt") ? jsonResponse(current) : undefined));
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+
+    // Answered on another device: the pane's screen no longer shows the menu.
+    current = { prompt: null, screenRevision: "rev-after", cols: 80, rows: 24 };
+    await act(async () => {
+      for (const socket of StubWebSocket.instances) {
+        socket.onmessage?.({
+          data: JSON.stringify({ type: "agentPromptChanged", sessionId: SESSION_ID, promptId: null, screenRevision: "rev-after" }),
+        } as MessageEvent);
+      }
+    });
+
+    await waitFor(() => expect(screen.queryByText("Question A")).toBeNull());
+  });
+
   it("ui-composer-prompt-1: a new prompt gets a fresh card, never the previous prompt's picks", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     let current = promptBody("A", true);
