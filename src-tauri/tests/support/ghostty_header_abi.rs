@@ -111,9 +111,9 @@ fn strip_comments(src: &str) -> String {
     let mut i = 0;
     while i < src.len() {
         let rest = &src[i..];
-        if rest.starts_with("/*") {
+        if let Some(body) = rest.strip_prefix("/*") {
             out.push(' ');
-            i = rest[2..].find("*/").map_or(src.len(), |end| i + 2 + end + 2);
+            i = body.find("*/").map_or(src.len(), |end| i + 2 + end + 2);
         } else if rest.starts_with("//") {
             i = rest.find('\n').map_or(src.len(), |end| i + end);
         } else {
