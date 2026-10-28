@@ -6938,6 +6938,10 @@ impl DaemonServer {
                             })
                             .await
                             .unwrap_or_default(),
+                            token_configured: crate::remote::server::machine_token_configured(),
+                            pairing_window: Some(
+                                self.remote_state.auth_manager.pairing_window_status(),
+                            ),
                         },
                     }
                 }
@@ -7478,6 +7482,31 @@ impl DaemonServer {
                         Ok(true) => DaemonResponse::RemoteRevokeDeviceOk,
                         Ok(false) => daemon_error(format!("Device '{device_id}' not found"),),
                         Err(err) => daemon_error(format!("Failed to persist revocation: {err}"),),
+                    }
+                }
+                Ok(DaemonRequest::RemoteSetDevicePermission { device_id, permission }) => {
+                    let auth = Arc::clone(&self.remote_state.auth_manager);
+                    match crate::ipc::run_blocking(move || {
+                        Ok(auth.set_device_permission(&device_id, permission))
+                    })
+                    .await
+                    {
+                        Ok(Ok(device)) => DaemonResponse::RemoteSetDevicePermissionOk { device },
+                        Ok(Err(err)) => {
+                            let code = match err {
+                                crate::remote::auth::PermissionChangeError::NotFound => "NOT_FOUND",
+                                crate::remote::auth::PermissionChangeError::MachineRequiresControl => {
+                                    "INVALID_ARGUMENT"
+                                }
+                                crate::remote::auth::PermissionChangeError::Auth(_) => "IO_ERROR",
+                            };
+                            DaemonResponse::Error {
+                                message: err.to_string(),
+                                code: Some(code.to_string()),
+                                details: None,
+                            }
+                        }
+                        Err(err) => daemon_error(err.to_string()),
                     }
                 }
                 Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {

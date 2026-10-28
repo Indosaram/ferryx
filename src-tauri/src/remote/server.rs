@@ -1731,6 +1731,11 @@ fn delete_worktree_blocking(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// A static relay machine token (`FERRYX_MACHINE_TOKEN`) is set in this process.
+pub fn machine_token_configured() -> bool {
+    std::env::var("FERRYX_MACHINE_TOKEN").is_ok_and(|token| !token.trim().is_empty())
+}
+
 async fn list_devices(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -1769,6 +1774,51 @@ async fn revoke_device(
         Ok(false) => Err((StatusCode::NOT_FOUND, "Device not found".into())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
+}
+
+#[derive(Deserialize)]
+struct SetDevicePermissionRequest {
+    permission: DevicePermission,
+}
+
+/// POST /api/v1/devices/{id}/permission. Only a Control device may change a role, so a View
+/// device can never raise itself or anyone else; the caller is authorized before the body is read.
+async fn set_device_permission(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(device_id): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<DeviceInfo>, (StatusCode, String)> {
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    if device.permission != DevicePermission::Control {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "View-only device cannot change device permissions".into(),
+        ));
+    }
+    let request: SetDevicePermissionRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid permission request: {e}")))?;
+    let auth = Arc::clone(&state.auth_manager);
+    crate::ipc::run_blocking(move || Ok(auth.set_device_permission(&device_id, request.permission)))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(|e| match e {
+            crate::remote::auth::PermissionChangeError::NotFound => {
+                (StatusCode::NOT_FOUND, "Device not found".into())
+            }
+            crate::remote::auth::PermissionChangeError::MachineRequiresControl => {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            }
+            crate::remote::auth::PermissionChangeError::Auth(e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })
 }
 
 async fn ws_events_handler(
@@ -7705,6 +7755,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
+        .route("/api/v1/devices/{id}/permission", post(set_device_permission))
         .route("/api/v1/socket-ticket", post(issue_socket_ticket))
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))

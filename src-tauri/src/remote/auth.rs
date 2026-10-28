@@ -1343,6 +1343,62 @@ impl AuthManager {
         Ok(changed)
     }
 
+    /// Changes what a paired device may do. The caller is the owner (desktop IPC) or an
+    /// already-authorized Control device; this method does not authorize.
+    ///
+    /// A real change ends the device's live sockets (the same latched signal revocation uses), so
+    /// a terminal socket admitted as Control cannot keep typing after a downgrade; the device
+    /// stays paired and reconnects under its new role. A Machine-scope device must keep Control.
+    pub fn set_device_permission(
+        &self,
+        device_id: &str,
+        permission: DevicePermission,
+    ) -> Result<DeviceInfo, PermissionChangeError> {
+        let _transaction = self.begin_transaction()?;
+        let (device, changed) = {
+            let mut devices = self.devices.write();
+            let device = devices
+                .get_mut(device_id)
+                .ok_or(PermissionChangeError::NotFound)?;
+            validate_machine_grant(permission, device.access_scope)
+                .map_err(|_| PermissionChangeError::MachineRequiresControl)?;
+            let changed = device.permission != permission;
+            device.permission = permission;
+            if changed {
+                if let Some(signal) = self.revocations.write().remove(device_id) {
+                    signal.send_replace(true);
+                }
+            }
+            (device.clone(), changed)
+        };
+        if changed {
+            self.persist_durable()?;
+        }
+        Ok(device)
+    }
+
+    /// Whether a pairing code is live now and how long the longest-lived one has left.
+    pub fn pairing_window_status(&self) -> PairingWindowStatus {
+        let now = Instant::now();
+        let seconds_left = self
+            .pairing_window
+            .read()
+            .codes
+            .values()
+            .map(|pairing| {
+                pairing
+                    .lifetime
+                    .saturating_sub(now.saturating_duration_since(pairing.created_at))
+            })
+            .max()
+            .unwrap_or_default();
+        let seconds_left = u32::try_from(seconds_left.as_secs()).unwrap_or(u32::MAX);
+        PairingWindowStatus {
+            open: seconds_left > 0,
+            seconds_left,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_injected_snapshot_failure(&self, fail: bool) {
         self.injected_snapshot_failure
@@ -1711,6 +1767,24 @@ fn validate_machine_grant(
         return Err(MachineGrantError);
     }
     Ok(())
+}
+
+/// Live pairing state as the desktop's Access facts show it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingWindowStatus {
+    pub open: bool,
+    pub seconds_left: u32,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PermissionChangeError {
+    #[error("Device not found")]
+    NotFound,
+    #[error("Machine access requires Control permission")]
+    MachineRequiresControl,
+    #[error(transparent)]
+    Auth(#[from] AuthError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

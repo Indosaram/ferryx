@@ -33,6 +33,7 @@ const createPairingCode = vi.fn();
 const enableRemoteGateway = vi.fn();
 const disableRemoteGateway = vi.fn();
 const revokeRemoteDevice = vi.fn();
+const setRemoteDevicePermission = vi.fn();
 
 vi.mock("../../lib/tauri", () => ({
   getRemoteStatus: () => getRemoteStatus(),
@@ -42,6 +43,7 @@ vi.mock("../../lib/tauri", () => ({
   enableRemoteGateway: (req: unknown) => enableRemoteGateway(req),
   disableRemoteGateway: () => disableRemoteGateway(),
   revokeRemoteDevice: (id: string) => revokeRemoteDevice(id),
+  setRemoteDevicePermission: (id: string, permission: "view" | "control") => setRemoteDevicePermission(id, permission),
   // The agent-control card is covered by RemoteAccessSection.agentControl.test.tsx; null hides it here.
   getAgentControlSettings: () => Promise.resolve(null),
   setAgentControlSettings: vi.fn(),
@@ -345,6 +347,36 @@ describe("RemoteAccessSection", () => {
     await act(async () => { vi.advanceTimersByTime(60_000); });
     expect(screen.queryByTestId("pair-device-role")).toBeNull();
     expect(screen.getByRole("tab", { name: "Watch only" })).toBeEnabled();
+  });
+
+  it("states loopback reach and relay exposure in the Access card", async () => {
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, boundAddress: "127.0.0.1:43821", bindScope: "loopback", publicExposure: false });
+    render(<RemoteAccessSection />);
+    const reach = await screen.findByTestId("access-fact-reach");
+    await waitFor(() => expect(reach).toHaveAttribute("data-scope", "loopback"));
+    expect(reach).toHaveTextContent("Reachable from: this computer only");
+    cleanup();
+
+    getRemoteStatus.mockResolvedValue({ ...relayStatus, bindScope: "relay", publicExposure: true });
+    render(<RemoteAccessSection />);
+    const exposure = await screen.findByTestId("access-fact-exposure");
+    await waitFor(() => expect(exposure).toHaveAttribute("data-exposed", "true"));
+    expect(exposure).toHaveTextContent("Public exposure: via relay");
+  });
+
+  it("changes a paired device to Watch only from its role control", async () => {
+    const phone = { id: "dev-phone", name: "Phone", permission: "control", accessScope: "mirror", createdAt: 0, lastSeenAt: 0, revoked: false };
+    listRemoteDevices.mockResolvedValue([phone]);
+    setRemoteDevicePermission.mockResolvedValue({ ...phone, permission: "view" });
+    render(<RemoteAccessSection />);
+
+    const watchOnly = await screen.findByRole("tab", { name: "Watch only for Phone" });
+    expect(screen.getByRole("tab", { name: "Can type for Phone" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(watchOnly);
+
+    await waitFor(() => expect(setRemoteDevicePermission).toHaveBeenCalledWith("dev-phone", "view"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Watch only for Phone" })).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByTestId("device-access-scope")).toHaveAttribute("data-scope", "mirror");
   });
 
   it("retires Remote Access QR/PIN control: Generate QR button and PIN are absent while the remaining surface renders", async () => {

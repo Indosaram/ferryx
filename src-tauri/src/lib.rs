@@ -1692,6 +1692,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_pairing_create,
         cmd_remote_devices,
         cmd_remote_device_revoke,
+        cmd_remote_device_set_permission,
         cmd_remote_auto_trust_status,
         cmd_remote_set_auto_trust_disabled,
         cmd_remote_set_active_selection,

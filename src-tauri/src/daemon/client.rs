@@ -737,6 +737,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteCreatePairingCode { .. } => "remoteCreatePairingCode",
         DaemonRequest::RemoteListDevices => "remoteListDevices",
         DaemonRequest::RemoteRevokeDevice { .. } => "remoteRevokeDevice",
+        DaemonRequest::RemoteSetDevicePermission { .. } => "remoteSetDevicePermission",
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
@@ -4899,6 +4900,34 @@ impl DaemonClient {
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
             }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    /// Owner role change. Never retried: the daemon's answer is the only record of the outcome.
+    pub async fn remote_set_device_permission(
+        &self,
+        device_id: &str,
+        permission: DevicePermission,
+    ) -> Result<DeviceInfo, IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::RemoteSetDevicePermission {
+                device_id: device_id.to_string(),
+                permission,
+            })
+            .await?;
+        match resp {
+            DaemonResponse::RemoteSetDevicePermissionOk { device } => Ok(device),
+            DaemonResponse::Error { message, code: Some(code), .. } => {
+                Err(IpcError::new(IpcErrorCode::from_code_str(&code), message))
+            }
+            DaemonResponse::Error { .. } => Err(IpcError::new(
+                IpcErrorCode::DaemonUpgradeRequired,
+                "The running Ferryx daemon predates device role changes; they work after the daemon restarts",
+            )),
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
                 "Unexpected daemon response",

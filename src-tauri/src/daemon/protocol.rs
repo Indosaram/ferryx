@@ -505,6 +505,12 @@ pub struct DaemonRemoteStatus {
     /// Insecure transport modes in effect in the daemon process (`direct`, `relay`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub insecure_modes: Vec<String>,
+    /// A static relay machine token (`FERRYX_MACHINE_TOKEN`) is set in the daemon process.
+    #[serde(default)]
+    pub token_configured: bool,
+    /// Live pairing code state; absent from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_window: Option<crate::remote::auth::PairingWindowStatus>,
 }
 
 /// One action on a lane's goal contract, as the desktop (`cmd_supervisor_goal`), the CLI
@@ -963,6 +969,12 @@ pub enum DaemonRequest {
     #[serde(rename_all = "camelCase")]
     RemoteRevokeDevice {
         device_id: String,
+    },
+    /// Owner-only role change for a paired device; only the desktop sends it.
+    #[serde(rename_all = "camelCase")]
+    RemoteSetDevicePermission {
+        device_id: String,
+        permission: DevicePermission,
     },
     #[serde(rename_all = "camelCase")]
     RemoteSetActiveSelection {
@@ -1423,6 +1435,10 @@ pub enum DaemonResponse {
         devices: Vec<DeviceInfo>,
     },
     RemoteRevokeDeviceOk,
+    #[serde(rename_all = "camelCase")]
+    RemoteSetDevicePermissionOk {
+        device: DeviceInfo,
+    },
     RemoteSetActiveSelectionOk,
     #[serde(rename_all = "camelCase")]
     RemoteGetActiveSelectionOk {
@@ -2427,6 +2443,8 @@ mod tests {
                 gate_status: None,
                 gate_reason: None,
                 insecure_modes: Vec::new(),
+                token_configured: false,
+                pairing_window: None,
             },
         };
         let status_json = serde_json::to_string(&remote_status_resp).expect("serialize status");
