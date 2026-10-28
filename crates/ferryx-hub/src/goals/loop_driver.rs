@@ -468,7 +468,15 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
             .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))?;
     }
     let bundle = evidence::collect(pool, control, lane_key).await?;
-    let outcome = decide(pool, judge, control, &contract, &session_id, &bundle).await;
+    // The assessment and convergence calls of this pass are attributed to the settled turn.
+    let cause = crate::usage::current_cause().unwrap_or_else(|| {
+        crate::usage::CallCause::new("lane_turn_settled").events([format!("lane:{lane_key}")])
+    });
+    let outcome = crate::usage::with_cause(
+        cause,
+        decide(pool, judge, control, &contract, &session_id, &bundle),
+    )
+    .await;
     if superseded {
         tracing::info!(lane = %lane_key, "a person spoke after the supervisor proposal; it was superseded");
     }

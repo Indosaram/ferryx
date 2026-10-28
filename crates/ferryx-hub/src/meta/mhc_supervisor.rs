@@ -1984,16 +1984,19 @@ impl MhcSupervisor {
         };
         let cancel = self.inner.cancel.subscribe();
         let epoch = *cancel.borrow();
-        self.inner
-            .clone()
-            .run(
+        let cause = crate::usage::current_cause()
+            .unwrap_or_else(|| crate::usage::CallCause::new("conversation"));
+        crate::usage::with_cause(
+            cause,
+            self.inner.clone().run(
                 SessionRole::Conversation(scope.clone()),
                 message.to_owned(),
                 Lease::Exclusive { _guard: guard },
                 cancel,
                 epoch,
-            )
-            .await
+            ),
+        )
+        .await
     }
 
     /// Sends authenticated owner-authored text to the serialized owner-ingest session, once per
@@ -2013,17 +2016,20 @@ impl MhcSupervisor {
         let guard = self.inner.ingest_session.clone().lock_owned().await;
         let cancel = self.inner.cancel.subscribe();
         let epoch = *cancel.borrow();
-        let reply = self
-            .inner
-            .clone()
-            .run(
+        let cause = crate::usage::current_cause()
+            .unwrap_or_else(|| crate::usage::CallCause::new("owner_ingest"))
+            .events([source.to_owned()]);
+        let reply = crate::usage::with_cause(
+            cause,
+            self.inner.clone().run(
                 SessionRole::OwnerIngest,
                 format!("[ferryx owner message {source}]\n{text}"),
                 Lease::Exclusive { _guard: guard },
                 cancel,
                 epoch,
-            )
-            .await?;
+            ),
+        )
+        .await?;
         if let Err(error) = self.inner.store().note_ingested(source) {
             tracing::warn!(%error, "an ingested owner message id was not persisted");
         }

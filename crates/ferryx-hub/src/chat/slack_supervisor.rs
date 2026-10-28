@@ -705,7 +705,9 @@ pub async fn try_handle(
     );
     // Registered like an omo turn, so `/omo-stop` ends it.
     let registration = super::turns::begin(&storage_key, &admitted.channel);
-    let converse = async {
+    let attribution = crate::usage::CallCause::new("owner_message:slack")
+        .events([format!("slack:{}", routed.source_message_id)]);
+    let converse = crate::usage::with_cause(attribution, async {
         let Some(mut cancel) = super::turns::cancelled(&storage_key) else {
             return conversation.converse(&routed.scope, turn, &message).await;
         };
@@ -713,7 +715,7 @@ pub async fn try_handle(
             reply = conversation.converse(&routed.scope, turn, &message) => reply,
             Ok(_) = cancel.wait_for(|stop| *stop) => Err(STOPPED.to_owned()),
         }
-    };
+    });
     let (reply, ()) = tokio::join!(converse, learn);
     drop(registration);
     let mut record = guard.record();

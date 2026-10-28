@@ -93,6 +93,29 @@ pub async fn render(
     json: bool,
     now: DateTime<Utc>,
 ) -> Result<String> {
+    let start = since_start(since, now)?;
+    let report = report(pool, start, now).await?;
+    if json {
+        serde_json::to_string(&report).map_err(|error| HubError::message(error.to_string()))
+    } else {
+        Ok(format!(
+            "jev: {} calls, {} fallbacks, rate {:.3}, cap reached {}",
+            report.judge_calls, report.fallback_calls, report.fallback_rate, report.cap_reached
+        ))
+    }
+}
+
+/// The supervisor engine calls of the last `since` (Nm, Nh, Nd), as [`supervisor_calls`].
+pub async fn render_supervisor_calls(
+    pool: &SqlitePool,
+    since: &str,
+    now: DateTime<Utc>,
+) -> Result<serde_json::Value> {
+    let start = since_start(since, now)?;
+    supervisor_calls(pool, start, now + chrono::Duration::seconds(1)).await
+}
+
+fn since_start(since: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
     let seconds = match since.chars().last() {
         Some('m') => 60,
         Some('h') => 3600,
@@ -106,18 +129,8 @@ pub async fn render(
         .and_then(|n| n.checked_mul(seconds))
         .and_then(chrono::Duration::try_seconds)
         .ok_or_else(|| HubError::message("invalid --since duration"))?;
-    let start = now
-        .checked_sub_signed(duration)
-        .ok_or_else(|| HubError::message("--since out of range"))?;
-    let report = report(pool, start, now).await?;
-    if json {
-        serde_json::to_string(&report).map_err(|error| HubError::message(error.to_string()))
-    } else {
-        Ok(format!(
-            "jev: {} calls, {} fallbacks, rate {:.3}, cap reached {}",
-            report.judge_calls, report.fallback_calls, report.fallback_rate, report.cap_reached
-        ))
-    }
+    now.checked_sub_signed(duration)
+        .ok_or_else(|| HubError::message("--since out of range"))
 }
 
 /// omo `usage::yesterday`: the previous KST day, for the digest.
@@ -477,5 +490,57 @@ mod tests {
         assert_eq!(report.fallback_calls, 1);
         assert_eq!(report.fallback_rate, 0.25);
         assert!(!report.cap_reached);
+    }
+
+    #[tokio::test]
+    async fn engine_calls_keep_cause_and_unknown_usage_stays_unknown() {
+        let pool = crate::storage::memory().await.unwrap();
+        let cause = CallCause::new("wake:dependency_ready")
+            .goal("g-1", Some(3))
+            .events(["goal:c-1:done".to_owned(), "goal:c-2:done".to_owned()]);
+        let prompt = with_delta("stable instruction", "goal g-1 evidence");
+        let mut known = ModelCall::start("decision", &prompt, Some(cause.clone()));
+        known.usage.add_engine_usage(&serde_json::json!({
+            "input": 120, "output": 30, "cacheRead": 100, "cacheWrite": 0
+        }));
+        known.provider = Some("anthropic".into());
+        known.model = Some("claude".into());
+        known.outcome = "ok".into();
+        record_call(&pool, &known).await.unwrap();
+        // A provider that reported nothing: every count unknown, not zero.
+        let mut silent = with_cause(cause, async {
+            ModelCall::start("decision", "no marker", current_cause())
+        })
+        .await;
+        silent
+            .usage
+            .add_engine_usage(&serde_json::json!({"input": 0, "output": 0}));
+        silent.outcome = "ok".into();
+        record_call(&pool, &silent).await.unwrap();
+        let unattributed = ModelCall::start("conversation", "x", None);
+        assert_eq!(unattributed.cause.cause, UNATTRIBUTED);
+
+        let since = Utc::now() - chrono::Duration::minutes(1);
+        let until = Utc::now() + chrono::Duration::minutes(1);
+        let report = supervisor_calls(&pool, since, until).await.unwrap();
+        let calls = report["calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["cause"], "wake:dependency_ready");
+        assert_eq!(calls[0]["goalId"], "g-1");
+        assert_eq!(calls[0]["goalRevision"], 3);
+        assert_eq!(
+            calls[0]["mergedEventIds"],
+            serde_json::json!(["goal:c-1:done", "goal:c-2:done"])
+        );
+        assert_eq!(calls[0]["prefixSha256"], sha256_hex("stable instruction"));
+        assert_eq!(calls[0]["usage"]["input"], 120);
+        assert_eq!(calls[0]["usage"]["cacheRead"], 100);
+        assert!(calls[0]["usage"]["cacheWrite"].is_null());
+        assert!(calls[1]["usage"]["input"].is_null());
+        assert!(calls[1]["prefixSha256"].is_null());
+        assert_eq!(calls[1]["cause"], "wake:dependency_ready");
+        assert_eq!(report["totals"]["input"]["known"], 120);
+        assert_eq!(report["totals"]["input"]["callsUnknown"], 1);
+        assert_eq!(report["totals"]["cacheWrite"]["callsUnknown"], 2);
     }
 }
