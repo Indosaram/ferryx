@@ -103,6 +103,25 @@ describe("useMachineEventSockets", () => {
     expect(opened).toHaveLength(1);
   });
 
+  it("reports a suspension close that reaches a socket already let go of by a re-key", async () => {
+    vi.useFakeTimers();
+    const { hook, opened, input, onPlanLimit } = render({ skip: null });
+    await act(async () => {});
+    const before = opened.map(({ socket }) => socket);
+
+    // A worktree opens on laptop: the hook re-keys and closes the sockets it had.
+    hook.rerender({ ...input, skip: "laptop" });
+    expect(before.every((socket) => socket.closed)).toBe(true);
+    act(() => before[0].onclose?.({ code: 1008, reason: REMOTE_SUSPENDED_CLOSE_REASON, wasClean: true } as never));
+    expect(onPlanLimit).toHaveBeenCalledWith({ code: REMOTE_SUSPENDED });
+
+    // A plain close of a socket the hook closed itself is never reopened.
+    const opens = opened.length;
+    act(() => before[1].onclose?.({ code: 1000, reason: "", wasClean: true } as never));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(opened).toHaveLength(opens);
+  });
+
   it("reports a plan-limit refusal of the open and does not retry it", async () => {
     vi.useFakeTimers();
     const { open, onPlanLimit } = render({}, () => new AccountSessionError(REMOTE_SUSPENDED, "remote access is suspended"));

@@ -224,13 +224,17 @@ export function useMachineEventSockets({ enabled, machines, linkFor, skip, open,
         };
         current.onerror = () => {};
         current.onclose = (event) => {
-          if (disposed || socket !== current) return;
-          socket = null;
+          // The server's suspension close is reported from any socket, also one this hook
+          // already let go of (a re-key closes the old sockets while their replacements are
+          // still opening): it may be the only socket the close reaches. It is never reopened.
           const limit = planLimitStateFromCloseEvent(event);
+          if (socket === current) socket = null;
           if (limit) {
             onPlanLimitRef.current(limit);
             return;
           }
+          // A socket this hook closed itself (cleanup, a replaced socket) is not reopened.
+          if (disposed || socket !== null) return;
           reconnect();
         };
       };
