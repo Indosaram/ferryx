@@ -481,6 +481,28 @@ describe("mobile terminal input lifecycle", () => {
       expect(line).toHaveValue("");
     });
 
+    it("leaves Enter to an IME that is still composing in the line", () => {
+      localStorage.setItem("ferryx.remote.terminalInputMode", "line");
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "한" } });
+      expect(fireEvent.keyDown(line, { key: "Enter", isComposing: true })).toBe(true);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(line).toHaveValue("한");
+    });
+
+    it("leaves Enter reported as an IME process key (229) to the IME", () => {
+      localStorage.setItem("ferryx.remote.terminalInputMode", "line");
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "한" } });
+      expect(fireEvent.keyDown(line, { key: "Enter", keyCode: 229 })).toBe(true);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(line).toHaveValue("한");
+    });
+
     it("submits on Enter and keeps Shift+Enter in the line", () => {
       localStorage.setItem("ferryx.remote.terminalInputMode", "line");
       render(<RemoteTerminal sessionId="a" token="token-a" />);
