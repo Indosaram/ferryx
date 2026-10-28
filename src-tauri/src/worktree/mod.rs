@@ -1,3 +1,4 @@
+pub mod changes;
 pub mod disk;
 pub mod git;
 pub mod manager;
