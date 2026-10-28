@@ -55,6 +55,11 @@ extern "C" {
     pub fn ghostty_kitty_graphics_get(graphics: Graphics, key: c_int, out: *mut c_void) -> c_int;
     pub fn ghostty_kitty_graphics_image(graphics: Graphics, id: u32) -> Image;
     pub fn ghostty_kitty_graphics_image_get(image: Image, key: c_int, out: *mut c_void) -> c_int;
+    pub fn ghostty_kitty_graphics_animation_tick(
+        graphics: Graphics,
+        now_ms: u64,
+        next_ms: *mut u64,
+    ) -> c_int;
     pub fn ghostty_kitty_graphics_placement_iterator_new(
         allocator: *const GhosttyAllocator,
         out: *mut PlacementIterator,
