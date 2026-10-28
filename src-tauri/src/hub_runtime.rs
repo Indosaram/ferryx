@@ -335,7 +335,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
-            eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear>");
+            eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>");
             return 2;
         }
     }
@@ -429,16 +429,27 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
 /// `ferryx hub cron list` prints each job with the model it runs on; `ferryx hub cron model
 /// <id> <provider/model>` pins one job to a model and `--clear` returns it to the background
 /// model. Edits go to the hub database directly, so the daemon does not need a restart: the
-/// scheduler reads the payload at every run.
+/// scheduler reads the payload at every run. `ferryx hub cron approve-rerun <problem-id>`
+/// approves one more verified rerun of a cron problem waiting on the owner, over the owner-only
+/// hub control socket.
 fn hub_cron_cli(args: &[String]) -> i32 {
     const USAGE: &str =
-        "usage: ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear>";
+        "usage: ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>";
     enum Op {
         List,
         Model(String, Option<String>),
     }
     let op = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["list"] => Op::List,
+        ["approve-rerun", id] => {
+            return match id.parse::<i64>() {
+                Ok(problem) => hub_control(ferryx_hub::control::ControlOp::ApproveRerun(problem), false),
+                Err(_) => {
+                    eprintln!("{USAGE}");
+                    2
+                }
+            };
+        }
         ["model", id, "--clear"] => Op::Model((*id).to_owned(), None),
         ["model", id, model] if !model.starts_with('-') => {
             Op::Model((*id).to_owned(), Some((*model).to_owned()))
@@ -1629,7 +1640,13 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             let _ = stream.write_all(format!("{report}\n").as_bytes()).await;
                             return;
                         }
-                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, or status\"}\n",
+                        Ok(ferryx_hub::control::ControlOp::ApproveRerun(problem)) => {
+                            let reply = ferryx_hub::control::approve_rerun_reply(problem).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(reply.as_bytes()).await;
+                            return;
+                        }
+                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, status, or approve_rerun\"}\n",
                     };
                     let mut stream = reader.into_inner();
                     let _ = stream.write_all(reply.as_bytes()).await;
@@ -1817,6 +1834,12 @@ mod tests {
         assert!(!relayed_from_a_person(Some("hub-auto-prompt-3")));
         assert!(!relayed_from_a_person(Some("lane-ledger-drive-2")));
         assert!(!relayed_from_a_person(None));
+    }
+
+    #[test]
+    fn approve_rerun_needs_a_numeric_problem_id() {
+        assert_eq!(hub_cron_cli(&["approve-rerun".into(), "abc".into()]), 2);
+        assert_eq!(hub_cron_cli(&["approve-rerun".into()]), 2);
     }
 
     #[test]

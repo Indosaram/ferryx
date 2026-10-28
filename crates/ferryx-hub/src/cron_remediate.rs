@@ -7,7 +7,9 @@
 //!   lane settles only when a gateway-owned rerun verifies (publishing waits for the owner);
 //! - login, quota, or payment trouble goes to the owner.
 //!
-//! The owner gets a one-time token. Only its sha256 is stored, and an approval spends it.
+//! The owner approves a rerun on this machine with `ferryx hub cron approve-rerun <id>`, which
+//! reaches the hub over its owner-only control socket. No approval secret is ever minted into a
+//! chat message: owner notices go to the Slack home channel, which other people can read.
 use crate::storage::WriteTx;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -52,7 +54,8 @@ pub struct Detail {
     pub last_run_id: Option<String>,
     #[serde(default)]
     pub evidence: Option<String>,
-    /// sha256 (hex) of the one-time owner token. The token itself is only in the owner's message.
+    /// sha256 (hex) of a one-time owner token. Builds before 2026.1028.1 posted the token to
+    /// chat; migration 0020 clears every such hash, and no new one is minted.
     #[serde(default)]
     pub approval_hash: Option<String>,
 }
@@ -69,14 +72,6 @@ impl Detail {
     fn encode(&self) -> Result<String> {
         serde_json::to_string(self).map_err(|error| HubError::message(error.to_string()))
     }
-}
-
-fn mint_owner_token() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
 }
 
 pub fn hash_owner_token(token: &str) -> String {
@@ -132,18 +127,63 @@ pub fn owner_message(job: &str, action: &str) -> String {
     format!("{job}: needs you - {action}")
 }
 
-/// The stored copy of an owner message never keeps the approval token.
+/// How the owner approves a rerun of `problem`: a local command over the owner-only control
+/// socket. It carries no secret, so the notice is safe in a shared channel.
+pub fn approval_instruction(problem: i64) -> String {
+    format!("To approve a rerun, run on the hub machine: ferryx hub cron approve-rerun {problem}")
+}
+
+const TOKEN_FLAG: &str = "--owner-token ";
+const REDACTED: &str = "<redacted>";
+
+/// Replaces every `--owner-token <value>` with `--owner-token <redacted>`. Idempotent.
 pub fn redact_token(message: &str) -> String {
-    match message.find("--owner-token ") {
-        Some(at) => {
-            let start = at + "--owner-token ".len();
-            let end = message[start..]
-                .find(char::is_whitespace)
-                .map_or(message.len(), |offset| start + offset);
-            format!("{}<redacted>{}", &message[..start], &message[end..])
-        }
-        None => message.to_owned(),
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(at) = rest.find(TOKEN_FLAG) {
+        let start = at + TOKEN_FLAG.len();
+        let end = rest[start..]
+            .find(char::is_whitespace)
+            .map_or(rest.len(), |offset| start + offset);
+        out.push_str(&rest[..start]);
+        out.push_str(REDACTED);
+        rest = &rest[end..];
     }
+    out.push_str(rest);
+    out
+}
+
+/// Builds before 2026.1028.1 posted one-time owner tokens to the Slack home channel and kept
+/// them in `chat_outbox` and the session transcript. Rewrites every stored copy to
+/// `--owner-token <redacted>`; runs at every hub start and changes nothing the second time.
+/// Migration 0020 invalidated the matching approval hashes.
+pub async fn redact_stored_owner_tokens(pool: &SqlitePool) -> Result<u64> {
+    let mut redacted = 0;
+    for (table, column) in [
+        ("chat_outbox", "text"),
+        ("messages", "content"),
+        ("cron_remediation_outcomes", "message"),
+    ] {
+        let rows: Vec<(i64, String)> = sqlx::query_as(&format!(
+            "SELECT rowid, {column} FROM {table} WHERE instr({column}, ?) > 0"
+        ))
+        .bind(TOKEN_FLAG)
+        .fetch_all(pool)
+        .await?;
+        for (rowid, text) in rows {
+            let clean = redact_token(&text);
+            if clean == text {
+                continue;
+            }
+            sqlx::query(&format!("UPDATE {table} SET {column} = ? WHERE rowid = ?"))
+                .bind(&clean)
+                .bind(rowid)
+                .execute(pool)
+                .await?;
+            redacted += 1;
+        }
+    }
+    Ok(redacted)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +229,27 @@ pub async fn handle_event(body: &str, lead: &str) -> Result<bool> {
     };
     remediator.handle_event(body, lead).await?;
     Ok(true)
+}
+
+/// The control socket's `approve_rerun` (`ferryx hub cron approve-rerun <id>`). The socket is
+/// 0600 in a 0700 directory, so reaching it is the owner's authority. The approval is recorded
+/// before this returns; the verified rerun runs in the background and reports to the owner.
+pub async fn owner_approve(id: i64) -> Result<()> {
+    let remediator = REMEDIATOR
+        .get()
+        .ok_or_else(|| HubError::message("cron remediator not installed (is the hub running?)"))?;
+    if !remediator.claim_owner_approval(id).await? {
+        return Err(HubError::message(format!(
+            "cron problem {id} is not awaiting owner approval"
+        )));
+    }
+    let remediator = Arc::clone(remediator);
+    tokio::spawn(async move {
+        if let Err(error) = remediator.verify_once(id).await {
+            tracing::warn!(%error, problem = id, "owner-approved cron rerun failed");
+        }
+    });
+    Ok(())
 }
 
 /// The cron socket's `approve_problem`. Errors when no remediator is installed.
@@ -467,11 +528,10 @@ impl Remediator {
     }
 
     /// Escalates to the owner: the job's one open owner inbox item (`cron:job:<job_id>`) and a
-    /// message carrying a fresh one-time approval token.
+    /// message naming the local approval command. The message carries no secret.
     pub async fn needs_owner(&self, problem: &Problem, action: &str) -> Result<()> {
         let now = update_stamp();
         let action = scrub(action);
-        let token = mint_owner_token();
         let mut tx = self.pool.begin_write().await?;
         let escalated = sqlx::query("UPDATE cron_problems SET status = 'needs_owner', updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status != 'fixed'")
             .bind(&now)
@@ -489,7 +549,7 @@ impl Remediator {
                 .fetch_one(&mut *tx)
                 .await?;
         let mut detail = Detail::parse(&stored);
-        detail.approval_hash = Some(hash_owner_token(&token));
+        detail.approval_hash = None;
         sqlx::query(
             "UPDATE cron_problems SET detail = ?, owner_token = NULL WHERE CAST(id AS INTEGER) = ?",
         )
@@ -514,9 +574,9 @@ impl Remediator {
             .outcome(
                 problem,
                 &format!(
-                    "{}\nTo approve a rerun, run: omo-gateway cron approve-rerun {} --owner-approved --owner-token {token}",
+                    "{}\n{}",
                     owner_message(&problem.job_id, &action),
-                    problem.id
+                    approval_instruction(problem.id)
                 ),
             )
             .await
@@ -663,12 +723,24 @@ impl Remediator {
     }
 
     pub async fn approve_rerun(&self, id: i64) -> Result<Option<RunReceipt>> {
-        let text: String = sqlx::query_scalar(
+        if !self.claim_owner_approval(id).await? {
+            return Ok(None);
+        }
+        self.verify_once(id).await
+    }
+
+    /// Records the owner's approval: `needs_owner` becomes `remediating` with one more attempt.
+    /// False when the problem is not awaiting the owner.
+    pub async fn claim_owner_approval(&self, id: i64) -> Result<bool> {
+        let text: Option<String> = sqlx::query_scalar(
             "SELECT detail FROM cron_problems WHERE CAST(id AS INTEGER) = ? AND status = 'needs_owner'",
         )
         .bind(id)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
+        let Some(text) = text else {
+            return Ok(false);
+        };
         let mut detail = Detail::parse(&text);
         detail.owner_approved = true;
         // Approval after an exhausted budget grants exactly one more attempt.
@@ -680,10 +752,7 @@ impl Remediator {
             .bind(id)
             .execute(&self.pool)
             .await?;
-        if taken.rows_affected() == 0 {
-            return Ok(None);
-        }
-        self.verify_once(id).await
+        Ok(taken.rows_affected() > 0)
     }
 }
 
@@ -921,7 +990,7 @@ impl Runtime for HubRuntime {
         let Some(owner) = &self.owner_session else {
             return Ok(());
         };
-        let message = scrub_keeping_token(message);
+        let message = redact_token(&scrub(message));
         let inserted = sqlx::query(
             "INSERT INTO chat_outbox(session_key, platform, text, created_at) VALUES(?, 'slack', ?, ?)",
         )
@@ -942,22 +1011,11 @@ impl Runtime for HubRuntime {
             sqlx::query("UPDATE cron_remediation_outcomes SET delivered_at = ? WHERE problem_id = ? AND message = ?")
                 .bind(now_rfc3339())
                 .bind(problem.id)
-                .bind(redact_token(&scrub(message.as_str())))
+                .bind(&message)
                 .execute(&self.pool)
                 .await?;
         }
         Ok(())
-    }
-}
-
-/// External text is scrubbed, but the owner's approval token has to survive it.
-fn scrub_keeping_token(message: &str) -> String {
-    match message.find("--owner-token ") {
-        Some(at) => {
-            let (head, tail) = message.split_at(at);
-            format!("{}{tail}", scrub(head))
-        }
-        None => scrub(message),
     }
 }
 
@@ -970,7 +1028,7 @@ pub async fn queue_outcome(
     sqlx::query("INSERT INTO cron_remediation_outcomes(problem_id, job_id, message, created_at) VALUES(?,?,?,?) ON CONFLICT(problem_id, message) DO NOTHING")
         .bind(problem)
         .bind(job)
-        .bind(redact_token(&scrub(&scrub_keeping_token(message))))
+        .bind(redact_token(&scrub(message)))
         .bind(now_rfc3339())
         .execute(pool)
         .await?;
@@ -1085,6 +1143,19 @@ pub async fn dispatch_once(pool: &SqlitePool, remediator: &Remediator) -> Result
 
 /// Installs the hub remediator and runs the dispatcher every 5 seconds.
 pub async fn serve(pool: SqlitePool, owner_session: Option<String>) {
+    match redact_stored_owner_tokens(&pool).await {
+        Ok(0) => {}
+        Ok(rows) => tracing::info!(rows, "redacted leaked cron owner tokens from stored chat"),
+        Err(error) => tracing::warn!(%error, "stored cron owner tokens were not redacted"),
+    }
+    match crate::schedule::reconcile_resolved_cron_failures(&pool).await {
+        Ok(0) => {}
+        Ok(jobs) => tracing::info!(
+            jobs,
+            "closed cron failures a later success already resolved"
+        ),
+        Err(error) => tracing::warn!(%error, "resolved cron failures were not reconciled"),
+    }
     match crate::schedule::reconcile_cron_owner_items(&pool).await {
         Ok(dismissed) => {
             tracing::info!(

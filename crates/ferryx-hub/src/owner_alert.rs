@@ -280,7 +280,7 @@ pub async fn serve_delivery(pool: SqlitePool, owner_session: String) {
     loop {
         match crate::chat::reply::flush_stale(
             &pool,
-            Duration::minutes(2),
+            crate::chat::reply::OUTBOX_SETTLE,
             Duration::hours(MAX_ALERT_AGE_HOURS),
         )
         .await

@@ -102,6 +102,10 @@ pub async fn deliver_stored(pool: &SqlitePool, id: i64, key: &str, text: &str) -
     Ok(false)
 }
 
+/// How old an undelivered outbox row must be before a retry may post it. Its writer posts it
+/// right after the insert; a retry that takes it sooner posts it a second time.
+pub const OUTBOX_SETTLE: chrono::Duration = chrono::Duration::minutes(2);
+
 /// The periodic retry of the outbox. Only rows older than `settle` are tried, so a reply
 /// whose first post is still in flight is not posted twice, and only rows younger than
 /// `max_age`, so a channel that is gone does not retry forever. One failure does not stop

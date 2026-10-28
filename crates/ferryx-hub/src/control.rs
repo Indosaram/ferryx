@@ -9,6 +9,10 @@ pub enum ControlOp {
     Stop,
     Start,
     Status,
+    /// `ferryx hub cron approve-rerun <id>`: the owner approves one more verified rerun of a
+    /// cron problem waiting on them. Reaching this socket (0600, owner-only) is the authority;
+    /// no secret travels through chat.
+    ApproveRerun(i64),
 }
 
 pub fn parse_control(line: &str) -> Result<ControlOp> {
@@ -18,8 +22,13 @@ pub fn parse_control(line: &str) -> Result<ControlOp> {
         Some("stop") => Ok(ControlOp::Stop),
         Some("start") => Ok(ControlOp::Start),
         Some("status") => Ok(ControlOp::Status),
+        Some("approve_rerun") => value
+            .get("problem")
+            .and_then(Value::as_i64)
+            .map(ControlOp::ApproveRerun)
+            .ok_or_else(|| HubError::message("approve_rerun needs a numeric problem id")),
         _ => Err(HubError::message(
-            "hub control expected stop, start, or status",
+            "hub control expected stop, start, status, or approve_rerun",
         )),
     }
 }
@@ -61,12 +70,29 @@ pub async fn is_stopped(pool: &sqlx::SqlitePool) -> Result<bool> {
     Ok(value.as_deref() != Some("0"))
 }
 
-pub fn control_line(op: ControlOp) -> &'static str {
+pub fn control_line(op: ControlOp) -> String {
     match op {
-        ControlOp::Stop => "{\"op\":\"stop\"}\n",
-        ControlOp::Start => "{\"op\":\"start\"}\n",
-        ControlOp::Status => "{\"op\":\"status\"}\n",
+        ControlOp::Stop => "{\"op\":\"stop\"}\n".to_owned(),
+        ControlOp::Start => "{\"op\":\"start\"}\n".to_owned(),
+        ControlOp::Status => "{\"op\":\"status\"}\n".to_owned(),
+        ControlOp::ApproveRerun(problem) => {
+            format!("{}\n", json!({"op": "approve_rerun", "problem": problem}))
+        }
     }
+}
+
+/// The control reply to `approve_rerun`. The rerun itself runs in the background and reports
+/// to the owner like any remediation outcome.
+pub async fn approve_rerun_reply(problem: i64) -> String {
+    let reply = match crate::cron_remediate::owner_approve(problem).await {
+        Ok(()) => {
+            json!({"status": "ok", "op": "approve_rerun", "problem": problem, "rerun": "started"})
+        }
+        Err(error) => {
+            json!({"status": "failed", "op": "approve_rerun", "problem": problem, "error": error.to_string()})
+        }
+    };
+    format!("{reply}\n")
 }
 
 /// What the daemon knows about its own hub tasks. The control socket fills it in.
@@ -211,10 +237,22 @@ mod tests {
             ControlOp::Status
         );
         assert_eq!(
-            parse_control(control_line(ControlOp::Status)).unwrap(),
+            parse_control(&control_line(ControlOp::Status)).unwrap(),
             ControlOp::Status
         );
+        assert_eq!(
+            parse_control(&control_line(ControlOp::ApproveRerun(134))).unwrap(),
+            ControlOp::ApproveRerun(134)
+        );
+        assert!(parse_control("{\"op\":\"approve_rerun\"}").is_err());
         assert!(parse_control("{\"op\":\"restart-daemon\"}").is_err());
+    }
+
+    #[tokio::test]
+    async fn approve_rerun_without_a_remediator_fails_and_says_why() {
+        let reply = approve_rerun_reply(7).await;
+        assert!(!reply_ok(&reply), "{reply}");
+        assert!(reply.contains("cron remediator not installed"), "{reply}");
     }
 
     #[test]

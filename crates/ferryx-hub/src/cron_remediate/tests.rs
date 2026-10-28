@@ -85,17 +85,6 @@ async fn status(pool: &SqlitePool, id: i64) -> (String, Detail) {
     (p.status, Detail::parse(&p.detail))
 }
 
-fn token_of(message: &str) -> String {
-    message
-        .split("--owner-token ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_owned()
-}
-
 #[tokio::test]
 async fn a_transient_failure_gets_one_verified_rerun_and_is_fixed() {
     let (pool, id) = seeded("job", json!({"command": "true"}), "connection reset").await;
@@ -125,7 +114,7 @@ async fn a_transient_failure_gets_one_verified_rerun_and_is_fixed() {
 }
 
 #[tokio::test]
-async fn an_unverified_rerun_goes_to_the_owner_with_a_one_time_token() {
+async fn an_unverified_rerun_goes_to_the_owner_with_a_local_approval_command() {
     let (pool, id) = seeded(
         "job",
         json!({"command": "true", "expect": {"output_regex": "^sent \\d+"}}),
@@ -147,20 +136,14 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_one_time_token() {
         message.starts_with("job: needs you - Verification failed"),
         "{message}"
     );
-    assert!(message.contains(&format!(
-        "omo-gateway cron approve-rerun {id} --owner-approved --owner-token "
-    )));
-    let token = token_of(&message);
-    // Only the hash is stored, never the token.
-    assert_eq!(
-        detail.approval_hash.as_deref(),
-        Some(hash_owner_token(&token).as_str())
+    // The notice names the command that exists in this build and carries no secret.
+    assert!(
+        message.ends_with(&format!("ferryx hub cron approve-rerun {id}")),
+        "{message}"
     );
-    let stored: String = sqlx::query_scalar("SELECT detail FROM cron_problems")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(!stored.contains(&token));
+    assert!(!message.contains("--owner-token"), "{message}");
+    assert!(!message.contains("omo-gateway"), "{message}");
+    assert!(detail.approval_hash.is_none());
     let decision: (String, String) =
         sqlx::query_as("SELECT class, status FROM inbox_decisions WHERE item_id = 'cron:job:job'")
             .fetch_one(&pool)
@@ -168,18 +151,15 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_one_time_token() {
             .unwrap();
     assert_eq!(decision, ("owner".to_owned(), "open".to_owned()));
 
-    // A wrong token is refused; the right one grants one more verified rerun and is spent.
-    assert!(r.approve_rerun_with_token(id, "wrong").await.is_err());
+    // No token was minted, so a token approval (the chat-leakable path) matches nothing.
+    assert!(r.approve_rerun_with_token(id, "anything").await.is_err());
     fake.receipts.lock().unwrap().clear();
     fake.receipts
         .lock()
         .unwrap()
         .push(receipt("succeeded", "sent 3"));
-    let approved = r
-        .approve_rerun_with_token(id, &token)
-        .await
-        .unwrap()
-        .unwrap();
+    // The owner's control-socket approval grants one more verified rerun.
+    let approved = r.approve_rerun(id).await.unwrap().unwrap();
     assert_eq!(approved.output.as_deref(), Some("sent 3"));
     let (state, detail) = status(&pool, id).await;
     assert_eq!(state, "fixed");
@@ -189,7 +169,10 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_one_time_token() {
         fake.reruns.lock().unwrap().last(),
         Some(&("job".to_owned(), true))
     );
-    assert!(r.approve_rerun_with_token(id, &token).await.is_err());
+    assert!(
+        r.approve_rerun(id).await.unwrap().is_none(),
+        "approval is spent"
+    );
     let decision: String =
         sqlx::query_scalar("SELECT status FROM inbox_decisions WHERE item_id = 'cron:job:job'")
             .fetch_one(&pool)
@@ -278,9 +261,7 @@ async fn a_publishing_job_waits_for_the_owner_before_any_rerun() {
     let message = fake.outcomes.lock().unwrap()[0].clone();
     assert!(message.contains("explicitly approve the publishing rerun"));
     // Approval runs it as an approved (publishing) rerun.
-    r.approve_rerun_with_token(id, &token_of(&message))
-        .await
-        .unwrap();
+    r.approve_rerun(id).await.unwrap();
     assert_eq!(
         fake.reruns.lock().unwrap().as_slice(),
         &[("omon-playstore-daily-publish".to_owned(), true)]
@@ -311,11 +292,7 @@ async fn an_exhausted_budget_and_a_stale_row_both_reach_the_owner() {
     assert!(fake.reruns.lock().unwrap().is_empty());
     assert_eq!(status(&pool, id).await.0, "needs_owner");
     // Approval after an exhausted budget grants exactly one more attempt.
-    let token = token_of(&fake.outcomes.lock().unwrap()[0]);
-    r.approve_rerun_with_token(id, &token)
-        .await
-        .unwrap()
-        .unwrap();
+    r.approve_rerun(id).await.unwrap().unwrap();
     assert_eq!(status(&pool, id).await.1.reruns, MAX_RERUNS);
 
     let stale =
@@ -434,6 +411,13 @@ fn owner_tokens_are_redacted_in_stored_copies() {
         ),
         "x\nrun: omo-gateway cron approve-rerun 4 --owner-approved --owner-token <redacted>"
     );
+    // Every occurrence, and a second pass changes nothing.
+    let twice = redact_token("--owner-token a1 then --owner-token b2 end");
+    assert_eq!(
+        twice,
+        "--owner-token <redacted> then --owner-token <redacted> end"
+    );
+    assert_eq!(redact_token(&twice), twice);
     assert_eq!(redact_token("no token"), "no token");
     let detail = Detail::parse("plain cause");
     assert_eq!(detail.cause, "plain cause");
@@ -522,6 +506,123 @@ async fn two_problems_of_one_job_share_one_open_owner_item() {
         decisions,
         vec![("cron:job:job".to_owned(), "open".to_owned(), opened)]
     );
-    // Each escalation still carries its own approval token.
+    // Each escalation still tells the owner how to approve it.
     assert_eq!(fake.outcomes.lock().unwrap().len(), 2);
+}
+
+const LEAKED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// 2026-10-28: the owner notice went through `HubRuntime::outcome` to the owner session (the
+/// public home channel) with the full approval token, and was kept in `chat_outbox`.
+#[tokio::test]
+async fn an_owner_escalation_never_puts_a_secret_in_chat_or_storage() {
+    let (pool, id) = seeded("job", json!({"command": "true"}), "HTTP 401 login expired").await;
+    let r = Remediator {
+        pool: pool.clone(),
+        judge: Judge::forced("needs_owner_login_or_quota"),
+        runtime: Arc::new(HubRuntime::new(pool.clone(), Some("slack:CHOME".into()))),
+    };
+    r.on_problem(id, "meta").await.unwrap();
+    assert_eq!(status(&pool, id).await.0, "needs_owner");
+    let outbox: Vec<String> = sqlx::query_scalar("SELECT text FROM chat_outbox")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outbox.len(), 1, "{outbox:?}");
+    assert!(
+        outbox[0].ends_with(&format!("ferryx hub cron approve-rerun {id}")),
+        "{outbox:?}"
+    );
+    let outcomes: Vec<String> = sqlx::query_scalar("SELECT message FROM cron_remediation_outcomes")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let detail: String = sqlx::query_scalar("SELECT detail FROM cron_problems")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for text in outbox
+        .iter()
+        .chain(&outcomes)
+        .chain(std::iter::once(&detail))
+    {
+        assert!(!text.contains("--owner-token"), "{text}");
+        assert!(!text.contains("approval_hash\":\""), "{text}");
+        assert!(
+            !text
+                .split(|c: char| !c.is_ascii_hexdigit())
+                .any(|word| word.len() >= 32),
+            "a long hex secret is stored: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn leaked_tokens_are_redacted_from_stored_chat_and_their_hashes_revoked() {
+    let (pool, id) = seeded("job", json!({"command": "true"}), "timeout").await;
+    let leaked = format!(
+        "job: needs you - x\nTo approve a rerun, run: omo-gateway cron approve-rerun {id} --owner-approved --owner-token {LEAKED}"
+    );
+    sqlx::query("INSERT INTO chat_outbox(session_key, platform, text, created_at, delivered_at) VALUES('slack:CHOME', 'slack', ?, ?, ?), ('slack:CHOME', 'slack', 'unrelated', ?, ?)")
+        .bind(&leaked)
+        .bind(now_rfc3339())
+        .bind(now_rfc3339())
+        .bind(now_rfc3339())
+        .bind(now_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO messages(id, session_key, role, content) VALUES('m1', 'slack:CHOME', 'assistant', ?)")
+        .bind(&leaked)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(redact_stored_owner_tokens(&pool).await.unwrap(), 2);
+    assert_eq!(
+        redact_stored_owner_tokens(&pool).await.unwrap(),
+        0,
+        "idempotent"
+    );
+    let texts: Vec<String> =
+        sqlx::query_scalar("SELECT text FROM chat_outbox UNION ALL SELECT content FROM messages")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(texts.iter().all(|text| !text.contains(LEAKED)), "{texts:?}");
+    assert!(texts.contains(&"unrelated".to_owned()));
+    assert!(texts
+        .iter()
+        .any(|text| text.ends_with("--owner-token <redacted>")));
+
+    // A hash minted before the fix is public now: migration 0020 clears it, so the leaked
+    // token can no longer approve anything.
+    let pre_fix = Detail {
+        cause: "timeout".into(),
+        approval_hash: Some(hash_owner_token(LEAKED)),
+        ..Detail::default()
+    };
+    sqlx::query("UPDATE cron_problems SET status = 'needs_owner', detail = ?")
+        .bind(serde_json::to_string(&pre_fix).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let r = remediator(&pool, "transient_retry_once", Arc::new(Fake::default()));
+    assert!(
+        r.approve_rerun_with_token(id, LEAKED).await.is_ok(),
+        "precondition: the leaked token works before the migration"
+    );
+    sqlx::query("UPDATE cron_problems SET status = 'needs_owner', detail = ?")
+        .bind(serde_json::to_string(&pre_fix).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/0021_revoke_leaked_owner_tokens.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(status(&pool, id).await.1.approval_hash.is_none());
+    assert_eq!(status(&pool, id).await.1.cause, "timeout");
+    assert!(r.approve_rerun_with_token(id, LEAKED).await.is_err());
 }

@@ -1027,17 +1027,31 @@ pub async fn run_dashboard_turn(
     Box::pin(run_session_turn(config, pool, turn)).await
 }
 
+/// Undelivered Slack outbox rows from the last day that are older than
+/// `reply::OUTBOX_SETTLE`. A younger row may still be in its writer's own first post
+/// (`deliver_stored` right after the insert); taking it here posted it twice (2026-10-28: the
+/// same cron owner notice appeared twice in the home channel within one second).
+async fn drainable_outbox(
+    pool: &SqlitePool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<(i64, String, String)>> {
+    let rows = sqlx::query_as(
+        "SELECT id, session_key, text FROM chat_outbox
+         WHERE delivered_at IS NULL AND platform = 'slack'
+           AND julianday(created_at) >= julianday(?) AND julianday(created_at) <= julianday(?)
+         ORDER BY id",
+    )
+    .bind((now - chrono::Duration::hours(24)).to_rfc3339())
+    .bind((now - super::reply::OUTBOX_SETTLE).to_rfc3339())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// Posts queued Slack outbox rows from the last day. A row addressed to a name that is not a
 /// session key (1022.8 queued owner alerts under `meta`) goes to the lead.
 pub async fn drain_outbox(pool: &SqlitePool, lead: &str) -> Result<usize> {
-    let since = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
-    let rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, session_key, text FROM chat_outbox
-         WHERE delivered_at IS NULL AND platform = 'slack' AND created_at >= ? ORDER BY id",
-    )
-    .bind(since)
-    .fetch_all(pool)
-    .await?;
+    let rows = drainable_outbox(pool, chrono::Utc::now()).await?;
     let mut sent = 0;
     for (id, session_key, text) in rows {
         let Some(key) = SessionKey::from_storage_key(&session_key)
@@ -1157,6 +1171,27 @@ mod tests {
         assert_eq!(dm.key.user_id, "UOWNER");
         // edits and joins are not turns
         assert!(admit(&c, &payload(json!({"type":"message","subtype":"message_changed","user":"UOWNER","channel":"CHOME","ts":"1.7","text":"x"})), "UBOT", false).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_outbox_drain_leaves_a_row_its_writer_is_still_posting() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = chrono::Utc::now();
+        for (text, at) in [
+            ("fresh", now),
+            ("settled", now - chrono::Duration::minutes(3)),
+            ("expired", now - chrono::Duration::hours(25)),
+        ] {
+            sqlx::query("INSERT INTO chat_outbox(session_key, platform, text, created_at) VALUES('slack:C1', 'slack', ?, ?)")
+                .bind(text)
+                .bind(at.to_rfc3339())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let rows = drainable_outbox(&pool, now).await.unwrap();
+        let texts: Vec<&str> = rows.iter().map(|row| row.2.as_str()).collect();
+        assert_eq!(texts, vec!["settled"]);
     }
 
     #[test]
