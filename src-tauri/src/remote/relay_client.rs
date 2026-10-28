@@ -773,10 +773,13 @@ impl RelayClient {
                             }
                             let client = self.clone();
                             sessions.spawn(async move {
-                                if let Err(err) = client.handle_session(&session_id, opaque).await {
-                                    tracing::warn!(
+                                match client.handle_session(&session_id, opaque).await {
+                                    Ok(()) => tracing::debug!(
+                                        "relay data channel for session {session_id} ended"
+                                    ),
+                                    Err(err) => tracing::warn!(
                                         "relay data channel for session {session_id} failed: {err}"
-                                    );
+                                    ),
                                 }
                             });
                         }

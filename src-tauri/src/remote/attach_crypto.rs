@@ -344,9 +344,28 @@ pub(crate) async fn read_frame<S: AsyncRead + Unpin>(
     stream: &mut S,
     max: usize,
 ) -> Result<Vec<u8>, AttachError> {
+    read_frame_or_end(stream, max)
+        .await?
+        .ok_or(AttachError::StreamClosed)
+}
+
+/// Like [`read_frame`], but a stream that ends exactly at a frame boundary is the peer
+/// finishing the session, not a failure: it answers `None`. An end inside a frame is still
+/// `StreamClosed`.
+pub(crate) async fn read_frame_or_end<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    max: usize,
+) -> Result<Option<Vec<u8>>, AttachError> {
     let mut header = [0u8; 4];
+    let first = stream
+        .read(&mut header[..1])
+        .await
+        .map_err(|_| AttachError::StreamClosed)?;
+    if first == 0 {
+        return Ok(None);
+    }
     stream
-        .read_exact(&mut header)
+        .read_exact(&mut header[1..])
         .await
         .map_err(|_| AttachError::StreamClosed)?;
     let length = u32::from_be_bytes(header) as usize;
@@ -358,7 +377,7 @@ pub(crate) async fn read_frame<S: AsyncRead + Unpin>(
         .read_exact(&mut buffer)
         .await
         .map_err(|_| AttachError::StreamClosed)?;
-    Ok(buffer)
+    Ok(Some(buffer))
 }
 
 #[cfg(test)]

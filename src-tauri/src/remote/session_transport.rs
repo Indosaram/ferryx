@@ -58,13 +58,17 @@ where
     let transport = std::sync::Arc::new(std::sync::Mutex::new(secure.transport));
 
     let t_rx = transport.clone();
+    // The peer closing its tunnel between frames is the normal end of a session (every
+    // relay request or attach ends that way). It used to surface as ATTACH_STREAM_CLOSED and
+    // was logged as a failed data channel once per session (2026-10-28: 927 warnings, one per
+    // distinct session).
     let to_gateway = async move {
-        loop {
-            let frame = crate::remote::attach_crypto::read_frame(
-                &mut stream_rx,
-                crate::remote::attach_crypto::MAX_ATTACH_FRAME + 16,
-            )
-            .await?;
+        while let Some(frame) = crate::remote::attach_crypto::read_frame_or_end(
+            &mut stream_rx,
+            crate::remote::attach_crypto::MAX_ATTACH_FRAME + 16,
+        )
+        .await?
+        {
             let mut plaintext = vec![0u8; frame.len().max(1)];
             let read = {
                 let mut t = t_rx.lock().unwrap();
@@ -77,7 +81,6 @@ where
                 .await
                 .map_err(|_| AttachError::StreamClosed)?;
         }
-        #[allow(unreachable_code)]
         Ok::<(), AttachError>(())
     };
 
@@ -242,6 +245,65 @@ mod tests {
         assert_eq!(reply, b"HTTP/1.1 200 OK\r\n");
 
         proxy.abort();
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_closes_between_frames_ends_the_session_cleanly() {
+        use tokio::io::AsyncReadExt;
+
+        let machine = attach_identity();
+        let device_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let device_private = device_secret.to_bytes();
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let responder_task = tokio::spawn({
+            let machine = machine.clone();
+            async move {
+                establish_session(server, true, Some(&machine), "machine-1", "s1", "2", |_| true).await
+            }
+        });
+        let initiator = AttachInitiator::new(&device_private, &machine.public_key, "machine-1", "s1", "2")
+            .expect("initiator");
+        let (mut secure_client, _) = initiator.connect(client).await.expect("handshake");
+        let SessionTransport::Attached(secure_server) = responder_task.await.expect("join").expect("session") else {
+            panic!("expected an attached transport");
+        };
+        // The gateway stays open, as a loopback gateway does after a response.
+        let (mut gateway_peer, gateway_local) = tokio::io::duplex(64 * 1024);
+        let proxy = tokio::spawn(async move { proxy_secure_to_gateway(secure_server, gateway_local).await });
+
+        secure_client.send_frame(b"GET / HTTP/1.1\r\n").await.expect("client frame");
+        let mut buffer = [0u8; 16];
+        tokio::time::timeout(Duration::from_secs(5), gateway_peer.read_exact(&mut buffer))
+            .await
+            .expect("gateway read timed out")
+            .expect("gateway read");
+        // The client finishes and closes its tunnel at a frame boundary.
+        drop(secure_client);
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), proxy)
+            .await
+            .expect("proxy did not end")
+            .expect("join");
+        assert_eq!(ended, Ok(()), "a finished session is not a failure");
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_closes_inside_a_frame_is_still_a_failure() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = tokio::io::duplex(64);
+        client.write_all(&[0, 0, 0, 9, 1, 2]).await.expect("partial frame");
+        drop(client);
+        assert_eq!(
+            crate::remote::attach_crypto::read_frame_or_end(&mut server, 64).await,
+            Err(AttachError::StreamClosed)
+        );
+        let (client, mut server) = tokio::io::duplex(64);
+        drop(client);
+        assert_eq!(
+            crate::remote::attach_crypto::read_frame_or_end(&mut server, 64).await,
+            Ok(None)
+        );
     }
 
     #[tokio::test]
