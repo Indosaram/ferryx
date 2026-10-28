@@ -506,7 +506,7 @@ impl Dispatcher {
         // either releases the claim (hold) or clears the transmit that follows it. An error
         // can only happen while nothing was sent, so it holds the goal and releases the claim
         // instead of leaving it `claimed` until the next restart.
-        match self.run_claimed(&goal, &binding, &claimed).await {
+        let result = match self.run_claimed(&goal, &binding, &claimed).await {
             Ok(result) => Ok(result),
             Err(error) => {
                 tracing::warn!(%error, request_id, "supervisor dispatch failed after its claim; holding the goal");
@@ -517,7 +517,9 @@ impl Dispatcher {
                 )
                 .await
             }
-        }
+        };
+        super::delivery::forget(request_id);
+        result
     }
 
     /// Launch, re-check, confirm and transmit for a claimed intent. Returns `Err` only while
@@ -579,6 +581,25 @@ impl Dispatcher {
             Err(error) => return Ok(released(request_id, &error)),
         };
         let delivery = transport.deliver(&send, settle_tx).await;
+        // An owner hold, correction or lane pause that landed while the transport waited for
+        // the pane revoked this request in the typing fence, and the transport refused it
+        // before the first byte. A goal hold or correction moved the goal, so the confirm call
+        // releases the claim; a lane pause did not, so the goal is held paused.
+        if matches!(delivery, Delivery::Refused { .. })
+            && super::delivery::check_before_typing(request_id).is_err()
+        {
+            return match confirm_claim_before_transmit(&self.pool, request_id).await {
+                Ok(_) => {
+                    let detail = format!(
+                        "{LANE_PAUSED}: the owner paused lane {} before {request_id} was typed",
+                        goal.lane_key
+                    );
+                    self.hold_claimed(claimed, RunState::Paused, detail).await
+                }
+                Err(SupervisorError::Sql(error)) => Err(SupervisorError::Sql(error)),
+                Err(error) => Ok(released(request_id, &error)),
+            };
+        }
         self.settle_transmission(goal, &sent, &send, delivery, settle_rx)
             .await
     }
@@ -668,7 +689,10 @@ impl Dispatcher {
                 format!("{OWNER_APPROVAL_REQUIRED}: a {mode} goal is not dispatched without the owner"),
             )));
         }
-        if turns_used >= turn_limit {
+        // The first dispatch consumes no turn; each corrective run counts its turn when it is
+        // enqueued ([`super::completion`]), so a dispatch goes out while the count is within
+        // the limit. A count past it was spent elsewhere and holds.
+        if turns_used > turn_limit {
             return Ok(Some((
                 RunState::AwaitingOwner,
                 format!("{TURN_LIMIT}: {turns_used} of {turn_limit} turns are used"),

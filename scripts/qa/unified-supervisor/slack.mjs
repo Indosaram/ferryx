@@ -51,6 +51,18 @@ function offeredTools(json) {
 
 const textOf = (content) => (typeof content === 'string' ? content : JSON.stringify(content ?? ''));
 
+/// Text of the user-role messages of the turn being asked: everything after the last assistant
+/// or tool message. The engine projects its own hidden custom messages (`omo-memory:notice`,
+/// task usage) onto the provider as user-role messages after the prompt, so the last user
+/// message alone is not the prompt.
+function turnUserText(messages) {
+  let start = 0;
+  messages.forEach((message, index) => {
+    if (message?.role === 'assistant' || message?.role === 'tool') start = index + 1;
+  });
+  return messages.slice(start).filter((message) => message?.role === 'user').map((message) => textOf(message?.content)).join('\n');
+}
+
 function closedLoopbackPort() {
   return new Promise((resolvePort, rejectPort) => {
     const server = createTcpServer();
@@ -230,8 +242,7 @@ async function startDecidingProvider(ctx, transcript) {
       const tools = offeredTools(json);
       const messages = Array.isArray(json?.messages) ? json.messages : [];
       const answered = messages.some((message) => message?.role === 'tool');
-      const lastUser = [...messages].reverse().find((message) => message?.role === 'user');
-      const userText = textOf(lastUser?.content);
+      const userText = turnUserText(messages);
       const conversationTurn = tools.includes(SUBMIT_TOOL);
       const entry = { at: new Date().toISOString(), path: request.url, model: json?.model ?? null, tools: tools.length, offersSubmit: conversationTurn,
         answered, ownerWork: userText.includes(OWNER_WORK),
@@ -365,7 +376,9 @@ export async function runSlackLeg(outer, { root, setupCli, hub, dbPath, waitForC
 
     // 1. A foreign Slack user (allow-listed for the legacy path, but not a supervisor owner):
     //    no supervisor turn, no goal, nothing learned. The legacy turn's first effect (its eyes
-    //    reaction in the foreign DM) is the barrier that the hub routed the message.
+    //    reaction in the foreign DM) is the barrier that the hub routed the message. The legacy
+    //    path's omo app-server is the closed loopback port above, so that turn later ends with
+    //    the hub's failure reply and `x` in the foreign DM; that is expected and never awaited.
     const foreignTs = `${Math.floor(Date.now() / 1000)}.000100`;
     const foreignCursor = ctx.journal.cursor();
     await slack.inject('foreign-dm', dmEvent(FOREIGN_USER, FOREIGN_DM, foreignTs, FOREIGN_WORK));

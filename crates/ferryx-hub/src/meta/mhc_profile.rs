@@ -1,7 +1,7 @@
 //! Launch profile and durable session identities of the retained mhc supervisor engine.
 //!
 //! The engine always runs as `mhc --mode rpc --multi-session --no-model-fallback
-//! --ttsr-rules-disabled=repetitive-turns` over stdio, in
+//! --ttsr-rules-disabled=repetitive-turns --omo-senpi-onboarding-disabled` over stdio, in
 //! the fixed profile directory `<data>/mhc-supervisor`, whatever directory the hub itself was
 //! started from. Its native memory identity is pinned by a profile-local `.omo/omo.jsonc`; no
 //! global configuration is written. Session roles get their policy from host-supplied session
@@ -28,12 +28,18 @@ pub const DEFAULT_MHC_BIN: &str = "mhc";
 /// session legitimately answers the same verdict for an unchanged goal, and that guard aborts
 /// a streamed turn that repeats the previous persisted answer, so every repeated verdict was
 /// lost as a fault. The other stream rules stay on.
-pub const LAUNCH_ARGS: [&str; 5] = [
+///
+/// `--omo-senpi-onboarding-disabled` turns off the omo onboarding component (mhc
+/// maho-omo-onboarding component.rs:15-20): on the first session it ever opens it triggers its
+/// own model turn ("Read the onboarding skill ... Greet the user first.") in the supervisor's
+/// identity, which a supervisor session has no use for.
+pub const LAUNCH_ARGS: [&str; 6] = [
     "--mode",
     "rpc",
     "--multi-session",
     "--no-model-fallback",
     "--ttsr-rules-disabled=repetitive-turns",
+    "--omo-senpi-onboarding-disabled",
 ];
 /// Capabilities the engine must advertise before any session opens: the host baseline the
 /// client relies on, then the plan's supervisor capabilities. `memory_forget` also stands for
@@ -75,6 +81,20 @@ pub const ENABLE_KEY: &str = "FERRYX_HUB_MHC_SUPERVISOR";
 pub const LOCK_FILENAME: &str = "mhc-supervisor.lock";
 /// Client capability that makes the host forward extension RPC events (the work-tool requests).
 pub const CLIENT_CAPABILITIES: [&str; 1] = ["extension_events"];
+/// Environment variables the engine's stdio host reads its client capabilities from (mhc
+/// maho-rpc custom_capability.rs:50, `env_value("RPC_CLIENT_CAPABILITIES")` over the brand
+/// prefixes MAHO, SENPI, PI, maho-core brand.rs:173,209-236). On stdio there is no
+/// connection, so `set_client_info` registers nothing (multi_session_host.rs:245-253): every
+/// session binding, including each worker's (multi_session_host.rs:388,396), takes the host
+/// options' capabilities parsed from this variable (host_runtime.rs:643-645,672-674). Without
+/// it a conversation session never forwards `supervisor.work_request`, and its work tool
+/// waits for a reply that cannot come. Every prefix is set, so an inherited value under any
+/// of them cannot shadow the hub's.
+pub const CLIENT_CAPABILITIES_ENV: [&str; 3] = [
+    "MAHO_RPC_CLIENT_CAPABILITIES",
+    "SENPI_RPC_CLIENT_CAPABILITIES",
+    "PI_RPC_CLIENT_CAPABILITIES",
+];
 /// Tools no decision, convergence, conversation or ingest session may register: terminal
 /// commands and file mutation. Memory write tools are withheld by `memory_write = deny`.
 pub const DEFAULT_EFFECT_TOOLS: [&str; 3] = ["bash", "edit", "write"];
@@ -380,6 +400,14 @@ impl MhcProfile {
 
     pub fn launch_args(&self) -> Vec<String> {
         LAUNCH_ARGS.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    /// Environment the engine is launched with on top of the hub child environment.
+    pub fn launch_env(&self) -> Vec<(String, String)> {
+        CLIENT_CAPABILITIES_ENV
+            .iter()
+            .map(|name| ((*name).to_owned(), CLIENT_CAPABILITIES.join(",")))
+            .collect()
     }
 
     /// Required capabilities the engine did not advertise, in [`REQUIRED_CAPABILITIES`] order.

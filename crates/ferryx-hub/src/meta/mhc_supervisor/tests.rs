@@ -251,6 +251,24 @@ impl Peer {
                     self.late.lock().unwrap().insert(handle, id.clone());
                     return;
                 }
+                if message.contains("BEHIND") {
+                    // A turn the engine ran on its own (an extension's triggered message) is
+                    // still running; the prompt starts only after it settled.
+                    self.emit(json!({"type": "agent_start", "sessionId": handle}));
+                    self.assistant(&handle, "extension-triggered answer");
+                }
+                if message.contains("WORK_EARLY") {
+                    // The turn's own tool call reaches the hub before the prompt's `started`
+                    // response is read.
+                    let durable = self.handles.lock().unwrap()[&handle].clone();
+                    self.emit(json!({"type": "extension_event", "sessionId": handle,
+                        "name": "supervisor.work_request", "data": {
+                            "requestId": "work-early", "sessionId": durable, "action": "submit",
+                            "payload": {"title": "ship it", "requirements": ["tests pass"], "worker": "pty"}}}));
+                    self.emit(ok(json!({"disposition": "started"})));
+                    self.emit(json!({"type": "agent_start", "sessionId": handle}));
+                    return;
+                }
                 let disposition = self
                     .disposition
                     .lock()
@@ -1594,6 +1612,46 @@ async fn failed_launches_back_off_5s_doubling_to_300s_and_reset_after_a_stable_e
 }
 
 #[tokio::test]
+async fn a_tool_call_of_the_prompts_own_turn_read_before_started_is_executed() {
+    let harness = Harness::new("work-early", all_capabilities());
+    let supervisor = harness.supervisor();
+    let handler = Arc::new(RecordingWork::default());
+    supervisor.set_work_handler(handler.clone());
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:C9".to_owned(),
+    };
+    let reply: Value = serde_json::from_str(
+        &supervisor
+            .converse_in_turn(&scope, Some(7), "WORK_EARLY please")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    // The handler ran for this turn, and its reply reached the engine and ended the turn.
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["requestId"], "work-early");
+    let calls = handler.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].turn, Some(7));
+    assert_eq!(calls[0].scope, scope);
+}
+
+#[tokio::test]
+async fn a_turn_the_engine_ran_before_the_prompt_started_never_answers_it() {
+    let harness = Harness::new("behind", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:C9".to_owned(),
+    };
+    let reply = supervisor.converse(&scope, "BEHIND owner work").await.unwrap();
+    assert_eq!(reply, "answer:BEHIND owner work");
+    // The conversation stays in step: the next turn gets its own answer.
+    assert_eq!(supervisor.converse(&scope, "next").await.unwrap(), "answer:next");
+}
+
+#[tokio::test]
 async fn channel_text_starting_with_a_slash_is_never_an_engine_command() {
     let harness = Harness::new("slash", all_capabilities());
     let supervisor = harness.supervisor();
@@ -1802,10 +1860,26 @@ fn the_owned_launch_is_stdio_rpc_in_the_profile_directory() {
             "rpc",
             "--multi-session",
             "--no-model-fallback",
-            "--ttsr-rules-disabled=repetitive-turns"
+            "--ttsr-rules-disabled=repetitive-turns",
+            "--omo-senpi-onboarding-disabled"
         ]
     );
     assert_eq!(spec.cwd, data.join("mhc-supervisor"));
+    // The stdio host forwards extension RPC events (the work-tool requests) only when its
+    // client capabilities, read from the environment, name them.
+    for name in [
+        "MAHO_RPC_CLIENT_CAPABILITIES",
+        "SENPI_RPC_CLIENT_CAPABILITIES",
+        "PI_RPC_CLIENT_CAPABILITIES",
+    ] {
+        assert!(
+            spec.env
+                .iter()
+                .any(|(key, value)| key == name && value == "extension_events"),
+            "{name} in {:?}",
+            spec.env
+        );
+    }
 }
 
 #[tokio::test]
@@ -1977,28 +2051,39 @@ async fn a_generation_abort_and_engine_restart_end_only_the_owned_engine_child()
     assert_eq!(supervisor.decide("first").await.unwrap(), "answer:first");
     // Engine restart: the owned child exits on its own; the next use relaunches it.
     harness.peer.disconnect();
-    tokio::time::timeout(WAIT, health.wait_for(|health| health.state != HealthState::Ready))
-        .await
-        .expect("the exit is observed")
-        .unwrap();
+    tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state != HealthState::Ready),
+    )
+    .await
+    .expect("the exit is observed")
+    .unwrap();
     tokio::time::advance(MIN_BACKOFF).await;
     assert_eq!(supervisor.decide("second").await.unwrap(), "answer:second");
     // Hub generation abort (hub stop or handover).
     generation.abort();
-    tokio::time::timeout(WAIT, health.wait_for(|health| health.state == HealthState::Stopped))
-        .await
-        .expect("the aborted generation stops the engine")
-        .unwrap();
+    tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state == HealthState::Stopped),
+    )
+    .await
+    .expect("the aborted generation stops the engine")
+    .unwrap();
     harness.peer.wait_ended(2).await;
 
     let children = launcher.children.lock().unwrap().clone();
     assert_eq!(children.len(), 2, "one owned child per launch");
     assert!(
-        children.iter().all(|(_, killed)| killed.load(Ordering::SeqCst)),
+        children
+            .iter()
+            .all(|(_, killed)| killed.load(Ordering::SeqCst)),
         "each recorded owned child was ended through its own kill switch"
     );
     assert!(supervisor.health().pid.is_none());
-    assert!(supervisor.profile().owned_pid().is_none(), "no owned pid record is left");
+    assert!(
+        supervisor.profile().owned_pid().is_none(),
+        "no owned pid record is left"
+    );
 }
 
 #[tokio::test]

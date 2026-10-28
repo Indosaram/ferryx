@@ -122,9 +122,10 @@ function freeLoopbackPort() {
 // ---------------------------------------------------------------------------
 // Loopback openai-completions stub. Records every request (method, path, model, whether a
 // tools list was offered and its names) and answers with one streamed assistant message, or
-// with an HTTP error while `failWith` is set.
+// with an HTTP error while `failWith` is set. The message is STUB_ASSESSMENT unless `answer`
+// (called with the parsed request body) returns another object for that request.
 
-export async function startProviderStub(ctx) {
+export async function startProviderStub(ctx, { answer = null } = {}) {
   const requests = [];
   // Raw request bodies, index-aligned with `requests`, kept in memory only (never written to
   // evidence): a scenario asks which requests carried a marker anywhere in what the model saw.
@@ -168,10 +169,11 @@ export async function startProviderStub(ctx) {
       }
       const id = `qa-${requests.length}`;
       const model = json?.model ?? STUB_MODEL;
+      const reply = answer?.(json) ?? STUB_ASSESSMENT;
       const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model,
         choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-      response.write(chunk({ role: 'assistant', content: JSON.stringify(STUB_ASSESSMENT) }));
+      response.write(chunk({ role: 'assistant', content: JSON.stringify(reply) }));
       response.write(chunk({}, 'stop'));
       response.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
@@ -365,7 +367,7 @@ export async function awaitEngine(ctx, env, label, predicate, deadlineMs) {
 // ---------------------------------------------------------------------------
 // Restart only the owned engine.
 
-const ENGINE_ARGS = ['--mode', 'rpc', '--multi-session', '--no-model-fallback', '--ttsr-rules-disabled=repetitive-turns'];
+const ENGINE_ARGS = ['--mode', 'rpc', '--multi-session', '--no-model-fallback', '--ttsr-rules-disabled=repetitive-turns', '--omo-senpi-onboarding-disabled'];
 
 function argvOf(probe) {
   if (Array.isArray(probe.argv)) return probe.argv;

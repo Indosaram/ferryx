@@ -2408,6 +2408,7 @@ async fn transition_goal_in(
         .bind(revision)
         .execute(&mut *conn)
         .await?;
+        revoke_claimed(conn, goal_id).await?;
     }
     if to == RunState::Cancelled {
         sqlx::query(
@@ -2447,9 +2448,8 @@ pub async fn revise_goal(
 /// [`revise_goal`]'s checks and writes inside the caller's write transaction, so an owner
 /// correction commits its contract, revision bump and corrected intent together. Every
 /// owner correction goes through here, so this is the one place a claimed send of the goal
-/// is revoked (the typing fence of the completion work belongs here, inside the caller's
-/// transaction); the claimed row itself is left to the dispatcher, whose pre-transmit check
-/// sees the moved revision and releases it untransmitted.
+/// is revoked in the typing fence ([`revoke_claimed`]); the claimed row itself is left to the
+/// dispatcher, whose pre-transmit check sees the moved revision and releases it untransmitted.
 pub(crate) async fn revise_goal_in(
     conn: &mut SqliteConnection,
     goal_id: &str,
@@ -2485,11 +2485,26 @@ pub(crate) async fn revise_goal_in(
     .bind(revision)
     .execute(&mut *conn)
     .await?;
+    revoke_claimed(conn, goal_id).await?;
     Ok(SupervisorGoal {
         revision,
         updated_at: now,
         ..goal
     })
+}
+
+/// An owner hold or correction landed while a dispatch of `goal_id` is claimed: that claim
+/// may already be past its confirm call and waiting for the pane, so it is revoked in the
+/// in-process typing fence ([`delivery::check_before_typing`]) and nothing of it is typed.
+async fn revoke_claimed(conn: &mut SqliteConnection, goal_id: &str) -> Result<(), SupervisorError> {
+    let claimed: Vec<String> = sqlx::query_scalar(
+        "SELECT request_id FROM supervisor_dispatches WHERE goal_id = ? AND state = 'claimed'",
+    )
+    .bind(goal_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    delivery::revoke(claimed);
+    Ok(())
 }
 
 /// Writes the goal's next ready dispatch intent at `expected_revision` and the binding's
@@ -3592,6 +3607,9 @@ pub async fn attach_legacy_pane(
 mod tests;
 
 pub mod admission;
+pub mod answers;
+pub mod completion;
+pub mod delivery;
 pub mod dispatcher;
 pub mod memory;
 pub mod receipts;
