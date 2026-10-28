@@ -1070,6 +1070,9 @@ pub struct AgentPromptView {
     pub question: String,
     pub options: Vec<AgentPromptViewOption>,
     pub kind: AgentPromptViewKind,
+    /// Picking an option must be confirmed first (approval, plan and menu prompts), by the same
+    /// rule the remote chat applies.
+    pub needs_confirmation: bool,
 }
 
 /// Authenticated identity of a paired DAG subscription. The desktop names the host

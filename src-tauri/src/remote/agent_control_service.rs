@@ -520,12 +520,18 @@ fn prompt_view(
         _ => AgentPromptViewKind::Choice,
     };
     let question = if prompt.question.trim().is_empty() { prompt.title.clone() } else { prompt.question.clone() };
+    // The remote chat's rule, for an option pick: the desktop asks the same confirm it does.
+    let needs_confirmation = prompt.needs_confirmation(&reference_types::ReferencePromptAnswer {
+        option_index: Some(0),
+        ..Default::default()
+    });
     AgentPromptView {
         prompt_id: prompt.id.clone(),
         screen_revision,
         question,
         options,
         kind,
+        needs_confirmation,
     }
 }
 
@@ -1519,6 +1525,9 @@ mod tests {
         assert!(!prompt.prompt_id.is_empty() && !prompt.screen_revision.is_empty());
         let wire = serde_json::to_value(&prompt).expect("wire");
         assert_eq!(wire["kind"], "choice", "{wire}");
+        // The update menu is a Menu card: picking an option is confirmed first, as on the phone.
+        assert!(prompt.needs_confirmation);
+        assert_eq!(wire["needsConfirmation"], true, "{wire}");
         assert_eq!(wire["options"].as_array().map(Vec::len), Some(3), "{wire}");
         assert!(wire["promptId"].is_string() && wire["screenRevision"].is_string(), "{wire}");
         assert!(backend.writes.lock().expect("writes").is_empty(), "a read types nothing");
@@ -1597,5 +1606,16 @@ mod tests {
             serde_json::from_value(serde_json::json!({"type": "agentPromptGet", "sessionId": "s"}))
                 .expect("a get without a registry id parses");
         assert!(matches!(get, crate::daemon::protocol::DaemonRequest::AgentPromptGet { registry_id: None, .. }));
+        let view = crate::daemon::protocol::AgentPromptView {
+            prompt_id: "p".into(),
+            screen_revision: "r".into(),
+            question: "q".into(),
+            options: Vec::new(),
+            kind: crate::daemon::protocol::AgentPromptViewKind::FreeText,
+            needs_confirmation: false,
+        };
+        let wire = serde_json::to_value(&view).expect("wire");
+        assert_eq!(wire["needsConfirmation"], false, "{wire}");
+        assert_eq!(wire["kind"], "freeText", "{wire}");
     }
 }
