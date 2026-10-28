@@ -968,7 +968,11 @@ async fn engine_view(
             let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
                 .with_fallback(Arc::new(supervisor.model()))
                 .with_pool(pool);
-            let reply = judge.structured(ferryx_hub::judge::Purpose::GapAssess, &prompt).await;
+            let reply = ferryx_hub::usage::with_cause(
+                ferryx_hub::usage::CallCause::new("owner_probe"),
+                judge.structured(ferryx_hub::judge::Purpose::GapAssess, &prompt),
+            )
+            .await;
             match reply {
                 Ok(reply) => Some(json!({ "purpose": "gap_assess", "reply": reply })),
                 Err(error) => {

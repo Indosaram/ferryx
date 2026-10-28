@@ -227,9 +227,10 @@ pub async fn with_cause<F: std::future::Future>(cause: CallCause, future: F) -> 
     CALL_CAUSE.scope(cause, future).await
 }
 
-/// Runs `future` under the current cause (or `unattributed`) with `purpose` set.
+/// Runs `future` under the current cause with `purpose` set. A judge call no caller attributed
+/// is attributed to its purpose (`judge:<purpose>`), never left unattributed.
 pub async fn with_purpose<F: std::future::Future>(purpose: &str, future: F) -> F::Output {
-    let mut cause = current_cause().unwrap_or_else(|| CallCause::new(UNATTRIBUTED));
+    let mut cause = current_cause().unwrap_or_else(|| CallCause::new(format!("judge:{purpose}")));
     cause.purpose = Some(purpose.to_owned());
     CALL_CAUSE.scope(cause, future).await
 }

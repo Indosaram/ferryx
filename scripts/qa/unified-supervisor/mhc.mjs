@@ -126,6 +126,9 @@ function freeLoopbackPort() {
 
 export async function startProviderStub(ctx) {
   const requests = [];
+  // Raw request bodies, index-aligned with `requests`, kept in memory only (never written to
+  // evidence): a scenario asks which requests carried a marker anywhere in what the model saw.
+  const bodies = [];
   // `arrivals` counts requests when they start (before their body is read and their reply
   // streams); each recorded entry carries its arrival number, so a caller can count only the
   // requests that arrived after a point it observed, whatever order they finish in.
@@ -144,6 +147,7 @@ export async function startProviderStub(ctx) {
       const entry = { at: new Date().toISOString(), arrival, arrivedAt, method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools,
         prompt: promptOf(json), failWith: state.failWith };
       requests.push(entry);
+      bodies.push(body);
       ctx.evidence.appendJsonl('runtime/provider-requests.jsonl', entry);
       ctx.journal.push({ source: 'provider-stub', kind: 'request', ...entry });
       if (state.failWith) {
@@ -185,6 +189,12 @@ export async function startProviderStub(ctx) {
     baseUrl,
     requests,
     arrivals: () => state.arrivals,
+    /// Arrival numbers of the recorded requests from index `from` whose raw body contains every
+    /// one of `needles` (a string or an array of strings).
+    containing: (needles, from = 0) => {
+      const all = Array.isArray(needles) ? needles : [needles];
+      return requests.slice(from).filter((_, index) => all.every((needle) => bodies[from + index].includes(needle))).map((entry) => entry.arrival);
+    },
     // Every request fails with `status` until succeed(). `code` is the provider error code in
     // the body (e.g. insufficient_quota) and `headers` extra response headers (e.g.
     // x-should-retry: false, which mhc's transport retry honours before any backoff).

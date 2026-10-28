@@ -17,6 +17,7 @@ import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
 import { runSlackLeg } from './slack.mjs';
+import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -1608,6 +1609,14 @@ async function runCapabilities(ctx) {
   }
 }
 
+// The memory and usage scenarios (task 15, memory-usage.mjs) reuse these helpers.
+const memoryUsageDeps = Object.freeze({
+  supervisedHub,
+  hubControl,
+  work: (instruction) => ({ ...ADMISSION_WORK, instruction }),
+});
+const loadMemoryUsage = async () => import('./memory-usage.mjs');
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -1682,7 +1691,14 @@ export const SCENARIOS = Object.freeze({
       'memory-receipts-unavailable-503', 'only-the-owner-changed-the-goal'],
     run: runAuthority,
   }),
-  memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
+  memory: Object.freeze({
+    implemented: true,
+    task: '15',
+    summary: 'Teach through the desktop adapter (receipt + provenance), recall in a new context, worker-injected MCP text never teaches, a one-time exception reaches only its goal and is absent next run, forget then daemon-hub restart and replay of the old message: the item never reaches the model again',
+    deadlineMs: 20 * 60_000,
+    requiredAssertions: MEMORY_REQUIRED_ASSERTIONS,
+    run: (ctx) => loadMemoryUsage().then((module) => module.runMemory(ctx, memoryUsageDeps)),
+  }),
   capabilities: Object.freeze({
     implemented: true,
     task: '12',
@@ -1701,7 +1717,14 @@ export const SCENARIOS = Object.freeze({
   legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
   surfaces: planned('14', 'Real desktop and mobile controls against a populated isolated hub: same state and goal revision, readable wait/degraded views'),
-  usage: planned('15', 'Replay the same reports before/after the scheduling change: no idle calls, stable prefix hash, every call has a cause'),
+  usage: Object.freeze({
+    implemented: true,
+    task: '15',
+    summary: 'Two differing goals assessed through the engine share one prefix hash; every engine call has a cause and unreported usage is null; a goal waiting on a subscribed dependency makes zero provider requests and zero model-call rows across delivered owner wakes',
+    deadlineMs: 20 * 60_000,
+    requiredAssertions: USAGE_REQUIRED_ASSERTIONS,
+    run: (ctx) => loadMemoryUsage().then((module) => module.runUsage(ctx, memoryUsageDeps)),
+  }),
 });
 
 async function startSleeper(ctx, id, flags, graceMs, { extraEnv = {}, onLine, detached = false } = {}) {
