@@ -167,9 +167,12 @@ fn engine_failure(error: MemoryRequestError) -> RequestFailure {
                 "invalid_request" => "INVALID_REQUEST",
                 "receipt_not_found" => "NOT_FOUND",
                 "source_conflict" => "REQUEST_CONFLICT",
-                "receipt_closed" => "GOAL_CLOSED",
+                "receipt_closed" => MEMORY_REFUSED,
                 "memory_content_retained" => MEMORY_CONTENT_RETAINED,
-                "memory_write_denied" | "memory_unavailable" => MEMORY_UNAVAILABLE,
+                "memory_write_denied"
+                | "memory_unavailable"
+                | "memory_write_failed"
+                | "memory_storage_failed" => MEMORY_UNAVAILABLE,
                 _ => MEMORY_REFUSED,
             };
             RequestFailure::new(mapped, format!("{code}: {message}"))

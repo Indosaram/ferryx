@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::agent_control::{failure, UsageError, EXIT_INVALID, EXIT_OK};
 use crate::daemon::protocol::{DaemonRequest, DaemonResponse, SupervisorEngineAction, DAEMON_PROTOCOL_VERSION};
 
-pub const SUPERVISOR_ENGINE_USAGE: &str = "usage: ferryx-cli supervisor engine status [--json]\n       ferryx-cli supervisor engine assess --prompt <text> [--json]";
+pub const SUPERVISOR_ENGINE_USAGE: &str = "usage: ferryx-cli supervisor engine status [--json]\n       ferryx-cli supervisor engine assess (--prompt <text> | --goal <goalId>) [--json]";
 
 /// How long one engine action may take: an assessment is one bounded engine turn (600s by
 /// default) behind a possible engine launch.
@@ -29,7 +29,10 @@ pub fn parse_supervisor_engine_cli(args: &[String]) -> Result<SupervisorEngineAc
             [flag, prompt] if flag.as_str() == "--prompt" && !prompt.trim().is_empty() => {
                 Ok(SupervisorEngineAction::Assess { prompt: (*prompt).clone() })
             }
-            _ => Err(UsageError(format!("assess needs exactly --prompt <text>\n{SUPERVISOR_ENGINE_USAGE}"))),
+            [flag, goal] if flag.as_str() == "--goal" && !goal.trim().is_empty() => {
+                Ok(SupervisorEngineAction::AssessGoal { goal_id: goal.trim().to_owned() })
+            }
+            _ => Err(UsageError(format!("assess needs exactly --prompt <text> or --goal <goalId>\n{SUPERVISOR_ENGINE_USAGE}"))),
         },
         "status" => Err(UsageError(format!("status takes no arguments\n{SUPERVISOR_ENGINE_USAGE}"))),
         other => Err(UsageError(format!("unknown engine command {other}\n{SUPERVISOR_ENGINE_USAGE}"))),
@@ -145,6 +148,10 @@ mod tests {
                 .unwrap(),
             SupervisorEngineAction::Assess { prompt: "grade it".into() }
         );
+        assert_eq!(
+            parse_supervisor_engine_cli(&argv(&["ferryx-cli", "supervisor", "engine", "assess", "--goal", "g-1"])).unwrap(),
+            SupervisorEngineAction::AssessGoal { goal_id: "g-1".into() }
+        );
     }
 
     #[test]
@@ -156,6 +163,7 @@ mod tests {
             &["ferryx-cli", "supervisor", "engine", "assess"],
             &["ferryx-cli", "supervisor", "engine", "assess", "--prompt"],
             &["ferryx-cli", "supervisor", "engine", "assess", "--prompt", "  "],
+            &["ferryx-cli", "supervisor", "engine", "assess", "--goal", " "],
             &["ferryx-cli", "supervisor", "goal", "show", "ledger"],
         ] {
             assert!(parse_supervisor_engine_cli(&argv(words)).is_err(), "{words:?} should be refused");

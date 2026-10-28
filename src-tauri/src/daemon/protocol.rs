@@ -596,6 +596,9 @@ pub enum SupervisorEngineAction {
     Status,
     /// One structured judgment through the supervisor judge (a `judge_calls` row).
     Assess { prompt: String },
+    /// The goal's real gap assessment (its contract, evidence and recent turns), attributed to
+    /// the goal and recorded like every engine call. Writes no goal, dispatch or contract.
+    AssessGoal { goal_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2072,6 +2075,10 @@ mod tests {
             (
                 SupervisorEngineAction::Assess { prompt: "grade this".into() },
                 serde_json::json!({"type":"supervisorEngine","request":{"action":"assess","prompt":"grade this"}}),
+            ),
+            (
+                SupervisorEngineAction::AssessGoal { goal_id: "g-1".into() },
+                serde_json::json!({"type":"supervisorEngine","request":{"action":"assessGoal","goalId":"g-1"}}),
             ),
         ];
         for (action, wire) in cases {

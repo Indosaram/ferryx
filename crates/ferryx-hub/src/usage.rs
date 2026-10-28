@@ -174,7 +174,8 @@ pub fn with_delta(prefix: &str, delta: &str) -> String {
     format!("{prefix}{DELTA_MARKER}{delta}")
 }
 
-fn sha256_hex(text: &str) -> String {
+/// Lowercase hex SHA-256 of `text`.
+pub fn sha256_hex(text: &str) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(text.as_bytes())
         .iter()

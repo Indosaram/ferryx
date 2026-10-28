@@ -950,6 +950,7 @@ impl From<ferryx_hub::goals::GoalError> for SupervisorEngineError {
 async fn engine_view(
     installed: Option<ferryx_hub::meta::mhc_supervisor::MhcSupervisor>,
     pool: Option<ferryx_hub::goals::SqlitePool>,
+    control: Option<Arc<dyn AgentControl>>,
     action: crate::daemon::protocol::SupervisorEngineAction,
 ) -> Result<Value, SupervisorEngineError> {
     use crate::daemon::protocol::SupervisorEngineAction as Action;
@@ -977,12 +978,53 @@ async fn engine_view(
                 }
             }
         }
+        Action::AssessGoal { goal_id } => {
+            let pool = pool.ok_or(SupervisorEngineError::Unavailable)?;
+            let control = control.ok_or(SupervisorEngineError::Unavailable)?;
+            let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+                .with_fallback(Arc::new(supervisor.model()))
+                .with_pool(pool.clone());
+            Some(assess_goal(&pool, &judge, control.as_ref(), &goal_id).await?)
+        }
     };
     let mut view = json!({ "engine": supervisor.engine_snapshot().await });
     if let (Some(assessment), Some(fields)) = (assessment, view.as_object_mut()) {
         fields.insert("assessment".into(), assessment);
     }
     Ok(view)
+}
+
+/// One goal's real gap assessment through `judge`: the prompt the goal loop builds (stable
+/// instruction prefix, then the goal's contract, evidence and recent turns), attributed to the
+/// goal (`owner_assess`). Reads only; the assessment is returned, never applied.
+async fn assess_goal(
+    pool: &ferryx_hub::goals::SqlitePool,
+    judge: &ferryx_hub::judge::Judge,
+    control: &dyn AgentControl,
+    goal_id: &str,
+) -> Result<Value, SupervisorEngineError> {
+    use ferryx_hub::goals::{assess, contract, evidence, prompts, turns};
+    let unknown = || SupervisorEngineError::Judge(format!("NOT_FOUND: goal {goal_id} has no lane contract"));
+    let goal = ferryx_hub::supervisor::goal_of(pool, goal_id)
+        .await
+        .map_err(|error| SupervisorEngineError::Judge(error.to_string()))?
+        .ok_or_else(unknown)?;
+    let contract = contract::contract_of(pool, &goal.lane_key).await?.ok_or_else(unknown)?;
+    let bundle = evidence::collect(pool, control, &goal.lane_key).await?;
+    let recent = turns::turns_of(pool, &goal.lane_key).await?;
+    let prompt = prompts::gap_assess_prompt(&contract, &bundle, &recent);
+    let prefix = ferryx_hub::usage::split_prompt(&prompt).map(|(prefix, _)| prefix.to_owned());
+    let cause = ferryx_hub::usage::CallCause::new("owner_assess").goal(goal_id, Some(goal.revision));
+    let assessment = ferryx_hub::usage::with_cause(cause, assess::assess(judge, &contract, &bundle, &recent)).await?;
+    Ok(json!({
+        "purpose": "gap_assess",
+        "goalId": goal_id,
+        "goalRevision": goal.revision,
+        "laneKey": goal.lane_key,
+        "prefixSha256": prefix.as_deref().map(ferryx_hub::usage::sha256_hex),
+        "promptBytes": prompt.len(),
+        "assessment": assessment,
+    }))
 }
 
 /// Reads the retained mhc supervisor engine or asks it for one structured judgment, and adds
@@ -996,10 +1038,11 @@ pub async fn supervisor_engine(
     action: crate::daemon::protocol::SupervisorEngineAction,
 ) -> Result<Value, SupervisorEngineError> {
     let pool = SUPERVISOR_VIEW.get().map(|(hub, _)| hub.pool.clone());
+    let control = SUPERVISOR_VIEW.get().map(|(hub, _)| Arc::clone(&hub.control));
     let hub_open = pool.is_some();
     // engine_view refuses first (MHC_NOT_RUNNING) when no engine is installed, so the identity
     // rows are read only for a view that is returned.
-    let mut view = engine_view(ferryx_hub::meta::mhc_supervisor::installed(), pool.clone(), action).await?;
+    let mut view = engine_view(ferryx_hub::meta::mhc_supervisor::installed(), pool.clone(), control, action).await?;
     let identities = match &pool {
         Some(pool) => match ferryx_hub::supervisor::identities(pool).await {
             Ok(rows) => json!(rows),
@@ -2818,8 +2861,12 @@ mod tests {
     async fn an_engine_action_without_an_installed_engine_is_mhc_not_running() {
         use crate::daemon::protocol::SupervisorEngineAction as Action;
         assert_eq!(SUPERVISOR_ENGINE_CAPABILITY, "supervisorEngineV1");
-        for action in [Action::Status, Action::Assess { prompt: "grade this".into() }] {
-            let refused = engine_view(None, None, action).await.unwrap_err();
+        for action in [
+            Action::Status,
+            Action::Assess { prompt: "grade this".into() },
+            Action::AssessGoal { goal_id: "g-1".into() },
+        ] {
+            let refused = engine_view(None, None, None, action).await.unwrap_err();
             assert_eq!(refused.code(), "MHC_NOT_RUNNING");
             assert!(refused.to_string().starts_with("MHC_NOT_RUNNING:"), "{refused}");
         }
