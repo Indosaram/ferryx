@@ -23,6 +23,9 @@ mod machine_event_cancellation_tests;
 #[cfg(test)]
 #[path = "machine_event_snapshot_race_tests.rs"]
 mod machine_event_snapshot_race_tests;
+#[cfg(all(test, unix))]
+#[path = "machine_event_prompt_push_tests.rs"]
+mod machine_event_prompt_push_tests;
 
 impl Default for MachineEvents {
     fn default() -> Self {

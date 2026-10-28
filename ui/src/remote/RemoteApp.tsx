@@ -3567,12 +3567,15 @@ export const RemoteHostConnection: React.FC<{
     }
     let cancelled = false;
     let fetching = false;
+    // A push that lands while a read is in flight: that read's answer may predate it.
+    let pushedDuringRead = false;
     const controller = new AbortController();
 
     const readPrompt = async () => {
       if (cancelled || fetching) return;
       if (typeof document !== "undefined" && document.hidden) return;
       fetching = true;
+      pushedDuringRead = false;
       try {
         const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, chatAgentType)}`;
         const response = await remoteFetch(transportBaseUrl, path, {
@@ -3590,6 +3593,7 @@ export const RemoteHostConnection: React.FC<{
           return;
         }
         const body: unknown = await response.json();
+        if (pushedDuringRead) return;
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
         const revision = prompt === null ? null : parseChatScreenRevision(body);
@@ -3616,6 +3620,7 @@ export const RemoteHostConnection: React.FC<{
         /* a transient prompt read keeps the card the user is looking at */
       } finally {
         fetching = false;
+        if (pushedDuringRead && !cancelled) void readPrompt();
       }
     };
 
@@ -3636,7 +3641,8 @@ export const RemoteHostConnection: React.FC<{
         setChatPrompt(null);
         setChatScreenRevision(null);
       }
-      void readPrompt();
+      if (fetching) pushedDuringRead = true;
+      else void readPrompt();
     };
     return () => {
       cancelled = true;
