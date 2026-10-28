@@ -62,6 +62,138 @@ pub async fn enqueue(
     Ok(result.last_insert_rowid())
 }
 
+/// Lane event kind of a report a supervisor goal's own worker sent ([`report_from_worker`]).
+pub const WORKER_REPORT: &str = "worker_report";
+/// Longest worker report id and body.
+const MAX_REPORT_ID_CHARS: usize = 256;
+const MAX_REPORT_BODY_CHARS: usize = 4_000;
+
+/// What [`report_from_worker`] recorded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerReport {
+    pub goal_id: String,
+    pub lane_key: String,
+    pub lane_event_id: i64,
+    /// The wake's event id (`lane_event:<id>`).
+    pub wake_event_id: String,
+    /// The same report id was already recorded for this lane; nothing new was written.
+    pub duplicate: bool,
+}
+
+/// Why a worker report was refused. Nothing was written.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerReportError {
+    #[error("INVALID_REQUEST: {0}")]
+    Invalid(String),
+    #[error("NOT_FOUND: session {session_id} on host {host_id} is not the worker of an open supervisor goal")]
+    NotBound { host_id: String, session_id: String },
+    #[error(transparent)]
+    Store(#[from] crate::error::HubError),
+}
+
+impl WorkerReportError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            WorkerReportError::Invalid(_) => "INVALID_REQUEST",
+            WorkerReportError::NotBound { .. } => "NOT_FOUND",
+            WorkerReportError::Store(_) => "STORAGE",
+        }
+    }
+}
+
+/// An ordinary report from the worker bound to a supervisor goal: one `worker_report` lane
+/// event on that goal's own lane, handed at once to the goal's wake service through
+/// [`hand_to_supervisor`], the one path every supervisor lane event takes. The lane is never
+/// the caller's choice: it is the lane of the open goal whose execution binding names
+/// `session_id` on `host_id`. `event_id` is the worker's own report id; the same id again (a
+/// retry, or an earlier report replayed out of order) is the same lane event and so the same
+/// wake. Status only: a report never moves the goal, and the kind is fixed, so a worker cannot
+/// raise an owner-urgent notice.
+pub async fn report_from_worker(
+    pool: &SqlitePool,
+    host_id: &str,
+    session_id: &str,
+    event_id: &str,
+    body: &str,
+) -> std::result::Result<WorkerReport, WorkerReportError> {
+    let id_ok = |value: &str| {
+        !value.is_empty()
+            && value.chars().count() <= MAX_REPORT_ID_CHARS
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    };
+    if !id_ok(session_id) || !id_ok(event_id) {
+        return Err(WorkerReportError::Invalid(format!(
+            "sessionId and eventId must be 1-{MAX_REPORT_ID_CHARS} printable characters"
+        )));
+    }
+    if body.trim().is_empty() || body.chars().count() > MAX_REPORT_BODY_CHARS {
+        return Err(WorkerReportError::Invalid(format!(
+            "body must be 1-{MAX_REPORT_BODY_CHARS} characters"
+        )));
+    }
+    let bound: Option<(String, String)> = sqlx::query_as(
+        "SELECT g.goal_id, g.lane_key FROM supervisor_execution_bindings b
+           JOIN supervisor_goals g ON g.goal_id = b.goal_id
+          WHERE b.host_id = ? AND b.provider_session_id = ?
+            AND g.run_state NOT IN ('completed','cancelled')
+          LIMIT 1",
+    )
+    .bind(host_id)
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(crate::error::HubError::from)?;
+    let Some((goal_id, lane_key)) = bound else {
+        return Err(WorkerReportError::NotBound {
+            host_id: host_id.to_owned(),
+            session_id: session_id.to_owned(),
+        });
+    };
+    let inserted: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, source_event_id)
+         VALUES(?,?,?,?,?,?)
+         ON CONFLICT(lane_key, source_event_id) WHERE source_event_id IS NOT NULL DO NOTHING
+         RETURNING id",
+    )
+    .bind(&lane_key)
+    .bind(format!("supervisor:{goal_id}"))
+    .bind(WORKER_REPORT)
+    .bind(body)
+    .bind(now_rfc3339())
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(crate::error::HubError::from)?;
+    let duplicate = inserted.is_none();
+    let (id, created_at, delivered_at): (i64, String, Option<String>) = sqlx::query_as(
+        "SELECT id, created_at, delivered_at FROM lane_events
+          WHERE lane_key = ? AND source_event_id = ?",
+    )
+    .bind(&lane_key)
+    .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .map_err(crate::error::HubError::from)?;
+    // A first report, or a replay of one whose hand-over did not finish, is handed over now;
+    // one already handed over is not touched again.
+    if delivered_at.is_none() {
+        let now = chrono::Utc::now();
+        let created = chrono::DateTime::parse_from_rfc3339(&created_at)
+            .map(|at| at.with_timezone(&chrono::Utc))
+            .unwrap_or(now);
+        hand_to_supervisor(pool, id, Some(&lane_key), false, created, &now.to_rfc3339()).await?;
+    }
+    Ok(WorkerReport {
+        goal_id,
+        lane_key,
+        lane_event_id: id,
+        wake_event_id: format!("lane_event:{id}"),
+        duplicate,
+    })
+}
+
 pub async fn take_undelivered(pool: &SqlitePool) -> Result<Vec<LaneEvent>> {
     let now = now_rfc3339();
     let rows: Vec<(i64, Option<String>, String, String, String)> = sqlx::query_as(
@@ -1025,5 +1157,170 @@ mod tests {
             delivered[1].1.is_none(),
             "an ordinary report stays queued: {delivered:?}"
         );
+    }
+
+    /// A worker report reaches its own goal's wake service as one `report` wake per report id:
+    /// a retry or an out-of-order replay of an earlier id is the same lane event and wake; a
+    /// session bound to no open goal, and a malformed report, write nothing; another goal's
+    /// report never lands on this goal.
+    #[tokio::test]
+    async fn a_worker_report_becomes_one_wake_on_its_own_goal() {
+        use crate::supervisor::admission::{
+            submit_work, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
+        };
+        use crate::supervisor::{
+            attach_session, bind_project_host, create_project, ensure_identity, goal_of,
+            pending_wakes, ChannelProvider, WakeCause,
+        };
+        let pool = crate::storage::memory().await.unwrap();
+        let owner = "slack:T1:U-owner";
+        let identity = ensure_identity(&pool, owner).await.unwrap();
+        let project = create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/x/ferryx")
+            .await
+            .unwrap();
+        bind_project_host(&pool, &project.project_id, "host-a", "/home/o/ferryx/.git")
+            .await
+            .unwrap();
+        let admit = |message: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let actor = ActorContext {
+                    principal: owner.into(),
+                    source_adapter: ChannelProvider::Slack,
+                    source_message_id: message.into(),
+                    source_body: "Create result.txt containing READY.".into(),
+                    channel_binding_id: None,
+                    choices: OwnerChoices::default(),
+                };
+                let work = SubmitWork {
+                    project_id: None,
+                    host_id: None,
+                    kind: None,
+                    title: "Write result.txt".into(),
+                    instruction: "Create result.txt containing READY.".into(),
+                    requirements: vec![crate::goals::contract::RequirementSpec {
+                        id: "r1".into(),
+                        text: "result.txt contains READY".into(),
+                        verifier: "verify.sh exits 0".into(),
+                    }],
+                    cwd: None,
+                    operations: OperationClass::BASELINE.to_vec(),
+                    turn_limit: None,
+                };
+                let SubmitOutcome::Admitted(admitted) =
+                    submit_work(&pool, &actor, &work).await.unwrap()
+                else {
+                    panic!("expected an admitted goal");
+                };
+                admitted.receipt
+            }
+        };
+        let mine = admit("D1/1.1").await;
+        let other = admit("D1/2.2").await;
+        attach_session(&pool, &mine.goal_id, 1, "pane-mine").await.unwrap();
+        attach_session(&pool, &other.goal_id, 1, "pane-other").await.unwrap();
+        let revision = goal_of(&pool, &mine.goal_id).await.unwrap().unwrap().revision;
+        let due = chrono::Utc::now() + chrono::Duration::hours(1);
+        let wakes_of = |goal: String| {
+            let pool = pool.clone();
+            async move {
+                pending_wakes(&pool, due, 100)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|wake| wake.goal_id == goal)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let mut first = Vec::new();
+        for id in ["r-0", "r-1", "r-2", "r-3"] {
+            let report = report_from_worker(&pool, "host-a", "pane-mine", id, "progress")
+                .await
+                .unwrap();
+            assert_eq!(report.goal_id, mine.goal_id);
+            assert_eq!(report.lane_key, mine.lane_key);
+            assert!(!report.duplicate, "{id}");
+            first.push(report);
+        }
+        // A retry of the newest and an out-of-order replay of the oldest.
+        for id in ["r-3", "r-0"] {
+            let again = report_from_worker(&pool, "host-a", "pane-mine", id, "progress")
+                .await
+                .unwrap();
+            assert!(again.duplicate, "{id}");
+            let original = first.iter().find(|report| report.wake_event_id == again.wake_event_id);
+            assert!(original.is_some(), "{id} is the same lane event");
+        }
+        let wakes = wakes_of(mine.goal_id.clone()).await;
+        assert_eq!(wakes.len(), 4, "{wakes:?}");
+        assert!(wakes.iter().all(|wake| wake.cause == WakeCause::Report));
+        let mut ids: Vec<String> = wakes.iter().map(|wake| wake.event_id.clone()).collect();
+        ids.sort();
+        let mut expected: Vec<String> = first.iter().map(|report| report.wake_event_id.clone()).collect();
+        expected.sort();
+        assert_eq!(ids, expected);
+        let events: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT kind, delivery_reason FROM lane_events WHERE lane_key = ? ORDER BY id",
+        )
+        .bind(&mine.lane_key)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 4, "one lane event per report id");
+        assert!(events
+            .iter()
+            .all(|(kind, reason)| kind == WORKER_REPORT && reason.as_deref() == Some(SUPERVISOR_WAKE)));
+        // Status only: the goal did not move.
+        let after = goal_of(&pool, &mine.goal_id).await.unwrap().unwrap();
+        assert_eq!(after.revision, revision);
+
+        // Another goal's worker reports only to its own goal.
+        let theirs = report_from_worker(&pool, "host-a", "pane-other", "r-0", "elsewhere")
+            .await
+            .unwrap();
+        assert_eq!(theirs.goal_id, other.goal_id);
+        assert!(!theirs.duplicate, "report ids are per lane");
+        assert_eq!(wakes_of(mine.goal_id.clone()).await.len(), 4);
+        assert_eq!(wakes_of(other.goal_id.clone()).await.len(), 1);
+
+        // Refusals write nothing.
+        let count = || {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM lane_events")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        let before = count().await;
+        let unbound = report_from_worker(&pool, "host-a", "pane-stranger", "r-9", "x")
+            .await
+            .unwrap_err();
+        assert_eq!(unbound.code(), "NOT_FOUND");
+        let wrong_host = report_from_worker(&pool, "host-b", "pane-mine", "r-9", "x")
+            .await
+            .unwrap_err();
+        assert_eq!(wrong_host.code(), "NOT_FOUND");
+        for (id, body) in [("", "x"), (" r-9", "x"), ("r-9", "  ")] {
+            let bad = report_from_worker(&pool, "host-a", "pane-mine", id, body)
+                .await
+                .unwrap_err();
+            assert_eq!(bad.code(), "INVALID_REQUEST", "{id:?} {body:?}");
+        }
+        assert_eq!(count().await, before);
+
+        // A goal that ended takes no more reports.
+        sqlx::query("UPDATE supervisor_goals SET run_state = 'cancelled' WHERE goal_id = ?")
+            .bind(&other.goal_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ended = report_from_worker(&pool, "host-a", "pane-other", "r-1", "late")
+            .await
+            .unwrap_err();
+        assert_eq!(ended.code(), "NOT_FOUND");
+        assert_eq!(count().await, before);
     }
 }
