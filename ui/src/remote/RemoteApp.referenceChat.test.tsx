@@ -2372,6 +2372,7 @@ describe("reference chat lane review fixes", () => {
       if (url.includes("/answer")) {
         return jsonResponse(
           { ok: false, error: { code: "INTERNAL", message: "host failed", retryable: true }, requestId: "r5" },
+          false,
           500,
         );
       }

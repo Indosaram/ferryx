@@ -142,10 +142,12 @@ type TestOverlayFn = Box<dyn Fn(&std::net::Ipv4Addr) -> Option<bool> + Send + Sy
 static TEST_OVERLAY_OVERRIDE: parking_lot::Mutex<Option<TestOverlayFn>> =
     parking_lot::Mutex::new(None);
 
-/// P19 (round 2) test hook: forces the Tailscale CLI probe outcome. `Some(b)`
-/// = CLI present with verdict `b`; `None` = CLI unavailable (no proof).
+/// P19 (round 2) test hook: forces the Tailscale CLI probe outcome. `Some(Some(b))`
+/// = CLI present with verdict `b`; `Some(None)` = CLI unavailable (no proof).
+/// The outer `None` leaves the real production probe enabled.
 #[cfg(test)]
-static TEST_CLI_PROBE_OVERRIDE: parking_lot::Mutex<Option<bool>> = parking_lot::Mutex::new(None);
+static TEST_CLI_PROBE_OVERRIDE: parking_lot::Mutex<Option<Option<bool>>> =
+    parking_lot::Mutex::new(None);
 
 #[cfg(test)]
 pub fn set_test_overlay_proof_override<F>(f: Option<F>)
@@ -238,7 +240,7 @@ fn get_interface_name_for_ipv4(_target: &std::net::Ipv4Addr) -> Option<String> {
 fn probe_tailscale_cli(target: &std::net::Ipv4Addr) -> Option<bool> {
     #[cfg(test)]
     if let Some(forced) = *TEST_CLI_PROBE_OVERRIDE.lock() {
-        return Some(forced);
+        return forced;
     }
     let target_str = target.to_string();
     let candidates = [
@@ -1491,10 +1493,17 @@ mod tests {
     /// explicitly denies the address also stays gated.
     #[test]
     fn p19_overlay_proof_fails_closed_without_authoritative_cli_confirmation() {
+        struct RestoreProbe(Option<Option<bool>>);
+        impl Drop for RestoreProbe {
+            fn drop(&mut self) {
+                *TEST_CLI_PROBE_OVERRIDE.lock() = self.0;
+            }
+        }
+        let _restore_probe = RestoreProbe(*TEST_CLI_PROBE_OVERRIDE.lock());
         let addr = std::net::Ipv4Addr::new(100, 100, 1, 1);
 
         // CLI unavailable (probe returns None): utun interface must NOT be exempt.
-        *TEST_CLI_PROBE_OVERRIDE.lock() = None;
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(None);
         assert!(
             !verify_overlay_with_interface(Some("utun5"), &addr),
             "utun interface without CLI proof must fail closed"
@@ -1505,11 +1514,11 @@ mod tests {
         );
 
         // CLI present but denies the address: still gated.
-        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(false);
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(Some(false));
         assert!(!verify_overlay_with_interface(Some("utun5"), &addr));
 
         // Positive CLI confirmation is the only way through.
-        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(true);
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(Some(true));
         assert!(verify_overlay_with_interface(Some("utun5"), &addr));
 
         // Non-tunnel interfaces are never exempt regardless of CLI.
@@ -1518,19 +1527,19 @@ mod tests {
 
         #[cfg(windows)]
         {
-            *TEST_CLI_PROBE_OVERRIDE.lock() = Some(true);
+            *TEST_CLI_PROBE_OVERRIDE.lock() = Some(Some(true));
             assert!(verify_overlay_with_interface(Some("Ethernet"), &addr));
 
-            *TEST_CLI_PROBE_OVERRIDE.lock() = Some(false);
+            *TEST_CLI_PROBE_OVERRIDE.lock() = Some(Some(false));
             assert!(!verify_overlay_with_interface(Some("Ethernet"), &addr));
         }
 
         // Missing interface with explicit CLI denial fails immediately closed.
-        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(false);
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(Some(false));
         assert!(!verify_overlay_with_interface(None, &addr));
 
         // Missing interface: fail closed.
-        *TEST_CLI_PROBE_OVERRIDE.lock() = None;
+        *TEST_CLI_PROBE_OVERRIDE.lock() = Some(None);
         assert!(!verify_overlay_with_interface(None, &addr));
 
         *TEST_CLI_PROBE_OVERRIDE.lock() = None;

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { JSDOM } from "jsdom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -94,7 +94,25 @@ describe("Settings > General Ferryx CLI launcher", () => {
     await renderGeneralSettings();
 
     expect(await screen.findByText("Ferryx CLI")).toBeInTheDocument();
-    expect(screen.getByText(missingLauncher.launcherPath)).toBeInTheDocument();
+    expect(await screen.findByText(missingLauncher.launcherPath)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Install Ferryx CLI" })).toBeEnabled();
+    expect(getCliLauncherStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps installation disabled until the asynchronous launcher status arrives", async () => {
+    let resolveStatus: (status: CliLauncherStatus) => void = () => undefined;
+    getCliLauncherStatus.mockImplementation(
+      () => new Promise<CliLauncherStatus>((resolve) => { resolveStatus = resolve; }),
+    );
+    await renderGeneralSettings();
+
+    expect(screen.getByText("Ferryx CLI")).toBeInTheDocument();
+    expect(screen.getByText("~/.local/bin/ferryx")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Install Ferryx CLI" })).toBeDisabled();
+    expect(screen.queryByText(missingLauncher.launcherPath)).not.toBeInTheDocument();
+
+    await act(async () => { resolveStatus(missingLauncher); });
+    expect(await screen.findByText(missingLauncher.launcherPath)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Install Ferryx CLI" })).toBeEnabled();
     expect(getCliLauncherStatus).toHaveBeenCalledTimes(1);
   });
@@ -103,7 +121,9 @@ describe("Settings > General Ferryx CLI launcher", () => {
     installCliLauncher.mockResolvedValue(installedLauncher);
     await renderGeneralSettings();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Install Ferryx CLI" }));
+    const installButton = await screen.findByRole("button", { name: "Install Ferryx CLI" });
+    await waitFor(() => expect(installButton).toBeEnabled());
+    fireEvent.click(installButton);
 
     expect(await screen.findByText("Installed")).toBeInTheDocument();
     expect(screen.getByText(`Target: ${installedLauncher.currentTarget}`)).toBeInTheDocument();
@@ -119,7 +139,9 @@ describe("Settings > General Ferryx CLI launcher", () => {
     );
     await renderGeneralSettings();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Install Ferryx CLI" }));
+    const installButton = await screen.findByRole("button", { name: "Install Ferryx CLI" });
+    await waitFor(() => expect(installButton).toBeEnabled());
+    fireEvent.click(installButton);
 
     const installing = await screen.findByRole("button", { name: /installing ferryx cli/i });
     expect(installing).toBeDisabled();
@@ -132,7 +154,9 @@ describe("Settings > General Ferryx CLI launcher", () => {
     installCliLauncher.mockRejectedValue(new Error("launcher path contains a regular file"));
     await renderGeneralSettings();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Install Ferryx CLI" }));
+    const installButton = await screen.findByRole("button", { name: "Install Ferryx CLI" });
+    await waitFor(() => expect(installButton).toBeEnabled());
+    fireEvent.click(installButton);
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("launcher path contains a regular file");

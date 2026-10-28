@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteSection } from "./RemoteSection";
 import { createRemoteHostStore, remoteHostKey } from "../../state/remoteHostStore";
 import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type PairedHostCommands } from "../../lib/pairedHostInventory";
-import { resetSshHostsCache, updateSshHost, type SshHost, type SshTargetSummary } from "../../lib/sshHosts";
+import { resetSshHostsCache, updateSshHost, type SshHost, type SshRemoteEnvironment, type SshTargetSummary } from "../../lib/sshHosts";
 import { SSH_CONFIG_PATH_STORAGE_KEY } from "../../lib/storageKeys";
 import { resetTailscaleDiscoveryForTests } from "../../lib/tailscaleDiscovery";
 
@@ -67,7 +67,7 @@ const bastion: SshHost = {
   disabled: false,
 };
 
-const posixEnvironment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
+const posixEnvironment: SshRemoteEnvironment = { platform: "posix", executor: "sh", version: "test", home: "/home/test", temp: "/tmp", git: true };
 
 /** IPC args as the fixture reads them; every field is optional because each command sends a different subset. */
 interface CommandArgs {

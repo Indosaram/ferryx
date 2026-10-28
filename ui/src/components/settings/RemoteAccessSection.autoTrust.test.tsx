@@ -10,6 +10,8 @@ const getDirectAutoTrustStatus = vi.fn();
 const setDirectAutoTrustDisabled = vi.fn();
 
 vi.mock("../../lib/tauri", () => ({
+  // Agent control has its own suite; this fixture exercises direct trust only.
+  getAgentControlSettings: () => Promise.resolve(null),
   getRemoteStatus: () => getRemoteStatus(),
   listRemoteDevices: () => listRemoteDevices(),
   enableRemoteGateway: (req: unknown) => enableRemoteGateway(req),

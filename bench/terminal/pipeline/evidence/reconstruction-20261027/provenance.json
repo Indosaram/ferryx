@@ -1,0 +1,109 @@
+{
+  "profile": {
+    "default_features": true,
+    "opt_level": 0,
+    "debug": 0,
+    "incremental": false,
+    "jobs": 1
+  },
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "operation": "Original ghostty_reconstruct_65536: new(80x24), resize8x16, feed byte-identical frozenhistory, render_snapshot+row_text assertion, drop. No search/retention operations timed.",
+  "sampling_plan": {
+    "pairs": 10,
+    "balanced_order": "5AB+5BA shuffled with seed20261027",
+    "samples_per_process": 30,
+    "iterations_per_sample": 100,
+    "warmup_iterations": 300,
+    "analysis_unit": "process pair; bootstrap paired log-ratio mean, 20000 replicates",
+    "control": "A/A sameheadbinary at least4 balancedpairs"
+  },
+  "worktrees": {
+    "baseline": {
+      "path": "/workspace/scratch/c4efaab78d82/ferryx-wt/pr24-perf-baseline-20261027",
+      "commit": "eab2e8e4712e60fa155cf794ad5885afff943244",
+      "tree": "e455952e898679b745155f3b8893243d054ca50a",
+      "ghostty": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+      "sha256": {
+        "src-tauri/Cargo.lock": "c00c839b77359a6396e1c0a6d6c3e2fd58048a1f499850ad992be79ae29eecef",
+        "src-tauri/examples/perf_terminal_pipeline.rs": "17eb1ce371480bf5dec0d14c2faba30ae81223a78a88d134e0e374a9c0e805c1",
+        "src-tauri/src/terminal/output_hub.rs": "919ac18278d01408631610231f7287182342a99b929cbe63752a14f14577193f",
+        "src-tauri/src/terminal/vt_stream.rs": "e036e6b5e545ac25ca5de69d95ecc33726fa6dedab6055776e4c0f13603590a2",
+        "src-tauri/src/terminal/retained_history.rs": "6c8a4a6291820f321b7c3806ed3b631b480b223405a9d7bfa32a3b859d971833",
+        "src-tauri/src/native_terminal/terminal.rs": "4fbdb73b6e5107ee3d643fa8e95c1218348ccb68b5a4804c6f68f507dbe9e097",
+        "src-tauri/src/native_terminal/engine.rs": "3224b4fe86aa355675b0095254d324b53b80d79e47601c4ef7ba8fef9ca447c0",
+        "src-tauri/src/native_terminal/lifecycle.rs": "361e038c188cadd6fd9782da5bf26fca63edef37ffb9e0255286b69b713ecdde",
+        "src-tauri/src/native_terminal/render_pass.rs": "21b902690ddf3f4135d3abee74b4100e0be2bd3da6335f0a1eebecdb55501fd7",
+        "src-tauri/src/native_terminal/snapshot.rs": "8717e1f8b42c90541d8f9fc3f668785b3128c5bed3f42adbcb8a5840d48374a6",
+        "src-tauri/src/native_terminal/images.rs": "fdf6a8bfcd1bc65b5f2469f088a4d701edc6c9f0fccdf8fda1880d8556f07949",
+        "src-tauri/src/native_terminal/png_decoder.rs": "4dd4d596abf677252b5a2ad41a2c43904ab7f1ecd1b3ccfe7fec3f3a9dc41155",
+        "src-tauri/src/native_terminal/bell.rs": "d59654322e71367dd080338e47c9d1901f60c684ec1f64811fe69a720ae825d1",
+        "src-tauri/src/native_terminal/selection.rs": "7033ac4891f956a5d94b1fb2bafa752958323e37caf637a705d866b10e27431d",
+        "src-tauri/src/native_terminal/search.rs": "da4d828d1261696d041355a3c63fe0684e9d45ea96dc7bb71a5d56fdc61210cc"
+      }
+    },
+    "head": {
+      "path": "/workspace/scratch/c4efaab78d82/ferryx-wt/pr24-perf-c748-20261027",
+      "commit": "c748cd83e1a301f5037bbdf3871bc5898571d701",
+      "tree": "54867dfc1e03b3a5e25191fb7c73c84f935662bd",
+      "ghostty": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+      "sha256": {
+        "src-tauri/Cargo.lock": "c00c839b77359a6396e1c0a6d6c3e2fd58048a1f499850ad992be79ae29eecef",
+        "src-tauri/examples/perf_terminal_pipeline.rs": "17eb1ce371480bf5dec0d14c2faba30ae81223a78a88d134e0e374a9c0e805c1",
+        "src-tauri/src/terminal/output_hub.rs": "919ac18278d01408631610231f7287182342a99b929cbe63752a14f14577193f",
+        "src-tauri/src/terminal/vt_stream.rs": "e036e6b5e545ac25ca5de69d95ecc33726fa6dedab6055776e4c0f13603590a2",
+        "src-tauri/src/terminal/retained_history.rs": "9c68a009aa9245522d1e13563f594dfdbaed950a55b6bd50059be343c8030aa2",
+        "src-tauri/src/native_terminal/terminal.rs": "4fbdb73b6e5107ee3d643fa8e95c1218348ccb68b5a4804c6f68f507dbe9e097",
+        "src-tauri/src/native_terminal/engine.rs": "3224b4fe86aa355675b0095254d324b53b80d79e47601c4ef7ba8fef9ca447c0",
+        "src-tauri/src/native_terminal/lifecycle.rs": "361e038c188cadd6fd9782da5bf26fca63edef37ffb9e0255286b69b713ecdde",
+        "src-tauri/src/native_terminal/render_pass.rs": "21b902690ddf3f4135d3abee74b4100e0be2bd3da6335f0a1eebecdb55501fd7",
+        "src-tauri/src/native_terminal/snapshot.rs": "8717e1f8b42c90541d8f9fc3f668785b3128c5bed3f42adbcb8a5840d48374a6",
+        "src-tauri/src/native_terminal/images.rs": "fdf6a8bfcd1bc65b5f2469f088a4d701edc6c9f0fccdf8fda1880d8556f07949",
+        "src-tauri/src/native_terminal/png_decoder.rs": "4dd4d596abf677252b5a2ad41a2c43904ab7f1ecd1b3ccfe7fec3f3a9dc41155",
+        "src-tauri/src/native_terminal/bell.rs": "d59654322e71367dd080338e47c9d1901f60c684ec1f64811fe69a720ae825d1",
+        "src-tauri/src/native_terminal/selection.rs": "7033ac4891f956a5d94b1fb2bafa752958323e37caf637a705d866b10e27431d",
+        "src-tauri/src/native_terminal/search.rs": "c12b015f733c4bda97dc632585e1d1173d9087c654fbd50b1300ced2cacfbd16"
+      }
+    }
+  },
+  "identical_files": [
+    "src-tauri/Cargo.lock",
+    "src-tauri/examples/perf_terminal_pipeline.rs",
+    "src-tauri/src/terminal/output_hub.rs",
+    "src-tauri/src/terminal/vt_stream.rs",
+    "src-tauri/src/native_terminal/terminal.rs",
+    "src-tauri/src/native_terminal/engine.rs",
+    "src-tauri/src/native_terminal/lifecycle.rs",
+    "src-tauri/src/native_terminal/render_pass.rs",
+    "src-tauri/src/native_terminal/snapshot.rs",
+    "src-tauri/src/native_terminal/images.rs",
+    "src-tauri/src/native_terminal/png_decoder.rs",
+    "src-tauri/src/native_terminal/bell.rs",
+    "src-tauri/src/native_terminal/selection.rs"
+  ],
+  "scope": "Component reconstruction only; excludes daemon, actualPTY, sockets, GPU, compositor and input-to-display latency; RSS is lifetimehighwater, notphaseheap",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "zig": "0.16.0",
+  "comparison_interpretation": "Predeclared follow-up: compare observed head/baseline ratio with original approximately1.06\u20131.07 slowdown signal, conditional on pairedbootstrap interval and A/A noise. Absenceofsignificance is not proof ofequivalence. No algorithmfix without causal evidence.",
+  "binaries": {
+    "pipeline-eab2": {
+      "sha256": "b4a872664fe98182cec761feaa815caaf3f3dbbcb62a41acb2116a16290b476b",
+      "bytes": 20337512
+    },
+    "pipeline-c748": {
+      "sha256": "67df0e1c59206f2f9d863d92056f60ad98ca9ac3e8d57eee8ca826e027cb0d8f",
+      "bytes": 20360264
+    },
+    "renderer-eab2": {
+      "sha256": "32545a78cffd0b2aa597633d1cb49fa72de3a33f131e546890816ffa05788982",
+      "bytes": 55009168
+    }
+  },
+  "ghostty_archive_sha256": "4dc277dac1446d7165b5cb8dbdae60691c820651a94ead977b76ff772bebfd9b",
+  "build_seconds": {
+    "head_cold": 741.0,
+    "baseline_cached_dependencies": 165.5,
+    "baseline_renderer_example": 3.7
+  },
+  "conclusion": "Original approximately6\u20137% small-sample slowdown not reproduced (paired ratio0.99605). Identical-binary A/A ratio0.95180 falsely excludes1 in the small-n bootstrap, so intervals are descriptive conditional resampling only, not calibrated acceptance bounds. No production code change justified; changed eviction/search code is not called in timed reconstruction.",
+  "runtime_scope": "28 separate audited headlesspipeline processes, no GUI/GPU/PTY/socket. All exited0; 84000 timed reconstructions plus8400warmups. CPU delta and lifetimeRSS recorded; not phase heap or whole-app measurements."
+}

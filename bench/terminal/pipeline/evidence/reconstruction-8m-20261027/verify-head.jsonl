@@ -1,0 +1,4 @@
+{"harness":"real-terminal-pipeline","mode":"reconstruct8m-verify","os":"linux","arch":"x86_64","debug_assertions":true,"cpu_rss_available":true,"scope":"Ghostty/parser/hub only; excludes GPU, window compositor, actual PTY and user-input latency"}
+{"qa":"search","passed":true,"cases":12}
+{"qa":"multipart_image_resize_snapshot_handover","passed":true}
+{"qa":"original_8m_snapshot_full_byte_equality","status":"PASS","bytes":8388612,"groups":399457,"fnv1a64":"629def158f5ffe56","preconditioning_publishes":3584}

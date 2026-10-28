@@ -1,0 +1,9 @@
+[ci-bounded] started leader_pid=50 timeout_seconds=60
+Wrote attribute evidence PNG to: /workspace/shared/ferryx-wt/.evidence/pr24-validation-20261026/baseline-attributes.png
+Width: 600 px
+Height: 200 px
+Wrote live attribute evidence PNG to: /workspace/shared/ferryx-wt/.evidence/pr24-validation-20261026/baseline-attributes-live.png
+Width: 800 px
+Height: 480 px
+[ci-bounded] shutdown reason=leader_exit exit_code=0
+[ci-bounded] finished exit_code=0 elapsed_seconds=0.4

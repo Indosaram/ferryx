@@ -11,13 +11,19 @@ const EXTENSION_PATH = path.resolve(
   __dirname,
   "../../../src-tauri/resources/agent-extensions/ferryx-agent-state.ts",
 );
-const SOCKET_PATH = "/tmp/ferryx-ext-test.sock";
 
 type Captured = { state: string; detail?: string; agent?: string };
 
 const captured: Captured[] = [];
 let moduleCounter = 0;
 const moduleDir = mkdtempSync(path.join(os.tmpdir(), "ferryx-ext-test-"));
+// Own the endpoint instead of unlinking a shared path used by another test process.
+const SOCKET_PATH = process.platform === "win32"
+  ? `\\\\.\\pipe\\${path.basename(moduleDir)}`
+  : path.join(moduleDir, "state.sock");
+const savedEnvironment = Object.fromEntries([
+  "FERRYX_AGENT_STATE_SOCKET", "FERRYX_SESSION_ID", "FERRYX_AGENT_STATE_PORT", "FERRYX_AGENT_STATE_TOKEN",
+].map((key) => [key, process.env[key]]));
 let server: net.Server;
 
 // Re-checked whenever the socket server records a payload, so waits resolve on the data event
@@ -96,9 +102,6 @@ function makeHarness() {
 
 describe("ferryx-agent-state extension", () => {
   beforeAll(async () => {
-    try {
-      rmSync(SOCKET_PATH);
-    } catch {}
     server = net.createServer((socket) => {
       let buffer = "";
       socket.on("data", (chunk) => {
@@ -114,15 +117,24 @@ describe("ferryx-agent-state extension", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => server.listen(SOCKET_PATH, resolve));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(SOCKET_PATH, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    try {
-      rmSync(SOCKET_PATH);
-    } catch {}
+    if (server?.listening) {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
     rmSync(moduleDir, { recursive: true, force: true });
+    for (const [key, value] of Object.entries(savedEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   beforeEach(() => {

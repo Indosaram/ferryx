@@ -194,6 +194,8 @@ vi.mock("./lib/tauri", () => ({
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   listenDagWatchStatus: vi.fn(() => Promise.resolve(() => undefined)),
   watchDagProject: vi.fn((projectPath: string) => Promise.resolve({ projectPath, runs: [] })),
+  watchDagSshProject: vi.fn((workspaceId: string, path: string) => Promise.resolve({ projectPath: `ssh:${workspaceId}:${path}`, runs: [] })),
+  watchDagPairedProject: vi.fn((workspaceId: string, path: string) => Promise.resolve({ projectPath: `paired:${workspaceId}:${path}`, runs: [] })),
   unwatchDagProject: vi.fn(async () => undefined),
   discoverDagWatchRoots: vi.fn(() => Promise.resolve([])),
   getTerminalPreferences: () => Promise.resolve({}),
@@ -671,7 +673,7 @@ describe("App project workspace flow", () => {
     ]);
   });
 
-  it("publishes the desktop sidebar model with SSH and paired members once per distinct model", async () => {
+  it("publishes the desktop sidebar model with SSH and paired members and deduplicates storage updates after listener readiness", async () => {
     const pairedId = `daemon:${"a".repeat(64)}`;
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
       { workspaceId: "publish-local", repoRoot: "/repo/publish-local", gitRoot: "/repo/publish-local" },
@@ -684,10 +686,12 @@ describe("App project workspace flow", () => {
     native.syncDesktopSidebar.mockReset().mockResolvedValue(1);
 
     render(<App />);
-    await waitFor(() => expect(native.syncDesktopSidebar).toHaveBeenCalledTimes(1));
+    // The publisher deliberately resends once when its resync listener becomes ready,
+    // closing the event-registration gap. Subsequent unchanged storage updates dedupe.
+    await waitFor(() => expect(native.syncDesktopSidebar).toHaveBeenCalledTimes(2));
     await act(async () => { window.dispatchEvent(new StorageEvent("storage")); });
 
-    expect(native.syncDesktopSidebar).toHaveBeenCalledTimes(1);
+    expect(native.syncDesktopSidebar).toHaveBeenCalledTimes(2);
     const [model] = native.syncDesktopSidebar.mock.calls[0] as [{ source: string; projects: { members: { workspaceId: string; kind: string }[] }[] }];
     expect(model.source).toBe("desktop");
     expect(model.projects.flatMap((node) => node.members.map((member) => [member.workspaceId, member.kind]))).toEqual(

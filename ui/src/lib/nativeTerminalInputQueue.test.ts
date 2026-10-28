@@ -10,6 +10,7 @@ import {
   subscribeTerminalInputDrop,
   resetTerminalInputDropCountsForTest,
   type TerminalInputDropReason,
+  type NativeTerminalEnqueueOptions,
 } from "./nativeTerminalInputQueue";
 
 function createDeferred<T = void>() {
@@ -856,7 +857,9 @@ describe("NativeTerminalInputQueueManager", () => {
   });
 
   describe("printable text coalescing at the entry cap", () => {
-    function textSender(sent: string[], head?: Promise<void>) {
+    type TextSender = NonNullable<NativeTerminalEnqueueOptions["coalesceText"]>["send"];
+
+    function textSender(sent: string[], head?: Promise<void>): TextSender {
       return async (text: string) => {
         sent.push(text);
         if (head && sent.length === 1) await head;
@@ -966,7 +969,7 @@ describe("NativeTerminalInputQueueManager", () => {
       const head = createDeferred<void>();
       const sent: string[] = [];
       let failOnce = true;
-      const send = async (text: string) => {
+      const send: TextSender = async (text) => {
         if (text === "de" && failOnce) {
           failOnce = false;
           throw new Error("not written");

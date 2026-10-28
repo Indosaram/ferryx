@@ -1,0 +1,34 @@
+{"harness":"real-terminal-pipeline","mode":"reconstruct64","os":"linux","arch":"x86_64","debug_assertions":true,"cpu_rss_available":true,"scope":"Ghostty/parser/hub only; excludes GPU, window compositor, actual PTY and user-input latency"}
+{"qa":"search","passed":true,"cases":12}
+{"qa":"multipart_image_resize_snapshot_handover","passed":true}
+{"fixture":"original_65536_reconstruction","bytes":65535,"retained_groups":3120,"command_bytes":21,"fnv1a64":"7a71668779302f8c","batch":100,"samples":30,"warmup_batches":3,"operation":"new+resize+feed+render_snapshot+row_text_assert+drop; no search or hub work timed"}
+{"phase":"ghostty_reconstruct_65536_batched","sample":0,"iterations":100,"wall_total_ms":101.409533,"wall_ms":1.01409533,"cpu_ms":1.01408,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":1,"iterations":100,"wall_total_ms":101.39118599999999,"wall_ms":1.0139118599999999,"cpu_ms":1.0138999999999998,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":2,"iterations":100,"wall_total_ms":95.523178,"wall_ms":0.95523178,"cpu_ms":0.9550099999999998,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":3,"iterations":100,"wall_total_ms":101.46888399999999,"wall_ms":1.0146888399999998,"cpu_ms":1.0146699999999997,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":4,"iterations":100,"wall_total_ms":97.25257099999999,"wall_ms":0.9725257099999999,"cpu_ms":0.9725099999999998,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":5,"iterations":100,"wall_total_ms":94.90219599999999,"wall_ms":0.9490219599999999,"cpu_ms":0.9490100000000007,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":6,"iterations":100,"wall_total_ms":98.733646,"wall_ms":0.98733646,"cpu_ms":0.9872300000000007,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":7,"iterations":100,"wall_total_ms":97.320734,"wall_ms":0.97320734,"cpu_ms":0.9731900000000008,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":8,"iterations":100,"wall_total_ms":95.568587,"wall_ms":0.9556858699999999,"cpu_ms":0.9555600000000004,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":9,"iterations":100,"wall_total_ms":96.305794,"wall_ms":0.9630579400000001,"cpu_ms":0.9630499999999984,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":10,"iterations":100,"wall_total_ms":96.569265,"wall_ms":0.96569265,"cpu_ms":0.9655299999999989,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":11,"iterations":100,"wall_total_ms":96.338644,"wall_ms":0.9633864400000001,"cpu_ms":0.9633800000000019,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":12,"iterations":100,"wall_total_ms":95.552683,"wall_ms":0.95552683,"cpu_ms":0.9553999999999996,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":13,"iterations":100,"wall_total_ms":96.392296,"wall_ms":0.96392296,"cpu_ms":0.9638999999999988,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":14,"iterations":100,"wall_total_ms":94.981547,"wall_ms":0.9498154700000001,"cpu_ms":0.9498000000000002,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":15,"iterations":100,"wall_total_ms":100.09438,"wall_ms":1.0009438,"cpu_ms":0.9642799999999988,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":16,"iterations":100,"wall_total_ms":97.431541,"wall_ms":0.97431541,"cpu_ms":0.9741100000000006,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":17,"iterations":100,"wall_total_ms":94.81880299999999,"wall_ms":0.9481880299999998,"cpu_ms":0.9481800000000021,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":18,"iterations":100,"wall_total_ms":95.258545,"wall_ms":0.95258545,"cpu_ms":0.9525199999999995,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":19,"iterations":100,"wall_total_ms":97.156243,"wall_ms":0.9715624300000001,"cpu_ms":0.9715000000000009,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":20,"iterations":100,"wall_total_ms":96.43988,"wall_ms":0.9643988,"cpu_ms":0.9643499999999995,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":21,"iterations":100,"wall_total_ms":96.74599,"wall_ms":0.9674599,"cpu_ms":0.9672600000000011,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":22,"iterations":100,"wall_total_ms":96.424777,"wall_ms":0.9642477700000001,"cpu_ms":0.9641800000000011,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":23,"iterations":100,"wall_total_ms":95.888487,"wall_ms":0.95888487,"cpu_ms":0.9586099999999987,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":24,"iterations":100,"wall_total_ms":95.25365,"wall_ms":0.9525364999999999,"cpu_ms":0.9524699999999985,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":25,"iterations":100,"wall_total_ms":95.239288,"wall_ms":0.95239288,"cpu_ms":0.9523299999999972,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":26,"iterations":100,"wall_total_ms":96.098725,"wall_ms":0.9609872500000001,"cpu_ms":0.960920000000001,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":27,"iterations":100,"wall_total_ms":99.57700299999999,"wall_ms":0.9957700299999999,"cpu_ms":0.9955200000000013,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":28,"iterations":100,"wall_total_ms":99.81503599999999,"wall_ms":0.9981503599999999,"cpu_ms":0.99808,"process_peak_rss_kib":40484,"checksum":65535}
+{"phase":"ghostty_reconstruct_65536_batched","sample":29,"iterations":100,"wall_total_ms":101.908305,"wall_ms":1.0190830499999999,"cpu_ms":1.0190200000000005,"process_peak_rss_kib":40484,"checksum":65535}

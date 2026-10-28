@@ -14,6 +14,19 @@ const { capturedProps, socketOpenCalls, socketErrors, deferredSignal } = vi.hois
   const deferredPromise = new Promise<void>((resolve) => {
     resolveDeferred = resolve;
   });
+  const signal: {
+    promise: Promise<void>;
+    resolve: (() => void) | null;
+    reset: () => void;
+  } = {
+    promise: deferredPromise,
+    resolve: resolveDeferred,
+    reset: () => {
+      signal.promise = new Promise<void>((resolve) => {
+        signal.resolve = resolve;
+      });
+    },
+  };
 
   return {
     capturedProps: [] as Array<{
@@ -22,29 +35,22 @@ const { capturedProps, socketOpenCalls, socketErrors, deferredSignal } = vi.hois
     }>,
     socketOpenCalls: [] as string[],
     socketErrors: [] as unknown[],
-    deferredSignal: {
-      promise: deferredPromise,
-      resolve: resolveDeferred,
-      reset: () => {
-        deferredSignal.promise = new Promise<void>((resolve) => {
-          deferredSignal.resolve = resolve;
-        });
-      },
-    },
+    deferredSignal: signal,
   };
 });
 
 vi.mock("./RemoteTerminal", () => ({
   RemoteTerminal: (props: { sessionId?: string; createWebSocket?: (path: string) => Promise<any> }) => {
+    const { sessionId, createWebSocket } = props;
     capturedProps.push({
-      sessionId: props.sessionId,
-      createWebSocket: props.createWebSocket,
+      sessionId,
+      createWebSocket,
     });
 
     useEffect(() => {
-      if (props.createWebSocket) {
-        socketOpenCalls.push(props.sessionId || "default");
-        props.createWebSocket("/api/v1/terminal/test")
+      if (createWebSocket) {
+        socketOpenCalls.push(sessionId || "default");
+        createWebSocket("/api/v1/terminal/test")
           .then(() => {
             deferredSignal.resolve?.();
           })
@@ -53,9 +59,9 @@ vi.mock("./RemoteTerminal", () => ({
             deferredSignal.resolve?.();
           });
       }
-    }, [props.createWebSocket]);
+    }, [createWebSocket, sessionId]);
 
-    return <div data-testid="mock-remote-terminal">{props.sessionId}</div>;
+    return <div data-testid="mock-remote-terminal">{sessionId}</div>;
   },
 }));
 

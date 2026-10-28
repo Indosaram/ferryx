@@ -845,10 +845,10 @@ fn windows_bridge_command_quotes_spaces_and_metachars() {
 #[cfg(unix)]
 #[tokio::test]
 async fn failed_probe_distinguishes_non_utf8_and_empty_stderr() {
-    // Non-UTF-8 stderr
+    // POSIX printf requires octal escapes; hex escapes are printed literally by dash.
     let plan = ShellCommandPlan {
         program: "/bin/sh".into(),
-        args: vec!["-c".into(), "printf '\\xff\\xfe\\xfd' >&2; exit 1".into()],
+        args: vec!["-c".into(), "printf '\\377\\376\\375' >&2; exit 1".into()],
     };
     let err = bounded_output(&plan, Duration::from_secs(2))
         .await

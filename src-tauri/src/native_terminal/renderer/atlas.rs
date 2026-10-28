@@ -392,8 +392,12 @@ mod tests {
     fn test_atlas_color_and_mask_coexist() {
         let gpu = match GpuContext::new() {
             Ok(gpu) => gpu,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
 
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = RendererConfig {
@@ -435,8 +439,12 @@ mod tests {
     fn atlas_overflow_never_invalidates_earlier_entries_mid_frame() {
         let gpu = match GpuContext::new() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = RendererConfig {
             cell_width_px: 16,
@@ -490,8 +498,12 @@ mod tests {
     fn atlas_skips_all_zero_raster_without_allocating_slot() {
         let gpu = match GpuContext::new() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(error) => {
+                eprintln!("FERRYX_GPU_TEST_UNAVAILABLE: {error}");
+                return;
+            }
         };
+        eprintln!("FERRYX_GPU_TEST_READY");
         let mut atlas = GlyphAtlas::new(&gpu.device);
         let config = RendererConfig {
             cell_width_px: 16,

@@ -193,21 +193,28 @@ impl LegacyPeer {
 
         let response: DaemonResponse = serde_json::from_str(line.trim())
             .map_err(|e| format!("Failed to parse legacy response: {e}"))?;
-        let queried_id = match req {
-            DaemonRequest::RemoteSessionDetails { session_id }
-            | DaemonRequest::DescribeSession { session_id } => Some(session_id),
-            _ => None,
-        };
-        let missing = matches!(&response, DaemonResponse::Error { code, .. }
-            if code.as_deref() == Some("SESSION_NOT_FOUND"))
-            || matches!(&response, DaemonResponse::RemoteSessionDetailsOk {
-                details: None, legacy_direct_ssh: false,
-            });
-        if let Some(id) = queried_id.filter(|_| missing) {
-            self.remove_session(id);
+        if self.forget_explicitly_missing_session(req, &response) {
             self.persist_sessions().await?;
         }
         Ok(response)
+    }
+
+    fn forget_explicitly_missing_session(&self, req: &DaemonRequest, response: &DaemonResponse) -> bool {
+        let queried_id = match req {
+            DaemonRequest::RemoteSessionDetails { session_id }
+            | DaemonRequest::DescribeSession { session_id } => session_id,
+            _ => return false,
+        };
+        // Missing remote-runtime metadata also describes a live local PTY.
+        // Only an explicit absence response proves that its legacy route is stale.
+        if matches!(response, DaemonResponse::Error { code, .. }
+            if code.as_deref() == Some("SESSION_NOT_FOUND"))
+        {
+            self.remove_session(queried_id);
+            true
+        } else {
+            false
+        }
     }
 
     async fn persist_sessions(&self) -> Result<(), String> {
@@ -1144,5 +1151,49 @@ impl RemoteSessionBackend for SessionRouter {
                 Err(format!("Session '{session_id}' not found"))
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod route_absence_tests {
+    use super::*;
+
+    #[test]
+    fn local_pty_without_remote_metadata_keeps_legacy_route() {
+        let peer = LegacyPeer::new(PathBuf::from("unused-no-socket"), vec!["local".into()]);
+        let request = DaemonRequest::RemoteSessionDetails { session_id: "local".into() };
+        for legacy_direct_ssh in [false, true] {
+            let response = DaemonResponse::RemoteSessionDetailsOk { details: None, legacy_direct_ssh };
+            assert!(!peer.forget_explicitly_missing_session(&request, &response));
+            assert!(peer.contains_session("local"));
+        }
+    }
+
+    #[test]
+    fn only_explicit_query_absence_removes_legacy_route() {
+        for request in [
+            DaemonRequest::RemoteSessionDetails { session_id: "gone".into() },
+            DaemonRequest::DescribeSession { session_id: "gone".into() },
+        ] {
+            let peer = LegacyPeer::new(PathBuf::from("unused-no-socket"), vec!["gone".into(), "live".into()]);
+            for code in [None, Some("INTERNAL_ERROR"), Some("REMOTE_UNAVAILABLE")] {
+                let response = DaemonResponse::Error {
+                    message: "Session not found".into(),
+                    code: code.map(str::to_owned),
+                    details: None,
+                };
+                assert!(!peer.forget_explicitly_missing_session(&request, &response));
+                assert!(peer.contains_session("gone"));
+            }
+            let absent = DaemonResponse::Error {
+                message: "Gone".into(), code: Some("SESSION_NOT_FOUND".into()), details: None,
+            };
+            let write = DaemonRequest::Write { session_id: "gone".into(), data: vec![] };
+            assert!(!peer.forget_explicitly_missing_session(&write, &absent));
+            assert!(peer.contains_session("gone"));
+            assert!(peer.forget_explicitly_missing_session(&request, &absent));
+            assert!(!peer.contains_session("gone"));
+            assert!(peer.contains_session("live"));
+        }
     }
 }

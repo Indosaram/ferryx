@@ -41,6 +41,16 @@ impl Gateway {
         auth.exchange_pairing_code(&pin, "supervisor fixture").expect("token").0
     }
 
+    fn authorized_machine_token(&self) -> String {
+        let token = self.token(DevicePermission::Control, DeviceAccessScope::Machine);
+        let device = self.state().auth_manager.validate_token(&token).expect("fixture device");
+        // Pairing a fresh machine does not opt it into agent control. Explicitly grant
+        // only this fixture device access before testing the downstream hub/body contract.
+        self.state().set_agent_control(true, Vec::new()).expect("enable fixture control");
+        self.state().agent_control_policy.restrict_to([device.id]);
+        token
+    }
+
     async fn send(&self, request: reqwest::RequestBuilder) -> (u16, Option<String>, serde_json::Value) {
         let response = tokio::time::timeout(LIMIT, request.send()).await.expect("bounded").expect("response");
         let status = response.status().as_u16();
@@ -83,6 +93,7 @@ const PAUSE: &str = r#"{"laneKey":"ledger","paused":true}"#;
 async fn a_mirror_device_cannot_read_the_supervisor() {
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    gateway.state().set_agent_control(true, Vec::new()).expect("enable policy to exercise scope denial");
 
     let (status, _, body) = gateway.get("/api/v1/supervisor", &token).await;
 
@@ -97,6 +108,7 @@ async fn a_device_outside_the_agent_control_allowlist_cannot_pause_a_lane() {
     // device that the agent-control policy no longer admits.
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().set_agent_control(true, Vec::new()).expect("enable policy to exercise allowlist denial");
     gateway.state().agent_control_policy.restrict_to(["another-device"]);
 
     let (status, _, body) = gateway.post(&token, PAUSE).await;
@@ -107,9 +119,27 @@ async fn a_device_outside_the_agent_control_allowlist_cannot_pause_a_lane() {
 }
 
 #[tokio::test]
-async fn a_machine_control_device_reads_the_snapshot_shape_without_a_hub() {
+async fn a_fresh_machine_control_device_is_denied_until_agent_control_is_enabled() {
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    assert!(!gateway.state().agent_control_policy.enabled(), "fresh agent control stays off");
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    // Authorization remains ahead of both valid hub operations and malformed body handling.
+    for request in [PAUSE, "not json"] {
+        let (status, _, body) = gateway.post(&token, request).await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+    }
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_machine_control_device_reads_the_snapshot_shape_without_a_hub() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
 
     let (status, cache, body) = gateway.get("/api/v1/supervisor", &token).await;
 
@@ -127,7 +157,7 @@ async fn a_machine_control_device_reads_the_snapshot_shape_without_a_hub() {
 #[tokio::test]
 async fn a_pause_without_an_open_hub_is_supervisor_unavailable() {
     let gateway = Gateway::start().await;
-    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let token = gateway.authorized_machine_token();
 
     let (status, _, body) = gateway.post(&token, PAUSE).await;
 
@@ -139,7 +169,7 @@ async fn a_pause_without_an_open_hub_is_supervisor_unavailable() {
 #[tokio::test]
 async fn a_malformed_pause_body_is_an_invalid_request() {
     let gateway = Gateway::start().await;
-    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let token = gateway.authorized_machine_token();
 
     for body in [r#"{"laneKey":"ledger"}"#, r#"{"laneKey":"ledger","paused":"yes"}"#, "not json"] {
         let (status, _, answer) = gateway.post(&token, body).await;

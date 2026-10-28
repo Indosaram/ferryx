@@ -1,3 +1,4 @@
+import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { filePreviewController } from "../lib/filePreview";
 import * as switchDebugModule from "../lib/switchDebug";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
@@ -1523,6 +1524,9 @@ describe("NativeTerminalPane geometry reporting contract", () => {
 describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () => {
   let restorePaneRect: () => void;
   beforeEach(() => {
+    // This group exercises Cmd-based macOS shortcuts by default. Ctrl-based cases
+    // explicitly opt into useNonMacShortcutPlatform rather than depending on the CI host.
+    vi.spyOn(shortcutsModule, "isMacShortcutPlatform").mockReturnValue(true);
     resetNativeTerminalPaneForTest();
     resetNativeTerminalLifecycleForTest();
     restorePaneRect = stubPaneRect();
@@ -4801,6 +4805,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("copies native selection to navigator.clipboard on platform copy shortcut", async () => {
+    useNonMacShortcutPlatform();
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
     const originalProcessPlatform = process.platform;
@@ -5092,6 +5097,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("surfaces browser clipboard write rejection on non-macOS platforms", async () => {
+    useNonMacShortcutPlatform();
     const originalPlatform = navigator.platform;
     const originalUserAgent = navigator.userAgent;
     const originalProcessPlatform = process.platform;
@@ -6391,6 +6397,58 @@ describe("NativeTerminalPane daemon and session identity mapping", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["Previous match", "Next match", "Close search"])(
+    "leaves docked search %s keyboard events with the DOM without releasing the surface",
+    async (label) => {
+      vi.spyOn(shortcutsModule, "isMacShortcutPlatform").mockReturnValue(false);
+      const session = createSession("term-search-button");
+      const onClose = vi.fn();
+      const onFocusTerminal = vi.fn();
+      const { getByRole, getByTestId, rerender } = await renderNative(
+        <><NativeTerminalPane sessionId={session.id} session={session} active />
+          <TerminalSearchOverlay docked sessionId={session.id} onClose={onClose}
+            onFocusTerminal={onFocusTerminal} /></>,
+      );
+      tauriCoreMocks.invoke.mockImplementation(async (command) => command === "cmd_native_terminal_search"
+        ? { matches: [{ row: 2, startCol: 0, endCol: 1 }, { row: 4, startCol: 0, endCol: 1 }], totalMatches: 2 }
+        : undefined);
+      fireEvent.change(getByTestId("terminal-search-input"), { target: { value: "needle" } });
+      await waitFor(() => expect(getByRole("search")).toHaveTextContent("1/2"));
+      fireEvent.click(getByRole("button", { name: "Next match" }));
+      expect(getByRole("search")).toHaveTextContent("2/2");
+      fireEvent.click(getByRole("button", { name: "Previous match" }));
+      expect(getByRole("search")).toHaveTextContent("1/2");
+      const button = getByRole("button", { name: label });
+      tauriCoreMocks.invoke.mockClear();
+      for (const [key, shiftKey] of [["Enter", false], [" ", false], ["Tab", false], ["Tab", true]] as const) {
+        act(() => button.focus());
+        const event = new KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true });
+        await act(async () => { button.dispatchEvent(event); });
+        expect(event.defaultPrevented).toBe(false);
+        expect(button).toHaveFocus();
+      }
+      expect(tauriCoreMocks.invoke.mock.calls.filter(([cmd]) =>
+        cmd === "cmd_native_terminal_send_input" ||
+        cmd === "cmd_native_terminal_detach")).toEqual([]);
+      await act(async () => { fireEvent.keyDown(button, { key: "Escape" }); });
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onFocusTerminal).toHaveBeenCalledTimes(1);
+      await act(async () => { fireEvent.click(getByRole("button", { name: "Close search" })); });
+      expect(onClose).toHaveBeenCalledTimes(2);
+      expect(onFocusTerminal).toHaveBeenCalledTimes(2);
+      expect(tauriCoreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_send_input")).toEqual([]);
+      await act(async () => rerender(<NativeTerminalPane sessionId={session.id} session={session} active />));
+      const input = getByTestId("native-terminal-focus-sink");
+      act(() => input.focus());
+      fireEvent.keyDown(input, { key: "x" });
+      await waitFor(() => expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_send_input", {
+        requestId: expect.any(String), sessionId: session.id, input: { text: "x" },
+      }));
+      expect(tauriCoreMocks.invoke.mock.calls.filter(([cmd]) =>
+        cmd === "cmd_native_terminal_detach" || cmd === "cmd_native_terminal_attach")).toEqual([]);
+    },
+  );
 
   it("redirects printable keydown fallback when activeElement is document.body", async () => {
     const session = createSession("term-session-capture-fallback");

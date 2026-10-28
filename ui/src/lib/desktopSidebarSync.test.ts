@@ -32,9 +32,19 @@ const sentGroupIds = () => tauri.invoke.mock.calls.map(([command, args]) => {
   return (args as { model: SidebarModel }).model.projects.map((node) => node.groupId);
 });
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function deferredInvoke() {
-  const started = Promise.withResolvers<void>();
-  const response = Promise.withResolvers<number>();
+  const started = deferred<void>();
+  const response = deferred<number>();
   tauri.invoke.mockImplementationOnce(() => {
     started.resolve();
     return response.promise;
@@ -237,7 +247,7 @@ describe("useDesktopSidebarPublisher", () => {
   };
 
   it.each([null, "STALE_EPOCH"])("forces publication after a missed resync and initial result %s", async (code) => {
-    const attached = Promise.withResolvers<() => void>();
+    const attached = deferred<() => void>();
     tauri.listen.mockReturnValue(attached.promise);
     if (code) tauri.invoke.mockRejectedValueOnce({ code, message: "old epoch" });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -254,7 +264,7 @@ describe("useDesktopSidebarPublisher", () => {
     await act(async () => undefined);
     const count = tauri.invoke.mock.calls.length;
     rerender({ enabled: false });
-    const attached = Promise.withResolvers<() => void>();
+    const attached = deferred<() => void>();
     tauri.listen.mockReturnValue(attached.promise);
     await act(async () => { rerender({ enabled: true }); });
     expect(tauri.invoke).toHaveBeenCalledTimes(count + 1);

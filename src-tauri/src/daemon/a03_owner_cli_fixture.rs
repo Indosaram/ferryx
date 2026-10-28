@@ -244,6 +244,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
                 capabilities.push("pairedHostInventoryV1");
                 capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY);
                 capabilities.push(crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY);
+                capabilities.push("pairedHostE2EV1");
             }
             capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY);
             // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
@@ -251,6 +252,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push("sessionOwnershipTransferV1");
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;

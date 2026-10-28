@@ -1,0 +1,38 @@
+{
+  "src-tauri/src/daemon/owner_admission.rs": {
+    "source_sha256": "214987117bf2a1209179bd92fcdb35ee93ffe9c107de1606552a49e9dbdc0a36",
+    "reason": "Reviewed test_binary_command callsites1568,1587,1651: only RACE_TEST and FAKE_DAEMON_TEST constants select same-file parent/fake child. Full constants resolved against compiler inventory; no other callers.",
+    "targets": [
+      "daemon::owner_admission::tests::d_two_processes_race_and_start_once",
+      "daemon::owner_admission::tests::d_fake_daemon_entry"
+    ]
+  },
+  "src-tauri/src/daemon/session_service_machine_tests.rs": {
+    "source_sha256": "c6197b344be0f93b15f8de0fc20e3bab6dd274ccd66f52ec47d2fa526deeda91",
+    "reason": "Reviewed projector_child_case four literal callers1291-1315 pass these exact full names through name to projector_child; all target functions in this same source file. Other provider child literal dispatch is parsed directly.",
+    "targets": [
+      "daemon::session_service::machine_tests::projector_desktop_gui_child_canonical_local_target",
+      "daemon::session_service::machine_tests::projector_desktop_gui_child_foreign_workspace",
+      "daemon::session_service::machine_tests::projector_desktop_gui_child_root_escape",
+      "daemon::session_service::machine_tests::projector_desktop_gui_child_non_ready_workspace"
+    ]
+  },
+  "src-tauri/src/ferryx_scope/ssh/process.rs": {
+    "source_sha256": "a0515ceacb9c5610e2a1cedfd90a62c5f0ba76ae56898b171eab80763ee1ceb5",
+    "reason": "Reviewed start() lines424-444: current_exe launches production daemon --root <path> --host-id <host>, not libtest selectors. No test registration or libtest mode in this helper; reviewed targets intentionally empty.",
+    "targets": []
+  },
+  "src-tauri/src/ssh/transport_windows.rs": {
+    "source_sha256": "67527d5acc88167866684ac1e3c9efae29d95da9e91226caf42284612d143e9d",
+    "reason": "Entire module has inner #![cfg(windows)] atline35. Linux compiler inventory contains no owner_lifetime_helper; exact inactive selector exception is rejected when that target becomes active on Windows. Windows runtime/cohort validation is not claimed.",
+    "targets": [],
+    "inactive_selectors": [
+      "transport_windows::tests::owner_lifetime_helper"
+    ]
+  },
+  "src-tauri/tests/support/private_supervisor.rs": {
+    "source_sha256": "ae1978df531b4817e511ec3059ce751e387cb41f9040e7b18f0a614fdae6a918",
+    "reason": "Integration-only helper: referenced only by src-tauri/tests/{machine_terminal_stream,a10_output_live_socket,machine_sessions,machine_session_metadata,machine_events,machine_owner_handover}. No src-tauri/src reference and absent from actual Linux root-libtest .d dep-info; targets intentionally empty for library-only gate. Integration sharding is not supported by this tool.",
+    "targets": []
+  }
+}

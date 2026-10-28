@@ -1,0 +1,99 @@
+name: Native desktop runtime QA
+
+on:
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-runtime-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-desktop-smoke:
+    name: Real Linux desktop smoke (isolated, offline runtime)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          shared-key: ubuntu-24-desktop-qa-no-debuginfo-v1
+      - name: Install build and virtual display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev \
+            cmake pkg-config xvfb xdotool x11-utils openbox imagemagick \
+            dbus-x11 iproute2 mesa-vulkan-drivers libvulkan1 fonts-dejavu-core
+      - name: Verify runtime isolation guards
+        run: python3 -m unittest discover -s scripts/qa -p 'pr24_native_smoke_test.py'
+      - name: Build actual desktop assets and executable (not a release bundle)
+        timeout-minutes: 42
+        run: |
+          bun install --frozen-lockfile
+          bun install --cwd ui --frozen-lockfile
+          bun run --cwd ui build
+          bun scripts/release-workflow-policy.mjs
+          python3 scripts/ci-run-bounded.py --timeout-seconds 2400 \
+            --log "$RUNNER_TEMP/desktop-qa/build.log" -- \
+            cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx --features tauri/custom-protocol
+      - name: Preserve successful dependency compilation if later GUI assertions fail
+        # rust-cache v2's post-if reads this exported flag. Set it only AFTER a
+        # successful build, not for compilation failures. Existing cache paths
+        # and trust scope stay unchanged; no runtime fixture state is cached.
+        run: echo "CACHE_ON_FAILURE=true" >> "$GITHUB_ENV"
+      - name: Run real GUI with no external network or host service access
+        timeout-minutes: 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/desktop-qa/runtime"
+          isolation="$RUNNER_TEMP/desktop-qa-isolation"
+          # Separate network AND PID/mount namespaces contain WebKit helpers and
+          # daemon descendants, including setsid children. No host firewall/TCC changes.
+          # Mask host /run sockets so D-Bus/systemd cannot launch a service outside
+          # the namespace. The smoke runs as the ordinary runner, with a clean env.
+          python3 scripts/ci-run-bounded.py --timeout-seconds 300 \
+            --log "$RUNNER_TEMP/desktop-qa/runtime-supervisor.log" -- \
+            sudo unshare --mount --net --pid --fork --mount-proc --kill-child=KILL \
+            bash -c '
+              set -euo pipefail
+              mount --make-rprivate /
+              mount -t tmpfs -o nosuid,nodev tmpfs /run
+              ip link set lo up
+              exec runuser -u "$1" -- env -i \
+                PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C.UTF-8 \
+                HOME="$4/home" XDG_RUNTIME_DIR="$4/runtime" \
+                python3 "$2/scripts/qa/pr24-native-smoke.py" \
+                --binary "$2/src-tauri/target/debug/ferryx" \
+                --ui-dist "$2/ui/dist" --evidence-dir "$3" --isolation-root "$4"
+            ' bash "$(id -un)" "$GITHUB_WORKSPACE" "$evidence" "$isolation"
+      - name: Preserve bounded QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop-qa
+          path: ${{ runner.temp }}/desktop-qa/
+          if-no-files-found: warn
+          retention-days: 7

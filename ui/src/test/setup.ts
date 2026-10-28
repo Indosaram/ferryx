@@ -1,5 +1,20 @@
 import "@testing-library/jest-dom/vitest";
 
+// Unit tests must explicitly supply their network responses. Never let an incomplete
+// component mock contact an account/relay server (including through jsdom's XHR).
+// These are the baseline implementations, so restoreAllMocks/unstubAllGlobals restore
+// an offline default rather than accidentally re-enabling the real network.
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  writable: true,
+  value: async () => { throw new Error("Unexpected network request in unit test: mock fetch explicitly"); },
+});
+if (typeof XMLHttpRequest !== "undefined") {
+  XMLHttpRequest.prototype.send = function () {
+    throw new Error("Unexpected network request in unit test: mock XMLHttpRequest explicitly");
+  };
+}
+
 // NWSAPI does not implement :modal or :fullscreen. We delegate top-layer
 // states without recursive loops while preserving compound selectors and
 // full document.fullscreenElement state tracking.

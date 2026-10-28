@@ -24,7 +24,7 @@ it.each(["ssh", "pairedDaemon"] as const)("delivers %s events into only the owni
   if (!snapshot) throw new Error("invalid fixture");
   const key = `${kind === "ssh" ? "ssh" : "paired"}:workspace:/remote:repo`;
   let emit: Parameters<typeof bridge.listenDagRunUpdated>[0] = () => { throw new Error("listener absent"); };
-  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn(); });
+  vi.mocked(bridge.listenDagRunUpdated).mockImplementation(async (handler) => { emit = handler; return vi.fn<() => void>(); });
   const result = { projectPath: key, generation: 1, runs: [] };
   vi.mocked(bridge.watchDagSshProject).mockResolvedValue(result);
   vi.mocked(bridge.watchDagPairedProject).mockResolvedValue(result);

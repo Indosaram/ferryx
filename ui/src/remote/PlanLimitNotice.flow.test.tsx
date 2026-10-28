@@ -15,9 +15,7 @@ import type {
   TunnelTransport,
   TunnelResponse,
   TunnelWebSocket,
-  TunnelMessageEvent,
   TunnelCloseEvent,
-  TunnelErrorEvent,
   FetchLikeInit,
 } from "./attachTunnel";
 import * as attachTunnelModule from "./attachTunnel";
@@ -38,8 +36,8 @@ const realSetTimeout = globalThis.setTimeout;
 const realClearTimeout = globalThis.clearTimeout;
 
 interface MockTunnelWebSocket extends TunnelWebSocket {
-  send: ReturnType<typeof vi.fn>;
-  close: ReturnType<typeof vi.fn>;
+  send: ReturnType<typeof vi.fn<TunnelWebSocket["send"]>>;
+  close: ReturnType<typeof vi.fn<TunnelWebSocket["close"]>>;
 }
 
 function createSocket(onCloseArmed?: () => void): MockTunnelWebSocket {

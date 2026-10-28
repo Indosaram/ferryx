@@ -9,6 +9,8 @@ pub mod directwrite_raster;
 pub mod font_manager;
 #[cfg(target_os = "linux")]
 pub mod freetype_raster;
+#[cfg(target_os = "linux")]
+pub mod linux_cluster_raster;
 pub mod gpu_context;
 pub mod images;
 pub mod instances;

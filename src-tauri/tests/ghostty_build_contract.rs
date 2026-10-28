@@ -140,6 +140,35 @@ fn test_compute_link_lib_stem() {
 }
 
 #[test]
+fn test_static_link_spec_windows_gnu_uses_exact_lib_filename() {
+    for target in ["x86_64-pc-windows-gnu", "aarch64-pc-windows-gnu", "aarch64-pc-windows-gnullvm"] {
+        assert_eq!(build_ghostty::static_link_spec(target, Path::new("cache/ghostty-vt-static.lib")).unwrap(),
+            "static:+verbatim=ghostty-vt-static.lib");
+        assert_eq!(build_ghostty::static_link_spec(target, Path::new("cache/libghostty-vt.a")).unwrap(),
+            "static=ghostty-vt");
+    }
+}
+
+#[test]
+fn test_static_link_spec_other_targets_unchanged() {
+    for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
+        assert_eq!(build_ghostty::static_link_spec(target, Path::new("ghostty-vt-static.lib")).unwrap(),
+            "static=ghostty-vt-static");
+    }
+    for target in ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"] {
+        assert_eq!(build_ghostty::static_link_spec(target, Path::new("libghostty-vt.a")).unwrap(),
+            "static=ghostty-vt");
+    }
+}
+
+#[test]
+fn test_static_link_spec_rejects_invalid_artifact() {
+    for artifact in ["", "/", "lib.a", ".lib", "ghostty-vt.dll"] {
+        assert!(build_ghostty::static_link_spec("x86_64-pc-windows-gnu", Path::new(artifact)).is_err());
+    }
+}
+
+#[test]
 fn test_ghostty_link_directives_are_owned_by_build_script() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source_paths = [
@@ -165,10 +194,14 @@ fn test_resolve_static_lib_windows_and_unix() {
     // 1. When ghostty-vt-static.lib exists, windows target prefers it
     let static_lib_win = lib_dir.join("ghostty-vt-static.lib");
     fs::write(&static_lib_win, b"fake_static_lib").unwrap();
+    // An import-library sibling must never displace the real static archive.
+    fs::write(lib_dir.join("ghostty-vt.lib"), b"fake_import_lib").unwrap();
 
     let (path, stem) =
         build_ghostty::resolve_static_lib(&lib_dir, "x86_64-pc-windows-gnu").unwrap();
     assert_eq!(path, static_lib_win);
+    assert_eq!(build_ghostty::static_link_spec("x86_64-pc-windows-gnu", &path).unwrap(),
+        "static:+verbatim=ghostty-vt-static.lib");
     assert_eq!(stem, "ghostty-vt-static");
 
     // 2. When only ghostty-vt.lib exists on windows

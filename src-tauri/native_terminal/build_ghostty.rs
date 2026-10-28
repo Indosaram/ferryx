@@ -172,6 +172,22 @@ pub fn compute_link_lib_stem(filename: &str) -> Result<String, String> {
     }
 }
 
+/// Select a rustc static-library specification without renaming the cached artifact.
+/// Zig emits a `.lib` static archive for Windows GNU too, whereas rustc's default
+/// GNU search adds `lib`/`.a`. Verbatim lookup preserves static archive bundling.
+pub fn static_link_spec(cargo_target: &str, artifact: &Path) -> Result<String, String> {
+    let filename = artifact.file_name().and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid static library artifact path: {}", artifact.display()))?;
+    let stem = compute_link_lib_stem(filename)?;
+    let windows_gnu = cargo_target.ends_with("-windows-gnu")
+        || cargo_target.ends_with("-windows-gnullvm");
+    if windows_gnu && filename.ends_with(".lib") {
+        Ok(format!("static:+verbatim={filename}"))
+    } else {
+        Ok(format!("static={stem}"))
+    }
+}
+
 /// Resolves the platform-correct static library artifact in `lib_dir` for `cargo_target`.
 pub fn resolve_static_lib(lib_dir: &Path, cargo_target: &str) -> Result<(PathBuf, String), String> {
     let candidates: &[&str] = if cargo_target.contains("windows") {
@@ -551,7 +567,7 @@ pub fn build_ghostty_vt() -> Result<GhosttyBuildConfig, String> {
         "cargo:rustc-link-search=native={}",
         config.lib_dir.display()
     );
-    println!("cargo:rustc-link-lib=static={}", config.link_lib_stem);
+    println!("cargo:rustc-link-lib={}", static_link_spec(&config.target, &config.static_lib_path)?);
     println!("cargo:include={}", config.include_dir.display());
     println!("cargo:ghostty_lib_dir={}", config.lib_dir.display());
     println!("cargo:ghostty_include_dir={}", config.include_dir.display());

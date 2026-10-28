@@ -1,0 +1,66 @@
+{
+  "design": "10 balanced shuffled AB/BA pairs plus 4 same-head AA pairs; seed20261027; once only",
+  "sample_operations": 5,
+  "samples_per_process": 10,
+  "warmup_operations": 30,
+  "total_timed_operations": 1400,
+  "total_warmup_operations": 840,
+  "fixture_bytes": 8388612,
+  "retained_groups": 399457,
+  "phase": "new+resize+feed+render_snapshot+row_text_assert+drop",
+  "difference_from_original": "direct frozen identical buffer, not unequal hub publish preconditioning; initial untimed QA remains",
+  "baseline": "eab2e8e4712e60fa155cf794ad5885afff943244",
+  "head_production_source": "675f452a66270bee21832dbaacae0ced9d159886; source remains unchanged in9c3a91fd",
+  "profile": "defaultfeatures devopt0 debug0 incremental0 jobs1 locked offline",
+  "fixture_sha256": "98fd959d4908bb928a7d4ae8cc026b6f9b738b08bf811cac09f7583f2c1097d3",
+  "harness_sha256": "740e3359706b68e287029d8177b9387a8cc6440f9c861f694467232fbebb8b65",
+  "verification": "separate reconstruct8m-verify process per binary; actual original hub snapshot byte equality to direct frozen fixture, no verification in timed process",
+  "head_commit": "9c3a91fd08c68b6b118b23cde01dc76f01516fc9",
+  "head_tree": "2fda4589efa3de78a644f57db3e97488f06f12cf",
+  "binaries": {
+    "baseline": {
+      "sha256": "e447c3704cb17477479566e0f8632b899e645bc1d313057870b615dc13e494c4",
+      "bytes": 20370096
+    },
+    "head": {
+      "sha256": "3d9f77d145789f34d9572c286c68b3d23dfac38cc5307b6e32694226f55d430a",
+      "bytes": 20375368
+    }
+  },
+  "baseline_ui_resources": "Exact head ui/dist copied to baseline to satisfy Tauri build resource check; not executed by example. Initial missing-resource failure retained in baseline-build.log.",
+  "build_seconds": {
+    "head": 141.1,
+    "baseline": 166.7
+  },
+  "interpretation": "Original8MiB slowdown not reproduced in isolated current-head reconstruction; publisher-preconditioned original pipeline and historical efbhead not retested; no causality/equivalence/release-app claim.",
+  "source_sha256": {
+    "src-tauri/src/native_terminal/terminal.rs": {
+      "baseline": "4fbdb73b6e5107ee3d643fa8e95c1218348ccb68b5a4804c6f68f507dbe9e097",
+      "head": "4fbdb73b6e5107ee3d643fa8e95c1218348ccb68b5a4804c6f68f507dbe9e097"
+    },
+    "src-tauri/src/terminal/output_hub.rs": {
+      "baseline": "919ac18278d01408631610231f7287182342a99b929cbe63752a14f14577193f",
+      "head": "919ac18278d01408631610231f7287182342a99b929cbe63752a14f14577193f"
+    },
+    "src-tauri/src/terminal/retained_history.rs": {
+      "baseline": "6c8a4a6291820f321b7c3806ed3b631b480b223405a9d7bfa32a3b859d971833",
+      "head": "9c68a009aa9245522d1e13563f594dfdbaed950a55b6bd50059be343c8030aa2"
+    },
+    "src-tauri/Cargo.lock": {
+      "baseline": "c00c839b77359a6396e1c0a6d6c3e2fd58048a1f499850ad992be79ae29eecef",
+      "head": "c00c839b77359a6396e1c0a6d6c3e2fd58048a1f499850ad992be79ae29eecef"
+    }
+  },
+  "toolchain": {
+    "rustc": "1.99.1 (58cf8f9c3 2026-10-13)",
+    "LLVM": "23.1.1",
+    "zig": "0.16.0",
+    "ghostty_commit": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+    "ghostty_archive_sha256": "4dc277dac1446d7165b5cb8dbdae60691c820651a94ead977b76ff772bebfd9b",
+    "RUSTFLAGS": "unset",
+    "target": "x86_64-unknown-linux-gnu native default",
+    "features": "default"
+  },
+  "build_command": "cargo build --manifest-path src-tauri/Cargo.toml --locked --offline --example perf_terminal_pipeline",
+  "build_environment_file_sha256": "ebaea27a13d2b1d02ecfe1bcd587562d726adc0d8b1fdfc1ae5b6f445489770e"
+}

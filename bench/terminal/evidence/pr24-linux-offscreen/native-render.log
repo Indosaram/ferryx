@@ -1,0 +1,10 @@
+[ci-bounded] started leader_pid=6 timeout_seconds=60
+=== Ferryx Native WGPU Terminal Renderer POC (Headless) ===
+Adapter: llvmpipe (LLVM 19.1.7, 256 bits) (Vulkan, Cpu)
+Dimensions: 800x480 px (24 rows)
+Dirty Stats: 1 rebuilt, 23 reused
+Glyph Atlas: 111 entries, 8395712 / 556345856 bytes
+Frame Latency (N=50): p50 = 3.331 ms, p95 = 4.942 ms
+Output Artifact: /workspace/shared/ferryx-wt/.evidence/pr24-validation-20261026/native-render.png (14874 bytes)
+[ci-bounded] shutdown reason=leader_exit exit_code=0
+[ci-bounded] finished exit_code=0 elapsed_seconds=1.4

@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { scrollNativeTerminal } from "../lib/tauri";
+import { TERMINAL_SEARCH_DOCK_HEIGHT } from "../lib/terminalSearchLayout";
 import { IconButton } from "./ui/IconButton";
 
 export type NativeTerminalSearchMatch = {
@@ -17,6 +18,8 @@ export type NativeTerminalSearchResult = {
 };
 
 export type TerminalSearchOverlayProps = {
+  /** Search occupies its own 48px strip outside native surface bounds. */
+  docked?: boolean;
   sessionId?: string;
   onClose: () => void;
   onFocusTerminal?: () => void;
@@ -54,6 +57,7 @@ function parseSearchResponse(raw: unknown): NativeTerminalSearchMatch[] {
 }
 
 export function TerminalSearchOverlay({
+  docked = false,
   sessionId,
   onClose,
   onFocusTerminal,
@@ -211,7 +215,12 @@ export function TerminalSearchOverlay({
     <div
       role="search"
       aria-label="Terminal search"
-      className="no-drag absolute top-2 right-4 z-40 flex items-center gap-1 rounded border border-border bg-card/95 p-1 text-foreground shadow-lg backdrop-blur-sm"
+      data-native-terminal-keep-visible={docked ? "true" : undefined}
+      data-native-terminal-search-layout={docked ? "docked" : "floating"}
+      style={docked ? { height: TERMINAL_SEARCH_DOCK_HEIGHT } : undefined}
+      className={`no-drag absolute z-40 flex items-center gap-1 border border-border bg-card/95 p-1 text-foreground shadow-lg backdrop-blur-sm ${docked
+        ? "inset-x-0 top-0 justify-end border-x-0 border-t-0 px-4"
+        : "top-2 right-4 rounded"}`}
       onKeyDown={(e) => {
         if (e.key === "Escape") {
           e.stopPropagation();

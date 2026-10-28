@@ -20,6 +20,8 @@ import {
   getDaemonSuspension,
 } from "../lib/sessionLifecycle";
 import { toIpcError } from "../lib/tauri";
+import { isMacShortcutPlatform } from "../lib/shortcuts";
+import { TERMINAL_SEARCH_DOCK_HEIGHT } from "../lib/terminalSearchLayout";
 import type { TerminalSession } from "../lib/types";
 import type { LocalRecoveryAdmissionResult } from "../state/workspaceStore";
 import { NativeTerminalPane } from "./NativeTerminalPane";
@@ -106,6 +108,9 @@ export function TerminalPane({
   onBackendSessionUnavailable,
 }: TerminalPaneProps) {
   const [pendingLocal, setPendingLocal] = useState(false);
+  // Linux/Windows native children stack above the webview. Keep search in a
+  // separate strip rather than hiding/detaching the terminal it needs to query.
+  const dockSearch = Boolean(searchOpen && !isMacShortcutPlatform());
   const advancedFeatures = useAdvancedFeatures();
   const [replacementError, setReplacementError] = useState<string | null>(null);
   const titleId = useId();
@@ -361,20 +366,26 @@ export function TerminalPane({
           agentWorking={activity?.isAgent === true && activity.state === "working"}
         />
       ) : null}
-      {nativeRendererUnavailable && session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId) ? (
-        <CompatibilityTerminal backendSessionId={session.backendSessionId} />
-      ) : <NativeTerminalPane
-        sessionId={session.id}
-        session={session}
-        splitAttempt={splitIntent ? { frontendSessionId: session.id, generation: splitIntent.generation } : undefined}
-        active={active}
-        activity={activity}
-        needsAttention={needsAttention}
-        onRefreshSessionIdentity={onRefreshSessionIdentity}
-        onBackendSessionUnavailable={(backendSessionId, reason, bindingKey) => {
-          onBackendSessionUnavailable?.(session.id, backendSessionId, reason, bindingKey);
-        }}
-      />}
+      <div
+        data-testid="terminal-native-viewport"
+        className="absolute inset-x-0 bottom-0 min-h-0 min-w-0"
+        style={{ top: dockSearch ? TERMINAL_SEARCH_DOCK_HEIGHT : 0 }}
+      >
+        {nativeRendererUnavailable && session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId) ? (
+          <CompatibilityTerminal backendSessionId={session.backendSessionId} />
+        ) : <NativeTerminalPane
+          sessionId={session.id}
+          session={session}
+          splitAttempt={splitIntent ? { frontendSessionId: session.id, generation: splitIntent.generation } : undefined}
+          active={active}
+          activity={activity}
+          needsAttention={needsAttention}
+          onRefreshSessionIdentity={onRefreshSessionIdentity}
+          onBackendSessionUnavailable={(backendSessionId, reason, bindingKey) => {
+            onBackendSessionUnavailable?.(session.id, backendSessionId, reason, bindingKey);
+          }}
+        />}
+      </div>
       {splitIntent && session.reconnectLifecycle !== "idle" ? (
         <div
           role={splitPending ? "status" : "alert"}
@@ -424,6 +435,7 @@ export function TerminalPane({
       ) : null}
       {searchOpen ? (
         <TerminalSearchOverlay
+          docked={dockSearch}
           sessionId={session.backendSessionId ?? session.id}
           onClose={onCloseSearch ?? (() => undefined)}
         />

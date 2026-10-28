@@ -1,0 +1,136 @@
+{
+  "seed": 20261027,
+  "order": [
+    [
+      "head",
+      "baseline"
+    ],
+    [
+      "head",
+      "baseline"
+    ],
+    [
+      "baseline",
+      "head"
+    ],
+    [
+      "baseline",
+      "head"
+    ]
+  ],
+  "binary_sha256": {
+    "baseline": "3d9f77d145789f34d9572c286c68b3d23dfac38cc5307b6e32694226f55d430a",
+    "head": "3d9f77d145789f34d9572c286c68b3d23dfac38cc5307b6e32694226f55d430a"
+  },
+  "mode": "reconstruct8m",
+  "binaries": {
+    "baseline": "/workspace/scratch/c4efaab78d82/ferryx-wt/.evidence/pr24-complete-local-20261027/performance-reconstruction-8m/pipeline-head",
+    "head": "/workspace/scratch/c4efaab78d82/ferryx-wt/.evidence/pr24-complete-local-20261027/performance-reconstruction-8m/pipeline-head"
+  },
+  "pairs": [
+    {
+      "pair": 0,
+      "order": [
+        "head",
+        "baseline"
+      ],
+      "head_median_ms": 73.4913291,
+      "head_cpu_median_ms": 73.48159999999993,
+      "head_process_peak_rss_kib": 38392,
+      "head_process_seconds": 6.135271008002746,
+      "head_raw_sha256": "96d086fb6d5a22b70fe7ae00d61b26bc9143cbb8e0d92934a17c8d9799bba073",
+      "baseline_median_ms": 76.8970147,
+      "baseline_cpu_median_ms": 76.87540000000007,
+      "baseline_process_peak_rss_kib": 38520,
+      "baseline_process_seconds": 6.085055863000889,
+      "baseline_raw_sha256": "1d5e7efb2ec72d1308aff6cde7955b533c07ce7c21834dabf861bc5743de35da"
+    },
+    {
+      "pair": 1,
+      "order": [
+        "head",
+        "baseline"
+      ],
+      "head_median_ms": 81.22523670000001,
+      "head_cpu_median_ms": 81.02769999999991,
+      "head_process_peak_rss_kib": 38520,
+      "head_process_seconds": 6.533950746998016,
+      "head_raw_sha256": "c4ff8e649fab8c7860b6b33047793d30ca6d64028ac3d94863c76e18ea331144",
+      "baseline_median_ms": 77.2014897,
+      "baseline_cpu_median_ms": 77.19389999999984,
+      "baseline_process_peak_rss_kib": 38520,
+      "baseline_process_seconds": 6.384514071000012,
+      "baseline_raw_sha256": "e8b69e49bce1c849e71f30a1083ee5afa46fd8c1f3bc22ea1ac18a95f9fe32d7"
+    },
+    {
+      "pair": 2,
+      "order": [
+        "baseline",
+        "head"
+      ],
+      "baseline_median_ms": 75.6124088,
+      "baseline_cpu_median_ms": 75.60599999999995,
+      "baseline_process_peak_rss_kib": 38520,
+      "baseline_process_seconds": 6.1865386520003085,
+      "baseline_raw_sha256": "f06e723e1d08c9f7c8781def013d79702a7d63e75e9cda6fab99ffdcceab9b2e",
+      "head_median_ms": 74.2958266,
+      "head_cpu_median_ms": 74.28980000000001,
+      "head_process_peak_rss_kib": 38520,
+      "head_process_seconds": 6.084360386998014,
+      "head_raw_sha256": "ad09a3fa12914c0ab7064e661ef1294cb24af107032afa36f9552ce903007cb8"
+    },
+    {
+      "pair": 3,
+      "order": [
+        "baseline",
+        "head"
+      ],
+      "baseline_median_ms": 73.5445851,
+      "baseline_cpu_median_ms": 73.53939999999997,
+      "baseline_process_peak_rss_kib": 38520,
+      "baseline_process_seconds": 5.933365559998492,
+      "baseline_raw_sha256": "c680632748d02a77d0ed8a7979e1f9c95ab497fc3dc0a7b26c0c930bcdc928ae",
+      "head_median_ms": 74.1625056,
+      "head_cpu_median_ms": 74.1502,
+      "head_process_peak_rss_kib": 38520,
+      "head_process_seconds": 6.334753324001213,
+      "head_raw_sha256": "81381a4465b7d314f7895916a4bf0aeee75a50559a70f863a9ef7e97d40b355f"
+    }
+  ],
+  "status": "MEASURED_NOT_A_GUI_OR_FULL_APP_PASS",
+  "scope": "real Ghostty reconstruction only, no UI/PTY/GPU",
+  "fixture": {
+    "fixture": "original_8388608_reconstruction_isolated",
+    "bytes": 8388612,
+    "retained_groups": 399457,
+    "command_bytes": 21,
+    "fnv1a64": "629def158f5ffe56",
+    "preconditioning": "direct identical buffer; no hub publish or snapshot",
+    "batch": 5,
+    "samples": 10,
+    "warmup_batches": 6,
+    "operation": "new+resize+feed+render_snapshot+row_text_assert+drop; no search or hub work timed"
+  },
+  "summary": {
+    "process_pairs": 4,
+    "head_over_baseline_geomean_ratio": 0.9990776438533968,
+    "paired_bootstrap_95pct_ratio": [
+      0.9686199046179557,
+      1.0342887836667012
+    ],
+    "pair_ratio_min_max": [
+      0.9557110817203155,
+      1.0521200693877286
+    ],
+    "baseline_process_median_range_ms": [
+      73.5445851,
+      77.2014897
+    ],
+    "head_process_median_range_ms": [
+      73.4913291,
+      81.22523670000001
+    ],
+    "unit": "per reconstruction milliseconds; >1 ratio means head slower",
+    "uncertainty_scope": "paired process-block resampling, conditional on this machine/profile/order; not whole-app performance"
+  }
+}

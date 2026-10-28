@@ -1577,7 +1577,10 @@ describe("retained local recovery owner", () => {
         ...snapshot.sessions,
         "sess-1": {
           ...snapshot.sessions["sess-1"],
-          spawnIntent: { requestId: "split-req-1", generation: 1, ready: true },
+          spawnIntent: {
+            requestId: "split-req-1", generation: 1, ready: true,
+            prepared: null, cancelRequested: false, createSent: true,
+          },
         },
       },
     });
