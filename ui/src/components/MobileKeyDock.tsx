@@ -3,49 +3,104 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  CornerDownLeft,
   SlidersHorizontal,
 } from "lucide-react";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+
+export type DockModifierState = "off" | "oneshot" | "locked";
+
+export type DockModifierName = "ctrl" | "alt" | "shift";
+
+export type DockModifiers = Readonly<Record<DockModifierName, DockModifierState>>;
+
+export const NO_DOCK_MODIFIERS: DockModifiers = { ctrl: "off", alt: "off", shift: "off" };
+
+/** A second tap on a one-shot modifier within this window locks it. */
+export const MODIFIER_LOCK_WINDOW_MS = 350;
+
+/** Advance one modifier through off -> one-shot -> (double tap) locked -> off. */
+export function nextModifierState(
+  current: DockModifierState,
+  sinceLastTapMs: number,
+): DockModifierState {
+  if (current === "off") return "oneshot";
+  if (current === "oneshot" && sinceLastTapMs <= MODIFIER_LOCK_WINDOW_MS) return "locked";
+  return "off";
+}
+
+/** Drop one-shot modifiers after a key consumed them; locked ones stay. */
+export function releaseOneShotModifiers(modifiers: DockModifiers): DockModifiers {
+  return {
+    ctrl: modifiers.ctrl === "oneshot" ? "off" : modifiers.ctrl,
+    alt: modifiers.alt === "oneshot" ? "off" : modifiers.alt,
+    shift: modifiers.shift === "oneshot" ? "off" : modifiers.shift,
+  };
+}
+
+export function hasActiveModifier(modifiers: DockModifiers): boolean {
+  return modifiers.ctrl !== "off" || modifiers.alt !== "off" || modifiers.shift !== "off";
+}
+
+/** `ctrl-alt-shift-` style prefix for a dock action, in a fixed order. */
+export function modifierPrefix(modifiers: DockModifiers): string {
+  return `${modifiers.ctrl !== "off" ? "ctrl-" : ""}${modifiers.alt !== "off" ? "alt-" : ""}${
+    modifiers.shift !== "off" ? "shift-" : ""
+  }`;
+}
 
 type MobileKeyDockProps = {
   onSendKey: (key: string) => void;
+  /** Controlled modifier state; the dock keeps its own when omitted. */
+  modifiers?: DockModifiers;
+  onModifiersChange?: (modifiers: DockModifiers) => void;
 };
 
-export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({ onSendKey }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [ctrlLatched, setCtrlLatched] = useState(false);
-  const [altLatched, setAltLatched] = useState(false);
+/** Keys that already carry their chord and ignore latched modifiers. */
+const FIXED_CHORD_ACTIONS = new Set(["ctrl-c", "ctrl-d", "ctrl-z"]);
 
-  const triggerKey = (action: string) => {
-    // Haptic vibration if supported
+export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
+  onSendKey,
+  modifiers: controlledModifiers,
+  onModifiersChange,
+}) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [ownModifiers, setOwnModifiers] = useState<DockModifiers>(NO_DOCK_MODIFIERS);
+  const lastTapRef = useRef<Record<DockModifierName, number>>({ ctrl: 0, alt: 0, shift: 0 });
+  const modifiers = controlledModifiers ?? ownModifiers;
+
+  const updateModifiers = (next: DockModifiers) => {
+    if (controlledModifiers === undefined) setOwnModifiers(next);
+    onModifiersChange?.(next);
+  };
+
+  const vibrate = () => {
     if ("vibrate" in navigator) {
       try {
         navigator.vibrate(15);
       } catch {
-        // ignore
+        // Haptics are optional; a refusing platform simply stays silent.
       }
     }
+  };
 
-    if (action === "ctrl") {
-      setCtrlLatched(!ctrlLatched);
+  const toggleModifier = (name: DockModifierName) => {
+    vibrate();
+    const now = Date.now();
+    const sinceLastTap = now - lastTapRef.current[name];
+    lastTapRef.current[name] = now;
+    updateModifiers({ ...modifiers, [name]: nextModifierState(modifiers[name], sinceLastTap) });
+  };
+
+  const triggerKey = (action: string) => {
+    vibrate();
+    if (FIXED_CHORD_ACTIONS.has(action)) {
+      onSendKey(action);
       return;
     }
-    if (action === "alt") {
-      setAltLatched(!altLatched);
-      return;
-    }
-
-    let finalAction = action;
-    if (ctrlLatched) {
-      finalAction = `ctrl-${action}`;
-    } else if (altLatched) {
-      finalAction = `alt-${action}`;
-    }
-
-    setCtrlLatched(false);
-    setAltLatched(false);
-
-    onSendKey(finalAction);
+    const prefix = modifierPrefix(modifiers);
+    if (prefix.length > 0) updateModifiers(releaseOneShotModifiers(modifiers));
+    onSendKey(`${prefix}${action}`);
   };
 
   return (
@@ -73,18 +128,8 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({ onSendKey }) => {
       {/* Primary essential row */}
       <div className="flex items-center justify-between gap-1 px-2 py-1.5 overflow-x-auto no-scrollbar">
         <div className="flex items-center gap-1.5">
-          <KeyButton
-            label="Ctrl"
-            active={ctrlLatched}
-            onClick={() => triggerKey("ctrl")}
-            className="font-semibold"
-          />
-          <KeyButton
-            label="Alt"
-            active={altLatched}
-            onClick={() => triggerKey("alt")}
-            className="font-semibold"
-          />
+          <ModifierButton label="Ctrl" state={modifiers.ctrl} onClick={() => toggleModifier("ctrl")} />
+          <ModifierButton label="Alt" state={modifiers.alt} onClick={() => toggleModifier("alt")} />
           <KeyButton label="Esc" onClick={() => triggerKey("esc")} />
           <KeyButton label="Tab" onClick={() => triggerKey("tab")} />
           <KeyButton
@@ -96,21 +141,51 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({ onSendKey }) => {
         </div>
 
         <div className="flex items-center gap-1">
-          <KeyButton icon={<ArrowLeft size={14} />} onClick={() => triggerKey("left")} />
-          <KeyButton icon={<ArrowUp size={14} />} onClick={() => triggerKey("up")} />
-          <KeyButton icon={<ArrowDown size={14} />} onClick={() => triggerKey("down")} />
-          <KeyButton icon={<ArrowRight size={14} />} onClick={() => triggerKey("right")} />
+          <KeyButton icon={<ArrowLeft size={14} />} ariaLabel="Left" onClick={() => triggerKey("left")} />
+          <KeyButton icon={<ArrowUp size={14} />} ariaLabel="Up" onClick={() => triggerKey("up")} />
+          <KeyButton icon={<ArrowDown size={14} />} ariaLabel="Down" onClick={() => triggerKey("down")} />
+          <KeyButton icon={<ArrowRight size={14} />} ariaLabel="Right" onClick={() => triggerKey("right")} />
+          <ModifierButton label="Shift" state={modifiers.shift} onClick={() => toggleModifier("shift")} />
+          <KeyButton
+            icon={<CornerDownLeft size={14} />}
+            ariaLabel="Enter"
+            title="Enter"
+            onClick={() => triggerKey("enter")}
+          />
           <KeyButton
             icon={<SlidersHorizontal size={13} />}
             active={isExpanded}
             onClick={() => setIsExpanded(!isExpanded)}
             title="More keys"
+            ariaLabel="More keys"
           />
         </div>
       </div>
     </div>
   );
 };
+
+function ModifierButton({
+  label,
+  state,
+  onClick,
+}: {
+  label: string;
+  state: DockModifierState;
+  onClick: () => void;
+}) {
+  return (
+    <KeyButton
+      label={label}
+      active={state !== "off"}
+      pressed={state === "locked" ? true : state === "oneshot" ? "mixed" : false}
+      dataState={state}
+      onClick={onClick}
+      title={state === "locked" ? `${label} locked` : undefined}
+      className={`font-semibold ${state === "locked" ? "underline decoration-2 underline-offset-2 ring-2 ring-primary/60 ring-offset-1 ring-offset-card" : ""}`}
+    />
+  );
+}
 
 function KeyButton({
   label,
@@ -120,6 +195,10 @@ function KeyButton({
   onClick,
   className = "",
   title,
+  ariaLabel,
+  pressed,
+  dataState,
+  testId,
 }: {
   label?: string;
   icon?: React.ReactNode;
@@ -128,6 +207,10 @@ function KeyButton({
   onClick: () => void;
   className?: string;
   title?: string;
+  ariaLabel?: string;
+  pressed?: boolean | "mixed";
+  dataState?: string;
+  testId?: string;
 }) {
   return (
     <button
@@ -137,6 +220,10 @@ function KeyButton({
         e.preventDefault();
       }}
       title={title}
+      aria-label={ariaLabel}
+      aria-pressed={pressed}
+      data-state={dataState}
+      data-testid={testId}
       className={`min-w-[44px] min-h-11 px-2 flex items-center justify-center rounded border text-xs font-mono font-medium transition-all active:scale-95 ${
         active
           ? "bg-primary border-primary text-primary-foreground shadow-sm"

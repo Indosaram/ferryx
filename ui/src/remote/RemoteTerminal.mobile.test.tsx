@@ -361,6 +361,65 @@ describe("mobile terminal input lifecycle", () => {
     expect(sink()).toHaveValue("");
   });
 
+  describe("mobile key dock modifiers", () => {
+    const sent = () => Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+    const type = (value: string) => fireEvent.input(sink(), { target: { value }, inputType: "insertText" });
+    const dockKey = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+
+    it("sends a carriage return from the Enter key", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Enter");
+      expect(sent()).toEqual(["\r"]);
+    });
+
+    it("applies a double-tapped (locked) Ctrl to every typed letter", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Ctrl");
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "true");
+      type("c");
+      type("c");
+      expect(sent()).toEqual(["\u0003", "\u0003"]);
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "true");
+      dockKey("Ctrl");
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("applies a one-shot Alt to the next typed character only", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Alt");
+      type("b");
+      type("b");
+      expect(sent()).toEqual(["\u001bb", "b"]);
+      expect(screen.getByRole("button", { name: "Alt" })).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("combines Ctrl and Alt instead of letting Ctrl win", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Alt");
+      type("x");
+      expect(sent()).toEqual(["\u001b\u0018"]);
+    });
+
+    it("sends composed text unmodified while Ctrl is locked", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Ctrl");
+      fireEvent.compositionStart(sink());
+      fireEvent.input(sink(), { target: { value: "한" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(sink(), { data: "한" });
+      fireEvent.input(sink(), { target: { value: "한" }, data: "한", inputType: "insertFromComposition" });
+      expect(sent()).toEqual(["한"]);
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "true");
+    });
+  });
+
   it("sends resize on ResizeObserver change and remoteResize on remoteStatus generation when followHostSize is false", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
     expect(Socket.latest.url).toContain("cols=80&rows=20");

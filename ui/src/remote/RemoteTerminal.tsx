@@ -2,7 +2,13 @@ import type { CSSProperties } from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronLeft } from "lucide-react";
 
-import { MobileKeyDock } from "../components/MobileKeyDock";
+import {
+  hasActiveModifier,
+  MobileKeyDock,
+  NO_DOCK_MODIFIERS,
+  releaseOneShotModifiers,
+  type DockModifiers,
+} from "../components/MobileKeyDock";
 import { observeWebOwner } from "./webRecoveryObservation";
 import {
   decodeRemoteTerminalFrame,
@@ -131,6 +137,7 @@ const KEY_SEQUENCES = {
   pagedown: "\u001b[6~",
   home: "\u001b[H",
   end: "\u001b[F",
+  enter: "\r",
   "ctrl-d": "\u0004",
   "ctrl-z": "\u001a",
   backspace: "\u007f",
@@ -177,12 +184,62 @@ function modifiedNavigationSequence(key: string, ctrlKey: boolean, altKey: boole
   return `\u001b[1;${modifier}${final}`;
 }
 
-function modifiedDockNavigationSequence(key: string): string | undefined {
-  const [modifier, direction] = key.split("-", 2);
-  const final = direction ? DOCK_NAVIGATION_FINALS[direction] : undefined;
-  if (!final) return undefined;
-  const modifierCode = modifier === "ctrl" ? 5 : modifier === "alt" ? 3 : undefined;
-  return modifierCode ? `\u001b[1;${modifierCode}${final}` : undefined;
+type DockChord = {
+  readonly ctrl: boolean;
+  readonly alt: boolean;
+  readonly shift: boolean;
+  readonly base: string;
+};
+
+const DOCK_CHORD_PREFIX = /^(ctrl|alt|shift)-(?=.)/s;
+
+/// Split a dock action such as `ctrl-alt-c` or `shift-left` into its modifiers and base key.
+/// Returns null for actions that carry no modifier prefix.
+function parseDockChord(key: string): DockChord | null {
+  let rest = key;
+  let ctrl = false;
+  let alt = false;
+  let shift = false;
+  for (let match = DOCK_CHORD_PREFIX.exec(rest); match; match = DOCK_CHORD_PREFIX.exec(rest)) {
+    if (match[1] === "ctrl") ctrl = true;
+    else if (match[1] === "alt") alt = true;
+    else shift = true;
+    rest = rest.slice(match[0].length);
+  }
+  return rest === key ? null : { ctrl, alt, shift, base: rest };
+}
+
+/// A typed character with dock modifiers applied: Shift upper-cases letters, Ctrl maps to the ASCII
+/// control byte, Alt prefixes ESC. Null when Ctrl has no control byte for the character.
+function modifiedCharSequence(ch: string, ctrl: boolean, alt: boolean, shift: boolean): string | null {
+  let base = shift && ch >= "a" && ch <= "z" ? ch.toUpperCase() : ch;
+  if (ctrl) {
+    const byte = controlByteForChar(base);
+    if (byte === null) return null;
+    base = String.fromCharCode(byte);
+  }
+  return alt ? `\u001b${base}` : base;
+}
+
+/// Terminal bytes for a modified dock action, or null when the chord has no encoding.
+function dockChordSequence({ ctrl, alt, shift, base }: DockChord): string | null {
+  if (base.length === 1) return modifiedCharSequence(base, ctrl, alt, shift);
+  const modifierCode = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+  const final = DOCK_NAVIGATION_FINALS[base];
+  if (final) {
+    return modifierCode === 1
+      ? KEY_SEQUENCES[base as keyof typeof KEY_SEQUENCES]
+      : `\u001b[1;${modifierCode}${final}`;
+  }
+  if (base === "pageup" || base === "pagedown") {
+    const code = base === "pageup" ? 5 : 6;
+    return modifierCode === 1 ? `\u001b[${code}~` : `\u001b[${code};${modifierCode}~`;
+  }
+  if (base === "tab" && shift && !ctrl) return `${alt ? "\u001b" : ""}\u001b[Z`;
+  const sequence = KEY_SEQUENCES[base as keyof typeof KEY_SEQUENCES];
+  // Ctrl/Shift have no encoding for Enter, Esc, Tab or Backspace; the key itself still goes out.
+  if (sequence === undefined) return null;
+  return alt ? `\u001b${sequence}` : sequence;
 }
 
 // Resolve a Ctrl/Alt chord character from the physical key code so IME layouts
@@ -483,6 +540,14 @@ export function RemoteTerminal({
   // over one at a time by keyboards that never compose (see commitComposition).
   const sinkTailRef = useRef("");
   const heldJamoRef = useRef("");
+  // Ctrl/Alt/Shift latched on the mobile key dock. The ref is read by input handlers that run
+  // before React re-renders, so it is always written together with the state.
+  const [dockModifiers, setDockModifiersState] = useState<DockModifiers>(NO_DOCK_MODIFIERS);
+  const dockModifiersRef = useRef<DockModifiers>(NO_DOCK_MODIFIERS);
+  const setDockModifiers = useCallback((next: DockModifiers) => {
+    dockModifiersRef.current = next;
+    setDockModifiersState(next);
+  }, []);
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -1683,6 +1748,40 @@ export function RemoteTerminal({
     resetSinkState();
   };
 
+  /// Send what was just typed into the sink with the dock's latched modifiers applied (Ctrl+c is
+  /// ETX, Alt+b is ESC b). One-shot modifiers apply to the first character only; locked ones to
+  /// every character. Hangul is left to the IME path: modifiers never touch composition.
+  /// Returns false when nothing was consumed and the regular settle path must run.
+  const applyDockModifiersToSink = (sink: HTMLTextAreaElement) => {
+    if (!hasActiveModifier(dockModifiersRef.current)) return false;
+    const start = Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, sink.value));
+    const typed = Array.from(sink.value.slice(start).replace(/\u00a0/g, " "));
+    if (typed.length === 0 || isHangulChar(typed[0].charCodeAt(0))) return false;
+    // Jamo held from before were typed first.
+    emitSettled("");
+    let plain = "";
+    for (const ch of typed) {
+      const modifiers = dockModifiersRef.current;
+      if (!hasActiveModifier(modifiers) || isHangulChar(ch.charCodeAt(0))) {
+        plain += ch;
+        continue;
+      }
+      const sequence = modifiedCharSequence(
+        ch,
+        modifiers.ctrl !== "off",
+        modifiers.alt !== "off",
+        modifiers.shift !== "off",
+      ) ?? ch;
+      emitText(plain);
+      plain = "";
+      sendText(sequence);
+      setDockModifiers(releaseOneShotModifiers(modifiers));
+    }
+    emitText(plain);
+    resetSinkField();
+    return true;
+  };
+
   const handleSinkInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
     const sink = event.currentTarget;
     const input = event.nativeEvent as InputEvent;
@@ -1704,6 +1803,8 @@ export function RemoteTerminal({
       resetSinkField();
       return;
     }
+    // An insertion that follows a composition commit belongs to the IME; modifiers stay latched.
+    if (committed === null && applyDockModifiersToSink(sink)) return;
     settleSinkText(sink);
   };
 
@@ -1732,18 +1833,15 @@ export function RemoteTerminal({
       sendPayload(JSON.stringify({ type: "signal", signal: "interrupt" }));
       return;
     }
-    const modifiedDockSequence = modifiedDockNavigationSequence(key);
-    if (modifiedDockSequence) {
-      sendInput(new TextEncoder().encode(modifiedDockSequence));
-      return;
-    }
-    if (key.startsWith("alt-")) {
-      sendInput(new TextEncoder().encode(`\u001b${key.slice(4)}`));
-      return;
-    }
-    if (key.startsWith("ctrl-")) {
-      const byte = controlByteForChar(key.slice(5));
-      if (byte !== null) sendInput(new Uint8Array([byte]));
+    const chord = parseDockChord(key);
+    if (chord) {
+      // Chords with no terminal encoding (Ctrl+Tab) send nothing rather than junk.
+      const sequence = dockChordSequence(chord);
+      if (sequence === null) return;
+      // A bare control byte keeps its historical single-byte payload.
+      sendInput((sequence.length === 1 && sequence.charCodeAt(0) < 0x20) || sequence === "\u007f"
+        ? new Uint8Array([sequence.charCodeAt(0)])
+        : new TextEncoder().encode(sequence));
       return;
     }
     const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
@@ -2106,7 +2204,9 @@ export function RemoteTerminal({
           </span>
         ) : null}
       </div>
-      {showKeyDock ? <MobileKeyDock onSendKey={sendKey} /> : null}
+      {showKeyDock ? (
+        <MobileKeyDock onSendKey={sendKey} modifiers={dockModifiers} onModifiersChange={setDockModifiers} />
+      ) : null}
     </div>
   );
 }
