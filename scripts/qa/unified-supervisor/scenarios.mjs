@@ -1865,12 +1865,16 @@ async function runWaiting(ctx) {
     transcript(`released ${token}`);
   };
 
-  // Every model request the hub makes, attributed to the goals its newest user message names
-  // (a retained decision session also resends earlier goals' prompts as history).
+  // Every model request the hub makes, attributed to the goals named by the request's own turn:
+  // the user messages after its last assistant message. The decision session retains earlier
+  // goals' prompts as history, and the engine appends reminder user messages (<omo-senpi-task>,
+  // <memory_notice>) after the prompt, so neither the whole body nor the newest message names
+  // the goal being graded.
   const modelCalls = [];
   const stub = await startProviderStub(ctx, { answer: (json) => {
-    const user = [...(json?.messages ?? [])].reverse().find((message) => message?.role === 'user');
-    const text = promptTextOf({ messages: user ? [user] : [] });
+    const messages = Array.isArray(json?.messages) ? json.messages : [];
+    const lastAssistant = messages.map((message) => message?.role).lastIndexOf('assistant');
+    const text = promptTextOf({ messages: messages.slice(lastAssistant + 1).filter((message) => message?.role === 'user') });
     const convergence = promptTextOf(json).includes(CONVERGENCE_MARKER);
     modelCalls.push({ seq: modelCalls.length + 1, at: new Date().toISOString(), goals: WAITING_GOALS.filter((name) => text.includes(waitingMarker(name))), convergence });
     return convergence ? AUTONOMY_CONVERGED : null;
@@ -2008,11 +2012,14 @@ async function runWaiting(ctx) {
 
     // 5. Duplicate and out-of-order reports of the ended child: its worker reports idle, working,
     //    idle again after its run settled and its goal completed.
-    release('echo-a');
-    const echoed = await waitForChange(ctx, 'child a echo reports', workerLogs, () => {
+    // Subscribe before the release: the worker's three reports and its `echoed` line land within
+    // a millisecond of the release file, before a watch armed afterwards is live.
+    const echoWait = waitForChange(ctx, 'child a echo reports', workerLogs, () => {
       const entry = workerOf('a')?.entries.find((line) => line.kind === 'echoed') ?? null;
       return { done: entry !== null, entry };
-    }, 30_000).then((result) => result.entry, (error) => { if (ctx.signal.aborted) throw error; return null; });
+    }, 30_000);
+    release('echo-a');
+    const echoed = await echoWait.then((result) => result.entry, (error) => { if (ctx.signal.aborted) throw error; return null; });
     ctx.assert('child-a-reported-again-after-its-end', echoed?.delivered?.length === 3 && echoed.delivered.every(Boolean), { echoed });
 
     // 6. The second child of `fail` fails (owner cancel): fail is released to the owner, not completed.
