@@ -361,6 +361,213 @@ describe("mobile terminal input lifecycle", () => {
     expect(sink()).toHaveValue("");
   });
 
+  describe("mobile key dock modifiers", () => {
+    const sent = () => Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+    const type = (value: string) => fireEvent.input(sink(), { target: { value }, inputType: "insertText" });
+    const dockKey = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+
+    it("sends a carriage return from the Enter key", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Enter");
+      expect(sent()).toEqual(["\r"]);
+    });
+
+    it("applies a double-tapped (locked) Ctrl to every typed letter", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Ctrl");
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "true");
+      type("c");
+      type("c");
+      expect(sent()).toEqual(["\u0003", "\u0003"]);
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "true");
+      dockKey("Ctrl");
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("applies a one-shot Alt to the next typed character only", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Alt");
+      type("b");
+      type("b");
+      expect(sent()).toEqual(["\u001bb", "b"]);
+      expect(screen.getByRole("button", { name: "Alt" })).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("combines Ctrl and Alt instead of letting Ctrl win", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Alt");
+      type("x");
+      expect(sent()).toEqual(["\u001b\u0018"]);
+    });
+
+    it("sends composed text unmodified while Ctrl is locked", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Ctrl");
+      fireEvent.compositionStart(sink());
+      fireEvent.input(sink(), { target: { value: "한" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(sink(), { data: "한" });
+      fireEvent.input(sink(), { target: { value: "한" }, data: "한", inputType: "insertFromComposition" });
+      expect(sent()).toEqual(["한"]);
+      expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "true");
+    });
+  });
+
+  describe("mobile key dock modifiers around IME input", () => {
+    const sent = () => Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+    const dockKey = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+    const ctrlPressed = () => screen.getByRole("button", { name: "Ctrl" }).getAttribute("aria-pressed");
+
+    it("applies a one-shot Ctrl to the first key typed after a commit that had no mirror insertion", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      fireEvent.compositionStart(sink());
+      fireEvent.input(sink(), { target: { value: "한" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(sink(), { data: "한" });
+      dockKey("Ctrl");
+      fireEvent.input(sink(), { target: { value: "c" }, inputType: "insertText" });
+      expect(ctrlPressed()).toBe("false");
+      fireEvent.input(sink(), { target: { value: "d" }, inputType: "insertText" });
+      expect(sent()).toEqual(["한", "\u0003", "d"]);
+    });
+
+    it("applies Ctrl to the ASCII typed after Hangul a composition-free IME still holds", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      fireEvent.input(sink(), { target: { value: "한" }, inputType: "insertText" });
+      dockKey("Ctrl");
+      fireEvent.input(sink(), { target: { value: "한c" }, inputType: "insertText" });
+      expect(sent()).toEqual(["한", "\u0003"]);
+      expect(ctrlPressed()).toBe("false");
+    });
+
+    it("keeps composition-free Hangul whole and unmodified while Ctrl is locked", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Ctrl");
+      for (const value of ["ㅎ", "하", "한", "한ㄱ", "한그", "한글"]) {
+        fireEvent.input(sink(), { target: { value }, inputType: "insertText" });
+      }
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+      dockKey("Enter");
+      expect(sent()).toEqual(["한글", "\r"]);
+      expect(ctrlPressed()).toBe("true");
+    });
+  });
+
+  describe("line input mode", () => {
+    const sent = () => Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+    afterEach(() => localStorage.removeItem("ferryx.remote.terminalInputMode"));
+
+    it("sends the whole edited line with Enter exactly once and persists the mode", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      fireEvent.click(screen.getByTestId("remote-terminal-input-mode-toggle"));
+      expect(localStorage.getItem("ferryx.remote.terminalInputMode")).toBe("line");
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "echo hi" } });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("remote-terminal-line-send"));
+      expect(sent()).toEqual(["echo hi\r"]);
+      expect(line).toHaveValue("");
+    });
+
+    it("leaves Enter to an IME that is still composing in the line", () => {
+      localStorage.setItem("ferryx.remote.terminalInputMode", "line");
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "한" } });
+      expect(fireEvent.keyDown(line, { key: "Enter", isComposing: true })).toBe(true);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(line).toHaveValue("한");
+    });
+
+    it("leaves Enter reported as an IME process key (229) to the IME", () => {
+      localStorage.setItem("ferryx.remote.terminalInputMode", "line");
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "한" } });
+      expect(fireEvent.keyDown(line, { key: "Enter", keyCode: 229 })).toBe(true);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(line).toHaveValue("한");
+    });
+
+    it("submits on Enter and keeps Shift+Enter in the line", () => {
+      localStorage.setItem("ferryx.remote.terminalInputMode", "line");
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "ls" } });
+      expect(fireEvent.keyDown(line, { key: "Enter", shiftKey: true })).toBe(true);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      fireEvent.keyDown(line, { key: "Enter" });
+      expect(sent()).toEqual(["ls\r"]);
+    });
+  });
+
+  describe("keep screen on", () => {
+    type Sentinel = { released: boolean; release: ReturnType<typeof vi.fn> };
+    let visibility: DocumentVisibilityState;
+    beforeEach(() => {
+      visibility = "visible";
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    });
+    afterEach(() => {
+      Reflect.deleteProperty(document, "visibilityState");
+      Reflect.deleteProperty(navigator, "wakeLock");
+      localStorage.removeItem("ferryx.remote.keepScreenOn");
+    });
+
+    it("requests the screen lock when turned on and again when the page becomes visible after a release", async () => {
+      const sentinels: Sentinel[] = [];
+      const request = vi.fn(async () => {
+        const sentinel: Sentinel = { released: false, release: vi.fn(async () => { sentinel.released = true; }) };
+        sentinels.push(sentinel);
+        return sentinel;
+      });
+      Object.defineProperty(navigator, "wakeLock", { configurable: true, value: { request } });
+      const view = render(<RemoteTerminal sessionId="a" token="token-a" />);
+      fireEvent.click(screen.getByTestId("remote-terminal-menu-button"));
+      const toggle = screen.getByRole("switch", { name: /keep screen on/i });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      await act(async () => { fireEvent.click(toggle); });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenLastCalledWith("screen");
+      expect(localStorage.getItem("ferryx.remote.keepScreenOn")).toBe("true");
+
+      // The browser drops the lock while the page is hidden.
+      visibility = "hidden";
+      sentinels[0].released = true;
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(request).toHaveBeenCalledTimes(1);
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenLastCalledWith("screen");
+
+      view.unmount();
+      expect(sentinels[1].release).toHaveBeenCalledTimes(1);
+    });
+
+    it("hides the toggle when the browser has no wake lock", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      expect("wakeLock" in navigator).toBe(false);
+      expect(screen.queryByTestId("remote-terminal-menu-button")).toBeNull();
+      expect(screen.queryByRole("switch", { name: /keep screen on/i })).toBeNull();
+    });
+  });
+
   it("sends resize on ResizeObserver change and remoteResize on remoteStatus generation when followHostSize is false", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
     expect(Socket.latest.url).toContain("cols=80&rows=20");

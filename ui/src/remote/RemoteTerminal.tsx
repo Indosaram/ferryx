@@ -1,8 +1,22 @@
 import type { CSSProperties } from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, EllipsisVertical, SendHorizontal, Sun } from "lucide-react";
 
-import { MobileKeyDock } from "../components/MobileKeyDock";
+import {
+  hasActiveModifier,
+  MobileKeyDock,
+  NO_DOCK_MODIFIERS,
+  releaseOneShotModifiers,
+  type DockModifiers,
+  type TerminalInputMode,
+} from "../components/MobileKeyDock";
+import {
+  getMigratedItem,
+  REMOTE_KEEP_SCREEN_ON_STORAGE_KEY,
+  REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY,
+} from "../lib/storageKeys";
+import { MobileSheet } from "./chat/MobileSheet";
+import { isScreenWakeLockSupported, useScreenWakeLock } from "./useScreenWakeLock";
 import { observeWebOwner } from "./webRecoveryObservation";
 import {
   decodeRemoteTerminalFrame,
@@ -131,6 +145,7 @@ const KEY_SEQUENCES = {
   pagedown: "\u001b[6~",
   home: "\u001b[H",
   end: "\u001b[F",
+  enter: "\r",
   "ctrl-d": "\u0004",
   "ctrl-z": "\u001a",
   backspace: "\u007f",
@@ -170,6 +185,22 @@ const DOCK_NAVIGATION_FINALS: Record<string, string> = {
   end: "F",
 };
 
+function readStoredInputMode(): TerminalInputMode {
+  return getMigratedItem(REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY) === "line" ? "line" : "direct";
+}
+
+function readStoredKeepScreenOn(): boolean {
+  return getMigratedItem(REMOTE_KEEP_SCREEN_ON_STORAGE_KEY) === "true";
+}
+
+function storePreference(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Disabled or full storage: the choice still applies until the page reloads.
+  }
+}
+
 function modifiedNavigationSequence(key: string, ctrlKey: boolean, altKey: boolean): string | undefined {
   const final = MODIFIED_NAVIGATION_FINALS[key];
   if (!final || (!ctrlKey && !altKey)) return undefined;
@@ -177,12 +208,62 @@ function modifiedNavigationSequence(key: string, ctrlKey: boolean, altKey: boole
   return `\u001b[1;${modifier}${final}`;
 }
 
-function modifiedDockNavigationSequence(key: string): string | undefined {
-  const [modifier, direction] = key.split("-", 2);
-  const final = direction ? DOCK_NAVIGATION_FINALS[direction] : undefined;
-  if (!final) return undefined;
-  const modifierCode = modifier === "ctrl" ? 5 : modifier === "alt" ? 3 : undefined;
-  return modifierCode ? `\u001b[1;${modifierCode}${final}` : undefined;
+type DockChord = {
+  readonly ctrl: boolean;
+  readonly alt: boolean;
+  readonly shift: boolean;
+  readonly base: string;
+};
+
+const DOCK_CHORD_PREFIX = /^(ctrl|alt|shift)-(?=.)/s;
+
+/// Split a dock action such as `ctrl-alt-c` or `shift-left` into its modifiers and base key.
+/// Returns null for actions that carry no modifier prefix.
+function parseDockChord(key: string): DockChord | null {
+  let rest = key;
+  let ctrl = false;
+  let alt = false;
+  let shift = false;
+  for (let match = DOCK_CHORD_PREFIX.exec(rest); match; match = DOCK_CHORD_PREFIX.exec(rest)) {
+    if (match[1] === "ctrl") ctrl = true;
+    else if (match[1] === "alt") alt = true;
+    else shift = true;
+    rest = rest.slice(match[0].length);
+  }
+  return rest === key ? null : { ctrl, alt, shift, base: rest };
+}
+
+/// A typed character with dock modifiers applied: Shift upper-cases letters, Ctrl maps to the ASCII
+/// control byte, Alt prefixes ESC. Null when Ctrl has no control byte for the character.
+function modifiedCharSequence(ch: string, ctrl: boolean, alt: boolean, shift: boolean): string | null {
+  let base = shift && ch >= "a" && ch <= "z" ? ch.toUpperCase() : ch;
+  if (ctrl) {
+    const byte = controlByteForChar(base);
+    if (byte === null) return null;
+    base = String.fromCharCode(byte);
+  }
+  return alt ? `\u001b${base}` : base;
+}
+
+/// Terminal bytes for a modified dock action, or null when the chord has no encoding.
+function dockChordSequence({ ctrl, alt, shift, base }: DockChord): string | null {
+  if (base.length === 1) return modifiedCharSequence(base, ctrl, alt, shift);
+  const modifierCode = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+  const final = DOCK_NAVIGATION_FINALS[base];
+  if (final) {
+    return modifierCode === 1
+      ? KEY_SEQUENCES[base as keyof typeof KEY_SEQUENCES]
+      : `\u001b[1;${modifierCode}${final}`;
+  }
+  if (base === "pageup" || base === "pagedown") {
+    const code = base === "pageup" ? 5 : 6;
+    return modifierCode === 1 ? `\u001b[${code}~` : `\u001b[${code};${modifierCode}~`;
+  }
+  if (base === "tab" && shift && !ctrl) return `${alt ? "\u001b" : ""}\u001b[Z`;
+  const sequence = KEY_SEQUENCES[base as keyof typeof KEY_SEQUENCES];
+  // Ctrl/Shift have no encoding for Enter, Esc, Tab or Backspace; the key itself still goes out.
+  if (sequence === undefined) return null;
+  return alt ? `\u001b${sequence}` : sequence;
 }
 
 // Resolve a Ctrl/Alt chord character from the physical key code so IME layouts
@@ -483,6 +564,31 @@ export function RemoteTerminal({
   // over one at a time by keyboards that never compose (see commitComposition).
   const sinkTailRef = useRef("");
   const heldJamoRef = useRef("");
+  // Ctrl/Alt/Shift latched on the mobile key dock. The ref is read by input handlers that run
+  // before React re-renders, so it is always written together with the state.
+  const [dockModifiers, setDockModifiersState] = useState<DockModifiers>(NO_DOCK_MODIFIERS);
+  const dockModifiersRef = useRef<DockModifiers>(NO_DOCK_MODIFIERS);
+  const setDockModifiers = useCallback((next: DockModifiers) => {
+    dockModifiersRef.current = next;
+    setDockModifiersState(next);
+  }, []);
+  const [inputMode, setInputModeState] = useState<TerminalInputMode>(readStoredInputMode);
+  const [lineDraft, setLineDraft] = useState("");
+  const lineInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const setInputMode = useCallback((next: TerminalInputMode) => {
+    setInputModeState(next);
+    storePreference(REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY, next);
+  }, []);
+  const [terminalMenuOpen, setTerminalMenuOpen] = useState(false);
+  const [keepScreenOn, setKeepScreenOnState] = useState(readStoredKeepScreenOn);
+  const wakeLockSupported = isScreenWakeLockSupported();
+  const setKeepScreenOn = useCallback((next: boolean) => {
+    setKeepScreenOnState(next);
+    storePreference(REMOTE_KEEP_SCREEN_ON_STORAGE_KEY, next ? "true" : "false");
+  }, []);
+  useScreenWakeLock(showKeyDock && keepScreenOn);
+  // The compatibility renderer (no key dock) always types directly.
+  const lineMode = showKeyDock && inputMode === "line";
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -634,7 +740,8 @@ export function RemoteTerminal({
   }, []);
 
   const focusInput = useCallback(() => {
-    inputSinkRef.current?.focus({ preventScroll: true });
+    // In line mode a tap on the terminal opens the visible line editor, not the raw key sink.
+    (lineInputRef.current ?? inputSinkRef.current)?.focus({ preventScroll: true });
   }, []);
 
   const retryTerminal = useCallback(() => {
@@ -1683,6 +1790,52 @@ export function RemoteTerminal({
     resetSinkState();
   };
 
+  /// Send what was just typed into the sink with the dock's latched modifiers applied (Ctrl+c is
+  /// ETX, Alt+b is ESC b). One-shot modifiers apply to the first non-Hangul character only; locked
+  /// ones to every non-Hangul character. Hangul never takes a modifier: settled Hangul goes out as
+  /// typed, and the trailing run the IME can still rewrite stays held exactly as settleSinkText
+  /// holds it. Returns false when the insertion carries no settled non-Hangul character, so the
+  /// regular settle path runs.
+  const applyDockModifiersToSink = (sink: HTMLTextAreaElement) => {
+    if (!hasActiveModifier(dockModifiersRef.current)) return false;
+    const text = sink.value;
+    // Never re-emit text the IME rewrote behind our back.
+    const start = Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, text));
+    const holdFrom = Math.max(start, hangulTailStart(text));
+    const settled = Array.from(text.slice(start, holdFrom).replace(/\u00a0/g, " "));
+    if (!settled.some((ch) => !isHangulChar(ch.charCodeAt(0)))) return false;
+    // Jamo held from before were typed first.
+    emitSettled("");
+    let plain = "";
+    for (const ch of settled) {
+      const modifiers = dockModifiersRef.current;
+      if (!hasActiveModifier(modifiers) || isHangulChar(ch.charCodeAt(0))) {
+        plain += ch;
+        continue;
+      }
+      const sequence = modifiedCharSequence(
+        ch,
+        modifiers.ctrl !== "off",
+        modifiers.alt !== "off",
+        modifiers.shift !== "off",
+      ) ?? ch;
+      emitText(plain);
+      plain = "";
+      sendText(sequence);
+      setDockModifiers(releaseOneShotModifiers(modifiers));
+    }
+    emitText(plain);
+    sinkEmittedCharsRef.current = holdFrom;
+    sinkValueRef.current = text;
+    if (holdFrom >= text.length) {
+      resetSinkField();
+    } else {
+      sinkTailRef.current = text.slice(holdFrom);
+      syncPreedit();
+    }
+    return true;
+  };
+
   const handleSinkInput = (event: React.FormEvent<HTMLTextAreaElement>) => {
     const sink = event.currentTarget;
     const input = event.nativeEvent as InputEvent;
@@ -1704,6 +1857,10 @@ export function RemoteTerminal({
       resetSinkField();
       return;
     }
+    // Anything but the commit's mirror is a fresh insertion, even right after compositionend: a
+    // browser that sends no mirror (Chrome on Android) must not let the next keystroke skip the
+    // latched modifier.
+    if (applyDockModifiersToSink(sink)) return;
     settleSinkText(sink);
   };
 
@@ -1732,23 +1889,32 @@ export function RemoteTerminal({
       sendPayload(JSON.stringify({ type: "signal", signal: "interrupt" }));
       return;
     }
-    const modifiedDockSequence = modifiedDockNavigationSequence(key);
-    if (modifiedDockSequence) {
-      sendInput(new TextEncoder().encode(modifiedDockSequence));
-      return;
-    }
-    if (key.startsWith("alt-")) {
-      sendInput(new TextEncoder().encode(`\u001b${key.slice(4)}`));
-      return;
-    }
-    if (key.startsWith("ctrl-")) {
-      const byte = controlByteForChar(key.slice(5));
-      if (byte !== null) sendInput(new Uint8Array([byte]));
+    const chord = parseDockChord(key);
+    if (chord) {
+      // Chords with no terminal encoding (Ctrl+Tab) send nothing rather than junk.
+      const sequence = dockChordSequence(chord);
+      if (sequence === null) return;
+      // A bare control byte keeps its historical single-byte payload.
+      sendInput((sequence.length === 1 && sequence.charCodeAt(0) < 0x20) || sequence === "\u007f"
+        ? new Uint8Array([sequence.charCodeAt(0)])
+        : new TextEncoder().encode(sequence));
       return;
     }
     const sequenceKey = BROWSER_KEY_NAMES[key] ?? key;
     const sequence = KEY_SEQUENCES[sequenceKey as keyof typeof KEY_SEQUENCES] ?? sequenceKey;
     sendInput(new TextEncoder().encode(sequence));
+  };
+
+  /// Line mode: the whole edited line goes out at once, followed by Enter. Hangul in it is sent as
+  /// the IME composed it; the dock's modifiers do not apply to a line.
+  const submitLine = () => {
+    // Anything still held in the direct-mode sink was typed first.
+    flushSinkText();
+    const line = lineDraft.replace(/\u00a0/g, " ");
+    setLineDraft("");
+    // One payload, so the shell never sees the line without its Enter.
+    sendText(`${line}\r`);
+    lineInputRef.current?.focus({ preventScroll: true });
   };
 
   return (
@@ -1804,6 +1970,20 @@ export function RemoteTerminal({
               <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
               <span>Output gap</span>
             </span>
+          ) : null}
+          {showKeyDock && wakeLockSupported ? (
+            <button
+              type="button"
+              data-testid="remote-terminal-menu-button"
+              aria-label="Terminal options"
+              title="Terminal options"
+              aria-haspopup="dialog"
+              aria-expanded={terminalMenuOpen}
+              onClick={() => setTerminalMenuOpen(true)}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground"
+            >
+              <EllipsisVertical className="size-4" aria-hidden="true" />
+            </button>
           ) : null}
           <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-[#838383]/70">{BUILD_STAMP}</span>
           <span data-testid="remote-terminal-connection-status" role="status" className="font-mono text-[10px] text-[#838383]">
@@ -2106,7 +2286,89 @@ export function RemoteTerminal({
           </span>
         ) : null}
       </div>
-      {showKeyDock ? <MobileKeyDock onSendKey={sendKey} /> : null}
+      {lineMode ? (
+        <form
+          data-testid="remote-terminal-line-form"
+          className="flex shrink-0 items-end gap-1.5 border-t border-border bg-card px-2 py-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitLine();
+          }}
+        >
+          <textarea
+            ref={lineInputRef}
+            data-testid="remote-terminal-line-input"
+            aria-label="Terminal command line"
+            rows={1}
+            value={lineDraft}
+            autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            onChange={(event) => setLineDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              // Enter sends; Shift+Enter keeps a newline in the line. An IME still composing owns
+              // its Enter (it commits the candidate).
+              if (event.key !== "Enter" || event.shiftKey) return;
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              event.preventDefault();
+              submitLine();
+            }}
+            className="max-h-24 min-h-11 min-w-0 flex-1 resize-none rounded border border-border bg-background px-2 py-2.5 font-mono text-base leading-5 text-foreground outline-none focus:border-primary"
+          />
+          <button
+            type="submit"
+            data-testid="remote-terminal-line-send"
+            aria-label="Send line"
+            title="Send line"
+            className="flex min-h-11 min-w-[44px] items-center justify-center rounded border border-primary bg-primary px-2 text-primary-foreground transition-all active:scale-95"
+          >
+            <SendHorizontal className="size-4" aria-hidden="true" />
+          </button>
+        </form>
+      ) : null}
+      {showKeyDock ? (
+        <MobileKeyDock
+          onSendKey={sendKey}
+          modifiers={dockModifiers}
+          onModifiersChange={setDockModifiers}
+          inputMode={inputMode}
+          onInputModeChange={setInputMode}
+        />
+      ) : null}
+      {showKeyDock && wakeLockSupported ? (
+        <MobileSheet
+          open={terminalMenuOpen}
+          onOpenChange={setTerminalMenuOpen}
+          title="Terminal"
+          ariaLabel="Terminal options"
+          testId="remote-terminal-menu"
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={keepScreenOn}
+            data-testid="remote-terminal-keep-screen-on"
+            onClick={() => setKeepScreenOn(!keepScreenOn)}
+            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <Sun className="size-[18px] shrink-0 text-chat-foreground-secondary" aria-hidden="true" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[15px] leading-5">Keep screen on</span>
+              <span className="mt-0.5 block truncate text-[13px] text-chat-foreground-secondary">
+                Stop the phone from dimming while this terminal is open
+              </span>
+            </span>
+            <span
+              aria-hidden="true"
+              className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors ${keepScreenOn ? "bg-primary" : "bg-chat-foreground-secondary/40"}`}
+            >
+              <span className={`inline-block size-5 rounded-full bg-white shadow transition-transform ${keepScreenOn ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+            </span>
+          </button>
+        </MobileSheet>
+      ) : null}
     </div>
   );
 }
