@@ -347,6 +347,17 @@ async function runSurfaces(ctx) {
   } catch (error) {
     // A failed UI wait leaves each open page as it was: record what a person would have seen.
     await captureFailure(ctx, surfaces, error, pageErrors);
+    // The run directory is removed at teardown: keep the hub's own view and the worker logs.
+    try {
+      ctx.evidence.writeJson('failure-hub.json', hub.read((all) => ({
+        goals: all('SELECT goal_id, run_state, state_detail, revision, lane_key, updated_at FROM supervisor_goals'),
+        dispatches: all('SELECT request_id, goal_id, state, run_id, provider_session_id, uncertain_code, generation FROM supervisor_dispatches ORDER BY id'),
+        bindings: all('SELECT goal_id, kind, host_id, provider_session_id, run_id, generation FROM supervisor_execution_bindings'),
+      })));
+    } catch (hubError) {
+      ctx.log(`surfaces failure: hub state unreadable: ${hubError?.message ?? hubError}`);
+    }
+    for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
     throw error;
   } finally {
     await browser.close().catch(() => {});
