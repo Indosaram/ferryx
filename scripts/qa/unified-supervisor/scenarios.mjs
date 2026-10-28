@@ -11,7 +11,7 @@
 // The __selftest-* scenarios exist only for --self-test and are reachable only
 // through --internal-self-test-child, which the CLI accepts only with the
 // per-run nonce the self-test parent creates.
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, watch, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2111,6 +2111,314 @@ async function runWaiting(ctx) {
   }
 }
 
+// burst (plan task 9): two owner submits (burst, other), each run held live by its fixture
+// worker. While burst's run is live its own worker sends four ordinary reports through the
+// product ingress (a `supervisorReport` line on the daemon's agent-state socket, the channel
+// its `agentState` reports use) at real 0, 1, 2 and 3s, then a retry of the newest and a replay
+// of the oldest; other's worker reports once; a session bound to no goal is refused. No clock
+// seam: the runner holds burst's run until the hub's own clock is past the oldest report plus
+// the 30s batch window, and asserts that until then no wake turn and no model call exists for
+// burst. Then the run settles: exactly one delivered turn carries every report, each receipted
+// once, at or after oldest + 30s. The hub database is only read, read-only.
+
+const BURST_WORKSPACE_ID = 'qa-burst';
+const BURST_PROJECT = 'qa-burst';
+const BURST_GOALS = Object.freeze(['burst', 'other']);
+// lanes/dispatch.rs BATCH_WINDOW_SECS.
+const BURST_WINDOW_MS = 30_000;
+// Real spacing of the four reports, from the first.
+const BURST_OFFSETS_MS = Object.freeze([0, 1_000, 2_000, 3_000]);
+// How far past oldest + window burst's run is held before it may settle.
+const BURST_HOLD_PAST_MS = 3_000;
+const burstWork = (name) => Object.freeze({
+  title: `Burst fixture ${name}`,
+  instruction: `Write result.txt and run verify.sh. ${waitingMarker(name)} QA_HOLD:hold-${name}`,
+  requirements: [{ id: 'r1', text: `result.txt is not empty ${waitingMarker(name)}`, verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+
+// Resolves after `ms` of real time; rejects when the run is aborted. Time is the behaviour
+// under test in burst (the report spacing and the batch window), so these pauses are its input.
+function pauseFor(ctx, ms) {
+  return new Promise((resolvePause, rejectPause) => {
+    if (ctx.signal.aborted) { rejectPause(ctx.signal.reason); return; }
+    const onAbort = () => { clearTimeout(timer); rejectPause(ctx.signal.reason); };
+    const timer = setTimeout(() => { ctx.signal.removeEventListener('abort', onAbort); resolvePause(); }, Math.max(0, ms));
+    ctx.signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+// One raw line on the agent-state socket, as a process that is not a goal's worker would send.
+function agentStateExchange(socketPath, line, deadlineMs = 10_000) {
+  return new Promise((resolveExchange) => {
+    let buffer = '';
+    let done = false;
+    const connection = createConnection(socketPath);
+    const finish = (value) => { if (done) return; done = true; clearTimeout(timer); connection.destroy(); resolveExchange(value); };
+    const timer = setTimeout(() => finish({ error: `no reply within ${deadlineMs}ms` }), deadlineMs);
+    connection.setEncoding('utf8');
+    connection.on('error', (error) => finish({ error: String(error?.message ?? error) }));
+    connection.on('connect', () => connection.write(`${line}\n`));
+    connection.on('data', (chunk) => {
+      buffer += chunk;
+      const end = buffer.indexOf('\n');
+      if (end < 0) return;
+      try { finish({ reply: JSON.parse(buffer.slice(0, end)) }); } catch { finish({ error: `unparsed reply ${buffer.slice(0, end)}` }); }
+    });
+  });
+}
+
+async function runBurst(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'burst runs POSIX fixture worker panes (the Windows pane shell ignores SHELL); this scenario runs on Linux or macOS');
+  }
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the burst fixture project is a git repository');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `hub database ${dbPath} is outside the run root`);
+  const hubDir = dirname(dbPath);
+  const log = [];
+  const transcript = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, BURST_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'verify.sh'), WAITING_VERIFY, { mode: 0o755 });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]],
+    ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
+    ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const gitCommonDir = realpathSync(join(repo, '.git'));
+  const workerLogs = join(data, 'workers');
+  const holdDir = join(data, 'holds');
+  const requestsDir = join(data, 'requests');
+  for (const dir of [workerLogs, holdDir, requestsDir]) mkdirSync(dir, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn ${shellQuote(`--hold-dir=${holdDir}`)}\n`, { mode: 0o755 });
+  const released = new Set();
+  const release = (token) => {
+    if (released.has(token)) return;
+    released.add(token);
+    writeFileSync(join(holdDir, token), `${new Date().toISOString()}\n`);
+    transcript(`released ${token}`);
+  };
+
+  // Model calls attributed to the goals named by the request's own turn (see runWaiting).
+  const modelCalls = [];
+  const stub = await startProviderStub(ctx, { answer: (json) => {
+    const messages = Array.isArray(json?.messages) ? json.messages : [];
+    const lastAssistant = messages.map((message) => message?.role).lastIndexOf('assistant');
+    const text = promptTextOf({ messages: messages.slice(lastAssistant + 1).filter((message) => message?.role === 'user') });
+    const convergence = promptTextOf(json).includes(CONVERGENCE_MARKER);
+    modelCalls.push({ seq: modelCalls.length + 1, at: new Date().toISOString(), goals: BURST_GOALS.filter((name) => text.includes(waitingMarker(name))), convergence });
+    return convergence ? AUTONOMY_CONVERGED : null;
+  } });
+  try {
+    const env = await prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: config.mhcBin, label: 'burst', extra: {
+      SHELL: shell,
+      FERRYX_HUB_WORKSPACE: BURST_WORKSPACE_ID,
+      OMON_LANE_AUTO_WORKTREE: '1',
+      OMON_INBOX_ENABLED: '0',
+    } });
+    ctx.announce({ burst: 'fixture', workspaceRoot, repo, gitCommonDir, holdDir, dbPath, provider: stub.baseUrl });
+
+    const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', BURST_PROJECT, '--repo-identity', `qa:${BURST_PROJECT}`,
+      '--host', ADMISSION_HOST, '--git-common-dir', gitCommonDir, '--json'], { label: 'supervisor-setup', env });
+    if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${JSON.stringify(setup.json)} ${setup.stderr}`);
+    const projectId = setup.json.projectId;
+    const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+    const engine = await awaitEngine(ctx, env, 'burst-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', engine?.engine?.state === 'ready', { engine });
+    const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), BURST_WORKSPACE_ID, realpathSync(workspaceRoot));
+    ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+
+    // 1. Two owner submits; both runs start and stay live.
+    const goals = {};
+    const submits = {};
+    for (const name of BURST_GOALS) {
+      const work = burstWork(name);
+      const file = join(requestsDir, `submit-${name}.json`);
+      const envelope = { requestId: `qa-burst-${name}-${ctx.runId}`, projectId, action: 'submit', payload: { request: work.instruction, work } };
+      writeFileSync(file, JSON.stringify(envelope));
+      ctx.evidence.appendJsonl('envelopes.jsonl', { label: `submit-${name}`, envelope, at: new Date().toISOString() });
+      const submitted = await ctx.cli(['supervisor', 'request', '--json', file], { label: `submit-${name}`, env });
+      transcript(`submit-${name}: exit ${submitted.code} ${JSON.stringify(submitted.json)}`);
+      submits[name] = { code: submitted.code, json: submitted.json };
+      goals[name] = submitted.json?.receipt?.receipt?.goal_id ?? null;
+    }
+    ctx.assert('two-goals-admitted', BURST_GOALS.every((name) => submits[name].code === 0 && submits[name].json?.receipt?.outcome === 'admitted'
+      && typeof goals[name] === 'string') && goals.burst !== goals.other, { goals, submits });
+    if (!BURST_GOALS.every((name) => typeof goals[name] === 'string')) throw new HarnessError('ADMISSION_FAILED', `not every burst goal was admitted: ${JSON.stringify(goals)}`);
+    ctx.announce({ burst: 'goals', goals });
+
+    const hub = await openHubReader(dbPath);
+    const snapshot = () => hub.read((query) => Object.fromEntries(BURST_GOALS.map((name) => [name, {
+      goal: query('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      dispatches: query('SELECT request_id, state, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goals[name]),
+    }])));
+    const wakeState = (name) => hub.read((query) => ({
+      goal: query('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goals[name])[0] ?? null,
+      wakes: query('SELECT id, cause, event_id, due_at, consumed_at, created_at FROM supervisor_pending_wakes WHERE goal_id = ? ORDER BY id', goals[name]),
+      turns: query('SELECT id, state, causes, urgent, judge_score, created_at, settled_at FROM supervisor_wake_turns WHERE goal_id = ? ORDER BY id', goals[name]),
+      receipts: query(`SELECT r.wake_id, r.turn_id, r.disposition FROM supervisor_wake_receipts r JOIN supervisor_pending_wakes w ON w.id = r.wake_id
+        WHERE w.goal_id = ? ORDER BY r.wake_id, r.turn_id`, goals[name]),
+      laneEvents: query(`SELECT e.id, e.kind, e.source_event_id, e.created_at, e.delivered_at, e.delivery_reason FROM lane_events e
+        JOIN supervisor_goals g ON g.lane_key = e.lane_key WHERE g.goal_id = ? ORDER BY e.id`, goals[name]),
+    }));
+    const live = (rows, name) => rows[name].goal?.run_state === 'running' && rows[name].dispatches.length === 1 && rows[name].dispatches[0].state === 'started';
+    const started = await waitForChange(ctx, 'both burst goals running', hubDir, () => {
+      const rows = snapshot();
+      return { done: BURST_GOALS.every((name) => live(rows, name) || HELD_STATES.has(rows[name].goal?.run_state)), rows };
+    }, 180_000);
+    ctx.assert('both-runs-started-and-held-live', BURST_GOALS.every((name) => live(started.rows, name)), started.rows);
+    if (!BURST_GOALS.every((name) => live(started.rows, name))) throw new HarnessError('DISPATCH_FAILED', 'not every burst goal reached a live run; its worker could not report');
+    const sessionOf = Object.fromEntries(BURST_GOALS.map((name) => [name, started.rows[name].dispatches[0].provider_session_id]));
+    const workerOf = (name) => readWorkerLogs(workerLogs).find((entry) => entry.sessionId === sessionOf[name]) ?? null;
+    const repliesOf = (name) => (workerOf(name)?.entries ?? []).filter((line) => line.kind === 'supervisor-report');
+
+    // 2. Reports through the worker's own pane: the runner drops a report file; the worker sends
+    //    it. Written by rename, so the worker never reads half a file.
+    let reportSeq = 0;
+    const sendReport = (name, eventId) => {
+      reportSeq += 1;
+      const temp = join(holdDir, `.tmp-report-${reportSeq}`);
+      writeFileSync(temp, `${eventId}\n`);
+      renameSync(temp, join(holdDir, `report-${sessionOf[name]}-${String(reportSeq).padStart(3, '0')}`));
+      transcript(`report ${name} ${eventId} (#${reportSeq})`);
+    };
+    const awaitReplies = (name, count, label) => waitForChange(ctx, label, workerLogs, () => {
+      const replies = repliesOf(name);
+      return { done: replies.length >= count, replies };
+    }, 30_000);
+
+    const firstFour = awaitReplies('burst', 4, 'four burst report replies');
+    const t0 = Date.now();
+    for (const [index, offset] of BURST_OFFSETS_MS.entries()) {
+      await pauseFor(ctx, t0 + offset - Date.now());
+      sendReport('burst', `r-${index}`);
+    }
+    const originals = (await firstFour).replies.slice(0, 4);
+    ctx.assert('four-reports-accepted-for-their-own-goal', originals.length === 4 && originals.every((entry, index) => entry.eventId === `r-${index}`
+      && entry.reply?.ok === true && entry.reply.goalId === goals.burst && entry.reply.laneKey === started.rows.burst.goal?.lane_key && entry.reply.duplicate === false)
+      && new Set(originals.map((entry) => entry.reply?.laneEventId)).size === 4, { originals });
+
+    // A retry of the newest and an out-of-order replay of the oldest.
+    const repeats = awaitReplies('burst', 6, 'duplicate burst report replies');
+    sendReport('burst', 'r-3');
+    sendReport('burst', 'r-0');
+    const duplicates = (await repeats).replies.slice(4, 6);
+    const laneEventOf = (eventId) => originals.find((entry) => entry.eventId === eventId)?.reply?.laneEventId ?? null;
+    ctx.assert('duplicate-and-out-of-order-reports-are-the-same-events', duplicates.length === 2 && duplicates.every((entry) => entry.reply?.ok === true
+      && entry.reply.duplicate === true && entry.reply.goalId === goals.burst && entry.reply.laneEventId === laneEventOf(entry.eventId))
+      && duplicates.map((entry) => entry.eventId).join(',') === 'r-3,r-0', { duplicates, originals });
+
+    // An unrelated goal's worker reports once; a session bound to no goal is refused.
+    const otherReply = awaitReplies('other', 1, 'other goal report reply');
+    sendReport('other', 'r-0');
+    const otherReport = (await otherReply).replies[0] ?? null;
+    ctx.assert('unrelated-report-lands-on-its-own-goal', otherReport?.reply?.ok === true && otherReport.reply.goalId === goals.other
+      && otherReport.reply.duplicate === false, { otherReport });
+    const laneEventsBefore = hub.count('SELECT COUNT(*) AS n FROM lane_events');
+    const stranger = await agentStateExchange(join(env.FERRYX_RUNTIME_DIR, 'agent-state.sock'),
+      JSON.stringify({ type: 'supervisorReport', sessionId: `qa-not-a-worker-${ctx.runId}`, eventId: 'r-0', body: 'not a worker' }));
+    const laneEventsAfter = hub.count('SELECT COUNT(*) AS n FROM lane_events');
+    ctx.assert('report-from-an-unbound-session-refused', stranger.reply?.ok === false && stranger.reply.code === 'NOT_FOUND' && laneEventsAfter === laneEventsBefore,
+      { stranger, laneEventsBefore, laneEventsAfter });
+
+    // 3. The window, on the hub's own clock: the oldest report's lane event time.
+    const afterReports = wakeState('burst');
+    const reportEvents = afterReports.laneEvents.filter((event) => event.kind === 'worker_report');
+    const oldestMs = Math.min(...reportEvents.map((event) => Date.parse(event.created_at)));
+    const windowEndMs = oldestMs + BURST_WINDOW_MS;
+    const spanMs = Math.max(...reportEvents.map((event) => Date.parse(event.created_at))) - oldestMs;
+    ctx.assert('reports-spread-over-three-seconds-inside-the-window', reportEvents.length === 4 && Number.isFinite(oldestMs)
+      && spanMs >= 2_500 && spanMs < BURST_WINDOW_MS, { reportEvents, spanMs });
+    const expectedWakeIds = reportEvents.map((event) => `lane_event:${event.id}`).sort();
+    ctx.assert('each-report-handed-to-the-goal-once', reportEvents.every((event) => event.delivery_reason === 'supervisor_wake' && event.delivered_at !== null)
+      && JSON.stringify(afterReports.wakes.filter((wake) => wake.cause === 'report').map((wake) => wake.event_id).sort()) === JSON.stringify(expectedWakeIds),
+    { laneEvents: afterReports.laneEvents, wakes: afterReports.wakes });
+    ctx.announce({ burst: 'window', oldest: new Date(oldestMs).toISOString(), windowEnd: new Date(windowEndMs).toISOString() });
+
+    // Hold the run past the window end; then nothing may have been decided or asked for burst.
+    await pauseFor(ctx, windowEndMs + BURST_HOLD_PAST_MS - Date.now());
+    const atWindowEnd = wakeState('burst');
+    const callsInWindow = modelCalls.filter((call) => Date.parse(call.at) >= oldestMs && Date.parse(call.at) < windowEndMs);
+    ctx.assert('no-wake-turn-before-the-window-ends', atWindowEnd.turns.length === 0 && atWindowEnd.receipts.length === 0
+      && atWindowEnd.wakes.every((wake) => wake.consumed_at === null), { now: new Date().toISOString(), turns: atWindowEnd.turns, wakes: atWindowEnd.wakes });
+    ctx.assert('no-model-call-between-the-reports-and-the-window-end', callsInWindow.length === 0
+      && modelCalls.every((call) => !call.goals.includes('burst')), { callsInWindow, modelCalls });
+
+    // 4. The run settles: one turn takes every report with the settle.
+    const callsBeforeRelease = modelCalls.length;
+    release('hold-burst');
+    const ended = await waitForChange(ctx, 'burst to complete or hold', hubDir, () => {
+      const state = wakeState('burst');
+      return { done: HELD_STATES.has(state.goal?.run_state) && state.turns.every((turn) => turn.state !== 'pending'), goal: state.goal };
+    }, 6 * 60_000);
+    const final = wakeState('burst');
+    ctx.assert('burst-goal-completed', ended.goal?.run_state === 'completed', ended.goal);
+    const reportWakes = final.wakes.filter((wake) => wake.cause === 'report');
+    const turn = final.turns[0] ?? null;
+    const causes = turn ? JSON.parse(turn.causes) : [];
+    ctx.assert('exactly-one-wake-turn-delivered-once', final.turns.length === 1 && turn?.state === 'delivered' && causes.includes('report')
+      && final.turns.filter((row) => row.state === 'delivered').length === 1, { turns: final.turns });
+    ctx.assert('turn-at-or-after-oldest-report-plus-window', turn !== null && Date.parse(turn.created_at) >= windowEndMs,
+      { oldest: new Date(oldestMs).toISOString(), windowEnd: new Date(windowEndMs).toISOString(), turn });
+    ctx.assert('each-report-receipted-once', reportWakes.length === 4 && JSON.stringify(reportWakes.map((wake) => wake.event_id).sort()) === JSON.stringify(expectedWakeIds)
+      && reportWakes.every((wake) => wake.consumed_at !== null && final.receipts.filter((receipt) => receipt.wake_id === wake.id).length === 1
+        && final.receipts.find((receipt) => receipt.wake_id === wake.id)?.turn_id === turn?.id
+        && final.receipts.find((receipt) => receipt.wake_id === wake.id)?.disposition === 'delivered'),
+    { reportWakes, receipts: final.receipts, turn });
+    ctx.assert('duplicates-added-no-event-wake-or-turn', final.laneEvents.filter((event) => event.kind === 'worker_report').length === 4
+      && reportWakes.length === 4 && final.turns.length === 1, { laneEvents: final.laneEvents, wakes: final.wakes, turns: final.turns });
+    const otherState = wakeState('other');
+    const otherWakeIds = otherState.wakes.filter((wake) => wake.cause === 'report').map((wake) => wake.event_id);
+    ctx.assert('unrelated-report-does-not-wake-this-goal', otherWakeIds.length === 1 && otherWakeIds[0] === `lane_event:${otherReport?.reply?.laneEventId}`
+      && !final.wakes.some((wake) => otherWakeIds.includes(wake.event_id)) && otherState.turns.length === 0,
+    { otherWakes: otherState.wakes, otherTurns: otherState.turns, burstWakes: final.wakes });
+    ctx.assert('burst-graded-only-after-the-window', modelCalls.filter((call) => call.goals.includes('burst')).every((call) => call.seq > callsBeforeRelease
+      && Date.parse(call.at) >= windowEndMs), { callsBeforeRelease, burstCalls: modelCalls.filter((call) => call.goals.includes('burst')) });
+
+    // Cleanup: every hold released, the daemon stopped; every fixture worker must be gone.
+    release('hold-other');
+    const workerPids = readWorkerLogs(workerLogs).map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
+    const cleanExit = new Set(['stdin-closed', 'hangup', 'terminated']);
+    await ctx.terminate(daemon, 'worker-cleanup');
+    const closed = await waitForChange(ctx, 'fixture worker exit', workerLogs, () => {
+      const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind))
+        && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
+      return { done: open.length === 0, open: open.map((entry) => entry.name) };
+    }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
+    const alive = workerPids.filter((pid) => pidAlive(pid));
+    ctx.assert('fixture-workers-gone', workerPids.length === BURST_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
+
+    for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+    ctx.evidence.writeJson('burst.json', {
+      worker: { kind: 'fixture', note: 'fixture-worker.mjs --multi-turn --hold-dir: each run stays live until its release file; its reports are supervisorReport lines on the agent-state socket, one per runner-written report file. Not a real provider worker.' },
+      model: { kind: 'loopback stub', note: 'The stub always answers complete and cites sig:req:r1. Calls are attributed by the [qa-goal:NAME] marker in their own turn.' },
+      ingress: 'agent-state socket supervisorReport -> hub_runtime::supervisor_worker_report -> lanes::dispatch::report_from_worker -> hand_to_supervisor -> wakes::report',
+      window: { oldest: new Date(oldestMs).toISOString(), windowEnd: new Date(windowEndMs).toISOString(), spanMs, heldPastMs: BURST_HOLD_PAST_MS },
+      goals, sessions: sessionOf, replies: { originals, duplicates, other: otherReport, stranger },
+      checkpoints: { afterReports, atWindowEnd, final, other: otherState },
+      modelCalls, callsBeforeRelease,
+    });
+  } finally {
+    for (const name of BURST_GOALS) {
+      try { release(`hold-${name}`); } catch { /* the run root may be gone */ }
+    }
+    await stub.close();
+    ctx.evidence.writeText('burst-transcript.log', `${log.join('\n')}\n`);
+  }
+}
+
 // The memory and usage scenarios (task 15, memory-usage.mjs) reuse these helpers.
 const memoryUsageDeps = Object.freeze({
   supervisedHub,
@@ -2178,8 +2486,26 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runWaiting,
   }),
-  // Blocked on product seams: see the burst note above SCENARIOS.
-  burst: planned('9', 'Four ordinary reports at virtual 0,1,2,3s advanced to 30s: one admitted model turn with four receipts; urgent pause has zero delay'),
+  burst: Object.freeze({
+    implemented: true,
+    task: '9',
+    summary: 'Four ordinary reports from a live run\'s own worker at real 0,1,2,3s, a retry and an out-of-order replay, another goal\'s report: no turn and no model call before oldest+30s, then exactly one delivered turn with each report receipted once',
+    deadlineMs: 12 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'workspace-registered', 'two-goals-admitted', 'both-runs-started-and-held-live', 'four-reports-accepted-for-their-own-goal',
+      'duplicate-and-out-of-order-reports-are-the-same-events', 'unrelated-report-lands-on-its-own-goal', 'report-from-an-unbound-session-refused',
+      'reports-spread-over-three-seconds-inside-the-window', 'each-report-handed-to-the-goal-once', 'no-wake-turn-before-the-window-ends',
+      'no-model-call-between-the-reports-and-the-window-end', 'burst-goal-completed', 'exactly-one-wake-turn-delivered-once',
+      'turn-at-or-after-oldest-report-plus-window', 'each-report-receipted-once', 'duplicates-added-no-event-wake-or-turn',
+      'unrelated-report-does-not-wake-this-goal', 'burst-graded-only-after-the-window', 'fixture-workers-gone',
+    ],
+    notCovered: [
+      { clause: 'report-only-window-on-an-idle-goal', reason: 'a worker reports only while its run is live, so the goal is busy and its reports wait for the settle; the runner holds the run past oldest+30s on the real clock. A report-only batch admitted by the window itself (and its judge call) is never reached through a live worker', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs reports_batch_on_the_oldest_and_an_owner_pause_skips_the_window' },
+      { clause: 'urgent-pause-zero-delay', reason: 'an owner pause skipping the window is a separate owner path', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs the_loop_recovers_at_start_and_delivers_an_owner_pause_without_delay' },
+      { clause: 'ended-goal-report', reason: 'a worker of an ended goal is gone with its pane, so a report for it cannot be sent through the product', coveredBy: 'crates/ferryx-hub/src/lanes/dispatch.rs a_worker_report_becomes_one_wake_on_its_own_goal' },
+    ],
+    run: runBurst,
+  }),
   'remote-delivery': Object.freeze({
     implemented: true,
     task: '8',

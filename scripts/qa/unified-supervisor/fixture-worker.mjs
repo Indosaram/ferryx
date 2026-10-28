@@ -24,8 +24,12 @@
 // exists lets the turn go on at once. A turn that also names QA_ECHO:<token> waits, after its
 // `idle`, until DIR/<token> exists and then reports `idle`, `working`, `idle` again: a
 // duplicate and out-of-order report of a run that already ended.
+// With --hold-dir, for the worker's whole life, every file DIR/report-<sessionId>-<n> (its own
+// session only, written by rename so it is never seen half written) is one ordinary supervisor
+// report: its content is the report id, sent as a `supervisorReport` line on the agent-state
+// socket, the reply recorded as `supervisor-report`. The `burst` scenario drives its reports so.
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, watch, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, watch, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -79,6 +83,48 @@ function released(token) {
     watcher = watch(holdDir, check);
     check();
   });
+}
+
+// One `supervisorReport` line; resolves with the daemon's JSON reply (or why there was none).
+function supervisorReport(eventId, body) {
+  return new Promise((resolveReport) => {
+    if (!sessionId || !socket) { resolveReport({ sent: false, reason: 'no FERRYX_SESSION_ID or FERRYX_AGENT_STATE_SOCKET' }); return; }
+    let buffer = '';
+    let done = false;
+    const connection = createConnection(socket);
+    const finish = (value) => { if (done) return; done = true; clearTimeout(timer); connection.destroy(); resolveReport(value); };
+    const timer = setTimeout(() => finish({ sent: true, reason: 'no reply within 5s' }), 5_000);
+    connection.setEncoding('utf8');
+    connection.on('error', (error) => finish({ sent: false, reason: String(error?.message ?? error) }));
+    connection.on('connect', () => connection.write(`${JSON.stringify({ type: 'supervisorReport', sessionId, eventId, body })}\n`));
+    connection.on('data', (chunk) => {
+      buffer += chunk;
+      const end = buffer.indexOf('\n');
+      if (end < 0) return;
+      let reply = null;
+      try { reply = JSON.parse(buffer.slice(0, end)); } catch { reply = { unparsed: buffer.slice(0, end) }; }
+      finish({ sent: true, reply });
+    });
+  });
+}
+
+if (holdDir && sessionId) {
+  const prefix = `report-${sessionId}-`;
+  const seen = new Set();
+  let reports = Promise.resolve();
+  const scan = () => {
+    for (const name of readdirSync(holdDir).sort()) {
+      if (!name.startsWith(prefix) || seen.has(name)) continue;
+      seen.add(name);
+      const eventId = readFileSync(join(holdDir, name), 'utf8').trim();
+      reports = reports.then(async () => {
+        const result = await supervisorReport(eventId, `qa report ${eventId}`);
+        record({ kind: 'supervisor-report', file: name, eventId, ...result });
+      });
+    }
+  };
+  watch(holdDir, scan);
+  scan();
 }
 
 // One turn of --multi-turn, run strictly one after another.
