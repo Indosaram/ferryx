@@ -848,6 +848,12 @@ impl WakeScheduler {
     /// its event (persisted wakes are still scheduled), or that one goal's wakes stay pending.
     pub async fn tick(&self, now: DateTime<Utc>) -> Result<TickReport, SupervisorError> {
         let mut report = TickReport::default();
+        // A closed unified intake (an upgrade not cut over yet, or a rollback) schedules
+        // nothing: the state log, its cursor and every pending wake stay as they are for the
+        // next cutover, and the loop waits for its rescan.
+        if !super::cutover::installation_intake(&self.pool).await?.unified_open {
+            return Ok(report);
+        }
         if let Err(error) = self.apply_state_events(now, &mut report).await {
             if transient(&error) {
                 return Err(error);

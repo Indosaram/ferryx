@@ -536,6 +536,16 @@ pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
     }
     let team = team_of(admitted);
     let principal = owner_principal(pool, team.as_deref(), &admitted.user).await?;
+    // Exactly one intake takes the owner's message: the supervisor once cut over, the legacy
+    // omo turn before a cutover and after a rollback.
+    match crate::supervisor::cutover::installation_intake(pool).await {
+        Ok(intake) if intake.unified_open => {}
+        Ok(_) => return None,
+        Err(error) => {
+            tracing::warn!(%error, "the supervisor intake was not read; the message keeps the legacy turn");
+            return None;
+        }
+    }
     let thread = admitted.key.thread_id.clone().unwrap_or_default();
     let binding: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT binding_id, project_id FROM supervisor_channel_bindings

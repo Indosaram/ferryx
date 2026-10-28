@@ -173,7 +173,12 @@ async fn dispatch<C: AgentControl + ?Sized>(
         )
     });
     let live = matches!(lane_row(pool, lane_key).await?, Some((_, status)) if !ended(status));
-    if !live || crate::supervisor::supervisor_owns_lane(pool, lane_key).await? {
+    // A cutover stopped the legacy intake: a committed legacy proposal is superseded, never
+    // sent, exactly as for an adopted lane.
+    if !live
+        || crate::supervisor::supervisor_owns_lane(pool, lane_key).await?
+        || !crate::supervisor::cutover::legacy_intake_runs(pool).await?
+    {
         contract::set_proposal_state(
             pool,
             lane_key,
@@ -418,6 +423,10 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
         return Ok(None);
     };
     if contract.mode == GoalMode::Off {
+        return Ok(None);
+    }
+    // After a cutover the legacy goal loop takes no new turn (and asks no judge).
+    if !crate::supervisor::cutover::legacy_intake_runs(pool).await? {
         return Ok(None);
     }
     let lock = lane_lock(lane_key);

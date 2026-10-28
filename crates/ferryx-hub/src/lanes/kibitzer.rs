@@ -238,6 +238,10 @@ pub async fn evaluate_at(
     now: DateTime<Utc>,
 ) -> Result<bool> {
     ensure_lead(pool, lead).await?;
+    // The kibitzer is a legacy intake: after a cutover it never wakes the owner lead.
+    if !crate::supervisor::cutover::legacy_intake_runs(pool).await? {
+        return Ok(false);
+    }
     let state = load_arm(pool, lead, now).await?;
     if next_due(now, &state).is_none_or(|due| due > now) {
         return Ok(false);

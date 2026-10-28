@@ -51,6 +51,11 @@ pub const LANE_KEY_PREFIX: &str = "sv-";
 /// the legacy lane as owned by the supervisor ([`supervisor_owns_lane`]).
 pub const ADOPT_MESSAGE_PREFIX: &str = "adopt:";
 
+/// Source message id prefix of an explicit adoption of one old channel session (a Slack or
+/// Discord conversation of the legacy intake): `adopt-session:<session key>`. Like a lane, a
+/// session is adopted once, whichever adapter asks (migration 0025 enforces it in the schema).
+pub const ADOPT_SESSION_PREFIX: &str = "adopt-session:";
+
 /// Code of [`SupervisorError::SetupConflict`].
 pub const SETUP_CONFLICT: &str = "SETUP_CONFLICT";
 
@@ -168,6 +173,14 @@ pub enum SupervisorError {
         session_id: String,
         goal_id: String,
     },
+    /// The unified supervisor intake is closed on this installation: an upgrade that has not
+    /// been cut over yet, or a rollback. New work is refused (503-class); nothing was written.
+    #[error("SUPERVISOR_INTAKE_CLOSED: {0}")]
+    IntakeClosed(String),
+    /// A cutover needs the mhc engine with every required capability; `code` is the engine's
+    /// fault code (`MHC_CAPABILITY_MISSING`, `MHC_NOT_RUNNING`, ...). Nothing was changed.
+    #[error("{code}: {detail}")]
+    EngineUnavailable { code: &'static str, detail: String },
     #[error(transparent)]
     Goal(#[from] GoalError),
     #[error(transparent)]
@@ -200,6 +213,8 @@ impl SupervisorError {
             SupervisorError::LegacyTermsChanged { .. } => admission::LEGACY_TERMS_CHANGED,
             SupervisorError::SetupConflict(_) => SETUP_CONFLICT,
             SupervisorError::SessionAlreadyBound { .. } => SESSION_ALREADY_BOUND,
+            SupervisorError::IntakeClosed(_) => cutover::SUPERVISOR_INTAKE_CLOSED,
+            SupervisorError::EngineUnavailable { code, .. } => code,
             SupervisorError::Invalid(_)
             | SupervisorError::Unknown { .. }
             | SupervisorError::Goal(_) => "INVALID_REQUEST",
@@ -1955,11 +1970,14 @@ pub async fn admit_request_bound(
     // A lane is adopted once, whichever adapter asks: the dedupe key is (adapter, message id),
     // so under the write lock an adoption first looks for `adopt:<lane>` from any adapter and
     // replays that admission (same owner and body) or refuses, never admitting a second goal.
-    let replay_adapter = match &terms.adopts_lane {
-        Some(_) => adoption_adapter(&mut tx, &request.source_message_id)
+    let adopts_once = terms.adopts_lane.is_some()
+        || request.source_message_id.starts_with(ADOPT_SESSION_PREFIX);
+    let replay_adapter = if adopts_once {
+        adoption_adapter(&mut tx, &request.source_message_id)
             .await?
-            .unwrap_or(request.source_adapter),
-        None => request.source_adapter,
+            .unwrap_or(request.source_adapter)
+    } else {
+        request.source_adapter
     };
     if let Some(admitted) =
         admitted_request(&mut tx, replay_adapter, &request.source_message_id).await?
@@ -1984,6 +2002,9 @@ pub async fn admit_request_bound(
             request.supervisor_id
         )));
     }
+    // Under the write lock: a rollback that committed first refuses this admission, and one
+    // that commits after it finds the goal and leaves it for the next cutover.
+    cutover::require_unified_intake(&mut tx, &request.supervisor_id).await?;
     require_project_of(&mut tx, &request.supervisor_id, &request.project_id).await?;
     let mapped: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM supervisor_project_hosts WHERE project_id = ? AND host_id = ?)",
@@ -2617,6 +2638,9 @@ pub async fn claim_dispatch(
         });
     }
     require_nothing_in_flight(&mut tx, &goal.goal_id).await?;
+    // A closed intake (an upgrade not cut over yet, or a rollback) claims nothing: the intent
+    // stays `ready` for the next cutover.
+    cutover::require_unified_intake(&mut tx, &goal.supervisor_id).await?;
     let now = now_rfc3339();
     sqlx::query(
         "UPDATE supervisor_dispatches SET state = 'claimed', claimed_at = ?, updated_at = ?
@@ -3626,6 +3650,7 @@ pub mod admission;
 pub mod answers;
 pub mod changes;
 pub mod completion;
+pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
 pub mod memory;
