@@ -2149,7 +2149,7 @@ async fn an_answer_from_another_model_than_the_configured_one_is_discarded() {
 
 #[tokio::test]
 async fn owner_memory_requests_go_to_the_owner_ingest_session_with_typed_refusals() {
-    let harness = Harness::new("owner-memory", all_capabilities());
+    let harness = Harness::new("owner-memory", ingest_capabilities());
     let supervisor = harness.supervisor();
     let taught = supervisor
         .owner_memory(
