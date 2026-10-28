@@ -824,7 +824,12 @@ impl SessionHub {
 ///
 /// One task per hub, holding only a weak reference: it sleeps until the mirror's scheduler is
 /// due, or waits for the mirror's activity signal when nothing is scheduled, and exits once the
-/// hub is gone. Without a runtime (synchronous callers) the mirror is simply not compressed.
+/// hub is gone or compression is unsupported here. Without a runtime (synchronous callers) the
+/// mirror is simply not compressed.
+///
+/// The current runtime must have its time driver enabled: tokio offers no non-panicking probe
+/// for it, and the driver's sleep would panic in the spawned task on an IO-only runtime. Every
+/// caller registers sessions from the daemon's `enable_all` runtime or the Tauri runtime.
 fn spawn_screen_compression(hub: &Arc<RwLock<SessionHub>>) -> Option<tokio::task::JoinHandle<()>> {
     let runtime = tokio::runtime::Handle::try_current().ok()?;
     let activity = hub.read().screen.as_ref()?.lock().activity_signal();
@@ -834,9 +839,10 @@ fn spawn_screen_compression(hub: &Arc<RwLock<SessionHub>>) -> Option<tokio::task
 async fn drive_screen_compression(hub: Weak<RwLock<SessionHub>>, activity: Arc<tokio::sync::Notify>) {
     loop {
         let enabled = super::cached_terminal_preferences().scrollback_compression;
-        // The runtime's clock, so a step is due exactly when the sleep below ends, also under
-        // a paused test clock. Every guard is released before the next await.
-        let now = tokio::time::Instant::now().into_std();
+        // The wall clock the mirror's activity marks also use. A sleep may end slightly before
+        // the step is due; the scheduler then reports the remainder. Every guard is released
+        // before the next await.
+        let now = std::time::Instant::now();
         let wakeup = {
             let Some(hub) = hub.upgrade() else { return };
             let hub = hub.read();
@@ -844,6 +850,11 @@ async fn drive_screen_compression(hub: Weak<RwLock<SessionHub>>, activity: Arc<t
             let mut screen = screen.lock();
             if let Err(error) = screen.run_due_compression(now, enabled) {
                 tracing::warn!(%error, "screen mirror scrollback compression step failed");
+            }
+            if !screen.compression_supported() {
+                // Nothing will ever be scheduled again; waking on every feed would only
+                // contend with publishers for the hub and screen locks.
+                return;
             }
             screen.compression_wakeup(now)
         };
@@ -2728,11 +2739,24 @@ mod tests {
     #[tokio::test]
     async fn screen_compression_driver_stops_when_the_hub_is_dropped() {
         let hub = TerminalOutputHub::new(4096);
-        let _output = hub.register_session("compressed");
-        hub.publish("compressed", b"hello\r\n".to_vec()).expect("publish");
+        // Registered off the runtime, so registration spawns no driver: the one below is the
+        // only one.
+        let registering = hub.clone();
+        let _output = std::thread::spawn(move || registering.register_session("compressed"))
+            .join()
+            .expect("register off the runtime");
         let session = hub.sessions.read().get("compressed").cloned().expect("session hub");
+        // No output yet, so nothing is scheduled and the driver waits on the activity signal,
+        // which only the mirror's drop can wake.
+        let scheduled = session
+            .read()
+            .screen
+            .as_ref()
+            .expect("screen mirror")
+            .lock()
+            .compression_wakeup(std::time::Instant::now());
+        assert_eq!(scheduled, None);
         let driver = spawn_screen_compression(&session).expect("driver on a tokio runtime");
-        // Let the driver run and park on the scheduler or the activity signal.
         tokio::task::yield_now().await;
         assert!(!driver.is_finished(), "the driver lives while the hub does");
 

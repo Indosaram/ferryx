@@ -115,6 +115,12 @@ impl ScreenMirror {
         self.compression.next_wakeup(now)
     }
 
+    /// Whether idle compression can still run; false for good once the platform reported it
+    /// unsupported, so a driver can stop.
+    pub fn compression_supported(&self) -> bool {
+        self.compression.is_supported()
+    }
+
     /// Runs one due incremental compression step; `enabled` is the `scrollback-compression`
     /// preference. Compression changes no cell, so [`Self::seed`] is unaffected.
     pub fn run_due_compression(

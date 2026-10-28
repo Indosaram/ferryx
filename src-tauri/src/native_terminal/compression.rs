@@ -108,6 +108,12 @@ impl CompressionScheduler {
         self.supported && self.due_at.is_some_and(|due| now >= due)
     }
 
+    /// Whether compression can still run here; false for good once a step reported
+    /// [`CompressionStep::Unsupported`].
+    pub fn is_supported(&self) -> bool {
+        self.supported
+    }
+
     /// Runs one incremental step on `engine` when one is due at `now`.
     ///
     /// `enabled` is the user's `scrollback-compression` preference; when it is off the scheduler
