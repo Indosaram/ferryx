@@ -469,6 +469,18 @@ impl PairingFailureBudget {
         }
     }
 
+    /// Failed attempts `source` may still spend before it is rate limited: its own
+    /// budget, capped by what the global ceiling has left.
+    fn remaining(&self, source: &str, now: Instant) -> u32 {
+        if self.closes_at.is_none_or(|closes_at| now >= closes_at) {
+            return PAIRING_FAILURE_BUDGET;
+        }
+        let own = self.per_source.get(source).copied().unwrap_or(0);
+        PAIRING_FAILURE_BUDGET
+            .saturating_sub(own)
+            .min(PAIRING_GLOBAL_FAILURE_CEILING.saturating_sub(self.total))
+    }
+
     fn admits(&self, source: &str) -> bool {
         self.total < PAIRING_GLOBAL_FAILURE_CEILING
             && self.per_source.get(source).copied().unwrap_or(0) < PAIRING_FAILURE_BUDGET
@@ -858,6 +870,15 @@ impl AuthManager {
             &pairing_source_key(source),
             Instant::now(),
         )
+    }
+
+    /// Failed pairing attempts the network peer `source` may still make before it
+    /// is rate limited, so a client can tell its user how many guesses are left.
+    pub fn pairing_attempts_remaining_from(&self, source: Option<IpAddr>) -> u32 {
+        self.pairing_window
+            .read()
+            .failures
+            .remaining(&pairing_source_key(source), Instant::now())
     }
 
     /// Spends one attempt from `source` against the budget, persisting any failure
@@ -3034,6 +3055,24 @@ mod persistence_tests {
             .expect("a different source keeps its own budget");
         assert_eq!(device.permission, DevicePermission::View);
         assert_eq!(manager.validate_token(&token).unwrap().id, device.id);
+    }
+
+    #[test]
+    fn remaining_attempts_count_down_per_source() {
+        let manager = AuthManager::new();
+        manager.create_pairing_code(DevicePermission::View);
+        assert_eq!(manager.pairing_attempts_remaining_from(peer(2)), PAIRING_FAILURE_BUDGET);
+        assert!(manager
+            .exchange_pairing_code_from("000000", "guess", None, peer(2))
+            .is_err());
+        assert_eq!(manager.pairing_attempts_remaining_from(peer(2)), 4);
+        assert_eq!(manager.pairing_attempts_remaining_from(peer(3)), PAIRING_FAILURE_BUDGET);
+        for _ in 1..PAIRING_FAILURE_BUDGET {
+            assert!(manager
+                .exchange_pairing_code_from("000000", "guess", None, peer(2))
+                .is_err());
+        }
+        assert_eq!(manager.pairing_attempts_remaining_from(peer(2)), 0);
     }
 
     #[test]

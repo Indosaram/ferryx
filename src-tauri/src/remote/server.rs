@@ -402,6 +402,25 @@ fn pairing_peer(peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<std::ne
     Some(peer)
 }
 
+/// A refused pair exchange that tells the client how many guesses its source has left.
+fn pairing_failure(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    remaining_attempts: u32,
+) -> Response {
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "code": code,
+            "message": message,
+            "details": { "remainingAttempts": remaining_attempts },
+        })),
+    )
+        .into_response()
+}
+
 async fn pair_exchange(
     State(state): State<Arc<RemoteGatewayState>>,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<SocketAddr>>>,
@@ -419,12 +438,18 @@ async fn pair_exchange(
             source,
         )
         .map_err(|e| match e {
-            AuthError::InvalidPairingCode => {
-                (StatusCode::BAD_REQUEST, "Invalid pairing code").into_response()
-            }
-            AuthError::ExpiredPairingCode => {
-                (StatusCode::UNAUTHORIZED, "Pairing code expired").into_response()
-            }
+            AuthError::InvalidPairingCode => pairing_failure(
+                StatusCode::BAD_REQUEST,
+                "INVALID_PIN",
+                "Invalid pairing code",
+                state.auth_manager.pairing_attempts_remaining_from(source),
+            ),
+            AuthError::ExpiredPairingCode => pairing_failure(
+                StatusCode::UNAUTHORIZED,
+                "PIN_EXPIRED",
+                "Pairing code expired",
+                state.auth_manager.pairing_attempts_remaining_from(source),
+            ),
             AuthError::PairingRateLimited => (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::CACHE_CONTROL, "no-store")],
