@@ -4,10 +4,14 @@ use ferryx_lib::native_terminal::snapshot_codec::{
     validate_snapshot_bounds, validate_snapshot_envelope, validate_snapshot_envelope_bounded,
     DecodedTerminal, IncrementalSnapshotDecoder, SnapshotCodecOptions,
     SnapshotProgressKind, DEFAULT_MAX_SNAPSHOT_WIRE_BYTES, KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED,
-    KITTY_VIRTUAL_PLACEHOLDER_CODEPOINT, MAX_CONTINUATION_CEILING, MIN_SNAPSHOT_WIRE_BYTES,
+    KITTY_IMAGE_STORAGE_LIMIT, KITTY_VIRTUAL_PLACEHOLDER_CODEPOINT, MAX_CONTINUATION_CEILING,
+    MIN_SNAPSHOT_WIRE_BYTES,
     SNAPSHOT_MAGIC, SNAPSHOT_VERSION_CURRENT,
 };
 use ferryx_lib::native_terminal::NativeTerminalError;
+
+/// 64 MiB, the explicit Kitty image storage limit on every terminal kind.
+const EXPECTED_KITTY_IMAGE_STORAGE_LIMIT: u64 = 67_108_864;
 
 /// 1x1 RGBA Kitty image (pixel 00 00 00 ff), transmitted and displayed as image id 1.
 const KITTY_RGBA_1X1: &[u8] = b"\x1b_Ga=T,f=32,s=1,v=1,i=1;AAAA/w==\x1b\\";
@@ -397,5 +401,80 @@ fn kitty_image_round_trips_through_snapshot() {
         decoded.kitty_image_pixels(KITTY_IMAGE_ID).expect("decoded image query"),
         Some(vec![0, 0, 0, 255]),
         "decoded terminal holds the Kitty image with its pixels"
+    );
+}
+
+#[test]
+fn kitty_image_storage_limit_is_explicit_on_snapshot_terminals() {
+    assert_eq!(KITTY_IMAGE_STORAGE_LIMIT, EXPECTED_KITTY_IMAGE_STORAGE_LIMIT);
+
+    let mut term = DecodedTerminal::new(80, 24).expect("new terminal");
+    assert_eq!(
+        term.kitty_image_storage_limit().expect("source limit"),
+        Some(EXPECTED_KITTY_IMAGE_STORAGE_LIMIT)
+    );
+    term.vt_write(KITTY_RGBA_1X1);
+    let snapshot = term
+        .encode(DEFAULT_MAX_SNAPSHOT_WIRE_BYTES)
+        .expect("encode kitty snapshot");
+
+    let mut incremental =
+        IncrementalSnapshotDecoder::start(&snapshot, SnapshotCodecOptions::default())
+            .expect("start incremental decoder");
+    assert_eq!(
+        incremental.kitty_image_storage_limit().expect("decoder limit"),
+        EXPECTED_KITTY_IMAGE_STORAGE_LIMIT
+    );
+    while incremental.next_page().expect("next record") {}
+    assert_eq!(
+        incremental.kitty_image_storage_limit().expect("decoder limit after records"),
+        EXPECTED_KITTY_IMAGE_STORAGE_LIMIT
+    );
+    assert_eq!(
+        incremental.finish().kitty_image_storage_limit().expect("incremental restored limit"),
+        Some(EXPECTED_KITTY_IMAGE_STORAGE_LIMIT)
+    );
+
+    let decoded = decode_terminal_snapshot(&snapshot, SnapshotCodecOptions::default())
+        .expect("one-shot decode");
+    assert_eq!(
+        decoded.kitty_image_storage_limit().expect("one-shot restored limit"),
+        Some(EXPECTED_KITTY_IMAGE_STORAGE_LIMIT)
+    );
+}
+
+#[test]
+fn kitty_image_storage_limit_evicts_older_image() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    // 4096 x 2560 RGBA = 40 MiB of pixels; two of them exceed the 64 MiB limit.
+    const WIDTH: usize = 4096;
+    const HEIGHT: usize = 2560;
+    const PIXEL_BYTES: usize = WIDTH * HEIGHT * 4;
+    let payload = STANDARD.encode(vec![0u8; PIXEL_BYTES]);
+    let transmit = |id: u32| {
+        let mut seq = format!("\x1b_Ga=t,q=2,f=32,s={WIDTH},v={HEIGHT},i={id};").into_bytes();
+        seq.extend_from_slice(payload.as_bytes());
+        seq.extend_from_slice(b"\x1b\\");
+        seq
+    };
+
+    let mut term = DecodedTerminal::new(80, 24).expect("new terminal");
+    term.vt_write(&transmit(1));
+    assert_eq!(
+        term.kitty_image_pixels(1).expect("first image").map(|p| p.len()),
+        Some(PIXEL_BYTES),
+        "a 40 MiB image fits under the 64 MiB limit"
+    );
+    term.vt_write(&transmit(2));
+    assert_eq!(
+        term.kitty_image_pixels(2).expect("newest image").map(|p| p.len()),
+        Some(PIXEL_BYTES),
+        "the newest image is stored"
+    );
+    assert_eq!(
+        term.kitty_image_pixels(1).expect("older image query"),
+        None,
+        "the older image is evicted to stay within the storage limit"
     );
 }

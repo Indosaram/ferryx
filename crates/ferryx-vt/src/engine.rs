@@ -14,6 +14,10 @@ pub const TITLE_MAX: usize = 4096;
 pub const URI_MAX: usize = 2048;
 pub const LINKS_MAX: usize = 1024;
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+/// Kitty image storage limit per screen, in bytes. Same value as
+/// `IMAGE_LIMIT` in src-tauri/src/native_terminal/png_decoder.rs (src-tauri does
+/// not depend on this crate, so the value is duplicated; keep both equal).
+pub const KITTY_IMAGE_STORAGE_LIMIT: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
@@ -173,6 +177,11 @@ impl VtEngine {
             check(ghostty_terminal_set(term, OPT_SCROLLBACK_MAX_BYTES, ptr::null()), "unset scrollback bytes");
             let lines = scrollback_lines;
             check(ghostty_terminal_set(term, OPT_SCROLLBACK_MAX_LINES, &lines as *const usize as *const c_void), "set scrollback lines");
+            let image_limit: u64 = KITTY_IMAGE_STORAGE_LIMIT;
+            check(
+                ghostty_terminal_set(term, OPT_KITTY_IMAGE_STORAGE_LIMIT, &image_limit as *const u64 as *const c_void),
+                "set kitty image storage limit",
+            );
         }
         let mut e = VtEngine { term, render, sink, sb_rows: 0, cols, rows, screen: 0, anchor: None };
         e.arm();
@@ -485,6 +494,18 @@ impl VtEngine {
 
     pub fn scrollback_rows(&self) -> usize {
         self.sb_rows
+    }
+
+    /// Kitty image storage limit of the active screen in bytes; `None` when
+    /// Kitty graphics are disabled at build time.
+    pub fn kitty_image_storage_limit(&self) -> Option<u64> {
+        let mut limit: u64 = 0;
+        let r = unsafe { ghostty_terminal_get(self.term, DATA_KITTY_IMAGE_STORAGE_LIMIT, &mut limit as *mut u64 as *mut c_void) };
+        if r == NO_VALUE {
+            return None;
+        }
+        check(r, "get kitty image storage limit");
+        Some(limit)
     }
 
     pub fn read_scrollback(&self, from: usize, links: &mut LinkTable) -> Vec<RowData> {

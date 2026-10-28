@@ -7,6 +7,7 @@ use super::sys::constants::{
     GHOSTTY_NO_VALUE, GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_ALTERNATE,
     GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_PRIMARY,
     GHOSTTY_SNAPSHOT_DECODER_DATA_KITTY_IMAGES_PRIMARY,
+    GHOSTTY_SNAPSHOT_DECODER_DATA_KITTY_IMAGE_STORAGE_LIMIT,
     GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_CONTINUATION_BYTES,
     GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_KIND,
     GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_REMAINING,
@@ -14,12 +15,14 @@ use super::sys::constants::{
     GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_SCREEN,
     GHOSTTY_SNAPSHOT_DECODER_DATA_RETAIN_CONTINUATION,
     GHOSTTY_SNAPSHOT_DECODER_DATA_SOURCE_OFFSET,
+    GHOSTTY_SNAPSHOT_DECODER_OPT_KITTY_IMAGE_STORAGE_LIMIT,
     GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_CONTINUATION_BYTES,
     GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION,
     GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_IMAGE, GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_PAGE,
     GHOSTTY_SNAPSHOT_MAGIC,
     GHOSTTY_SNAPSHOT_VERSION_1, GHOSTTY_SUCCESS,
     GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES,
+    GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT,
     GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES,
 };
 use super::sys::ffi::{
@@ -32,7 +35,7 @@ use super::sys::ffi::{
 };
 use super::sys::kitty::{
     ghostty_kitty_graphics_image, ghostty_kitty_graphics_image_get, Graphics, GRAPHICS,
-    IMAGE_DATA, IMAGE_LEN,
+    IMAGE_DATA, IMAGE_LEN, STORAGE_LIMIT,
 };
 use super::sys::types::{
     GhosttySnapshotDecoder, GhosttySnapshotDecoderImpl, GhosttyTerminal,
@@ -54,6 +57,27 @@ pub const DEFAULT_MAX_SCROLLBACK_BYTES: u64 = 256 * 1024 * 1024;
 
 pub const KITTY_VIRTUAL_PLACEHOLDER_CODEPOINT: u32 = 0x10EEEE;
 pub const KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED: bool = true;
+/// Kitty image storage limit per screen applied to snapshot terminals: the same
+/// value the live terminals use (lifecycle.rs via `png_decoder::IMAGE_LIMIT`).
+pub const KITTY_IMAGE_STORAGE_LIMIT: u64 = super::png_decoder::IMAGE_LIMIT as u64;
+
+/// Applies `KITTY_IMAGE_STORAGE_LIMIT` to a live snapshot decoder. The decoder
+/// never reads the limit from the snapshot, so every decode path must set it.
+fn set_decoder_kitty_image_storage_limit(
+    decoder: NonNull<GhosttySnapshotDecoderImpl>,
+) -> Result<(), NativeTerminalError> {
+    let limit: u64 = KITTY_IMAGE_STORAGE_LIMIT;
+    // SAFETY: Callers pass a decoder they own and have not freed; the u64
+    // option is copied synchronously.
+    let res = unsafe {
+        ghostty_snapshot_decoder_set(
+            decoder.as_ptr(),
+            GHOSTTY_SNAPSHOT_DECODER_OPT_KITTY_IMAGE_STORAGE_LIMIT,
+            (&limit as *const u64).cast(),
+        )
+    };
+    NativeTerminalError::from_c_result(res, "set(OPT_KITTY_IMAGE_STORAGE_LIMIT)")
+}
 
 /// What the most recent successful `IncrementalSnapshotDecoder::next_page` call decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,7 +434,15 @@ impl DecodedTerminal {
         let mut raw: GhosttyTerminal = std::ptr::null_mut();
         let res = unsafe { ghostty_terminal_new(std::ptr::null(), &mut raw, cols, rows) };
         NativeTerminalError::from_c_result(res, "ghostty_terminal_new")?;
-        unsafe { Self::from_raw(raw) }
+        let terminal = unsafe { Self::from_raw(raw) }?;
+        let limit: u64 = KITTY_IMAGE_STORAGE_LIMIT;
+        // SAFETY: Live terminal; the u64 option is copied synchronously. On
+        // error `terminal` drops and frees the handle.
+        let res = unsafe {
+            ghostty_terminal_set(terminal.as_raw(), STORAGE_LIMIT, (&limit as *const u64).cast())
+        };
+        NativeTerminalError::from_c_result(res, "set(KittyImageStorageLimit)")?;
+        Ok(terminal)
     }
 
     /// # Safety
@@ -478,6 +510,28 @@ impl DecodedTerminal {
         unsafe {
             ghostty_terminal_vt_write(self.handle.as_ptr(), data.as_ptr(), data.len());
         }
+    }
+
+    /// Kitty image storage limit of the active screen in bytes; `None` when
+    /// Kitty graphics are disabled at build time.
+    pub fn kitty_image_storage_limit(&self) -> Result<Option<u64>, NativeTerminalError> {
+        let mut limit: u64 = 0;
+        // SAFETY: Live terminal owned by self; the u64 is written synchronously.
+        let res = unsafe {
+            ghostty_terminal_get(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT,
+                (&mut limit as *mut u64).cast(),
+            )
+        };
+        if res == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
+        NativeTerminalError::from_c_result(
+            res,
+            "ghostty_terminal_get(DATA_KITTY_IMAGE_STORAGE_LIMIT)",
+        )?;
+        Ok(Some(limit))
     }
 
     /// Copies the pixels of the Kitty image `id` on the active screen.
@@ -591,6 +645,11 @@ impl<'a> IncrementalSnapshotDecoder<'a> {
             )
         };
         if let Err(e) = NativeTerminalError::from_c_result(set_retain_res, "set(OPT_RETAIN_CONTINUATION)") {
+            unsafe { ghostty_snapshot_decoder_free(decoder_handle.as_ptr()) };
+            return Err(e);
+        }
+
+        if let Err(e) = set_decoder_kitty_image_storage_limit(decoder_handle) {
             unsafe { ghostty_snapshot_decoder_free(decoder_handle.as_ptr()) };
             return Err(e);
         }
@@ -726,6 +785,24 @@ impl<'a> IncrementalSnapshotDecoder<'a> {
         };
         NativeTerminalError::from_c_result(res, "ghostty_snapshot_decoder_get(DATA_KITTY_IMAGES_PRIMARY)")?;
         Ok(count)
+    }
+
+    /// Kitty image storage limit, in bytes, applied to each restored screen.
+    pub fn kitty_image_storage_limit(&self) -> Result<u64, NativeTerminalError> {
+        let dec_ptr = self.decoder.expect("decoder present").as_ptr();
+        let mut limit: u64 = 0;
+        let res = unsafe {
+            ghostty_snapshot_decoder_get(
+                dec_ptr,
+                GHOSTTY_SNAPSHOT_DECODER_DATA_KITTY_IMAGE_STORAGE_LIMIT,
+                (&mut limit as *mut u64).cast(),
+            )
+        };
+        NativeTerminalError::from_c_result(
+            res,
+            "ghostty_snapshot_decoder_get(DATA_KITTY_IMAGE_STORAGE_LIMIT)",
+        )?;
+        Ok(limit)
     }
 
     /// Kind of record the most recent successful `next_page` call decoded.
@@ -869,6 +946,8 @@ pub fn decode_terminal_snapshot(
         )
     };
     NativeTerminalError::from_c_result(set_retain_res, "set(OPT_RETAIN_CONTINUATION)")?;
+
+    set_decoder_kitty_image_storage_limit(decoder_handle)?;
 
     let mut raw_term: GhosttyTerminal = std::ptr::null_mut();
     let decode_res = unsafe {

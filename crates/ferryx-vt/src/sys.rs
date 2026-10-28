@@ -241,6 +241,7 @@ pub const OPT_WRITE_PTY: c_int = 1;
 pub const OPT_BELL: c_int = 2;
 pub const OPT_SIZE: c_int = 6;
 pub const OPT_DEVICE_ATTRIBUTES: c_int = 8;
+pub const OPT_KITTY_IMAGE_STORAGE_LIMIT: c_int = 15;
 pub const OPT_CLIPBOARD_WRITE: c_int = 26;
 pub const OPT_SCROLLBACK_MAX_BYTES: c_int = 27;
 pub const OPT_SCROLLBACK_MAX_LINES: c_int = 28;
@@ -261,6 +262,7 @@ pub const DATA_COLOR_FOREGROUND_DEFAULT: c_int = 22;
 pub const DATA_COLOR_BACKGROUND_DEFAULT: c_int = 23;
 pub const DATA_COLOR_CURSOR_DEFAULT: c_int = 24;
 pub const DATA_COLOR_PALETTE_DEFAULT: c_int = 25;
+pub const DATA_KITTY_IMAGE_STORAGE_LIMIT: c_int = 26;
 pub const DATA_MODE: c_int = 37;
 
 pub const RS_CURSOR_VISUAL_STYLE: c_int = 10;
