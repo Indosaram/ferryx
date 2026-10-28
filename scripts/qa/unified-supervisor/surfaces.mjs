@@ -188,6 +188,7 @@ async function runSurfaces(ctx) {
   const browser = await chromium.launch({ headless: true, channel: process.env.QA_BROWSER_CHANNEL || 'chrome' });
   const pageErrors = [];
   const shots = [];
+  const surfaces = [];
   try {
     const signIn = async (name) => {
       const layout = LAYOUTS[name];
@@ -198,6 +199,7 @@ async function runSurfaces(ctx) {
         if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify({ theme: 'system', accentColor: 'default', density: 'compact' }));
       }, [APPEARANCE_KEY]);
       const page = await context.newPage();
+      surfaces.push({ name, layout, page });
       page.setDefaultTimeout(UI_DEADLINE_MS);
       page.on('pageerror', (error) => pageErrors.push({ surface: name, message: String(error?.message ?? error) }));
       await page.goto(origin, { waitUntil: 'domcontentloaded' });
@@ -342,9 +344,57 @@ async function runSurfaces(ctx) {
       desktopSurface: 'The 1440x900 surface is the remote web client wide layout; the native desktop window was not driven (MahoRD capture is not part of this runner). The desktop app reads the same daemon supervisorSnapshot recorded under states.*.daemon.',
     });
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+  } catch (error) {
+    // A failed UI wait leaves each open page as it was: record what a person would have seen.
+    await captureFailure(ctx, surfaces, error, pageErrors);
+    throw error;
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+/** Visible elements carrying a data-testid, with the attributes the scenario reads. */
+function visibleTestIds() {
+  return [...document.querySelectorAll('[data-testid]')].flatMap((element) => {
+    const box = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    if (box.width === 0 || box.height === 0 || style.visibility === 'hidden' || style.display === 'none') return [];
+    const data = Object.fromEntries(Object.entries(element.dataset).filter(([key]) => key !== 'testid'));
+    const role = element.getAttribute('role');
+    const label = element.getAttribute('aria-label');
+    return [{ testid: element.dataset.testid, ...(role ? { role } : {}), ...(label ? { label } : {}), ...(Object.keys(data).length ? { data } : {}) }];
+  });
+}
+
+/**
+ * Writes `failure.json` and one full-page `screenshots/failure-<surface>.png` per open page: the
+ * URL, title, visible testids, tabs and status text at the moment a UI step failed. Each page is
+ * captured on its own; one page that cannot be read never hides the others or the original error.
+ */
+async function captureFailure(ctx, surfaces, error, pageErrors) {
+  const pages = [];
+  for (const { name, layout, page } of surfaces) {
+    const entry = { surface: name, viewport: `${layout.width}x${layout.height}` };
+    try {
+      entry.url = page.url();
+      entry.title = await page.title();
+      entry.testids = await page.evaluate(visibleTestIds);
+      entry.tabs = await page.evaluate(() => [...document.querySelectorAll('[role="tab"]')].map((tab) => ({
+        name: tab.getAttribute('aria-label') ?? tab.textContent?.trim() ?? '', selected: tab.getAttribute('aria-selected'),
+      })));
+      entry.status = await page.evaluate(() => [...document.querySelectorAll('[role="status"],[role="alert"]')].map((node) => node.textContent?.trim() ?? ''));
+      const file = `screenshots/failure-${name}-${layout.width}x${layout.height}.png`;
+      mkdirSync(ctx.evidence.path('screenshots'), { recursive: true });
+      // Binary evidence: written directly, the text writers would redact bytes.
+      writeFileSync(ctx.evidence.path(file), await page.screenshot({ fullPage: true }));
+      entry.screenshot = file;
+    } catch (captureError) {
+      entry.captureError = String(captureError?.message ?? captureError);
+    }
+    pages.push(entry);
+  }
+  ctx.evidence.writeJson('failure.json', { at: new Date().toISOString(), error: String(error?.stack ?? error), pages, pageErrors });
+  ctx.log(`surfaces UI failure captured: failure.json, ${pages.filter((page) => page.screenshot).length} screenshot(s)`);
 }
 
 export const SURFACES_SCENARIO = Object.freeze({
