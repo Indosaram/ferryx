@@ -1598,27 +1598,68 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn agent_prompt_answer_text_over_the_cap_is_refused_and_types_nothing() {
-        let session_id = "agent-prompt-answer-too-long";
-        let (backend, state) = pane(session_id, CODEX_MENU);
-        let prompt = desktop_prompt(&state, session_id).await;
-        let text = "a".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX + 1);
+    const CLAUDE_QUESTION: &str = include_str!("reference_chat/fixtures/claude/prompt/question.screen");
 
-        let error = prompt_answer(
+    /// Answer the claude question card, which takes typed text on its "Type something." row,
+    /// with `text`. Each call is its own pane, so the single-use ledger never decides it.
+    async fn answer_claude_question_with(
+        session_id: &str,
+        text: String,
+    ) -> (Arc<FixedPane>, Result<crate::scoped_contracts::DeliveryReceipt, ScopeError>) {
+        let (backend, state) = pane(session_id, CLAUDE_QUESTION);
+        let prompt = prompt_get(&state, session_id, Some("claude".into()))
+            .await
+            .expect("the screen is readable")
+            .expect("the question is a prompt");
+        let result = prompt_answer(
             &state,
             session_id.into(),
             prompt.prompt_id,
             prompt.screen_revision,
             crate::daemon::protocol::AgentPromptAnswerInput { key: None, text: Some(text) },
-            Some("codex".into()),
+            Some("claude".into()),
         )
-        .await
-        .expect_err("text over the cap is refused");
+        .await;
+        (backend, result)
+    }
 
+    fn assert_refused_untyped(
+        backend: &FixedPane,
+        result: Result<crate::scoped_contracts::DeliveryReceipt, ScopeError>,
+    ) {
+        let error = result.expect_err("text over the cap is refused");
         assert_eq!(error.code, ScopeErrorCode::InvalidRequest, "{}", error.message);
         assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(backend.writes.lock().expect("writes").is_empty(), "a refused answer typed nothing");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_text_at_the_cap_is_typed() {
+        let text = "a".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX);
+        let (backend, result) = answer_claude_question_with("agent-prompt-answer-at-cap", text.clone()).await;
+
+        result.expect("text of exactly the cap is accepted");
+        let writes = backend.writes.lock().expect("writes").clone();
+        assert!(writes.iter().any(|write| write == text.as_bytes()), "the whole text was typed");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_text_over_the_cap_is_refused_and_types_nothing() {
+        let text = "a".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX + 1);
+        let (backend, result) = answer_claude_question_with("agent-prompt-answer-over-cap", text).await;
+
+        assert_refused_untyped(&backend, result);
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_multibyte_text_over_the_byte_cap_is_refused() {
+        // Three bytes a character: over the cap in bytes, well under it in characters.
+        let text = "\u{AC00}".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX / 3 + 1);
+        assert!(text.len() > policy::AGENT_CONTROL_HTTP_BODY_MAX);
+        assert!(text.chars().count() < policy::AGENT_CONTROL_HTTP_BODY_MAX);
+        let (backend, result) = answer_claude_question_with("agent-prompt-answer-multibyte", text).await;
+
+        assert_refused_untyped(&backend, result);
     }
 
     #[test]
