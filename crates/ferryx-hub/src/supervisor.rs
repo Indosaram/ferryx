@@ -3593,6 +3593,7 @@ mod tests;
 
 pub mod admission;
 pub mod dispatcher;
+pub mod memory;
 pub mod receipts;
 pub mod request;
 pub mod wakes;

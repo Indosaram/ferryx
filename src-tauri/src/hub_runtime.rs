@@ -1075,7 +1075,7 @@ pub async fn supervisor_request(
         adapter: caller.adapter(),
         channel_binding_id: None,
         control,
-        memory: ferryx_hub::meta::mhc_supervisor::installed(),
+        memory: ferryx_hub::meta::mhc_supervisor::installed_memory(),
     };
     let answer = request::handle(&pool, &context, envelope).await?;
     let mut payload =
@@ -1117,13 +1117,29 @@ pub async fn supervisor_conversation(
     request::conversation(&pool, &context, project_id, after).await
 }
 
-/// Memory receipts: unavailable until the hub reaches native receipt RPCs (todo 15). The hub
-/// state is still checked first, so a closed hub stays SUPERVISOR_UNAVAILABLE.
+/// The owner's native memory receipts with their provenance, read from the installed mhc
+/// engine. A closed hub is SUPERVISOR_UNAVAILABLE; a daemon without the engine is
+/// MEMORY_UNAVAILABLE, never an empty success.
 pub async fn supervisor_memory(
     state: &RemoteGatewayState,
+    caller: SupervisorCaller,
 ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
-    supervisor_service(state).await?;
-    Err(ferryx_hub::supervisor::request::memory_receipts_unavailable())
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    let (pool, owner, _) = supervisor_service(state).await?;
+    let owner = owner.ok_or_else(|| {
+        RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        )
+    })?;
+    let context = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control: None,
+        memory: ferryx_hub::meta::mhc_supervisor::installed_memory(),
+    };
+    request::memory_receipts(&pool, &context).await
 }
 
 /// The unified supervisor's part of the snapshot: identity, engine health and every goal's
@@ -1876,6 +1892,9 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     });
     if let Some(runtime) = &mhc_supervisor {
         tracing::info!(cwd = %runtime.profile().cwd().display(), "mhc supervisor engine is configured");
+        // Every engine call (decision, convergence, conversation, ingest) is recorded with its
+        // cause and usage in this hub's `supervisor_model_calls`.
+        runtime.set_usage_sink(launch.hub.pool.clone());
         // Slack owner conversations call the typed work tools; admission acts only for the
         // authenticated Slack turn in flight for the calling scope.
         #[cfg(feature = "hub-slack")]

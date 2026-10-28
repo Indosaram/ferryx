@@ -71,6 +71,8 @@ const MAX_WORK_IN_FLIGHT: usize = 8;
 const STOPPED: u64 = u64::MAX;
 const MAX_TURN_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_TURN_EVENTS: usize = 100_000;
+/// Engine calls kept in memory while no usage sink is set.
+const UNRECORDED_KEPT: usize = 256;
 const DIALOG_METHODS: [&str; 6] = [
     "select",
     "confirm",
@@ -437,6 +439,51 @@ fn parse_work_call(data: &Value) -> Result<WorkToolCall, WorkToolRejection> {
     }
 }
 
+/// The owner memory requests the engine serves on a memory-write-enabled session (mhc
+/// `owner_memory.rs`, behind the `memory_receipts` and `memory_forget` capabilities).
+pub const OWNER_MEMORY_REQUESTS: [&str; 3] = ["memory_receipts", "memory_forget", "memory_correct"];
+
+/// Why an owner memory request did not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryRequestError {
+    /// The engine refused it with its own typed code (`receipt_not_found`, `source_conflict`,
+    /// `memory_content_retained`, ...). Nothing more is known; it is not retried.
+    Refused { code: String, message: String },
+    /// The engine could not be reached or broke the contract.
+    Fault(SupervisorFault),
+}
+
+impl std::fmt::Display for MemoryRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused { code, message } => write!(formatter, "{code}: {message}"),
+            Self::Fault(fault) => write!(formatter, "{}: {fault}", fault.code()),
+        }
+    }
+}
+
+/// Native owner memory as the hub's request service uses it: receipt-backed teach, forget,
+/// correct and listing, and owner-ingest of authenticated owner text.
+#[async_trait]
+pub trait OwnerMemory: Send + Sync {
+    /// One owner memory extension request ([`OWNER_MEMORY_REQUESTS`]) on the owner-ingest
+    /// session, the only memory-write-enabled role.
+    async fn memory_request(&self, name: &str, data: Value) -> Result<Value, MemoryRequestError>;
+    /// Authenticated owner-authored text for learning, once per source message.
+    async fn ingest_owner_text(&self, source_message_id: &str, text: &str) -> Result<IngestOutcome, SupervisorFault>;
+}
+
+#[async_trait]
+impl OwnerMemory for MhcSupervisor {
+    async fn memory_request(&self, name: &str, data: Value) -> Result<Value, MemoryRequestError> {
+        self.owner_memory(name, data).await
+    }
+
+    async fn ingest_owner_text(&self, source_message_id: &str, text: &str) -> Result<IngestOutcome, SupervisorFault> {
+        self.ingest_owner(source_message_id, text).await
+    }
+}
+
 /// What an owner ingest did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestOutcome {
@@ -616,6 +663,13 @@ struct TurnCollector {
     text: String,
     error: Option<String>,
     events: usize,
+    /// Usage summed over every assistant message of the turn; unreported counts stay unknown.
+    usage: crate::usage::TokenUsage,
+    /// Provider and model the engine reported answering with (the last assistant message).
+    provider: Option<String>,
+    model: Option<String>,
+    /// The configured policy the answer must come from; `None` is the engine default.
+    expected: Option<(String, String)>,
 }
 
 fn assistant_text(message: &Value) -> String {
@@ -644,6 +698,33 @@ impl TurnCollector {
                 };
                 if message.get("role").and_then(Value::as_str) != Some("assistant") {
                     return Step::More;
+                }
+                if let Some(usage) = message.get("usage") {
+                    self.usage.add_engine_usage(usage);
+                }
+                let text_of = |key: &str| {
+                    message
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                };
+                if let Some(provider) = text_of("provider") {
+                    self.provider = Some(provider);
+                }
+                if let Some(model) = text_of("model") {
+                    self.model = Some(model);
+                }
+                // No silent routing change: an answer from another provider or model than the
+                // configured policy is discarded, whatever made the engine switch.
+                if let (Some((provider, model)), Some(seen_provider), Some(seen_model)) =
+                    (&self.expected, &self.provider, &self.model)
+                {
+                    if seen_provider != provider || seen_model != model {
+                        return Step::Refuse(SupervisorFault::provider(&format!(
+                            "the engine answered with {seen_provider}/{seen_model}, not the configured {provider}/{model}; the turn was discarded"
+                        )));
+                    }
                 }
                 match message.get("stopReason").and_then(Value::as_str) {
                     Some("error" | "aborted") => {
@@ -778,6 +859,10 @@ struct Inner {
     /// `0` unsupervised, [`STOPPED`] after teardown, otherwise the supervising token.
     run_state: AtomicU64,
     next_token: AtomicU64,
+    /// Where every engine call is recorded (`supervisor_model_calls`); set by the hub.
+    usage: RwLock<Option<sqlx::SqlitePool>>,
+    /// Calls the sink did not take (no pool yet, or a failed write), kept for inspection.
+    unrecorded: Mutex<Vec<crate::usage::ModelCall>>,
 }
 
 /// One conversation's scope and the lock serialising its turns.
@@ -857,6 +942,43 @@ impl Inner {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Records one finished engine call. It never delays the turn's caller: the write runs in
+    /// its own task. Without a sink the call is kept in memory (bounded) instead of dropped.
+    fn meter(&self, call: crate::usage::ModelCall) {
+        tracing::info!(
+            role = %call.role,
+            cause = %call.cause.cause,
+            purpose = ?call.cause.purpose,
+            goal = ?call.cause.goal_id,
+            outcome = %call.outcome,
+            input = ?call.usage.input,
+            output = ?call.usage.output,
+            cache_read = ?call.usage.cache_read,
+            "supervisor engine call"
+        );
+        let pool = self
+            .usage
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match pool {
+            Some(pool) => {
+                tokio::spawn(async move {
+                    if let Err(error) = crate::usage::record_call(&pool, &call).await {
+                        tracing::warn!(%error, "a supervisor engine call was not recorded");
+                    }
+                });
+            }
+            None => {
+                let mut kept = self.unrecorded.lock().unwrap_or_else(PoisonError::into_inner);
+                if kept.len() >= UNRECORDED_KEPT {
+                    kept.remove(0);
+                }
+                kept.push(call);
+            }
+        }
     }
 
     fn is_stopped(&self) -> bool {
@@ -1243,12 +1365,21 @@ impl Inner {
     ) -> TurnResult {
         let spec = self.profile.role_spec(&role);
         let (sender, receiver) = oneshot::channel();
+        let cause = crate::usage::current_cause();
         tokio::spawn(async move {
             let mut sender = sender;
             let mut cancel = cancel;
+            let mut call = crate::usage::ModelCall::start(spec.role, &message, cause);
+            let started = std::time::Instant::now();
             let (outcome, after) = self
-                .execute(&spec, &message, &mut cancel, epoch, &mut sender)
+                .execute(&spec, &message, &mut cancel, epoch, &mut sender, &mut call)
                 .await;
+            call.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            call.outcome = match &outcome {
+                Ok(_) => "ok".to_owned(),
+                Err(fault) => fault.code().to_owned(),
+            };
+            self.meter(call);
             match after {
                 None => {
                     drop(lease);
@@ -1271,6 +1402,7 @@ impl Inner {
         cancel: &mut watch::Receiver<u64>,
         epoch: u64,
         caller: &mut oneshot::Sender<TurnResult>,
+        call: &mut crate::usage::ModelCall,
     ) -> (TurnResult, Option<Cleanup>) {
         if spec.cancellable && *cancel.borrow() != epoch {
             return (Err(SupervisorFault::Cancelled), None);
@@ -1355,7 +1487,31 @@ impl Inner {
             );
         }
         let deadline = tokio::time::Instant::now() + self.profile.config.timeouts.turn;
-        let mut collector = TurnCollector::default();
+        // Whatever ends the loop, what the engine reported so far is metered.
+        struct Meter<'a> {
+            call: &'a mut crate::usage::ModelCall,
+            collector: TurnCollector,
+        }
+        impl Drop for Meter<'_> {
+            fn drop(&mut self) {
+                self.call.usage = self.collector.usage;
+                self.call.provider = self.collector.provider.take();
+                self.call.model = self.collector.model.take();
+            }
+        }
+        let mut meter = Meter {
+            call,
+            collector: TurnCollector {
+                expected: self
+                    .profile
+                    .config
+                    .provider
+                    .clone()
+                    .zip(self.profile.config.model.clone()),
+                ..TurnCollector::default()
+            },
+        };
+        let collector = &mut meter.collector;
         loop {
             tokio::select! {
                 () = cancel_signal(cancel, epoch, spec.cancellable) => {
@@ -1617,6 +1773,8 @@ impl MhcSupervisor {
                 queued: AtomicUsize::new(0),
                 run_state: AtomicU64::new(0),
                 next_token: AtomicU64::new(1),
+                usage: RwLock::new(None),
+                unrecorded: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -1687,6 +1845,35 @@ impl MhcSupervisor {
             .current
             .as_ref()
             .map_or(0, |engine| engine.client.malformed_lines())
+    }
+
+    /// Records every engine call in `pool` (`supervisor_model_calls`) from now on, and the calls
+    /// made before a sink existed.
+    pub fn set_usage_sink(&self, pool: sqlx::SqlitePool) {
+        let kept = std::mem::take(
+            &mut *self
+                .inner
+                .unrecorded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        *self
+            .inner
+            .usage
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(pool);
+        for call in kept {
+            self.inner.meter(call);
+        }
+    }
+
+    /// Engine calls made while no usage sink was set (bounded, oldest first).
+    pub fn unrecorded_calls(&self) -> Vec<crate::usage::ModelCall> {
+        self.inner
+            .unrecorded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Installs the supervisor service's work-tool handler (todo 7 provides it).
@@ -1841,6 +2028,59 @@ impl MhcSupervisor {
             tracing::warn!(%error, "an ingested owner message id was not persisted");
         }
         Ok(IngestOutcome::Learned { reply })
+    }
+
+    /// One owner memory extension request on the owner-ingest session: `memory_receipts`
+    /// (teach, get, list), `memory_forget` or `memory_correct`. Serialized with owner ingest, so
+    /// a teach never interleaves with an ingest turn of the same identity. The engine is
+    /// idempotent by the request's `sourceId`; a request whose answer is lost is safe to repeat
+    /// with the same source id. Never sent to a memory-write-denied session.
+    pub async fn owner_memory(&self, name: &str, data: Value) -> Result<Value, MemoryRequestError> {
+        if !OWNER_MEMORY_REQUESTS.contains(&name) {
+            return Err(MemoryRequestError::Fault(SupervisorFault::protocol(&format!(
+                "{name} is not an owner memory request"
+            ))));
+        }
+        let inner = &self.inner;
+        let _order = inner.ingest_order.lock().await;
+        let _session = inner.ingest_session.clone().lock_owned().await;
+        let engine = inner.engine().await.map_err(MemoryRequestError::Fault)?;
+        let spec = inner.profile.role_spec(&SessionRole::OwnerIngest);
+        let open = inner
+            .session(&engine, &spec)
+            .await
+            .map_err(MemoryRequestError::Fault)?;
+        let command = json!({
+            "type": "extension_request",
+            "sessionId": open.handle,
+            "name": name,
+            "data": data,
+        });
+        match engine
+            .client
+            .request(command, inner.profile.config.timeouts.request)
+            .await
+        {
+            Ok(value) => Ok(value),
+            Err(RequestError::Refused {
+                code: Some(code), ..
+            }) if code == "unknown_session" || code == "session_closing" => {
+                engine.forget(&spec.key);
+                Err(MemoryRequestError::Fault(SupervisorFault::session_closed(&code)))
+            }
+            Err(RequestError::Refused {
+                code: Some(code),
+                error,
+                ..
+            }) => Err(MemoryRequestError::Refused {
+                code,
+                message: redact(&error),
+            }),
+            Err(error) => Err(MemoryRequestError::Fault(request_fault(
+                "extension_request",
+                error,
+            ))),
+        }
     }
 
     /// Owner cancellation: every running or queued decision ends as
@@ -2020,6 +2260,11 @@ pub fn install_with(make: impl FnOnce() -> MhcSupervisor) -> MhcSupervisor {
 
 pub fn installed() -> Option<MhcSupervisor> {
     INSTALLED.get().cloned()
+}
+
+/// The installed supervisor as the request service's native owner memory.
+pub fn installed_memory() -> Option<Arc<dyn OwnerMemory>> {
+    installed().map(|supervisor| Arc::new(supervisor) as Arc<dyn OwnerMemory>)
 }
 
 /// [`MhcSupervisor::engine_snapshot`] of the engine installed in this process, or

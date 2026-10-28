@@ -145,6 +145,264 @@ pub async fn yesterday(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Report> 
     Ok(report)
 }
 
+/// Separates a supervisor prompt's stable instruction prefix from its per-call delta payload.
+/// Everything before the marker is identical across goals and calls of one purpose (so the
+/// provider can reuse its cached prefix); everything after it is this call's data.
+pub const DELTA_MARKER: &str = "\n<ferryx-delta>\n";
+
+/// Splits `prompt` at [`DELTA_MARKER`]: `(prefix, delta)`. `None` when the prompt has none.
+pub fn split_prompt(prompt: &str) -> Option<(&str, &str)> {
+    prompt
+        .split_once(DELTA_MARKER)
+}
+
+/// `prefix + DELTA_MARKER + delta`.
+pub fn with_delta(prefix: &str, delta: &str) -> String {
+    format!("{prefix}{DELTA_MARKER}{delta}")
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Why a supervisor engine call happens. Set by the caller around the call with [`with_cause`]
+/// (a wake turn, a goal pass, a conversation, an owner ingest); a call nobody attributed is
+/// recorded as `unattributed`, never dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallCause {
+    pub cause: String,
+    pub purpose: Option<String>,
+    pub goal_id: Option<String>,
+    pub goal_revision: Option<i64>,
+    pub wake_turn_id: Option<i64>,
+    /// Event ids merged into this call (a wake batch), or the owner source id.
+    pub merged_event_ids: Vec<String>,
+}
+
+impl CallCause {
+    pub fn new(cause: impl Into<String>) -> Self {
+        Self {
+            cause: cause.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn goal(mut self, goal_id: &str, revision: Option<i64>) -> Self {
+        self.goal_id = Some(goal_id.to_owned());
+        self.goal_revision = revision;
+        self
+    }
+
+    pub fn events(mut self, ids: impl IntoIterator<Item = String>) -> Self {
+        self.merged_event_ids = ids.into_iter().collect();
+        self
+    }
+}
+
+tokio::task_local! {
+    static CALL_CAUSE: CallCause;
+}
+
+/// Runs `future` with `cause` as the attribution of every supervisor engine call it makes.
+pub async fn with_cause<F: std::future::Future>(cause: CallCause, future: F) -> F::Output {
+    CALL_CAUSE.scope(cause, future).await
+}
+
+/// Runs `future` under the current cause (or `unattributed`) with `purpose` set.
+pub async fn with_purpose<F: std::future::Future>(purpose: &str, future: F) -> F::Output {
+    let mut cause = current_cause().unwrap_or_else(|| CallCause::new(UNATTRIBUTED));
+    cause.purpose = Some(purpose.to_owned());
+    CALL_CAUSE.scope(cause, future).await
+}
+
+/// The cause of the calling task, if one was set.
+pub fn current_cause() -> Option<CallCause> {
+    CALL_CAUSE.try_with(Clone::clone).ok()
+}
+
+/// Cause of a call no caller attributed.
+pub const UNATTRIBUTED: &str = "unattributed";
+
+/// Token counts of one call. `None` is unknown: the provider did not report it (the engine
+/// reports an unreported count as zero, so a zero is unknown too). Never summed as zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+impl TokenUsage {
+    /// Adds one engine `usage` object (`input`, `output`, `cacheRead`, `cacheWrite`); a
+    /// missing or zero field leaves the count as it was.
+    pub fn add_engine_usage(&mut self, usage: &serde_json::Value) {
+        let add = |slot: &mut Option<u64>, key: &str| {
+            if let Some(value) = usage.get(key).and_then(serde_json::Value::as_u64) {
+                if value > 0 {
+                    *slot = Some(slot.unwrap_or(0).saturating_add(value));
+                }
+            }
+        };
+        add(&mut self.input, "input");
+        add(&mut self.output, "output");
+        add(&mut self.cache_read, "cacheRead");
+        add(&mut self.cache_write, "cacheWrite");
+    }
+}
+
+/// One supervisor engine call as recorded in `supervisor_model_calls`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCall {
+    pub cause: CallCause,
+    pub role: String,
+    pub prompt_bytes: usize,
+    pub prefix_sha256: Option<String>,
+    pub prefix_bytes: Option<usize>,
+    pub delta_bytes: Option<usize>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub usage: TokenUsage,
+    /// `ok` or the typed fault code.
+    pub outcome: String,
+    pub ms: u64,
+}
+
+impl ModelCall {
+    /// A call of `role` with `prompt`, attributed to the calling task's cause.
+    pub fn start(role: &str, prompt: &str, cause: Option<CallCause>) -> Self {
+        let split = split_prompt(prompt);
+        Self {
+            cause: cause.unwrap_or_else(|| CallCause::new(UNATTRIBUTED)),
+            role: role.to_owned(),
+            prompt_bytes: prompt.len(),
+            prefix_sha256: split.map(|(prefix, _)| sha256_hex(prefix)),
+            prefix_bytes: split.map(|(prefix, _)| prefix.len()),
+            delta_bytes: split.map(|(_, delta)| delta.len()),
+            provider: None,
+            model: None,
+            usage: TokenUsage::default(),
+            outcome: String::new(),
+            ms: 0,
+        }
+    }
+}
+
+fn to_i64(value: Option<u64>) -> Option<i64> {
+    value.map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+/// Persists one supervisor engine call.
+pub async fn record_call(pool: &SqlitePool, call: &ModelCall) -> Result<()> {
+    let merged = serde_json::to_string(&call.cause.merged_event_ids)
+        .map_err(|error| HubError::message(error.to_string()))?;
+    let size = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+    sqlx::query(
+        "INSERT INTO supervisor_model_calls(cause, purpose, role, goal_id, goal_revision,
+            wake_turn_id, merged_event_ids, prefix_sha256, prefix_bytes, delta_bytes, prompt_bytes,
+            provider, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+            outcome, ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&call.cause.cause)
+    .bind(&call.cause.purpose)
+    .bind(&call.role)
+    .bind(&call.cause.goal_id)
+    .bind(call.cause.goal_revision)
+    .bind(call.cause.wake_turn_id)
+    .bind(merged)
+    .bind(&call.prefix_sha256)
+    .bind(call.prefix_bytes.map(size))
+    .bind(call.delta_bytes.map(size))
+    .bind(size(call.prompt_bytes))
+    .bind(&call.provider)
+    .bind(&call.model)
+    .bind(to_i64(call.usage.input))
+    .bind(to_i64(call.usage.output))
+    .bind(to_i64(call.usage.cache_read))
+    .bind(to_i64(call.usage.cache_write))
+    .bind(&call.outcome)
+    .bind(i64::try_from(call.ms).unwrap_or(i64::MAX))
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Supervisor engine calls in `[since, until)`, newest last, each with its cause, prefix hash
+/// and usage. Unknown counts are `null`; the totals count only known values and say how many
+/// calls left each unknown.
+pub async fn supervisor_calls(
+    pool: &SqlitePool,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Result<serde_json::Value> {
+    use sqlx::Row as _;
+    let rows = sqlx::query(
+        "SELECT id, cause, purpose, role, goal_id, goal_revision, wake_turn_id, merged_event_ids,
+                prefix_sha256, prefix_bytes, delta_bytes, prompt_bytes, provider, model,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, outcome, ms,
+                created_at
+           FROM supervisor_model_calls
+          WHERE julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?)
+          ORDER BY id",
+    )
+    .bind(since.to_rfc3339())
+    .bind(until.to_rfc3339())
+    .fetch_all(pool)
+    .await?;
+    let mut known = [0i64; 4];
+    let mut unknown = [0i64; 4];
+    let mut calls = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let tokens: [Option<i64>; 4] = [
+            row.try_get(14)?,
+            row.try_get(15)?,
+            row.try_get(16)?,
+            row.try_get(17)?,
+        ];
+        for (index, value) in tokens.into_iter().enumerate() {
+            match value {
+                Some(value) => known[index] += value,
+                None => unknown[index] += 1,
+            }
+        }
+        let merged: String = row.try_get(7)?;
+        calls.push(serde_json::json!({
+            "id": row.try_get::<i64, _>(0)?,
+            "cause": row.try_get::<String, _>(1)?,
+            "purpose": row.try_get::<Option<String>, _>(2)?,
+            "role": row.try_get::<String, _>(3)?,
+            "goalId": row.try_get::<Option<String>, _>(4)?,
+            "goalRevision": row.try_get::<Option<i64>, _>(5)?,
+            "wakeTurnId": row.try_get::<Option<i64>, _>(6)?,
+            "mergedEventIds": serde_json::from_str::<serde_json::Value>(&merged).unwrap_or(serde_json::Value::Null),
+            "prefixSha256": row.try_get::<Option<String>, _>(8)?,
+            "prefixBytes": row.try_get::<Option<i64>, _>(9)?,
+            "deltaBytes": row.try_get::<Option<i64>, _>(10)?,
+            "promptBytes": row.try_get::<i64, _>(11)?,
+            "provider": row.try_get::<Option<String>, _>(12)?,
+            "model": row.try_get::<Option<String>, _>(13)?,
+            "usage": {"input": tokens[0], "output": tokens[1], "cacheRead": tokens[2], "cacheWrite": tokens[3]},
+            "outcome": row.try_get::<String, _>(18)?,
+            "ms": row.try_get::<i64, _>(19)?,
+            "createdAt": row.try_get::<String, _>(20)?,
+        }));
+    }
+    let field = |index: usize| serde_json::json!({"known": known[index], "callsUnknown": unknown[index]});
+    Ok(serde_json::json!({
+        "calls": calls,
+        "totals": {"input": field(0), "output": field(1), "cacheRead": field(2), "cacheWrite": field(3)},
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

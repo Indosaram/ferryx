@@ -406,7 +406,7 @@ async fn memory_without_an_engine_and_a_closed_hub_are_503() {
     populate(&gateway).await;
     let (status, _, body) = gateway.get("/api/v1/supervisor/memory", &token).await;
     assert_eq!(status, 503, "{body}");
-    assert_eq!(body["error"]["code"], "MEMORY_RECEIPTS_UNAVAILABLE");
+    assert_eq!(body["error"]["code"], "MEMORY_UNAVAILABLE");
     let teach =
         r#"{"requestId":"qa-teach","action":"teach","payload":{"text":"use the QA remote host"}}"#;
     let (status, _, body) = gateway

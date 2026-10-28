@@ -677,16 +677,24 @@ pub async fn try_handle(
         prepared,
         briefings.as_ref().map(|briefings| briefings.text.as_str()),
     );
+    // Only the owner's own words, without task-only lines, with their provenance; a source
+    // already ingested (a backfill replay) is not sent again.
     let learn = async {
         if owner_text.is_empty() {
             return;
         }
-        if let Err(error) = conversation
-            .ingest_owner(&format!("slack:{}", routed.source_message_id), &owner_text)
-            .await
-        {
-            tracing::warn!(%error, "owner message was not ingested");
-        }
+        crate::supervisor::memory::ingest_with(
+            pool,
+            &routed.principal,
+            ChannelProvider::Slack,
+            &routed.source_message_id,
+            routed.project_id.as_deref(),
+            &owner_text,
+            |source, text| async move {
+                conversation.ingest_owner(&source, &text).await.map(|()| false)
+            },
+        )
+        .await;
     };
     let status_message = super::slack_turn::TurnStatus::start(
         config,

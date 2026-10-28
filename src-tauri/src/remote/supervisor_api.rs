@@ -177,16 +177,20 @@ pub(crate) async fn http_conversation(
     }
 }
 
-/// `GET /api/v1/supervisor/memory`: memory receipts. Until the hub reaches native receipt RPCs
-/// (todo 15) this is 503 `MEMORY_RECEIPTS_UNAVAILABLE`, never an empty success.
+/// `GET /api/v1/supervisor/memory`: the owner's native memory receipts with their provenance.
+/// Without the engine in this daemon it is 503 `MEMORY_UNAVAILABLE`, never an empty success.
 pub(crate) async fn http_memory(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = agent_control_service::http_device(&state, &headers, false) {
-        return response;
-    }
-    match crate::hub_runtime::supervisor_memory(&state).await {
+    let device = match agent_control_service::http_device(&state, &headers, false) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let caller = crate::hub_runtime::SupervisorCaller::Remote {
+        device_id: device.id.clone(),
+    };
+    match crate::hub_runtime::supervisor_memory(&state, caller).await {
         Ok(value) => no_store(value),
         Err(failure) => service_refusal(&failure),
     }

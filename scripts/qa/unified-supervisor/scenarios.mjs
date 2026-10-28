@@ -1066,7 +1066,8 @@ async function runAuthority(ctx) {
   const stale = await http('owner-pause-stale', 'POST', '/api/v1/supervisor/request', { token: owner.token, body: { ...pause, requestId: `${pause.requestId}-again` } });
   ctx.assert('stale-revision-409', stale.status === 409 && stale.body?.error?.code === 'REVISION_CONFLICT', { status: stale.status, body: stale.body });
   const receipts = await http('owner-memory-receipts', 'GET', '/api/v1/supervisor/memory', { token: owner.token });
-  ctx.assert('memory-receipts-unavailable-503', receipts.status === 503 && receipts.body?.error?.code === 'MEMORY_RECEIPTS_UNAVAILABLE', { status: receipts.status, body: receipts.body });
+  // No mhc engine runs in this daemon: the native receipt listing is unavailable, never empty.
+  ctx.assert('memory-receipts-unavailable-503', receipts.status === 503 && receipts.body?.error?.code === 'MEMORY_UNAVAILABLE', { status: receipts.status, body: receipts.body });
   const final = { goal: goalRow(), dispatches: dispatchRows() };
   ctx.assert('only-the-owner-changed-the-goal', final.goal?.run_state === 'paused' && final.goal?.revision === revision + 1
     && final.dispatches.every((row) => row.state === 'ready' || row.state === 'superseded'), final);
@@ -1673,7 +1674,7 @@ export const SCENARIOS = Object.freeze({
   authority: Object.freeze({
     implemented: true,
     task: '13',
-    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
+    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503 without an engine',
     deadlineMs: 5 * 60_000,
     requiredAssertions: ['hub-open-before-the-owner-submit', 'owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
       'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-mcp-submit-forbidden', 'pane-mcp-opens-the-isolated-hub-db', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
