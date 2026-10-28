@@ -696,3 +696,52 @@ async fn the_snapshot_names_the_owner_projects_and_each_goal_budget_and_grant() 
     assert_eq!(goal["grant"], json!([]));
     assert_eq!(goal["revision"], 1);
 }
+
+/// Drains every announcement so far and says whether `goal_id` was among them. The channel is
+/// process-wide, so other tests' goals appear too and are skipped.
+fn announced(changes: &mut tokio::sync::broadcast::Receiver<String>, goal_id: &str) -> bool {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut seen = false;
+    loop {
+        match changes.try_recv() {
+            Ok(id) => seen |= id == goal_id,
+            Err(TryRecvError::Empty) => return seen,
+            Err(TryRecvError::Lagged(missed)) => panic!("change channel lagged by {missed}"),
+            Err(TryRecvError::Closed) => panic!("change channel closed"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_autonomous_goal_write_announces_the_goal_after_commit() {
+    let fixture = fixture().await;
+    let mut changes = crate::supervisor::changes::subscribe();
+    let goal_id = admit(&fixture, "n1").await;
+    assert!(announced(&mut changes, &goal_id), "admission");
+    let request_id: String = sqlx::query_scalar(
+        "SELECT request_id FROM supervisor_dispatches WHERE goal_id = ? AND state = 'ready'",
+    )
+    .bind(&goal_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    attach_session(&fixture.pool, &goal_id, 1, "pane-1").await.unwrap();
+    let _ = announced(&mut changes, &goal_id);
+    claim_dispatch(&fixture.pool, &request_id, 1, 1).await.unwrap();
+    assert!(announced(&mut changes, &goal_id), "claim");
+    confirm_claim_before_transmit(&fixture.pool, &request_id).await.unwrap();
+    record_receipt(&fixture.pool, &request_id, 1, &Receipt::Accepted).await.unwrap();
+    assert!(announced(&mut changes, &goal_id), "accepted receipt");
+    let started = Receipt::Started { run_id: "run-1".into(), provider_session_id: "pane-1".into() };
+    record_receipt(&fixture.pool, &request_id, 1, &started).await.unwrap();
+    assert!(announced(&mut changes, &goal_id), "started receipt");
+    transition_goal(&fixture.pool, &goal_id, 1, RunState::Dispatching, RunState::Running, None)
+        .await
+        .unwrap();
+    assert!(announced(&mut changes, &goal_id), "transition");
+    // A refused write commits nothing and announces nothing.
+    transition_goal(&fixture.pool, &goal_id, 1, RunState::Ready, RunState::Paused, None)
+        .await
+        .unwrap_err();
+    assert!(!announced(&mut changes, &goal_id), "refused transition");
+}

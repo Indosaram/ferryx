@@ -1156,6 +1156,7 @@ impl WakeScheduler {
         if goal.run_state.is_terminal() {
             let ids: Vec<i64> = rest.iter().map(|wake| wake.id).collect();
             settle_wakes(&self.pool, None, &ids, now).await?;
+            super::changes::announce(&goal.goal_id);
             report.closed += ids.len();
             return Ok(());
         }
@@ -1311,6 +1312,7 @@ impl WakeScheduler {
             };
             if score < JUDGE_THRESHOLD {
                 settle_wakes(&self.pool, Some((turn_id, "skipped")), &ids, now).await?;
+                super::changes::announce(&goal.goal_id);
                 report.skipped.push(turn_id);
                 return Ok(true);
             }
@@ -1327,6 +1329,7 @@ impl WakeScheduler {
         let consumed = match self.handler.handle(&turn).await {
             WakeAck::Done => {
                 settle_wakes(&self.pool, Some((turn_id, "delivered")), &ids, now).await?;
+                super::changes::announce(&goal.goal_id);
                 report.delivered.push(turn_id);
                 true
             }
