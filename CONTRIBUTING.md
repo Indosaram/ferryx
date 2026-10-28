@@ -17,7 +17,7 @@ Ferryx is source-available under the license in [`LICENSE`](LICENSE). It is not 
 - [Bun](https://bun.sh/) 1.1+
 - [Rust](https://www.rust-lang.org/) stable (at least 1.82)
 - [Node.js](https://nodejs.org/) 20+
-- [Zig](https://ziglang.org/download/) 0.16.0 (required for the pinned Ghostty build)
+- [Zig](https://ziglang.org/download/) 0.17.0 (required for the pinned Ghostty build)
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by

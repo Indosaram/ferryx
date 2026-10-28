@@ -100,11 +100,12 @@ unsafe extern "C" fn on_device_attributes(_t: Terminal, _ud: *mut c_void, out: *
     true
 }
 
-unsafe extern "C" fn on_clipboard_write(_t: Terminal, ud: *mut c_void, w: *const ClipboardWrite) -> c_int {
+unsafe extern "C" fn on_clipboard_write(_t: Terminal, ud: *mut c_void, w: *const ClipboardWrite) {
     if ud.is_null() || w.is_null() {
-        return CLIPBOARD_WRITE_SUCCESS;
+        return;
     }
-    let w = unsafe { &*w };
+    let write = w;
+    let w = unsafe { &*write };
     let target = match w.location {
         CLIPBOARD_SELECTION | CLIPBOARD_PRIMARY => ClipboardTarget::Primary,
         _ => ClipboardTarget::Clipboard,
@@ -115,10 +116,22 @@ unsafe extern "C" fn on_clipboard_write(_t: Terminal, ud: *mut c_void, w: *const
         .find(|c| c.mime.bytes().starts_with(b"text/plain"))
         .or(contents.first())
         .and_then(|c| std::str::from_utf8(c.data.bytes()).ok());
+    let queued = text.is_some();
     if let Some(text) = text {
         unsafe { &mut *(ud as *mut Sink) }.effects.push(Effect::Ui(UiEventKind::ClipboardWrite { target, text: text.to_owned() }));
     }
-    CLIPBOARD_WRITE_SUCCESS
+    let reply_end = std::mem::offset_of!(ClipboardWrite, reply) + std::mem::size_of::<Option<ClipboardWriteReplyFn>>();
+    if w.size < reply_end {
+        return;
+    }
+    if let Some(reply_fn) = w.reply {
+        let reply = ClipboardWriteReply {
+            size: std::mem::size_of::<ClipboardWriteReply>(),
+            result: if queued { CLIPBOARD_WRITE_SUCCESS } else { CLIPBOARD_WRITE_UNSUPPORTED },
+            remember: false,
+        };
+        unsafe { reply_fn(write, &reply) };
+    }
 }
 
 unsafe extern "C" fn on_notification(_t: Terminal, ud: *mut c_void, n: *const DesktopNotification) {

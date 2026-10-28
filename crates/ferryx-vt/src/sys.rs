@@ -200,7 +200,21 @@ pub struct ClipboardWrite {
     pub location: c_int,
     pub contents: *const ClipboardContent,
     pub contents_len: usize,
+    pub name: GString,
+    pub granted: bool,
+    pub can_remember: bool,
+    pub ctx: *const c_void,
+    pub reply: Option<ClipboardWriteReplyFn>,
 }
+
+#[repr(C)]
+pub struct ClipboardWriteReply {
+    pub size: usize,
+    pub result: c_int,
+    pub remember: bool,
+}
+
+pub type ClipboardWriteReplyFn = unsafe extern "C" fn(*const ClipboardWrite, *const ClipboardWriteReply);
 
 #[repr(C)]
 pub struct DesktopNotification {
@@ -213,12 +227,13 @@ pub const CLIPBOARD_STANDARD: c_int = 0;
 pub const CLIPBOARD_SELECTION: c_int = 1;
 pub const CLIPBOARD_PRIMARY: c_int = 2;
 pub const CLIPBOARD_WRITE_SUCCESS: c_int = 0;
+pub const CLIPBOARD_WRITE_UNSUPPORTED: c_int = 2;
 
 pub type WritePtyFn = unsafe extern "C" fn(Terminal, *mut c_void, *const u8, usize);
 pub type BellFn = unsafe extern "C" fn(Terminal, *mut c_void);
 pub type SizeFn = unsafe extern "C" fn(Terminal, *mut c_void, *mut SizeReport) -> bool;
 pub type DeviceAttributesFn = unsafe extern "C" fn(Terminal, *mut c_void, *mut DeviceAttributes) -> bool;
-pub type ClipboardWriteFn = unsafe extern "C" fn(Terminal, *mut c_void, *const ClipboardWrite) -> c_int;
+pub type ClipboardWriteFn = unsafe extern "C" fn(Terminal, *mut c_void, *const ClipboardWrite);
 pub type NotificationFn = unsafe extern "C" fn(Terminal, *mut c_void, *const DesktopNotification);
 
 pub const OPT_USERDATA: c_int = 0;
@@ -291,3 +306,16 @@ extern "C" {
     pub fn ghostty_render_state_update(state: RenderState, terminal: Terminal) -> GhosttyResult;
     pub fn ghostty_render_state_get(state: RenderState, data: c_int, out: *mut c_void) -> GhosttyResult;
 }
+
+// Layout guards: sizes of the v1.4 `terminal.h` clipboard structs on 64-bit
+// targets (c_int = 4, size_t/pointers = 8). A drift here breaks the C ABI.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    // mime GhosttyString(16) + data GhosttyString(16)
+    assert!(std::mem::size_of::<ClipboardContent>() == 32);
+    // size(8) + location(4) + pad(4) + contents(8) + contents_len(8) + name(16)
+    // + granted(1) + can_remember(1) + pad(6) + ctx(8) + reply fn ptr(8)
+    assert!(std::mem::size_of::<ClipboardWrite>() == 72);
+    // size(8) + result(4) + remember(1) + tail pad(3)
+    assert!(std::mem::size_of::<ClipboardWriteReply>() == 16);
+};

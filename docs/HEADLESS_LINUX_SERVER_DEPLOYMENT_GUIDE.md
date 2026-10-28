@@ -84,7 +84,7 @@ sudo apt-get install -y --no-install-recommends \
 For toolchains, install:
 * **Rust:** Stable toolchain (`rustc`, `cargo`).
 * **Bun:** Latest stable release (`oven-sh/setup-bun` or official installer).
-* **Zig:** Version `0.16.0` (`src-tauri/native_terminal/build_ghostty.rs:7`, `REQUIRED_ZIG_VERSION`), required to compile the vendored `native-terminal` Ghostty VT component.
+* **Zig:** Version `0.17.0` (`src-tauri/native_terminal/build_ghostty.rs:7`, `REQUIRED_ZIG_VERSION`), required to compile the vendored `native-terminal` Ghostty VT component.
 
 ---
 

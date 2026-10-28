@@ -279,7 +279,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
     };
@@ -312,7 +312,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
       return {
         exitCode: 0,
-        toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
+        toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.17.0", rust: "1.92.0" },
       };
     };
 
@@ -380,7 +380,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
     };
@@ -413,7 +413,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
       return {
         exitCode: 0,
-        toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
+        toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.17.0", rust: "1.92.0" },
       };
     };
 
@@ -455,7 +455,7 @@ test("createBuildReceipt: creates valid receipt conforming to release contract",
     msixVersion: "2026.908.1.0",
     channels: { store: true, nsisMigration: false },
     requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
     sourceDateEpoch: 1788868800,
     createdAt: "2026-09-08T12:00:00.000Z",
   };
@@ -489,7 +489,7 @@ test("createBuildReceipt: creates valid receipt conforming to release contract",
     toolchains: {
       node: "22.22.3",
       bun: "1.4.0",
-      zig: "0.16.0",
+      zig: "0.17.0",
       rust: "1.92.0",
       tauri: "2.10.1",
     },
@@ -552,7 +552,7 @@ test("buildHost: fails closed when a custom runner returns no result", async () 
       appVersion: "2026.908.1", msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800, createdAt: "2026-09-08T12:00:00.000Z",
     }));
     const config = { repository: tmp, ghosttyRepository: tmp, hosts: {
@@ -608,7 +608,7 @@ test("buildHost: fails closed if workspace already exists on host", async () => 
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
     };
@@ -667,7 +667,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
     };
@@ -706,7 +706,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
         toolchains: {
           node: "22.22.3",
           bun: "1.4.0",
-          zig: "0.16.0",
+          zig: "0.17.0",
           rust: "1.92.0",
           tauri: "2.10.1",
         },
@@ -803,7 +803,7 @@ fi
     chmodSync(join(binDir, "bun"), 0o755);
 
     // Mock zig
-    writeFileSync(join(binDir, "zig"), "#!/usr/bin/env bash\necho '0.16.0'\n");
+    writeFileSync(join(binDir, "zig"), "#!/usr/bin/env bash\necho '0.17.0'\n");
     chmodSync(join(binDir, "zig"), 0o755);
 
     // Mock rustc

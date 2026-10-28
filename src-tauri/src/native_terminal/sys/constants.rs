@@ -160,6 +160,12 @@ pub const GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_SCREEN: c_int = 5;
 pub const GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS: c_int = 6;
 pub const GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_REMAINING: c_int = 7;
 pub const GHOSTTY_SNAPSHOT_DECODER_DATA_RETAIN_CONTINUATION: c_int = 8;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_KIND: c_int = 11;
+pub const GHOSTTY_SNAPSHOT_DECODER_DATA_KITTY_IMAGES_PRIMARY: c_int = 15;
+
+// GhosttySnapshotDecoderProgressKind constants matching `ghostty/vt/snapshot.h`.
+pub const GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_PAGE: c_int = 0;
+pub const GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_IMAGE: c_int = 1;
 
 // GhosttyTerminal continuation options matching `ghostty/vt/terminal.h`.
 pub const GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES: c_int = 31;

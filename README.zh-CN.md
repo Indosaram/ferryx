@@ -164,7 +164,7 @@ Ferryx 原生 Ghostty 和 Rust 组件的架构清单。这不是与基于 Electr
 - [Bun](https://bun.sh/) 1.1+
 - [Rust](https://www.rust-lang.org/) stable（至少 1.82）
 - [Node.js](https://nodejs.org/) 20+
-- [Zig](https://ziglang.org/download/) 0.16.0（构建固定版本的 Ghostty 时需要）
+- [Zig](https://ziglang.org/download/) 0.17.0（构建固定版本的 Ghostty 时需要）
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
 在 Linux 上，编译桌面或 CLI 二进制文件之前，请安装

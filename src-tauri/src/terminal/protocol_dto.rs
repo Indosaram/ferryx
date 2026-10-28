@@ -5,7 +5,7 @@ use thiserror::Error;
 
 pub const GHOSTTY_SNAPSHOT_MAGIC: &[u8; 8] = b"GHOSTSNP";
 pub const GHOSTTY_SNAPSHOT_FORMAT_VERSION: u16 = 1;
-pub const GHOSTTY_CLEAN_REVISION: &str = "6a508fd5e34c7e222c052a6d00bb3891ff3feace";
+pub const GHOSTTY_CLEAN_REVISION: &str = "83fb95624b0439ee660c2679b43b38c8b63769cd";
 pub const ENGINE_IDENTIFIER: &str = "ghostty-vt";
 pub const MAX_SNAPSHOT_CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_COMPRESSED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;

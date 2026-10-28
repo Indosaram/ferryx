@@ -6,14 +6,18 @@ use super::error::NativeTerminalError;
 use super::sys::constants::{
     GHOSTTY_NO_VALUE, GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_ALTERNATE,
     GHOSTTY_SNAPSHOT_DECODER_DATA_HISTORY_ROWS_PRIMARY,
+    GHOSTTY_SNAPSHOT_DECODER_DATA_KITTY_IMAGES_PRIMARY,
     GHOSTTY_SNAPSHOT_DECODER_DATA_MAX_CONTINUATION_BYTES,
+    GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_KIND,
     GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_REMAINING,
     GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_ROWS,
     GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_SCREEN,
     GHOSTTY_SNAPSHOT_DECODER_DATA_RETAIN_CONTINUATION,
     GHOSTTY_SNAPSHOT_DECODER_DATA_SOURCE_OFFSET,
     GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_CONTINUATION_BYTES,
-    GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION, GHOSTTY_SNAPSHOT_MAGIC,
+    GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION,
+    GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_IMAGE, GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_PAGE,
+    GHOSTTY_SNAPSHOT_MAGIC,
     GHOSTTY_SNAPSHOT_VERSION_1, GHOSTTY_SUCCESS,
     GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES,
     GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES,
@@ -25,6 +29,10 @@ use super::sys::ffi::{
     ghostty_snapshot_decoder_set, ghostty_snapshot_encode,
     ghostty_snapshot_encode_buf, ghostty_terminal_free, ghostty_terminal_get,
     ghostty_terminal_new, ghostty_terminal_set, ghostty_terminal_vt_write,
+};
+use super::sys::kitty::{
+    ghostty_kitty_graphics_image, ghostty_kitty_graphics_image_get, Graphics, GRAPHICS,
+    IMAGE_DATA, IMAGE_LEN,
 };
 use super::sys::types::{
     GhosttySnapshotDecoder, GhosttySnapshotDecoderImpl, GhosttyTerminal,
@@ -45,7 +53,16 @@ pub const DEFAULT_MAX_SCROLLBACK_ROWS: u64 = 1_000_000;
 pub const DEFAULT_MAX_SCROLLBACK_BYTES: u64 = 256 * 1024 * 1024;
 
 pub const KITTY_VIRTUAL_PLACEHOLDER_CODEPOINT: u32 = 0x10EEEE;
-pub const KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED: bool = false;
+pub const KITTY_GRAPHICS_IN_SNAPSHOT_SUPPORTED: bool = true;
+
+/// What the most recent successful `IncrementalSnapshotDecoder::next_page` call decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotProgressKind {
+    /// One history page (with the Kitty placements pinned to it).
+    Page,
+    /// The pixels of one Kitty graphics image or animation frame.
+    Image,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotCodecOptions {
@@ -462,6 +479,54 @@ impl DecodedTerminal {
             ghostty_terminal_vt_write(self.handle.as_ptr(), data.as_ptr(), data.len());
         }
     }
+
+    /// Copies the pixels of the Kitty image `id` on the active screen.
+    ///
+    /// Returns `None` when Kitty graphics are unavailable, the image does not
+    /// exist, or its pixels are still pending from an incremental decode.
+    pub fn kitty_image_pixels(&self, id: u32) -> Result<Option<Vec<u8>>, NativeTerminalError> {
+        let mut graphics: Graphics = std::ptr::null_mut();
+        // SAFETY: GRAPHICS writes a borrowed graphics handle that lives as long as
+        // this terminal is not mutated; it never escapes this call.
+        let res = unsafe {
+            ghostty_terminal_get(
+                self.handle.as_ptr(),
+                GRAPHICS,
+                (&mut graphics as *mut Graphics).cast(),
+            )
+        };
+        if res == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
+        NativeTerminalError::from_c_result(res, "ghostty_terminal_get(DATA_KITTY_GRAPHICS)")?;
+        let image = unsafe { ghostty_kitty_graphics_image(graphics, id) };
+        if image.is_null() {
+            return Ok(None);
+        }
+        let mut ptr: *const u8 = std::ptr::null();
+        let res = unsafe {
+            ghostty_kitty_graphics_image_get(image, IMAGE_DATA, (&mut ptr as *mut *const u8).cast())
+        };
+        if res == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
+        NativeTerminalError::from_c_result(res, "ghostty_kitty_graphics_image_get(DATA_PTR)")?;
+        let mut len: usize = 0;
+        NativeTerminalError::from_c_result(
+            unsafe {
+                ghostty_kitty_graphics_image_get(image, IMAGE_LEN, (&mut len as *mut usize).cast())
+            },
+            "ghostty_kitty_graphics_image_get(DATA_LEN)",
+        )?;
+        if ptr.is_null() {
+            return Err(NativeTerminalError::InvalidValue(
+                "Kitty image reported pixels through a null pointer".to_string(),
+            ));
+        }
+        // SAFETY: Non-null library-owned buffer of exactly `len` bytes, copied
+        // before any further terminal call.
+        Ok(Some(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()))
+    }
 }
 
 impl Drop for DecodedTerminal {
@@ -648,7 +713,42 @@ impl<'a> IncrementalSnapshotDecoder<'a> {
         Ok(Some(rows))
     }
 
-    pub fn progress_rows(&self) -> Result<usize, NativeTerminalError> {
+    /// Number of Kitty images restored for the primary screen at READY.
+    pub fn kitty_images_primary(&self) -> Result<u32, NativeTerminalError> {
+        let dec_ptr = self.decoder.expect("decoder present").as_ptr();
+        let mut count: u32 = 0;
+        let res = unsafe {
+            ghostty_snapshot_decoder_get(
+                dec_ptr,
+                GHOSTTY_SNAPSHOT_DECODER_DATA_KITTY_IMAGES_PRIMARY,
+                (&mut count as *mut u32).cast(),
+            )
+        };
+        NativeTerminalError::from_c_result(res, "ghostty_snapshot_decoder_get(DATA_KITTY_IMAGES_PRIMARY)")?;
+        Ok(count)
+    }
+
+    /// Kind of record the most recent successful `next_page` call decoded.
+    pub fn progress_kind(&self) -> Result<SnapshotProgressKind, NativeTerminalError> {
+        let dec_ptr = self.decoder.expect("decoder present").as_ptr();
+        let mut kind: std::ffi::c_int = -1;
+        let res = unsafe {
+            ghostty_snapshot_decoder_get(
+                dec_ptr,
+                GHOSTTY_SNAPSHOT_DECODER_DATA_PROGRESS_KIND,
+                (&mut kind as *mut std::ffi::c_int).cast(),
+            )
+        };
+        NativeTerminalError::from_c_result(res, "ghostty_snapshot_decoder_get(DATA_PROGRESS_KIND)")?;
+        match kind {
+            GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_PAGE => Ok(SnapshotProgressKind::Page),
+            GHOSTTY_SNAPSHOT_DECODER_PROGRESS_KIND_IMAGE => Ok(SnapshotProgressKind::Image),
+            other => Err(NativeTerminalError::ForeignErrorCode(other)),
+        }
+    }
+
+    /// Rows prepended by the last decoded history page; `None` for image records.
+    pub fn progress_rows(&self) -> Result<Option<usize>, NativeTerminalError> {
         let dec_ptr = self.decoder.expect("decoder present").as_ptr();
         let mut rows: usize = 0;
         let res = unsafe {
@@ -658,11 +758,15 @@ impl<'a> IncrementalSnapshotDecoder<'a> {
                 (&mut rows as *mut usize).cast(),
             )
         };
+        if res == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
         NativeTerminalError::from_c_result(res, "ghostty_snapshot_decoder_get(DATA_PROGRESS_ROWS)")?;
-        Ok(rows)
+        Ok(Some(rows))
     }
 
-    pub fn progress_remaining(&self) -> Result<u32, NativeTerminalError> {
+    /// Pages remaining in the current screen's history; `None` for image records.
+    pub fn progress_remaining(&self) -> Result<Option<u32>, NativeTerminalError> {
         let dec_ptr = self.decoder.expect("decoder present").as_ptr();
         let mut count: u32 = 0;
         let res = unsafe {
@@ -672,8 +776,11 @@ impl<'a> IncrementalSnapshotDecoder<'a> {
                 (&mut count as *mut u32).cast(),
             )
         };
+        if res == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
         NativeTerminalError::from_c_result(res, "ghostty_snapshot_decoder_get(DATA_PROGRESS_REMAINING)")?;
-        Ok(count)
+        Ok(Some(count))
     }
 
     pub fn progress_screen(&self) -> Result<i32, NativeTerminalError> {

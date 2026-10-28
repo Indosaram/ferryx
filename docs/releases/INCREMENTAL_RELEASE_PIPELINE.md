@@ -42,8 +42,8 @@
 
 | Builder | OS / Arch | sccache Version | Cache Storage | Cargo Config Location | Persistent Release Path |
 |---|---|---|---|---|---|
-| **MacBook** | macOS arm64 | `0.16.0` | MinIO S3 (`100.126.171.58:9000/sccache`) via launchd daemon (`port 4226`) | `~/.cargo/config.toml` (`/opt/homebrew/bin/sccache`) | Persistent worktree or `CARGO_TARGET_DIR` |
-| **omaki** | Arch Linux x86_64 | `0.16.0-3` | Local NVMe (`/home/indo/.cache/sccache`, 50 GiB max) | `/home/indo/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/indo/ferryx-release` |
+| **MacBook** | macOS arm64 | `0.17.0` | MinIO S3 (`100.126.171.58:9000/sccache`) via launchd daemon (`port 4226`) | `~/.cargo/config.toml` (`/opt/homebrew/bin/sccache`) | Persistent worktree or `CARGO_TARGET_DIR` |
+| **omaki** | Arch Linux x86_64 | `0.17.0` | Local NVMe (`/home/indo/.cache/sccache`, 50 GiB max) | `/home/indo/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/indo/ferryx-release` |
 | **maho-win** | Windows 11 x86_64 | `0.17.0` | Local disk (`C:\Users\sook\.cache\maho\sccache`, 50 GiB max) | `C:\Users\sook\.cargo\config.toml` (`sccache.exe`) | `C:\Users\sook\ferryx-winbuild\ferryx-release` |
 
 ---
@@ -59,7 +59,7 @@ ssh omaki "/home/indo/build-release-incremental.sh <TAG>"
 ```
 - **What it does**:
   1. Fetches the latest tag in `/home/indo/ferryx-release`.
-  2. Ensures Ghostty submodule is pinned at `6a508fd5`.
+  2. Ensures Ghostty submodule is pinned at `83fb9562`.
   3. Stamps version via `sync-version.mjs`.
   4. Incrementally builds UI (`bun run --cwd ui build`).
   5. Incrementally builds DEB bundle (`bun tauri build --bundles deb`) with sccache and preserved target.

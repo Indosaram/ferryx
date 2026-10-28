@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const EXPECTED_GHOSTTY_SHA: &str = "6a508fd5e34c7e222c052a6d00bb3891ff3feace";
-pub const REQUIRED_ZIG_VERSION: &str = "0.16.0";
+pub const EXPECTED_GHOSTTY_SHA: &str = "83fb95624b0439ee660c2679b43b38c8b63769cd";
+pub const REQUIRED_ZIG_VERSION: &str = "0.17.0";
 
 /// Version of the shared libghostty-vt artifact cache layout and of the `zig build`
 /// arguments below. Bump it whenever either changes so stale artifacts are never reused.

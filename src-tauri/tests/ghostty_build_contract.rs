@@ -306,7 +306,7 @@ fn test_negative_zig_verification_missing_binary() {
         build_ghostty::verify_zig("/tmp/deliberately_missing_zig_binary_path"),
         &[
             "Missing Zig toolchain: failed to execute",
-            "Zig 0.16.0 is required to build libghostty-vt",
+            "Zig 0.17.0 is required to build libghostty-vt",
             "ZIG",
         ],
     );
@@ -332,7 +332,7 @@ fn test_negative_zig_verification_incompatible_version() {
         res,
         &[
             "Incompatible Zig version '0.15.0'",
-            "libghostty-vt requires Zig 0.16.0",
+            "libghostty-vt requires Zig 0.17.0",
         ],
     );
 }

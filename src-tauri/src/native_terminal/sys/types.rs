@@ -471,3 +471,21 @@ pub struct GhosttyMouseEncoderSize {
     pub padding_right: u32,
     pub padding_left: u32,
 }
+
+// Layout guards: sizes of the v1.4 header structs on 64-bit targets
+// (c_int = 4, size_t/pointers = 8). A drift here breaks the C ABI.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    // tag(4) + pad(4) + union{intptr_t, size_t, uint64_t[2]}(16)
+    assert!(std::mem::size_of::<GhosttyTerminalScrollViewport>() == 24);
+    // tag(4) + pad(4) + union{coordinate(8), uint64_t[2]}(16)
+    assert!(std::mem::size_of::<GhosttyPoint>() == 24);
+    // tag(4) + pad(4) + union{u8, rgb(3), uint64_t}(8)
+    assert!(std::mem::size_of::<GhosttyStyleColor>() == 16);
+    // size(8) + node(8) + x(2) + y(2) + tail pad(4)
+    assert!(std::mem::size_of::<GhosttyGridRef>() == 24);
+    // size(8) + start(24) + end(24) + rectangle(1) + tail pad(7)
+    assert!(std::mem::size_of::<GhosttySelection>() == 64);
+    // size(8) + has_value(1) + pad(1) + x(2) + y(2) + 4 bools(4) + pad(2) + visual_style(4)
+    assert!(std::mem::size_of::<GhosttyRenderStateCursor>() == 24);
+};
