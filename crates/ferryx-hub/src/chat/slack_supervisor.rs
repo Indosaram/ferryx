@@ -36,7 +36,8 @@ use crate::supervisor::admission::{
 };
 use crate::supervisor::{goal_of, ChannelProvider, ExecutionKind};
 
-/// Shown instead of a model reply that claims work was accepted when nothing was persisted.
+/// Added to a reply that claims work was accepted, or that follows a tried submit, when
+/// nothing was persisted.
 pub const NO_GOAL_NOTICE: &str =
     "No work was registered for this message, so nothing was started. Ask again with the task you want done.";
 
@@ -46,16 +47,27 @@ const STOPPED: &str = "supervisor turn stopped by /omo-stop";
 /// The retained supervisor conversation as the Slack adapter uses it.
 #[async_trait]
 pub trait SupervisorConversation: Send + Sync {
-    /// One turn in the retained conversation of `scope`.
-    async fn converse(&self, scope: &ConversationScope, message: &str) -> Result<String, String>;
+    /// One turn in the retained conversation of `scope`. Work tools the turn calls carry
+    /// `turn`, the Slack turn's registration ([`TurnGuard`]).
+    async fn converse(
+        &self,
+        scope: &ConversationScope,
+        turn: u64,
+        message: &str,
+    ) -> Result<String, String>;
     /// Sends authenticated owner-authored text to owner ingest, once per source message.
     async fn ingest_owner(&self, source_message_id: &str, text: &str) -> Result<(), String>;
 }
 
 #[async_trait]
 impl SupervisorConversation for MhcSupervisor {
-    async fn converse(&self, scope: &ConversationScope, message: &str) -> Result<String, String> {
-        MhcSupervisor::converse(self, scope, message)
+    async fn converse(
+        &self,
+        scope: &ConversationScope,
+        turn: u64,
+        message: &str,
+    ) -> Result<String, String> {
+        MhcSupervisor::converse_in_turn(self, scope, Some(turn), message)
             .await
             .map_err(|fault| format!("{}: {fault}", fault.code()))
     }
@@ -95,7 +107,7 @@ pub struct TurnRecord {
     pub outcomes: Vec<SubmitOutcome>,
     /// Codes of submit attempts admission refused or failed; nothing was persisted for them.
     pub rejected: Vec<String>,
-    /// The turn read goal status through the Status tool.
+    /// The turn read an existing goal of this owner through the Status tool.
     pub status_used: bool,
     /// The reply names an existing goal of this owner.
     pub cites_owned_goal: bool,
@@ -172,16 +184,27 @@ impl Drop for TurnGuard {
     }
 }
 
-fn actor_for(scope: &ConversationScope) -> Option<ActorContext> {
+/// The actor of the Slack turn `turn` in `scope`. A call from an earlier turn (one aborted
+/// while its tool call was queued) finds nothing, so it never acts for the next turn.
+fn actor_for(scope: &ConversationScope, turn: Option<u64>) -> Option<ActorContext> {
     turns_lock()
         .1
         .get(&scope.key())
+        .filter(|live| Some(live.generation) == turn)
         .map(|turn| turn.actor.clone())
 }
 
-fn update_record(scope: &ConversationScope, update: impl FnOnce(&mut TurnRecord)) {
-    if let Some(turn) = turns_lock().1.get_mut(&scope.key()) {
-        update(&mut turn.record);
+fn update_record(
+    scope: &ConversationScope,
+    turn: Option<u64>,
+    update: impl FnOnce(&mut TurnRecord),
+) {
+    if let Some(live) = turns_lock()
+        .1
+        .get_mut(&scope.key())
+        .filter(|live| Some(live.generation) == turn)
+    {
+        update(&mut live.record);
     }
 }
 
@@ -235,10 +258,11 @@ fn submit_from_call(
 #[async_trait]
 impl WorkToolHandler for SlackWorkTools {
     async fn handle(&self, request: WorkToolRequest) -> Result<Value, WorkToolRejection> {
-        let Some(actor) = actor_for(&request.scope) else {
+        let turn = request.turn;
+        let Some(actor) = actor_for(&request.scope, turn) else {
             return Err(WorkToolRejection::new(
                 "SUPERVISOR_WORK_SCOPE",
-                "no authenticated owner message is in flight for this conversation",
+                "no authenticated owner message is in flight for this conversation turn",
             ));
         };
         match request.call {
@@ -255,11 +279,13 @@ impl WorkToolHandler for SlackWorkTools {
                         // A refused or failed submit is part of the turn: the reply must say
                         // that nothing was registered.
                         let code = error.code();
-                        update_record(&request.scope, |record| record.rejected.push(code.into()));
+                        update_record(&request.scope, turn, |record| {
+                            record.rejected.push(code.into())
+                        });
                         return Err(WorkToolRejection::new(code, &error.to_string()));
                     }
                 };
-                update_record(&request.scope, |record| {
+                update_record(&request.scope, turn, |record| {
                     record.outcomes.push(outcome.clone())
                 });
                 serde_json::to_value(&outcome).map_err(|error| {
@@ -267,22 +293,22 @@ impl WorkToolHandler for SlackWorkTools {
                 })
             }
             WorkToolCall::Status { goal_id: None } => {
+                // This turn's own outcomes: not a statement about earlier work.
                 let mut outcomes = Vec::new();
-                update_record(&request.scope, |record| {
-                    record.status_used = true;
-                    outcomes = record.outcomes.clone();
+                update_record(&request.scope, turn, |record| {
+                    outcomes = record.outcomes.clone()
                 });
                 Ok(json!({ "outcomes": outcomes }))
             }
             WorkToolCall::Status {
                 goal_id: Some(goal_id),
             } => {
-                update_record(&request.scope, |record| record.status_used = true);
                 let goal = goal_of(&self.pool, &goal_id)
                     .await
                     .map_err(|error| WorkToolRejection::new(error.code(), &error.to_string()))?;
                 match goal {
                     Some(goal) if goal.owner_principal == actor.principal => {
+                        update_record(&request.scope, turn, |record| record.status_used = true);
                         serde_json::to_value(&goal).map_err(|error| {
                             WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
                         })
@@ -335,9 +361,9 @@ fn quoted_lines(event: &Value) -> Vec<String> {
 }
 
 /// The text the owner wrote themself: the event's own `text` without the bot mention and
-/// without quoted lines (`>` / `&gt;` prefixed, or the text of a `rich_text_quote` block).
-/// The forwarded block, the quoted thread root and attachment contents are not
-/// owner-authored either; they never appear in `text`.
+/// without quoted lines (`>` / `&gt;` prefixed outside a ``` code fence, or the text of a
+/// `rich_text_quote` block). The forwarded block, the quoted thread root and attachment
+/// contents are not owner-authored either; they never appear in `text`.
 pub fn owner_authored_text(event: &Value, bot_user: &str) -> String {
     let text = event
         .get("text")
@@ -349,11 +375,16 @@ pub fn owner_authored_text(event: &Value, bot_user: &str) -> String {
         text.replace(&format!("<@{bot_user}>"), "")
     };
     let quoted = quoted_lines(event);
+    let mut fenced = false;
     text.lines()
         .filter(|line| {
             let line = line.trim();
-            !line.starts_with('>')
-                && !line.starts_with("&gt;")
+            let in_code = fenced || line.starts_with("```");
+            if line.matches("```").count() % 2 == 1 {
+                fenced = !fenced;
+            }
+            let quote_prefix = line.starts_with('>') || line.starts_with("&gt;");
+            !(quote_prefix && !in_code)
                 && !(!line.is_empty() && quoted.iter().any(|quote| quote == line))
         })
         .collect::<Vec<_>>()
@@ -378,11 +409,11 @@ pub fn claims_acceptance(text: &str) -> bool {
 }
 
 /// The reply the owner sees. Acknowledgments come only from persisted admission outcomes.
-/// - A submit was tried (answered or refused) and nothing was persisted: [`NO_GOAL_NOTICE`]
-///   is always appended, whatever the model wrote.
-/// - Nothing was persisted and the model claims acceptance: its body is replaced by the
-///   notice, unless the turn read goal status or names an existing goal of this owner (a
-///   status answer about earlier work is kept).
+/// - A submit was tried (answered or refused) and nothing was persisted: a body claiming
+///   acceptance is replaced by [`NO_GOAL_NOTICE`]; any other body keeps it appended.
+/// - No submit was tried and the body reads as an acceptance: the notice is appended, never
+///   substituted (the wording check is a heuristic), unless the turn read an existing goal of
+///   this owner or the reply names one (a status answer about earlier work).
 pub fn render_reply(model: &str, record: &TurnRecord) -> String {
     let mut persisted = false;
     let mut notes = Vec::new();
@@ -402,12 +433,13 @@ pub fn render_reply(model: &str, record: &TurnRecord) -> String {
         notes.push(format!("The work submission was refused ({code})."));
     }
     let status_answer = record.status_used || record.cites_owned_goal;
-    let body = if !persisted && !status_answer && claims_acceptance(model) {
+    let claim = !persisted && !status_answer && claims_acceptance(model);
+    let body = if claim && record.submit_attempted() {
         NO_GOAL_NOTICE.to_owned()
     } else {
         model.trim().to_owned()
     };
-    if !persisted && record.submit_attempted() && body != NO_GOAL_NOTICE {
+    if !persisted && (record.submit_attempted() || claim) && body != NO_GOAL_NOTICE {
         notes.push(NO_GOAL_NOTICE.to_owned());
     }
     notes.dedup();
@@ -574,12 +606,27 @@ fn conversation_message(
 }
 
 /// Writes the session row of a supervised Slack turn, as the omo path does, so the owner's
-/// unmentioned follow-ups in its thread are admitted (`slack_turn::known_thread`).
+/// unmentioned follow-ups in its thread are admitted (`slack_turn::known_thread`). An existing
+/// row keeps its state: only its `updated_at` moves (the backfill's session window).
 async fn persist_session(pool: &SqlitePool, key: &crate::chat::session::SessionKey) {
-    let state = super::slack_turn::load_state(pool, key)
-        .await
-        .unwrap_or_default();
-    if let Err(error) = super::slack_turn::save_state(pool, key, &state).await {
+    let state = serde_json::to_string(&crate::chat::session::SessionState::default())
+        .unwrap_or_else(|_| "{}".into());
+    let saved = sqlx::query(
+        "INSERT INTO sessions (session_key, platform, guild_id, channel_id, thread_id, user_id, state_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_key) DO UPDATE SET updated_at = excluded.updated_at",
+    )
+    .bind(key.storage_key())
+    .bind(&key.platform)
+    .bind(&key.guild_id)
+    .bind(&key.channel_id)
+    .bind(&key.thread_id)
+    .bind(&key.user_id)
+    .bind(state)
+    .bind(super::slack_turn::omo_timestamp())
+    .execute(pool)
+    .await;
+    if let Err(error) = saved {
         tracing::warn!(%error, "supervisor slack session was not saved");
     }
 }
@@ -616,6 +663,7 @@ pub async fn try_handle(
         },
     };
     let guard = TurnGuard::register(&routed.scope, actor);
+    let turn = guard.generation;
     // Cron deliveries mirrored into this session ride on the turn, consumed only on success.
     let briefings = crate::mirror::peek_pending_cron_briefings(pool, &storage_key)
         .await
@@ -651,10 +699,10 @@ pub async fn try_handle(
     let registration = super::turns::begin(&storage_key, &admitted.channel);
     let converse = async {
         let Some(mut cancel) = super::turns::cancelled(&storage_key) else {
-            return conversation.converse(&routed.scope, &message).await;
+            return conversation.converse(&routed.scope, turn, &message).await;
         };
         tokio::select! {
-            reply = conversation.converse(&routed.scope, &message) => reply,
+            reply = conversation.converse(&routed.scope, turn, &message) => reply,
             Ok(_) = cancel.wait_for(|stop| *stop) => Err(STOPPED.to_owned()),
         }
     };
@@ -743,12 +791,24 @@ mod tests {
             "시작했습니다.",
         ] {
             assert!(claims_acceptance(claim), "{claim}");
-            assert_eq!(render_reply(claim, &nothing), NO_GOAL_NOTICE, "{claim}");
+            // No submit was tried: the wording is only a heuristic, so the body stays and the
+            // notice follows it.
+            assert_eq!(
+                render_reply(claim, &nothing),
+                format!("{claim}\n\n{NO_GOAL_NOTICE}"),
+                "{claim}"
+            );
+            // A tried submit that persisted nothing: the claim is replaced.
             assert_eq!(
                 render_reply(claim, &conversational),
                 NO_GOAL_NOTICE,
                 "{claim}"
             );
+        }
+        // Ordinary wording the pattern also matches is never erased.
+        for answer in ["I'm working on that answer for you: 42.", "현재 진행중인 작업은 없어요."] {
+            let shown = render_reply(answer, &nothing);
+            assert!(shown.starts_with(answer), "{shown}");
         }
         assert_eq!(
             render_reply("I can edit, test and commit in your projects.", &nothing),
@@ -833,6 +893,136 @@ mod tests {
         let block_only = json!({"text": "quoted block line\nfix the build",
             "blocks": [{"type": "rich_text", "elements": [quote]}]});
         assert_eq!(owner_authored_text(&block_only, "UBOT"), "fix the build");
+        // Inside a code fence a `&gt;` or `>` line is the owner's own text (a shell redirect,
+        // a diff), not a quote.
+        let text = "run this:\n```\necho READY &gt; result.txt\n&gt; tail\n```\n&gt; quoted";
+        let fenced = json!({ "text": text });
+        assert_eq!(
+            owner_authored_text(&fenced, "UBOT"),
+            "run this:\n```\necho READY &gt; result.txt\n&gt; tail\n```"
+        );
+        let inline = json!({"text": "```&gt; one line```\n&gt; quoted"});
+        assert_eq!(owner_authored_text(&inline, "UBOT"), "```&gt; one line```");
+    }
+
+    #[tokio::test]
+    async fn only_a_status_read_of_an_owned_goal_counts_as_a_status_answer() {
+        let (pool, _, _) = owner_pool().await;
+        let tools = SlackWorkTools::new(pool.clone());
+        let scope = ConversationScope {
+            project_id: None,
+            channel_key: "slack:T1:UBOT:D10:".into(),
+        };
+        let actor = ActorContext {
+            principal: OWNER.into(),
+            source_adapter: ChannelProvider::Slack,
+            source_message_id: "D10/1.1".into(),
+            source_body: WORK.into(),
+            channel_binding_id: None,
+            choices: OwnerChoices::default(),
+        };
+        let guard = TurnGuard::register(&scope, actor);
+        let status = |goal_id: Option<&str>| WorkToolRequest {
+            request_id: "req-s".into(),
+            scope: scope.clone(),
+            turn: Some(guard.generation),
+            call: WorkToolCall::Status {
+                goal_id: goal_id.map(str::to_owned),
+            },
+        };
+        tools.handle(status(None)).await.unwrap();
+        assert!(!guard.record().status_used, "the scope listing is not a goal read");
+        let unknown = tools
+            .handle(status(Some("00000000-0000-4000-8000-000000000000")))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.code, "NOT_FOUND");
+        assert!(!guard.record().status_used, "a failed lookup is not a goal read");
+
+        let submitted = tools
+            .handle(WorkToolRequest {
+                request_id: "req-w".into(),
+                scope: scope.clone(),
+                turn: Some(guard.generation),
+                call: WorkToolCall::Submit {
+                    title: "Write result.txt".into(),
+                    requirements: vec!["result.txt contains READY".into()],
+                    worker: WorkerPreference::Any,
+                },
+            })
+            .await
+            .unwrap();
+        let goal_id = submitted["receipt"]["goal_id"].as_str().unwrap().to_owned();
+        tools.handle(status(Some(&goal_id))).await.unwrap();
+        assert!(guard.record().status_used);
+
+        // A call carrying another turn's token never acts for this turn.
+        let foreign = tools
+            .handle(WorkToolRequest {
+                turn: Some(guard.generation + 1_000_000),
+                ..status(Some(&goal_id))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(foreign.code, "SUPERVISOR_WORK_SCOPE");
+        let without = tools
+            .handle(WorkToolRequest {
+                turn: None,
+                ..status(None)
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(without.code, "SUPERVISOR_WORK_SCOPE");
+        assert_eq!(goals(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_supervised_turn_keeps_an_existing_session_state() {
+        use crate::chat::session::SessionState;
+        let (pool, _, _) = owner_pool().await;
+        let config = slack_config(false);
+        let admitted = admit(
+            &config,
+            &dm("UOWNER", "D11", "7901.000001", WORK),
+            "UBOT",
+            false,
+        )
+        .unwrap();
+        let state = SessionState {
+            active_model: Some("kept/model".into()),
+            ..SessionState::default()
+        };
+        sqlx::query(
+            "INSERT INTO sessions (session_key, platform, guild_id, channel_id, thread_id, user_id, state_json, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, '2020-01-01T00:00:00Z')",
+        )
+        .bind(admitted.key.storage_key())
+        .bind(&admitted.key.platform)
+        .bind(&admitted.key.guild_id)
+        .bind(&admitted.key.channel_id)
+        .bind(&admitted.key.thread_id)
+        .bind(&admitted.key.user_id)
+        .bind(serde_json::to_string(&state).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let fake = FakeConversation::new(&pool, false, "Hello.");
+        let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+        with_test_api(base, "xoxb-test".into(), async {
+            try_handle(&config, &pool, &admitted, WORK, fake.as_ref()).await
+        })
+        .await
+        .expect("supervised");
+        let (stored, updated): (String, String) = sqlx::query_as(
+            "SELECT state_json, updated_at FROM sessions WHERE session_key = ?",
+        )
+        .bind(admitted.key.storage_key())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let stored: SessionState = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored.active_model.as_deref(), Some("kept/model"));
+        assert_ne!(updated, "2020-01-01T00:00:00Z", "the session window moves");
     }
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -909,6 +1099,7 @@ mod tests {
         async fn converse(
             &self,
             scope: &ConversationScope,
+            turn: u64,
             message: &str,
         ) -> Result<String, String> {
             self.turns.fetch_add(1, Ordering::SeqCst);
@@ -925,6 +1116,7 @@ mod tests {
                     .handle(WorkToolRequest {
                         request_id: "req-1".into(),
                         scope: scope.clone(),
+                        turn: Some(turn),
                         call: WorkToolCall::Submit {
                             title: "Write result.txt".into(),
                             requirements: vec!["result.txt contains READY".into()],
@@ -1119,6 +1311,7 @@ mod tests {
                     project_id: None,
                     channel_key: "slack:T1:UBOT:D2:".into(),
                 },
+                turn: None,
                 call: WorkToolCall::Submit {
                     title: "x".into(),
                     requirements: vec!["y".into()],
@@ -1148,12 +1341,12 @@ mod tests {
             try_handle(&config, &pool, &admitted, WORK, fake.as_ref()).await
         })
         .await;
-        assert_eq!(shown.as_deref(), Some(NO_GOAL_NOTICE));
+        let shown = shown.expect("supervised");
+        assert!(shown.ends_with(NO_GOAL_NOTICE), "{shown}");
         assert_eq!(goals(&pool).await, 0);
         let replies = posted(&calls);
         assert_eq!(replies.len(), 1, "{replies:?}");
         let text = replies[0]["text"].as_str().unwrap_or("");
-        assert!(!text.contains("registered the task"), "{text}");
         assert!(text.contains("No work was registered"), "{text}");
     }
 

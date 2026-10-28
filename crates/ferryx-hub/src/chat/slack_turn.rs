@@ -386,7 +386,7 @@ pub(crate) fn session_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     locks.entry(key.to_owned()).or_default().clone()
 }
 
-pub(crate) async fn load_state(pool: &SqlitePool, key: &SessionKey) -> Option<SessionState> {
+async fn load_state(pool: &SqlitePool, key: &SessionKey) -> Option<SessionState> {
     let raw: Option<String> =
         sqlx::query_scalar("SELECT state_json FROM sessions WHERE session_key = ?")
             .bind(key.storage_key())
@@ -424,11 +424,7 @@ pub fn omo_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
 }
 
-pub(crate) async fn save_state(
-    pool: &SqlitePool,
-    key: &SessionKey,
-    state: &SessionState,
-) -> Result<()> {
+async fn save_state(pool: &SqlitePool, key: &SessionKey, state: &SessionState) -> Result<()> {
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".into());
     sqlx::query(
         "INSERT INTO sessions (session_key, platform, guild_id, channel_id, thread_id, user_id, state_json, updated_at)

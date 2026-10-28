@@ -932,6 +932,62 @@ async fn work_tool_requests_reach_the_typed_handler_with_the_hub_scope() {
 }
 
 #[tokio::test]
+async fn a_work_request_carries_its_turn_and_one_from_an_ended_turn_is_refused() {
+    let harness = Harness::new("work-turns", all_capabilities());
+    let supervisor = harness.supervisor();
+    let handler = Arc::new(RecordingWork::default());
+    supervisor.set_work_handler(handler.clone());
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D9:".to_owned(),
+    };
+    // A turn's own request reaches the handler with that turn's token.
+    let reply: Value = serde_json::from_str(
+        &supervisor
+            .converse_in_turn(&scope, Some(7), "WORK one")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(handler.calls.lock().unwrap()[0].turn, Some(7));
+
+    // A request the engine emits for a turn that has already ended (here: replayed after the
+    // next turn settled) is refused and never reaches the handler under another token.
+    supervisor
+        .converse_in_turn(&scope, Some(8), "plain")
+        .await
+        .unwrap();
+    let handle = harness.peer.of_type("prompt")[1]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let durable = harness.peer.handles.lock().unwrap()[&handle].clone();
+    let cursor = harness.peer.frames().len();
+    harness.peer.emit(json!({"type": "extension_event", "sessionId": handle,
+        "name": "supervisor.work_request", "data": {
+            "requestId": "stale-1", "sessionId": durable, "action": "submit",
+            "payload": {"title": "late", "requirements": ["x"]}}}));
+    harness
+        .peer
+        .wait_for("the stale request's reply", |frames| {
+            frames[cursor..]
+                .iter()
+                .any(|frame| frame["type"] == "extension_request")
+        })
+        .await;
+    let stale = harness
+        .peer
+        .of_type("extension_request")
+        .into_iter()
+        .find(|frame| frame["data"]["requestId"] == "stale-1")
+        .expect("the stale request was answered");
+    assert_eq!(stale["data"]["ok"], false, "{stale}");
+    assert_eq!(stale["data"]["error"]["code"], "SUPERVISOR_WORK_STALE");
+    assert_eq!(handler.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn owner_ingest_is_serialized_and_idempotent_across_restarts() {
     let harness = Harness::new("ingest", ingest_capabilities());
     let supervisor = harness.supervisor();

@@ -154,12 +154,13 @@ where
             .unwrap_or(now);
         // A supervisor-owned lane reports to its goal's wake service, never to a second lead;
         // an owner-urgent kind also keeps its owner DM notice. A failed hand-over stays queued
-        // without blocking other events.
+        // without blocking other events; an owner-urgent one is still delivered to the owner.
+        let owner_urgent = owner_dm_worthy(&kind, &body);
         let handed = hand_to_supervisor(
             pool,
             id,
             lane_key.as_deref(),
-            owner_dm_worthy(&kind, &body),
+            owner_urgent,
             parsed_at,
             &stamp,
         )
@@ -167,6 +168,13 @@ where
         match handed {
             Ok(true) => continue,
             Ok(false) => {}
+            Err(error) if owner_urgent => {
+                tracing::warn!(
+                    event_id = id,
+                    %error,
+                    "supervisor wake was not queued; the owner-urgent event is delivered anyway"
+                );
+            }
             Err(error) => {
                 tracing::warn!(
                     event_id = id,
@@ -958,5 +966,64 @@ mod tests {
                 .await
                 .unwrap();
         assert_ne!(reason.as_deref(), Some(SUPERVISOR_WAKE));
+
+        // The goal's wake cannot be queued (its execution binding is gone): an ordinary report
+        // stays queued, an owner-urgent one still reaches the owner.
+        sqlx::query("DELETE FROM supervisor_execution_bindings WHERE goal_id = ?")
+            .bind(&goal_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut failed_handover = Vec::new();
+        for (kind, body) in [
+            ("launch_failed", "worker could not start"),
+            ("not_done", "still missing tests"),
+        ] {
+            let event: i64 = sqlx::query_scalar(
+                "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at)
+                 VALUES(?, ?, ?, ?, ?) RETURNING id",
+            )
+            .bind(&lane_key)
+            .bind(&lead)
+            .bind(kind)
+            .bind(body)
+            .bind(old.to_rfc3339())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            failed_handover.push(event);
+        }
+        let urgent = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let heard = urgent.clone();
+        let much_later = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let lead_turns = dispatch_tick(&pool, &judge, much_later, move |_, text| {
+            heard.lock().unwrap().push(text);
+            async { true }
+        })
+        .await
+        .unwrap();
+        assert_eq!(lead_turns, 1, "the owner hears the failed launch");
+        let heard = urgent.lock().unwrap().clone();
+        assert!(
+            heard.iter().any(|text| text.contains("worker could not start")),
+            "{heard:?}"
+        );
+        assert!(
+            !heard.iter().any(|text| text.contains("still missing tests")),
+            "{heard:?}"
+        );
+        let delivered: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, delivered_at FROM lane_events WHERE id IN (?, ?) ORDER BY id",
+        )
+        .bind(failed_handover[0])
+        .bind(failed_handover[1])
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(delivered[0].1.is_some(), "{delivered:?}");
+        assert!(
+            delivered[1].1.is_none(),
+            "an ordinary report stays queued: {delivered:?}"
+        );
     }
 }

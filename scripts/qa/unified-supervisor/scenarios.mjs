@@ -16,6 +16,7 @@ import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HarnessError, isInside, POSIX, waitForPath } from './harness.mjs';
+import { runSlackLeg } from './slack.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -261,7 +262,7 @@ async function runAdmission(ctx) {
   if (!setup.json?.projectId) throw new HarnessError('SETUP_FAILED', 'supervisor setup did not return a project; nothing further can be admitted');
 
   // 2. Isolated daemon (its hub runs the dispatcher) and the fixture workspace.
-  await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
   const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), ADMISSION_WORKSPACE_ID, realpathSync(workspaceRoot));
   ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
 
@@ -378,6 +379,28 @@ async function runAdmission(ctx) {
     },
     sourceId, goalId, receipt, setup: setup.json, binding: finalBinding, goal: finalGoal, dispatches: dispatched.dispatches,
     counts: { afterStart, afterReplay, afterEdited, afterQuestion, final: finalCounts }, toolsCalled, hubHttp: env.FERRYX_HUB_TRACKER_ADDR,
+  });
+
+  // 10. Slack leg (plan task 11): the same admission reached from an owner's Slack DM through
+  //     the production Slack ingress adapter of a fresh hub generation (slack.mjs). The MCP
+  //     daemon is stopped first; the Slack owner is a second identity with its own project.
+  await ctx.terminate(mcp, 'slack leg');
+  await ctx.terminate(daemon, 'slack leg');
+  const slackRepo = join(data, 'slack-ws', 'qa-slack');
+  mkdirSync(slackRepo, { recursive: true });
+  for (const [label, args] of [
+    ['git-init-slack', [...gitArgs, 'init', '-q', slackRepo]],
+    ['git-commit-slack', [...gitArgs, '-C', slackRepo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  await runSlackLeg(ctx, {
+    setupCli: (owner) => ctx.cli(['supervisor', 'setup', '--owner', owner, '--project', 'qa-slack', '--repo-identity', 'qa:qa-slack',
+      '--host', ADMISSION_HOST, '--git-common-dir', realpathSync(join(slackRepo, '.git')), '--json'], { label: 'supervisor-setup-slack', env }),
+    hub, dbPath, waitForChange,
+    // The fixture pane shell, so a dispatched Slack goal never launches a real agent.
+    extraEnv: { SHELL: shell, FERRYX_HUB_WORKSPACE: ADMISSION_WORKSPACE_ID, OMON_LANE_AUTO_WORKTREE: '1' },
   });
 }
 
@@ -761,14 +784,19 @@ export const SCENARIOS = Object.freeze({
   admission: Object.freeze({
     implemented: true,
     task: '7',
-    summary: 'Submit the fixture request, replay the same source id, ask "What can you do?": one goal, one initial dispatch',
-    deadlineMs: 6 * 60_000,
+    summary: 'Submit the fixture request, replay the same source id, ask "What can you do?": one goal, one initial dispatch; then the owner\'s Slack DM through the production Slack adapter: one goal, foreign user and redelivery add nothing (task 11)',
+    deadlineMs: 14 * 60_000,
     requiredAssertions: [
       'setup-created-identity-project-and-host', 'setup-rerun-returns-the-same-ids', 'setup-conflicting-rebind-refused', 'workspace-registered',
       'submit-admitted-with-acknowledgment-naming-goal', 'initial-dispatch-started-without-drive-call', 'exactly-one-worker-started',
       'replay-returns-the-same-receipt', 'replay-created-no-second-dispatch', 'edited-replay-returns-request-conflict',
       'edited-replay-created-no-second-worker', 'question-is-conversational', 'question-created-no-goal-or-dispatch',
       'final-one-goal-one-dispatch-one-worker',
+      // Slack leg (task 11, slack.mjs).
+      'slack-owner-identity-provisioned', 'slack-adapter-connected-through-loopback-socket-mode',
+      'owner-dm-created-exactly-one-goal-through-common-admission', 'owner-reply-carries-the-persisted-acknowledgment',
+      'foreign-user-yields-no-goal-and-no-learned-fact', 'owner-text-learned-once', 'duplicate-delivery-yields-no-new-goal-and-no-learned-fact',
+      'foreign-text-never-reached-the-engine',
     ],
     run: runAdmission,
   }),

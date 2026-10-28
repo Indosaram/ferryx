@@ -45,7 +45,9 @@ use super::mhc_profile::{
     profile_lock_held, ConversationScope, MhcProfile, MhcProfileConfig, PersistedSession,
     ProfileLock, RoleSpec, SessionRole, SessionStore, CLIENT_CAPABILITIES, DECISION_SLOTS,
 };
-use super::mhc_stdio::{BoxedReader, BoxedWriter, RequestError, StdioClient, WORK_REPLY_REQUEST};
+use super::mhc_stdio::{
+    BoxedReader, BoxedWriter, RequestError, StdioClient, WORK_REPLY_REQUEST, WORK_SEQUENCE_FIELD,
+};
 use crate::error::HubError;
 use crate::lanes::kibitzer::ModelTurn;
 
@@ -351,6 +353,9 @@ pub enum WorkToolCall {
 pub struct WorkToolRequest {
     pub request_id: String,
     pub scope: ConversationScope,
+    /// The caller's token of the conversation turn that emitted the request
+    /// ([`MhcSupervisor::converse_in_turn`]); a request from any other turn is never passed on.
+    pub turn: Option<u64>,
     pub call: WorkToolCall,
 }
 
@@ -763,6 +768,9 @@ struct Inner {
     /// Held by the ingest turn until any abort drain is done.
     ingest_session: Arc<tokio::sync::Mutex<()>>,
     conversations: Mutex<HashMap<String, ConversationEntry>>,
+    /// The turn each conversation is running, by conversation key.
+    live: Mutex<HashMap<String, LiveTurn>>,
+    turn_serial: AtomicU64,
     cancel: watch::Sender<u64>,
     work: RwLock<Arc<dyn WorkToolHandler>>,
     /// Decisions waiting for a slot; mirrored in [`SupervisorHealth::queued_decisions`].
@@ -774,6 +782,32 @@ struct Inner {
 
 /// One conversation's scope and the lock serialising its turns.
 type ConversationEntry = (ConversationScope, Arc<tokio::sync::Mutex<()>>);
+
+/// The turn a conversation is running. A work request the engine emitted after `since` (the
+/// transport position read just before the turn's prompt was sent) belongs to it and carries
+/// its `token`. An earlier turn of the conversation was settled or drained before this one
+/// took the conversation lock, so its requests precede `since` and are refused.
+struct LiveTurn {
+    serial: u64,
+    token: Option<u64>,
+    since: Option<u64>,
+}
+
+/// Ends a conversation's live turn when its caller is done or gone; never a later turn's.
+struct LiveGuard {
+    inner: Arc<Inner>,
+    key: String,
+    serial: u64,
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        let mut live = self.inner.live();
+        if live.get(&self.key).is_some_and(|turn| turn.serial == self.serial) {
+            live.remove(&self.key);
+        }
+    }
+}
 
 type TurnResult = Result<String, SupervisorFault>;
 
@@ -812,6 +846,10 @@ impl Inner {
 
     fn conversations(&self) -> MutexGuard<'_, HashMap<String, ConversationEntry>> {
         self.conversations.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn live(&self) -> MutexGuard<'_, HashMap<String, LiveTurn>> {
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn work_handler(&self) -> Arc<dyn WorkToolHandler> {
@@ -1257,6 +1295,10 @@ impl Inner {
             Ok(events) => events,
             Err(error) => return (Err(request_fault("subscribe", error)), None),
         };
+        // Read before the prompt is sent: this turn's work requests can only follow it.
+        if let Some(live) = self.live().get_mut(&spec.key) {
+            live.since = Some(engine.client.position());
+        }
         let client = engine.client.clone();
         let prompt = client.request(
             json!({"type": "prompt", "sessionId": handle, "message": escape_command(message)}),
@@ -1426,18 +1468,33 @@ impl Inner {
             }
             self.conversations().get(key).map(|(scope, _)| scope.clone())
         });
+        let position = record
+            .get(WORK_SEQUENCE_FIELD)
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let turn = owner.as_ref().and_then(|(key, _)| {
+            self.live()
+                .get(key)
+                .filter(|live| live.since.is_some_and(|since| position > since))
+                .map(|live| live.token)
+        });
         let reply = match scope {
             None => Err(WorkToolRejection::new(
                 "SUPERVISOR_WORK_SCOPE",
                 "the request did not come from a supervisor conversation",
             )),
-            Some(scope) => match parse_work_call(&data) {
-                Err(rejection) => Err(rejection),
-                Ok(call) => {
+            Some(scope) => match (turn, parse_work_call(&data)) {
+                (None, _) => Err(WorkToolRejection::new(
+                    "SUPERVISOR_WORK_STALE",
+                    "the request did not come from the conversation's current turn",
+                )),
+                (Some(_), Err(rejection)) => Err(rejection),
+                (Some(turn), Ok(call)) => {
                     self.work_handler()
                         .handle(WorkToolRequest {
                             request_id: request_id.clone(),
                             scope,
+                            turn,
                             call,
                         })
                         .await
@@ -1540,6 +1597,8 @@ impl MhcSupervisor {
                 ingest_order: tokio::sync::Mutex::new(()),
                 ingest_session: Arc::new(tokio::sync::Mutex::new(())),
                 conversations: Mutex::new(HashMap::new()),
+                live: Mutex::new(HashMap::new()),
+                turn_serial: AtomicU64::new(0),
                 cancel,
                 work: RwLock::new(Arc::new(UnavailableWorkTools)),
                 queued: AtomicUsize::new(0),
@@ -1679,6 +1738,18 @@ impl MhcSupervisor {
     /// One turn in the retained conversation of `scope`. The conversation may call the typed
     /// work tools; its memory writes are denied.
     pub async fn converse(&self, scope: &ConversationScope, message: &str) -> TurnResult {
+        self.converse_in_turn(scope, None, message).await
+    }
+
+    /// [`Self::converse`] for a caller that tracks its own turns: every work request this turn
+    /// emits reaches the work handler with `turn`, and a request emitted by an earlier turn of
+    /// the conversation (one aborted while its tool call was queued) is refused.
+    pub async fn converse_in_turn(
+        &self,
+        scope: &ConversationScope,
+        turn: Option<u64>,
+        message: &str,
+    ) -> TurnResult {
         let key = self
             .inner
             .profile
@@ -1687,7 +1758,7 @@ impl MhcSupervisor {
         let lock = {
             let mut conversations = self.inner.conversations();
             let entry = conversations
-                .entry(key)
+                .entry(key.clone())
                 .or_insert_with(|| (scope.clone(), Arc::new(tokio::sync::Mutex::new(()))));
             if entry.0 != *scope {
                 return Err(SupervisorFault::protocol(
@@ -1697,6 +1768,20 @@ impl MhcSupervisor {
             entry.1.clone()
         };
         let guard = lock.lock_owned().await;
+        let serial = self.inner.turn_serial.fetch_add(1, Ordering::SeqCst) + 1;
+        self.inner.live().insert(
+            key.clone(),
+            LiveTurn {
+                serial,
+                token: turn,
+                since: None,
+            },
+        );
+        let _live = LiveGuard {
+            inner: self.inner.clone(),
+            key,
+            serial,
+        };
         let cancel = self.inner.cancel.subscribe();
         let epoch = *cancel.borrow();
         self.inner
