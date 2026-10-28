@@ -24,7 +24,7 @@ This directory defines the Phase 1 build contract and verification harness for e
 
 3. **Narrowly Scoped Compilation & Hermetic Caching**:
    - Only `libghostty-vt` is built (macOS app, XCFramework, documentation, executables, and tests are disabled with `-Demit-*` flags).
-   - Compilation artifacts and Zig caches (`--cache-dir`, `--global-cache-dir`) are isolated strictly inside Cargo's `$OUT_DIR`, retaining no untracked cache files in the workspace.
+   - Compilation artifacts and Zig caches (`--cache-dir`, and the `ZIG_GLOBAL_CACHE_DIR` environment variable since Zig 0.17 dropped `--global-cache-dir`) are isolated strictly inside Cargo's `$OUT_DIR`, retaining no untracked cache files in the workspace.
 
 4. **FFI Safety & ABI Matching**:
    - `GhosttyResult`, `GhosttyOptimizeMode`, and `GhosttyBuildInfo` use `#[repr(i32)]` to align with C `enum : int` / Zig `enum(c_int)` ABI.

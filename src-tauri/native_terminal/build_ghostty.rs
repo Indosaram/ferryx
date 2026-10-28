@@ -308,6 +308,9 @@ pub fn build_ghostty_vt_with_target_and_env(
 
     let mut cmd = Command::new(&zig_binary);
     cmd.current_dir(&submodule_dir);
+    // Zig 0.17 removed `zig build --global-cache-dir`; the frontend now resolves the global
+    // cache from ZIG_GLOBAL_CACHE_DIR and hands it to the build runner itself.
+    cmd.env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir_str);
     cmd.args([
         "build",
         "-Demit-lib-vt=true",
@@ -321,8 +324,6 @@ pub fn build_ghostty_vt_with_target_and_env(
         ghostty_prefix_str,
         "--cache-dir",
         zig_cache_dir_str,
-        "--global-cache-dir",
-        zig_global_cache_dir_str,
     ]);
 
     let output = cmd.output().map_err(|e| {
