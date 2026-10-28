@@ -30,6 +30,9 @@ import { BUILD_STAMP } from "../lib/buildStamp";
 import { MobileTopBar, type MobileTopBarActivityState } from "./chat/MobileTopBar";
 import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
+import { MobileSheet } from "./chat/MobileSheet";
+import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import { useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
 import { capRetainedMessages } from "./agentConversation";
 import {
   ReferenceHistoryFetchError,
@@ -1268,6 +1271,10 @@ export const RemoteHostConnection: React.FC<{
   const chatPromptGenerationRef = useRef(0);
   /** Set by the prompt lane: a pushed `agentPromptChanged` frame for a session re-reads its card. */
   const chatPromptPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
+  /** The phone Inbox's handlers for the same push, and for a reconnected events socket. */
+  const inboxPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
+  const inboxRefreshRef = useRef<(() => void) | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -2198,6 +2205,7 @@ export const RemoteHostConnection: React.FC<{
       const promptChange = parseAgentPromptChange(text);
       if (promptChange) {
         chatPromptPushRef.current?.(promptChange);
+        inboxPushRef.current?.(promptChange);
         if (activeTunnelConnection) supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
         else supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
         return;
@@ -2293,6 +2301,8 @@ export const RemoteHostConnection: React.FC<{
         if (disposed || socket !== current) return;
         attempt = 0;
         workspaceRefreshVersionRef.current += 1;
+        // Pushes missed while the socket was down: every Inbox row reads its card again.
+        inboxRefreshRef.current?.();
         const pendingSelection = pendingSelectionRef.current;
         if (pendingSelection) void confirmSelection(pendingSelection);
         else void refreshWorkspace();
@@ -2990,6 +3000,60 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [chatDaemonEpoch, chatGateway, chatProviderSession, effectiveSessionId]);
   const chatTargetKey = chatReferenceTarget === null ? null : referenceTargetKey(chatReferenceTarget);
+
+  /* The phone's Inbox reads and answers each waiting session's card through the same prompt
+     routes, bound to that session's own target. Nothing here selects a pane on the desktop. */
+  const inboxTargetFor = useCallback(
+    (sessionId: string): ReferenceTargetRef | null => {
+      const ownerId = chatGateway?.referenceOwnerId ?? null;
+      const epoch =
+        chatGateway?.daemonEpoch ?? sessionEpochs[sessionId] ?? sessionEpochsRef.current.get(sessionId) ?? null;
+      if (!ownerId || !epoch) return null;
+      return {
+        target: {
+          hostId: chatGateway?.referenceHostId ?? REFERENCE_CHAT_DEFAULT_HOST_ID,
+          ownerId,
+          epoch,
+          backendSessionId: sessionId,
+        },
+      };
+    },
+    [chatGateway, sessionEpochs],
+  );
+  const inboxTransport = useMemo<RemoteInboxTransport>(
+    () => ({
+      read: async (sessionId, registryId) => {
+        const target = inboxTargetFor(sessionId);
+        if (!target || !token) return null;
+        const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, registryId)}`;
+        const response = await remoteFetch(transportBaseUrl, path, { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) throw new ReferencePromptRefused(await readChatErrorCode(response), "prompt read failed");
+        const body: unknown = await response.json();
+        const prompt = parseChatPrompt(body);
+        return { prompt, screenRevision: prompt === null ? null : parseChatScreenRevision(body) };
+      },
+      answer: async (sessionId, registryId, payload) => {
+        const target = inboxTargetFor(sessionId);
+        if (!target || !token) return { ok: false, code: "UNAUTHORIZED", message: CHAT_NO_SESSION_WARNING };
+        const outcome = await postChatMutation(transportBaseUrl, sessionId, token, "answer", {
+          requestId: newChatRequestId(),
+          target: target.target,
+          registryId,
+          params: payload,
+        });
+        return outcome.ok ? { ok: true } : { ok: false, code: outcome.code, message: outcome.message };
+      },
+    }),
+    [inboxTargetFor, token, transportBaseUrl],
+  );
+  const remoteInbox = useRemoteInbox({
+    workspaceId: effectiveModel.context.workspaceId,
+    workspaceLabel: effectiveModel.context.workspaceId,
+    tabs: effectiveModel.context.terminalTabs ?? [],
+    transport: inboxTransport,
+  });
+  inboxPushRef.current = remoteInbox.push;
+  inboxRefreshRef.current = remoteInbox.refreshAll;
 
   // Read through refs so a poll closure never runs against a pane it was not started for.
   const chatTargetRef = useRef<ReferenceTargetRef | null>(null);
@@ -4816,6 +4880,7 @@ export const RemoteHostConnection: React.FC<{
           viewMode={viewMode as "chat" | "terminal"}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
+          inbox={model.context.workspaceId ? { count: remoteInbox.needsYou, open: inboxOpen, onOpen: () => setInboxOpen(true) } : undefined}
           switcherOpen={switcherOpen}
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
@@ -5149,6 +5214,26 @@ export const RemoteHostConnection: React.FC<{
           );
         }}
       />
+
+      <MobileSheet
+        open={inboxOpen}
+        onOpenChange={setInboxOpen}
+        title="Inbox"
+        ariaLabel="Inbox"
+        testId="mobile-inbox-sheet"
+      >
+        <AttentionInbox
+          compact
+          rows={remoteInbox.rows}
+          prompts={remoteInbox.prompts}
+          onOpen={(row) => {
+            const tab = terminalTabs.find((candidate) => candidate.id === row.id);
+            const option = tab ? paneSelectionOption(model, tab) : null;
+            if (option) void selectContext(option);
+            setInboxOpen(false);
+          }}
+        />
+      </MobileSheet>
 
       <MobileOverflowSheet
         open={menuOpen}
