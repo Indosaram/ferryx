@@ -120,7 +120,7 @@ pub fn peer_pid(fd: std::os::unix::io::RawFd) -> Option<u32> {
                 &mut len,
             )
         } == 0;
-        return (ok && cred.pid > 0).then_some(cred.pid as u32);
+        (ok && cred.pid > 0).then_some(cred.pid as u32)
     }
     #[cfg(target_os = "macos")]
     {
@@ -136,9 +136,9 @@ pub fn peer_pid(fd: std::os::unix::io::RawFd) -> Option<u32> {
                 &mut len,
             )
         } == 0;
-        return (ok && pid > 0).then_some(pid as u32);
+        (ok && pid > 0).then_some(pid as u32)
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = fd;
         None
@@ -181,12 +181,12 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
         let session = field(3).ok_or(ProcError::Unreadable)?;
         let tty = field(4).ok_or(ProcError::Unreadable)?;
         let start = field(19).ok_or(ProcError::Unreadable)?;
-        return Ok(ProcInfo {
+        Ok(ProcInfo {
             ppid: u32::try_from(ppid).unwrap_or(0),
             session: u32::try_from(session).ok().filter(|session| *session > 0),
             tty: u64::try_from(tty).ok().filter(|tty| *tty != 0),
             start: u64::try_from(start).unwrap_or(0),
-        });
+        })
     }
     #[cfg(target_os = "macos")]
     {
@@ -214,7 +214,7 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
         // SAFETY: getsid only reads the process table.
         let session = unsafe { libc::getsid(pid as libc::pid_t) };
         const NODEV: u32 = u32::MAX;
-        return Ok(ProcInfo {
+        Ok(ProcInfo {
             ppid: info.pbi_ppid,
             session: (session > 0).then_some(session as u32),
             tty: (info.e_tdev != NODEV && info.e_tdev != 0).then_some(u64::from(info.e_tdev)),
@@ -222,9 +222,9 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
                 .pbi_start_tvsec
                 .saturating_mul(1_000_000)
                 .saturating_add(info.pbi_start_tvusec),
-        });
+        })
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         Err(ProcError::Unreadable)

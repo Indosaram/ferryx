@@ -5972,15 +5972,17 @@ impl DaemonServer {
                 &super::supervisor_peer::SystemProcs,
             );
         }
-        #[allow(unused_mut)]
-        let mut pane_pids: Vec<u32> = self
+        let pane_pids: Vec<u32> = self
             .terminal_service
             .list_sessions()
             .into_iter()
             .filter_map(|id| self.terminal_service.get_session(&id)?.pid())
             .collect();
         #[cfg(test)]
-        pane_pids.extend(self.test_pane_pids.lock().iter().copied());
+        let pane_pids: Vec<u32> = pane_pids
+            .into_iter()
+            .chain(self.test_pane_pids.lock().iter().copied())
+            .collect();
         tokio::task::spawn_blocking(move || {
             let table = super::supervisor_peer::SystemProcs;
             let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
