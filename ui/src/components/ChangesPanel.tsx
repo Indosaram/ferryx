@@ -184,6 +184,9 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
   const request = useMemo(() => ({ workspaceId, worktree: { wsId, slug } }), [workspaceId, wsId, slug]);
   const refreshSeq = useRef(0);
   const diffSeq = useRef(0);
+  // `busy` state lags a render behind; this ref stops a second action (e.g. a repeated
+  // Cmd+Enter) from starting while one is still in flight.
+  const inFlight = useRef(false);
 
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current;
@@ -244,6 +247,8 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
   }, [groups, loadDiff, selection]);
 
   const toggleStage = async (group: ChangeGroup, path: string) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy("stage");
     setActionError(null);
     setNotice(null);
@@ -253,6 +258,7 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
     } catch (error) {
       setActionError(toIpcError(error));
     } finally {
+      inFlight.current = false;
       setBusy(null);
       await refresh();
     }
@@ -260,7 +266,8 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
 
   const commit = async () => {
     const trimmed = message.trim();
-    if (!trimmed) return;
+    if (!trimmed || inFlight.current) return;
+    inFlight.current = true;
     setBusy("commit");
     setActionError(null);
     setNotice(null);
@@ -271,12 +278,15 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
     } catch (error) {
       setActionError(toIpcError(error));
     } finally {
+      inFlight.current = false;
       setBusy(null);
       await refresh();
     }
   };
 
   const push = async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy("push");
     setActionError(null);
     setNotice(null);
@@ -286,6 +296,7 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
     } catch (error) {
       setActionError(toIpcError(error));
     } finally {
+      inFlight.current = false;
       setBusy(null);
       await refresh();
     }

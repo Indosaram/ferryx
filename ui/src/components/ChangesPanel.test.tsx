@@ -153,6 +153,31 @@ describe("ChangesPanel", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_commit", { request: { ...request, message: "qa commit" } });
   });
 
+  it("sends one commit when Cmd+Enter is pressed twice while the first is in flight", async () => {
+    let resolveCommit: (sha: string) => void = () => undefined;
+    const pending = new Promise<string>((resolve) => {
+      resolveCommit = resolve;
+    });
+    mockIpc({
+      status: () => ({ isDirty: true, files: [{ statusCode: "M ", path: "README.md" }] }),
+      commit: () => pending,
+    });
+    renderPanel();
+    await screen.findByRole("checkbox", { name: "Unstage README.md" });
+
+    const box = screen.getByRole("textbox", { name: "Commit message" });
+    fireEvent.change(box, { target: { value: "qa commit" } });
+    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+
+    const commitCalls = () => core.invoke.mock.calls.filter(([command]) => command === "cmd_worktree_commit").length;
+    expect(commitCalls()).toBe(1);
+    resolveCommit("abcdef0123");
+    await screen.findByText(/abcdef01/);
+    expect(commitCalls()).toBe(1);
+  });
+
   it("shows GIT_NO_REMOTE inline when Push has nowhere to go", async () => {
     mockIpc({
       status: () => ({ isDirty: false, files: [] }),
