@@ -20,6 +20,7 @@ import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
 import { runSlackLeg } from './slack.mjs';
 import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
 import { LEGACY_REQUIRED_ASSERTIONS } from './legacy.mjs';
+import { CORRECTION_REQUIRED_ASSERTIONS } from './correction.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -2474,6 +2475,26 @@ const legacyDeps = Object.freeze({
 });
 const loadLegacy = async () => import('./legacy.mjs');
 
+// The correction scenario (task 10, correction.mjs) reuses these helpers.
+const correctionDeps = Object.freeze({
+  onPath,
+  shellQuote,
+  worker: WORKER,
+  promptTextOf,
+  convergenceMarker: CONVERGENCE_MARKER,
+  converged: AUTONOMY_CONVERGED,
+  registerWorkspace,
+  openHubReader,
+  hubStatusUntil,
+  hubRunning,
+  hubControl,
+  waitForChange,
+  readWorkerLogs,
+  stillAlive,
+  heldStates: HELD_STATES,
+});
+const loadCorrection = async () => import('./correction.mjs');
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -2513,7 +2534,18 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runAutonomy,
   }),
-  correction: planned('10', 'Owner correction "Use DONE instead of READY" before dispatch, stale expectedRevision replayed: final bytes DONE, stale mutation 409'),
+  correction: Object.freeze({
+    implemented: true,
+    task: '10',
+    summary: 'Submit with the hub generation stopped, inject owner correction "Use DONE instead of READY" before dispatch, replay it at the stale expectedRevision: old dispatch superseded and never typed, final bytes DONE verified, goal completed, stale mutation 409 changes nothing',
+    deadlineMs: 12 * 60_000,
+    requiredAssertions: CORRECTION_REQUIRED_ASSERTIONS,
+    notCovered: [
+      { clause: 'correction-while-claimed', reason: 'the runner holds the first dispatch by stopping the hub before it is claimed; a correction racing a claimed send (the typing fence) has no reachable window without a product hook', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/request.rs a_correction_fences_a_claimed_send_and_the_claim_is_released_untransmitted' },
+      { clause: 'stale-decision-after-correction', reason: 'a model decision computed at the pre-correction revision needs a decision in flight across the correction', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/completion.rs a_stale_decision_cannot_overwrite_an_owner_correction' },
+    ],
+    run: (ctx) => loadCorrection().then((module) => module.runCorrection(ctx, correctionDeps)),
+  }),
   waiting: Object.freeze({
     implemented: true,
     task: '9',
