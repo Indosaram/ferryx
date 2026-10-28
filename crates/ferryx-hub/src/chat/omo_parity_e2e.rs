@@ -65,31 +65,57 @@ fn approval_answer(log: &MockLog) -> Option<Value> {
         .cloned()
 }
 
-/// Waits for the approval card; returns (card ts, button value for `choice`).
+/// Waits for the approval card; returns (card ts, button value for `choice`). Subscribed to the
+/// mock's call log before each check, so the card's own post wakes it.
 async fn wait_card(calls: &Calls, choice: &str) -> (String, String) {
-    for _ in 0..200 {
-        let found = calls
-            .lock()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .find(|(_, (m, b))| m == "chat.postMessage" && b.get("blocks").is_some())
-            .map(|(index, (_, body))| (index, body.clone()));
-        if let Some((index, card)) = found {
-            let value = card["blocks"]
-                .as_array()
+    let (index, card) = wait_call(calls, "an approval card", |method, body| {
+        method == "chat.postMessage" && body.get("blocks").is_some()
+    })
+    .await;
+    let value = card["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|block| block["elements"].as_array().cloned().unwrap_or_default())
+        .filter_map(|element| element["value"].as_str().map(str::to_owned))
+        .find(|value| value.ends_with(&format!(":{choice}")))
+        .expect("card has the button");
+    // The mock numbers a posted message by its position in the call log.
+    (format!("1700000000.{:06}", index + 1), value)
+}
+
+/// Waits until the mock has recorded a call matching `matches`; returns its index and body.
+async fn wait_call(
+    calls: &Calls,
+    what: &str,
+    matches: impl Fn(&str, &Value) -> bool,
+) -> (usize, Value) {
+    let mut changed = super::slack_web::mock::recorded();
+    let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let found = calls
+                .lock()
                 .unwrap()
                 .iter()
-                .flat_map(|block| block["elements"].as_array().cloned().unwrap_or_default())
-                .filter_map(|element| element["value"].as_str().map(str::to_owned))
-                .find(|value| value.ends_with(&format!(":{choice}")))
-                .expect("card has the button");
-            // The mock numbers a posted message by its position in the call log.
-            return (format!("1700000000.{:06}", index + 1), value);
+                .enumerate()
+                .find(|(_, (method, body))| matches(method, body))
+                .map(|(index, (_, body))| (index, body.clone()));
+            if let Some(found) = found {
+                return found;
+            }
+            changed.changed().await.expect("the call log outlives the test");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    })
+    .await;
+    match found {
+        Ok(found) => found,
+        Err(_) => panic!("no {what}: {:?}", calls.lock().unwrap()),
     }
-    panic!("no approval card: {:?}", calls.lock().unwrap());
+}
+
+fn is_status_post(method: &str, body: &Value) -> bool {
+    let text = body["text"].as_str().unwrap_or("");
+    method == "chat.postMessage" && text.starts_with("작업 중:")
 }
 
 fn click(user: &str, ts: &str, value: &str, response_url: &str) -> Value {
@@ -264,12 +290,7 @@ async fn an_unanswered_card_expires_and_a_stale_click_clears_it() {
     let answer = with_test_api(base.clone(), "xoxb-test".into(), async {
         let answer = approver.ask(&frame, None, "needs approval").await;
         let (ts, once) = wait_card(&calls, "once").await;
-        for _ in 0..100 {
-            if !calls_of(&calls, "chat.update").is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        wait_call(&calls, "expired update", |method, _| method == "chat.update").await;
         assert!(
             super::turn_approval::handle_click(
                 &click("UOWNER", &ts, &once, ""),
@@ -659,8 +680,13 @@ async fn e2e_a_long_owner_turn_gets_a_status_message_that_ends_done() {
                     .scope(false, async {
                         let clicker = async {
                             let (ts, allow) = wait_card(&calls, "once").await;
-                            // The owner answers after a few status intervals.
-                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                            // The owner answers once the status message was posted and edited.
+                            let (status, _) = wait_call(&calls, "status", is_status_post).await;
+                            let status_ts = format!("1700000000.{:06}", status + 1);
+                            wait_call(&calls, "status edit", |method, body| {
+                                method == "chat.update" && body["ts"] == status_ts.as_str()
+                            })
+                            .await;
                             super::turn_approval::handle_click(
                                 &click("UOWNER", &ts, &allow, &response_url),
                                 &owners,
@@ -708,12 +734,11 @@ async fn e2e_a_reply_claim_is_stripped_then_remeasured_and_corrected() {
         super::report_claims::DELAY_OVERRIDE
             .scope(std::time::Duration::from_millis(50), async {
                 let reply = run_session_turn(&config, &pool, slack_turn("빌드 어때?")).await;
-                for _ in 0..200 {
-                    if calls_of(&calls, "chat.postMessage").len() >= 2 {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
+                wait_call(&calls, "the correction post", |method, body| {
+                    method == "chat.postMessage"
+                        && body["text"].as_str().unwrap_or("").starts_with("정정:")
+                })
+                .await;
                 reply
             })
             .await
@@ -735,4 +760,105 @@ async fn e2e_a_reply_claim_is_stripped_then_remeasured_and_corrected() {
     .await
     .unwrap();
     assert!(!stored.contains("[[measure"), "{stored}");
+}
+
+/// A supervisor conversation whose turn runs until the test releases it.
+struct GatedConversation {
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl super::slack_supervisor::SupervisorConversation for GatedConversation {
+    async fn converse(
+        &self,
+        _scope: &crate::meta::mhc_profile::ConversationScope,
+        _turn: u64,
+        _message: &str,
+    ) -> Result<String, String> {
+        self.release.notified().await;
+        Ok("supervised answer".into())
+    }
+
+    async fn ingest_owner(&self, _source: &str, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn e2e_a_supervised_owner_dm_keeps_the_status_card_and_never_reaches_omo() {
+    let (omo_url, log) = serve(script(&["omo must not answer"], false)).await;
+    let config = config(omo_url);
+    let pool = crate::storage::memory().await.unwrap();
+    crate::supervisor::ensure_identity(&pool, "slack:T1:UOWNER")
+        .await
+        .unwrap();
+    let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+    let payload = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
+        "type": "message", "channel_type": "im", "team": "T1", "user": "UOWNER",
+        "channel": "D1", "ts": "8801.000001", "text": "push   it"}});
+    let admitted = admit(&config, &payload, "UBOT", false).expect("the owner's DM");
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let conversation: std::sync::Arc<dyn super::slack_supervisor::SupervisorConversation> =
+        std::sync::Arc::new(GatedConversation {
+            release: release.clone(),
+        });
+    let handled = with_test_api(base, "xoxb-test".into(), async {
+        super::turn_status::INTERVAL_OVERRIDE
+            .scope(std::time::Duration::from_millis(150), async {
+                super::slack_supervisor::TEST_CONVERSATION
+                    .scope(conversation, async {
+                        let owner = async {
+                            // The turn ends once its status card was posted and edited.
+                            let (status, _) = wait_call(&calls, "status", is_status_post).await;
+                            let status_ts = format!("1700000000.{:06}", status + 1);
+                            wait_call(&calls, "status edit", |method, body| {
+                                method == "chat.update" && body["ts"] == status_ts.as_str()
+                            })
+                            .await;
+                            release.notify_one();
+                        };
+                        let turn = super::slack_turn::handle(&config, &pool, admitted);
+                        tokio::join!(turn, owner).0
+                    })
+                    .await
+            })
+            .await
+    })
+    .await;
+    assert!(handled);
+    assert!(
+        log.frames.lock().unwrap().is_empty(),
+        "the omo app-server is never contacted"
+    );
+    let posts = calls_of(&calls, "chat.postMessage");
+    assert!(
+        posts.iter().all(|post| post.get("blocks").is_none()),
+        "no approval card: {posts:?}"
+    );
+    let status: Vec<&Value> = posts
+        .iter()
+        .filter(|post| is_status_post("chat.postMessage", post))
+        .collect();
+    assert_eq!(status.len(), 1, "{posts:?}");
+    assert_eq!(status[0]["text"], "작업 중: push it · 0분");
+    assert_eq!(status[0]["channel"], "D1");
+    let answers: Vec<&Value> = posts
+        .iter()
+        .filter(|post| post["text"] == "supervised answer")
+        .collect();
+    assert_eq!(answers.len(), 1, "{posts:?}");
+    assert_eq!(answers[0]["channel"], "D1");
+    let updates = calls_of(&calls, "chat.update");
+    let finished = updates
+        .iter()
+        .rev()
+        .find(|update| {
+            let text = update["text"].as_str().unwrap_or("");
+            text.starts_with("작업 중:") || text.starts_with("완료")
+        })
+        .cloned();
+    assert_eq!(
+        finished.map(|update| update["text"].clone()),
+        Some(json!("완료 · 0분"))
+    );
 }

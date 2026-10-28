@@ -24,6 +24,10 @@ pub const WORK_REPLY_REQUEST: &str = "supervisor.work_reply";
 pub const WORK_QUEUE: usize = 64;
 /// Error code of the reply to a work request the full queue could not take.
 pub const WORK_BUSY_CODE: &str = "SUPERVISOR_WORK_BUSY";
+/// Field the reader adds to every queued work request, response and session record: its
+/// position in the engine's output ([`StdioClient::position`]). The engine writes in order, so
+/// a record positioned after a reading (or after a prompt's response) was emitted after it.
+pub const WORK_SEQUENCE_FIELD: &str = "fxReceivedAt";
 
 pub type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 pub type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
@@ -61,6 +65,8 @@ struct Shared {
     malformed: AtomicU64,
     /// Work requests refused because the queue was full; also numbers their reply ids.
     busy: AtomicU64,
+    /// Records dispatched so far, in engine output order.
+    received: AtomicU64,
     /// The writer queue, held weakly so [`StdioClient::close`] still shuts the engine's stdin.
     outbound: mpsc::WeakUnboundedSender<String>,
     gone: watch::Sender<Option<String>>,
@@ -86,7 +92,11 @@ impl Shared {
     fn malformed(&self, why: &str, bytes: usize) {
         self.malformed.fetch_add(1, Ordering::Relaxed);
         // The line itself may carry secrets; only its size is logged.
-        tracing::warn!(why, bytes, "mhc supervisor engine sent a malformed line; it was skipped");
+        tracing::warn!(
+            why,
+            bytes,
+            "mhc supervisor engine sent a malformed line; it was skipped"
+        );
     }
 
     /// Answers a work request the full queue cannot take with an error reply, so the engine's
@@ -123,10 +133,14 @@ impl Shared {
             .outbound
             .upgrade()
             .is_some_and(|sender| sender.send(line).is_ok());
-        tracing::warn!(sent, "a supervisor work request was refused: the work queue is full");
+        tracing::warn!(
+            sent,
+            "a supervisor work request was refused: the work queue is full"
+        );
     }
 
     fn dispatch(&self, value: Value) {
+        let position = self.received.fetch_add(1, Ordering::SeqCst) + 1;
         let Some(kind) = value.get("type").and_then(Value::as_str).map(str::to_owned) else {
             self.malformed("record without a type", value.to_string().len());
             return;
@@ -135,6 +149,8 @@ impl Shared {
         let Some(routes) = guard.as_mut() else {
             return;
         };
+        let mut value = value;
+        value[WORK_SEQUENCE_FIELD] = json!(position);
         if kind == "response" {
             if let Some(sender) = value
                 .get("id")
@@ -159,7 +175,11 @@ impl Shared {
             }
             return;
         }
-        let Some(handle) = value.get("sessionId").and_then(Value::as_str).map(str::to_owned) else {
+        let Some(handle) = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
             tracing::debug!(kind = %kind, "mhc supervisor host record");
             return;
         };
@@ -218,7 +238,10 @@ async fn next_line<R: AsyncBufRead + Unpin>(
                 overflow += line.len() + take;
                 line.clear();
             }
-            (newline.is_some(), newline.map_or(available.len(), |index| index + 1))
+            (
+                newline.is_some(),
+                newline.map_or(available.len(), |index| index + 1),
+            )
         };
         reader.consume(used);
         if found {
@@ -249,6 +272,7 @@ impl StdioClient {
             })),
             malformed: AtomicU64::new(0),
             busy: AtomicU64::new(0),
+            received: AtomicU64::new(0),
             outbound: outbound.downgrade(),
             gone,
         });
@@ -316,6 +340,11 @@ impl StdioClient {
         self.shared.gone.borrow().is_some()
     }
 
+    /// How many engine records the reader has dispatched so far.
+    pub fn position(&self) -> u64 {
+        self.shared.received.load(Ordering::SeqCst)
+    }
+
     /// Stops sending: queued lines are still written, then the engine's stdin is shut, which
     /// ends its stdio host. The transport is gone once the engine closes its stdout.
     pub fn close(&self) {
@@ -356,13 +385,27 @@ impl StdioClient {
         let outbound = self.outbound.lock().unwrap_or_else(PoisonError::into_inner);
         match outbound.as_ref() {
             Some(sender) => sender.send(line).map_err(|_| self.gone_error()),
-            None => Err(RequestError::Gone("the supervisor closed the engine transport".to_owned())),
+            None => Err(RequestError::Gone(
+                "the supervisor closed the engine transport".to_owned(),
+            )),
         }
     }
 
     /// Sends one command with a fresh id and waits up to `deadline` for its response.
     /// Returns the response `data` (null when absent).
     pub async fn request(&self, command: Value, deadline: Duration) -> Result<Value, RequestError> {
+        self.request_at(command, deadline)
+            .await
+            .map(|(data, _)| data)
+    }
+
+    /// [`Self::request`] that also returns the response's position in the engine's output
+    /// ([`WORK_SEQUENCE_FIELD`]): a session record positioned before it was emitted earlier.
+    pub async fn request_at(
+        &self,
+        command: Value,
+        deadline: Duration,
+    ) -> Result<(Value, u64), RequestError> {
         let mut command = command;
         let id = format!("fx-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         command["id"] = json!(id);
@@ -391,7 +434,11 @@ impl StdioClient {
             Ok(Err(_)) => Err(self.gone_error()),
             Ok(Ok(response)) => {
                 if response.get("success") == Some(&Value::Bool(true)) {
-                    Ok(response.get("data").cloned().unwrap_or(Value::Null))
+                    let at = response
+                        .get(WORK_SEQUENCE_FIELD)
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    Ok((response.get("data").cloned().unwrap_or(Value::Null), at))
                 } else {
                     Err(RequestError::Refused {
                         command: kind,
