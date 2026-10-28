@@ -45,10 +45,15 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       });
 
       if (!res.ok) {
+        if (res.status === 429) {
+          throw new Error("Too many attempts. Wait a moment, then request a new code in Ferryx Desktop.");
+        }
+        if (res.status === 401) {
+          throw new Error("Code expired. Ask for a new code in Ferryx Desktop settings.");
+        }
         const remaining = await remainingAttempts(res);
         if (remaining !== null) {
-          const reason = res.status === 401 ? "Code expired." : "Wrong code.";
-          throw new Error(`${reason} ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`);
+          throw new Error(`Wrong code. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`);
         }
         throw new Error(`Pairing failed (${res.status})`);
       }
