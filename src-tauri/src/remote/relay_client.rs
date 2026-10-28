@@ -403,6 +403,16 @@ impl RelayClient {
         self
     }
 
+    /// The machine id this client announces to the relay and binds into every attach
+    /// handshake: its signing identity's, or the one set with [`Self::with_machine_id`] when it
+    /// authenticates with a machine token instead.
+    fn machine_id(&self) -> &str {
+        self.identity
+            .as_ref()
+            .map(|identity| identity.machine_id.as_str())
+            .unwrap_or(&self.pairing.machine_id)
+    }
+
     pub fn with_identity(
         relay_url: impl Into<String>,
         identity: MachineIdentity,
@@ -528,11 +538,7 @@ impl RelayClient {
                 format!("Bearer {}", self.machine_token).parse()?,
             );
         }
-        let machine_id = self
-            .identity
-            .as_ref()
-            .map(|i| i.machine_id.as_str())
-            .unwrap_or(&self.pairing.machine_id);
+        let machine_id = self.machine_id();
         if !machine_id.is_empty() {
             if let Ok(val) = machine_id.parse() {
                 request.headers_mut().insert("x-ferryx-machine-id", val);
@@ -821,11 +827,9 @@ impl RelayClient {
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let attach = attach.map_err(|error| anyhow::anyhow!(error))?;
-        let machine_id = self
-            .identity
-            .as_ref()
-            .map(|identity| identity.machine_id.clone())
-            .unwrap_or_default();
+        // The browser binds the account machine id into the prologue; a token-authenticated
+        // client has no identity here and must still bind the id it announced.
+        let machine_id = self.machine_id().to_owned();
         let enrollment_epoch = enrollment_record
             .map(|record| record.enrollment_epoch)
             .unwrap_or_default();
@@ -1121,6 +1125,19 @@ mod tests {
                 .encode(key.verifying_key().to_bytes()),
             private_key: base64::engine::general_purpose::STANDARD.encode(key.to_bytes()),
         }
+    }
+
+    #[test]
+    fn a_token_authenticated_client_binds_its_announced_machine_id() {
+        // The daemon with FERRYX_MACHINE_TOKEN: no signing identity, machine id set separately.
+        // An empty id here gives the attach responder a prologue the browser never used.
+        let token =
+            RelayClient::with_gateway("https://relay.example", "operator-token", LOCAL_GATEWAY_ADDR)
+                .with_machine_id("enrolled-machine");
+        assert_eq!(token.machine_id(), "enrolled-machine");
+        let signed =
+            RelayClient::with_identity("https://relay.example", test_identity(), LOCAL_GATEWAY_ADDR);
+        assert_eq!(signed.machine_id(), "test-machine");
     }
 
     async fn auth_fixture(success: bool) -> (RelayClient, tokio::task::JoinHandle<()>) {
