@@ -1070,6 +1070,24 @@ pub async fn supervisor_memory(
     Err(ferryx_hub::supervisor::request::memory_receipts_unavailable())
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorReadV1`.
+pub const SUPERVISOR_READ_CAPABILITY: &str = "supervisorReadV1";
+
+/// The desktop's read of the unified supervisor besides the snapshot: the same conversation
+/// page and memory view the remote `GET /api/v1/supervisor/{conversation,memory}` routes serve.
+pub async fn supervisor_read(
+    state: &RemoteGatewayState,
+    request: crate::daemon::protocol::SupervisorReadAction,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use crate::daemon::protocol::SupervisorReadAction;
+    match request {
+        SupervisorReadAction::Conversation { project_id, after } => {
+            supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
+        }
+        SupervisorReadAction::Memory => supervisor_memory(state).await,
+    }
+}
+
 /// The unified supervisor's part of the snapshot: identity, engine health and every goal's
 /// run state, wait reason, next trigger and revision. Additive to the legacy lane view.
 async fn unified_snapshot(pool: &ferryx_hub::goals::SqlitePool) -> Value {

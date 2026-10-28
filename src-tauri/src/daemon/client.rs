@@ -608,6 +608,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::RemoteSessionDetails { .. }
             | DaemonRequest::RetryRemoteSession { .. }
             | DaemonRequest::SupervisorSnapshot
+            | DaemonRequest::SupervisorReadV1 { .. }
             | DaemonRequest::AgentControlSettingsGet
     )
 }
@@ -738,6 +739,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
+        DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
     }
 }
 

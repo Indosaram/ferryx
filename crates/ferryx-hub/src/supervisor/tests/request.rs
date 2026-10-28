@@ -679,3 +679,20 @@ async fn a_stale_depend_writes_no_wait() {
     assert_eq!(inner.http_status(), 409);
     assert_eq!(fingerprint(&fixture.pool).await, before);
 }
+
+#[tokio::test]
+async fn the_snapshot_names_the_owner_projects_and_each_goal_budget_and_grant() {
+    let fixture = fixture().await;
+    let goal_id = admit(&fixture, "s1").await;
+    let snapshot = crate::supervisor::request::snapshot(&fixture.pool).await.unwrap();
+    assert_eq!(snapshot["identity"]["ownerPrincipal"], OWNER);
+    assert_eq!(snapshot["projects"], json!([{"projectId": fixture.project_id, "name": "ferryx"}]));
+    let goal = &snapshot["goals"][0];
+    assert_eq!(goal["goalId"], goal_id.as_str());
+    assert_eq!(goal["title"], "Goal s1");
+    assert_eq!(goal["mode"], "full");
+    assert_eq!(goal["turnLimit"], i64::from(DEFAULT_TURN_LIMIT));
+    assert_eq!(goal["turnsUsed"], 0);
+    assert_eq!(goal["grant"], json!([]));
+    assert_eq!(goal["revision"], 1);
+}

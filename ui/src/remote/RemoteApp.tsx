@@ -2872,6 +2872,7 @@ export const RemoteHostConnection: React.FC<{
               now={phoneSupervisor.now}
               needsYou={new Set<string>()}
               onSetPaused={phoneSupervisor.setPaused}
+              unified={phoneSupervisor.unified}
               onOpenLane={(machineId, sessionId) => {
                 const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
                 if (option) void selectAccountOption(option);
@@ -4632,6 +4633,7 @@ export const RemoteHostConnection: React.FC<{
             now: phoneSupervisor.now,
             needsYou: phoneNeedsYou,
             onSetPaused: phoneSupervisor.setPaused,
+            unified: phoneSupervisor.unified,
             onOpenLane: (machineId, sessionId) => {
               const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
               if (!option) {

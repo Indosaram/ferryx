@@ -7316,6 +7316,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
@@ -7399,6 +7400,16 @@ impl DaemonServer {
                     };
                     match crate::hub_runtime::supervisor_request(self.remote_state(), caller, envelope).await {
                         Ok(receipt) => DaemonResponse::SupervisorRequestV1Ok { receipt },
+                        Err(failure) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorReadV1 { request }) => {
+                    match crate::hub_runtime::supervisor_read(self.remote_state(), request).await {
+                        Ok(value) => DaemonResponse::SupervisorReadV1Ok { value },
                         Err(failure) => DaemonResponse::Error {
                             message: failure.message.clone(),
                             code: Some(failure.code.clone()),
