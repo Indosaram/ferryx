@@ -10,6 +10,8 @@
 //   argv: <logDir> [--max-lifetime-ms=N] [--no-report]   (leak guard, default 600000)
 // With --no-report it logs its input but never reports a state: a target that accepts the
 // typed bytes and never shows a turn start (remote-delivery's suppressed receipt).
+// A later typed line containing QA-SETTLE (the runner types it) reports `agentState idle`: the
+// turn ended, so the supervisor run settles (surfaces). Without that line it never reports idle.
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
@@ -53,6 +55,7 @@ const lines = createInterface({ input: process.stdin, terminal: false });
 lines.on('line', (raw) => {
   const text = raw.replace(/\r/g, '');
   record({ kind: 'input', text });
+  if (reported && !silent && text.includes('QA-SETTLE')) { report('idle'); return; }
   if (reported || text.trim() === '') return;
   reported = true;
   if (silent) { record({ kind: 'report-suppressed', state: 'working' }); return; }
