@@ -677,16 +677,24 @@ pub async fn try_handle(
         prepared,
         briefings.as_ref().map(|briefings| briefings.text.as_str()),
     );
+    // Only the owner's own words, without task-only lines, with their provenance; a source
+    // already ingested (a backfill replay) is not sent again.
     let learn = async {
         if owner_text.is_empty() {
             return;
         }
-        if let Err(error) = conversation
-            .ingest_owner(&format!("slack:{}", routed.source_message_id), &owner_text)
-            .await
-        {
-            tracing::warn!(%error, "owner message was not ingested");
-        }
+        crate::supervisor::memory::ingest_with(
+            pool,
+            &routed.principal,
+            ChannelProvider::Slack,
+            &routed.source_message_id,
+            routed.project_id.as_deref(),
+            &owner_text,
+            |source, text| async move {
+                conversation.ingest_owner(&source, &text).await.map(|()| false)
+            },
+        )
+        .await;
     };
     let status_message = super::slack_turn::TurnStatus::start(
         config,
@@ -697,7 +705,9 @@ pub async fn try_handle(
     );
     // Registered like an omo turn, so `/omo-stop` ends it.
     let registration = super::turns::begin(&storage_key, &admitted.channel);
-    let converse = async {
+    let attribution = crate::usage::CallCause::new("owner_message:slack")
+        .events([format!("slack:{}", routed.source_message_id)]);
+    let converse = crate::usage::with_cause(attribution, async {
         let Some(mut cancel) = super::turns::cancelled(&storage_key) else {
             return conversation.converse(&routed.scope, turn, &message).await;
         };
@@ -705,7 +715,7 @@ pub async fn try_handle(
             reply = conversation.converse(&routed.scope, turn, &message) => reply,
             Ok(_) = cancel.wait_for(|stop| *stop) => Err(STOPPED.to_owned()),
         }
-    };
+    });
     let (reply, ()) = tokio::join!(converse, learn);
     drop(registration);
     let mut record = guard.record();

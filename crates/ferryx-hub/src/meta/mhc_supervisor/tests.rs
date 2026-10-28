@@ -286,6 +286,18 @@ impl Peer {
                     self.emit(json!({"type": "message_end", "sessionId": handle, "message": {
                         "role": "assistant", "content": [], "stopReason": "error", "errorMessage": error}}));
                     self.emit(json!({"type": "agent_settled", "sessionId": handle}));
+                } else if message.contains("USAGE_ROUTED") {
+                    self.emit(json!({"type": "message_end", "sessionId": handle, "message": {
+                        "role": "assistant", "content": [{"type": "text", "text": "routed"}],
+                        "stopReason": "stop", "provider": "other", "model": "other-model",
+                        "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0}}}));
+                    self.emit(json!({"type": "agent_settled", "sessionId": handle}));
+                } else if message.contains("USAGE") {
+                    self.emit(json!({"type": "message_end", "sessionId": handle, "message": {
+                        "role": "assistant", "content": [{"type": "text", "text": "metered"}],
+                        "stopReason": "stop", "provider": "anthropic", "model": "claude-test",
+                        "usage": {"input": 120, "output": 30, "cacheRead": 100, "cacheWrite": 0}}}));
+                    self.emit(json!({"type": "agent_settled", "sessionId": handle}));
                 } else if message.contains("MODEL_SWAP") {
                     self.emit(json!({"type": "model_changed", "sessionId": handle,
                         "model": {"provider": "other", "id": "other-model"}, "thinkingLevel": "high", "source": "fallback"}));
@@ -313,6 +325,18 @@ impl Peer {
                         self.emit(json!({"type": "agent_settled", "sessionId": handle}));
                     }
                 }
+            }
+            "extension_request" if frame["name"].as_str().is_some_and(|name| name.starts_with("memory_")) => {
+                // mhc owner memory: refused with a typed code for an unknown receipt, else a
+                // receipt echoing the session it was served on.
+                if frame["data"]["receiptId"] == "missing" {
+                    self.emit(json!({"type": "response", "id": id, "command": kind,
+                        "success": false, "error": "no such receipt", "errorCode": "receipt_not_found"}));
+                    return;
+                }
+                self.emit(ok(json!({"changed": true, "receipt": {
+                    "receiptId": "rcpt-1", "sourceId": frame["data"]["sourceId"], "state": "applied",
+                    "servedOn": session}})));
             }
             "extension_request" => {
                 self.emit(ok(json!({"delivered": true})));
@@ -2060,4 +2084,104 @@ async fn a_generation_abort_and_engine_restart_end_only_the_owned_engine_child()
         supervisor.profile().owned_pid().is_none(),
         "no owned pid record is left"
     );
+}
+
+#[tokio::test]
+async fn every_engine_turn_is_metered_with_its_cause_and_unknown_usage_stays_unknown() {
+    let harness = Harness::new("usage", all_capabilities());
+    let supervisor = harness.supervisor();
+    let cause = crate::usage::CallCause::new("wake:dependency_ready")
+        .goal("goal-1", Some(4))
+        .events(["goal:child:done".to_owned()]);
+    let prompt = crate::usage::with_delta("STABLE", "USAGE goal-1");
+    let answer = crate::usage::with_cause(cause, supervisor.decide(&prompt))
+        .await
+        .unwrap();
+    assert_eq!(answer, "metered");
+    assert_eq!(supervisor.decide("plain").await.unwrap(), "answer:plain");
+    let calls = supervisor.unrecorded_calls();
+    assert_eq!(calls.len(), 2);
+    let metered = &calls[0];
+    assert_eq!(metered.cause.cause, "wake:dependency_ready");
+    assert_eq!(metered.cause.goal_id.as_deref(), Some("goal-1"));
+    assert_eq!(metered.cause.merged_event_ids, ["goal:child:done"]);
+    assert_eq!(metered.role, "decision");
+    assert_eq!(metered.outcome, "ok");
+    assert_eq!(metered.provider.as_deref(), Some("anthropic"));
+    assert_eq!(metered.usage.input, Some(120));
+    assert_eq!(metered.usage.cache_read, Some(100));
+    assert_eq!(metered.usage.cache_write, None, "an unreported zero is unknown");
+    assert!(metered.prefix_sha256.is_some());
+    // A turn that reported no usage and that nobody attributed: unknown, unattributed.
+    let plain = &calls[1];
+    assert_eq!(plain.cause.cause, crate::usage::UNATTRIBUTED);
+    assert_eq!(plain.usage, crate::usage::TokenUsage::default());
+    assert!(plain.prefix_sha256.is_none());
+
+    // Setting the sink flushes what was kept into supervisor_model_calls.
+    let pool = crate::storage::memory().await.unwrap();
+    supervisor.set_usage_sink(pool.clone()).await;
+    assert!(supervisor.unrecorded_calls().is_empty());
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_model_calls")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 2);
+}
+
+#[tokio::test]
+async fn an_answer_from_another_model_than_the_configured_one_is_discarded() {
+    let harness = Harness::new("routing", all_capabilities());
+    let mut configured = config();
+    configured.provider = Some("anthropic".into());
+    configured.model = Some("claude-test".into());
+    let supervisor = MhcSupervisor::new(harness.profile("/parent", configured), harness.launcher.clone());
+    assert_eq!(supervisor.decide("USAGE").await.unwrap(), "metered");
+    let routed = supervisor.decide("USAGE_ROUTED").await.unwrap_err();
+    assert!(
+        matches!(routed, SupervisorFault::Provider { ref detail } if detail.contains("other/other-model")),
+        "{routed:?}"
+    );
+    let calls = supervisor.unrecorded_calls();
+    assert_eq!(calls[1].outcome, routed.code());
+    assert_eq!(calls[1].model.as_deref(), Some("other-model"));
+}
+
+#[tokio::test]
+async fn owner_memory_requests_go_to_the_owner_ingest_session_with_typed_refusals() {
+    let harness = Harness::new("owner-memory", ingest_capabilities());
+    let supervisor = harness.supervisor();
+    let taught = supervisor
+        .owner_memory(
+            "memory_receipts",
+            json!({"action": "teach", "sourceId": "desktop:t1", "text": "use bun"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(taught["receipt"]["sourceId"], "desktop:t1");
+    let requests = harness.peer.of_type("extension_request");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["name"], "memory_receipts");
+    // Served on the owner-ingest role's session, the only memory-write-enabled one.
+    let ingest_key = supervisor
+        .profile()
+        .role_spec(&SessionRole::OwnerIngest)
+        .key;
+    let engine = current_engine(&supervisor).await;
+    let handle = engine.handles().get(&ingest_key).map(|open| open.handle.clone());
+    assert_eq!(taught["receipt"]["servedOn"].as_str(), handle.as_deref());
+    let missing = supervisor
+        .owner_memory(
+            "memory_forget",
+            json!({"sourceId": "desktop:f1", "receiptId": "missing"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(missing, MemoryRequestError::Refused { ref code, .. } if code == "receipt_not_found"),
+        "{missing:?}"
+    );
+    let unknown = supervisor.owner_memory("memory_dump", json!({})).await.unwrap_err();
+    assert!(matches!(unknown, MemoryRequestError::Fault(_)));
+    assert_eq!(harness.peer.of_type("extension_request").len(), 2);
 }

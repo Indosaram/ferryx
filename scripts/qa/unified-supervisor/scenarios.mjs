@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
 import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
 import { runSlackLeg } from './slack.mjs';
+import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -1252,7 +1253,8 @@ async function runAuthority(ctx) {
   const stale = await http('owner-pause-stale', 'POST', '/api/v1/supervisor/request', { token: owner.token, body: { ...pause, requestId: `${pause.requestId}-again` } });
   ctx.assert('stale-revision-409', stale.status === 409 && stale.body?.error?.code === 'REVISION_CONFLICT', { status: stale.status, body: stale.body });
   const receipts = await http('owner-memory-receipts', 'GET', '/api/v1/supervisor/memory', { token: owner.token });
-  ctx.assert('memory-receipts-unavailable-503', receipts.status === 503 && receipts.body?.error?.code === 'MEMORY_RECEIPTS_UNAVAILABLE', { status: receipts.status, body: receipts.body });
+  // No mhc engine runs in this daemon: the native receipt listing is unavailable, never empty.
+  ctx.assert('memory-receipts-unavailable-503', receipts.status === 503 && receipts.body?.error?.code === 'MEMORY_UNAVAILABLE', { status: receipts.status, body: receipts.body });
   const final = { goal: goalRow(), dispatches: dispatchRows() };
   ctx.assert('only-the-owner-changed-the-goal', final.goal?.run_state === 'paused' && final.goal?.revision === revision + 1
     && final.dispatches.every((row) => row.state === 'ready' || row.state === 'superseded'), final);
@@ -2109,14 +2111,13 @@ async function runWaiting(ctx) {
   }
 }
 
-// burst (plan task 9) is blocked on product seams a black-box runner cannot reach:
-// - no product path enqueues an ordinary report wake: supervisor/wakes.rs `report` (:383) has
-//   no caller outside tests (no CLI, MCP, HTTP or worker-report ingress turns a report into it);
-// - the running hub's scheduler uses SystemClock (src-tauri/src/hub_runtime.rs:1708
-//   `WakeScheduler::new(pool, handler)`, never `.with_clock`) and the 30s window is a const
-//   (lanes/dispatch.rs:18 BATCH_WINDOW_SECS), so virtual 0/1/2/3/30s cannot be driven.
-// The 0/1/2/3/30s schedule is covered only by crates/ferryx-hub/src/supervisor/tests/wakes.rs
-// reports_batch_on_the_oldest_and_an_owner_pause_skips_the_window, so burst stays planned.
+// The memory and usage scenarios (task 15, memory-usage.mjs) reuse these helpers.
+const memoryUsageDeps = Object.freeze({
+  supervisedHub,
+  hubControl,
+  work: (instruction) => ({ ...ADMISSION_WORK, instruction }),
+});
+const loadMemoryUsage = async () => import('./memory-usage.mjs');
 
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
@@ -2219,7 +2220,7 @@ export const SCENARIOS = Object.freeze({
   authority: Object.freeze({
     implemented: true,
     task: '13',
-    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
+    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503 without an engine',
     deadlineMs: 5 * 60_000,
     requiredAssertions: ['hub-open-before-the-owner-submit', 'owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
       'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-mcp-submit-forbidden', 'pane-mcp-opens-the-isolated-hub-db', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
@@ -2227,7 +2228,14 @@ export const SCENARIOS = Object.freeze({
       'memory-receipts-unavailable-503', 'only-the-owner-changed-the-goal'],
     run: runAuthority,
   }),
-  memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
+  memory: Object.freeze({
+    implemented: true,
+    task: '15',
+    summary: 'Teach through the desktop adapter (receipt + provenance), recall in a new context, worker-injected MCP text never teaches, a one-time exception reaches only its goal and is absent next run, forget then daemon-hub restart and replay of the old message: the item never reaches the model again',
+    deadlineMs: 20 * 60_000,
+    requiredAssertions: MEMORY_REQUIRED_ASSERTIONS,
+    run: (ctx) => loadMemoryUsage().then((module) => module.runMemory(ctx, memoryUsageDeps)),
+  }),
   capabilities: Object.freeze({
     implemented: true,
     task: '12',
@@ -2246,7 +2254,14 @@ export const SCENARIOS = Object.freeze({
   legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
   surfaces: planned('14', 'Real desktop and mobile controls against a populated isolated hub: same state and goal revision, readable wait/degraded views'),
-  usage: planned('15', 'Replay the same reports before/after the scheduling change: no idle calls, stable prefix hash, every call has a cause'),
+  usage: Object.freeze({
+    implemented: true,
+    task: '15',
+    summary: 'Two differing goals assessed through the engine share one prefix hash; every engine call has a cause and unreported usage is null; a goal waiting on a subscribed dependency makes zero provider requests and zero model-call rows across delivered owner wakes',
+    deadlineMs: 20 * 60_000,
+    requiredAssertions: USAGE_REQUIRED_ASSERTIONS,
+    run: (ctx) => loadMemoryUsage().then((module) => module.runUsage(ctx, memoryUsageDeps)),
+  }),
 });
 
 async function startSleeper(ctx, id, flags, graceMs, { extraEnv = {}, onLine, detached = false } = {}) {
