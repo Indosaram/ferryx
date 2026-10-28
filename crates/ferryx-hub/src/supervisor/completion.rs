@@ -883,11 +883,11 @@ fn withheld_named(instruction: &str, grant: &[OperationClass]) -> Vec<&'static s
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
         .filter(|word| !word.is_empty())
         .collect();
-    let names = |phrase: &str| {
+    let names = |phrase: &'static str| {
         if phrase.contains(' ') {
             lower.contains(phrase)
         } else {
-            words.iter().any(|word| *word == phrase)
+            words.contains(&phrase)
         }
     };
     OperationClass::ALL
