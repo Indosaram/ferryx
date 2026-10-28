@@ -218,6 +218,13 @@ export async function prepareEngineEnv(ctx, { baseUrl, mhcBin, label, extra = {}
   // failed turn off the canary, so a canary request proves a fallback happened.
   const settings = { retry: { modelFallback: true, fallbackChains: { [`${STUB_PROVIDER}/${STUB_MODEL}`]: [`${STUB_PROVIDER}/${CANARY_MODEL}`] } } };
   writeFileSync(join(agentDir, 'settings.json'), `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  // Loopback only: mhc's built-in MCP servers (maho-omo-builtin-mcps index.rs:19-23,57-62:
+  // context7 -> mcp.context7.com, grep_app -> mcp.grep.app) have no env switch; a global
+  // mcp.json entry with enabled:false wins over an extension declaration (maho-ext-mcp
+  // config.rs:175 reads <agentDir>/mcp.json, :217-218 marks it Disabled, :232-241 skips the
+  // extension's server, :229-231 spawns Enabled servers only).
+  const mcp = { mcpServers: { context7: { enabled: false }, grep_app: { enabled: false } } };
+  writeFileSync(join(agentDir, 'mcp.json'), `${JSON.stringify(mcp, null, 2)}\n`, { mode: 0o600 });
   const envFile = join(data, `hub-${label}.env`);
   writeFileSync(envFile, [
     'FERRYX_HUB_MHC_SUPERVISOR=1',
@@ -226,17 +233,32 @@ export async function prepareEngineEnv(ctx, { baseUrl, mhcBin, label, extra = {}
     `FERRYX_HUB_MHC_MODEL=${STUB_MODEL}`,
     '',
   ].join('\n'), { mode: 0o600 });
-  for (const path of [agentDir, envFile]) {
+  for (const path of [agentDir, join(agentDir, 'mcp.json'), envFile]) {
     if (!within(path, data)) throw new HarnessError('HARNESS_ERROR', `${path} escapes the run data root ${data}`);
   }
   // The hub HTTP listener gets a run-local port instead of the production default :9119.
   const trackerAddr = `127.0.0.1:${await freeLoopbackPort()}`;
-  ctx.evidence.writeJson(`runtime/engine-env-${label}.json`, { envFile, agentDir, models, settings, mhcBin, memoryHome: join(memory, 'mhc'), trackerAddr });
+  // The daemon's environment reaches the hub's mhc engine and its session workers (both inherit
+  // it: ferryx-hub child_env.rs:60-65, mhc host_runtime.rs:683-693).
+  // - PostHog telemetry (us.i.posthog.com): DO_NOT_TRACK=1 and OMO_DISABLE_POSTHOG=1
+  //   (telemetry-core env.rs:6,28-47, gate of posthog_client.rs:53-58 used by
+  //   maho-omo-telemetry omo_native_session.rs:27 and record_daily_active.rs:40).
+  // - Model catalog refresh, version and package checks: MAHO_OFFLINE=1 (maho-core
+  //   brand.rs:173,209-236; maho-cli runtime.rs:340, version_check.rs:37; maho-core
+  //   model_runtime.rs:382, package_manager.rs:698) and MAHO_SKIP_VERSION_CHECK=1
+  //   (version_check.rs:57).
+  // - The hub's inbox watchers: OMON_INBOX_ENABLED=0 (ferryx-hub inbox_watch.rs inbox_enabled,
+  //   src-tauri hub_runtime.rs:1725). Their kakao source defaults to a non-loopback
+  //   OMON_PIRATETALK_URL (inbox_watch.rs fetch_kakao), and their triage is an engine
+  //   decision turn (judge.rs inbox_class) no scenario drives.
+  const offline = { DO_NOT_TRACK: '1', OMO_DISABLE_POSTHOG: '1', MAHO_OFFLINE: '1', MAHO_SKIP_VERSION_CHECK: '1', OMON_INBOX_ENABLED: '0' };
+  ctx.evidence.writeJson(`runtime/engine-env-${label}.json`, { envFile, agentDir, models, settings, mcp, offline, mhcBin, memoryHome: join(memory, 'mhc'), trackerAddr });
   return ctx.productEnv({
     FERRYX_HUB_ENV_FILE: envFile,
     FERRYX_HUB_TRACKER_ADDR: trackerAddr,
     MAHO_CODING_AGENT_DIR: agentDir,
     MAHO_MEMORY_HOME: join(memory, 'mhc'),
+    ...offline,
     ...extra,
   });
 }

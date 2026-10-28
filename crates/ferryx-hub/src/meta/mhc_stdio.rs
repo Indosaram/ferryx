@@ -24,6 +24,10 @@ pub const WORK_REPLY_REQUEST: &str = "supervisor.work_reply";
 pub const WORK_QUEUE: usize = 64;
 /// Error code of the reply to a work request the full queue could not take.
 pub const WORK_BUSY_CODE: &str = "SUPERVISOR_WORK_BUSY";
+/// Field the reader adds to every queued work request: its position in the engine's output
+/// ([`StdioClient::position`]). The engine writes in order, so a request positioned after a
+/// reading taken before a prompt was sent was emitted after that moment.
+pub const WORK_SEQUENCE_FIELD: &str = "fxReceivedAt";
 
 pub type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
 pub type BoxedWriter = Box<dyn AsyncWrite + Send + Unpin>;
@@ -61,6 +65,8 @@ struct Shared {
     malformed: AtomicU64,
     /// Work requests refused because the queue was full; also numbers their reply ids.
     busy: AtomicU64,
+    /// Records dispatched so far, in engine output order.
+    received: AtomicU64,
     /// The writer queue, held weakly so [`StdioClient::close`] still shuts the engine's stdin.
     outbound: mpsc::WeakUnboundedSender<String>,
     gone: watch::Sender<Option<String>>,
@@ -127,6 +133,7 @@ impl Shared {
     }
 
     fn dispatch(&self, value: Value) {
+        let position = self.received.fetch_add(1, Ordering::SeqCst) + 1;
         let Some(kind) = value.get("type").and_then(Value::as_str).map(str::to_owned) else {
             self.malformed("record without a type", value.to_string().len());
             return;
@@ -148,6 +155,8 @@ impl Shared {
         if kind == "extension_event"
             && value.get("name").and_then(Value::as_str) == Some(WORK_REQUEST_EVENT)
         {
+            let mut value = value;
+            value[WORK_SEQUENCE_FIELD] = json!(position);
             if let Some(work) = &routes.work {
                 match work.try_send(value) {
                     Ok(()) => {}
@@ -249,6 +258,7 @@ impl StdioClient {
             })),
             malformed: AtomicU64::new(0),
             busy: AtomicU64::new(0),
+            received: AtomicU64::new(0),
             outbound: outbound.downgrade(),
             gone,
         });
@@ -314,6 +324,11 @@ impl StdioClient {
 
     pub fn is_gone(&self) -> bool {
         self.shared.gone.borrow().is_some()
+    }
+
+    /// How many engine records the reader has dispatched so far.
+    pub fn position(&self) -> u64 {
+        self.shared.received.load(Ordering::SeqCst)
     }
 
     /// Stops sending: queued lines are still written, then the engine's stdin is shut, which

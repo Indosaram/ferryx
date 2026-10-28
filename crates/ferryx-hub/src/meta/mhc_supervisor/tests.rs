@@ -51,6 +51,8 @@ struct PeerFlags {
     mismatch_on_resume: AtomicBool,
     ignore_open: AtomicBool,
     garbage: AtomicBool,
+    /// Work replies are acknowledged without ending the turn they were routed to.
+    quiet_work_replies: AtomicBool,
 }
 
 /// A scripted engine. Its "disk" (session files and their ids) outlives one connection, so a
@@ -296,6 +298,9 @@ impl Peer {
             }
             "extension_request" => {
                 self.emit(ok(json!({"delivered": true})));
+                if self.flags.quiet_work_replies.load(Ordering::SeqCst) {
+                    return;
+                }
                 let handle = session.clone().expect("a work reply is routed to a session");
                 self.assistant(&handle, &frame["data"].to_string());
             }
@@ -929,6 +934,179 @@ async fn work_tool_requests_reach_the_typed_handler_with_the_hub_scope() {
     assert_eq!(handler.calls.lock().unwrap().len(), 1);
     // The conversation context was retained across both turns.
     assert_eq!(harness.peer.of_type("open_session").len(), 1);
+}
+
+#[tokio::test]
+async fn a_work_request_carries_its_turn_and_one_from_an_ended_turn_is_refused() {
+    let harness = Harness::new("work-turns", all_capabilities());
+    let supervisor = harness.supervisor();
+    let handler = Arc::new(RecordingWork::default());
+    supervisor.set_work_handler(handler.clone());
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D9:".to_owned(),
+    };
+    // A turn's own request reaches the handler with that turn's token.
+    let reply: Value = serde_json::from_str(
+        &supervisor
+            .converse_in_turn(&scope, Some(7), "WORK one")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(handler.calls.lock().unwrap()[0].turn, Some(7));
+
+    // A request the engine emits for a turn that has already ended (here: replayed after the
+    // next turn settled) is refused and never reaches the handler under another token.
+    supervisor
+        .converse_in_turn(&scope, Some(8), "plain")
+        .await
+        .unwrap();
+    let handle = harness.peer.of_type("prompt")[1]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let durable = harness.peer.handles.lock().unwrap()[&handle].clone();
+    let cursor = harness.peer.frames().len();
+    harness.peer.emit(json!({"type": "extension_event", "sessionId": handle,
+        "name": "supervisor.work_request", "data": {
+            "requestId": "stale-1", "sessionId": durable, "action": "submit",
+            "payload": {"title": "late", "requirements": ["x"]}}}));
+    harness
+        .peer
+        .wait_for("the stale request's reply", |frames| {
+            frames[cursor..]
+                .iter()
+                .any(|frame| frame["type"] == "extension_request")
+        })
+        .await;
+    let stale = harness
+        .peer
+        .of_type("extension_request")
+        .into_iter()
+        .find(|frame| frame["data"]["requestId"] == "stale-1")
+        .expect("the stale request was answered");
+    assert_eq!(stale["data"]["ok"], false, "{stale}");
+    assert_eq!(stale["data"]["error"]["code"], "SUPERVISOR_WORK_STALE");
+    assert_eq!(handler.calls.lock().unwrap().len(), 1);
+}
+
+/// Holds every work call until released, counting the calls that entered.
+struct GatedWork {
+    entered: watch::Sender<usize>,
+    release: tokio::sync::Semaphore,
+    calls: Mutex<Vec<WorkToolRequest>>,
+}
+
+#[async_trait]
+impl WorkToolHandler for GatedWork {
+    async fn handle(&self, request: WorkToolRequest) -> Result<Value, WorkToolRejection> {
+        self.calls.lock().unwrap().push(request);
+        self.entered.send_modify(|count| *count += 1);
+        self.release.acquire().await.expect("never closed").forget();
+        Ok(json!({"ok": true}))
+    }
+}
+
+#[tokio::test]
+async fn an_earlier_turns_request_handled_while_the_next_turn_is_live_is_stale() {
+    let harness = Harness::new("work-stale-live", all_capabilities());
+    harness
+        .peer
+        .flags
+        .quiet_work_replies
+        .store(true, Ordering::SeqCst);
+    let supervisor = harness.supervisor();
+    let handler = Arc::new(GatedWork {
+        entered: watch::channel(0).0,
+        release: tokio::sync::Semaphore::new(0),
+        calls: Mutex::new(Vec::new()),
+    });
+    supervisor.set_work_handler(handler.clone());
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D10:".to_owned(),
+    };
+    let work = |handle: &str, durable: &str, id: &str| {
+        json!({"type": "extension_event", "sessionId": handle,
+            "name": "supervisor.work_request", "data": {
+                "requestId": id, "sessionId": durable, "action": "submit",
+                "payload": {"title": "t", "requirements": ["r"]}}})
+    };
+
+    // Turn N is live: its requests fill every in-flight work slot and stay there.
+    let first = supervisor.clone();
+    let first_scope = scope.clone();
+    let turn_n = tokio::spawn(async move {
+        turn_in(&first, &first_scope, 7, "HANG turn n").await
+    });
+    harness
+        .peer
+        .wait_for("turn n", |frames| count(frames, "prompt", "HANG turn n") == 1)
+        .await;
+    let handle = harness.peer.of_type("prompt")[0]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let durable = harness.peer.handles.lock().unwrap()[&handle].clone();
+    for n in 0..MAX_WORK_IN_FLIGHT {
+        harness.peer.emit(work(&handle, &durable, &format!("busy-{n}")));
+    }
+    let mut entered = handler.entered.subscribe();
+    tokio::time::timeout(WAIT, entered.wait_for(|n| *n == MAX_WORK_IN_FLIGHT))
+        .await
+        .expect("every slot is held")
+        .unwrap();
+    // Turn N's last request waits for a slot. The turn then ends; the reader has read the
+    // request before the settle that follows it on the same stream.
+    harness.peer.emit(work(&handle, &durable, "late-n"));
+    harness.peer.settle_hung("turn n done");
+    assert_eq!(turn_n.await.unwrap().unwrap(), "turn n done");
+
+    // Turn N+1 is held live while turn N's request is finally handled.
+    let second = supervisor.clone();
+    let second_scope = scope.clone();
+    let turn_next = tokio::spawn(async move {
+        turn_in(&second, &second_scope, 8, "HANG turn n+1").await
+    });
+    harness
+        .peer
+        .wait_for("turn n+1", |frames| count(frames, "prompt", "HANG turn n+1") == 1)
+        .await;
+    handler.release.add_permits(MAX_WORK_IN_FLIGHT);
+    harness
+        .peer
+        .wait_for("the late request's reply", |frames| {
+            frames.iter().any(|frame| {
+                frame["type"] == "extension_request" && frame["data"]["requestId"] == "late-n"
+            })
+        })
+        .await;
+    let late = harness
+        .peer
+        .of_type("extension_request")
+        .into_iter()
+        .find(|frame| frame["data"]["requestId"] == "late-n")
+        .unwrap();
+    assert_eq!(late["data"]["ok"], false, "{late}");
+    assert_eq!(late["data"]["error"]["code"], "SUPERVISOR_WORK_STALE");
+    {
+        let calls = handler.calls.lock().unwrap();
+        assert_eq!(calls.len(), MAX_WORK_IN_FLIGHT, "the late request never reached it");
+        assert!(calls.iter().all(|call| call.turn == Some(7)));
+    }
+    harness.peer.settle_hung("turn n+1 done");
+    assert_eq!(turn_next.await.unwrap().unwrap(), "turn n+1 done");
+}
+
+async fn turn_in(
+    supervisor: &MhcSupervisor,
+    scope: &ConversationScope,
+    turn: u64,
+    message: &str,
+) -> TurnResult {
+    supervisor.converse_in_turn(scope, Some(turn), message).await
 }
 
 #[tokio::test]
