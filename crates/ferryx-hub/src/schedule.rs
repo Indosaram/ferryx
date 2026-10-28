@@ -724,6 +724,14 @@ pub async fn run_native_job(
     } else {
         None
     };
+    // A run-now or remediation rerun that succeeded and delivered settles the job like a
+    // scheduled clean run does.
+    if status == "succeeded"
+        && last_delivery_error.is_none()
+        && expected_output_miss(&payload, output.as_deref().unwrap_or("")).is_none()
+    {
+        resolve_after_success(pool, job_id, &now_rfc3339()).await?;
+    }
     Ok(RunReceipt {
         job_id: job_id.to_owned(),
         run_id,
@@ -1608,20 +1616,7 @@ pub(crate) async fn note_run_health(
         _ => None,
     };
     let Some((kind, detail)) = problem else {
-        sqlx::query(
-            "UPDATE cron_problems SET status = 'fixed', updated_at = ? WHERE job_id = ? AND status IN ('open', 'remediating', 'needs_owner')",
-        )
-        .bind(now_rfc3339())
-        .bind(job_id)
-        .execute(pool)
-        .await?;
-        sqlx::query("UPDATE inbox_decisions SET status = 'done' WHERE status = 'open' AND item_id IN (SELECT 'cron:' || CAST(id AS INTEGER) FROM cron_problems WHERE job_id = ? AND status = 'fixed')")
-            .bind(job_id)
-            .execute(pool)
-            .await?;
-        close_cron_owner_items(pool, job_id).await?;
-        crate::cron_remediate::reconcile_fixed(pool, job_id).await?;
-        return Ok(());
+        return resolve_after_success(pool, job_id, &now_rfc3339()).await;
     };
     let signature = problem_signature(kind, &detail);
     if let Some(problem_id) =
@@ -1634,6 +1629,80 @@ pub(crate) async fn note_run_health(
         announce_cron_failure(pool, job_id, &detail, remediating).await;
     }
     Ok(())
+}
+
+/// Resolves the job's open incidents and fixes its open, remediating, and owner-waiting
+/// problems recorded no later than `at`, the finish of a clean run.
+async fn settle_failures_before(pool: &SqlitePool, job_id: &str, at: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE cron_incidents SET status = 'resolved', resolved_at = ?
+          WHERE job_id = ? AND status = 'open' AND julianday(created_at) <= julianday(?)",
+    )
+    .bind(now_rfc3339())
+    .bind(job_id)
+    .bind(at)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE cron_problems SET status = 'fixed', updated_at = ?
+          WHERE job_id = ? AND status IN ('open', 'remediating', 'needs_owner')
+            AND julianday(COALESCE(updated_at, created_at)) <= julianday(?)",
+    )
+    .bind(now_rfc3339())
+    .bind(job_id)
+    .bind(at)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE inbox_decisions SET status = 'done' WHERE status = 'open' AND item_id IN (SELECT 'cron:' || CAST(id AS INTEGER) FROM cron_problems WHERE job_id = ? AND status = 'fixed')")
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// A clean run of a job settles every failure it recorded before `at`: its open incidents are
+/// resolved, its open, remediating, and owner-waiting problems are fixed, and its owner items
+/// and remediation lanes close. Every path that records a succeeded run ends here.
+pub(crate) async fn resolve_after_success(pool: &SqlitePool, job_id: &str, at: &str) -> Result<()> {
+    settle_failures_before(pool, job_id, at).await?;
+    close_cron_owner_items(pool, job_id).await?;
+    crate::cron_remediate::reconcile_fixed(pool, job_id).await?;
+    Ok(())
+}
+
+/// Earlier builds left a job's incidents open after a later clean run (only problems were
+/// fixed), and runs through the cron sockets settled nothing, so owner items kept returning to
+/// the digest (2026-10-28: 85 open incidents, most for jobs that had succeeded since). For each
+/// job with a clean run, settles the failures recorded before its latest one; when that run is
+/// also the job's latest finished run, the owner item and lanes close too. Idempotent; returns
+/// how many jobs it touched.
+pub async fn reconcile_resolved_cron_failures(pool: &SqlitePool) -> Result<u64> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT s.job_id, s.at,
+                NOT EXISTS (SELECT 1 FROM cron_runs later
+                             WHERE later.job_id = s.job_id AND later.status != 'succeeded'
+                               AND later.finished_at IS NOT NULL
+                               AND julianday(later.finished_at) > julianday(s.at))
+           FROM (SELECT job_id, MAX(finished_at) AS at FROM cron_runs
+                  WHERE status = 'succeeded' AND finished_at IS NOT NULL GROUP BY job_id) s
+          WHERE EXISTS (SELECT 1 FROM cron_incidents i WHERE i.job_id = s.job_id AND i.status = 'open'
+                          AND julianday(i.created_at) <= julianday(s.at))
+             OR EXISTS (SELECT 1 FROM cron_problems p WHERE p.job_id = s.job_id
+                          AND p.status IN ('open', 'remediating', 'needs_owner')
+                          AND julianday(COALESCE(p.updated_at, p.created_at)) <= julianday(s.at))",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut settled = 0;
+    for (job_id, at, latest) in rows {
+        if latest != 0 {
+            resolve_after_success(pool, &job_id, &at).await?;
+        } else {
+            settle_failures_before(pool, &job_id, &at).await?;
+        }
+        settled += 1;
+    }
+    Ok(settled)
 }
 
 async fn announce_cron_failure(
@@ -2984,6 +3053,217 @@ mod tests {
             vec![
                 (cron_owner_item_id("job"), "done".to_owned()),
                 (cron_owner_item_id("other"), "open".to_owned()),
+            ]
+        );
+    }
+
+    async fn incident_states(pool: &SqlitePool) -> Vec<(String, String, bool)> {
+        sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT job_id, status, resolved_at FROM cron_incidents ORDER BY job_id, created_at",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(job, status, at)| (job, status, at.is_some()))
+        .collect()
+    }
+
+    async fn seed_failed_job(pool: &SqlitePool, job: &str) {
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled) VALUES(?, 'every 1h', '{\"command\":\"printf ok\"}', 1)")
+            .bind(job)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO cron_runs(id, job_id, status, started_at, output) VALUES(?, ?, 'running', ?, '')")
+            .bind(format!("{job}-fail"))
+            .bind(job)
+            .bind(now_rfc3339())
+            .execute(pool)
+            .await
+            .unwrap();
+        finish_run(
+            pool,
+            job,
+            &format!("{job}-fail"),
+            false,
+            Some("boom"),
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+        note_run_health(
+            pool,
+            job,
+            &format!("{job}-fail"),
+            "failed",
+            "",
+            Some("boom"),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE cron_problems SET status = 'needs_owner' WHERE job_id = ?")
+            .bind(job)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_later_clean_run_resolves_incidents_problems_and_the_owner_item() {
+        let pool = crate::storage::memory().await.unwrap();
+        seed_failed_job(&pool, "job").await;
+        seed_failed_job(&pool, "other").await;
+        assert_eq!(
+            incident_states(&pool).await,
+            vec![
+                ("job".to_owned(), "open".to_owned(), false),
+                ("other".to_owned(), "open".to_owned(), false),
+            ]
+        );
+        // A run-now through the cron socket is a later run of the same job.
+        let receipt = run_native_job(&pool, "job", false, false).await.unwrap();
+        assert_eq!(receipt.status, "succeeded");
+        assert_eq!(
+            incident_states(&pool).await,
+            vec![
+                ("job".to_owned(), "resolved".to_owned(), true),
+                ("other".to_owned(), "open".to_owned(), false),
+            ]
+        );
+        let problems: Vec<(String, String)> =
+            sqlx::query_as("SELECT job_id, status FROM cron_problems ORDER BY job_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            problems,
+            vec![
+                ("job".to_owned(), "fixed".to_owned()),
+                ("other".to_owned(), "needs_owner".to_owned()),
+            ]
+        );
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (cron_owner_item_id("job"), "done".to_owned()),
+                (cron_owner_item_id("other"), "open".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_backlog_of_failures_a_later_success_resolved_is_reconciled_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        let at = |minutes: i64| (Utc::now() - TimeDelta::minutes(minutes)).to_rfc3339();
+        // healed: failed, then succeeded (as the pre-fix build left it). still: succeeded long
+        // ago, failing since. never: no success at all.
+        for (job, run, status, finished) in [
+            ("healed", "h1", "failed", at(60)),
+            ("healed", "h2", "succeeded", at(30)),
+            ("still", "s1", "succeeded", at(90)),
+            ("still", "s2", "failed", at(20)),
+            ("never", "n1", "failed", at(20)),
+        ] {
+            sqlx::query("INSERT INTO cron_runs(id, job_id, status, started_at, finished_at, output) VALUES(?,?,?,?,?, '')")
+                .bind(run)
+                .bind(job)
+                .bind(status)
+                .bind(&finished)
+                .bind(&finished)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (id, job, created) in [
+            ("i1", "healed", at(61)),
+            ("i2", "healed", at(59)),
+            ("i3", "still", at(100)),
+            ("i4", "still", at(21)),
+            ("i5", "never", at(21)),
+        ] {
+            sqlx::query("INSERT INTO cron_incidents(id, job_id, kind, detail, status, created_at) VALUES(?,?, 'failed', 'boom', 'open', ?)")
+                .bind(id)
+                .bind(job)
+                .bind(&created)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (id, job, updated) in [("134", "healed", at(59)), ("135", "still", at(21))] {
+            sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, updated_at) VALUES(?,?, 'boom', ?, 'needs_owner', 'failed', 'sig', 'boom', ?)")
+                .bind(id)
+                .bind(job)
+                .bind(&updated)
+                .bind(&updated)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for job in ["healed", "still", "never"] {
+            escalate_incident(
+                &pool,
+                job,
+                "failed",
+                "boom",
+                Utc::now() - TimeDelta::minutes(59),
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(reconcile_resolved_cron_failures(&pool).await.unwrap(), 2);
+        assert_eq!(
+            reconcile_resolved_cron_failures(&pool).await.unwrap(),
+            0,
+            "idempotent"
+        );
+
+        let incidents: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, status FROM cron_incidents ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            incidents,
+            vec![
+                ("i1".to_owned(), "resolved".to_owned()),
+                ("i2".to_owned(), "resolved".to_owned()),
+                ("i3".to_owned(), "resolved".to_owned()),
+                ("i4".to_owned(), "open".to_owned()),
+                ("i5".to_owned(), "open".to_owned()),
+            ]
+        );
+        let problems: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, status FROM cron_problems ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            problems,
+            vec![
+                ("134".to_owned(), "fixed".to_owned()),
+                ("135".to_owned(), "needs_owner".to_owned()),
+            ]
+        );
+        let states: Vec<(String, String)> = owner_items(&pool)
+            .await
+            .into_iter()
+            .map(|(id, state, _)| (id, state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (cron_owner_item_id("healed"), "done".to_owned()),
+                (cron_owner_item_id("never"), "open".to_owned()),
+                (cron_owner_item_id("still"), "open".to_owned()),
             ]
         );
     }
