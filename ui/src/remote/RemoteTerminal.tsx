@@ -1791,18 +1791,23 @@ export function RemoteTerminal({
   };
 
   /// Send what was just typed into the sink with the dock's latched modifiers applied (Ctrl+c is
-  /// ETX, Alt+b is ESC b). One-shot modifiers apply to the first character only; locked ones to
-  /// every character. Hangul is left to the IME path: modifiers never touch composition.
-  /// Returns false when nothing was consumed and the regular settle path must run.
+  /// ETX, Alt+b is ESC b). One-shot modifiers apply to the first non-Hangul character only; locked
+  /// ones to every non-Hangul character. Hangul never takes a modifier: settled Hangul goes out as
+  /// typed, and the trailing run the IME can still rewrite stays held exactly as settleSinkText
+  /// holds it. Returns false when the insertion carries no settled non-Hangul character, so the
+  /// regular settle path runs.
   const applyDockModifiersToSink = (sink: HTMLTextAreaElement) => {
     if (!hasActiveModifier(dockModifiersRef.current)) return false;
-    const start = Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, sink.value));
-    const typed = Array.from(sink.value.slice(start).replace(/\u00a0/g, " "));
-    if (typed.length === 0 || isHangulChar(typed[0].charCodeAt(0))) return false;
+    const text = sink.value;
+    // Never re-emit text the IME rewrote behind our back.
+    const start = Math.min(sinkEmittedCharsRef.current, commonPrefixLength(sinkValueRef.current, text));
+    const holdFrom = Math.max(start, hangulTailStart(text));
+    const settled = Array.from(text.slice(start, holdFrom).replace(/\u00a0/g, " "));
+    if (!settled.some((ch) => !isHangulChar(ch.charCodeAt(0)))) return false;
     // Jamo held from before were typed first.
     emitSettled("");
     let plain = "";
-    for (const ch of typed) {
+    for (const ch of settled) {
       const modifiers = dockModifiersRef.current;
       if (!hasActiveModifier(modifiers) || isHangulChar(ch.charCodeAt(0))) {
         plain += ch;
@@ -1820,7 +1825,14 @@ export function RemoteTerminal({
       setDockModifiers(releaseOneShotModifiers(modifiers));
     }
     emitText(plain);
-    resetSinkField();
+    sinkEmittedCharsRef.current = holdFrom;
+    sinkValueRef.current = text;
+    if (holdFrom >= text.length) {
+      resetSinkField();
+    } else {
+      sinkTailRef.current = text.slice(holdFrom);
+      syncPreedit();
+    }
     return true;
   };
 
@@ -1845,8 +1857,10 @@ export function RemoteTerminal({
       resetSinkField();
       return;
     }
-    // An insertion that follows a composition commit belongs to the IME; modifiers stay latched.
-    if (committed === null && applyDockModifiersToSink(sink)) return;
+    // Anything but the commit's mirror is a fresh insertion, even right after compositionend: a
+    // browser that sends no mirror (Chrome on Android) must not let the next keystroke skip the
+    // latched modifier.
+    if (applyDockModifiersToSink(sink)) return;
     settleSinkText(sink);
   };
 

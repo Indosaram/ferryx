@@ -420,6 +420,50 @@ describe("mobile terminal input lifecycle", () => {
     });
   });
 
+  describe("mobile key dock modifiers around IME input", () => {
+    const sent = () => Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+    const dockKey = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+    const ctrlPressed = () => screen.getByRole("button", { name: "Ctrl" }).getAttribute("aria-pressed");
+
+    it("applies a one-shot Ctrl to the first key typed after a commit that had no mirror insertion", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      fireEvent.compositionStart(sink());
+      fireEvent.input(sink(), { target: { value: "한" }, isComposing: true, inputType: "insertCompositionText" });
+      fireEvent.compositionEnd(sink(), { data: "한" });
+      dockKey("Ctrl");
+      fireEvent.input(sink(), { target: { value: "c" }, inputType: "insertText" });
+      expect(ctrlPressed()).toBe("false");
+      fireEvent.input(sink(), { target: { value: "d" }, inputType: "insertText" });
+      expect(sent()).toEqual(["한", "\u0003", "d"]);
+    });
+
+    it("applies Ctrl to the ASCII typed after Hangul a composition-free IME still holds", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      fireEvent.input(sink(), { target: { value: "한" }, inputType: "insertText" });
+      dockKey("Ctrl");
+      fireEvent.input(sink(), { target: { value: "한c" }, inputType: "insertText" });
+      expect(sent()).toEqual(["한", "\u0003"]);
+      expect(ctrlPressed()).toBe("false");
+    });
+
+    it("keeps composition-free Hangul whole and unmodified while Ctrl is locked", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      dockKey("Ctrl");
+      dockKey("Ctrl");
+      for (const value of ["ㅎ", "하", "한", "한ㄱ", "한그", "한글"]) {
+        fireEvent.input(sink(), { target: { value }, inputType: "insertText" });
+      }
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      expect(screen.getByTestId("remote-terminal-preedit")).toHaveTextContent("한글");
+      dockKey("Enter");
+      expect(sent()).toEqual(["한글", "\r"]);
+      expect(ctrlPressed()).toBe("true");
+    });
+  });
+
   describe("line input mode", () => {
     const sent = () => Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
     afterEach(() => localStorage.removeItem("ferryx.remote.terminalInputMode"));
