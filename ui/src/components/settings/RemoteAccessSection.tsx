@@ -61,7 +61,7 @@ function formatCountdown(seconds: number): string {
 /** Mints a one-time pairing code for the chosen role and counts down to its expiry. */
 function PairDeviceCard({ disabled }: { disabled: boolean }) {
   const [role, setRole] = useState<PairingRole>("view");
-  const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [pairing, setPairing] = useState<{ code: string; expiresAt: number; role: PairingRole } | null>(null);
   const [remaining, setRemaining] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,8 +78,9 @@ function PairDeviceCard({ disabled }: { disabled: boolean }) {
     setBusy(true);
     setError(null);
     try {
-      const created = await createPairingCode(role);
-      setPairing({ code: created.code, expiresAt: Date.now() + created.expiresInSeconds * 1000 });
+      const minted = role;
+      const created = await createPairingCode(minted);
+      setPairing({ code: created.code, expiresAt: Date.now() + created.expiresInSeconds * 1000, role: minted });
       setRemaining(created.expiresInSeconds);
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to create a pairing code"));
@@ -89,6 +90,7 @@ function PairDeviceCard({ disabled }: { disabled: boolean }) {
   };
 
   const expired = pairing !== null && remaining <= 0;
+  const live = pairing !== null && !expired;
 
   return (
     <section aria-label="Pair a device" className="mt-8 space-y-3">
@@ -102,15 +104,19 @@ function PairDeviceCard({ disabled }: { disabled: boolean }) {
           value={role}
           options={ROLE_OPTIONS}
           onChange={setRole}
+          disabled={live || busy}
           className="max-w-64"
         />
-        {pairing && !expired ? (
+        {pairing && live ? (
           <div className="flex items-baseline gap-3">
             <span data-testid="pair-device-code" className="font-mono text-[22px] tracking-[0.3em] text-foreground">
               {pairing.code}
             </span>
             <span data-testid="pair-device-countdown" role="timer" className="text-[11px] text-muted-foreground">
               Expires in {formatCountdown(remaining)}
+            </span>
+            <span data-testid="pair-device-role" data-role={pairing.role} className="text-[11px] text-muted-foreground">
+              Grants: {ROLE_OPTIONS.find((option) => option.value === pairing.role)?.label}
             </span>
           </div>
         ) : null}

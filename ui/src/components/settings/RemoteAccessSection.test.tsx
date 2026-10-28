@@ -326,6 +326,27 @@ describe("RemoteAccessSection", () => {
     expect(screen.getByRole("button", { name: "New code" })).toBeInTheDocument();
   });
 
+  it("binds the role to a live code and locks the role picker until the code expires", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 60 });
+    await act(async () => { render(<RemoteAccessSection />); });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Can type" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+
+    const watchOnly = screen.getByRole("tab", { name: "Watch only" });
+    expect(watchOnly).toBeDisabled();
+    expect(screen.getByRole("tab", { name: "Can type" })).toBeDisabled();
+    fireEvent.click(watchOnly);
+    expect(screen.getByRole("tab", { name: "Can type" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("pair-device-role")).toHaveAttribute("data-role", "control");
+    expect(createPairingCode).toHaveBeenCalledWith("control");
+
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(screen.queryByTestId("pair-device-role")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Watch only" })).toBeEnabled();
+  });
+
   it("retires Remote Access QR/PIN control: Generate QR button and PIN are absent while the remaining surface renders", async () => {
     render(<RemoteAccessSection />);
 
