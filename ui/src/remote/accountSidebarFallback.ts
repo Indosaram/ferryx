@@ -48,7 +48,9 @@ export function discoverySidebarModel(status: MachineDiscoveryStatus | undefined
     reachability: () => ({ supported: false, entry: null }),
     worktreeOrder: {},
     collapsedGroupIds: new Set(),
-    advancedFeatures: false,
+    // No desktop published its preference, so nothing asks to hide the Supervisor entry: an
+    // account-mode remote shows it, as the phone tab bar always does.
+    advancedFeatures: true,
     listingFailures,
   });
 }
