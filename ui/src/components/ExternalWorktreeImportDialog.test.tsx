@@ -6,7 +6,12 @@ const native = vi.hoisted(() => ({ registerProject: vi.fn(), listExternalWorktre
 vi.mock("../lib/tauri", () => native);
 
 import { ExternalWorktreeImportDialog } from "./ExternalWorktreeImportDialog";
-import { loadPromptedExternalWorktrees, pendingExternalWorktrees } from "../lib/externalWorktrees";
+import {
+  isExternalWorktreePromptMuted,
+  loadPromptedExternalWorktrees,
+  pendingExternalWorktrees,
+  setExternalWorktreePromptMuted,
+} from "../lib/externalWorktrees";
 import { EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY } from "../lib/storageKeys";
 import { useExternalWorktreePrompt } from "../state/useExternalWorktreePrompt";
 import type { ExternalWorktree, RegisteredProject } from "../lib/tauri";
@@ -55,7 +60,7 @@ describe("ExternalWorktreeImportDialog", () => {
     }));
     const onImported = vi.fn();
     const onClose = vi.fn();
-    render(<ExternalWorktreeImportDialog worktrees={[orcaWorktree, otherWorktree]} projects={[project]}
+    render(<ExternalWorktreeImportDialog workspaceId="lectures" worktrees={[orcaWorktree, otherWorktree]} projects={[project]}
       onImported={onImported} onLater={vi.fn()} onClose={onClose} />);
 
     expect(screen.getByRole("dialog", { name: "Orca worktrees found" })).toBeTruthy();
@@ -70,19 +75,32 @@ describe("ExternalWorktreeImportDialog", () => {
 
   it("declining imports nothing and stops asking", () => {
     const onClose = vi.fn();
-    render(<ExternalWorktreeImportDialog worktrees={[orcaWorktree]} projects={[project]}
+    render(<ExternalWorktreeImportDialog workspaceId="lectures" worktrees={[orcaWorktree]} projects={[project]}
       onImported={vi.fn()} onLater={vi.fn()} onClose={onClose} />);
     fireEvent.click(screen.getByRole("button", { name: "Don't import" }));
     expect(native.registerProject).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalledOnce();
     expect(JSON.parse(window.localStorage.getItem(EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY) ?? "[]")).toEqual([orcaWorktree.path]);
+    expect(isExternalWorktreePromptMuted("lectures")).toBe(false);
+  });
+
+  it("mutes only this workspace when Don't ask again is checked before Later", () => {
+    const onLater = vi.fn();
+    render(<ExternalWorktreeImportDialog workspaceId="lectures" worktrees={[orcaWorktree]} projects={[project]}
+      onImported={vi.fn()} onLater={onLater} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Don't ask again for this project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onLater).toHaveBeenCalledOnce();
+    expect(isExternalWorktreePromptMuted("lectures")).toBe(true);
+    expect(isExternalWorktreePromptMuted("other")).toBe(false);
+    expect(loadPromptedExternalWorktrees().size).toBe(0);
   });
 
   it("keeps a failed import open and unanswered", async () => {
     native.registerProject.mockRejectedValue({ code: "INVALID_REPO_ROOT", message: "gone" });
     const onClose = vi.fn();
     const onImported = vi.fn();
-    render(<ExternalWorktreeImportDialog worktrees={[orcaWorktree]} projects={[project]}
+    render(<ExternalWorktreeImportDialog workspaceId="lectures" worktrees={[orcaWorktree]} projects={[project]}
       onImported={onImported} onLater={vi.fn()} onClose={onClose} />);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Import selected" })); });
     expect(screen.getByRole("alert").textContent).toBe("gone");
@@ -116,6 +134,18 @@ describe("useExternalWorktreePrompt", () => {
     const ssh: RegisteredProject = { ...project, workspaceId: "ssh:x", target: { kind: "ssh", hostId: "h" } };
     renderHook(() => useExternalWorktreePrompt(ssh, "ssh:x", [ssh], { listExternalWorktrees: native.listExternalWorktrees }));
     expect(native.listExternalWorktrees).not.toHaveBeenCalled();
+  });
+
+  it("never checks a workspace muted with Don't ask again", () => {
+    setExternalWorktreePromptMuted("lectures", true);
+    renderHook(() => useExternalWorktreePrompt(project, "lectures", [project], { listExternalWorktrees: native.listExternalWorktrees }));
+    expect(native.listExternalWorktrees).not.toHaveBeenCalled();
+  });
+
+  it("unmuting a workspace restores the prompt", () => {
+    setExternalWorktreePromptMuted("lectures", true);
+    setExternalWorktreePromptMuted("lectures", false);
+    expect(isExternalWorktreePromptMuted("lectures")).toBe(false);
   });
 });
 

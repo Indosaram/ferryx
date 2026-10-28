@@ -1,4 +1,4 @@
-import { EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY } from "./storageKeys";
+import { EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY, EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY } from "./storageKeys";
 import type { ExternalWorktree, RegisteredProject } from "./tauri";
 
 type PromptStorage = Pick<Storage, "getItem" | "setItem">;
@@ -11,13 +11,39 @@ function normalizePath(path: string): string {
   return path.replace(/[\\/]+$/, "");
 }
 
-/** Paths the user already answered (imported or declined), so the prompt never repeats them. */
-export function loadPromptedExternalWorktrees(storage: PromptStorage | null = defaultStorage()): Set<string> {
+function loadStringSet(key: string, storage: PromptStorage | null): Set<string> {
   try {
-    const parsed: unknown = JSON.parse(storage?.getItem(EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY) ?? "[]");
+    const parsed: unknown = JSON.parse(storage?.getItem(key) ?? "[]");
     return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []);
   } catch {
     return new Set();
+  }
+}
+
+/** Paths the user already answered (imported or declined), so the prompt never repeats them. */
+export function loadPromptedExternalWorktrees(storage: PromptStorage | null = defaultStorage()): Set<string> {
+  return loadStringSet(EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY, storage);
+}
+
+/** Whether the user turned the outside-worktree prompt off for this workspace. */
+export function isExternalWorktreePromptMuted(
+  workspaceId: string,
+  storage: PromptStorage | null = defaultStorage(),
+): boolean {
+  return loadStringSet(EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY, storage).has(workspaceId);
+}
+
+export function setExternalWorktreePromptMuted(
+  workspaceId: string,
+  muted: boolean,
+  storage: PromptStorage | null = defaultStorage(),
+): void {
+  const next = loadStringSet(EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY, storage);
+  if (muted) next.add(workspaceId); else next.delete(workspaceId);
+  try {
+    storage?.setItem(EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY, JSON.stringify([...next]));
+  } catch {
+    // Without persistence the prompt may reappear next launch.
   }
 }
 

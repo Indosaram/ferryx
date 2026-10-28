@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
-import { loadPromptedExternalWorktrees, pendingExternalWorktrees } from "../lib/externalWorktrees";
+import {
+  isExternalWorktreePromptMuted,
+  loadPromptedExternalWorktrees,
+  pendingExternalWorktrees,
+} from "../lib/externalWorktrees";
 import { listExternalWorktrees, type ExternalWorktree, type RegisteredProject } from "../lib/tauri";
 
 export type ExternalWorktreePrompt = { workspaceId: string; worktrees: ExternalWorktree[] };
@@ -10,7 +14,8 @@ type Services = { listExternalWorktrees: typeof listExternalWorktrees };
 /**
  * Once the active local project is registered, asks Git for its worktrees outside the project
  * folder and surfaces the unanswered ones as a prompt. Each project is checked once per session;
- * "Later" hides the current set until the next launch.
+ * "Later" hides the current set until the next launch; a workspace muted with "Don't ask again"
+ * is never checked.
  */
 export function useExternalWorktreePrompt(
   activeProject: RegisteredProject,
@@ -32,6 +37,7 @@ export function useExternalWorktreePrompt(
 
   useEffect(() => {
     if (!isLocal || !isGit || readyWorkspaceId !== workspaceId || checkedRef.current.has(workspaceId)) return;
+    if (isExternalWorktreePromptMuted(workspaceId)) return;
     let cancelled = false;
     void servicesRef.current
       .listExternalWorktrees(workspaceId)

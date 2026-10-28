@@ -1,12 +1,14 @@
 import { FolderGit2, LoaderCircle, X } from "lucide-react";
 import { useRef, useState } from "react";
 
-import { rememberPromptedExternalWorktrees } from "../lib/externalWorktrees";
+import { rememberPromptedExternalWorktrees, setExternalWorktreePromptMuted } from "../lib/externalWorktrees";
 import { registerProject, type ExternalWorktree, type RegisteredProject } from "../lib/tauri";
 import { deriveWorkspaceId } from "./ProjectDialogs";
 import { useModalDialog } from "./useModalDialog";
 
 export type ExternalWorktreeImportDialogProps = {
+  /** Workspace the prompt was raised for; "Don't ask again" mutes the prompt for it. */
+  workspaceId: string;
   worktrees: ExternalWorktree[];
   projects: RegisteredProject[];
   /** Called once with every worktree that registered successfully. */
@@ -34,12 +36,20 @@ function branchLabel(worktree: ExternalWorktree): string {
  * Asks whether to add worktrees that Git knows about but that live outside the project folder,
  * such as ones Orca created. Nothing is imported without an explicit choice.
  */
-export function ExternalWorktreeImportDialog({ worktrees, projects, onImported, onLater, onClose }: ExternalWorktreeImportDialogProps) {
+export function ExternalWorktreeImportDialog({ workspaceId, worktrees, projects, onImported, onLater, onClose }: ExternalWorktreeImportDialogProps) {
   const [selected, setSelected] = useState(() => new Set(worktrees.map((worktree) => worktree.path)));
+  const [dontAskAgain, setDontAskAgain] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failures, setFailures] = useState<Record<string, string>>({});
   const busyRef = useRef(false);
-  const { dialogRef } = useModalDialog({ onEscape: onLater, dismissible: !busy });
+  const applyDontAskAgain = () => {
+    if (dontAskAgain) setExternalWorktreePromptMuted(workspaceId, true);
+  };
+  const handleLater = () => {
+    applyDontAskAgain();
+    onLater();
+  };
+  const { dialogRef } = useModalDialog({ onEscape: handleLater, dismissible: !busy });
   const fromOrca = worktrees.some((worktree) => worktree.createdByOrca);
   const title = fromOrca ? "Orca worktrees found" : "Worktrees found outside this project";
 
@@ -53,6 +63,7 @@ export function ExternalWorktreeImportDialog({ worktrees, projects, onImported, 
 
   const handleDecline = () => {
     rememberPromptedExternalWorktrees(worktrees.map((worktree) => worktree.path));
+    applyDontAskAgain();
     onClose();
   };
 
@@ -78,6 +89,7 @@ export function ExternalWorktreeImportDialog({ worktrees, projects, onImported, 
     }
     // Failed imports stay unanswered so they are offered again; everything else is settled.
     rememberPromptedExternalWorktrees(worktrees.map((worktree) => worktree.path).filter((path) => !(path in failed)));
+    applyDontAskAgain();
     if (imported.length > 0) onImported(imported);
     busyRef.current = false;
     setBusy(false);
@@ -106,7 +118,7 @@ export function ExternalWorktreeImportDialog({ worktrees, projects, onImported, 
             aria-label="Close"
             disabled={busy}
             className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-            onClick={onLater}
+            onClick={handleLater}
           >
             <X className="size-3.5" />
           </button>
@@ -143,7 +155,16 @@ export function ExternalWorktreeImportDialog({ worktrees, projects, onImported, 
             ))}
           </ul>
         </div>
-        <div className="flex justify-end gap-2 border-t border-border px-3 py-2">
+        <div className="flex items-center justify-end gap-2 border-t border-border px-3 py-2">
+          <label className="mr-auto flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={dontAskAgain}
+              disabled={busy}
+              onChange={(event) => setDontAskAgain(event.target.checked)}
+            />
+            Don't ask again for this project
+          </label>
           <button
             type="button"
             disabled={busy}

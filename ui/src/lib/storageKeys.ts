@@ -99,6 +99,8 @@ export const FILE_PREVIEW_MARKDOWN_FONT_SIZE_STORAGE_KEY = "ferryx.filePreview.m
 export const FILE_PREVIEW_MARKDOWN_WIDE_STORAGE_KEY = "ferryx.filePreview.markdownWide";
 /** Outside-project worktree paths the user already answered in the import prompt. */
 export const EXTERNAL_WORKTREE_PROMPTED_STORAGE_KEY = "ferryx.worktrees.externalPrompted";
+/** Workspace ids whose outside-project worktree prompt the user turned off ("Don't ask again"). */
+export const EXTERNAL_WORKTREE_PROMPT_MUTED_STORAGE_KEY = "ferryx.worktrees.externalPromptMuted";
 
 
 

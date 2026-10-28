@@ -4194,6 +4194,7 @@ function WorkspaceApp({
       {externalWorktreePrompt.prompt && !activeRemoteHost ? (
         <ExternalWorktreeImportDialog
           key={externalWorktreePrompt.prompt.workspaceId}
+          workspaceId={externalWorktreePrompt.prompt.workspaceId}
           worktrees={externalWorktreePrompt.prompt.worktrees}
           projects={projects}
           onImported={handleImportedExternalWorktrees}
