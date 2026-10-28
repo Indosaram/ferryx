@@ -15,7 +15,7 @@ import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync,
 import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
+import { awaitGone, HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
 import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
 import { runSlackLeg } from './slack.mjs';
 import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
@@ -626,7 +626,7 @@ async function runAutonomy(ctx) {
       const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind)));
       return { done: open.length === 0, open: open.map((entry) => entry.name) };
     }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
-    const alive = workerPids.filter((pid) => pidAlive(pid));
+    const alive = await stillAlive(workerPids);
     ctx.assert('fixture-workers-gone', workerPids.length === 1 && closed && alive.length === 0, { workerPids, closed, alive });
 
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
@@ -689,6 +689,14 @@ export function portIsFree(port) {
 // True while `pid` exists (signal 0 probes without sending anything).
 export function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+// The worker pids still alive once each had `ms` to finish exiting. A worker logs its exit
+// line just before process.exit, so a single signal-0 probe right after that line can still see
+// it; this waits (bounded) for the process itself to be gone.
+async function stillAlive(pids, ms = 5_000) {
+  const gone = await Promise.all(pids.map((pid) => awaitGone({ pid, startStamp: null }, ms)));
+  return pids.filter((_, index) => !gone[index]);
 }
 
 // One request on a fresh connection after a handshake; a protocolMismatch retries once with
@@ -977,7 +985,7 @@ async function runRemoteDelivery(ctx) {
   // probe cannot fail. The receipt's per-descendant initial verdict can: a worker that had to
   // be reaped shows up as 'match'; one that exited by itself is absent or 'gone'.
   const reaped = (targetReceipt?.descendants ?? []).filter((entry) => workerPids.includes(entry.pid) && entry.initial !== 'gone');
-  const alive = workerPids.filter((pid) => pidAlive(pid));
+  const alive = await stillAlive(workerPids);
   ctx.evidence.writeJson('worker-cleanup.json', {
     workerPids, allExitedCleanly: closed, reaped, alive, descendantsObservable: targetReceipt?.descendantsObservable ?? null,
     workerDescendants: (targetReceipt?.descendants ?? []).filter((entry) => workerPids.includes(entry.pid))
@@ -2113,7 +2121,7 @@ async function runWaiting(ctx) {
         && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
       return { done: open.length === 0, open: open.map((entry) => entry.name) };
     }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
-    const alive = workerPids.filter((pid) => pidAlive(pid));
+    const alive = await stillAlive(workerPids);
     ctx.assert('fixture-workers-gone', workerPids.length === WAITING_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
 
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
@@ -2419,7 +2427,7 @@ async function runBurst(ctx) {
         && pidAlive(Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])));
       return { done: open.length === 0, open: open.map((entry) => entry.name) };
     }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
-    const alive = workerPids.filter((pid) => pidAlive(pid));
+    const alive = await stillAlive(workerPids);
     ctx.assert('fixture-workers-gone', workerPids.length === BURST_GOALS.length && closed && alive.length === 0, { workerPids, closed, alive });
 
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
