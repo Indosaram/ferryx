@@ -163,7 +163,7 @@ describe("terminal settings", () => {
       fontSize: null,
       macosOptionAsAlt: null,
       shell: null,
-      scrollback: 10_000,
+      scrollback: 50_000,
       scrollbackCompression: null,
     });
 
@@ -174,7 +174,7 @@ describe("terminal settings", () => {
         fontSize: 17,
         macosOptionAsAlt: null,
         shell: null,
-        scrollback: 10_000,
+        scrollback: 50_000,
         scrollbackCompression: null,
       }),
     );
@@ -186,7 +186,7 @@ describe("terminal settings", () => {
         fontSize: 17,
         macosOptionAsAlt: null,
         shell: "pwsh",
-        scrollback: 10_000,
+        scrollback: 50_000,
         scrollbackCompression: null,
       }),
     );
@@ -312,6 +312,13 @@ describe("terminal settings", () => {
     act(() => result.current.updateSettings({ fontSize: 18 }));
     window.removeEventListener("orca:terminal-settings", events);
     expect(events).toHaveBeenCalledTimes(1);
+  });
+
+  it("defaults scrollback to 50,000 lines and keeps a saved 10,000 after the upgrade", () => {
+    expect(DEFAULT_TERMINAL_SETTINGS.scrollback).toBe(50_000);
+    expect(loadTerminalSettings().scrollback).toBe(50_000);
+    localStorage.setItem(TERMINAL_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_TERMINAL_SETTINGS, scrollback: 10_000 }));
+    expect(loadTerminalSettings().scrollback).toBe(10_000);
   });
 
   it("resolves scrollback compression from the local override, then Ghostty, then on", () => {

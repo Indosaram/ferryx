@@ -13,7 +13,7 @@ pub const GRAPHEME_EXTRA_MAX: usize = 32;
 pub const TITLE_MAX: usize = 4096;
 pub const URI_MAX: usize = 2048;
 pub const LINKS_MAX: usize = 1024;
-pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+pub const DEFAULT_SCROLLBACK_LINES: usize = 50_000;
 /// Kitty image storage limit per screen, in bytes. Same value as
 /// `IMAGE_LIMIT` in src-tauri/src/native_terminal/png_decoder.rs (src-tauri does
 /// not depend on this crate, so the value is duplicated; keep both equal).
@@ -39,6 +39,17 @@ pub enum Step {
     Appended { evicted: usize, appended: usize },
     /// Scrollback rows were rewritten (§2.3); line_ids must be reassigned.
     Rewritten,
+}
+
+/// Result of one incremental scrollback compression step (`ghostty_terminal_compress`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressStep {
+    /// Compression cannot free memory on this platform; never schedule it again.
+    Unsupported,
+    /// More work remains; run another step while the terminal stays idle.
+    Pending,
+    /// The pass finished; nothing to do until the terminal changes.
+    Complete,
 }
 
 struct Anchor {
@@ -496,6 +507,25 @@ impl VtEngine {
         self.sb_rows
     }
 
+    /// Runs one bounded incremental compression step over cold scrollback.
+    /// `&mut self` serializes it with every other access, as the header requires.
+    pub fn compress_step(&mut self) -> CompressStep {
+        let mut raw: c_int = COMPRESSION_RESULT_UNSUPPORTED;
+        unsafe { check(ghostty_terminal_compress(self.term, COMPRESSION_MODE_INCREMENTAL, &mut raw), "compress") };
+        match raw {
+            COMPRESSION_RESULT_PENDING => CompressStep::Pending,
+            COMPRESSION_RESULT_COMPLETE => CompressStep::Complete,
+            _ => CompressStep::Unsupported,
+        }
+    }
+
+    /// Opaque token that changes whenever compression work may have appeared.
+    pub fn compression_activity(&self) -> u64 {
+        let mut activity: u64 = 0;
+        unsafe { check(ghostty_terminal_compression_activity(self.term, &mut activity), "compression_activity") };
+        activity
+    }
+
     /// Kitty image storage limit of the active screen in bytes; `None` when
     /// Kitty graphics are disabled at build time.
     pub fn kitty_image_storage_limit(&self) -> Option<u64> {
@@ -629,6 +659,12 @@ impl HostTerminal {
 
     pub fn next_ui_event_id(&self) -> u64 {
         self.next_event_id
+    }
+
+    /// One idle compression step on the engine. Compression changes only the
+    /// storage representation, never the replicated state.
+    pub fn compress_step(&mut self) -> CompressStep {
+        self.engine.compress_step()
     }
 
     fn light(&self) -> Light {

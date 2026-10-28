@@ -35,7 +35,7 @@ export function TerminalSection({
   fontSize,
   macosOptionAsAlt,
   shell = null,
-  scrollback = 10_000,
+  scrollback = 50_000,
   scrollbackCompression = true,
   source,
   sourcePath,

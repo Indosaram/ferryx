@@ -9,7 +9,7 @@ use thiserror::Error;
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "monospace";
 pub const DEFAULT_MACOS_OPTION_AS_ALT: bool = false;
 pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 13.0;
-pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+pub const DEFAULT_SCROLLBACK_LINES: usize = 50_000;
 /// Same key and default as Ghostty 1.4 `scrollback-compression`.
 pub const DEFAULT_SCROLLBACK_COMPRESSION: bool = true;
 
@@ -1401,5 +1401,35 @@ scrollback-limit-lines = 25000
         value.as_object_mut().unwrap().remove("scrollbackCompression");
         let restored: TerminalPreferences = serde_json::from_value(value).unwrap();
         assert!(restored.scrollback_compression);
+    }
+
+    #[test]
+    fn default_scrollback_is_fifty_thousand_lines_and_explicit_values_are_kept() {
+        assert_eq!(DEFAULT_SCROLLBACK_LINES, 50_000);
+        let defaults = TerminalPreferences::defaults(TerminalPreferencesStatus::Absent, None);
+        assert_eq!(defaults.scrollback, 50_000);
+        let absent = parse_ghostty_config("font-size = 14\n").expect("parse config");
+        let imported = TerminalPreferences::imported(absent, PathBuf::from("/tmp/config"));
+        assert_eq!(imported.scrollback, 50_000);
+        let saved = parse_ghostty_config("scrollback-limit = 10000\n").expect("parse config");
+        let imported_saved = TerminalPreferences::imported(saved, PathBuf::from("/tmp/config"));
+        assert_eq!(imported_saved.scrollback, 10000, "an explicit 10000 survives the default change");
+    }
+}
+
+#[cfg(test)]
+mod saved_preferences_tests {
+    use super::*;
+
+    #[test]
+    fn saved_preferences_without_scrollback_load_the_new_default() {
+        let mut value = serde_json::to_value(TerminalPreferences::defaults(
+            TerminalPreferencesStatus::Absent,
+            None,
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().remove("scrollback");
+        let restored: TerminalPreferences = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.scrollback, DEFAULT_SCROLLBACK_LINES);
     }
 }

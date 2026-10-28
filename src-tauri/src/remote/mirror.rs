@@ -4,9 +4,11 @@ use crate::remote::protocol::{
 use crate::terminal::output_hub::HistorySegment;
 
 use crate::native_terminal::{
-    CellSnapshot, CellWide, ColorRgb, CursorSnapshot, CursorVisualStyle, NativeTerminal,
-    NativeTerminalError, RenderSnapshot, ScrollViewport, TerminalEngine,
+    CellSnapshot, CellWide, ColorRgb, CompressionScheduler, CompressionStep, CursorSnapshot,
+    CursorVisualStyle, MemoryUsage, NativeTerminal, NativeTerminalError, RenderSnapshot,
+    ScrollViewport, TerminalEngine,
 };
+use std::time::{Duration, Instant};
 
 const REMOTE_CELL_WIDTH_PX: u32 = 8;
 const REMOTE_CELL_HEIGHT_PX: u32 = 16;
@@ -16,6 +18,7 @@ pub struct RemoteTerminalMirror {
     last_cols: Option<u16>,
     last_rows: Option<u16>,
     last_lines: Option<Vec<Vec<RemoteGridRun>>>,
+    compression: CompressionScheduler,
 }
 
 impl RemoteTerminalMirror {
@@ -27,7 +30,31 @@ impl RemoteTerminalMirror {
             last_cols: None,
             last_rows: None,
             last_lines: None,
+            compression: CompressionScheduler::default(),
         })
+    }
+
+    /// Records output or another change at `now`; idle compression restarts its delay.
+    pub fn mark_activity(&mut self, now: Instant) {
+        self.compression.mark_activity(now);
+    }
+
+    /// Time until the next idle compression step is due, or `None` when none is scheduled.
+    pub fn compression_wakeup(&self, now: Instant) -> Option<Duration> {
+        self.compression.next_wakeup(now)
+    }
+
+    /// Runs one due incremental compression step. The owner holds the mirror exclusively.
+    pub fn run_due_compression(
+        &mut self,
+        now: Instant,
+        enabled: bool,
+    ) -> Result<Option<CompressionStep>, NativeTerminalError> {
+        self.compression.run_due_step(now, enabled, &mut self.engine)
+    }
+
+    pub fn memory_usage(&self) -> Result<MemoryUsage, NativeTerminalError> {
+        self.engine.memory_usage()
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Result<RemoteGridFrame, NativeTerminalError> {
@@ -1181,6 +1208,66 @@ pub mod headless {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_compression_runs_only_after_activity_and_keeps_frames_intact() {
+        let mut mirror = RemoteTerminalMirror::new(80, 24).expect("mirror");
+        let mut input = String::new();
+        for i in 0..20_000 {
+            input.push_str(&format!("line {i:06} repeated and compressible terminal history\r\n"));
+        }
+        mirror.feed(input.as_bytes()).expect("feed");
+        let start = Instant::now();
+        assert_eq!(mirror.compression_wakeup(start), None, "no activity, nothing scheduled");
+        mirror.mark_activity(start);
+        assert_eq!(
+            mirror.run_due_compression(start, true).expect("early step"),
+            None,
+            "nothing runs before the idle delay"
+        );
+
+        let mut now = start + crate::native_terminal::compression::COMPRESSION_IDLE_DELAY;
+        let mut last = None;
+        for _ in 0..100_000 {
+            let Some(wait) = mirror.compression_wakeup(now) else { break };
+            now += wait;
+            last = mirror.run_due_compression(now, true).expect("step");
+        }
+        assert_eq!(mirror.compression_wakeup(now), None, "the pass must end");
+        let usage = mirror.memory_usage().expect("memory usage");
+        if usage.compression_supported {
+            assert_eq!(last, Some(CompressionStep::Complete));
+            assert!(usage.primary_compressed_pages > 0, "{usage:?}");
+        } else {
+            assert_eq!(last, Some(CompressionStep::Unsupported));
+        }
+        let frame = mirror.full_frame().expect("frame after compression");
+        let RemoteGridFrame::Grid { lines, .. } = frame else { panic!("expected a full grid frame") };
+        assert!(lines.iter().any(|l| l.runs.iter().any(|r| r.text.contains("line 019999"))));
+    }
+
+    #[test]
+    fn idle_compression_is_skipped_when_the_preference_is_off() {
+        let mut mirror = RemoteTerminalMirror::new(20, 5).expect("mirror");
+        mirror.feed(b"hello\r\n").expect("feed");
+        let start = Instant::now();
+        mirror.mark_activity(start);
+        let due = start + crate::native_terminal::compression::COMPRESSION_IDLE_DELAY;
+        assert_eq!(mirror.run_due_compression(due, false).expect("step"), None);
+        assert_eq!(mirror.compression_wakeup(due), None);
+    }
+
+    #[test]
+    fn remote_mirror_inherits_the_fifty_thousand_line_default() {
+        assert_eq!(crate::terminal::DEFAULT_SCROLLBACK_LINES, 50_000);
+        let mut mirror = RemoteTerminalMirror::new(40, 5).expect("mirror");
+        let mut input = String::new();
+        for i in 0..30_000 {
+            input.push_str(&format!("{i}\r\n"));
+        }
+        mirror.feed(input.as_bytes()).expect("feed");
+        assert!(mirror.engine.scrollback_rows().unwrap() >= 29_000);
+    }
 
     fn first_line(frame: &RemoteGridFrame) -> &RemoteGridLine {
         match frame {
