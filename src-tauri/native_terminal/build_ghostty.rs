@@ -8,7 +8,7 @@ pub const REQUIRED_ZIG_VERSION: &str = "0.17.0";
 
 /// Version of the shared libghostty-vt artifact cache layout and of the `zig build`
 /// arguments below. Bump it whenever either changes so stale artifacts are never reused.
-const ARTIFACT_CACHE_SCHEMA: &str = "v1";
+const ARTIFACT_CACHE_SCHEMA: &str = "v2";
 const ARTIFACT_CACHE_COMPLETE_MARKER: &str = ".complete";
 
 /// Result of build environment verification and libghostty-vt compilation.
