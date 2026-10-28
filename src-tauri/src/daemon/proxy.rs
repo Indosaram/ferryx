@@ -862,7 +862,16 @@ impl SessionRouter {
 
     /// A paired session id is served here unless an older generation that kept it across an
     /// upgrade (todo 8) still owns it and this daemon runs no actor for it.
+    ///
+    /// A session this daemon runs itself (a local PTY or a remote controller) is never routed to
+    /// a peer: a predecessor's session list can outlive the predecessor, and routing a session
+    /// this daemon owns to a dead peer socket fails every request for it.
     pub fn find_legacy_peer_for_session(&self, session_id: &str) -> Option<Arc<LegacyPeer>> {
+        if self.terminal_service.get_session(session_id).is_some()
+            || self.terminal_service.remote().contains(session_id)
+        {
+            return None;
+        }
         if crate::terminal::paired_runtime::Runtime::owns(session_id)
             && self.terminal_service.paired().contains(session_id)
         {

@@ -882,6 +882,39 @@ async fn ssh_handover_remote_details_fall_back_when_peer_lacks_session() {
     );
 }
 
+/// A local PTY this daemon runs is answered locally even when a stale peer entry (whose
+/// predecessor is gone) still lists it; otherwise the GUI's pre-write classification fails and
+/// every keystroke for that pane is dropped.
+#[tokio::test]
+async fn local_pty_is_not_routed_to_stale_legacy_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("config")),
+        Some(dir.path().join("auth")),
+    ));
+    let (session_id, _output) = server
+        .terminal_service
+        .pty_manager()
+        .spawn(portable_pty::CommandBuilder::new("/bin/cat"), 80, 24)
+        .expect("spawn a live pty session");
+    server.session_router.add_legacy_peer(Arc::new(crate::daemon::proxy::LegacyPeer::new(
+        dir.path().join("gone.sock"),
+        vec![session_id.clone()],
+    )));
+
+    assert!(server.session_router.find_legacy_peer_for_session(&session_id).is_none());
+    let reply = request_response(
+        &server,
+        serde_json::json!({"type":"remoteSessionDetails","sessionId":session_id}),
+    )
+    .await;
+    assert!(
+        matches!(reply, DaemonResponse::RemoteSessionDetailsOk { details: None, legacy_direct_ssh: false }),
+        "local pty must be classified locally, got {reply:?}"
+    );
+    server.terminal_service.close_session(&session_id).await.unwrap();
+}
+
 /// Retry has to reach the daemon that owns the controller, and must stay local when this
 /// runtime owns the session.
 #[tokio::test]
