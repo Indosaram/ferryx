@@ -108,14 +108,6 @@ pub fn task_only_block(exceptions: &[String]) -> Option<String> {
     Some(block)
 }
 
-fn sha256_hex(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(text.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn memory(context: &RequestContext) -> Result<&Arc<dyn OwnerMemory>, RequestFailure> {
     context.memory.as_ref().ok_or_else(|| {
         RequestFailure::new(
@@ -194,7 +186,7 @@ async fn provenance(
     body: &str,
     target: Option<&str>,
 ) -> Result<(), RequestFailure> {
-    let hash = sha256_hex(&format!("{action}\u{0}{}\u{0}{body}", target.unwrap_or("")));
+    let hash = crate::usage::sha256_hex(&format!("{action}\u{0}{}\u{0}{body}", target.unwrap_or("")));
     let now = crate::storage::now_rfc3339();
     sqlx::query(
         "INSERT INTO supervisor_memory_sources(source_id, supervisor_id, owner_principal,
