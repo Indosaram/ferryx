@@ -563,11 +563,20 @@ pub(crate) async fn prompt_get(
     Ok(prompt.map(|prompt| prompt_view(&prompt, snapshot.revision)))
 }
 
-/// The reference answer an `AgentPromptAnswerInput` names. Both or neither shape set is passed
+/// The reference answer an `AgentPromptAnswerInput` names, after the daemon boundary's length
+/// cap on free text. Both or neither shape set is passed
 /// on as such, so the shared answer path refuses it exactly as it refuses the phone's.
 fn reference_answer(
     input: crate::daemon::protocol::AgentPromptAnswerInput,
 ) -> Result<reference_types::ReferencePromptAnswer, ScopeError> {
+    // The same bound an HTTP agent-control body has: longer text is refused before anything is
+    // read or typed.
+    if input.text.as_ref().is_some_and(|text| text.len() > policy::AGENT_CONTROL_HTTP_BODY_MAX) {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::InvalidRequest,
+            "the answer text is longer than an answer may carry; nothing was typed",
+        ));
+    }
     let option_index = match input.key {
         Some(key) => Some(key.trim().parse::<u32>().map_err(|_| {
             reference_chat_scope(ScopeErrorCode::InvalidRequest, "the answer key is not an option of this prompt")
@@ -1587,6 +1596,29 @@ mod tests {
             backend.writes.lock().expect("writes").clone(),
             vec![b"\x1b[B".to_vec(), b"\x1b[B".to_vec(), b"\r".to_vec()]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_text_over_the_cap_is_refused_and_types_nothing() {
+        let session_id = "agent-prompt-answer-too-long";
+        let (backend, state) = pane(session_id, CODEX_MENU);
+        let prompt = desktop_prompt(&state, session_id).await;
+        let text = "a".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX + 1);
+
+        let error = prompt_answer(
+            &state,
+            session_id.into(),
+            prompt.prompt_id,
+            prompt.screen_revision,
+            crate::daemon::protocol::AgentPromptAnswerInput { key: None, text: Some(text) },
+            Some("codex".into()),
+        )
+        .await
+        .expect_err("text over the cap is refused");
+
+        assert_eq!(error.code, ScopeErrorCode::InvalidRequest, "{}", error.message);
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "a refused answer typed nothing");
     }
 
     #[test]
