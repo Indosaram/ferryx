@@ -136,7 +136,16 @@ impl ScreenMirror {
     }
 
     /// The mirror's screen as a seed, or `None` when the parser cannot serialize it.
-    pub fn seed(&self) -> Option<ScreenSeed> {
+    ///
+    /// The formatter reads every scrollback page, which restores compressed ones, so taking a
+    /// seed counts as activity: idle compression is re-armed and its driver woken.
+    pub fn seed(&mut self) -> Option<ScreenSeed> {
+        let seed = self.serialize();
+        self.mark_activity();
+        seed
+    }
+
+    fn serialize(&self) -> Option<ScreenSeed> {
         let (cols, rows) = self.terminal.dimensions().ok()?;
         match self.terminal.reconstruction_bytes() {
             Ok(bytes) => Some(ScreenSeed { cols, rows, bytes }),
@@ -329,5 +338,42 @@ mod tests {
         assert_eq!(mirror.run_due_compression(due, false).unwrap(), None);
         assert_eq!(mirror.compression_wakeup(due), None, "the preference off disarms the pass");
         assert_eq!(mirror.terminal.memory_usage().unwrap().primary_compressed_pages, 0);
+    }
+
+    /// Runs every due compression step from one idle delay after now until the pass ends.
+    fn drain_compression(mirror: &mut ScreenMirror) -> Option<CompressionStep> {
+        let mut now = Instant::now() + COMPRESSION_IDLE_DELAY;
+        let mut last = None;
+        for _ in 0..100_000 {
+            let Some(wait) = mirror.compression_wakeup(now) else { break };
+            now += wait;
+            last = mirror.run_due_compression(now, true).unwrap();
+        }
+        assert_eq!(mirror.compression_wakeup(now), None, "the pass must end");
+        last
+    }
+
+    #[test]
+    fn screen_mirror_recompresses_after_a_seed_reads_its_history() {
+        let mut mirror = full_mirror();
+        let first = drain_compression(&mut mirror);
+        let compressed = mirror.terminal.memory_usage().unwrap();
+        // A full-replay attach takes a seed of an idle mirror; the formatter restores every
+        // compressed page it reads.
+        assert!(!mirror.seed().unwrap().bytes.is_empty());
+        if compressed.compression_supported {
+            assert_eq!(first, Some(CompressionStep::Complete));
+            assert!(compressed.primary_compressed_pages > 0, "{compressed:?}");
+            assert!(
+                mirror.compression_wakeup(Instant::now()).is_some(),
+                "taking a seed must re-arm idle compression"
+            );
+            assert_eq!(drain_compression(&mut mirror), Some(CompressionStep::Complete));
+            let after = mirror.terminal.memory_usage().unwrap();
+            assert!(after.primary_compressed_pages > 0, "{after:?}");
+        } else {
+            assert_eq!(first, Some(CompressionStep::Unsupported));
+            assert_eq!(mirror.compression_wakeup(Instant::now()), None);
+        }
     }
 }

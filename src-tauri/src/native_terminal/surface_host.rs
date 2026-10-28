@@ -3647,6 +3647,22 @@ impl NativeTerminalSurfaceHostState {
         self.with_session_terminal_and_context(session_id, |term, _| f(term))
     }
 
+    /// Like [`Self::with_session_terminal`] for requests that read scrollback (search,
+    /// select-all, copy). Reading restores compressed pages, so the session pump is told to
+    /// re-arm idle compression.
+    pub fn with_session_history<T>(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut NativeTerminal) -> Result<T, NativeTerminalError>,
+    ) -> Result<T, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let mut session = handle.lock();
+        let result = f(&mut session.terminal);
+        session.snapshot_slot.mark_history_read();
+        result
+    }
+
     pub fn reapply_theme_to_sessions(&self) {
         let theme = &cached_terminal_preferences().theme;
         for (session_id, session) in self.session_handles() {
@@ -4669,6 +4685,13 @@ impl NativeTerminalSurfaceHostState {
                             update_sender.send_replace(());
                             schedule_render();
                         }
+                        continue;
+                    }
+                    _ = slot.history_read() => {
+                        // A search, select-all or copy read scrollback and restored compressed
+                        // pages; restart the idle delay the way output does.
+                        refresh_deadline = false;
+                        compression.mark_activity(std::time::Instant::now());
                         continue;
                     }
                     _ = slot.animation_woken() => {

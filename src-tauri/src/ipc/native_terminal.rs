@@ -1664,7 +1664,7 @@ pub fn select_attached_native_terminal(
     mode: &NativeTerminalSelectMode,
 ) -> Result<NativeTerminalSelectionReceipt, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| {
+    state.with_session_history(session_id, |term| {
         let selection_res = match mode {
             NativeTerminalSelectMode::All => term.select_all(),
             NativeTerminalSelectMode::Word { col, row } => term.select_word_at(*col, *row),
@@ -1708,7 +1708,7 @@ pub fn copy_attached_native_selection(
     session_id: &str,
 ) -> Result<String, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| {
+    state.with_session_history(session_id, |term| {
         let text = term.selection_text()?.unwrap_or_default();
         Ok(text)
     })
@@ -1750,7 +1750,7 @@ pub fn search_attached_native_terminal(
     case_sensitive: bool,
 ) -> Result<NativeTerminalSearchResult, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| {
+    state.with_session_history(session_id, |term| {
         let raw_matches = term.search_grid(query, case_sensitive)?;
         let matches = raw_matches
             .into_iter()
@@ -4099,6 +4099,26 @@ mod tests {
             select_attached_native_terminal(&state, "range", &out_of_bounds),
             Err(NativeTerminalError::InvalidValue(_))
         ));
+        state.teardown();
+    }
+
+    #[test]
+    fn history_reads_wake_the_pump_to_rearm_idle_compression() {
+        use futures_util::FutureExt as _;
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("history", 1, None).unwrap();
+        let slot = state.session_snapshot_slot("history").unwrap();
+        state
+            .with_session_terminal("history", |term| term.feed(b"history line\r\n"))
+            .unwrap();
+        assert!(slot.history_read().now_or_never().is_none(), "plain access is not a history read");
+
+        search_attached_native_terminal(&state, "history", "history", false).unwrap();
+        assert!(slot.history_read().now_or_never().is_some(), "search must wake the pump");
+        select_attached_native_terminal(&state, "history", &NativeTerminalSelectMode::All).unwrap();
+        assert!(slot.history_read().now_or_never().is_some(), "select-all must wake the pump");
+        copy_attached_native_selection(&state, "history").unwrap();
+        assert!(slot.history_read().now_or_never().is_some(), "copy must wake the pump");
         state.teardown();
     }
 

@@ -796,11 +796,13 @@ impl SessionHub {
     /// Two cases keep retained replay: an alternate screen (the formatter serializes only the
     /// active screen, so the primary screen's history would be lost) and retained inline images
     /// (the formatter carries no image data).
+    ///
+    /// Taking the seed re-arms the mirror's idle compression and wakes its driver.
     fn screen_seed(&self) -> Option<super::screen_mirror::ScreenSeed> {
         if self.buffer.retained_image_bytes() > 0 {
             return None;
         }
-        let screen = self.screen.as_ref()?.lock();
+        let mut screen = self.screen.as_ref()?.lock();
         if screen.is_alternate_screen() {
             return None;
         }

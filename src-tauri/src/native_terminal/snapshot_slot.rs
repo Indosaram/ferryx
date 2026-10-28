@@ -46,6 +46,9 @@ pub struct SnapshotSlot {
     /// Wakes the session pump to re-read its Kitty animation deadline after a frame prepared
     /// outside the pump armed one, or after the surface became visible again.
     animation_wake: tokio::sync::Notify,
+    /// Wakes the session pump after a request read scrollback (search, select-all, copy), which
+    /// restores compressed pages, so the pump re-arms idle compression.
+    history_read: tokio::sync::Notify,
 }
 
 impl Default for SnapshotSlot {
@@ -64,6 +67,7 @@ impl SnapshotSlot {
             attachment_epoch: AtomicU64::new(1),
             render_suspended: AtomicBool::new(false),
             animation_wake: tokio::sync::Notify::new(),
+            history_read: tokio::sync::Notify::new(),
         }
     }
 
@@ -194,6 +198,15 @@ impl SnapshotSlot {
 
     pub(crate) fn animation_woken(&self) -> tokio::sync::futures::Notified<'_> {
         self.animation_wake.notified()
+    }
+
+    /// Records that a request read the session's scrollback; the pump treats it as activity.
+    pub(crate) fn mark_history_read(&self) {
+        self.history_read.notify_one();
+    }
+
+    pub(crate) fn history_read(&self) -> tokio::sync::futures::Notified<'_> {
+        self.history_read.notified()
     }
 }
 
