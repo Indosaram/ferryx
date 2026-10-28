@@ -39,7 +39,7 @@ import { NONCE_ENV, NONCE_FILE, selfTest } from './unified-supervisor/self-test.
 const SCRIPT = fileURLToPath(import.meta.url);
 const QA_DIR = join(dirname(SCRIPT), 'unified-supervisor');
 const REPO_ROOT = resolve(dirname(SCRIPT), '..', '..');
-const SCRIPTS = [SCRIPT, ...['harness.mjs', 'scenarios.mjs', 'mhc.mjs', 'memory-usage.mjs', 'self-test.mjs', 'self-test-units.mjs', 'fixture-sleeper.mjs', 'fixture-worker.mjs', 'fixture-mhc-filter.mjs', 'config.schema.json'].map((name) => join(QA_DIR, name))];
+const SCRIPTS = [SCRIPT, ...['harness.mjs', 'scenarios.mjs', 'mhc.mjs', 'memory-usage.mjs', 'surfaces.mjs', 'self-test.mjs', 'self-test-units.mjs', 'fixture-sleeper.mjs', 'fixture-worker.mjs', 'fixture-mhc-filter.mjs', 'config.schema.json'].map((name) => join(QA_DIR, name))];
 const USAGE = 'usage: bun scripts/qa/unified-supervisor.mjs (--scenario NAME | --all | --self-test | --cleanup) [--config <json>] --evidence <dir> [--force-evidence] [--force-owner]';
 
 export function writeOut(stream, text) {

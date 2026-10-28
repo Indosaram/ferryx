@@ -285,10 +285,12 @@ export function assertIsolatedRoot(path, label, context = {}) {
 // Config.
 
 export const CONFIG_REQUIRED = Object.freeze(['ferryxCli', 'ferryxApp', 'mhcBin', 'dataRoot', 'memoryRoot', 'projectRoot', 'ownerPrincipal']);
-export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', '$schema', '$comment']);
+export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', 'ferryxUiDist', '$schema', '$comment']);
 const BINARY_FIELDS = ['ferryxCli', 'ferryxApp', 'mhcBin'];
 // Binaries only some scenarios need; validated like BINARY_FIELDS when present.
 const OPTIONAL_BINARY_FIELDS = ['ferryxRelay'];
+// Built artifact directories only some scenarios need (surfaces serves ui/dist through the relay).
+const OPTIONAL_DIR_FIELDS = ['ferryxUiDist'];
 const ROOT_FIELDS = ['dataRoot', 'memoryRoot', 'projectRoot'];
 const STATE_ROOT_ENTRIES = new Set(['.qa-unified-supervisor', 'runs']);
 
@@ -325,6 +327,17 @@ export function loadConfig(path, context = {}) {
     let info;
     try { info = statSync(value); } catch { throw new HarnessError('CONFIG_INVALID', `${key} ${value} does not exist`); }
     if (!info.isFile()) throw new HarnessError('CONFIG_INVALID', `${key} ${value} is not a file`);
+  }
+  for (const key of OPTIONAL_DIR_FIELDS) {
+    const value = config[key];
+    if (value === undefined || value === null) continue;
+    if (value.startsWith('~')) throw new HarnessError('CONFIG_INVALID', `${key} must be absolute; ~ is never expanded`);
+    if (!isAbsolute(value)) throw new HarnessError('CONFIG_INVALID', `${key} must be an absolute path, got ${value}`);
+    if (value.split(/[\\/]+/).includes('..')) throw new HarnessError('CONFIG_INVALID', `${key} must not contain .. segments`);
+    assertNotProduction(value, key, context);
+    let info;
+    try { info = statSync(value); } catch { throw new HarnessError('CONFIG_INVALID', `${key} ${value} does not exist`); }
+    if (!info.isDirectory()) throw new HarnessError('CONFIG_INVALID', `${key} ${value} is not a directory`);
   }
   for (const key of BINARY_FIELDS) assertNotProduction(config[key], key, context);
   for (const key of ROOT_FIELDS) assertIsolatedRoot(config[key], key, context);
@@ -1546,6 +1559,7 @@ export async function collectReceipts({ repoRoot, configInfo = null, scripts = [
       ferryxApp: await describeArtifact(config.ferryxApp),
       mhcBin: await describeArtifact(config.mhcBin),
       ...(config.ferryxRelay ? { ferryxRelay: await describeArtifact(config.ferryxRelay) } : {}),
+      ...(config.ferryxUiDist ? { ferryxUiDist: await describeArtifact(config.ferryxUiDist) } : {}),
     } : null,
     binaryRepos: config ? {
       ferryxCli: await containingRepo(config.ferryxCli),

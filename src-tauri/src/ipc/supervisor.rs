@@ -3,7 +3,7 @@
 
 use super::error::{IpcError, IpcErrorCode};
 use crate::daemon::client::DaemonClient;
-use crate::daemon::protocol::{DaemonRequest, DaemonResponse, SupervisorGoalAction};
+use crate::daemon::protocol::{DaemonRequest, DaemonResponse, SupervisorGoalAction, SupervisorReadAction};
 use std::sync::Arc;
 
 /// A daemon that knows these requests types every failure, so an untyped error is an older daemon.
@@ -111,6 +111,30 @@ pub async fn cmd_supervisor_request(
     )
 }
 
+fn read_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
+    match response {
+        DaemonResponse::SupervisorReadV1Ok { value } => Ok(value),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            if details.is_some() {
+                error.details = details;
+            }
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon supervisor read response")),
+    }
+}
+
+/// A read-only unified supervisor view: one project's conversation page or the memory
+/// receipts. Refusals keep their wire code (`SUPERVISOR_UNAVAILABLE`, `MEMORY_*`, ...).
+#[tauri::command]
+pub async fn cmd_supervisor_read(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    request: SupervisorReadAction,
+) -> Result<serde_json::Value, IpcError> {
+    read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +202,24 @@ mod tests {
         let error = receipt_from(stale).unwrap_err();
         assert_ne!(error.code, IpcErrorCode::DaemonUpgradeRequired);
         assert_eq!(error.details.unwrap()["status"], 409);
+    }
+
+    #[test]
+    fn a_supervisor_read_reply_carries_the_view_and_a_refusal_keeps_its_code() {
+        let ok = DaemonResponse::SupervisorReadV1Ok { value: serde_json::json!({"next": 3, "messages": []}) };
+        assert_eq!(read_from(ok).unwrap()["next"], 3);
+        let memory = DaemonResponse::Error {
+            message: "the hub has no native memory receipt listing yet".into(),
+            code: Some("MEMORY_RECEIPTS_UNAVAILABLE".into()),
+            details: Some(serde_json::json!({"code": "MEMORY_RECEIPTS_UNAVAILABLE", "status": 503})),
+        };
+        let error = read_from(memory).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::Custom("MEMORY_RECEIPTS_UNAVAILABLE".into()));
+        assert_eq!(error.details.unwrap()["status"], 503);
+        let old = DaemonResponse::Error { message: "unknown variant".into(), code: None, details: None };
+        assert_eq!(read_from(old).unwrap_err().code, IpcErrorCode::DaemonUpgradeRequired);
+        let request: SupervisorReadAction =
+            serde_json::from_value(serde_json::json!({"view": "conversation", "projectId": "p", "after": 2})).unwrap();
+        assert_eq!(request, SupervisorReadAction::Conversation { project_id: "p".into(), after: Some(2) });
     }
 }

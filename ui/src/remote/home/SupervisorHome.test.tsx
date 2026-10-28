@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LanePauseResult } from "../remoteSupervisor";
 import { fixtureAction, fixtureLane, fixtureMachine, fixtureSnapshot } from "./phoneHomeFixtures";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
+import { unifiedHosts } from "./usePhoneSupervisor";
+import { normalizeUnified } from "../../lib/unifiedSupervisor";
 
 const NOW = 5_000_000;
 
@@ -93,5 +95,72 @@ describe("SupervisorHome", () => {
       machines: [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "k", lastReason: "tests failed twice" })] }) })],
     });
     expect(screen.getByTestId("supervisor-lane-reason")).toHaveTextContent("Stopped: tests failed twice");
+  });
+});
+
+describe("SupervisorHome unified supervisor", () => {
+  const unifiedWire = {
+    identity: { supervisorId: "s-1", ownerPrincipal: "desktop:qa-owner" },
+    projects: [{ projectId: "p-1", name: "qa-supervisor" }],
+    goals: [{ goalId: "g-1", supervisorId: "s-1", projectId: "p-1", laneKey: "sv-1", title: "Write result.txt", runState: "running",
+      stateDetail: null, revision: 2, pendingWaits: [], nextTrigger: null, updatedAt: "", mode: "full", turnLimit: 20, turnsUsed: 1, grant: ["edit"] }],
+    health: { state: "ready", generation: 1, pid: 3, capabilities: [], serverVersion: null, fault: null, detail: null, queuedDecisions: 0 },
+  };
+  const live = normalizeUnified(unifiedWire)!;
+
+  it("renders the host's goals without a machine picker and pauses with the revision", async () => {
+    const requests: unknown[] = [];
+    const client = {
+      request: vi.fn(async (envelope: unknown) => {
+        requests.push(envelope);
+        return { kind: "ok" as const, value: {} };
+      }),
+      conversation: vi.fn(async () => ({ kind: "ok" as const, value: { messages: [], next: 0 } })),
+      memory: vi.fn(async () => ({ kind: "error" as const, code: "MEMORY_RECEIPTS_UNAVAILABLE", message: "", status: 503 })),
+      remember: vi.fn(async () => ({ kind: "ok" as const, value: {} })),
+      refresh: vi.fn(),
+    };
+    renderHome({
+      machines: [fixtureMachine({ machineId: "studio", snapshot: fixtureSnapshot({ supervisor: live }) })],
+      unified: [{ machineId: "studio", label: "Studio", connection: "live", error: null, view: live, client }],
+    });
+    await act(async () => {
+      await client.conversation.mock.results[0]?.value;
+      await client.memory.mock.results[0]?.value;
+    });
+    expect(screen.getByTestId("supervisor-unified").dataset.surface).toBe("phone");
+    expect(screen.queryByRole("combobox", { name: /machine/i })).toBeNull();
+    expect(screen.getByTestId("supervisor-goal-id")).toHaveTextContent("g-1");
+    await act(async () => fireEvent.click(screen.getByTestId("supervisor-pause")));
+    expect(requests[0]).toMatchObject({ goalId: "g-1", expectedRevision: 2, action: "pause" });
+    expect(client.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a disconnected host's last goals, says so, and substitutes no other supervisor", () => {
+    const lastSeen = new Map();
+    const clientFor = vi.fn(() => null);
+    const liveMachines = [
+      fixtureMachine({ machineId: "studio", label: "Studio", snapshot: fixtureSnapshot({ supervisor: live }) }),
+      fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: fixtureSnapshot() }),
+    ];
+    expect(unifiedHosts(liveMachines, lastSeen, clientFor).map((host) => [host.machineId, host.connection])).toEqual([["studio", "live"]]);
+    const gone = [
+      fixtureMachine({ machineId: "studio", label: "Studio", state: "offline", snapshot: null, error: { code: "OFFLINE", message: "tunnel closed" } }),
+      fixtureMachine({ machineId: "laptop", label: "Laptop", snapshot: fixtureSnapshot() }),
+    ];
+    const hosts = unifiedHosts(gone, lastSeen, clientFor);
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0]).toMatchObject({ machineId: "studio", connection: "disconnected", client: null, error: { code: "OFFLINE" } });
+    expect(hosts[0]!.view.goals[0]!.goalId).toBe("g-1");
+    // A hub that closed on a reachable machine is unavailable, not disconnected.
+    const closed = [fixtureMachine({ machineId: "studio", label: "Studio", snapshot: fixtureSnapshot({ supervisor: null }) })];
+    expect(unifiedHosts(closed, lastSeen, clientFor)[0]).toMatchObject({ connection: "unavailable", client: null, error: { code: "SUPERVISOR_UNAVAILABLE" } });
+
+    renderHome({ machines: gone, unified: hosts });
+    const banner = screen.getByTestId("supervisor-connection");
+    expect(banner.dataset.state).toBe("disconnected");
+    expect(banner).toHaveTextContent("Studio is disconnected");
+    expect(screen.getByTestId("supervisor-goal-id")).toHaveTextContent("g-1");
+    expect(screen.getByTestId("supervisor-pause")).toBeDisabled();
   });
 });

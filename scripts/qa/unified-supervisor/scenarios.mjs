@@ -47,12 +47,12 @@ const ADMISSION_WORK = Object.freeze({
 });
 // Daemon protocol version of this source revision (src-tauri/src/daemon/protocol.rs); a
 // daemon that speaks another one answers protocolMismatch with its own, which is used instead.
-const DAEMON_PROTOCOL_VERSION = 5;
+export const DAEMON_PROTOCOL_VERSION = 5;
 const HELD_STATES = new Set(['degraded', 'awaiting_owner', 'delivery_uncertain', 'cancelled', 'paused', 'completed']);
 
-const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+export const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
-function onPath(name) {
+export function onPath(name) {
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (!dir || !isAbsolute(dir)) continue;
     const candidate = join(dir, name);
@@ -64,7 +64,7 @@ function onPath(name) {
   return null;
 }
 
-function freeLoopbackPort() {
+export function freeLoopbackPort() {
   return new Promise((resolvePort, rejectPort) => {
     const server = createServer();
     server.unref();
@@ -77,7 +77,7 @@ function freeLoopbackPort() {
 }
 
 // One connection, newline-delimited JSON frames, one reply per frame (the CLI's exchange).
-function daemonExchange(socketPath, frames, deadlineMs) {
+export function daemonExchange(socketPath, frames, deadlineMs) {
   return new Promise((resolveExchange, rejectExchange) => {
     const replies = [];
     let buffer = '';
@@ -131,7 +131,7 @@ async function registerWorkspace(ctx, socketPath, workspaceId, repoRoot) {
   return [];
 }
 
-async function openHubReader(dbPath) {
+export async function openHubReader(dbPath) {
   let Database;
   try { ({ Database } = await import('bun:sqlite')); } catch {
     throw new HarnessError('SQLITE_UNAVAILABLE', 'the admission scenario reads the isolated hub database with bun:sqlite; run the runner with bun');
@@ -166,7 +166,7 @@ async function openHubReader(dbPath) {
 // Subscribe to a directory (the hub directory: every SQLite commit writes the -wal file; the
 // worker log directory: every worker line is an append), then reconcile: `check` runs once now
 // and again after each change, until it returns { done: true } or the deadline passes.
-function waitForChange(ctx, label, dir, check, deadlineMs) {
+export function waitForChange(ctx, label, dir, check, deadlineMs) {
   return new Promise((resolveWait, rejectWait) => {
     let settled = false;
     let watcher = null;
@@ -205,7 +205,7 @@ function waitForChange(ctx, label, dir, check, deadlineMs) {
   });
 }
 
-function readWorkerLogs(logDir) {
+export function readWorkerLogs(logDir) {
   if (!existsSync(logDir)) return [];
   return readdirSync(logDir).filter((name) => /^worker-\d+\.jsonl$/.test(name)).sort().map((name) => {
     const text = readFileSync(join(logDir, name), 'utf8');
@@ -645,12 +645,12 @@ const remoteWork = (nonce) => ({
 });
 // The product forces the gateway onto this loopback port (src-tauri/src/remote/state.rs); only
 // the target daemon binds it (relay mode), the hub daemon's gateway stays off.
-const GATEWAY_PORT = 43821;
+export const GATEWAY_PORT = 43821;
 const TURN_START_MS = 6_000;
 
 // Free only when nothing answers a connect to 127.0.0.1:<port> (also catches a 0.0.0.0
 // listener a SO_REUSEADDR bind probe misses on macOS) and a loopback bind succeeds.
-function portIsFree(port) {
+export function portIsFree(port) {
   const connects = new Promise((resolveConnect) => {
     const socket = createConnection({ host: '127.0.0.1', port });
     const done = (value) => { socket.destroy(); resolveConnect(value); };
@@ -668,7 +668,7 @@ function portIsFree(port) {
 }
 
 // True while `pid` exists (signal 0 probes without sending anything).
-function pidAlive(pid) {
+export function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
 }
 
@@ -1918,7 +1918,8 @@ export const SCENARIOS = Object.freeze({
   }),
   legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
-  surfaces: planned('14', 'Real desktop and mobile controls against a populated isolated hub: same state and goal revision, readable wait/degraded views'),
+  // Task 14, implemented in surfaces.mjs.
+  surfaces: SURFACES_SCENARIO,
   usage: Object.freeze({
     implemented: true,
     task: '15',
@@ -2098,3 +2099,4 @@ export function resolveScenario(name, internal = false) {
 
 // ES imports are hoisted: RUNTIME_SCENARIO is bound before SCENARIOS is built.
 import { RUNTIME_SCENARIO } from './mhc.mjs';
+import { SURFACES_SCENARIO } from './surfaces.mjs';

@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  desktopUnifiedClient,
+  normalizeSnapshot,
   setSupervisorSnapshotForTest,
   SUPERVISOR_STOP_REASON_LABELS,
   SUPERVISOR_STOP_REASONS,
@@ -10,7 +12,7 @@ import {
   type SupervisorSnapshot,
 } from "../../lib/supervisor";
 import { SupervisorPaneBarView } from "./SupervisorPaneBar";
-import { SupervisorPanelView } from "./SupervisorPanel";
+import { adoptableLanes, desktopConnection, SupervisorPanelView } from "./SupervisorPanel";
 
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => false, invoke: ipc.invoke }));
@@ -212,5 +214,96 @@ describe("SupervisorPanelView", () => {
       fireEvent.click(screen.getByRole("tab", { name: "Full" }));
     });
     expect(goalCalls()).toEqual([["cmd_supervisor_goal", { request: { action: "mode", laneKey: "ledger", mode: "full" } }]]);
+  });
+});
+
+describe("SupervisorPanelView unified supervisor", () => {
+  const unifiedGoal = {
+    goalId: "g-7", supervisorId: "s-1", projectId: "p-1", laneKey: "sv-7", title: "Write result.txt", runState: "waiting_event",
+    stateDetail: "WAITING_ON: 1 pending dependencies", revision: 5,
+    pendingWaits: [{ waitId: "w1", kind: "external_event", childGoalId: null, eventKey: "ci:green" }],
+    nextTrigger: null, updatedAt: "", mode: "full", turnLimit: 20, turnsUsed: 2, grant: ["edit"],
+  };
+  const wire = {
+    hub: { available: true, running: true },
+    lanes: [lane],
+    watched: [],
+    actions: [],
+    supervisor: {
+      identity: { supervisorId: "s-1", ownerPrincipal: "desktop:qa-owner" },
+      projects: [{ projectId: "p-1", name: "qa-supervisor" }],
+      goals: [unifiedGoal],
+      health: { state: "ready", generation: 1, pid: 9, capabilities: [], serverVersion: null, fault: null, detail: null, queuedDecisions: 0 },
+    },
+  };
+
+  function client() {
+    return {
+      request: vi.fn(async () => ({ kind: "ok" as const, value: {} })),
+      conversation: vi.fn(async () => ({ kind: "ok" as const, value: { messages: [], next: 0 } })),
+      memory: vi.fn(async () => ({ kind: "error" as const, code: "MEMORY_RECEIPTS_UNAVAILABLE", message: "", status: 503 })),
+      remember: vi.fn(async () => ({ kind: "ok" as const, value: {} })),
+      refresh: vi.fn(),
+    };
+  }
+
+  it("shows the live goal, its wait and the lanes together; the lane pause still works", async () => {
+    const fake = client();
+    render(<SupervisorPanelView snapshot={normalizeSnapshot(wire)} now={now} client={fake} />);
+    await act(async () => {
+      await fake.conversation.mock.results[0]?.value;
+      await fake.memory.mock.results[0]?.value;
+    });
+    expect(screen.getByTestId("supervisor-unified").dataset.connection).toBe("live");
+    expect(screen.getByTestId("supervisor-goal-wait").textContent).toContain("ci:green");
+    expect(screen.getByTestId("supervisor-goal").dataset.revision).toBe("5");
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Pause Ledger" }));
+    });
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_set_paused", { laneKey: "ledger", paused: true });
+  });
+
+  it("keeps the last goals when the hub becomes unavailable and never sends", () => {
+    const fake = client();
+    const last = normalizeSnapshot(wire).supervisor!;
+    const off: SupervisorSnapshot = { hub: { available: false, running: false, error: "daemon unreachable" }, lanes: [], watched: [], actions: [] };
+    render(<SupervisorPanelView snapshot={off} now={now} lastUnified={last} client={fake} />);
+    expect(screen.getByTestId("supervisor-panel").dataset.supervisorState).toBe("off");
+    expect(screen.getByTestId("supervisor-connection").dataset.state).toBe("disconnected");
+    expect(screen.getByTestId("supervisor-goal-id").textContent).toBe("g-7");
+    expect((screen.getByTestId("supervisor-pause") as HTMLButtonElement).disabled).toBe(true);
+    expect(fake.conversation).not.toHaveBeenCalled();
+    expect(fake.request).not.toHaveBeenCalled();
+    // No local fallback: the desktop never asks its daemon to start a supervisor.
+    expect(ipc.invoke).not.toHaveBeenCalled();
+  });
+
+  it("offers adoption only for legacy lanes with a live goal contract", () => {
+    const snapshot = normalizeSnapshot({ ...wire, lanes: [
+      { ...lane, key: "ledger", goalContract: goal({ mode: "full" }) },
+      { ...lane, key: "notes", title: "Notes", goalContract: goal({ mode: "off" }) },
+      { ...lane, key: "sv-7", title: "Supervisor lane", goalContract: goal() },
+      { ...lane, key: "bare", title: "Bare" },
+    ] });
+    expect(adoptableLanes(snapshot, snapshot.supervisor ?? null)).toEqual([{ key: "ledger", title: "Ledger" }]);
+    expect(desktopConnection(snapshot)).toBe("live");
+    expect(desktopConnection({ ...snapshot, supervisor: null })).toBe("unavailable");
+  });
+});
+
+describe("desktopUnifiedClient", () => {
+  it("sends envelopes and reads through the typed IPC commands and keeps refusal codes", async () => {
+    ipc.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_supervisor_request") throw { code: "REVISION_CONFLICT", message: "goal g changed", details: { code: "REVISION_CONFLICT", status: 409 } };
+      if (command === "cmd_supervisor_read") return { projectId: "p", messages: [], next: 0 };
+      return undefined;
+    });
+    const envelope = { requestId: "r", goalId: "g", expectedRevision: 1, action: "pause", payload: {} };
+    await expect(desktopUnifiedClient.request(envelope)).resolves.toEqual({ kind: "error", code: "REVISION_CONFLICT", message: "goal g changed", status: 409 });
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_request", { envelope });
+    await expect(desktopUnifiedClient.conversation("p", 2)).resolves.toMatchObject({ kind: "ok" });
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_read", { request: { view: "conversation", projectId: "p", after: 2 } });
+    await desktopUnifiedClient.memory();
+    expect(ipc.invoke).toHaveBeenCalledWith("cmd_supervisor_read", { request: { view: "memory" } });
   });
 });

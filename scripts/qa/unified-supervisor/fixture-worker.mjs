@@ -10,6 +10,10 @@
 //   argv: <logDir> [--max-lifetime-ms=N] [--no-report] [--multi-turn]   (leak guard, default 600000)
 // With --no-report it logs its input but never reports a state: a target that accepts the
 // typed bytes and never shows a turn start (remote-delivery's suppressed receipt).
+// A later typed line containing QA-SETTLE (the runner types it) reports `agentState idle`: the
+// turn ended, so the supervisor run settles (surfaces). Without that line it never reports idle.
+// It applies only to the single-turn mode after a reported start (not --no-report, not a
+// withheld QA_NO_START_REPORT start, not --multi-turn, which reports idle per turn itself).
 // With --multi-turn (autonomy) every delivered instruction is one turn: the worker reports
 // `working`, writes result.txt in its cwd (`NOT READY` on its first turn, exactly `READY`
 // after), runs the runner-committed verify.sh, prints its exit code to the pane, then reports
@@ -80,6 +84,8 @@ function turn(instruction) {
 // Bracketed paste of the current delivery, when one is open.
 let paste = null;
 let reported = false;
+// A `working` start was reported (not --no-report, not withheld): only then may QA-SETTLE end it.
+let started = false;
 const lines = createInterface({ input: process.stdin, terminal: false });
 lines.on('line', (raw) => {
   if (multiTurn) {
@@ -99,6 +105,7 @@ lines.on('line', (raw) => {
   }
   const text = raw.replace(/\r/g, '');
   record({ kind: 'input', text });
+  if (reported && started && text.includes('QA-SETTLE')) { report('idle'); return; }
   if (reported || text.trim() === '') return;
   reported = true;
   if (silent) { record({ kind: 'report-suppressed', state: 'working' }); return; }
@@ -106,6 +113,7 @@ lines.on('line', (raw) => {
     record({ kind: 'report-withheld', state: 'working' });
     return;
   }
+  started = true;
   report('working');
 });
 lines.on('close', () => {

@@ -6,7 +6,9 @@ import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
 import { actingSessionIds, type SupervisorLane } from "../../lib/supervisorModel";
+import { UnifiedSupervisorSection } from "../../components/supervisor/UnifiedSupervisorSection";
 import type { LanePauseResult } from "../remoteSupervisor";
+import type { UnifiedHostView } from "./usePhoneSupervisor";
 import {
   actionText,
   clock,
@@ -25,6 +27,8 @@ export type SupervisorHomeProps = {
   readonly needsYou: ReadonlySet<string>;
   readonly onSetPaused: (machineId: string, laneKey: string, paused: boolean) => Promise<LanePauseResult>;
   readonly onOpenLane: (machineId: string, sessionId: string) => void;
+  /** The unified supervisor host(s), live or last seen. Absent: the lane view only. */
+  readonly unified?: readonly UnifiedHostView[];
 };
 
 const SECTION_LABEL = "px-1 text-[12px] font-medium text-chat-foreground-secondary";
@@ -133,7 +137,7 @@ function LaneCard({
   );
 }
 
-export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLane }: SupervisorHomeProps) {
+export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLane, unified = [] }: SupervisorHomeProps) {
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   // The lane's paused value the person asked for, shown until the next snapshot settles it.
   const [optimistic, setOptimistic] = useState<ReadonlyMap<string, boolean>>(() => new Map());
@@ -177,6 +181,18 @@ export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLan
           </div>
           <p className="mt-1.5 text-[14px] leading-snug text-chat-foreground-secondary">{headlineSentence(headline)}</p>
         </section>
+
+        {unified.map((host) => (
+          <UnifiedSupervisorSection
+            key={host.machineId}
+            surface="phone"
+            hostLabel={host.label}
+            connection={host.connection}
+            connectionError={host.error}
+            view={host.view}
+            client={host.client}
+          />
+        ))}
 
         {machines.length > 0 && machines.every((machine) => machine.state !== "loading") && !anySupervisor ? (
           <p data-testid="supervisor-home-none" className="px-1 text-[13px] leading-snug text-chat-foreground-secondary">

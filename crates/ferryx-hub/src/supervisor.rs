@@ -2173,6 +2173,7 @@ pub async fn admit_request_bound(
         .await?;
     }
     tx.commit().await?;
+    changes::announce(&goal_id);
     Ok(Admission {
         receipt: AdmissionReceipt {
             supervisor_id: request.supervisor_id.clone(),
@@ -2287,6 +2288,7 @@ pub async fn transition_goal(
     let goal =
         transition_goal_in(&mut tx, goal_id, expected_revision, expected_state, to, detail).await?;
     tx.commit().await?;
+    changes::announce(goal_id);
     wakes::poke();
     Ok(goal)
 }
@@ -2329,6 +2331,7 @@ pub async fn hold_live_run(
     )
     .await?;
     tx.commit().await?;
+    changes::announce(goal_id);
     wakes::poke();
     Ok(true)
 }
@@ -2441,6 +2444,7 @@ pub async fn revise_goal(
     let mut tx = pool.begin_write().await?;
     let goal = revise_goal_in(&mut tx, goal_id, expected_revision).await?;
     tx.commit().await?;
+    changes::announce(goal_id);
     wakes::poke();
     Ok(goal)
 }
@@ -2542,6 +2546,7 @@ pub async fn enqueue_dispatch(
     )
     .await?;
     tx.commit().await?;
+    changes::announce(goal_id);
     Ok(dispatch)
 }
 
@@ -2632,6 +2637,7 @@ pub async fn claim_dispatch(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    changes::announce(&goal.goal_id);
     Ok(Dispatch {
         state: DispatchState::Claimed,
         claimed_at: Some(now),
@@ -2706,6 +2712,7 @@ pub async fn confirm_claim_before_transmit(
         .await?;
     }
     tx.commit().await?;
+    changes::announce(&goal.goal_id);
     Err(SupervisorError::ClaimReleased {
         request_id: request_id.to_owned(),
         why,
@@ -2803,6 +2810,7 @@ pub async fn resolve_uncertain_delivery(
         });
     }
     tx.commit().await?;
+    changes::announce(goal_id);
     wakes::poke();
     Ok(SupervisorGoal {
         run_state: to,
@@ -2902,6 +2910,9 @@ pub async fn reconcile_claims_after_restart(
         .await?;
     }
     tx.commit().await?;
+    for dispatch in &changed {
+        changes::announce(&dispatch.goal_id);
+    }
     Ok(changed)
 }
 
@@ -2934,6 +2945,7 @@ pub async fn record_receipt(
     match apply_receipt(&mut tx, request_id, generation, receipt).await? {
         AppliedReceipt::Recorded(dispatch) => {
             tx.commit().await?;
+            changes::announce(&dispatch.goal_id);
             wakes::poke();
             Ok(*dispatch)
         }
@@ -3203,6 +3215,7 @@ pub async fn record_start(
         .await?;
     }
     tx.commit().await?;
+    changes::announce(&dispatch.goal_id);
     wakes::poke();
     Ok(dispatch)
 }
@@ -3376,6 +3389,7 @@ pub async fn add_wait_at(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    changes::announce(goal_id);
     Ok(Wait {
         wait_id,
         supervisor_id: goal.supervisor_id,
@@ -3474,6 +3488,7 @@ pub async fn record_wait_event(
         None
     };
     tx.commit().await?;
+    changes::announce(&wait.goal_id);
     if wake.is_some() {
         wakes::poke();
     }
@@ -3507,6 +3522,7 @@ pub async fn enqueue_wake(
     )
     .await?;
     tx.commit().await?;
+    changes::announce(goal_id);
     Ok(wake)
 }
 
@@ -3608,6 +3624,7 @@ mod tests;
 
 pub mod admission;
 pub mod answers;
+pub mod changes;
 pub mod completion;
 pub mod delivery;
 pub mod dispatcher;

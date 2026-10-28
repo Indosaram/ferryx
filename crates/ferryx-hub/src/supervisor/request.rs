@@ -1247,8 +1247,14 @@ pub async fn memory_receipts(
     super::memory::receipts(pool, context, None).await
 }
 
+/// A goal's lane title and continuation budget (`mode`, `turn_limit`, `turns_used`), each
+/// budget field null without a contract row.
+type LaneTerms = (String, Option<String>, Option<i64>, Option<i64>);
+
 /// One goal as every adapter reports it: identity, authoritative revision, run state, wait
-/// reason, pending waits and the next persisted trigger.
+/// reason, pending waits and the next persisted trigger, plus what the Supervisor views show
+/// about it: the lane title, the continuation budget (`mode`, `turnLimit`, `turnsUsed`; null
+/// without a contract row) and the persisted operation grant (null when it does not parse).
 pub async fn goal_receipt(pool: &SqlitePool, goal_id: &str) -> Result<Value, RequestFailure> {
     let goal = goal_of(pool, goal_id)
         .await?
@@ -1268,21 +1274,37 @@ pub async fn goal_receipt(pool: &SqlitePool, goal_id: &str) -> Result<Value, Req
     .bind(goal_id)
     .fetch_one(pool)
     .await?;
+    let lane: Option<LaneTerms> = sqlx::query_as(
+        "SELECT l.title, g.mode, g.turn_limit, g.turns_used
+         FROM lanes l LEFT JOIN lane_goal g ON g.lane_key = l.key WHERE l.key = ?",
+    )
+    .bind(&goal.lane_key)
+    .fetch_optional(pool)
+    .await?;
+    let (title, mode, turn_limit, turns_used) = lane.unwrap_or((String::new(), None, None, None));
+    let grant = admission::goal_grant(pool, goal_id).await.ok();
     Ok(json!({
         "goalId": goal.goal_id,
         "supervisorId": goal.supervisor_id,
         "projectId": goal.project_id,
         "laneKey": goal.lane_key,
+        "title": title,
         "runState": goal.run_state,
         "stateDetail": goal.state_detail,
         "revision": goal.revision,
         "pendingWaits": waits,
         "nextTrigger": next_trigger,
         "updatedAt": goal.updated_at,
+        "mode": mode,
+        "turnLimit": turn_limit,
+        "turnsUsed": turns_used,
+        "grant": grant,
     }))
 }
 
-/// Supervisor goals for the snapshot: every open goal and the latest ended ones.
+/// Supervisor goals for the snapshot: every open goal and the latest ended ones, and the
+/// owner's projects (`{projectId, name}`, empty without a single identity) so a view can read
+/// a project's conversation and submit into it.
 pub async fn snapshot(pool: &SqlitePool) -> Result<Value, RequestFailure> {
     let identities: Vec<(String, String)> = sqlx::query_as(
         "SELECT supervisor_id, owner_principal FROM supervisor_identity ORDER BY created_at LIMIT 2",
@@ -1299,11 +1321,24 @@ pub async fn snapshot(pool: &SqlitePool) -> Result<Value, RequestFailure> {
     for id in ids {
         goals.push(goal_receipt(pool, &id).await?);
     }
-    let identity = match identities.as_slice() {
-        [(supervisor_id, owner)] => json!({"supervisorId": supervisor_id, "ownerPrincipal": owner}),
-        _ => Value::Null,
+    let (identity, projects) = match identities.as_slice() {
+        [(supervisor_id, owner)] => {
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT project_id, name FROM supervisor_projects WHERE supervisor_id = ?
+                 ORDER BY created_at, project_id",
+            )
+            .bind(supervisor_id)
+            .fetch_all(pool)
+            .await?;
+            let projects: Vec<Value> = rows
+                .into_iter()
+                .map(|(project_id, name)| json!({"projectId": project_id, "name": name}))
+                .collect();
+            (json!({"supervisorId": supervisor_id, "ownerPrincipal": owner}), projects)
+        }
+        _ => (Value::Null, Vec::new()),
     };
-    Ok(json!({"identity": identity, "goals": goals}))
+    Ok(json!({"identity": identity, "projects": projects, "goals": goals}))
 }
 
 /// The admitted owner messages of one project after a cursor, oldest first: the conversation

@@ -604,6 +604,7 @@ impl CompletionDriver {
             )
             .await?;
             tx.commit().await?;
+            super::changes::announce(&goal.goal_id);
             wakes::poke();
             super::dispatcher::poke();
             return Ok(Verification::Resumed { request_id });
@@ -646,6 +647,7 @@ impl CompletionDriver {
             )
             .await?;
             tx.commit().await?;
+            super::changes::announce(&goal.goal_id);
             wakes::poke();
             return Ok(Verification::Held {
                 state: RunState::AwaitingOwner,
@@ -684,6 +686,7 @@ impl CompletionDriver {
         )
         .await?;
         tx.commit().await?;
+        super::changes::announce(&goal.goal_id);
         wakes::poke();
         super::dispatcher::poke();
         Ok(Verification::Corrective {
@@ -785,6 +788,7 @@ impl CompletionDriver {
         )
         .await?;
         tx.commit().await?;
+        super::changes::announce(&goal.goal_id);
         wakes::poke();
         self.clear_retry(&goal.goal_id);
         if let Err(error) = state::transition(

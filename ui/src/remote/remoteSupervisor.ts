@@ -8,6 +8,7 @@ import {
   type SupervisorLane,
   type SupervisorSnapshot,
 } from "../lib/supervisorModel";
+import type { SupervisorCallResult, SupervisorEnvelope, UnifiedSupervisorClient } from "../lib/unifiedSupervisor";
 
 export const SUPERVISOR_CAPABILITY = "supervisorV1";
 export const SUPERVISOR_CHANGED_FRAME = "supervisorChanged";
@@ -59,8 +60,10 @@ function objectOf(value: unknown): Record<string, unknown> | null {
 
 function errorOf(res: SupervisorHttpResponse): { code: string; message: string } {
   const data = objectOf(decodeJson(res.body));
-  const code = typeof data?.code === "string" && data.code ? data.code : (STATUS_CODES[res.status] ?? "HTTP_ERROR");
-  const message = typeof data?.message === "string" && data.message ? data.message : `Supervisor request failed (${res.status})`;
+  // The machine API answers `{error: {code, message}}`; older routes answered `{code, message}`.
+  const envelope = objectOf(data?.error) ?? data;
+  const code = typeof envelope?.code === "string" && envelope.code ? envelope.code : (STATUS_CODES[res.status] ?? "HTTP_ERROR");
+  const message = typeof envelope?.message === "string" && envelope.message ? envelope.message : `Supervisor request failed (${res.status})`;
   return { code, message };
 }
 
@@ -116,6 +119,60 @@ export async function setRemoteLanePaused(
 
 function frameObject(frame: unknown): Record<string, unknown> | null {
   return objectOf(typeof frame === "string" ? decodeJson(frame) : frame);
+}
+
+/** One unified supervisor call (`/api/v1/supervisor/{request,conversation,memory}`). */
+async function supervisorCall(
+  fetchLike: SupervisorFetch,
+  path: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<SupervisorCallResult> {
+  let res: SupervisorHttpResponse;
+  try {
+    res = init ? await fetchLike(path, init) : await fetchLike(path);
+  } catch (err) {
+    return { kind: "error", ...offline(err), status: null };
+  }
+  if (res.status < 200 || res.status >= 300) return { kind: "error", ...errorOf(res), status: res.status };
+  const data = objectOf(decodeJson(res.body));
+  if (!data) return { kind: "error", code: "INVALID_RESPONSE", message: "Supervisor response is not a JSON object", status: res.status };
+  return { kind: "ok", value: data };
+}
+
+function postJson(body: unknown) {
+  return { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+}
+
+/** `POST /api/v1/supervisor/request`: one envelope; the machine derives the actor. */
+export function postSupervisorRequest(fetchLike: SupervisorFetch, envelope: SupervisorEnvelope): Promise<SupervisorCallResult> {
+  return supervisorCall(fetchLike, "/api/v1/supervisor/request", postJson(envelope));
+}
+
+/** `GET /api/v1/supervisor/conversation?projectId=...&after=...`. */
+export function fetchSupervisorConversation(fetchLike: SupervisorFetch, projectId: string, after: number): Promise<SupervisorCallResult> {
+  const query = new URLSearchParams({ projectId, after: String(after) });
+  return supervisorCall(fetchLike, `/api/v1/supervisor/conversation?${query.toString()}`);
+}
+
+/** `GET /api/v1/supervisor/memory`: the memory receipts. */
+export function fetchSupervisorMemory(fetchLike: SupervisorFetch): Promise<SupervisorCallResult> {
+  return supervisorCall(fetchLike, "/api/v1/supervisor/memory");
+}
+
+/** `POST /api/v1/supervisor/memory`: a `teach` or `forget` envelope. */
+export function postSupervisorMemory(fetchLike: SupervisorFetch, envelope: SupervisorEnvelope): Promise<SupervisorCallResult> {
+  return supervisorCall(fetchLike, "/api/v1/supervisor/memory", postJson(envelope));
+}
+
+/** The unified supervisor client over one machine's remote API. */
+export function remoteUnifiedClient(fetchLike: SupervisorFetch, refresh: () => void): UnifiedSupervisorClient {
+  return {
+    request: (envelope) => postSupervisorRequest(fetchLike, envelope),
+    conversation: (projectId, after) => fetchSupervisorConversation(fetchLike, projectId, after),
+    memory: () => fetchSupervisorMemory(fetchLike),
+    remember: (envelope) => postSupervisorMemory(fetchLike, envelope),
+    refresh,
+  };
 }
 
 /** True for an `/api/v1/events` frame (raw text or parsed) announcing a supervisor change. */

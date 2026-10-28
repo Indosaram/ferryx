@@ -1201,6 +1201,24 @@ pub async fn supervisor_memory(
     request::memory_receipts(&pool, &context).await
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorReadV1`.
+pub const SUPERVISOR_READ_CAPABILITY: &str = "supervisorReadV1";
+
+/// The desktop's read of the unified supervisor besides the snapshot: the same conversation
+/// page and memory view the remote `GET /api/v1/supervisor/{conversation,memory}` routes serve.
+pub async fn supervisor_read(
+    state: &RemoteGatewayState,
+    request: crate::daemon::protocol::SupervisorReadAction,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use crate::daemon::protocol::SupervisorReadAction;
+    match request {
+        SupervisorReadAction::Conversation { project_id, after } => {
+            supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
+        }
+        SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+    }
+}
+
 /// The unified supervisor's part of the snapshot: identity, engine health and every goal's
 /// run state, wait reason, next trigger and revision. Additive to the legacy lane view.
 async fn unified_snapshot(pool: &ferryx_hub::goals::SqlitePool) -> Value {
@@ -1772,6 +1790,26 @@ fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
     tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
 }
 
+/// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
+/// desktop and phone Supervisor views as `supervisor_changed {goalId}`, so a goal the
+/// dispatcher, a worker receipt or the wake scheduler moved is refetched without an owner
+/// action. A lagged forwarder sends one `{lagged: true}` change: the views refetch everything.
+fn spawn_supervisor_change_forwarder(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    use tokio::sync::broadcast::error::RecvError;
+    let state = Arc::clone(launch.server.remote_state());
+    let mut changes = ferryx_hub::supervisor::changes::subscribe();
+    tokio::spawn(async move {
+        loop {
+            let payload = match changes.recv().await {
+                Ok(goal_id) => json!({ "goalId": goal_id }),
+                Err(RecvError::Lagged(_)) => json!({ "lagged": true }),
+                Err(RecvError::Closed) => break,
+            };
+            crate::remote::server::agent_control_service::publish_supervisor_changed(&state, payload);
+        }
+    })
+}
+
 async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let mut tasks = Vec::new();
     #[cfg(feature = "hub-discord")]
@@ -1850,6 +1888,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         }
     }));
     tasks.push(spawn_supervisor_dispatcher(launch, idle));
+    tasks.push(spawn_supervisor_change_forwarder(launch));
     tasks.push(spawn_supervisor_wakes(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());

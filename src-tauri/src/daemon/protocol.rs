@@ -601,6 +601,20 @@ pub enum SupervisorEngineAction {
     AssessGoal { goal_id: String },
 }
 
+/// A read of the unified supervisor the desktop view needs besides the snapshot: one project's
+/// owner-message conversation after a cursor, or the memory receipts. Gated by
+/// `supervisorReadV1`. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "view", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorReadAction {
+    Conversation {
+        project_id: String,
+        #[serde(default)]
+        after: Option<i64>,
+    },
+    Memory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonRequest {
@@ -880,6 +894,12 @@ pub enum DaemonRequest {
         cli: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         mcp: bool,
+    },
+    /// A read-only unified supervisor view (conversation page or memory receipts), served by
+    /// the same hub service as the remote `GET /api/v1/supervisor/*` routes.
+    #[serde(rename = "supervisorReadV1", rename_all = "camelCase")]
+    SupervisorReadV1 {
+        request: SupervisorReadAction,
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
@@ -1380,6 +1400,11 @@ pub enum DaemonResponse {
     #[serde(rename = "supervisorRequestV1Ok", rename_all = "camelCase")]
     SupervisorRequestV1Ok {
         receipt: serde_json::Value,
+    },
+    /// The view a `SupervisorReadV1` asked for.
+    #[serde(rename = "supervisorReadV1Ok", rename_all = "camelCase")]
+    SupervisorReadV1Ok {
+        value: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
     AttachOk {
@@ -2167,6 +2192,31 @@ mod tests {
             serde_json::from_str::<DaemonResponse>(&text).unwrap(),
             DaemonResponse::SupervisorRequestV1Ok { receipt } if receipt["revision"] == 4
         ));
+    }
+
+    #[test]
+    fn the_supervisor_read_round_trips_on_the_daemon_wire() {
+        let conversation = DaemonRequest::SupervisorReadV1 {
+            request: SupervisorReadAction::Conversation { project_id: "p1".into(), after: Some(3) },
+        };
+        assert_eq!(
+            serde_json::to_value(&conversation).unwrap(),
+            serde_json::json!({"type": "supervisorReadV1", "request": {"view": "conversation", "projectId": "p1", "after": 3}})
+        );
+        let memory: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type": "supervisorReadV1", "request": {"view": "memory"}})).unwrap();
+        assert!(matches!(memory, DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Memory }));
+        let first: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorReadV1", "request": {"view": "conversation", "projectId": "p1"}}
+        ))
+        .unwrap();
+        assert!(matches!(
+            first,
+            DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Conversation { after: None, .. } }
+        ));
+        let ok = DaemonResponse::SupervisorReadV1Ok { value: serde_json::json!({"next": 4}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorReadV1Ok""#), "{text}");
     }
 
     #[test]
