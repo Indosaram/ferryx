@@ -26,10 +26,25 @@ export const DEFAULT_AGENT_COMMANDS: Readonly<Partial<Record<AgentCandidate, str
 export const AGENTS_SETTINGS_STORAGE_KEY = "ferryx.agents.v1";
 export const AGENTS_SETTINGS_CHANGED_EVENT = "ferryx:agents-settings";
 
+export const CLAUDE_PERMISSION_MODES = [
+  "default",
+  "acceptEdits",
+  "plan",
+  "bypassPermissions",
+] as const;
+export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
+
+export const CODEX_SANDBOX_MODES = ["read-only", "workspace-write", "danger-full-access"] as const;
+export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
+
 export type AgentOverride = {
   enabled?: boolean;
   command?: string;
   args?: string;
+  /** Claude Code only: appended as `--permission-mode <v>` unless args already set it. */
+  permissionMode?: ClaudePermissionMode;
+  /** Codex only: appended as `--sandbox <v>` unless args already set it. */
+  sandbox?: CodexSandboxMode;
 };
 
 export type CustomAgent = {
@@ -151,6 +166,35 @@ function getStorage(storage?: Storage | null): Storage | null {
   return null;
 }
 
+function oneOf<T extends string>(allowed: readonly T[], value: unknown): T | undefined {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : undefined;
+}
+
+function hasFlag(args: string, flags: readonly string[]): boolean {
+  return args
+    .split(/\s+/)
+    .some((token) => flags.some((flag) => token === flag || token.startsWith(`${flag}=`)));
+}
+
+function appendFlag(
+  args: string,
+  flag: string,
+  value: string | undefined,
+  aliases: readonly string[] = [],
+): string {
+  if (!value || hasFlag(args, [flag, ...aliases])) return args;
+  return `${args.trim()} ${flag} ${value}`.trim();
+}
+
+/** Launch-mode flags owned by a structured setting, keyed by built-in agent name. */
+function withLaunchModeFlags(name: string, args: string, override: AgentOverride | undefined): string {
+  if (name === "claude") return appendFlag(args, "--permission-mode", override?.permissionMode);
+  if (name === "codex") return appendFlag(args, "--sandbox", override?.sandbox, ["-s"]);
+  return args;
+}
+
 export function loadAgentSettings(storage?: Storage | null): AgentSettings {
   const store = getStorage(storage);
   if (!store) return { ...DEFAULT_AGENT_SETTINGS, overrides: {}, custom: [] };
@@ -172,6 +216,8 @@ export function loadAgentSettings(storage?: Storage | null): AgentSettings {
         enabled: typeof entry.enabled === "boolean" ? entry.enabled : undefined,
         command: typeof entry.command === "string" ? entry.command : undefined,
         args: typeof entry.args === "string" ? entry.args : undefined,
+        permissionMode: oneOf(CLAUDE_PERMISSION_MODES, entry.permissionMode),
+        sandbox: oneOf(CODEX_SANDBOX_MODES, entry.sandbox),
       };
     }
 
@@ -261,7 +307,9 @@ export function mergeDetections(
       available,
       enabled,
       command,
-      args: override?.args ?? fallbackArgs,
+      args: custom
+        ? (override?.args ?? fallbackArgs)
+        : withLaunchModeFlags(name, override?.args ?? fallbackArgs, override),
       custom,
     };
   };
