@@ -6,6 +6,24 @@ use std::sync::Arc;
 use std::io::BufRead;
 use tauri::Manager;
 
+const QA_HISTORY: &[u8] = b"\x1b[?25l\x1b[32mFerryx GPU worker QA\x1b[0m\r\nNative surface: render / resize / retire\r\n0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n";
+
+/// `FERRYX_QA_KITTY_ANIM=1` appends a looping two-frame 8x8 RGBA Kitty animation (red, then
+/// green, 100 ms each) so two screenshots 200 ms apart show different image cell colors.
+const QA_KITTY_ANIMATION: &[u8] = b"\x1b_Ga=T,f=32,s=8,v=8,i=1,q=2;/wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA/w==\x1b\\\
+\x1b_Ga=f,f=32,s=8,v=8,i=1,z=100,q=2;AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/wD/AP8A/w==\x1b\\\
+\x1b_Ga=a,i=1,r=1,z=100,q=2\x1b\\\
+\x1b_Ga=a,i=1,s=3,v=1,q=2\x1b\\\r\n";
+
+fn qa_history() -> bytes::Bytes {
+    let mut history = QA_HISTORY.to_vec();
+    if std::env::var("FERRYX_QA_KITTY_ANIM").as_deref() == Ok("1") {
+        history.extend_from_slice(QA_KITTY_ANIMATION);
+        println!("QA_KITTY_ANIM enabled");
+    }
+    bytes::Bytes::from(history)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
@@ -54,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     start_sequence: Some(1),
                     end_sequence: Some(1),
                     gap: None,
-                    history: bytes::Bytes::from_static(b"\x1b[?25l\x1b[32mFerryx GPU worker QA\x1b[0m\r\nNative surface: render / resize / retire\r\n0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n"),
+                    history: qa_history(),
                     history_segments: Vec::new(),
                     pty_cols: Some(80),
                     pty_rows: Some(24),

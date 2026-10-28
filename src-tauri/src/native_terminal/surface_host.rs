@@ -83,6 +83,22 @@ fn replay_absorb_continues(
 ) -> bool {
     since_start < max && since_last_output < REPLAY_ABSORB_IDLE
 }
+
+/// Whether a session's Kitty animations may run: only for a pane that owns a surface the last
+/// frame did not find occluded. Detached and occluded panes neither tick nor wake the pump.
+fn kitty_animation_active(surface_attached: bool, render_suspended: bool) -> bool {
+    surface_attached && !render_suspended
+}
+
+/// The Kitty animation deadline the pump waits on, or `None` when the pane cannot show it.
+fn animation_pump_deadline(
+    surface_attached: bool,
+    render_suspended: bool,
+    deadline: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    deadline.filter(|_| kitty_animation_active(surface_attached, render_suspended))
+}
+
 pub const NATIVE_TERMINAL_SCROLLBAR_EVENT: &str = "native_terminal_scrollbar";
 pub const NATIVE_TERMINAL_FOCUS_EVENT: &str = "native_terminal_focus";
 
@@ -2053,6 +2069,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 )
                             }
                         };
+                        completion_snapshot_slot.set_render_suspended(receipt.render_suspended);
                         let current_frame = completion_snapshot_slot.consume();
                         let tuple_is_current = current_frame.as_ref().is_some_and(|current| {
                             current.generation == frame_generation
@@ -2420,6 +2437,53 @@ fn defer_scheduled_render<R: Runtime>(
 pub(crate) static RENDER_SNAPSHOT_CALL_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+mod kitty_animation_pump_tests {
+    use super::{animation_pump_deadline, kitty_animation_active};
+    use crate::native_terminal::snapshot_slot::SnapshotSlot;
+
+    #[test]
+    fn kitty_animation_deadline_is_armed_only_for_a_visible_attached_pane() {
+        let due = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(100));
+        assert_eq!(animation_pump_deadline(true, false, due), due);
+        assert_eq!(
+            animation_pump_deadline(true, true, due),
+            None,
+            "an occluded (render_suspended) pane must not arm an animation deadline"
+        );
+        assert_eq!(
+            animation_pump_deadline(false, false, due),
+            None,
+            "a detached pane must not arm an animation deadline"
+        );
+        assert_eq!(animation_pump_deadline(true, false, None), None);
+        assert!(!kitty_animation_active(true, true));
+        assert!(!kitty_animation_active(false, false));
+    }
+
+    #[tokio::test]
+    async fn uncovering_a_suspended_surface_wakes_the_animation_pump() {
+        let slot = SnapshotSlot::new();
+        slot.set_attached(true);
+        slot.set_render_suspended(true);
+        assert!(slot.render_suspended());
+        // Subscribe before the transition so the wake cannot be missed.
+        let woken = slot.animation_woken();
+        slot.set_render_suspended(false);
+        tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("becoming visible must wake the pump to resume a paused animation");
+        assert!(!slot.render_suspended());
+
+        slot.set_render_suspended(true);
+        slot.set_attached(false);
+        assert!(
+            !slot.render_suspended(),
+            "a new attachment starts with unknown, not suspended, visibility"
+        );
+    }
+}
+
 pub fn dispatch_main_thread_receipt<R: Runtime>(
     window: &Window<R>,
     task: impl FnOnce() + Send + 'static,
@@ -2672,6 +2736,18 @@ fn session_render_snapshot(
                     end_row,
                 },
             );
+    // Kitty animations advance once per prepared frame, before the image capture below, and
+    // only for a visible pane. The tick invalidates image handles; the capture looks every
+    // image up again.
+    if kitty_animation_active(session.surface_attached, session.snapshot_slot.render_suspended()) {
+        match session.terminal.advance_animations() {
+            // A frame prepared outside the pump (focus, visibility, reattach) may have armed a
+            // deadline the pump is not waiting on; let it re-read.
+            Ok(true) => session.snapshot_slot.wake_animation(),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "Failed to advance Kitty animations"),
+        }
+    }
     let mut snapshot = session.terminal.render_snapshot()?;
     #[cfg(test)]
     RENDER_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -4491,16 +4567,25 @@ impl NativeTerminalSurfaceHostState {
             // Only this task feeds the terminal or defers agent detection once it runs, so idle
             // ticks skip the session lock unless a handled message may have changed either.
             let mut deadline = None;
+            let mut animation_deadline = None;
             let mut refresh_deadline = true;
             let mut agent_detect_maybe_pending = false;
             // A non-output message drained while batching output is handled on the next turn.
             let mut carried: Option<DaemonStreamMessage<'static>> = None;
             loop {
                 if refresh_deadline {
-                    deadline = read_session(&sessions, &session_id_owned, |session| {
-                        session.terminal.synchronized_output_deadline()
+                    (deadline, animation_deadline) = read_session(&sessions, &session_id_owned, |session| {
+                        let animation = animation_pump_deadline(
+                            session.surface_attached,
+                            session.snapshot_slot.render_suspended(),
+                            session.terminal.animation_deadline(),
+                        );
+                        if animation.is_none() {
+                            session.terminal.forget_animation_deadline();
+                        }
+                        (session.terminal.synchronized_output_deadline(), animation)
                     })
-                    .flatten();
+                    .unwrap_or((None, None));
                 }
                 refresh_deadline = true;
                 let received = if let Some(msg) = carried.take() {
@@ -4522,6 +4607,55 @@ impl NativeTerminalSurfaceHostState {
                         });
                         update_sender.send_replace(());
                         schedule_render();
+                        continue;
+                    }
+                    _ = async {
+                        match animation_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        // The next Kitty animation frame is due: prepare a frame, which ticks the
+                        // animation and arms the following deadline.
+                        let redraw = with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |session| {
+                            let now = tokio::time::Instant::now();
+                            let visible = kitty_animation_active(
+                                session.surface_attached,
+                                session.snapshot_slot.render_suspended(),
+                            );
+                            if visible {
+                                session.publish_frame();
+                            }
+                            // A frame that ticked re-armed a later deadline. One that could not
+                            // (no layout yet, or the pane went away) must not fire again at once.
+                            session.terminal.clear_due_animation_deadline(now);
+                            visible
+                        })
+                        .unwrap_or(false);
+                        if redraw {
+                            update_sender.send_replace(());
+                            schedule_render();
+                        }
+                        continue;
+                    }
+                    _ = slot.animation_woken() => {
+                        // A visible pane with no armed deadline (it was just uncovered) may hold
+                        // a paused animation: prepare one frame so its tick re-arms the deadline.
+                        let redraw = with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |session| {
+                            let resume = kitty_animation_active(
+                                session.surface_attached,
+                                session.snapshot_slot.render_suspended(),
+                            ) && session.terminal.animation_deadline().is_none();
+                            if resume {
+                                session.publish_frame();
+                            }
+                            resume && session.terminal.animation_deadline().is_some()
+                        })
+                        .unwrap_or(false);
+                        if redraw {
+                            update_sender.send_replace(());
+                            schedule_render();
+                        }
                         continue;
                     }
                     result = async {

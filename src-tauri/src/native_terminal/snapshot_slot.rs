@@ -40,6 +40,12 @@ pub struct SnapshotSlot {
     generation: AtomicU64,
     attached: AtomicBool,
     attachment_epoch: AtomicU64,
+    /// Whether the last completed frame found the surface occluded. Kitty animations are not
+    /// ticked and arm no pump deadline while this holds.
+    render_suspended: AtomicBool,
+    /// Wakes the session pump to re-read its Kitty animation deadline after a frame prepared
+    /// outside the pump armed one, or after the surface became visible again.
+    animation_wake: tokio::sync::Notify,
 }
 
 impl Default for SnapshotSlot {
@@ -56,6 +62,8 @@ impl SnapshotSlot {
             generation: AtomicU64::new(0),
             attached: AtomicBool::new(false),
             attachment_epoch: AtomicU64::new(1),
+            render_suspended: AtomicBool::new(false),
+            animation_wake: tokio::sync::Notify::new(),
         }
     }
 
@@ -65,6 +73,8 @@ impl SnapshotSlot {
         let mut ready = self.ready.lock();
         let epoch = self.attachment_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.attached.store(attached, Ordering::SeqCst);
+        // A new attachment owns a new surface; its visibility is unknown until it renders.
+        self.render_suspended.store(false, Ordering::Release);
         if !attached {
             *ready = None;
         }
@@ -163,6 +173,27 @@ impl SnapshotSlot {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    /// Records whether the last completed frame was suspended because the surface is occluded.
+    /// Becoming visible again wakes the pump so a paused animation resumes.
+    pub(crate) fn set_render_suspended(&self, suspended: bool) {
+        if self.render_suspended.swap(suspended, Ordering::AcqRel) && !suspended {
+            self.animation_wake.notify_one();
+        }
+    }
+
+    pub(crate) fn render_suspended(&self) -> bool {
+        self.render_suspended.load(Ordering::Acquire)
+    }
+
+    /// Asks the pump to re-read the session's Kitty animation deadline.
+    pub(crate) fn wake_animation(&self) {
+        self.animation_wake.notify_one();
+    }
+
+    pub(crate) fn animation_woken(&self) -> tokio::sync::futures::Notified<'_> {
+        self.animation_wake.notified()
     }
 }
 

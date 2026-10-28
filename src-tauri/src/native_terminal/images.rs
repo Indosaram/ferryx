@@ -63,7 +63,6 @@ pub struct ImageCapture {
 
 #[derive(Default)]
 pub struct ImageCache {
-    generation: u64,
     images: HashMap<u32, Arc<TerminalImage>>,
 }
 
@@ -77,6 +76,27 @@ impl Drop for IteratorGuard {
 
 fn check(result: i32) -> Result<(), NativeTerminalError> {
     NativeTerminalError::from_c_result(result, "Kitty graphics snapshot")
+}
+
+/// Whether the terminal's Kitty storage has ever held an image. The storage generation is 0
+/// until a program first sends, places or deletes an image, so a terminal that never used Kitty
+/// graphics answers `false` without touching the storage.
+pub(crate) fn kitty_storage_in_use(terminal: GhosttyTerminal) -> Result<bool, NativeTerminalError> {
+    let mut graphics: Graphics = std::ptr::null_mut();
+    // SAFETY: The caller holds the live terminal exclusively; the out pointer has the exact
+    // header-documented type and the handle does not escape this call.
+    let result =
+        unsafe { ghostty_terminal_get(terminal, GRAPHICS, (&mut graphics as *mut Graphics).cast()) };
+    if result == GHOSTTY_NO_VALUE {
+        return Ok(false);
+    }
+    check(result)?;
+    let mut generation = 0u64;
+    // SAFETY: `graphics` was just read from the live terminal; the output is a u64.
+    check(unsafe {
+        ghostty_kitty_graphics_get(graphics, GENERATION, (&mut generation as *mut u64).cast())
+    })?;
+    Ok(generation != 0)
 }
 
 // These query wrappers remain private: callers pair each C key with its exact
@@ -109,7 +129,6 @@ impl ImageCache {
         };
         if result == GHOSTTY_NO_VALUE {
             self.images.clear();
-            self.generation = 0;
             return Ok(capture);
         }
         check(result)?;
@@ -119,10 +138,8 @@ impl ImageCache {
         })?;
         if generation == 0 {
             self.images.clear();
-            self.generation = 0;
             return Ok(capture);
         }
-        let changed = self.generation != generation;
         let mut iter = std::ptr::null_mut();
         check(unsafe {
             ghostty_kitty_graphics_placement_iterator_new(std::ptr::null(), &mut iter)
@@ -147,79 +164,79 @@ impl ImageCache {
                 continue;
             }
             retained.insert(id);
-            if changed || !self.images.contains_key(&id) {
-                let image_generation: u64 = unsafe { image_get(raw_image, IMAGE_GENERATION)? };
-                if self
-                    .images
-                    .get(&id)
-                    .is_none_or(|i| i.generation != image_generation)
-                {
-                    let width: u32 = unsafe { image_get(raw_image, IMAGE_WIDTH)? };
-                    let height: u32 = unsafe { image_get(raw_image, IMAGE_HEIGHT)? };
-                    let format: i32 = unsafe { image_get(raw_image, IMAGE_FORMAT)? };
-                    let len: usize = unsafe { image_get(raw_image, IMAGE_LEN)? };
-                    let mut ptr: *const u8 = std::ptr::null();
-                    let result = unsafe {
-                        ghostty_kitty_graphics_image_get(
-                            raw_image,
-                            IMAGE_DATA,
-                            (&mut ptr as *mut *const u8).cast(),
-                        )
-                    };
-                    if result == GHOSTTY_NO_VALUE {
-                        self.images.remove(&id);
-                        continue;
-                    }
-                    check(result)?;
-                    let channels = match format {
-                        0 => 3,
-                        1 => 4,
-                        3 => 2,
-                        4 => 1,
-                        _ => return Err(NativeTerminalError::ForeignErrorCode(format)),
-                    };
-                    let pixels = (width as usize)
-                        .checked_mul(height as usize)
-                        .ok_or(NativeTerminalError::LimitExceeded)?;
-                    if ptr.is_null() || pixels == 0 || pixels.checked_mul(channels) != Some(len) {
-                        return Err(NativeTerminalError::InvalidValue(
-                            "Invalid Kitty image payload dimensions".into(),
-                        ));
-                    }
-                    // Too large to expand is a resource limit, not corruption. Propagating an
-                    // error here aborts the whole snapshot, so one oversized image would blank
-                    // every text frame in the pane. Drop just this image, as the no-value branch
-                    // above already does, and keep rendering.
-                    if pixels > super::png_decoder::IMAGE_LIMIT / 4 {
-                        self.images.remove(&id);
-                        continue;
-                    }
-                    // SAFETY: Validated non-null decoded foreign buffer and exact
-                    // format length; copied before any mutating terminal call.
-                    let data = unsafe { std::slice::from_raw_parts(ptr, len) };
-                    let rgba = match channels {
-                        4 => data.to_vec(),
-                        3 => data
-                            .chunks_exact(3)
-                            .flat_map(|p| [p[0], p[1], p[2], 255])
-                            .collect(),
-                        2 => data
-                            .chunks_exact(2)
-                            .flat_map(|p| [p[0], p[0], p[0], p[1]])
-                            .collect(),
-                        _ => data.iter().flat_map(|&p| [p, p, p, 255]).collect(),
-                    };
-                    self.images.insert(
-                        id,
-                        Arc::new(TerminalImage {
-                            id,
-                            generation: image_generation,
-                            width,
-                            height,
-                            rgba,
-                        }),
-                    );
+            // The storage generation does not move when an animation advances a frame, so the
+            // per-image generation is read on every capture; it is what changes per frame.
+            let image_generation: u64 = unsafe { image_get(raw_image, IMAGE_GENERATION)? };
+            if self
+                .images
+                .get(&id)
+                .is_none_or(|i| i.generation != image_generation)
+            {
+                let width: u32 = unsafe { image_get(raw_image, IMAGE_WIDTH)? };
+                let height: u32 = unsafe { image_get(raw_image, IMAGE_HEIGHT)? };
+                let format: i32 = unsafe { image_get(raw_image, IMAGE_FORMAT)? };
+                let len: usize = unsafe { image_get(raw_image, IMAGE_LEN)? };
+                let mut ptr: *const u8 = std::ptr::null();
+                let result = unsafe {
+                    ghostty_kitty_graphics_image_get(
+                        raw_image,
+                        IMAGE_DATA,
+                        (&mut ptr as *mut *const u8).cast(),
+                    )
+                };
+                if result == GHOSTTY_NO_VALUE {
+                    self.images.remove(&id);
+                    continue;
                 }
+                check(result)?;
+                let channels = match format {
+                    0 => 3,
+                    1 => 4,
+                    3 => 2,
+                    4 => 1,
+                    _ => return Err(NativeTerminalError::ForeignErrorCode(format)),
+                };
+                let pixels = (width as usize)
+                    .checked_mul(height as usize)
+                    .ok_or(NativeTerminalError::LimitExceeded)?;
+                if ptr.is_null() || pixels == 0 || pixels.checked_mul(channels) != Some(len) {
+                    return Err(NativeTerminalError::InvalidValue(
+                        "Invalid Kitty image payload dimensions".into(),
+                    ));
+                }
+                // Too large to expand is a resource limit, not corruption. Propagating an
+                // error here aborts the whole snapshot, so one oversized image would blank
+                // every text frame in the pane. Drop just this image, as the no-value branch
+                // above already does, and keep rendering.
+                if pixels > super::png_decoder::IMAGE_LIMIT / 4 {
+                    self.images.remove(&id);
+                    continue;
+                }
+                // SAFETY: Validated non-null decoded foreign buffer and exact
+                // format length; copied before any mutating terminal call.
+                let data = unsafe { std::slice::from_raw_parts(ptr, len) };
+                let rgba = match channels {
+                    4 => data.to_vec(),
+                    3 => data
+                        .chunks_exact(3)
+                        .flat_map(|p| [p[0], p[1], p[2], 255])
+                        .collect(),
+                    2 => data
+                        .chunks_exact(2)
+                        .flat_map(|p| [p[0], p[0], p[0], p[1]])
+                        .collect(),
+                    _ => data.iter().flat_map(|&p| [p, p, p, 255]).collect(),
+                };
+                self.images.insert(
+                    id,
+                    Arc::new(TerminalImage {
+                        id,
+                        generation: image_generation,
+                        width,
+                        height,
+                        rgba,
+                    }),
+                );
             }
             let is_virtual = NativeTerminalError::decode_c_bool(
                 unsafe { placement_get(iter, PLACEMENT_IS_VIRTUAL)? },
@@ -269,7 +286,6 @@ impl ImageCache {
             });
         }
         self.images.retain(|id, _| retained.contains(id));
-        self.generation = generation;
         placements.sort_by_key(|p| (p.z, p.image.id, p.placement_id));
         capture.placements = placements;
         Ok(capture)

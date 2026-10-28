@@ -37,16 +37,35 @@ use super::sys::ffi::{
     ghostty_terminal_get, ghostty_terminal_reset, ghostty_terminal_resize, ghostty_terminal_set,
     ghostty_terminal_vt_write,
 };
+use super::sys::kitty::{ghostty_kitty_graphics_animation_tick, Graphics, GRAPHICS};
 use super::sys::types::{
     GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalModeConfig,
     GHOSTTY_MODE_SYNCHRONIZED_OUTPUT, GHOSTTY_TERMINAL_DATA_MODE,
     GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
     GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
     GHOSTTY_TERMINAL_OPT_MODE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_TITLE,
+    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_TITLE, GHOSTTY_NO_VALUE,
 };
 use super::viewport::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
 use crate::terminal::TerminalThemeColors;
+
+/// Shortest spacing between two animation redraws: one frame at 120 Hz, as kitty_graphics.h
+/// ("Animation", step 2) recommends. Playback advances at most one frame per tick anyway.
+const MIN_ANIMATION_FRAME_MS: u64 = 8;
+
+/// Converts the next due frame `next_ms` (on the terminal's animation clock that started at
+/// `epoch`) into a pump deadline no sooner than one minimum frame interval after `now_ms`.
+/// `None` only if the due time is beyond what `Instant` can represent.
+fn clamp_animation_deadline(
+    epoch: std::time::Instant,
+    now_ms: u64,
+    next_ms: u64,
+) -> Option<tokio::time::Instant> {
+    let due_ms = next_ms.max(now_ms.saturating_add(MIN_ANIMATION_FRAME_MS));
+    epoch
+        .checked_add(std::time::Duration::from_millis(due_ms))
+        .map(tokio::time::Instant::from_std)
+}
 
 const ONE_DARK_DEFAULTS: [&str; 16] = [
     "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
@@ -118,6 +137,11 @@ pub struct NativeTerminal {
     gesture: SelectionGestureGuard,
     image_cache: std::cell::RefCell<super::images::ImageCache>,
     synchronized_output_deadline: Option<tokio::time::Instant>,
+    /// Start of this terminal's monotonic Kitty animation clock. libghostty requires one clock
+    /// with one starting point for the terminal's whole lifetime.
+    animation_epoch: std::time::Instant,
+    /// When the next Kitty animation frame is due, from the last tick; `None` when nothing plays.
+    animation_deadline: std::cell::Cell<Option<tokio::time::Instant>>,
     /// Monotonic count of primary-screen rows dropped from the top of the screen
     /// (scrollback pruning or erasure) since this terminal was created.
     scrollback_pruned_rows: u64,
@@ -152,6 +176,8 @@ impl NativeTerminal {
             gesture,
             image_cache: Default::default(),
             synchronized_output_deadline: None,
+            animation_epoch: std::time::Instant::now(),
+            animation_deadline: std::cell::Cell::new(None),
             scrollback_pruned_rows: 0,
         })
     }
@@ -235,6 +261,75 @@ impl NativeTerminal {
 
     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
         self.synchronized_output_deadline
+    }
+
+    /// Advances every playing Kitty animation to the frame due at `now_ms` (milliseconds on
+    /// this terminal's animation clock) and returns when the next frame is due on the same
+    /// clock, or `None` when nothing is playing.
+    ///
+    /// The call mutates the image storage and invalidates every image handle; `render_snapshot`
+    /// looks images up again on each capture, so no handle outlives this call.
+    pub fn animation_tick(&self, now_ms: u64) -> Result<Option<u64>, NativeTerminalError> {
+        let mut graphics: Graphics = std::ptr::null_mut();
+        // SAFETY: The owned terminal is live and accessed exclusively; the out pointer has the
+        // header-documented GhosttyKittyGraphics * type.
+        let result = unsafe {
+            ghostty_terminal_get(
+                self.handle.as_ptr(),
+                GRAPHICS,
+                (&mut graphics as *mut Graphics).cast(),
+            )
+        };
+        if result == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_get(KittyGraphics)")?;
+        let mut next_ms = 0u64;
+        // SAFETY: `graphics` was just read from the live terminal and `next_ms` is a valid u64
+        // out pointer that the call writes only on success.
+        let result =
+            unsafe { ghostty_kitty_graphics_animation_tick(graphics, now_ms, &mut next_ms) };
+        if result == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
+        NativeTerminalError::from_c_result(result, "ghostty_kitty_graphics_animation_tick")?;
+        Ok(Some(next_ms))
+    }
+
+    /// Ticks Kitty animations for a frame about to be drawn and records when the next frame is
+    /// due. Skipped while the image storage holds no image. Returns `true` when this tick armed
+    /// a deadline that was not armed before, so a pump that is not waiting on one must re-read.
+    pub(crate) fn advance_animations(&self) -> Result<bool, NativeTerminalError> {
+        let was_armed = self.animation_deadline.get().is_some();
+        if !super::images::kitty_storage_in_use(self.handle.as_ptr())? {
+            self.animation_deadline.set(None);
+            return Ok(false);
+        }
+        let now_ms = u64::try_from(self.animation_epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let deadline = self
+            .animation_tick(now_ms)?
+            .and_then(|next_ms| clamp_animation_deadline(self.animation_epoch, now_ms, next_ms));
+        self.animation_deadline.set(deadline);
+        Ok(!was_armed && deadline.is_some())
+    }
+
+    /// When the next Kitty animation frame is due, as recorded by the last tick.
+    pub(crate) fn animation_deadline(&self) -> Option<tokio::time::Instant> {
+        self.animation_deadline.get()
+    }
+
+    /// Forgets a deadline that is due at `now`, so a wakeup that cannot redraw (no layout yet)
+    /// does not fire again immediately. The next tick arms a fresh one.
+    pub(crate) fn clear_due_animation_deadline(&self, now: tokio::time::Instant) {
+        if self.animation_deadline.get().is_some_and(|deadline| deadline <= now) {
+            self.animation_deadline.set(None);
+        }
+    }
+
+    /// Forgets the animation deadline of a pane that cannot show it (detached or occluded), so
+    /// the first tick after it becomes visible again counts as newly armed and wakes the pump.
+    pub(crate) fn forget_animation_deadline(&self) {
+        self.animation_deadline.set(None);
     }
 
     pub(crate) fn expire_synchronized_output(
@@ -419,6 +514,7 @@ impl TerminalEngine for NativeTerminal {
             ghostty_terminal_reset(self.handle.as_ptr());
         }
         self.synchronized_output_deadline = None;
+        self.animation_deadline.set(None);
         reset_selection_gesture(&self.gesture, self.handle);
     }
 
@@ -726,7 +822,7 @@ impl TerminalEngine for NativeTerminal {
 
 #[cfg(test)]
 mod tests {
-    use super::NativeTerminal;
+    use super::{clamp_animation_deadline, NativeTerminal};
     use crate::native_terminal::color::ColorRgb;
     use crate::native_terminal::engine::TerminalEngine;
     use crate::native_terminal::terminal::full_palette;
@@ -734,6 +830,62 @@ mod tests {
         MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize,
     };
     use crate::terminal::TerminalThemeColors;
+
+    /// A looping two-frame 1x1 Kitty animation (red, then green), 100 ms per frame, image id 7.
+    const KITTY_TWO_FRAME_ANIMATION: &[u8] = b"\x1b_Ga=T,f=32,s=1,v=1,i=7,q=2,C=1;/wAA/w==\x1b\\\
+\x1b_Ga=f,f=32,s=1,v=1,i=7,z=100,q=2;AP8A/w==\x1b\\\
+\x1b_Ga=a,i=7,r=1,z=100,q=2\x1b\\\
+\x1b_Ga=a,i=7,s=3,q=2\x1b\\";
+
+    #[test]
+    fn kitty_animation_tick_advances_frames_and_stops() {
+        let mut terminal = NativeTerminal::new(8, 6).unwrap();
+        terminal.resize(8, 6, 8, 8).unwrap();
+        terminal.feed(KITTY_TWO_FRAME_ANIMATION).unwrap();
+        let image = |terminal: &NativeTerminal| {
+            let snapshot = terminal.render_snapshot().unwrap();
+            assert_eq!(snapshot.images.len(), 1, "the animated image is placed once");
+            std::sync::Arc::clone(&snapshot.images[0].image)
+        };
+
+        assert!(
+            terminal.animation_tick(0).unwrap().is_some(),
+            "a looping animation reports when its next frame is due"
+        );
+        let first = image(&terminal);
+        assert!(terminal.animation_tick(150).unwrap().is_some());
+        let second = image(&terminal);
+        assert_ne!(
+            first.generation, second.generation,
+            "a new animation frame must change the image generation the texture cache keys on"
+        );
+        assert_ne!(first.rgba, second.rgba, "the captured pixels follow the current frame");
+
+        terminal.feed(b"\x1b_Ga=a,i=7,s=1,q=2\x1b\\").unwrap();
+        assert_eq!(
+            terminal.animation_tick(300).unwrap(),
+            None,
+            "a stopped animation asks for no redraw"
+        );
+    }
+
+    #[test]
+    fn kitty_animation_deadline_is_never_sooner_than_one_frame_interval() {
+        let epoch = std::time::Instant::now();
+        let at = |ms: u64| {
+            Some(tokio::time::Instant::from_std(epoch + std::time::Duration::from_millis(ms)))
+        };
+        assert_eq!(clamp_animation_deadline(epoch, 100, 250), at(250));
+        assert_eq!(clamp_animation_deadline(epoch, 100, 103), at(108));
+        assert_eq!(clamp_animation_deadline(epoch, 100, 40), at(108));
+    }
+
+    #[test]
+    fn kitty_animation_is_not_ticked_without_images() {
+        let terminal = NativeTerminal::new(8, 6).unwrap();
+        assert!(!terminal.advance_animations().unwrap());
+        assert_eq!(terminal.animation_deadline(), None);
+    }
 
     #[test]
     fn synchronized_output_survives_resize_until_redraw_completes() {
