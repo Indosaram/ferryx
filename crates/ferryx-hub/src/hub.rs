@@ -14,7 +14,7 @@ use crate::config::HubConfig;
 use crate::error::Result;
 use crate::import::import_once;
 use crate::sessions::watch::ObserveOutcome;
-use crate::sessions::watch::{owner_post, NotifyPolicy, Observation, Watcher};
+use crate::sessions::watch::{owner_actionable, owner_post, NotifyPolicy, Observation, Watcher};
 
 pub struct Hub {
     pub pool: SqlitePool,
@@ -77,16 +77,32 @@ impl Hub {
         })
     }
 
-    /// Where owner notices, approval cards, and auto-answer escalations go.
-    /// A configured Slack home channel receives them. With no home channel they go to
-    /// the owner DM (the owner id as the channel, which is how Slack accepts a DM post).
-    pub fn owner_session(&self) -> SessionKey {
-        let owner = self
-            .config
+    fn owner_id(&self) -> String {
+        self.config
             .owner_slack_id
             .clone()
             .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| "owner".into());
+            .unwrap_or_else(|| "owner".into())
+    }
+
+    /// Where anything that needs the owner to act goes: approval cards, questions, auto-answer
+    /// escalations, cron needs-you, credential and security alerts. Always the owner DM (the
+    /// owner id as the channel, which is how Slack accepts a DM post).
+    pub fn owner_session(&self) -> SessionKey {
+        let owner = self.owner_id();
+        SessionKey::new(
+            "slack",
+            None::<String>,
+            owner.clone(),
+            None::<String>,
+            owner,
+        )
+    }
+
+    /// Where informational notices go (failures, results, auto-recovered cron jobs): the Slack
+    /// home channel, or the owner DM when no home channel is set, so nothing is lost.
+    pub fn home_session(&self) -> SessionKey {
+        let owner = self.owner_id();
         let channel = self
             .config
             .slack_home_channel
@@ -127,7 +143,11 @@ impl Hub {
                     tracing::warn!(%error, key = %notice.dedupe_key, "notice was not written to the activity log");
                 }
                 if owner_post(self.watcher.mode(), &notice.kind) {
-                    let session = self.owner_session();
+                    let session = if owner_actionable(&notice.kind) {
+                        self.owner_session()
+                    } else {
+                        self.home_session()
+                    };
                     if let Err(error) = crate::chat::reply::chat_reply_card(
                         &self.pool,
                         &session,
@@ -334,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_notices_use_the_home_channel_and_fall_back_to_the_owner_dm() {
+    async fn actionable_notices_use_the_owner_dm_and_the_rest_the_home_channel() {
         let pool = crate::storage::memory().await.unwrap();
         let dm = hub_with(
             pool.clone(),
@@ -344,9 +364,14 @@ mod tests {
                 ..HubConfig::default()
             },
         );
-        let fallback = dm.owner_session();
-        assert_eq!(fallback.channel_id, "UOWNER");
-        assert_eq!(fallback.user_id, "UOWNER");
+        let owner = dm.owner_session();
+        assert_eq!(owner.channel_id, "UOWNER");
+        assert_eq!(owner.user_id, "UOWNER");
+        let fallback = dm.home_session();
+        assert_eq!(
+            fallback.channel_id, "UOWNER",
+            "no home channel: FYI falls back to the DM"
+        );
         let home = hub_with(
             pool,
             std::time::Duration::ZERO,
@@ -356,13 +381,14 @@ mod tests {
                 ..HubConfig::default()
             },
         );
-        let session = home.owner_session();
+        let session = home.home_session();
         assert_eq!(session.channel_id, "C0C9XG5FP8W");
         assert_eq!(session.user_id, "UOWNER");
+        assert_eq!(home.owner_session().channel_id, "UOWNER");
     }
 
     #[tokio::test]
-    async fn a_due_notice_is_queued_for_the_home_channel() {
+    async fn a_question_is_queued_for_the_owner_dm_and_not_the_home_channel() {
         let pool = crate::storage::memory().await.unwrap();
         let hub = hub_with(
             pool.clone(),
@@ -381,8 +407,7 @@ mod tests {
                 .unwrap();
         assert_eq!(queued.len(), 1);
         let session = SessionKey::from_storage_key(&queued[0].0).unwrap();
-        assert_eq!(session.channel_id, "CHOME");
-        assert_ne!(session.channel_id, "UOWNER");
+        assert_eq!(session.channel_id, "UOWNER");
     }
 
     #[tokio::test]

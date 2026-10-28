@@ -557,6 +557,52 @@ async fn an_owner_escalation_never_puts_a_secret_in_chat_or_storage() {
     }
 }
 
+/// The owner is told once, in the owner DM: the needs-you notice carries the owner item's alert
+/// obligation, so the owner alert sweep does not post the item again. A verified fix is
+/// informational and goes to the home channel only.
+#[tokio::test]
+async fn needs_you_reaches_the_owner_dm_once_and_a_fix_only_the_home_channel() {
+    let (pool, id) = seeded("job", json!({"command": "true"}), "HTTP 401 login expired").await;
+    let runtime = HubRuntime {
+        home_session: Some("home".into()),
+        ..HubRuntime::new(pool.clone(), Some("owner-dm".into()))
+    };
+    let r = Remediator {
+        pool: pool.clone(),
+        judge: Judge::forced("needs_owner_login_or_quota"),
+        runtime: Arc::new(runtime),
+    };
+    r.on_problem(id, "meta").await.unwrap();
+    assert_eq!(
+        crate::owner_alert::sweep(&pool, "owner-dm", chrono::Utc::now())
+            .await
+            .unwrap(),
+        0,
+        "the cron owner item is not alerted a second time"
+    );
+    let posted: Vec<String> = sqlx::query_scalar("SELECT session_key FROM chat_outbox")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(posted, vec!["owner-dm".to_owned()]);
+
+    let fixed = HubRuntime {
+        home_session: Some("home".into()),
+        ..HubRuntime::new(pool.clone(), Some("owner-dm".into()))
+    };
+    let problem = problem(&pool, id).await.unwrap().unwrap();
+    fixed
+        .outcome(&problem, "job: cause -> fixed")
+        .await
+        .unwrap();
+    let last: String =
+        sqlx::query_scalar("SELECT session_key FROM chat_outbox ORDER BY id DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(last, "home");
+}
+
 #[tokio::test]
 async fn leaked_tokens_are_redacted_from_stored_chat_and_their_hashes_revoked() {
     let (pool, id) = seeded("job", json!({"command": "true"}), "timeout").await;
