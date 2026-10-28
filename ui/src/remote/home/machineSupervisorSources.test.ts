@@ -3,7 +3,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AccountMachineView } from "../accountSession";
+import { AccountSessionError, REMOTE_SUSPENDED, REMOTE_SUSPENDED_CLOSE_REASON, type AccountMachineView } from "../accountSession";
 import type { TunnelMessageEvent, TunnelWebSocket } from "../attachTunnel";
 import { isSupervisorChangedFrame } from "../remoteSupervisor";
 import {
@@ -21,9 +21,11 @@ const machine = (machineId: string, online = true): AccountMachineView => ({
 
 type FakeSocket = Pick<TunnelWebSocket, "close" | "onmessage" | "onclose" | "onerror"> & { closed: boolean };
 
-function fakeOpener() {
+function fakeOpener(refuse?: () => Error | null) {
   const opened: Array<{ machineId: string; deviceToken: string; socket: FakeSocket }> = [];
   const open = vi.fn(async (target: AccountMachineView, deviceToken: string) => {
+    const refusal = refuse?.();
+    if (refusal) throw refusal;
     const socket: FakeSocket = { closed: false, onmessage: null, onclose: null, onerror: null, close: () => { socket.closed = true; } };
     opened.push({ machineId: target.machineId, deviceToken, socket });
     return socket;
@@ -33,9 +35,10 @@ function fakeOpener() {
 
 const link = (deviceToken: string): MachineLink => ({ transport: { fetchLike: vi.fn() }, deviceToken });
 
-function render(over: Partial<MachineEventSocketsInput> = {}) {
+function render(over: Partial<MachineEventSocketsInput> = {}, refuse?: () => Error | null) {
   const bus = createSupervisorFrameBus();
-  const { open, opened } = fakeOpener();
+  const { open, opened } = fakeOpener(refuse);
+  const onPlanLimit = vi.fn();
   const links: Record<string, MachineLink> = { studio: link("tok-studio"), laptop: link("tok-laptop"), gone: link("tok-gone") };
   const input: MachineEventSocketsInput = {
     enabled: true,
@@ -44,10 +47,11 @@ function render(over: Partial<MachineEventSocketsInput> = {}) {
     skip: "laptop",
     open,
     bus,
+    onPlanLimit,
     ...over,
   };
   const hook = renderHook((props: MachineEventSocketsInput) => useMachineEventSockets(props), { initialProps: input });
-  return { hook, bus, open, opened, input };
+  return { hook, bus, open, opened, input, onPlanLimit };
 }
 
 const frame = (data: string): TunnelMessageEvent => ({ data });
@@ -85,6 +89,42 @@ describe("useMachineEventSockets", () => {
 
     hook.unmount();
     expect(opened[1].socket.closed).toBe(true);
+  });
+
+  it("reports the exact suspension close and never reopens that socket", async () => {
+    vi.useFakeTimers();
+    const { opened, onPlanLimit } = render();
+    await act(async () => {});
+
+    act(() => opened[0].socket.onclose?.({ code: 1008, reason: REMOTE_SUSPENDED_CLOSE_REASON, wasClean: true } as never));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(onPlanLimit).toHaveBeenCalledWith({ code: REMOTE_SUSPENDED });
+    expect(opened).toHaveLength(1);
+  });
+
+  it("reports a plan-limit refusal of the open and does not retry it", async () => {
+    vi.useFakeTimers();
+    const { open, onPlanLimit } = render({}, () => new AccountSessionError(REMOTE_SUSPENDED, "remote access is suspended"));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(onPlanLimit).toHaveBeenCalledTimes(1);
+    expect(onPlanLimit.mock.calls[0][0].code).toBe(REMOTE_SUSPENDED);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes every socket and stops reconnecting once disabled (the plan-limit notice disables it)", async () => {
+    vi.useFakeTimers();
+    const { hook, opened, input } = render({ skip: null });
+    await act(async () => {});
+    expect(opened.map(({ machineId }) => machineId)).toEqual(["studio", "laptop"]);
+
+    hook.rerender({ ...input, skip: null, enabled: false });
+    expect(opened.every(({ socket }) => socket.closed)).toBe(true);
+    act(() => opened[0].socket.onclose?.({ code: 1006, reason: "", wasClean: false } as never));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(opened).toHaveLength(2);
   });
 
   it("opens nothing while disabled", async () => {

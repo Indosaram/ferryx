@@ -5,7 +5,7 @@
 // (useMachineEventSockets).
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
-import type { AccountMachineView } from "../accountSession";
+import { planLimitStateFromCloseEvent, planLimitStateFromError, type AccountMachineView, type PlanLimitState } from "../accountSession";
 import type { TunnelTransport, TunnelWebSocket } from "../attachTunnel";
 import type { RemoteSupervisorMachine, SupervisorFetch, SupervisorHttpResponse } from "../remoteSupervisor";
 
@@ -148,6 +148,12 @@ export type MachineEventSocketsInput = {
   readonly skip: string | null;
   readonly open: MachineEventsOpener;
   readonly bus: SupervisorFrameBus;
+  /**
+   * A plan limit or suspension seen on one of these sockets (the exact REMOTE_SUSPENDED close,
+   * or a refused open). That socket is not reopened; the caller disables the hook, which
+   * closes the others.
+   */
+  readonly onPlanLimit: (state: PlanLimitState) => void;
 };
 
 /** Longest wait before reopening a machine's events socket after it closed or failed. */
@@ -159,11 +165,14 @@ export const MACHINE_EVENTS_RETRY_MAX_MS = 10_000;
  * (the phone home, the wide Supervisor tab) never hears `supervisorChanged`: a goal another
  * surface admitted, or the dispatcher moved, would stay stale until the next manual action.
  * The daemon opens each subscription with an `inventoryInvalidated {reason: subscribe}`
- * boundary, which makes every view refetch once.
+ * boundary, which makes every view refetch once. A suspension or plan limit stops the retries
+ * and is reported through `onPlanLimit`, like the active connection's socket does.
  */
-export function useMachineEventSockets({ enabled, machines, linkFor, skip, open, bus }: MachineEventSocketsInput): void {
+export function useMachineEventSockets({ enabled, machines, linkFor, skip, open, bus, onPlanLimit }: MachineEventSocketsInput): void {
   const openRef = useRef(open);
   openRef.current = open;
+  const onPlanLimitRef = useRef(onPlanLimit);
+  onPlanLimitRef.current = onPlanLimit;
   const targets = enabled
     ? machines.flatMap((machine) => {
         if (machine.online === false || machine.machineId === skip) return [];
@@ -192,7 +201,13 @@ export function useMachineEventSockets({ enabled, machines, linkFor, skip, open,
         let current: Awaited<ReturnType<MachineEventsOpener>>;
         try {
           current = await openRef.current(machine, deviceToken);
-        } catch {
+        } catch (error) {
+          if (disposed) return;
+          const limit = planLimitStateFromError(error);
+          if (limit) {
+            onPlanLimitRef.current(limit);
+            return;
+          }
           reconnect();
           return;
         }
@@ -208,9 +223,14 @@ export function useMachineEventSockets({ enabled, machines, linkFor, skip, open,
           bus.emit(machine.machineId, text);
         };
         current.onerror = () => {};
-        current.onclose = () => {
+        current.onclose = (event) => {
           if (disposed || socket !== current) return;
           socket = null;
+          const limit = planLimitStateFromCloseEvent(event);
+          if (limit) {
+            onPlanLimitRef.current(limit);
+            return;
+          }
           reconnect();
         };
       };

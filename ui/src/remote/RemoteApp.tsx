@@ -2824,6 +2824,8 @@ export const RemoteHostConnection: React.FC<{
     skip: activeTunnelConnection && !activeTunnelConnection.isClosed ? activeTunnelConnection.machine.machineId : null,
     open: openMachineEvents,
     bus: supervisorBus,
+    // Enabled only without a plan-limit notice, so the notice this sets closes every socket.
+    onPlanLimit: handlePlanLimit,
   });
   const phoneBack = phoneNav.back;
   // A selection backed out of on the Session screen ("Back to Worktrees") leaves no session to
