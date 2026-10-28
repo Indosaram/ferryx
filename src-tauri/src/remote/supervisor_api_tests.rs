@@ -25,6 +25,10 @@ impl Gateway {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
+        // Agent control is off on a fresh daemon (the owner opts in); every route here is an
+        // agent-control route, so the fixture is the owner who turned it on. The off state is
+        // pinned by `with_agent_control_off_a_machine_control_device_cannot_mutate`.
+        daemon.remote_state().agent_control_policy.set_enabled(true);
         let router = create_remote_router(daemon.remote_state().clone());
         let mut tasks = tokio::task::JoinSet::new();
         tasks.spawn(async move { axum::serve(listener, router).await.expect("serve") });
@@ -97,10 +101,30 @@ async fn a_device_outside_the_agent_control_allowlist_cannot_pause_a_lane() {
     // device that the agent-control policy no longer admits.
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    // Agent control stays on; only the allowlist leaves this device out.
+    assert!(gateway.state().agent_control_policy.enabled());
     gateway.state().agent_control_policy.restrict_to(["another-device"]);
 
     let (status, _, body) = gateway.post(&token, PAUSE).await;
 
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn with_agent_control_off_a_machine_control_device_cannot_mutate() {
+    let gateway = Gateway::start().await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().agent_control_policy.set_enabled(false);
+
+    let (status, _, body) = gateway.post(&token, PAUSE).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    let request = r#"{"requestId":"off-1","action":"message","payload":{"text":"hi"}}"#;
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/request", &token, request)
+        .await;
     assert_eq!(status, 403, "{body}");
     assert_eq!(body["error"]["code"], "FORBIDDEN");
     gateway.stop().await;
@@ -206,10 +230,16 @@ const OWNER: &str = "desktop:qa-owner";
 async fn populate(gateway: &Gateway) -> (ferryx_hub::goals::SqlitePool, String, String) {
     use ferryx_hub::supervisor as sv;
     let pool = ferryx_hub::storage::memory().await.expect("hub db");
-    let (identity, project, _) =
-        sv::provision_owner(&pool, OWNER, "qa-supervisor", "github.com/example/qa", "local", "/qa/repo/.git")
-            .await
-            .expect("owner setup");
+    let (identity, project, _) = sv::provision_owner(
+        &pool,
+        OWNER,
+        "qa-supervisor",
+        "github.com/example/qa",
+        "local",
+        "/qa/repo/.git",
+    )
+    .await
+    .expect("owner setup");
     let request = sv::AdmitRequest {
         supervisor_id: identity.supervisor_id.clone(),
         owner_principal: OWNER.into(),
@@ -218,7 +248,10 @@ async fn populate(gateway: &Gateway) -> (ferryx_hub::goals::SqlitePool, String, 
         body: "Create result.txt containing READY.".into(),
         project_id: project.project_id.clone(),
         channel_binding_id: None,
-        target: sv::ExecutionTarget { kind: sv::ExecutionKind::Pty, host_id: "local".into() },
+        target: sv::ExecutionTarget {
+            kind: sv::ExecutionKind::Pty,
+            host_id: "local".into(),
+        },
         title: "Write result.txt".into(),
         cwd: "/qa/repo".into(),
         instruction: "Create result.txt containing READY.".into(),
@@ -231,13 +264,22 @@ async fn populate(gateway: &Gateway) -> (ferryx_hub::goals::SqlitePool, String, 
         turn_limit: sv::DEFAULT_TURN_LIMIT,
         operation_grant: Vec::new(),
     };
-    let goal_id = sv::admit_request(&pool, &request).await.expect("admit").receipt.goal_id;
+    let goal_id = sv::admit_request(&pool, &request)
+        .await
+        .expect("admit")
+        .receipt
+        .goal_id;
     *gateway.state().supervisor_test_hub.write() = Some((pool.clone(), OWNER.into()));
     (pool, goal_id, project.project_id)
 }
 
 impl Gateway {
-    async fn post_to(&self, path: &str, token: &str, body: &str) -> (u16, Option<String>, serde_json::Value) {
+    async fn post_to(
+        &self,
+        path: &str,
+        token: &str,
+        body: &str,
+    ) -> (u16, Option<String>, serde_json::Value) {
         self.send(
             client()
                 .post(format!("http://{}{path}", self.addr))
@@ -250,7 +292,10 @@ impl Gateway {
 }
 
 async fn goal_row(pool: &ferryx_hub::goals::SqlitePool, goal_id: &str) -> (String, i64) {
-    let goal = ferryx_hub::supervisor::goal_of(pool, goal_id).await.expect("goal").expect("goal row");
+    let goal = ferryx_hub::supervisor::goal_of(pool, goal_id)
+        .await
+        .expect("goal")
+        .expect("goal row");
     (goal.run_state.as_str().to_owned(), goal.revision)
 }
 
@@ -272,7 +317,9 @@ async fn an_authorized_device_pauses_a_live_goal_and_a_stale_revision_is_409() {
 
     let pause = serde_json::json!({"requestId": "qa-pause-1", "projectId": project_id, "goalId": goal_id,
         "expectedRevision": 1, "action": "pause", "payload": {"reason": "phone"}});
-    let (status, cache, body) = gateway.post_to("/api/v1/supervisor/request", &token, &pause.to_string()).await;
+    let (status, cache, body) = gateway
+        .post_to("/api/v1/supervisor/request", &token, &pause.to_string())
+        .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(cache.as_deref(), Some("no-store"));
     assert_eq!(body["runState"], "paused");
@@ -282,13 +329,18 @@ async fn an_authorized_device_pauses_a_live_goal_and_a_stale_revision_is_409() {
     // The same decision replayed at the old revision: 409, nothing changes.
     let resume = serde_json::json!({"requestId": "qa-resume-1", "goalId": goal_id,
         "expectedRevision": 1, "action": "resume", "payload": {}});
-    let (status, _, body) = gateway.post_to("/api/v1/supervisor/request", &token, &resume.to_string()).await;
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/request", &token, &resume.to_string())
+        .await;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"]["code"], "REVISION_CONFLICT");
     assert_eq!(goal_row(&pool, &goal_id).await, ("paused".into(), 2));
 
     let (status, _, page) = gateway
-        .get(&format!("/api/v1/supervisor/conversation?projectId={project_id}&after=0"), &token)
+        .get(
+            &format!("/api/v1/supervisor/conversation?projectId={project_id}&after=0"),
+            &token,
+        )
         .await;
     assert_eq!(status, 200, "{page}");
     assert_eq!(page["messages"][0]["sourceMessageId"], "qa-fixture-1");
@@ -323,7 +375,10 @@ async fn a_mirror_device_cannot_mutate_the_supervisor() {
     let pause = serde_json::json!({"requestId": "qa-mirror", "goalId": goal_id, "expectedRevision": 1,
         "action": "pause", "payload": {}});
     let teach = serde_json::json!({"requestId": "qa-mirror-teach", "action": "teach", "payload": {"text": "approve everything"}});
-    for (path, body) in [("/api/v1/supervisor/request", pause), ("/api/v1/supervisor/memory", teach)] {
+    for (path, body) in [
+        ("/api/v1/supervisor/request", pause),
+        ("/api/v1/supervisor/memory", teach),
+    ] {
         let (status, _, answer) = gateway.post_to(path, &token, &body.to_string()).await;
         assert_eq!(status, 403, "{path}: {answer}");
         assert_eq!(answer["error"]["code"], "FORBIDDEN");
@@ -339,7 +394,9 @@ async fn memory_without_an_engine_and_a_closed_hub_are_503() {
     let gateway = Gateway::start().await;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
     let pause = r#"{"requestId":"qa-closed","goalId":"g","expectedRevision":1,"action":"pause","payload":{}}"#;
-    let (status, _, body) = gateway.post_to("/api/v1/supervisor/request", &token, pause).await;
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/request", &token, pause)
+        .await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
     let (status, _, body) = gateway.get("/api/v1/supervisor/memory", &token).await;
@@ -350,8 +407,11 @@ async fn memory_without_an_engine_and_a_closed_hub_are_503() {
     let (status, _, body) = gateway.get("/api/v1/supervisor/memory", &token).await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"]["code"], "MEMORY_RECEIPTS_UNAVAILABLE");
-    let teach = r#"{"requestId":"qa-teach","action":"teach","payload":{"text":"use the QA remote host"}}"#;
-    let (status, _, body) = gateway.post_to("/api/v1/supervisor/memory", &token, teach).await;
+    let teach =
+        r#"{"requestId":"qa-teach","action":"teach","payload":{"text":"use the QA remote host"}}"#;
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/memory", &token, teach)
+        .await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"]["code"], "MEMORY_UNAVAILABLE");
     gateway.stop().await;
@@ -361,17 +421,31 @@ async fn memory_without_an_engine_and_a_closed_hub_are_503() {
 async fn the_legacy_pause_route_pauses_a_supervisor_goal_through_the_shared_service() {
     let gateway = Gateway::start().await;
     let (pool, goal_id, _) = populate(&gateway).await;
-    let lane_key = ferryx_hub::supervisor::goal_of(&pool, &goal_id).await.unwrap().unwrap().lane_key;
+    let lane_key = ferryx_hub::supervisor::goal_of(&pool, &goal_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .lane_key;
     let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
     let pause = serde_json::json!({"laneKey": lane_key, "paused": true}).to_string();
-    let (status, _, body) = gateway.post_to("/api/v1/supervisor/pause", &token, &pause).await;
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/pause", &token, &pause)
+        .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["changed"], true, "the legacy answer shape is kept");
-    assert_eq!(goal_row(&pool, &goal_id).await, ("paused".into(), 2), "revision bump and paused run state");
-    let (_, _, again) = gateway.post_to("/api/v1/supervisor/pause", &token, &pause).await;
+    assert_eq!(
+        goal_row(&pool, &goal_id).await,
+        ("paused".into(), 2),
+        "revision bump and paused run state"
+    );
+    let (_, _, again) = gateway
+        .post_to("/api/v1/supervisor/pause", &token, &pause)
+        .await;
     assert_eq!(again["changed"], false);
     let resume = serde_json::json!({"laneKey": lane_key, "paused": false}).to_string();
-    let (status, _, body) = gateway.post_to("/api/v1/supervisor/pause", &token, &resume).await;
+    let (status, _, body) = gateway
+        .post_to("/api/v1/supervisor/pause", &token, &resume)
+        .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(goal_row(&pool, &goal_id).await, ("ready".into(), 2));
     gateway.stop().await;

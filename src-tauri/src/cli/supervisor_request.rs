@@ -36,13 +36,23 @@ pub fn read_envelope(path: &str) -> Result<Value, UsageError> {
 /// The JSON and exit code a daemon reply maps to. A refusal keeps its HTTP-equivalent status.
 pub fn outcome_of(response: DaemonResponse) -> (Value, i32) {
     match response {
-        DaemonResponse::SupervisorRequestV1Ok { receipt } => {
-            (serde_json::json!({ "ok": true, "receipt": receipt }), EXIT_OK)
-        }
-        DaemonResponse::Error { message, code, details } => {
-            let code = code.filter(|code| !code.is_empty()).unwrap_or_else(|| "INTERNAL".into());
+        DaemonResponse::SupervisorRequestV1Ok { receipt } => (
+            serde_json::json!({ "ok": true, "receipt": receipt }),
+            EXIT_OK,
+        ),
+        DaemonResponse::Error {
+            message,
+            code,
+            details,
+        } => {
+            let code = code
+                .filter(|code| !code.is_empty())
+                .unwrap_or_else(|| "INTERNAL".into());
             let (mut value, mut exit) = failure(&code, &message);
-            let status = details.as_ref().and_then(|details| details.get("status")).and_then(Value::as_u64);
+            let status = details
+                .as_ref()
+                .and_then(|details| details.get("status"))
+                .and_then(Value::as_u64);
             if let (Some(fields), Some(status)) = (value.as_object_mut(), status) {
                 fields.insert("status".into(), status.into());
                 if status == 409 {
@@ -51,7 +61,10 @@ pub fn outcome_of(response: DaemonResponse) -> (Value, i32) {
             }
             (value, exit)
         }
-        other => failure("INTERNAL", &format!("unexpected daemon response: {other:?}")),
+        other => failure(
+            "INTERNAL",
+            &format!("unexpected daemon response: {other:?}"),
+        ),
     }
 }
 
@@ -65,7 +78,7 @@ pub fn run_request_cli(args: &[String]) -> i32 {
         }
         Ok(envelope) => match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime.block_on(async {
-                let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true };
+                let request = DaemonRequest::SupervisorRequestV1 { envelope, cli: true, mcp: false };
                 match tokio::time::timeout(
                     super::supervisor_goal::GOAL_CLI_TIMEOUT,
                     super::supervisor_goal::exchange_once(
@@ -101,13 +114,41 @@ mod tests {
 
     #[test]
     fn the_cli_takes_exactly_one_json_file() {
-        assert_eq!(parse_request_cli(&argv(&["ferryx-cli", "supervisor", "request", "--json", "e.json"])).unwrap(), "e.json");
-        assert_eq!(parse_request_cli(&argv(&["ferryx-cli", "supervisor", "request", "--json", "-"])).unwrap(), "-");
+        assert_eq!(
+            parse_request_cli(&argv(&[
+                "ferryx-cli",
+                "supervisor",
+                "request",
+                "--json",
+                "e.json"
+            ]))
+            .unwrap(),
+            "e.json"
+        );
+        assert_eq!(
+            parse_request_cli(&argv(&[
+                "ferryx-cli",
+                "supervisor",
+                "request",
+                "--json",
+                "-"
+            ]))
+            .unwrap(),
+            "-"
+        );
         for bad in [
             vec!["ferryx-cli", "supervisor", "request"],
             vec!["ferryx-cli", "supervisor", "request", "--json"],
             vec!["ferryx-cli", "supervisor", "request", "e.json"],
-            vec!["ferryx-cli", "supervisor", "request", "--json", "e.json", "--actor", "x"],
+            vec![
+                "ferryx-cli",
+                "supervisor",
+                "request",
+                "--json",
+                "e.json",
+                "--actor",
+                "x",
+            ],
         ] {
             assert!(parse_request_cli(&argv(&bad)).is_err(), "{bad:?}");
         }
@@ -115,18 +156,38 @@ mod tests {
 
     #[test]
     fn a_receipt_and_typed_refusals_map_to_json_and_exit_codes() {
-        let (value, code) = outcome_of(DaemonResponse::SupervisorRequestV1Ok { receipt: serde_json::json!({"revision": 2}) });
-        assert_eq!((value["ok"].clone(), value["receipt"]["revision"].clone(), code), (true.into(), 2.into(), EXIT_OK));
+        let (value, code) = outcome_of(DaemonResponse::SupervisorRequestV1Ok {
+            receipt: serde_json::json!({"revision": 2}),
+        });
+        assert_eq!(
+            (
+                value["ok"].clone(),
+                value["receipt"]["revision"].clone(),
+                code
+            ),
+            (true.into(), 2.into(), EXIT_OK)
+        );
         let stale = DaemonResponse::Error {
             message: "stale".into(),
             code: Some("REVISION_CONFLICT".into()),
             details: Some(serde_json::json!({"status": 409})),
         };
         let (value, code) = outcome_of(stale);
-        assert_eq!((value["code"].clone(), value["status"].clone(), code), ("REVISION_CONFLICT".into(), 409.into(), EXIT_REFUSED));
-        let forbidden = DaemonResponse::Error { message: "pane".into(), code: Some("FORBIDDEN".into()), details: None };
+        assert_eq!(
+            (value["code"].clone(), value["status"].clone(), code),
+            ("REVISION_CONFLICT".into(), 409.into(), EXIT_REFUSED)
+        );
+        let forbidden = DaemonResponse::Error {
+            message: "pane".into(),
+            code: Some("FORBIDDEN".into()),
+            details: None,
+        };
         assert_eq!(outcome_of(forbidden).1, EXIT_REFUSED);
-        let invalid = DaemonResponse::Error { message: "bad".into(), code: Some("INVALID_REQUEST".into()), details: None };
+        let invalid = DaemonResponse::Error {
+            message: "bad".into(),
+            code: Some("INVALID_REQUEST".into()),
+            details: None,
+        };
         assert_eq!(outcome_of(invalid).1, EXIT_INVALID);
     }
 }

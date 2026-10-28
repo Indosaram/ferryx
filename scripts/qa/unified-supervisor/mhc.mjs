@@ -74,6 +74,23 @@ export const ALWAYS_OFFERED_DECISION_TOOLS = Object.freeze(['read', 'grep']);
 /// (maho-ai api/openai_completions.rs:1103-1140), plus deferred tool lists carried on system
 /// messages (`messages[].tools`, :1078-1080). An entry without a name is kept as null so the
 /// scenario can fail on a shape it could not parse.
+/// What a chat request asked, for attributing it: the last user message's text (start and end,
+/// bounded) and the system prompt's first line. Fixture data only (the loopback stub's own
+/// requests); nothing here reaches a real provider.
+function promptOf(json) {
+  const messages = Array.isArray(json?.messages) ? json.messages : [];
+  const text = (message) => (typeof message?.content === 'string' ? message.content
+    : Array.isArray(message?.content) ? message.content.map((part) => part?.text ?? '').join('') : '');
+  const user = [...messages].reverse().find((message) => message?.role === 'user');
+  const userText = text(user);
+  const system = text(messages.find((message) => message?.role === 'system' || message?.role === 'developer'));
+  return {
+    messages: messages.length,
+    user: userText.length > 600 ? `${userText.slice(0, 400)} ... ${userText.slice(-200)}` : userText,
+    systemFirstLine: system.split('\n', 1)[0].slice(0, 200),
+  };
+}
+
 function toolNamesOf(json) {
   const nameOf = (tool) => {
     const name = tool?.function?.name ?? tool?.custom?.name ?? tool?.name;
@@ -105,12 +122,19 @@ function freeLoopbackPort() {
 // ---------------------------------------------------------------------------
 // Loopback openai-completions stub. Records every request (method, path, model, whether a
 // tools list was offered and its names) and answers with one streamed assistant message, or
-// with an HTTP error while `failWith` is set.
+// with an HTTP error while `failWith` is set. The message is STUB_ASSESSMENT unless `answer`
+// (called with the parsed request body) returns another object for that request.
 
-export async function startProviderStub(ctx) {
+export async function startProviderStub(ctx, { answer = null } = {}) {
   const requests = [];
-  const state = { failWith: null };
+  // `arrivals` counts requests when they start (before their body is read and their reply
+  // streams); each recorded entry carries its arrival number, so a caller can count only the
+  // requests that arrived after a point it observed, whatever order they finish in.
+  const state = { failWith: null, arrivals: 0 };
   const server = createServer((request, response) => {
+    state.arrivals += 1;
+    const arrival = state.arrivals;
+    const arrivedAt = new Date().toISOString();
     let body = '';
     request.setEncoding('utf8');
     request.on('data', (chunk) => { body += chunk; });
@@ -118,13 +142,15 @@ export async function startProviderStub(ctx) {
       let json = null;
       try { json = JSON.parse(body); } catch { /* recorded raw */ }
       const tools = toolNamesOf(json);
-      const entry = { at: new Date().toISOString(), method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools, failWith: state.failWith };
+      const entry = { at: new Date().toISOString(), arrival, arrivedAt, method: request.method, path: request.url, model: json?.model ?? null, stream: json?.stream ?? null, tools,
+        prompt: promptOf(json), failWith: state.failWith };
       requests.push(entry);
       ctx.evidence.appendJsonl('runtime/provider-requests.jsonl', entry);
       ctx.journal.push({ source: 'provider-stub', kind: 'request', ...entry });
       if (state.failWith) {
-        response.writeHead(state.failWith.status, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ error: { message: state.failWith.message, type: 'qa_stub_error' } }));
+        const { status, message, code = null, headers = {} } = state.failWith;
+        response.writeHead(status, { 'content-type': 'application/json', ...headers });
+        response.end(JSON.stringify({ error: { message, type: 'qa_stub_error', ...(code ? { code } : {}) } }));
         return;
       }
       if (request.method === 'GET' && request.url?.replace(/\?.*$/, '').endsWith('/models')) {
@@ -139,10 +165,11 @@ export async function startProviderStub(ctx) {
       }
       const id = `qa-${requests.length}`;
       const model = json?.model ?? STUB_MODEL;
+      const reply = answer?.(json) ?? STUB_ASSESSMENT;
       const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model,
         choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-      response.write(chunk({ role: 'assistant', content: JSON.stringify(STUB_ASSESSMENT) }));
+      response.write(chunk({ role: 'assistant', content: JSON.stringify(reply) }));
       response.write(chunk({}, 'stop'));
       response.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model, choices: [],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
@@ -159,7 +186,11 @@ export async function startProviderStub(ctx) {
   return {
     baseUrl,
     requests,
-    failNext(status, message) { state.failWith = { status, message }; },
+    arrivals: () => state.arrivals,
+    // Every request fails with `status` until succeed(). `code` is the provider error code in
+    // the body (e.g. insufficient_quota) and `headers` extra response headers (e.g.
+    // x-should-retry: false, which mhc's transport retry honours before any backoff).
+    failNext(status, message, { code = null, headers = {} } = {}) { state.failWith = { status, message, code, headers }; },
     succeed() { state.failWith = null; },
     close: () => new Promise((resolveClose) => { server.closeAllConnections?.(); server.close(() => resolveClose()); }),
   };

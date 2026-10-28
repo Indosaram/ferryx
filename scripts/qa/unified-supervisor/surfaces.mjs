@@ -12,8 +12,8 @@
 // database is only read, read-only.
 //
 // Not covered here (listed in assertions.json): the native desktop window (MahoRD capture), a
-// goal reaching `completed` (no production path completes a goal before task 10's attested
-// verifier), and typing/native-pane masks (ui unit tests).
+// goal reaching `completed` (needs a runnable verifier and T10's mhc judge, see notCovered), and
+// typing/native-pane masks (ui unit tests).
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -359,7 +359,7 @@ export const SURFACES_SCENARIO = Object.freeze({
   ],
   notCovered: [
     { clause: 'native desktop window', reason: 'the native Ferryx window is captured with MahoRD, outside this runner', coveredBy: 'unrun: MahoRD native capture' },
-    { clause: 'run state completed', reason: 'no production path completes a goal before the attested verifier of task 10', coveredBy: 'autonomy scenario (task 10)' },
+    { clause: 'run state completed', reason: 'T10 completes a goal only through a Ferryx-runnable verifier graded by the retained mhc judge; the composer submits with the "owner review" verifier, which T10 holds as VERIFIER_NOT_RUNNABLE, and driving the judge needs the T6 provider stub this scenario does not start. The views render completed from the same snapshot field (data-run-state), and the completion paths announce the goal (supervisor/completion.rs)', coveredBy: 'autonomy scenario (task 10): goal-completed-without-owner; ui/src/lib/unifiedSupervisor.test.ts (completed goal offers no controls)' },
     { clause: 'typing and native-pane masks', reason: 'rendered from fixture snapshots, not from a live hub', coveredBy: 'ui/src/components/supervisor/Supervisor.test.tsx, ui/src/remote/home/SupervisorHome.test.tsx' },
   ],
   run: runSurfaces,

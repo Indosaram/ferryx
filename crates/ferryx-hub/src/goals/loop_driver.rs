@@ -308,7 +308,8 @@ async fn finish(
     Ok(LoopOutcome::new(lane_key))
 }
 
-fn verification_instruction(unmet_ids: &[String]) -> String {
+/// The corrective instruction after the blind convergence check refused `complete`.
+pub fn verification_instruction(unmet_ids: &[String]) -> String {
     format!(
         "The lane goal is not verified yet. Requirements still unproven: {}. For each one, run the check its verifier names, fix what fails, and report the exact commands you ran and their results.",
         unmet_ids.join(", ")

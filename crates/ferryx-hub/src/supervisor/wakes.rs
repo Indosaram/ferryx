@@ -56,10 +56,10 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, Notify};
 
 use super::{
-    add_wait_at, enqueue_wake, execution_binding_of, goal_of, in_flight_dispatch, record_wait_event,
-    sha256_hex, transition_goal, wake_from_row, PendingWake, RunState, SupervisorError,
-    SupervisorGoal, Wait, WaitEventReceipt, WaitKind, WaitOutcome, WaitTarget, WakeCause, WakeRow,
-    WAKE_COLUMNS,
+    add_wait_at, enqueue_wake, execution_binding_of, goal_of, in_flight_dispatch,
+    record_wait_event, sha256_hex, transition_goal, wake_from_row, PendingWake, RunState,
+    SupervisorError, SupervisorGoal, Wait, WaitEventReceipt, WaitKind, WaitOutcome, WaitTarget,
+    WakeCause, WakeRow, WAKE_COLUMNS,
 };
 use crate::lanes::dispatch::{batch_window_elapsed, delivered_recently, BATCH_WINDOW_SECS};
 use crate::storage::WriteTx;

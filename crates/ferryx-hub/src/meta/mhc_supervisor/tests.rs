@@ -1711,3 +1711,101 @@ fn an_unreadable_session_store_is_set_aside_not_trusted() {
     assert!(store.get("decision-0").is_none());
     assert!(store.get("decision-1").is_none());
 }
+
+/// An engine launcher that reports an owned child: every launch gets its own kill switch and
+/// exit future, so the test sees exactly which recorded child was ended. Its stdio is the
+/// scripted peer.
+struct OwnedLauncher {
+    peer: Arc<Peer>,
+    /// pid of each launch, and whether its kill switch fired.
+    children: Mutex<Vec<(u32, Arc<AtomicBool>)>>,
+}
+
+#[async_trait]
+impl EngineLauncher for OwnedLauncher {
+    async fn launch(&self, profile: &MhcProfile) -> Result<Launched, SupervisorFault> {
+        let (client, peer) = tokio::io::duplex(1 << 16);
+        tokio::spawn(self.peer.clone().serve(peer));
+        let (read, write) = tokio::io::split(client);
+        let pid = 40_000 + self.children.lock().unwrap().len() as u32;
+        // As the production launcher does: the owned child is recorded as `<pid> <hub pid>`.
+        profile.record_pid(pid).unwrap();
+        let killed = Arc::new(AtomicBool::new(false));
+        let (kill, on_kill) = oneshot::channel::<()>();
+        let (reaped_tx, reaped_rx) = oneshot::channel::<()>();
+        let flag = killed.clone();
+        tokio::spawn(async move {
+            if on_kill.await.is_ok() {
+                flag.store(true, Ordering::SeqCst);
+            }
+            let _ = reaped_tx.send(());
+        });
+        self.children.lock().unwrap().push((pid, killed));
+        Ok(Launched {
+            reader: Box::new(read),
+            writer: Box::new(write),
+            pid: Some(pid),
+            exited: Some(Box::pin(async move { reaped_rx.await.ok().map(|_| false) })),
+            kill: Some(kill),
+        })
+    }
+}
+
+/// Todo 12: a hub generation abort and an engine restart end only the recorded owned engine
+/// children (each one's own kill switch), and the pid record is cleared. Paused time: the
+/// shutdown grace passes virtually, never by a sleep.
+///
+/// Worker PTYs are out of this runtime's reach by construction: [`MhcSupervisor::new`] takes
+/// only the profile and an [`EngineLauncher`], never an agent control or pane launcher, so
+/// the only processes it can end are the children its launcher reported. That worker panes
+/// survive a hub generation restart against a real daemon is checked by the QA runner's
+/// `recovery` and `capabilities` scenarios (pane census before and after each `hub stop`/
+/// `hub start`), not here.
+#[tokio::test(start_paused = true)]
+async fn a_generation_abort_and_engine_restart_end_only_the_owned_engine_child() {
+    let harness = Harness::new("owned-only", all_capabilities());
+    let launcher = Arc::new(OwnedLauncher {
+        peer: harness.peer.clone(),
+        children: Mutex::new(Vec::new()),
+    });
+    let supervisor = MhcSupervisor::new(harness.profile("/parent", config()), launcher.clone());
+
+    let mut health = supervisor.subscribe_health();
+    let generation = tokio::spawn(supervisor.clone().supervise());
+    assert_eq!(supervisor.decide("first").await.unwrap(), "answer:first");
+    // Engine restart: the owned child exits on its own; the next use relaunches it.
+    harness.peer.disconnect();
+    tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state != HealthState::Ready),
+    )
+    .await
+    .expect("the exit is observed")
+    .unwrap();
+    tokio::time::advance(MIN_BACKOFF).await;
+    assert_eq!(supervisor.decide("second").await.unwrap(), "answer:second");
+    // Hub generation abort (hub stop or handover).
+    generation.abort();
+    tokio::time::timeout(
+        WAIT,
+        health.wait_for(|health| health.state == HealthState::Stopped),
+    )
+    .await
+    .expect("the aborted generation stops the engine")
+    .unwrap();
+    harness.peer.wait_ended(2).await;
+
+    let children = launcher.children.lock().unwrap().clone();
+    assert_eq!(children.len(), 2, "one owned child per launch");
+    assert!(
+        children
+            .iter()
+            .all(|(_, killed)| killed.load(Ordering::SeqCst)),
+        "each recorded owned child was ended through its own kill switch"
+    );
+    assert!(supervisor.health().pid.is_none());
+    assert!(
+        supervisor.profile().owned_pid().is_none(),
+        "no owned pid record is left"
+    );
+}

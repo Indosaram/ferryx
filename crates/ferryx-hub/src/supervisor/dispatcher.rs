@@ -50,16 +50,17 @@ use tokio::sync::{mpsc, oneshot, Notify};
 
 use super::admission::goal_grant;
 use super::receipts::{
-    record_pty_settle, IdleLedger, PtySettle, PtyWorker, SettleReport, WorkerTransport,
+    record_pty_settle, watch_paired_settle, IdleLedger, PtySettle, PtyWorker, SettleReport,
+    SettleWatch, WorkerTransport,
 };
 use super::{
     attach_session, claim_dispatch, confirm_claim_before_transmit, execution_binding_of, goal_of,
-    identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt, record_start,
-    transition_goal, Dispatch, ExecutionBinding, ExecutionKind, Receipt, RunState,
-    SupervisorError, SupervisorGoal,
+    hold_live_run, identity_of, ready_dispatches, reconcile_claims_after_restart, record_receipt,
+    record_start, transition_goal, Dispatch, DispatchRow, ExecutionBinding, ExecutionKind, Receipt,
+    RunState, SupervisorError, SupervisorGoal, DISPATCH_COLUMNS,
 };
 use crate::agent_control::{
-    AgentControl, Delivery, StartReceipt, TaskLauncher, WorkerSend, RECEIPT_MISMATCH,
+    AgentControl, AgentOp, Delivery, StartReceipt, TaskLauncher, WorkerSend, RECEIPT_MISMATCH,
 };
 use crate::goals::types::{GoalMode, SendOutcome};
 use crate::lanes::state::LaneStatus;
@@ -76,6 +77,11 @@ const DRAIN_LIMIT: u32 = 256;
 const RECONCILE_ATTEMPTS: u32 = 6;
 const RECONCILE_BACKOFF: Duration = Duration::from_millis(250);
 
+/// Attempts at listing this machine's panes for the restart census, and the first retry delay
+/// (doubled after each failure: at most 0.25 + 0.5 seconds in all).
+const PANE_LIST_ATTEMPTS: u32 = 3;
+const PANE_LIST_BACKOFF: Duration = Duration::from_millis(250);
+
 /// Hold codes (`state_detail` prefixes) the dispatcher writes.
 pub use super::receipts::MHC_WORKER_UNAVAILABLE;
 pub const REMOTE_LAUNCH_UNAVAILABLE: &str = "REMOTE_LAUNCH_UNAVAILABLE";
@@ -90,6 +96,9 @@ pub const DISPATCH_FAILED: &str = "DISPATCH_FAILED";
 /// A causal start receipt arrived but its start could not be committed (with the goal's move
 /// to running); the dispatch is uncertain and is not resent.
 pub const START_NOT_RECORDED: &str = "START_NOT_RECORDED";
+/// Restart census: a local PTY run whose pane is not a live session of this daemon any more.
+/// Its end can never be observed; the goal is held, never settled and never resent.
+pub const PTY_RUN_LOST: &str = "PTY_RUN_LOST";
 
 /// The daemon's dispatcher wake, shared by every in-process admission.
 pub fn dispatch_wake() -> Arc<Notify> {
@@ -153,6 +162,10 @@ enum Launch {
 
 pub struct Dispatcher {
     pool: SqlitePool,
+    /// Agent control of this machine and paired hosts, for the restart census.
+    control: Arc<dyn AgentControl>,
+    /// How the census watches a paired-host run it re-arms.
+    settle_watch: SettleWatch,
     /// Terminal agents on this machine and paired hosts.
     pty: Arc<dyn WorkerTransport>,
     /// Native mhc worker sessions, when an engine for them is wired.
@@ -179,7 +192,9 @@ impl Dispatcher {
     ) -> Self {
         Self {
             pool,
-            pty: Arc::new(PtyWorker::new(control)),
+            pty: Arc::new(PtyWorker::new(Arc::clone(&control))),
+            control,
+            settle_watch: SettleWatch::default(),
             mhc: None,
             launcher,
             local_host_id: local_host_id.into(),
@@ -215,6 +230,12 @@ impl Dispatcher {
         self
     }
 
+    /// How the restart census watches the paired-host runs it re-arms.
+    pub fn with_census_settle_watch(mut self, watch: SettleWatch) -> Self {
+        self.settle_watch = watch;
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_drain_probe(mut self, probe: mpsc::UnboundedSender<usize>) -> Self {
         self.drained = Some(probe);
@@ -232,6 +253,7 @@ impl Dispatcher {
     /// generation's tasks were aborted, so no other dispatcher of this hub is running.
     pub async fn run(self, wake: Arc<Notify>) {
         self.reconcile_at_start().await;
+        self.census_started_runs().await;
         loop {
             let notified = wake.notified();
             tokio::pin!(notified);
@@ -301,6 +323,138 @@ impl Dispatcher {
         results
     }
 
+    /// Restart census, once per hub generation after [`reconcile_claims_after_restart`]: every
+    /// started PTY run of a current execution generation whose goal is still open was left by
+    /// a predecessor, whose watchers died with it. Nothing is sent and nothing is settled here.
+    /// - A run on a paired host is watched again from its start reading
+    ///   ([`watch_paired_settle`]): its settle is recorded, and an end that cannot be observed
+    ///   (the host's observer restarted, waits keep failing) holds a `running` goal degraded
+    ///   with [`super::receipts::PAIRED_SETTLE_UNOBSERVED`]. It is never left unwatched.
+    /// - A run on this machine is settled by the hub observer
+    ///   ([`super::receipts::record_pty_settle_across_restart`]) while its pane lives. A pane
+    ///   that is not a live session of this daemon holds a `running` goal degraded with
+    ///   [`PTY_RUN_LOST`]. A census whose session list cannot be read holds nothing: the
+    ///   observer still covers a live pane.
+    ///
+    /// Native mhc worker runs are not reattached here: no daemon wires an mhc worker yet
+    /// (`with_mhc_worker` is test-only), and that wiring must add its own census.
+    pub async fn census_started_runs(&self) -> usize {
+        let sql = format!(
+            "SELECT {} FROM supervisor_dispatches d
+             JOIN supervisor_execution_bindings b
+               ON b.goal_id = d.goal_id AND b.generation = d.generation
+             JOIN supervisor_goals g ON g.goal_id = d.goal_id
+             WHERE d.state = 'started' AND b.kind = 'pty' AND d.run_id = b.run_id
+               AND g.run_state NOT IN ('completed','cancelled')
+             ORDER BY d.id",
+            DISPATCH_COLUMNS
+                .split(", ")
+                .map(|column| format!("d.{}", column.trim()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let rows: Vec<DispatchRow> = match sqlx::query_as(&sql).fetch_all(&self.pool).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "started supervisor runs were not read at start; the observer still settles live local panes");
+                return 0;
+            }
+        };
+        let mut local_panes: Option<Option<Vec<String>>> = None;
+        let mut handled = 0;
+        for row in rows {
+            let Ok(dispatch) = super::dispatch_from_row(row) else {
+                continue;
+            };
+            let (Some(run_id), Some(session_id)) = (
+                dispatch.run_id.clone(),
+                dispatch.provider_session_id.clone(),
+            ) else {
+                continue;
+            };
+            let Ok(Some(binding)) = execution_binding_of(&self.pool, &dispatch.goal_id).await
+            else {
+                continue;
+            };
+            let run = StartReceipt {
+                request_id: dispatch.request_id.clone(),
+                session_id: session_id.clone(),
+                run_id,
+            };
+            handled += 1;
+            if binding.host_id != self.local_host_id {
+                let (notice, settle) = oneshot::channel();
+                tokio::spawn(watch_paired_settle(
+                    Arc::clone(&self.control),
+                    binding.host_id.clone(),
+                    run.clone(),
+                    self.settle_watch,
+                    notice,
+                ));
+                self.watch_settle(&dispatch, binding.host_id.clone(), run, settle);
+                continue;
+            }
+            if local_panes.is_none() {
+                local_panes = Some(self.local_panes().await);
+            }
+            let Some(Some(panes)) = &local_panes else {
+                continue;
+            };
+            if panes.iter().any(|pane| pane == &session_id) {
+                continue;
+            }
+            let reason =
+                format!("pane {session_id} is not a live session of this daemon after the restart");
+            hold_unobserved(
+                &self.pool,
+                &dispatch.goal_id,
+                &dispatch.request_id,
+                &self.local_host_id,
+                &run,
+                PTY_RUN_LOST,
+                &reason,
+            )
+            .await;
+        }
+        handled
+    }
+
+    /// Session ids of this machine's live panes, or `None` when they cannot be read after
+    /// [`PANE_LIST_ATTEMPTS`] bounded tries.
+    async fn local_panes(&self) -> Option<Vec<String>> {
+        let mut backoff = PANE_LIST_BACKOFF;
+        for attempt in 1..=PANE_LIST_ATTEMPTS {
+            let failure = match self.control.execute(None, AgentOp::List).await {
+                Ok(listed) => match listed.get("sessions").and_then(serde_json::Value::as_array) {
+                    Some(sessions) => {
+                        return Some(
+                            sessions
+                                .iter()
+                                .filter_map(|session| {
+                                    session.get("sessionId").and_then(|id| id.as_str())
+                                })
+                                .map(str::to_owned)
+                                .collect(),
+                        )
+                    }
+                    None => "the list reply has no sessions".to_owned(),
+                },
+                Err(error) => error.to_string(),
+            };
+            if attempt == PANE_LIST_ATTEMPTS {
+                tracing::warn!(
+                    %failure,
+                    attempt,
+                    "local panes were not listed at start; no local run is held"
+                );
+                break;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = backoff.saturating_mul(2);
+        }
+        None
+    }
+
     async fn dispatch_one(&self, dispatch: &Dispatch) -> Result<DispatchResult, SupervisorError> {
         let request_id = dispatch.request_id.as_str();
         let Some(goal) = goal_of(&self.pool, &dispatch.goal_id).await? else {
@@ -352,7 +506,7 @@ impl Dispatcher {
         // either releases the claim (hold) or clears the transmit that follows it. An error
         // can only happen while nothing was sent, so it holds the goal and releases the claim
         // instead of leaving it `claimed` until the next restart.
-        match self.run_claimed(&goal, &binding, &claimed).await {
+        let result = match self.run_claimed(&goal, &binding, &claimed).await {
             Ok(result) => Ok(result),
             Err(error) => {
                 tracing::warn!(%error, request_id, "supervisor dispatch failed after its claim; holding the goal");
@@ -363,7 +517,9 @@ impl Dispatcher {
                 )
                 .await
             }
-        }
+        };
+        super::delivery::forget(request_id);
+        result
     }
 
     /// Launch, re-check, confirm and transmit for a claimed intent. Returns `Err` only while
@@ -425,6 +581,25 @@ impl Dispatcher {
             Err(error) => return Ok(released(request_id, &error)),
         };
         let delivery = transport.deliver(&send, settle_tx).await;
+        // An owner hold, correction or lane pause that landed while the transport waited for
+        // the pane revoked this request in the typing fence, and the transport refused it
+        // before the first byte. A goal hold or correction moved the goal, so the confirm call
+        // releases the claim; a lane pause did not, so the goal is held paused.
+        if matches!(delivery, Delivery::Refused { .. })
+            && super::delivery::check_before_typing(request_id).is_err()
+        {
+            return match confirm_claim_before_transmit(&self.pool, request_id).await {
+                Ok(_) => {
+                    let detail = format!(
+                        "{LANE_PAUSED}: the owner paused lane {} before {request_id} was typed",
+                        goal.lane_key
+                    );
+                    self.hold_claimed(claimed, RunState::Paused, detail).await
+                }
+                Err(SupervisorError::Sql(error)) => Err(SupervisorError::Sql(error)),
+                Err(error) => Ok(released(request_id, &error)),
+            };
+        }
         self.settle_transmission(goal, &sent, &send, delivery, settle_rx)
             .await
     }
@@ -514,7 +689,10 @@ impl Dispatcher {
                 format!("{OWNER_APPROVAL_REQUIRED}: a {mode} goal is not dispatched without the owner"),
             )));
         }
-        if turns_used >= turn_limit {
+        // The first dispatch consumes no turn; each corrective run counts its turn when it is
+        // enqueued ([`super::completion`]), so a dispatch goes out while the count is within
+        // the limit. A count past it was spent elsewhere and holds.
+        if turns_used > turn_limit {
             return Ok(Some((
                 RunState::AwaitingOwner,
                 format!("{TURN_LIMIT}: {turns_used} of {turn_limit} turns are used"),
@@ -883,42 +1061,11 @@ async fn hold_unobserved(
     code: &str,
     reason: &str,
 ) {
-    let live: Result<Option<(String, Option<String>)>, sqlx::Error> =
-        sqlx::query_as("SELECT state, run_id FROM supervisor_dispatches WHERE request_id = ?")
-            .bind(request_id)
-            .fetch_optional(pool)
-            .await;
-    match live {
-        Ok(Some((state, run_id)))
-            if state == "started" && run_id.as_deref() == Some(run.run_id.as_str()) => {}
-        Ok(_) => return,
-        Err(error) => {
-            tracing::warn!(%error, request_id, "an unobserved run was not checked; its goal is not held");
-            return;
-        }
-    }
-    let goal = match goal_of(pool, goal_id).await {
-        Ok(Some(goal)) if goal.run_state == RunState::Running => goal,
-        Ok(_) => return,
-        Err(error) => {
-            tracing::warn!(%error, request_id, "an unobserved run's goal was not read; it is not held");
-            return;
-        }
-    };
     let detail = format!(
         "{code}: {reason}; run {} of {request_id} may still be running on host {host}",
         run.run_id
     );
-    if let Err(error) = transition_goal(
-        pool,
-        goal_id,
-        goal.revision,
-        RunState::Running,
-        RunState::Degraded,
-        Some(&detail),
-    )
-    .await
-    {
+    if let Err(error) = hold_live_run(pool, goal_id, request_id, &run.run_id, &detail).await {
         tracing::warn!(%error, request_id, "the goal of an unobserved run was not held");
     }
 }

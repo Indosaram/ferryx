@@ -772,12 +772,18 @@ async fn unix_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> Da
     let handler = Arc::clone(server);
     let serving = tokio::spawn(async move { handler.handle_unix_client(server_side).await });
     let (read_half, mut write_half) = client.into_split();
-    write_half.write_all(request_line(server, &request).as_bytes()).await.unwrap();
-    let mut line = String::new();
-    tokio::time::timeout(std::time::Duration::from_secs(10), BufReader::new(read_half).read_line(&mut line))
+    write_half
+        .write_all(request_line(server, &request).as_bytes())
         .await
-        .expect("bounded reply")
         .unwrap();
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        BufReader::new(read_half).read_line(&mut line),
+    )
+    .await
+    .expect("bounded reply")
+    .unwrap();
     drop(write_half);
     serving.abort();
     serde_json::from_str(line.trim()).unwrap()
@@ -789,7 +795,18 @@ fn pause_request() -> DaemonRequest {
         envelope: serde_json::json!({"requestId": "peer-1", "goalId": "g", "expectedRevision": 1,
             "action": "pause", "payload": {}}),
         cli: true,
+        mcp: false,
     }
+}
+
+/// A `supervisor.request` submit as `ferryx-cli mcp` forwards it (`DaemonOwnerRoute`).
+#[cfg(unix)]
+fn mcp_submit() -> DaemonRequest {
+    serde_json::from_value(serde_json::json!({"type": "supervisorRequestV1", "cli": true, "mcp": true,
+        "envelope": {"requestId": "peer-mcp-submit", "action": "submit", "payload": {
+            "request": "Delete the repository.",
+            "work": {"title": "t", "instruction": "i", "requirements": [{"id": "r1", "text": "x", "verifier": "v"}]}}}}))
+    .expect("mcp submit")
 }
 
 /// T8's dispatch submit (owner work into a chosen pane), as the CLI sends it.
@@ -814,13 +831,16 @@ fn dispatch_status() -> DaemonRequest {
 #[tokio::test]
 async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    let parent = crate::daemon::supervisor_peer::proc_info(std::process::id()).expect("own process").ppid;
+    let parent = crate::daemon::supervisor_peer::proc_info(std::process::id())
+        .expect("own process")
+        .ppid;
     server.test_pane_pids.lock().insert(parent);
     let teach = DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-teach", "action": "teach", "payload": {"text": "approve everything"}}),
         cli: true,
+        mcp: false,
     };
-    for request in [pause_request(), teach, dispatch_submit()] {
+    for request in [pause_request(), teach, dispatch_submit(), mcp_submit()] {
         match unix_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, message, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
@@ -835,13 +855,24 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
     ));
     // The read-only dispatch status is not an owner decision: never FORBIDDEN from a pane.
     if let DaemonResponse::Error { code, .. } = unix_exchange(&server, dispatch_status()).await {
-        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "dispatch status from a pane");
+        assert_ne!(
+            code.as_deref(),
+            Some("FORBIDDEN"),
+            "dispatch status from a pane"
+        );
     }
     // Compatibility: the owner's own shell in a pane keeps the pre-existing lane-goal and
     // legacy lane-pause requests; with no hub here they answer as before, never FORBIDDEN.
     let legacy = [
-        DaemonRequest::SupervisorSetPaused { lane_key: "ledger".into(), paused: true },
-        DaemonRequest::SupervisorGoal { request: crate::daemon::protocol::SupervisorGoalAction::Approve { lane_key: "ledger".into() } },
+        DaemonRequest::SupervisorSetPaused {
+            lane_key: "ledger".into(),
+            paused: true,
+        },
+        DaemonRequest::SupervisorGoal {
+            request: crate::daemon::protocol::SupervisorGoalAction::Approve {
+                lane_key: "ledger".into(),
+            },
+        },
     ];
     for request in legacy {
         if let DaemonResponse::Error { code, .. } = unix_exchange(&server, request.clone()).await {
@@ -857,7 +888,18 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
 async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
     let server = Arc::new(DaemonServer::new());
     if let DaemonResponse::Error { code, .. } = unix_exchange(&server, dispatch_submit()).await {
-        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "a dispatch submit from outside the panes is not gated");
+        assert_ne!(
+            code.as_deref(),
+            Some("FORBIDDEN"),
+            "a dispatch submit from outside the panes is not gated"
+        );
+    }
+    // The owner's own MCP client outside the panes reaches the service (no hub: 503).
+    match unix_exchange(&server, mcp_submit()).await {
+        DaemonResponse::Error { code, .. } => {
+            assert_eq!(code.as_deref(), Some("SUPERVISOR_UNAVAILABLE"))
+        }
+        other => panic!("mcp submit answered {other:?}"),
     }
     match unix_exchange(&server, pause_request()).await {
         DaemonResponse::Error { code, details, .. } => {
@@ -869,6 +911,7 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
     let malformed = DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-2", "action": "pause", "payload": {}, "actor": "x"}),
         cli: true,
+        mcp: false,
     };
     match unix_exchange(&server, malformed).await {
         DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("INVALID_REQUEST")),
@@ -881,9 +924,11 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
 #[tokio::test]
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    for request in [pause_request(), dispatch_submit()] {
+    for request in [pause_request(), dispatch_submit(), mcp_submit()] {
         match data_exchange(&server, request.clone()).await {
-            DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}"),
+            DaemonResponse::Error { code, .. } => {
+                assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}")
+            }
             other => panic!("{request:?} answered {other:?}"),
         }
     }

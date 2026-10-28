@@ -15,7 +15,8 @@ import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync,
 import { createConnection, createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HarnessError, isInside, POSIX, waitForPath } from './harness.mjs';
+import { HarnessError, isInside, POSIX, probeProcess, waitForPath } from './harness.mjs';
+import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -137,8 +138,24 @@ export async function openHubReader(dbPath) {
     const db = new Database(dbPath, { readonly: true });
     try { return db.query(sql).all(...params); } finally { db.close(); }
   };
+  // Several reads from one snapshot: one connection inside one read transaction, so rows the
+  // hub commits together (e.g. a started dispatch and its goal's move to running, written in
+  // one transaction by supervisor.rs record_start) are never seen half applied. `all` opens a
+  // connection per query, so two `all` calls can straddle a commit.
+  const read = (fn) => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      db.exec('BEGIN');
+      try {
+        return fn((sql, ...params) => db.query(sql).all(...params));
+      } finally {
+        db.exec('COMMIT');
+      }
+    } finally { db.close(); }
+  };
   return {
     all,
+    read,
     one: (sql, ...params) => all(sql, ...params)[0] ?? null,
     count: (sql, ...params) => Number(Object.values(all(sql, ...params)[0] ?? { n: -1 })[0]),
   };
@@ -264,6 +281,12 @@ async function runAdmission(ctx) {
   await ctx.startDaemon({ env, deadlineMs: 60_000 });
   const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), ADMISSION_WORKSPACE_ID, realpathSync(workspaceRoot));
   ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+  // FERRYX_DAEMON_READY precedes the hub: the first MCP submit waits until the hub answers.
+  const hubWaitStarted = Date.now();
+  const hubProbe = await hubOpen(ctx, env, 90_000);
+  ctx.evidence.appendJsonl('requests.jsonl', { label: 'hub-open-wait', waitedMs: Date.now() - hubWaitStarted, code: hubProbe?.code, reply: hubProbe?.json ?? null, at: new Date().toISOString() });
+  ctx.assert('hub-open-before-the-first-submit', hubProbe?.json?.code === 'NOT_FOUND', { code: hubProbe?.code, json: hubProbe?.json });
+  if (hubProbe?.json?.code !== 'NOT_FOUND') throw new HarnessError('HUB_UNAVAILABLE', `the isolated daemon's hub did not open: ${JSON.stringify(hubProbe?.json ?? null)}`);
 
   // 3. The owner's MCP channel, an owned stdio process.
   const mcp = await ctx.spawn('mcp', config.ferryxCli, ['mcp'], { env, cwd: data, stdin: 'pipe', graceMs: 3_000 });
@@ -379,6 +402,191 @@ async function runAdmission(ctx) {
     sourceId, goalId, receipt, setup: setup.json, binding: finalBinding, goal: finalGoal, dispatches: dispatched.dispatches,
     counts: { afterStart, afterReplay, afterEdited, afterQuestion, final: finalCounts }, toolsCalled, hubHttp: env.FERRYX_HUB_TRACKER_ADDR,
   });
+}
+
+// ---------------------------------------------------------------------------
+// autonomy (plan task 10): one submit through MCP `supervisor.request`; the fixture worker's
+// first turn writes the wrong bytes, every later turn writes READY. The hub's own wakes grade
+// each settled run on the retained mhc engine (a loopback provider stub) and run the
+// requirement's verifier itself (`sig:req:r1`). The stub model claims completion every time
+// and cites that check, so only the check Ferryx ran decides: run 1 fails it and becomes one
+// corrective run without the owner, run 2 passes and completes the goal. The hub database is
+// only read, read-only.
+
+const AUTONOMY_WORKSPACE_ID = 'qa-autonomy';
+const AUTONOMY_PROJECT = 'qa-autonomy';
+const AUTONOMY_BODY = 'Create result.txt containing READY. Run the verifier. Correct failures until it passes.';
+const AUTONOMY_WORK = Object.freeze({
+  title: 'Write result.txt',
+  instruction: 'Create result.txt containing READY. Run verify.sh. Correct failures until it passes.',
+  requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+const AUTONOMY_VERIFY = 'test "$(cat result.txt)" = READY\n';
+// The blind convergence prompt's opening (crates/ferryx-hub/src/goals/converge.rs build_prompt).
+const CONVERGENCE_MARKER = 'You independently check whether a coding lane';
+const AUTONOMY_CONVERGED = Object.freeze({ requirements: [{ req_id: 'r1', met: true, evidence_refs: ['sig:req:r1'] }] });
+
+function promptTextOf(json) {
+  return (json?.messages ?? []).map((message) => (typeof message?.content === 'string' ? message.content
+    : (Array.isArray(message?.content) ? message.content.map((part) => part?.text ?? '').join('') : ''))).join('\n');
+}
+
+async function runAutonomy(ctx) {
+  if (!POSIX) {
+    throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'autonomy runs a POSIX fixture worker pane (the Windows pane shell ignores SHELL); this scenario runs on Linux or macOS');
+  }
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the autonomy fixture project is a git repository');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  if (!isInside(dbPath, data)) throw new HarnessError('PRODUCTION_PATH_REFUSED', `hub database ${dbPath} is outside the run root`);
+
+  // Fixture: a committed verify.sh (so every lane worktree has it) in a workspace checkout.
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, AUTONOMY_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'verify.sh'), AUTONOMY_VERIFY, { mode: 0o755 });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]],
+    ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
+    ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']],
+  ]) {
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
+  }
+  const gitCommonDir = realpathSync(join(repo, '.git'));
+  const workerLogs = join(data, 'workers');
+  mkdirSync(workerLogs, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn\n`, { mode: 0o755 });
+
+  // The decision engine: the hub's retained mhc on a loopback provider stub.
+  const stub = await startProviderStub(ctx, { answer: (json) => (promptTextOf(json).includes(CONVERGENCE_MARKER) ? AUTONOMY_CONVERGED : null) });
+  try {
+    const env = await prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: config.mhcBin, label: 'autonomy', extra: {
+      SHELL: shell,
+      FERRYX_HUB_WORKSPACE: AUTONOMY_WORKSPACE_ID,
+      OMON_LANE_AUTO_WORKTREE: '1',
+    } });
+    ctx.announce({ autonomy: 'fixture', workspaceRoot, repo, gitCommonDir, hubHttp: env.FERRYX_HUB_TRACKER_ADDR, dbPath, provider: stub.baseUrl });
+
+    const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', AUTONOMY_PROJECT, '--repo-identity', `qa:${AUTONOMY_PROJECT}`,
+      '--host', ADMISSION_HOST, '--git-common-dir', gitCommonDir, '--json'], { label: 'supervisor-setup', env });
+    if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${JSON.stringify(setup.json)} ${setup.stderr}`);
+
+    const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+    const engine = await awaitEngine(ctx, env, 'autonomy-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', engine?.engine?.state === 'ready', { engine });
+    const registered = await registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), AUTONOMY_WORKSPACE_ID, realpathSync(workspaceRoot));
+    ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+
+    // The owner's one request, through the owned MCP channel.
+    const mcp = await ctx.spawn('mcp', config.ferryxCli, ['mcp'], { env, cwd: data, stdin: 'pipe', graceMs: 3_000 });
+    mcp.child.stdin.on('error', () => { /* the exit event decides */ });
+    const sourceId = `qa-autonomy-${ctx.runId}`;
+    // Every frame actually written to the MCP channel, as written.
+    const sentFrames = [];
+    const sendFrame = (value) => { sentFrames.push(JSON.parse(JSON.stringify(value))); mcp.child.stdin.write(`${JSON.stringify(value)}\n`); };
+    const frame = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'supervisor.request', arguments: { requestId: sourceId, action: 'submit', payload: { request: AUTONOMY_BODY, work: AUTONOMY_WORK } } } };
+    const cursor = ctx.journal.cursor();
+    ctx.evidence.appendJsonl('requests.jsonl', { label: 'submit', surface: 'ferryx-cli mcp', frame, at: new Date().toISOString() });
+    sendFrame(frame);
+    const reply = await ctx.waitFor('mcp reply to submit', (e) => e.source === 'mcp' && e.kind === 'stdout' && e.json?.id === 1, { after: cursor, deadlineMs: 30_000 });
+    let body = null;
+    try { body = JSON.parse(reply.json?.result?.content?.[0]?.text ?? 'null'); } catch { /* asserted below */ }
+    ctx.evidence.appendJsonl('responses.jsonl', { label: 'submit', reply: reply.json, body, at: new Date().toISOString() });
+    const goalId = body?.receipt?.goal_id ?? null;
+    ctx.assert('submit-admitted', reply.json?.error == null && body?.outcome === 'admitted' && typeof goalId === 'string', { reply: reply.json, body });
+    if (!goalId) throw new HarnessError('ADMISSION_FAILED', 'the submit returned no goal; nothing can run');
+
+    // Nothing more is asked of anyone: the goal must end by itself.
+    const hub = await openHubReader(dbPath);
+    const observedDetails = [];
+    const ended = await waitForChange(ctx, 'goal to complete or hold', dirname(dbPath), () => {
+      const goal = hub.one('SELECT run_state, state_detail, revision, lane_key FROM supervisor_goals WHERE goal_id = ?', goalId);
+      if (goal?.state_detail && observedDetails.at(-1) !== goal.state_detail) observedDetails.push(goal.state_detail);
+      return { done: HELD_STATES.has(goal?.run_state), goal };
+    }, 6 * 60_000);
+    const goal = ended.goal;
+    ctx.assert('goal-completed-without-owner', goal?.run_state === 'completed', { goal, observedDetails });
+
+    const dispatches = hub.all('SELECT id, request_id, goal_revision, state, run_id, instruction, created_at, settled_at FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId);
+    const [first, second] = dispatches;
+    const admittedRevision = first?.goal_revision ?? null;
+    ctx.assert('two-runs-at-admitted-revision', dispatches.length === 2 && dispatches.every((row) => row.state === 'settled' && row.goal_revision === admittedRevision && typeof row.run_id === 'string')
+      && first.request_id !== second.request_id && first.run_id !== second.run_id, { dispatches: dispatches.map(({ instruction, ...row }) => row) });
+    ctx.assert('correction-followed-first-settle-and-names-r1', Boolean(first?.settled_at && second?.created_at) && second.created_at >= first.settled_at
+      && second.instruction.includes('r1') && second.instruction.includes('Allowed operations: edit, test'), { first: first && { settledAt: first.settled_at }, second });
+    // state_detail is overwritten by later moves; the durable trace of the failed check is the
+    // verifying -> ready transition that queued the correction.
+    const events = hub.all("SELECT seq, from_state, to_state, from_revision, to_revision FROM supervisor_state_events WHERE goal_id = ? AND source = 'goal' ORDER BY seq", goalId);
+    ctx.assert('verifier-failure-took-the-corrective-path', events.some((event) => event.from_state === 'verifying' && event.to_state === 'ready')
+      && !events.some((event) => ['awaiting_owner', 'paused', 'degraded'].includes(event.to_state)), { events, observedDetails });
+    const terms = hub.one('SELECT turns_used FROM lane_goal WHERE lane_key = ?', goal?.lane_key ?? '');
+    ctx.assert('one-corrective-turn-counted', terms?.turns_used === 1, { terms });
+    let verified = null;
+    try { verified = JSON.parse((goal?.state_detail ?? '').replace(/^VERIFIED: /, '')); } catch { /* asserted below */ }
+    ctx.assert('verified-names-second-run-and-current-revision', goal?.state_detail?.startsWith('VERIFIED: ') && verified?.runId === second?.run_id
+      && verified?.requestId === second?.request_id && verified?.goalRevision === goal?.revision && verified?.evidenceRefs?.includes('sig:req:r1'), { detail: goal?.state_detail, verified });
+    const requirement = hub.one("SELECT status, evidence_json FROM lane_goal_requirements WHERE lane_key = ? AND req_id = 'r1'", goal?.lane_key ?? '');
+    let refs = [];
+    try { refs = JSON.parse(requirement?.evidence_json ?? '[]'); } catch { /* asserted below */ }
+    ctx.assert('r1-met-with-ferryx-check-and-run-provenance', requirement?.status === 'met' && refs.includes('sig:req:r1')
+      && refs.some((ref) => typeof ref === 'string' && ref.startsWith('run:') && ref.includes(second?.run_id ?? '\u0000')), { requirement, refs });
+    const calls = hub.all('SELECT purpose, kind, outcome, used_fallback FROM judge_calls ORDER BY rowid');
+    const graded = calls.filter((call) => ['gap_assess', 'convergence_check'].includes(call.purpose));
+    // Every grading turn ran on the retained mhc engine (kind mhc_*, outcome ok); none on omo.
+    ctx.assert('grading-ran-on-mhc', graded.length >= 4 && graded.every((call) => call.kind.startsWith('mhc_') && call.outcome === 'ok')
+      && stub.requests.some((request) => request.path?.endsWith('/chat/completions')), { calls, providerRequests: stub.requests.length });
+    // What actually crossed the owner's channel: the frames written to MCP stdin, the
+    // JSON-RPC replies the MCP process emitted, and the requests the hub admitted. Exactly one
+    // supervisor.request submit, answered once, admitted once from MCP: no other tool call,
+    // no correct/approve/resume nudge.
+    const mcpCalls = sentFrames.map((sent) => ({ id: sent.id, method: sent.method, tool: sent.params?.name ?? null, action: sent.params?.arguments?.action ?? null }));
+    const replyIds = ctx.journal.events.filter((e) => e.source === 'mcp' && e.kind === 'stdout' && e.json && e.json.id !== undefined && e.json.id !== null).map((e) => e.json.id);
+    const requests = hub.all('SELECT source_adapter, source_message_id, goal_id FROM supervisor_requests ORDER BY id');
+    ctx.assert('only-submit-was-requested', mcpCalls.length === 1 && mcpCalls[0].method === 'tools/call' && mcpCalls[0].tool === 'supervisor.request' && mcpCalls[0].action === 'submit'
+      && JSON.stringify(replyIds) === JSON.stringify([mcpCalls[0].id])
+      && requests.length === 1 && requests[0].source_message_id === sourceId && requests[0].goal_id === goalId,
+    { mcpCalls, replyIds, requests });
+
+    const workers = readWorkerLogs(workerLogs);
+    const instructions = workers.flatMap((entry) => entry.entries.filter((line) => line.kind === 'instruction'));
+    const turns = workers.flatMap((entry) => entry.entries.filter((line) => line.kind === 'turn'));
+    ctx.assert('worker-received-exactly-two-instructions', workers.length === 1 && instructions.length === 2
+      && turns.map((line) => line.verifyExit).join(',') === '1,0' && instructions[0].text.includes(AUTONOMY_WORK.instruction), { instructions, turns });
+
+    // The runner checks the final bytes itself, in the lane's checkout.
+    const lane = hub.one('SELECT cwd FROM lanes WHERE key = ?', goal?.lane_key ?? '');
+    const cwd = lane?.cwd ?? null;
+    const check = cwd ? await ctx.run('verify-final', '/bin/sh', ['verify.sh'], { cwd, deadlineMs: 20_000 }) : null;
+    const bytes = cwd && existsSync(join(cwd, 'result.txt')) ? readFileSync(join(cwd, 'result.txt'), 'utf8') : null;
+    ctx.assert('final-bytes-verify-on-disk', check?.code === 0 && bytes === 'READY', { cwd, code: check?.code, bytes });
+
+    // Cleanup: stop the daemon; the fixture worker must exit by itself.
+    const workerPids = workers.map((entry) => Number(entry.name.match(/^worker-(\d+)\.jsonl$/)?.[1])).filter(Number.isInteger);
+    const cleanExit = new Set(['stdin-closed', 'hangup', 'terminated']);
+    await ctx.terminate(daemon, 'worker-cleanup');
+    const closed = await waitForChange(ctx, 'fixture worker exit', workerLogs, () => {
+      const open = readWorkerLogs(workerLogs).filter((entry) => !entry.entries.some((line) => cleanExit.has(line.kind)));
+      return { done: open.length === 0, open: open.map((entry) => entry.name) };
+    }, 30_000).then(() => true, (error) => { if (ctx.signal.aborted) throw error; return false; });
+    const alive = workerPids.filter((pid) => pidAlive(pid));
+    ctx.assert('fixture-workers-gone', workerPids.length === 1 && closed && alive.length === 0, { workerPids, closed, alive });
+
+    for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
+    ctx.evidence.writeJson('autonomy.json', {
+      worker: { kind: 'fixture', note: 'fixture-worker.mjs --multi-turn: wrong bytes on turn 1, READY after, runs verify.sh, reports working then idle. Not a real provider worker.' },
+      model: { kind: 'loopback stub', note: 'The stub always answers complete and cites sig:req:r1; the check Ferryx ran decides. It is no proof of a real model\'s judgment.' },
+      sourceId, goalId, goal, dispatches, events, observedDetails, terms, requirement, judgeCalls: calls, final: { cwd, code: check?.code, bytes },
+    });
+  } finally {
+    await stub.close();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -609,19 +817,7 @@ async function runRemoteDelivery(ctx) {
   // read-only status request for a goal that cannot exist until the hub itself answers NOT_FOUND
   // (bounded backoff). Any other answer - unavailable, timeout, connect error - keeps polling,
   // and is the recorded failure if it is still the answer at the deadline.
-  const hubReadyBy = Date.now() + 90_000;
-  let hubProbe = null;
-  for (let attempt = 0, pauseMs = 250; ; attempt += 1, pauseMs = Math.min(pauseMs * 2, 2_000)) {
-    hubProbe = await ctx.cli(['supervisor', 'dispatch', 'status', '--goal', `qa-hub-ready-${attempt}`, '--json'], { label: `hub-ready-${attempt}`, env: hubEnv });
-    if (hubProbe.json?.code === 'NOT_FOUND') break;
-    if (Date.now() + pauseMs > hubReadyBy) break;
-    await new Promise((resolvePause, rejectPause) => {
-      if (ctx.signal.aborted) { rejectPause(ctx.signal.reason); return; }
-      const onAbort = () => { clearTimeout(timer); rejectPause(ctx.signal.reason); };
-      const timer = setTimeout(() => { ctx.signal.removeEventListener('abort', onAbort); resolvePause(); }, pauseMs);
-      ctx.signal.addEventListener('abort', onAbort, { once: true });
-    });
-  }
+  const hubProbe = await hubOpen(ctx, hubEnv, 90_000);
   ctx.assert('hub-open-on-the-hub-daemon', hubProbe?.json?.code === 'NOT_FOUND', { code: hubProbe?.code, json: hubProbe?.json });
 
   // 5. Positive receipt: the reporting pane starts the run from its own report.
@@ -787,6 +983,27 @@ function listTree(root) {
   return out;
 }
 
+// The daemon opens its hub after the socket is up and publishes no event for it, so ask the
+// read-only dispatch status for a goal that cannot exist until the hub itself answers NOT_FOUND
+// (bounded backoff). Any other answer - unavailable, timeout, connect error - keeps polling, and
+// is the recorded failure if it is still the answer at the deadline. Returns the last probe.
+async function hubOpen(ctx, env, deadlineMs) {
+  const readyBy = Date.now() + deadlineMs;
+  let probe = null;
+  for (let attempt = 0, pauseMs = 250; ; attempt += 1, pauseMs = Math.min(pauseMs * 2, 2_000)) {
+    probe = await ctx.cli(['supervisor', 'dispatch', 'status', '--goal', `qa-hub-ready-${attempt}`, '--json'], { label: `hub-ready-${attempt}`, env });
+    if (probe.json?.code === 'NOT_FOUND') break;
+    if (Date.now() + pauseMs > readyBy) break;
+    await new Promise((resolvePause, rejectPause) => {
+      if (ctx.signal.aborted) { rejectPause(ctx.signal.reason); return; }
+      const onAbort = () => { clearTimeout(timer); rejectPause(ctx.signal.reason); };
+      const timer = setTimeout(() => { ctx.signal.removeEventListener('abort', onAbort); resolvePause(); }, pauseMs);
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+  return probe;
+}
+
 async function runAuthority(ctx) {
   if (!POSIX) {
     throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'the pane peer check is POSIX (peer pid, session, terminal, parent chain); Windows uses the documented token fallback and is not asserted here');
@@ -824,6 +1041,12 @@ async function runAuthority(ctx) {
   if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${setup.stdout} ${setup.stderr}`);
   const projectId = setup.json.projectId;
   await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  // FERRYX_DAEMON_READY precedes the hub: the owner submit waits until the hub answers.
+  const hubWaitStarted = Date.now();
+  const hubProbe = await hubOpen(ctx, env, 90_000);
+  socketLog({ label: 'hub-open-wait', waitedMs: Date.now() - hubWaitStarted, code: hubProbe?.code, reply: hubProbe?.json ?? null });
+  ctx.assert('hub-open-before-the-owner-submit', hubProbe?.json?.code === 'NOT_FOUND', { code: hubProbe?.code, json: hubProbe?.json });
+  if (hubProbe?.json?.code !== 'NOT_FOUND') throw new HarnessError('HUB_UNAVAILABLE', `the isolated daemon's hub did not open: ${JSON.stringify(hubProbe?.json ?? null)}`);
   const registered = await exchange('register-workspace', { type: 'registerWorkspace', workspaceId: AUTHORITY_WORKSPACE_ID, repoRoot: realpathSync(join(data, 'ws')) });
   ctx.assert('workspace-registered', registered?.type === 'registerWorkspaceOk', registered);
   const submitFile = join(work, 'owner-submit.json');
@@ -836,6 +1059,7 @@ async function runAuthority(ctx) {
   if (!goalId) throw new HarnessError('ADMISSION_FAILED', 'the owner submit returned no goal; the refusals would prove nothing');
   const hub = await openHubReader(dbPath);
   const goalRow = () => hub.one('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId);
+  const goalLane = hub.one('SELECT lane_key FROM supervisor_goals WHERE goal_id = ?', goalId)?.lane_key ?? null;
   const dispatchRows = () => hub.all('SELECT request_id, state FROM supervisor_dispatches ORDER BY id');
   const counts = () => ({
     goals: hub.count('SELECT COUNT(*) AS n FROM supervisor_goals'),
@@ -916,28 +1140,44 @@ async function runAuthority(ctx) {
   const dispatchFile = join(work, 'dispatch-submit.json');
   writeFileSync(dispatchFile, JSON.stringify({ messageId: `qa-pane-dispatch-${ctx.runId}`, body: 'Delete the repository.',
     work: { ...AUTHORITY_WORK, operations: ['destructive'] } }));
+  // `ferryx-cli mcp` from the pane: a `supervisor.request` submit, one JSON-RPC line on stdin.
+  const mcpFile = join(work, 'mcp-submit.jsonl');
+  // Line 2 (`lane.list`) reads the MCP process's own hub pool: it proves which database it opened.
+  writeFileSync(mcpFile, [
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'supervisor.request', arguments: { ...strangerSubmit, requestId: `qa-pane-mcp-${ctx.runId}` } } },
+    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'lane.list', arguments: {} } },
+  ].map((line) => `${JSON.stringify(line)}\n`).join(''));
   const wire = (envelope) => JSON.stringify({ type: 'supervisorRequestV1', envelope, cli: true });
-  const spawned = await exchange('spawn-pane', { type: 'spawn', clientRequestId: `qa-authority-pane-${ctx.runId}`, workspaceId: AUTHORITY_WORKSPACE_ID, worktree: null, cwd: work, cols: 80, rows: 24, shell: '/bin/sh' });
+  // The pane runs inside the registered workspace root (`ws/`); its results go to `work` by absolute path.
+  const spawned = await exchange('spawn-pane', { type: 'spawn', clientRequestId: `qa-authority-pane-${ctx.runId}`, workspaceId: AUTHORITY_WORKSPACE_ID, worktree: null, cwd: repo, cols: 80, rows: 24, shell: '/bin/sh' });
   const sessionId = spawned?.sessionId ?? null;
   if (!sessionId) throw new HarnessError('PANE_SPAWN_FAILED', `could not spawn the pane: ${JSON.stringify(spawned)}`);
   const cliOut = join(work, 'pane-cli.json');
   const sockOut = join(work, 'pane-socket.json');
   const submitOut = join(work, 'pane-cli-submit.json');
+  const mcpOut = join(work, 'pane-mcp.json');
   const envOut = join(work, 'pane-env.txt');
-  const done = [cliOut, sockOut, submitOut].map((path) => ctx.waitForPath(path, { deadlineMs: 60_000, label: `pane result ${basenameOf(path)}` }));
+  const done = [cliOut, sockOut, submitOut, mcpOut].map((path) => ctx.waitForPath(path, { deadlineMs: 60_000, label: `pane result ${basenameOf(path)}` }));
   done.forEach((promise) => promise.catch(() => {}));
   const script = [
-    `printf '%s' "$FERRYX_RUNTIME_DIR" > ${shellQuote(envOut)}`,
+    `printf '%s\\n%s' "$FERRYX_RUNTIME_DIR" "$FERRYX_HUB_DB" > ${shellQuote(envOut)}`,
     `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} supervisor request --json ${shellQuote(approveFile)} > ${shellQuote(`${cliOut}.tmp`)} 2>&1; mv ${shellQuote(`${cliOut}.tmp`)} ${shellQuote(cliOut)}`,
     `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} supervisor submit --request-file ${shellQuote(dispatchFile)} --json > ${shellQuote(`${submitOut}.tmp`)} 2>&1; mv ${shellQuote(`${submitOut}.tmp`)} ${shellQuote(submitOut)}`,
+    `env -u FERRYX_SESSION_ID ${shellQuote(config.ferryxCli)} mcp < ${shellQuote(mcpFile)} > ${shellQuote(`${mcpOut}.tmp`)} 2>/dev/null; mv ${shellQuote(`${mcpOut}.tmp`)} ${shellQuote(mcpOut)}`,
     `${shellQuote(process.execPath)} ${shellQuote(client)} ${shellQuote(socket)} ${DAEMON_PROTOCOL_VERSION} ${shellQuote(wire(approve))} ${shellQuote(wire(approveEverything))} ${shellQuote(wire(strangerSubmit))} > ${shellQuote(`${sockOut}.tmp`)} 2>&1; mv ${shellQuote(`${sockOut}.tmp`)} ${shellQuote(sockOut)}`,
   ].join('; ') + '\n';
   const typed = await exchange('pane-write', { type: 'write', sessionId, data: Buffer.from(script).toString('base64') });
   ctx.assert('pane-script-written', typed?.type !== 'error', typed);
   await Promise.all(done);
-  const paneRuntime = existsSync(envOut) ? readFileSync(envOut, 'utf8') : null;
+  const [paneRuntime = null, paneHubDb = null] = existsSync(envOut) ? readFileSync(envOut, 'utf8').split('\n') : [];
   ctx.assert('pane-inherits-the-isolated-daemon-env', paneRuntime === runtimeDir || (paneRuntime && realpathSync(paneRuntime) === realpathSync(runtimeDir)), { paneRuntime, runtimeDir });
-  let paneCli = null; let paneSock = null; let paneSubmit = null;
+  let paneCli = null; let paneSock = null; let paneSubmit = null; let paneMcp = null;
+  let paneMcpLanes = null;
+  try {
+    const lines = readFileSync(mcpOut, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    paneMcp = lines.find((line) => line?.id === 1) ?? null;
+    paneMcpLanes = lines.find((line) => line?.id === 2) ?? null;
+  } catch { /* asserted below */ }
   try { paneCli = JSON.parse(readFileSync(cliOut, 'utf8')); } catch { /* asserted below */ }
   try { paneSubmit = JSON.parse(readFileSync(submitOut, 'utf8')); } catch { /* asserted below */ }
   try { paneSock = JSON.parse(readFileSync(sockOut, 'utf8')); } catch { /* asserted below */ }
@@ -947,6 +1187,18 @@ async function runAuthority(ctx) {
   socketLog({ label: 'pane-cli-dispatch-submit', peer: 'pane', reply: paneSubmit });
   // FERRYX_SESSION_ID is removed, so the CLI's own speed bump does not fire: the daemon's peer gate refuses it.
   ctx.assert('pane-cli-dispatch-submit-forbidden', paneSubmit?.ok === false && paneSubmit?.code === 'FORBIDDEN', paneSubmit);
+  socketLog({ label: 'pane-mcp-submit', peer: 'pane', reply: paneMcp });
+  // The MCP server forwards every write to the daemon, whose peer gate sees the pane-run MCP process.
+  ctx.assert('pane-mcp-submit-forbidden', paneMcp?.id === 1 && typeof paneMcp?.error?.message === 'string'
+    && paneMcp.error.message.startsWith('FORBIDDEN'), paneMcp);
+  // The pane-run MCP opened the isolated hub (inherited FERRYX_HUB_DB), never the real data dir:
+  // its own lane list holds the lane of the goal admitted in this run's database.
+  let mcpLaneKeys = null;
+  try { mcpLaneKeys = JSON.parse(paneMcpLanes?.result?.content?.[0]?.text ?? 'null')?.map((lane) => lane.key) ?? null; } catch { /* asserted below */ }
+  socketLog({ label: 'pane-mcp-hub-db', peer: 'pane', paneHubDb, dbPath, goalLane, mcpLaneKeys });
+  const sameFile = (left, right) => left === right || (!!left && existsSync(left) && realpathSync(left) === right);
+  ctx.assert('pane-mcp-opens-the-isolated-hub-db', sameFile(paneHubDb, dbPath) && typeof goalLane === 'string'
+    && Array.isArray(mcpLaneKeys) && mcpLaneKeys.includes(goalLane), { paneHubDb, dbPath, goalLane, mcpLaneKeys, reply: paneMcpLanes });
   const paneReplies = Array.isArray(paneSock) ? paneSock.slice(1) : [];
   ctx.assert('pane-socket-approve-teach-submit-forbidden', paneReplies.length === 3 && paneReplies.every((reply) => reply?.type === 'error' && reply?.code === 'FORBIDDEN'), paneSock);
 
@@ -978,6 +1230,538 @@ async function runAuthority(ctx) {
 
 function basenameOf(path) { return path.slice(path.lastIndexOf('/') + 1); }
 
+// Todo 12: recovery and capabilities.
+//
+// A hub restart is `ferryx-cli hub stop` + `hub start` against the isolated daemon: the hub
+// generation (dispatcher, wake scheduler, observer loop, engine) ends and a new one reconciles,
+// while the daemon and its worker PTYs keep running. Killing the daemon would kill the PTYs it
+// owns, which is the very thing the scenario must show never happens, so no boundary needs a
+// daemon kill or a product hook: each boundary is reached by observing the hub database (WAL
+// changes) and the fixture worker's own log before the stop.
+
+const RECOVERY_WORKSPACE_ID = 'qa-recovery';
+const NO_START_MARK = 'QA_NO_START_REPORT';
+
+/** Fixture repo + worker shell + owner setup + isolated daemon + workspace + MCP channel. */
+async function supervisedHub(ctx, { workspaceId, extraEnv = {}, label }) {
+  if (!POSIX) throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', `${label} needs the POSIX fixture worker shell`);
+  const { config } = ctx;
+  const git = onPath('git');
+  if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH');
+  const data = realpathSync(ctx.paths.data);
+  const dbPath = join(data, 'hub', 'hub.sqlite');
+  const workspaceRoot = join(data, 'ws');
+  const repo = join(workspaceRoot, ADMISSION_PROJECT);
+  mkdirSync(repo, { recursive: true });
+  const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
+  for (const [step, args] of [['git-init', [...gitArgs, 'init', '-q', repo]], ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']]]) {
+    const result = await ctx.run(`${label}-${step}`, git, args, { deadlineMs: 30_000 });
+    if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${step} exited ${result.code}: ${result.stderr}`);
+  }
+  const workerLogs = join(data, 'workers');
+  mkdirSync(workerLogs, { recursive: true });
+  const shell = join(data, 'bin', 'qa-worker-shell');
+  mkdirSync(dirname(shell), { recursive: true });
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)}\n`, { mode: 0o755 });
+  // OMON_INBOX_ENABLED=0 is the hub's own switch for its inbox watchers
+  // (ferryx-hub inbox_watch.rs inbox_enabled, read in hub_runtime spawn_generation). The
+  // isolated run has no iMessage or mail; a watcher that ran would fail and `hub status
+  // --check` would count it (control.rs status_report), so health would mean nothing.
+  const isolation = { SHELL: shell, FERRYX_HUB_WORKSPACE: workspaceId, OMON_LANE_AUTO_WORKTREE: '1', OMON_INBOX_ENABLED: '0' };
+  const env = typeof extraEnv === 'function'
+    ? await extraEnv(isolation)
+    : ctx.productEnv({ ...isolation, FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${await freeLoopbackPort()}`, ...extraEnv });
+  const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', ADMISSION_PROJECT, '--repo-identity', ADMISSION_REPO_IDENTITY,
+    '--host', ADMISSION_HOST, '--git-common-dir', realpathSync(join(repo, '.git')), '--json'], { label: `${label}-setup`, env });
+  ctx.assert('setup-created-identity-project-and-host', setup.code === 0 && setup.json?.ok === true, { code: setup.code, json: setup.json, stderr: setup.stderr });
+  if (!setup.json?.projectId) throw new HarnessError('SETUP_FAILED', 'supervisor setup returned no project');
+  const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  const socket = join(data, 'runtime', 'daemon.sock');
+  const registered = await registerWorkspace(ctx, socket, workspaceId, realpathSync(workspaceRoot));
+  ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
+  const mcp = await ctx.spawn(`${label}-mcp`, config.ferryxCli, ['mcp'], { env, cwd: data, stdin: 'pipe', graceMs: 3_000 });
+  mcp.child.stdin.on('error', () => { /* the exit event decides */ });
+  let rpcId = 0;
+  const submit = async (step, sourceId, instruction) => {
+    rpcId += 1;
+    const id = rpcId;
+    const work = { ...ADMISSION_WORK, instruction };
+    const frame = { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'supervisor.request', arguments: { requestId: sourceId, action: 'submit', payload: { request: instruction, work } } } };
+    const cursor = ctx.journal.cursor();
+    ctx.evidence.appendJsonl('requests.jsonl', { label: step, surface: 'ferryx-cli mcp', frame, at: new Date().toISOString() });
+    mcp.child.stdin.write(`${JSON.stringify(frame)}\n`);
+    const reply = await ctx.waitFor(`mcp reply to ${step}`, (e) => e.source === `${label}-mcp` && e.kind === 'stdout' && e.json?.id === id, { after: cursor, deadlineMs: 30_000 });
+    let body = null;
+    try { body = JSON.parse(reply.json?.result?.content?.[0]?.text ?? 'null'); } catch { /* asserted by the caller */ }
+    ctx.evidence.appendJsonl('responses.jsonl', { label: step, reply: reply.json, body, at: new Date().toISOString() });
+    return body;
+  };
+  const hub = await openHubReader(dbPath);
+  // Pane census through the product CLI. A failed list is never an empty census: `ok` must be
+  // true and `sessions` an array, or the census step fails the scenario.
+  const panes = async (step) => {
+    const listed = await ctx.cli(['agents', 'list'], { label: `${label}-panes-${step}`, env });
+    const ok = listed.code === 0 && listed.json?.ok === true && Array.isArray(listed.json?.sessions);
+    const ids = ok ? listed.json.sessions.map((session) => session.sessionId).filter(Boolean).sort() : [];
+    ctx.evidence.appendJsonl('pty-census.jsonl', { step, ok, code: listed.code, ids, at: new Date().toISOString() });
+    ctx.assert(`pty-census-listed-${step}`, ok, { code: listed.code, json: listed.json, stderr: listed.stderr });
+    return ids;
+  };
+  // Child census: the daemon and every fixture worker (one per pane, pid from its own log),
+  // each with its start stamp, so a restarted or replaced process is told from a survivor.
+  const children = async (step) => {
+    const probe = async (pid) => {
+      const seen = await probeProcess(pid);
+      return { pid, state: seen.state, startStamp: seen.startStamp ?? null };
+    };
+    const workers = [];
+    for (const worker of readWorkerLogs(workerLogs)) {
+      const pid = worker.entries.find((entry) => entry.kind === 'ready')?.pid ?? null;
+      if (pid) workers.push({ sessionId: worker.sessionId, ...(await probe(pid)) });
+    }
+    const record = { step, daemon: await probe(daemon.pid), workers, at: new Date().toISOString() };
+    ctx.evidence.appendJsonl('child-census.jsonl', record);
+    return record;
+  };
+  return { data, dbPath, env, daemon, hub, submit, panes, children, workerLogs };
+}
+
+/** Every process of `before` is alive in `after` with the same start stamp. */
+const survived = (before, after) => {
+  const same = (a, b) => b?.state === 'alive' && a.state === 'alive' && a.startStamp !== null && b.startStamp === a.startStamp;
+  return same(before.daemon, after.daemon)
+    && before.workers.every((worker) => same(worker, after.workers.find((later) => later.pid === worker.pid)));
+};
+
+/** Session ids of every started (or held-started) dispatch, which must each be a live pane. */
+const startedSessions = (hub) => hub.all(
+  "SELECT DISTINCT provider_session_id AS id FROM supervisor_dispatches WHERE state = 'started' AND provider_session_id IS NOT NULL",
+).map((row) => row.id).sort();
+
+const hubControl = async (ctx, env, op, step) => {
+  const result = await ctx.cli(['hub', op], { label: `hub-${op}-${step}`, env });
+  ctx.evidence.appendJsonl('boundaries.jsonl', { step, op, code: result.code, stdout: result.stdout, at: new Date().toISOString() });
+  // `ferryx-cli hub stop|start` exits 0 only on a `"status":"ok"` reply (hub_runtime control_exit_code).
+  return result.code === 0;
+};
+
+/**
+ * `ferryx-cli hub status [--check]` until `accept(result)` holds, bounded by `deadlineMs`.
+ * The daemon opens its hub only after it announced ready (src-tauri/src/cli.rs:3920-3925), and
+ * binds control.sock after the hub's first generation (hub_runtime.rs serve_control), so right
+ * after a daemon start (or a `hub start`, whose HTTP bind is async) the answer can still be
+ * "no control socket" or "unhealthy". Each try is one bounded CLI round trip; there is no
+ * event to subscribe to across the process boundary, so the pause only spaces the tries.
+ */
+const hubStatusUntil = async (ctx, env, step, { check = false, accept, deadlineMs = 60_000 }) => {
+  const deadline = performance.now() + deadlineMs;
+  const args = check ? ['hub', 'status', '--check'] : ['hub', 'status'];
+  for (let attempt = 1; ; attempt += 1) {
+    const result = await ctx.cli(args, { label: `hub-status-${step}-${attempt}`, env });
+    if (accept(result)) {
+      ctx.evidence.appendJsonl('boundaries.jsonl', { step, op: args.slice(1).join(' '), attempt, code: result.code, stdout: result.stdout, at: new Date().toISOString() });
+      return { ok: true, attempt, result };
+    }
+    if (performance.now() >= deadline) return { ok: false, attempt, result };
+    if (ctx.signal.aborted) throw ctx.signal.reason;
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(250 * attempt, 2_000)));
+  }
+};
+const hubRunning = (result) => result.code === 0 && result.json?.running === true;
+const hubHealthy = (result) => result.code === 0 && result.json?.healthy === true;
+
+// The prompt the dispatcher types (supervisor/admission.rs dispatch text) is several lines:
+// the work instruction, then "Owner request (verbatim):" and the owner's body, then the scope.
+// The fixture logs one `input` entry per line, so a marker in both instruction and body would
+// count twice per line-count. One delivery is one header line followed by its body line.
+const OWNER_REQUEST_HEADER = 'Owner request (verbatim):';
+const deliveries = (workerLogs) => readWorkerLogs(workerLogs).flatMap((worker) => {
+  const inputs = worker.entries.filter((entry) => entry.kind === 'input');
+  return inputs.flatMap((entry, index) => (entry.text.trim() === OWNER_REQUEST_HEADER && inputs[index + 1]
+    ? [{ worker: worker.name, body: inputs[index + 1].text }] : []));
+});
+
+// The goal and its dispatches from one snapshot (see openHubReader `read`).
+const goalRows = (hub, goalId) => hub.read((query) => ({
+  goal: query('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', goalId)[0] ?? null,
+  dispatches: query('SELECT request_id, state, uncertain_code, run_id, provider_session_id FROM supervisor_dispatches WHERE goal_id = ? ORDER BY id', goalId),
+}));
+
+/** Workers (one entry per delivery) whose delivered owner request carries `needle`. */
+const inputsWith = (workerLogs, needle) => deliveries(workerLogs)
+  .filter((delivery) => delivery.body.includes(needle)).map((delivery) => delivery.worker);
+
+async function runRecovery(ctx) {
+  const log = [];
+  const note = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+  // The no-start dispatch must still be waiting for its start receipt when the hub stops.
+  const h = await supervisedHub(ctx, { workspaceId: RECOVERY_WORKSPACE_ID, label: 'recovery', extraEnv: { FERRYX_SUPERVISOR_TURN_START_MS: '240000' } });
+  const { hub, env, workerLogs } = h;
+  const hubDir = dirname(h.dbPath);
+  const transcript = (boundary, phase) => ctx.evidence.appendJsonl(`recovery/${boundary}.jsonl`, { phase, ...goalRows(hub, transcript.goals[boundary] ?? ''), workers: readWorkerLogs(workerLogs).length, at: new Date().toISOString() });
+  transcript.goals = {};
+  // Every wait of this scenario: on a timeout (or any failure) the state of every goal seen so
+  // far, its dispatches and the worker/pane counts are written to the evidence before the
+  // failure propagates, so a hang carries a snapshot even after the data root is cleaned up.
+  const snapshotOnFailure = async (label, wait) => {
+    try {
+      return await wait;
+    } catch (error) {
+      let snapshot;
+      try {
+        snapshot = {
+          label,
+          error: String(error?.message ?? error),
+          goals: Object.fromEntries(Object.entries(transcript.goals).map(([boundary, goalId]) => [boundary, { goalId, ...goalRows(hub, goalId ?? '') }])),
+          allDispatches: hub.all('SELECT goal_id, request_id, state, uncertain_code, run_id, provider_session_id, generation FROM supervisor_dispatches ORDER BY id'),
+          bindings: hub.all('SELECT goal_id, kind, host_id, generation, provider_session_id, run_id FROM supervisor_execution_bindings ORDER BY goal_id'),
+          workers: readWorkerLogs(workerLogs).map((worker) => ({ name: worker.name, sessionId: worker.sessionId, lines: worker.entries.length })),
+          at: new Date().toISOString(),
+        };
+      } catch (readError) {
+        snapshot = { label, error: String(error?.message ?? error), snapshotError: String(readError?.message ?? readError) };
+      }
+      ctx.evidence.appendJsonl('recovery/timeout-snapshots.jsonl', snapshot);
+      throw error;
+    }
+  };
+  const census = [];
+  const take = async (step) => { const ids = await h.panes(step); census.push({ step, ids }); return ids; };
+  // One hub-generation restart: stop and start must each succeed, and the daemon and every
+  // fixture worker must be the same processes (pid and start stamp) afterwards.
+  const restartHub = async (step) => {
+    const before = await h.children(`${step}-before`);
+    ctx.assert(`hub-stopped-${step}`, await hubControl(ctx, env, 'stop', step), {});
+    ctx.assert(`hub-started-${step}`, await hubControl(ctx, env, 'start', step), {});
+    const after = await h.children(`${step}-after`);
+    ctx.assert(`children-survived-${step}`, survived(before, after), { before, after });
+  };
+  try {
+    // Boundary 1: before send. The hub is stopped, so the admission commits a ready intent that
+    // no dispatcher can claim; after the restart it runs exactly once.
+    // Precondition: the hub this daemon opened is running (control.sock bound, a generation
+    // live), so the stop below is a real stop, and afterwards status reports it not running.
+    const upFirst = await hubStatusUntil(ctx, env, 'before-send-up', { accept: hubRunning });
+    ctx.assert('hub-running-before-send', upFirst.ok, { attempt: upFirst.attempt, code: upFirst.result.code, json: upFirst.result.json, stderr: upFirst.result.stderr });
+    const childrenFirst = await h.children('before-send-before');
+    const stoppedFirst = await hubControl(ctx, env, 'stop', 'before-send');
+    const downFirst = await ctx.cli(['hub', 'status'], { label: 'hub-status-before-send-down', env });
+    ctx.assert('hub-stopped-before-send', stoppedFirst && downFirst.code === 0 && downFirst.json?.running === false
+      && downFirst.json?.stopped_flag === true, { stopped: stoppedFirst, status: downFirst.json, stderr: downFirst.stderr });
+    const marker1 = `QA_RECOVERY_BEFORE_SEND_${ctx.runId}`;
+    const first = await h.submit('before-send', `qa-recovery-1-${ctx.runId}`, `Create result.txt containing READY. ${marker1}`);
+    const goal1 = first?.receipt?.goal_id ?? null;
+    transcript.goals['before-send'] = goal1;
+    const rows1 = goalRows(hub, goal1 ?? '');
+    ctx.assert('before-send-admitted-while-stopped', first?.outcome === 'admitted' && rows1.goal?.run_state === 'ready'
+      && rows1.dispatches.length === 1 && rows1.dispatches[0].state === 'ready' && inputsWith(workerLogs, marker1).length === 0, rows1);
+    transcript('before-send', 'stopped');
+    const panesBefore = await take('before-send-restart');
+    ctx.assert('hub-restarted-before-send', await hubControl(ctx, env, 'start', 'before-send'), {});
+    const childrenFirstAfter = await h.children('before-send-after');
+    ctx.assert('children-survived-before-send', survived(childrenFirst, childrenFirstAfter), { before: childrenFirst, after: childrenFirstAfter });
+    const ran1 = await snapshotOnFailure('before-send dispatch after restart', waitForChange(ctx, 'before-send dispatch after restart', hubDir, () => {
+      const rows = goalRows(hub, goal1);
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000));
+    transcript('before-send', 'restarted');
+    ctx.assert('before-send-runs-once-after-restart', ran1.goal?.run_state === 'running' && ran1.dispatches.length === 1
+      && ran1.dispatches[0].state === 'started' && inputsWith(workerLogs, marker1).length === 1, { ...ran1, inputs: inputsWith(workerLogs, marker1) });
+    note(`before-send goal=${goal1} panes-before=${panesBefore.length}`);
+
+    // Boundary 2: after send, before the start receipt. The worker logs the typed instruction
+    // and withholds its start report, so the dispatch stays claimed while its delivery waits.
+    const marker2 = `QA_RECOVERY_AFTER_SEND_${ctx.runId} ${NO_START_MARK}`;
+    const second = await h.submit('after-send', `qa-recovery-2-${ctx.runId}`, `Create result.txt containing READY. ${marker2}`);
+    const goal2 = second?.receipt?.goal_id ?? null;
+    transcript.goals['after-send'] = goal2;
+    const typed = await snapshotOnFailure('after-send instruction typed while claimed', waitForChange(ctx, 'after-send instruction typed while claimed', workerLogs, () => {
+      const rows = goalRows(hub, goal2 ?? '');
+      return { done: inputsWith(workerLogs, marker2).length >= 1 && ['claimed', 'accepted'].includes(rows.dispatches[0]?.state), ...rows };
+    }, 120_000));
+    transcript('after-send', 'typed');
+    const typedState = typed.dispatches[0]?.state;
+    ctx.assert('after-send-instruction-typed-while-claimed', typed.dispatches.length === 1 && ['claimed', 'accepted'].includes(typedState), typed);
+    const panesMid = await take('after-send-restart');
+    await restartHub('after-send');
+    const held = await snapshotOnFailure('after-send reconciliation', waitForChange(ctx, 'after-send reconciliation', hubDir, () => {
+      const rows = goalRows(hub, goal2);
+      return { done: rows.goal?.run_state === 'delivery_uncertain', ...rows };
+    }, 60_000));
+    transcript('after-send', 'restarted');
+    ctx.assert('after-send-held-uncertain-not-resent', held.dispatches.length === 1 && held.dispatches[0].state === 'uncertain'
+      && held.dispatches[0].uncertain_code === (typedState === 'claimed' ? 'CLAIM_UNCONFIRMED_AT_RESTART' : 'START_UNCONFIRMED_AT_RESTART')
+      && inputsWith(workerLogs, marker2).length === 1, { typedState, ...held, inputs: inputsWith(workerLogs, marker2) });
+    note(`after-send goal=${goal2} panes-before=${panesMid.length}`);
+
+    // Boundary 3: after start. The run is reattached (still running, same dispatch), never resent.
+    const marker3 = `QA_RECOVERY_AFTER_START_${ctx.runId}`;
+    const third = await h.submit('after-start', `qa-recovery-3-${ctx.runId}`, `Create result.txt containing READY. ${marker3}`);
+    const goal3 = third?.receipt?.goal_id ?? null;
+    transcript.goals['after-start'] = goal3;
+    const started = await snapshotOnFailure('after-start run started', waitForChange(ctx, 'after-start run started', hubDir, () => {
+      const rows = goalRows(hub, goal3 ?? '');
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000));
+    transcript('after-start', 'started');
+    ctx.assert('after-start-run-started', started.goal?.run_state === 'running' && started.dispatches[0]?.state === 'started', started);
+    const panesLate = await take('after-start-restart');
+    await restartHub('after-start');
+    const status = await hubStatusUntil(ctx, env, 'after-start-check', { check: true, accept: hubHealthy, deadlineMs: 30_000 });
+    ctx.assert('hub-healthy-after-start-restart', status.ok, { attempt: status.attempt, code: status.result.code, stdout: status.result.stdout, stderr: status.result.stderr });
+    // A live pane's run is left to the observer by the restart census, which writes nothing.
+    // The new dispatcher runs its census before its first drain, so a sentinel goal submitted
+    // now reaching `started` proves this generation's census already ran; goal3 is read after.
+    const markerS = `QA_RECOVERY_SENTINEL_${ctx.runId}`;
+    const sentinel = await h.submit('sentinel', `qa-recovery-s-${ctx.runId}`, `Create result.txt containing READY. ${markerS}`);
+    const goalS = sentinel?.receipt?.goal_id ?? null;
+    transcript.goals.sentinel = goalS;
+    const sentinelRan = await snapshotOnFailure('sentinel dispatch after the after-start restart', waitForChange(ctx, 'sentinel dispatch after the after-start restart', hubDir, () => {
+      const rows = goalRows(hub, goalS ?? '');
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000));
+    ctx.assert('census-ran-sentinel-started', sentinel?.outcome === 'admitted' && sentinelRan.dispatches[0]?.state === 'started', sentinelRan);
+    const after = goalRows(hub, goal3);
+    transcript('after-start', 'restarted');
+    ctx.assert('after-start-reattached-not-resent', after.goal?.run_state === 'running' && after.dispatches.length === 1
+      && after.dispatches[0].request_id === started.dispatches[0].request_id && after.dispatches[0].state === 'started'
+      && inputsWith(workerLogs, marker3).length === 1, { ...after, inputs: inputsWith(workerLogs, marker3) });
+    note(`after-start goal=${goal3} panes-before=${panesLate.length}`);
+
+    const final = await take('final');
+    const settledLate = goalRows(hub, goal3);
+    ctx.evidence.appendJsonl('recovery/after-start.jsonl', { phase: 'final', ...settledLate, at: new Date().toISOString() });
+    ctx.assert('after-start-still-running-at-end', settledLate.goal?.run_state === 'running' && settledLate.dispatches.length === 1
+      && settledLate.dispatches[0].state === 'started' && inputsWith(workerLogs, marker3).length === 1, settledLate);
+    const goals = hub.count('SELECT COUNT(*) AS n FROM supervisor_goals');
+    ctx.assert('no-goal-lost', goals === 4 && [goal1, goal2, goal3, goalS].every((goal) => goal && hub.one('SELECT goal_id FROM supervisor_goals WHERE goal_id = ?', goal)), { goals });
+    // Falsifiable census: every pane seen before any restart is still listed, and every started
+    // dispatch's pane (the runs the restarts must not lose) is a live pane at the end.
+    const liveRuns = startedSessions(hub);
+    ctx.assert('pty-census-unchanged-across-restarts', census.every(({ ids }) => ids.every((id) => final.includes(id)))
+      && liveRuns.length >= 2 && liveRuns.every((id) => final.includes(id)), { census, final, liveRuns });
+    // Each goal launched its own pane: the hub never handed one goal's pane to another.
+    const panesByGoal = hub.all('SELECT goal_id, provider_session_id FROM supervisor_execution_bindings WHERE provider_session_id IS NOT NULL ORDER BY goal_id');
+    const boundPanes = panesByGoal.map((row) => row.provider_session_id);
+    ctx.assert('each-goal-owns-its-pane', boundPanes.length >= 4 && new Set(boundPanes).size === boundPanes.length, { panesByGoal });
+    // One body per delivery; every submit's body carries its own marker, so a repeat is a resend.
+    const allInputs = deliveries(workerLogs).map((delivery) => delivery.body).filter((body) => body.includes('QA_RECOVERY_'));
+    ctx.assert('no-instruction-typed-twice', new Set(allInputs).size === allInputs.length, { allInputs });
+  } finally {
+    for (const worker of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${worker.name}`, worker.text);
+    ctx.evidence.writeText('task-12-recovery.log', `${log.join('\n')}\n`);
+  }
+}
+
+async function runCapabilities(ctx) {
+  // T6's engine fixtures (provider stub, isolated mhc profile, capability filter, engine status
+  // and assess through `ferryx-cli supervisor engine`). Loaded lazily: until T6 merges, only
+  // this scenario fails, with a named prerequisite.
+  let mhc;
+  try { mhc = await import('./mhc.mjs'); } catch (error) {
+    throw new HarnessError('PREREQUISITE_MISSING', `capabilities needs the T6 engine fixtures (scripts/qa/unified-supervisor/mhc.mjs, us/t6-qa): ${error?.message ?? error}`);
+  }
+  const { config } = ctx;
+  const log = [];
+  const note = (line) => { log.push(`${new Date().toISOString()} ${line}`); ctx.log(line); };
+  const stub = await mhc.startProviderStub(ctx);
+  try {
+    // The hub reads its env file once per process (hub_env FILE_ENV), so the engine binary
+    // cannot be swapped by a hub restart. The engine is instead a runner-owned wrapper that runs
+    // the real mhc while `dropFile` is empty and T6's capability filter once it names a
+    // capability; each engine launch reads it, and a hub restart relaunches the engine.
+    const binDir = join(realpathSync(ctx.paths.data), 'bin');
+    mkdirSync(binDir, { recursive: true });
+    const dropFile = join(binDir, 'mhc-drop-capability');
+    const frames = join(binDir, 'mhc-filter-frames.jsonl');
+    const wrapper = join(binDir, 'mhc-switchable');
+    writeFileSync(dropFile, '');
+    writeFileSync(wrapper, [
+      '#!/bin/sh',
+      `drop=$(cat ${shellQuote(dropFile)} 2>/dev/null)`,
+      `[ -z "$drop" ] && exec ${shellQuote(config.mhcBin)} "$@"`,
+      `UNIFIED_SUPERVISOR_MHC_REAL=${shellQuote(config.mhcBin)}`,
+      'UNIFIED_SUPERVISOR_MHC_DROP_CAPABILITY="$drop"',
+      `UNIFIED_SUPERVISOR_MHC_FRAMES=${shellQuote(frames)}`,
+      'export UNIFIED_SUPERVISOR_MHC_REAL UNIFIED_SUPERVISOR_MHC_DROP_CAPABILITY UNIFIED_SUPERVISOR_MHC_FRAMES',
+      `exec ${shellQuote(process.execPath)} ${shellQuote(mhc.MHC_FILTER)} "$@"`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+    let engineEnv = null;
+    const h = await supervisedHub(ctx, {
+      workspaceId: 'qa-capabilities',
+      label: 'capabilities',
+      extraEnv: async (extra) => { engineEnv = await mhc.prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: wrapper, label: 'switchable', extra }); return engineEnv; },
+    });
+    const ready = await mhc.awaitEngine(ctx, engineEnv, 'ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+    ctx.assert('engine-ready', ready?.engine?.state === 'ready', ready?.engine ?? null);
+    // A worker pane the faults must leave alone.
+    const marker = `QA_CAPABILITIES_${ctx.runId}`;
+    const submitted = await h.submit('worker', `qa-capabilities-${ctx.runId}`, `Create result.txt containing READY. ${marker}`);
+    const goalId = submitted?.receipt?.goal_id ?? '';
+    const running = await waitForChange(ctx, 'worker pane started', dirname(h.dbPath), () => {
+      const rows = goalRows(h.hub, goalId);
+      return { done: rows.dispatches.some((row) => row.state === 'started') || HELD_STATES.has(rows.goal?.run_state), ...rows };
+    }, 120_000);
+    ctx.assert('worker-pane-started', running.goal?.run_state === 'running', running);
+    const panesBefore = await h.panes('before-faults');
+
+    // One fault leg: the stub fails every request of the turn, then answers normally again.
+    // Before the next leg the engine must have ended this turn: a probe assessment (stub
+    // succeeding) is repeated, bounded, until it returns an answer. A turn the engine still
+    // runs keeps its decision session open (open_session refuses session_path_in_use), so
+    // without this a slow leg cascades into the next. Per-leg stub request counts are kept.
+    const legs = [];
+    const fault = async (step, status, message, options = {}) => {
+      const from = stub.requests.length;
+      stub.failNext(status, message, options);
+      const reply = await mhc.engineAssess(ctx, engineEnv, step, 'Assess: is the qa goal complete? Answer JSON.');
+      stub.succeed();
+      const faultRequests = stub.requests.length - from;
+      const settle = [];
+      const settleDeadline = performance.now() + 120_000;
+      for (let attempt = 1; ; attempt += 1) {
+        const probe = await mhc.engineAssess(ctx, engineEnv, `${step}-settled-${attempt}`, 'Assess: is the qa goal complete? Answer JSON.');
+        settle.push({ attempt, code: probe.code, faultCode: probe.json?.code ?? null });
+        if (probe.code === 0) break;
+        if (performance.now() >= settleDeadline) {
+          throw new HarnessError('DEADLINE_EXCEEDED', `the engine did not end the ${step} turn within 120s`, { settle });
+        }
+        if (ctx.signal.aborted) throw ctx.signal.reason;
+        await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(500 * attempt, 4_000)));
+      }
+      const leg = { step, status, options, code: reply.code, faultCode: reply.json?.code ?? null, message: reply.json?.message ?? null,
+        faultRequests, settleRequests: stub.requests.length - from - faultRequests, settle, lastArrival: stub.arrivals() };
+      legs.push(leg);
+      ctx.evidence.writeJson('capabilities/fault-legs.json', legs);
+      note(`${step}: code=${leg.faultCode ?? reply.code} faultRequests=${faultRequests} settleAttempts=${settle.length}`);
+      return reply;
+    };
+    const auth = await fault('auth', 401, 'invalid x-api-key qa-loopback-fixture');
+    ctx.assert('auth-fault-is-typed', auth.code !== 0 && auth.json?.code === 'MHC_AUTH', auth.json);
+    // An exhausted quota, as OpenAI reports it: 429 with code insufficient_quota and
+    // `x-should-retry: false`. mhc's transport retry stops on that header
+    // (maho-ai utils/provider_retry.rs is_retryable) and its turn retry treats the
+    // insufficient_quota text as non-retryable (utils/retry.rs NON_RETRYABLE_PROVIDER_ERROR_PATTERN),
+    // so the turn fails at once instead of backing off until the assessment times out. A
+    // plain 429 "rate limit" is a transient limit that mhc rightly retries.
+    const quota = await fault('quota', 429, 'You exceeded your current quota: insufficient_quota (qa)',
+      { code: 'insufficient_quota', headers: { 'x-should-retry': 'false' } });
+    ctx.assert('quota-fault-is-typed', quota.code !== 0 && quota.json?.code === 'MHC_QUOTA'
+      && legs.at(-1).faultRequests >= 1 && legs.at(-1).faultRequests <= 2, { reply: quota.json, leg: legs.at(-1) });
+    const provider = await fault('provider', 400, 'qa stub refused the request');
+    ctx.assert('provider-fault-is-typed', provider.code !== 0 && provider.json?.code === 'MHC_PROVIDER', provider.json);
+
+    // Missing capability: the next engine launch hides one required capability; only the hub
+    // generation restarts (hub stop/start), never the daemon, so every PTY stays alive.
+    writeFileSync(dropFile, mhc.DROPPED_CAPABILITY);
+    note(`engine wrapper now drops ${mhc.DROPPED_CAPABILITY}; restarting the hub generation only`);
+    // Child census around the hub-generation restart: the owned engine (profile pid record
+    // `<pid> <hub pid>`) is replaced, while the daemon and every worker are the same processes.
+    const pidFile = join(mhc.engineStateDir(ctx), 'mhc-supervisor.pid');
+    const enginePid = () => {
+      try {
+        const [pid, owner] = readFileSync(pidFile, 'utf8').trim().split(/\s+/).map(Number);
+        return owner === h.daemon.pid ? pid : null;
+      } catch { return null; }
+    };
+    const oldEngine = enginePid();
+    const oldProbe = oldEngine ? await probeProcess(oldEngine) : null;
+    const childrenBefore = await h.children('capability-before');
+    ctx.assert('hub-stopped-capability', await hubControl(ctx, engineEnv, 'stop', 'capability'), {});
+    // Baseline by arrival, taken once the old engine process is gone. `hub stop` returns when
+    // the generation's tasks are aborted; the engine's teardown is only spawned then
+    // (mhc_supervisor.rs StopOnDrop::drop -> stop_engine: stdin close, SHUTDOWN_GRACE 5s, kill),
+    // and during that graceful drain mhc's own shutdown work (e.g. the memory extension's
+    // shutdown evaluators) may still call the provider. Such a request is the old engine's,
+    // not a send of the degraded one, so the baseline waits for its exit (bounded) and every
+    // request arriving after it can only come from the new generation's engine.
+    const oldGoneDeadline = performance.now() + 30_000;
+    let oldExit = oldEngine ? await probeProcess(oldEngine) : null;
+    for (let attempt = 1; oldExit && oldExit.state === 'alive' && oldExit.startStamp === oldProbe?.startStamp; attempt += 1) {
+      if (performance.now() >= oldGoneDeadline) {
+        throw new HarnessError('DEADLINE_EXCEEDED', `the old engine ${oldEngine} did not exit within 30s of hub stop`, { oldProbe, oldExit });
+      }
+      if (ctx.signal.aborted) throw ctx.signal.reason;
+      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(100 * attempt, 1_000)));
+      oldExit = await probeProcess(oldEngine);
+    }
+    const arrivalsBefore = stub.arrivals();
+    const shutdownRequests = stub.requests.filter((entry) => entry.arrival > (legs.at(-1)?.lastArrival ?? 0));
+    ctx.evidence.writeJson('capabilities/old-engine-shutdown.json', { oldEngine, oldProbe, oldExit, arrivalsBefore, shutdownRequests });
+    const degradedSends = () => stub.requests.filter((entry) => entry.arrival > arrivalsBefore);
+    ctx.assert('hub-started-capability', await hubControl(ctx, engineEnv, 'start', 'capability'), {});
+    const degraded = await mhc.awaitEngine(ctx, engineEnv, 'degraded', (json) => json?.engine?.state === 'degraded', 120_000);
+    ctx.assert('missing-capability-is-degraded', degraded?.engine?.faultCode === 'MHC_CAPABILITY_MISSING'
+      && JSON.stringify(degraded?.engine?.fault?.missing) === JSON.stringify([mhc.DROPPED_CAPABILITY]), degraded?.engine ?? null);
+    // The refused engine is ended and its pid record forgotten (MhcSupervisor::launch), so a
+    // degraded generation leaves no owned engine child. Its relaunch loop records a transient
+    // pid per refused launch, so the record is re-read (bounded) until it is empty, or names a
+    // pid other than the old engine that is gone on a second probe.
+    const oldAfter = oldEngine ? await probeProcess(oldEngine) : null;
+    // Ended only on positive evidence: gone or zombie, or alive with a defined, different start
+    // stamp. An `unknown` probe is never counted as ended.
+    const ended = (before, after) => Boolean(before) && before.state === 'alive' && typeof before.startStamp === 'string'
+      && Boolean(after) && (after.state === 'gone' || after.state === 'zombie'
+        || (after.state === 'alive' && typeof after.startStamp === 'string' && after.startStamp !== before.startStamp));
+    const recordReads = [];
+    const recordDeadline = performance.now() + 30_000;
+    let noOwnedEngine = false;
+    for (let attempt = 1; ; attempt += 1) {
+      const recorded = enginePid();
+      if (recorded === null) { recordReads.push({ attempt, recorded }); noOwnedEngine = true; break; }
+      if (recorded !== oldEngine) {
+        const first = await probeProcess(recorded);
+        const second = first.state === 'gone' ? first : await probeProcess(recorded);
+        recordReads.push({ attempt, recorded, first: first.state, second: second.state });
+        if (second.state === 'gone') { noOwnedEngine = true; break; }
+      } else {
+        recordReads.push({ attempt, recorded, note: 'still the old engine' });
+      }
+      if (performance.now() >= recordDeadline) break;
+      if (ctx.signal.aborted) throw ctx.signal.reason;
+      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(250 * attempt, 2_000)));
+    }
+    const childrenAfter = await h.children('capability-after');
+    const degradedCensus = { pidFile, oldEngine, oldProbe, oldAfter, recordReads, noOwnedEngine, childrenBefore, childrenAfter };
+    ctx.evidence.writeJson('capabilities/engine-census-degraded.json', degradedCensus);
+    ctx.assert('engine-child-ended-workers-kept', ended(oldProbe, oldAfter) && noOwnedEngine
+      && survived(childrenBefore, childrenAfter), degradedCensus);
+    const refused = await mhc.engineAssess(ctx, engineEnv, 'degraded-refused', 'Assess again.');
+    const seen = mhc.readFrames(frames);
+    ctx.assert('degraded-engine-got-zero-sends', refused.json?.code === 'MHC_CAPABILITY_MISSING' && stub.arrivals() === arrivalsBefore
+      && degradedSends().length === 0 && seen.length >= 1 && seen.every((frame) => frame.type === 'get_protocol_info'),
+    { frames: seen, arrivalsBefore, arrivalsNow: stub.arrivals(), providerRequests: degradedSends() });
+    ctx.assert('no-fallback-canary-requests', stub.requests.every((entry) => entry.model !== mhc.CANARY_MODEL), { requests: stub.requests.length });
+    const panesAfter = await h.panes('after-faults');
+    const rows = goalRows(h.hub, goalId);
+    const started = startedSessions(h.hub);
+    ctx.assert('worker-panes-preserved', panesBefore.length >= 1 && panesBefore.every((id) => panesAfter.includes(id))
+      && started.length >= 1 && started.every((id) => panesAfter.includes(id))
+      && inputsWith(h.workerLogs, marker).length === 1 && rows.dispatches.length === 1, { panesBefore, panesAfter, started, rows });
+
+    // Recovery from degraded: the filter is cleared and only the hub generation restarts once
+    // more. A new owned engine child exists; the daemon and every worker are unchanged.
+    writeFileSync(dropFile, '');
+    const childrenRecover = await h.children('recover-before');
+    ctx.assert('hub-stopped-recover', await hubControl(ctx, engineEnv, 'stop', 'recover'), {});
+    ctx.assert('hub-started-recover', await hubControl(ctx, engineEnv, 'start', 'recover'), {});
+    const recovered = await mhc.awaitEngine(ctx, engineEnv, 'recovered', (json) => json?.engine?.state === 'ready', 120_000);
+    const newEngine = enginePid();
+    const newProbe = newEngine ? await probeProcess(newEngine) : null;
+    const childrenRecovered = await h.children('recover-after');
+    const recoverCensus = { oldEngine, newEngine, newProbe, reported: recovered?.engine?.pid ?? null, childrenRecover, childrenRecovered };
+    ctx.evidence.writeJson('capabilities/engine-census-recovered.json', recoverCensus);
+    ctx.assert('engine-child-replaced-workers-kept', newEngine !== null && newEngine !== oldEngine && newProbe?.state === 'alive'
+      && recovered?.engine?.pid === newEngine && survived(childrenRecover, childrenRecovered), recoverCensus);
+    const panesRecovered = await h.panes('recovered');
+    ctx.assert('worker-panes-preserved-after-recovery', started.every((id) => panesRecovered.includes(id)), { started, panesRecovered });
+  } finally {
+    await stub.close();
+    ctx.evidence.writeText('task-12-capabilities.log', `${log.join('\n')}\n`);
+  }
+}
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -987,7 +1771,7 @@ export const SCENARIOS = Object.freeze({
     summary: 'Submit the fixture request, replay the same source id, ask "What can you do?": one goal, one initial dispatch',
     deadlineMs: 6 * 60_000,
     requiredAssertions: [
-      'setup-created-identity-project-and-host', 'setup-rerun-returns-the-same-ids', 'setup-conflicting-rebind-refused', 'workspace-registered',
+      'setup-created-identity-project-and-host', 'setup-rerun-returns-the-same-ids', 'setup-conflicting-rebind-refused', 'workspace-registered', 'hub-open-before-the-first-submit',
       'submit-admitted-with-acknowledgment-naming-goal', 'initial-dispatch-started-without-drive-call', 'exactly-one-worker-started',
       'replay-returns-the-same-receipt', 'replay-created-no-second-dispatch', 'edited-replay-returns-request-conflict',
       'edited-replay-created-no-second-worker', 'question-is-conversational', 'question-created-no-goal-or-dispatch',
@@ -995,11 +1779,26 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runAdmission,
   }),
-  autonomy: planned('10', 'First verification forced to fail, corrected result allowed: two run ids, attested pass, one completed goal, no owner nudge'),
+  autonomy: Object.freeze({
+    implemented: true,
+    task: '10',
+    summary: 'First verification forced to fail, corrected result allowed: two run ids, attested pass, one completed goal, no owner nudge',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'workspace-registered', 'submit-admitted', 'goal-completed-without-owner', 'two-runs-at-admitted-revision',
+      'correction-followed-first-settle-and-names-r1', 'verifier-failure-took-the-corrective-path', 'one-corrective-turn-counted',
+      'verified-names-second-run-and-current-revision', 'r1-met-with-ferryx-check-and-run-provenance', 'grading-ran-on-mhc',
+      'only-submit-was-requested', 'worker-received-exactly-two-instructions', 'final-bytes-verify-on-disk', 'fixture-workers-gone',
+    ],
+    notCovered: [
+      { clause: 'model-judgment', reason: 'the provider is a loopback stub that always claims completion; only the Ferryx-run check decides', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/completion.rs' },
+      { clause: 'remote-run', reason: 'a run on a paired host is held REMOTE_CHECK_UNAVAILABLE, not graded', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/completion.rs a_remote_run_is_never_checked_against_the_local_checkout' },
+    ],
+    run: runAutonomy,
+  }),
   correction: planned('10', 'Owner correction "Use DONE instead of READY" before dispatch, stale expectedRevision replayed: final bytes DONE, stale mutation 409'),
   waiting: planned('9', 'Parent starts two children; one settles, then the second settles/fails: no decision while incomplete, one resume, failure is not completion'),
   burst: planned('9', 'Four ordinary reports at virtual 0,1,2,3s advanced to 30s: one admitted model turn with four receipts; urgent pause has zero delay'),
-  recovery: planned('12', 'Restart only the isolated supervisor at before-send, after-send-before-receipt and after-start boundaries: no resend, PTYs survive'),
   'remote-delivery': Object.freeze({
     implemented: true,
     task: '8',
@@ -1017,19 +1816,53 @@ export const SCENARIOS = Object.freeze({
     ],
     run: runRemoteDelivery,
   }),
+  recovery: Object.freeze({
+    implemented: true,
+    task: '12',
+    summary: 'Restart only the isolated hub generation at before-send, after-send-before-receipt and after-start boundaries: one execution when reconcilable, otherwise delivery_uncertain with no resend; every PTY survives',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: [
+      'setup-created-identity-project-and-host', 'workspace-registered', 'hub-running-before-send', 'hub-stopped-before-send',
+      'before-send-admitted-while-stopped',
+      'hub-restarted-before-send', 'children-survived-before-send', 'before-send-runs-once-after-restart',
+      'after-send-instruction-typed-while-claimed', 'hub-stopped-after-send', 'hub-started-after-send', 'children-survived-after-send',
+      'after-send-held-uncertain-not-resent', 'after-start-run-started', 'hub-stopped-after-start', 'hub-started-after-start',
+      'children-survived-after-start', 'hub-healthy-after-start-restart', 'census-ran-sentinel-started',
+      'after-start-reattached-not-resent', 'after-start-still-running-at-end', 'no-goal-lost', 'pty-census-listed-final',
+      'pty-census-unchanged-across-restarts', 'each-goal-owns-its-pane', 'no-instruction-typed-twice',
+    ],
+    // No product surface advances an execution generation for a live goal (advance_generation is
+    // called only from tests), so a predecessor's late completion cannot be provoked end to end.
+    notCovered: ['predecessor-completion-after-new-generation: crates/ferryx-hub/src/supervisor/tests/recovery.rs a_predecessor_completion_after_a_new_generation_is_ignored'],
+    run: runRecovery,
+  }),
   authority: Object.freeze({
     implemented: true,
     task: '13',
-    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request and `supervisor submit` with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
+    summary: 'Owner goal provisioned; mirror device, excluded device, body-named actor, and a real pane (CLI request, `supervisor submit` and a `ferryx-cli mcp` `supervisor.request` submit with FERRYX_SESSION_ID removed, raw socket approve/"approve everything"/submit) are refused: goal, dispatches, requests and memory root unchanged; then the owner device pauses it (200), the replay is 409, memory receipts 503',
     deadlineMs: 5 * 60_000,
-    requiredAssertions: ['owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
-      'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
+    requiredAssertions: ['hub-open-before-the-owner-submit', 'owner-goal-held-for-the-owner', 'non-owner-devices-refused-403', 'body-named-actor-refused-400', 'pane-inherits-the-isolated-daemon-env',
+      'pane-cli-approve-forbidden', 'pane-cli-dispatch-submit-forbidden', 'pane-mcp-submit-forbidden', 'pane-mcp-opens-the-isolated-hub-db', 'pane-socket-approve-teach-submit-forbidden', 'goal-unchanged-after-refusals', 'zero-dispatch-after-refusals',
       'no-request-or-wait-written', 'memory-root-unchanged', 'authorized-snapshot-200-lists-the-goal', 'authorized-pause-200', 'stale-revision-409',
       'memory-receipts-unavailable-503', 'only-the-owner-changed-the-goal'],
     run: runAuthority,
   }),
   memory: planned('15', 'Teach, new context and restart, task-only exception, forget: persisted/applied receipts, exception not learned, no resurrection'),
-  capabilities: planned('12', 'Remove one required RPC capability; auth, quota and provider faults: named degraded cause, no fallback model, workers preserved'),
+  capabilities: Object.freeze({
+    implemented: true,
+    task: '12',
+    summary: 'Remove one required RPC capability; auth, quota and provider faults: named degraded cause, no fallback model, workers preserved',
+    deadlineMs: 10 * 60_000,
+    requiredAssertions: [
+      'engine-ready', 'worker-pane-started', 'auth-fault-is-typed', 'quota-fault-is-typed', 'provider-fault-is-typed',
+      'hub-stopped-capability', 'hub-started-capability', 'engine-child-ended-workers-kept',
+      'missing-capability-is-degraded', 'degraded-engine-got-zero-sends', 'no-fallback-canary-requests',
+      'pty-census-listed-before-faults', 'pty-census-listed-after-faults', 'worker-panes-preserved',
+      'hub-stopped-recover', 'hub-started-recover', 'engine-child-replaced-workers-kept', 'pty-census-listed-recovered',
+      'worker-panes-preserved-after-recovery',
+    ],
+    run: runCapabilities,
+  }),
   legacy: planned('16', 'Import historical closed/failed/blocked work, adopt one safe fixture: no automatic revival, one chosen adoption'),
   channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
   // Task 14, implemented in surfaces.mjs.
