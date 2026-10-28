@@ -92,7 +92,11 @@ impl Shared {
     fn malformed(&self, why: &str, bytes: usize) {
         self.malformed.fetch_add(1, Ordering::Relaxed);
         // The line itself may carry secrets; only its size is logged.
-        tracing::warn!(why, bytes, "mhc supervisor engine sent a malformed line; it was skipped");
+        tracing::warn!(
+            why,
+            bytes,
+            "mhc supervisor engine sent a malformed line; it was skipped"
+        );
     }
 
     /// Answers a work request the full queue cannot take with an error reply, so the engine's
@@ -129,7 +133,10 @@ impl Shared {
             .outbound
             .upgrade()
             .is_some_and(|sender| sender.send(line).is_ok());
-        tracing::warn!(sent, "a supervisor work request was refused: the work queue is full");
+        tracing::warn!(
+            sent,
+            "a supervisor work request was refused: the work queue is full"
+        );
     }
 
     fn dispatch(&self, value: Value) {
@@ -168,7 +175,11 @@ impl Shared {
             }
             return;
         }
-        let Some(handle) = value.get("sessionId").and_then(Value::as_str).map(str::to_owned) else {
+        let Some(handle) = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
             tracing::debug!(kind = %kind, "mhc supervisor host record");
             return;
         };
@@ -227,7 +238,10 @@ async fn next_line<R: AsyncBufRead + Unpin>(
                 overflow += line.len() + take;
                 line.clear();
             }
-            (newline.is_some(), newline.map_or(available.len(), |index| index + 1))
+            (
+                newline.is_some(),
+                newline.map_or(available.len(), |index| index + 1),
+            )
         };
         reader.consume(used);
         if found {
@@ -371,14 +385,18 @@ impl StdioClient {
         let outbound = self.outbound.lock().unwrap_or_else(PoisonError::into_inner);
         match outbound.as_ref() {
             Some(sender) => sender.send(line).map_err(|_| self.gone_error()),
-            None => Err(RequestError::Gone("the supervisor closed the engine transport".to_owned())),
+            None => Err(RequestError::Gone(
+                "the supervisor closed the engine transport".to_owned(),
+            )),
         }
     }
 
     /// Sends one command with a fresh id and waits up to `deadline` for its response.
     /// Returns the response `data` (null when absent).
     pub async fn request(&self, command: Value, deadline: Duration) -> Result<Value, RequestError> {
-        self.request_at(command, deadline).await.map(|(data, _)| data)
+        self.request_at(command, deadline)
+            .await
+            .map(|(data, _)| data)
     }
 
     /// [`Self::request`] that also returns the response's position in the engine's output

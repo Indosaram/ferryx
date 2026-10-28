@@ -806,7 +806,10 @@ mod tests {
             );
         }
         // Ordinary wording the pattern also matches is never erased.
-        for answer in ["I'm working on that answer for you: 42.", "현재 진행중인 작업은 없어요."] {
+        for answer in [
+            "I'm working on that answer for you: 42.",
+            "현재 진행중인 작업은 없어요.",
+        ] {
             let shown = render_reply(answer, &nothing);
             assert!(shown.starts_with(answer), "{shown}");
         }
@@ -931,13 +934,19 @@ mod tests {
             },
         };
         tools.handle(status(None)).await.unwrap();
-        assert!(!guard.record().status_used, "the scope listing is not a goal read");
+        assert!(
+            !guard.record().status_used,
+            "the scope listing is not a goal read"
+        );
         let unknown = tools
             .handle(status(Some("00000000-0000-4000-8000-000000000000")))
             .await
             .unwrap_err();
         assert_eq!(unknown.code, "NOT_FOUND");
-        assert!(!guard.record().status_used, "a failed lookup is not a goal read");
+        assert!(
+            !guard.record().status_used,
+            "a failed lookup is not a goal read"
+        );
 
         let submitted = tools
             .handle(WorkToolRequest {
@@ -1013,13 +1022,12 @@ mod tests {
         })
         .await
         .expect("supervised");
-        let (stored, updated): (String, String) = sqlx::query_as(
-            "SELECT state_json, updated_at FROM sessions WHERE session_key = ?",
-        )
-        .bind(admitted.key.storage_key())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (stored, updated): (String, String) =
+            sqlx::query_as("SELECT state_json, updated_at FROM sessions WHERE session_key = ?")
+                .bind(admitted.key.storage_key())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let stored: SessionState = serde_json::from_str(&stored).unwrap();
         assert_eq!(stored.active_model.as_deref(), Some("kept/model"));
         assert_ne!(updated, "2020-01-01T00:00:00Z", "the session window moves");

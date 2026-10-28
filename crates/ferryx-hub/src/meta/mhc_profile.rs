@@ -157,7 +157,10 @@ impl Default for MhcProfileConfig {
             provider: None,
             model: None,
             thinking_level: None,
-            effect_tools: DEFAULT_EFFECT_TOOLS.iter().map(|tool| (*tool).to_owned()).collect(),
+            effect_tools: DEFAULT_EFFECT_TOOLS
+                .iter()
+                .map(|tool| (*tool).to_owned())
+                .collect(),
             timeouts: MhcTimeouts::default(),
         }
     }
@@ -256,7 +259,11 @@ impl MhcProfileConfig {
 
     /// Adds valid comma-separated tool names; the defaults are never removed.
     pub fn add_effect_tools(&mut self, extra: &str) {
-        for name in extra.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        for name in extra
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
             if !is_tool_name(name) {
                 tracing::warn!(tool = %name, "ignored an invalid supervisor effect tool name");
                 continue;
@@ -520,11 +527,20 @@ impl MhcProfile {
                 context.insert("memory_write".to_owned(), "deny".to_owned());
                 context.insert("supervisor_tools".to_owned(), "work".to_owned());
                 context.insert("ferryx_scope".to_owned(), scope_key.clone());
-                (format!("conversation-{scope_key}"), "conversation", true, false)
+                (
+                    format!("conversation-{scope_key}"),
+                    "conversation",
+                    true,
+                    false,
+                )
             }
             SessionRole::Decision(slot) => {
                 let tools = std::iter::once(self.effect_tools())
-                    .chain(DECISION_EXCLUDED_TOOLS.iter().map(|tool| (*tool).to_owned()))
+                    .chain(
+                        DECISION_EXCLUDED_TOOLS
+                            .iter()
+                            .map(|tool| (*tool).to_owned()),
+                    )
                     .collect::<Vec<_>>()
                     .join(",");
                 context.insert("tools_exclude".to_owned(), tools);
@@ -619,7 +635,9 @@ pub fn context_error(context: &BTreeMap<String, String>) -> Option<String> {
             return Some(format!("context key {key:?} is not ^[a-z][a-z0-9_]*$"));
         }
         if value.len() > CONTEXT_MAX_VALUE_BYTES {
-            return Some(format!("context value of {key} exceeds {CONTEXT_MAX_VALUE_BYTES} bytes"));
+            return Some(format!(
+                "context value of {key} exceeds {CONTEXT_MAX_VALUE_BYTES} bytes"
+            ));
         }
         total += key.len() + value.len();
     }
