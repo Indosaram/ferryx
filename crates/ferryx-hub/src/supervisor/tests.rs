@@ -7,9 +7,11 @@
 //! `bound_session` covers an owner-chosen existing pane bound at admission and the read-only
 //! dispatch status reader.
 //! `request` covers the shared request service behind every adapter (todo 13).
+//! `recovery` crashes the hub at every effect boundary and restarts it (todo 12).
 mod admission;
 mod bound_session;
 mod receipts;
+mod recovery;
 mod request;
 mod schema;
 mod setup;

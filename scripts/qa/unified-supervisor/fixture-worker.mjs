@@ -10,6 +10,8 @@
 //   argv: <logDir> [--max-lifetime-ms=N] [--no-report]   (leak guard, default 600000)
 // With --no-report it logs its input but never reports a state: a target that accepts the
 // typed bytes and never shows a turn start (remote-delivery's suppressed receipt).
+// An instruction containing QA_NO_START_REPORT is logged but never reported: the `recovery`
+// scenario uses it to hold a dispatch between "typed" and "start recorded".
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
@@ -56,6 +58,10 @@ lines.on('line', (raw) => {
   if (reported || text.trim() === '') return;
   reported = true;
   if (silent) { record({ kind: 'report-suppressed', state: 'working' }); return; }
+  if (text.includes('QA_NO_START_REPORT')) {
+    record({ kind: 'report-withheld', state: 'working' });
+    return;
+  }
   report('working');
 });
 lines.on('close', () => {
