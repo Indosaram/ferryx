@@ -131,6 +131,12 @@ impl PtyWorker {
 #[async_trait]
 impl WorkerTransport for PtyWorker {
     async fn deliver(&self, send: &WorkerSend, settled: SettleNotice) -> Delivery {
+        // An owner hold or correction may have landed since the claim was confirmed.
+        if let Err(code) = super::delivery::check_before_typing(&send.request_id) {
+            return Delivery::Refused {
+                code: code.to_owned(),
+            };
+        }
         let delivery = self.control.deliver(send).await;
         // On this machine the settle is the hub observer's idle reading (`record_pty_settle`).
         // A paired host's observer is reached only through that host's own agent control.

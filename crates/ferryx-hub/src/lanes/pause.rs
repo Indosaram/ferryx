@@ -64,6 +64,17 @@ pub async fn pause(pool: &SqlitePool, key: &str, by: &str) -> Result<bool> {
         .bind(&status)
         .execute(&mut *tx)
         .await?;
+    // A supervisor dispatch of this lane already claimed may be waiting for its pane: the
+    // pause revokes it in the typing fence, so nothing of it is typed.
+    let claimed: Vec<String> = sqlx::query_scalar(
+        "SELECT d.request_id FROM supervisor_dispatches d
+           JOIN supervisor_goals g ON g.goal_id = d.goal_id
+          WHERE g.lane_key = ? AND d.state = 'claimed'",
+    )
+    .bind(key)
+    .fetch_all(&mut *tx)
+    .await?;
+    crate::supervisor::delivery::revoke(claimed);
     tx.commit().await?;
     Ok(true)
 }
