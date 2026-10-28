@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, EllipsisVertical, SendHorizontal, Sun } from "lucide-react";
 
 import {
   hasActiveModifier,
@@ -8,7 +8,15 @@ import {
   NO_DOCK_MODIFIERS,
   releaseOneShotModifiers,
   type DockModifiers,
+  type TerminalInputMode,
 } from "../components/MobileKeyDock";
+import {
+  getMigratedItem,
+  REMOTE_KEEP_SCREEN_ON_STORAGE_KEY,
+  REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY,
+} from "../lib/storageKeys";
+import { MobileSheet } from "./chat/MobileSheet";
+import { isScreenWakeLockSupported, useScreenWakeLock } from "./useScreenWakeLock";
 import { observeWebOwner } from "./webRecoveryObservation";
 import {
   decodeRemoteTerminalFrame,
@@ -176,6 +184,22 @@ const DOCK_NAVIGATION_FINALS: Record<string, string> = {
   home: "H",
   end: "F",
 };
+
+function readStoredInputMode(): TerminalInputMode {
+  return getMigratedItem(REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY) === "line" ? "line" : "direct";
+}
+
+function readStoredKeepScreenOn(): boolean {
+  return getMigratedItem(REMOTE_KEEP_SCREEN_ON_STORAGE_KEY) === "true";
+}
+
+function storePreference(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Disabled or full storage: the choice still applies until the page reloads.
+  }
+}
 
 function modifiedNavigationSequence(key: string, ctrlKey: boolean, altKey: boolean): string | undefined {
   const final = MODIFIED_NAVIGATION_FINALS[key];
@@ -548,6 +572,23 @@ export function RemoteTerminal({
     dockModifiersRef.current = next;
     setDockModifiersState(next);
   }, []);
+  const [inputMode, setInputModeState] = useState<TerminalInputMode>(readStoredInputMode);
+  const [lineDraft, setLineDraft] = useState("");
+  const lineInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const setInputMode = useCallback((next: TerminalInputMode) => {
+    setInputModeState(next);
+    storePreference(REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY, next);
+  }, []);
+  const [terminalMenuOpen, setTerminalMenuOpen] = useState(false);
+  const [keepScreenOn, setKeepScreenOnState] = useState(readStoredKeepScreenOn);
+  const wakeLockSupported = isScreenWakeLockSupported();
+  const setKeepScreenOn = useCallback((next: boolean) => {
+    setKeepScreenOnState(next);
+    storePreference(REMOTE_KEEP_SCREEN_ON_STORAGE_KEY, next ? "true" : "false");
+  }, []);
+  useScreenWakeLock(showKeyDock && keepScreenOn);
+  // The compatibility renderer (no key dock) always types directly.
+  const lineMode = showKeyDock && inputMode === "line";
   const requestResizeRef = useRef<() => void>(() => {});
   const lastSentGeometryRef = useRef<GridGeometry | null>(null);
   const scheduledSocketRequestRef = useRef<SocketRequest | null>(null);
@@ -699,7 +740,8 @@ export function RemoteTerminal({
   }, []);
 
   const focusInput = useCallback(() => {
-    inputSinkRef.current?.focus({ preventScroll: true });
+    // In line mode a tap on the terminal opens the visible line editor, not the raw key sink.
+    (lineInputRef.current ?? inputSinkRef.current)?.focus({ preventScroll: true });
   }, []);
 
   const retryTerminal = useCallback(() => {
@@ -1849,6 +1891,18 @@ export function RemoteTerminal({
     sendInput(new TextEncoder().encode(sequence));
   };
 
+  /// Line mode: the whole edited line goes out at once, followed by Enter. Hangul in it is sent as
+  /// the IME composed it; the dock's modifiers do not apply to a line.
+  const submitLine = () => {
+    // Anything still held in the direct-mode sink was typed first.
+    flushSinkText();
+    const line = lineDraft.replace(/\u00a0/g, " ");
+    setLineDraft("");
+    // One payload, so the shell never sees the line without its Enter.
+    sendText(`${line}\r`);
+    lineInputRef.current?.focus({ preventScroll: true });
+  };
+
   return (
     <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-[#f5f5f5] ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
       <div className={`flex shrink-0 items-center border-b border-chat-header-border bg-chat-header px-2 ${showTitleBar ? "h-11 justify-between" : "h-7 justify-end"}`}>
@@ -1902,6 +1956,20 @@ export function RemoteTerminal({
               <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
               <span>Output gap</span>
             </span>
+          ) : null}
+          {showKeyDock && wakeLockSupported ? (
+            <button
+              type="button"
+              data-testid="remote-terminal-menu-button"
+              aria-label="Terminal options"
+              title="Terminal options"
+              aria-haspopup="dialog"
+              aria-expanded={terminalMenuOpen}
+              onClick={() => setTerminalMenuOpen(true)}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground"
+            >
+              <EllipsisVertical className="size-4" aria-hidden="true" />
+            </button>
           ) : null}
           <span data-testid="remote-terminal-build-stamp" className="font-mono text-[10px] text-[#838383]/70">{BUILD_STAMP}</span>
           <span data-testid="remote-terminal-connection-status" role="status" className="font-mono text-[10px] text-[#838383]">
@@ -2204,8 +2272,88 @@ export function RemoteTerminal({
           </span>
         ) : null}
       </div>
+      {lineMode ? (
+        <form
+          data-testid="remote-terminal-line-form"
+          className="flex shrink-0 items-end gap-1.5 border-t border-border bg-card px-2 py-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitLine();
+          }}
+        >
+          <textarea
+            ref={lineInputRef}
+            data-testid="remote-terminal-line-input"
+            aria-label="Terminal command line"
+            rows={1}
+            value={lineDraft}
+            autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            onChange={(event) => setLineDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              // Enter sends; Shift+Enter keeps a newline in the line. An IME still composing owns
+              // its Enter (it commits the candidate).
+              if (event.key !== "Enter" || event.shiftKey) return;
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              event.preventDefault();
+              submitLine();
+            }}
+            className="max-h-24 min-h-11 min-w-0 flex-1 resize-none rounded border border-border bg-background px-2 py-2.5 font-mono text-base leading-5 text-foreground outline-none focus:border-primary"
+          />
+          <button
+            type="submit"
+            data-testid="remote-terminal-line-send"
+            aria-label="Send line"
+            title="Send line"
+            className="flex min-h-11 min-w-[44px] items-center justify-center rounded border border-primary bg-primary px-2 text-primary-foreground transition-all active:scale-95"
+          >
+            <SendHorizontal className="size-4" aria-hidden="true" />
+          </button>
+        </form>
+      ) : null}
       {showKeyDock ? (
-        <MobileKeyDock onSendKey={sendKey} modifiers={dockModifiers} onModifiersChange={setDockModifiers} />
+        <MobileKeyDock
+          onSendKey={sendKey}
+          modifiers={dockModifiers}
+          onModifiersChange={setDockModifiers}
+          inputMode={inputMode}
+          onInputModeChange={setInputMode}
+        />
+      ) : null}
+      {showKeyDock && wakeLockSupported ? (
+        <MobileSheet
+          open={terminalMenuOpen}
+          onOpenChange={setTerminalMenuOpen}
+          title="Terminal"
+          ariaLabel="Terminal options"
+          testId="remote-terminal-menu"
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={keepScreenOn}
+            data-testid="remote-terminal-keep-screen-on"
+            onClick={() => setKeepScreenOn(!keepScreenOn)}
+            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <Sun className="size-[18px] shrink-0 text-chat-foreground-secondary" aria-hidden="true" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[15px] leading-5">Keep screen on</span>
+              <span className="mt-0.5 block truncate text-[13px] text-chat-foreground-secondary">
+                Stop the phone from dimming while this terminal is open
+              </span>
+            </span>
+            <span
+              aria-hidden="true"
+              className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors ${keepScreenOn ? "bg-primary" : "bg-chat-foreground-secondary/40"}`}
+            >
+              <span className={`inline-block size-5 rounded-full bg-white shadow transition-transform ${keepScreenOn ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+            </span>
+          </button>
+        </MobileSheet>
       ) : null}
     </div>
   );

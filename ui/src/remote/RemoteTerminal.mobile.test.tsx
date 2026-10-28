@@ -420,6 +420,88 @@ describe("mobile terminal input lifecycle", () => {
     });
   });
 
+  describe("line input mode", () => {
+    const sent = () => Socket.latest.send.mock.calls.map(([data]) => new TextDecoder().decode(data as Uint8Array));
+    afterEach(() => localStorage.removeItem("ferryx.remote.terminalInputMode"));
+
+    it("sends the whole edited line with Enter exactly once and persists the mode", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      fireEvent.click(screen.getByTestId("remote-terminal-input-mode-toggle"));
+      expect(localStorage.getItem("ferryx.remote.terminalInputMode")).toBe("line");
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "echo hi" } });
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("remote-terminal-line-send"));
+      expect(sent()).toEqual(["echo hi\r"]);
+      expect(line).toHaveValue("");
+    });
+
+    it("submits on Enter and keeps Shift+Enter in the line", () => {
+      localStorage.setItem("ferryx.remote.terminalInputMode", "line");
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      establishReady();
+      const line = screen.getByTestId("remote-terminal-line-input");
+      fireEvent.change(line, { target: { value: "ls" } });
+      expect(fireEvent.keyDown(line, { key: "Enter", shiftKey: true })).toBe(true);
+      expect(Socket.latest.send).not.toHaveBeenCalled();
+      fireEvent.keyDown(line, { key: "Enter" });
+      expect(sent()).toEqual(["ls\r"]);
+    });
+  });
+
+  describe("keep screen on", () => {
+    type Sentinel = { released: boolean; release: ReturnType<typeof vi.fn> };
+    let visibility: DocumentVisibilityState;
+    beforeEach(() => {
+      visibility = "visible";
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    });
+    afterEach(() => {
+      Reflect.deleteProperty(document, "visibilityState");
+      Reflect.deleteProperty(navigator, "wakeLock");
+      localStorage.removeItem("ferryx.remote.keepScreenOn");
+    });
+
+    it("requests the screen lock when turned on and again when the page becomes visible after a release", async () => {
+      const sentinels: Sentinel[] = [];
+      const request = vi.fn(async () => {
+        const sentinel: Sentinel = { released: false, release: vi.fn(async () => { sentinel.released = true; }) };
+        sentinels.push(sentinel);
+        return sentinel;
+      });
+      Object.defineProperty(navigator, "wakeLock", { configurable: true, value: { request } });
+      const view = render(<RemoteTerminal sessionId="a" token="token-a" />);
+      fireEvent.click(screen.getByTestId("remote-terminal-menu-button"));
+      const toggle = screen.getByRole("switch", { name: /keep screen on/i });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      await act(async () => { fireEvent.click(toggle); });
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenLastCalledWith("screen");
+      expect(localStorage.getItem("ferryx.remote.keepScreenOn")).toBe("true");
+
+      // The browser drops the lock while the page is hidden.
+      visibility = "hidden";
+      sentinels[0].released = true;
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(request).toHaveBeenCalledTimes(1);
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenLastCalledWith("screen");
+
+      view.unmount();
+      expect(sentinels[1].release).toHaveBeenCalledTimes(1);
+    });
+
+    it("hides the toggle when the browser has no wake lock", () => {
+      render(<RemoteTerminal sessionId="a" token="token-a" />);
+      expect("wakeLock" in navigator).toBe(false);
+      expect(screen.queryByTestId("remote-terminal-menu-button")).toBeNull();
+      expect(screen.queryByRole("switch", { name: /keep screen on/i })).toBeNull();
+    });
+  });
+
   it("sends resize on ResizeObserver change and remoteResize on remoteStatus generation when followHostSize is false", () => {
     render(<RemoteTerminal sessionId="a" token="token-a" />);
     expect(Socket.latest.url).toContain("cols=80&rows=20");

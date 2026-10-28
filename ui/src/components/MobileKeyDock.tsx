@@ -49,11 +49,16 @@ export function modifierPrefix(modifiers: DockModifiers): string {
   }`;
 }
 
+export type TerminalInputMode = "direct" | "line";
+
 type MobileKeyDockProps = {
   onSendKey: (key: string) => void;
   /** Controlled modifier state; the dock keeps its own when omitted. */
   modifiers?: DockModifiers;
   onModifiersChange?: (modifiers: DockModifiers) => void;
+  /** Shows the Direct/Line input toggle when both are provided. */
+  inputMode?: TerminalInputMode;
+  onInputModeChange?: (mode: TerminalInputMode) => void;
 };
 
 /** Keys that already carry their chord and ignore latched modifiers. */
@@ -63,6 +68,8 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
   onSendKey,
   modifiers: controlledModifiers,
   onModifiersChange,
+  inputMode,
+  onInputModeChange,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [ownModifiers, setOwnModifiers] = useState<DockModifiers>(NO_DOCK_MODIFIERS);
@@ -159,6 +166,17 @@ export const MobileKeyDock: React.FC<MobileKeyDockProps> = ({
             title="More keys"
             ariaLabel="More keys"
           />
+          {inputMode !== undefined && onInputModeChange ? (
+            <KeyButton
+              label={inputMode === "line" ? "Line" : "Direct"}
+              active={inputMode === "line"}
+              pressed={inputMode === "line"}
+              ariaLabel="Line input mode"
+              title={inputMode === "line" ? "Line input: edit a whole line, then send it" : "Direct input: every key goes straight to the terminal"}
+              testId="remote-terminal-input-mode-toggle"
+              onClick={() => onInputModeChange(inputMode === "line" ? "direct" : "line")}
+            />
+          ) : null}
         </div>
       </div>
     </div>
