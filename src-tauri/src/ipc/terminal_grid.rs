@@ -96,14 +96,27 @@ pub async fn cmd_terminal_grid_attach(
     let mut messages = attachment.messages;
     let task = tokio::spawn(async move {
         let _upstream = upstream;
+        // Idle scrollback compression of the mirror: output restarts the idle delay and a
+        // third select arm runs one bounded step when the scheduler's deadline passes. The
+        // task owns the mirror, so steps are serialized with every other mirror access.
+        mirror.mark_activity(std::time::Instant::now());
         loop {
+            let compression_deadline = mirror
+                .compression_wakeup(std::time::Instant::now())
+                .map(|wait| tokio::time::Instant::now() + wait);
             let frame = tokio::select! {
                 command = command_rx.recv() => match command {
-                    Some(GridCommand::Resize(cols, rows)) => mirror.resize(cols, rows),
+                    Some(GridCommand::Resize(cols, rows)) => {
+                        mirror.mark_activity(std::time::Instant::now());
+                        mirror.resize(cols, rows)
+                    }
                     None => break,
                 },
                 message = messages.recv() => match message {
-                    Some(DaemonStreamMessage::Output { data, .. }) => mirror.feed(&data),
+                    Some(DaemonStreamMessage::Output { data, .. }) => {
+                        mirror.mark_activity(std::time::Instant::now());
+                        mirror.feed(&data)
+                    }
                     Some(DaemonStreamMessage::Lagged { history, segments, .. }) => {
                         // A replay replaces the screen: rebuild the mirror from it at the current size.
                         let Ok((cols, rows)) = mirror.dimensions() else { break };
@@ -130,11 +143,25 @@ pub async fn cmd_terminal_grid_attach(
                             break;
                         }
                         mirror = replacement;
+                        mirror.mark_activity(std::time::Instant::now());
                         mirror.full_frame()
                     }
                     Some(DaemonStreamMessage::Exit { .. }) | None => break,
                     Some(_) => continue,
                 },
+                _ = async {
+                    match compression_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let enabled = crate::terminal::cached_terminal_preferences().scrollback_compression;
+                    if let Err(error) = mirror.run_due_compression(std::time::Instant::now(), enabled) {
+                        tracing::warn!(%error, "grid mirror scrollback compression step failed");
+                    }
+                    // Compression changes no visible cell, so no frame is sent.
+                    continue;
+                }
             };
             let Ok(frame) = frame else { break };
             let Some(text) = grid_text(&frame) else { break };

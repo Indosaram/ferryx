@@ -347,7 +347,7 @@ export async function getTerminalPreferences(remote?: RemotePreferenceTarget): P
       status: "absent",
       sourcePath: null,
       defaultShell: null,
-      scrollback: 10_000,
+      scrollback: 50_000,
       scrollbackCompression: true,
     };
   }

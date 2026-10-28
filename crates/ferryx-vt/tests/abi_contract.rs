@@ -19,6 +19,8 @@ const EXACT_NAMES: &[(&str, &str)] = &[
 
 /// Short-name prefix -> header prefix; first match wins, so longer prefixes come first.
 const PREFIXES: &[(&str, &str)] = &[
+    ("COMPRESSION_MODE_", "GHOSTTY_TERMINAL_COMPRESSION_MODE_"),
+    ("COMPRESSION_RESULT_", "GHOSTTY_TERMINAL_COMPRESSION_RESULT_"),
     ("CLIPBOARD_WRITE_", "GHOSTTY_CLIPBOARD_WRITE_RESULT_"),
     ("CLIPBOARD_", "GHOSTTY_CLIPBOARD_LOCATION_"),
     ("OPT_", "GHOSTTY_TERMINAL_OPT_"),

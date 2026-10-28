@@ -19,13 +19,19 @@ use tokio::task::JoinHandle;
 
 use crate::host::HostShared;
 use crate::outbox::{ConnHandle, SnapItem};
-use ferryx_vt::{state_changed, Advance, HostTerminal, DEFAULT_SCROLLBACK_LINES};
+use ferryx_vt::{state_changed, Advance, CompressStep, HostTerminal, DEFAULT_SCROLLBACK_LINES};
 
 pub const MAILBOX_LIMIT: usize = 8 * 1024 * 1024;
 pub const SNAPSHOT_CHUNK: usize = 1024 * 1024;
 pub const MAX_SUBSCRIBERS: usize = 64;
 pub const FLUSH_BACKLOG: usize = 1024 * 1024;
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(4);
+/// Quiet time after output before idle scrollback compression starts (same
+/// value as COMPRESSION_IDLE_DELAY in src-tauri native_terminal/compression.rs).
+pub const COMPRESS_IDLE_DELAY: Duration = Duration::from_secs(2);
+/// Pause between incremental compression steps of one pass, so requests and
+/// output interleave with the pass.
+pub const COMPRESS_STEP_INTERVAL: Duration = Duration::from_millis(1);
 pub const EXIT_DRAIN: Duration = Duration::from_millis(250);
 
 pub enum Event {
@@ -42,6 +48,57 @@ pub enum Event {
     Released { subscription_id: u64, reservation_id: u64, snapshot_id: u64 },
     Deadline { subscription_id: u64, reservation_id: u64, snapshot_id: u64 },
     Flush,
+    /// One-shot idle compression timer. `generation` names the arming; a
+    /// timer superseded by later output is ignored.
+    Compress { generation: u64 },
+}
+
+/// Decides when the next idle compression step runs. Output re-arms it
+/// [`COMPRESS_IDLE_DELAY`] ahead; a pending step re-arms it
+/// [`COMPRESS_STEP_INTERVAL`] ahead; complete disarms until the next output;
+/// unsupported disarms for good.
+#[derive(Debug, Default)]
+pub struct CompressTimer {
+    generation: u64,
+    armed: bool,
+    unsupported: bool,
+}
+
+impl CompressTimer {
+    /// Arms after output; returns the generation and delay of the timer to start.
+    pub fn on_output(&mut self) -> Option<(u64, Duration)> {
+        self.arm(COMPRESS_IDLE_DELAY)
+    }
+
+    /// Whether a fired timer of `generation` should run a step now.
+    pub fn fire(&mut self, generation: u64) -> bool {
+        let due = self.armed && !self.unsupported && generation == self.generation;
+        if due {
+            self.armed = false;
+        }
+        due
+    }
+
+    /// Records a step result; returns the next timer to start, if any.
+    pub fn after_step(&mut self, step: CompressStep) -> Option<(u64, Duration)> {
+        match step {
+            CompressStep::Pending => self.arm(COMPRESS_STEP_INTERVAL),
+            CompressStep::Complete => None,
+            CompressStep::Unsupported => {
+                self.unsupported = true;
+                None
+            }
+        }
+    }
+
+    fn arm(&mut self, delay: Duration) -> Option<(u64, Duration)> {
+        if self.unsupported {
+            return None;
+        }
+        self.generation += 1;
+        self.armed = true;
+        Some((self.generation, delay))
+    }
 }
 
 #[derive(Default)]
@@ -115,6 +172,7 @@ pub struct Session {
     exit: Option<ExitInfo>,
     pending_exit: Option<ExitInfo>,
     flush_scheduled: bool,
+    compress: CompressTimer,
 }
 
 pub fn start(parts: SessionParts) {
@@ -180,6 +238,7 @@ pub fn start(parts: SessionParts) {
         exit: None,
         pending_exit: None,
         flush_scheduled: false,
+        compress: CompressTimer::default(),
     };
     tokio::spawn(session.run(rx));
 }
@@ -233,6 +292,8 @@ impl Session {
                 self.gate.release(bytes.len());
                 let adv = self.term.feed(&bytes);
                 self.publish(adv);
+                let next = self.compress.on_output();
+                self.start_compress_timer(next);
             }
             Event::PtyEof => self.finish_child(None),
             Event::Written(n) => {
@@ -294,7 +355,23 @@ impl Session {
                 self.flush_scheduled = false;
                 self.flush_deltas();
             }
+            Event::Compress { generation } => {
+                if self.compress.fire(generation) {
+                    let step = self.term.compress_step();
+                    let next = self.compress.after_step(step);
+                    self.start_compress_timer(next);
+                }
+            }
         }
+    }
+
+    fn start_compress_timer(&self, timer: Option<(u64, Duration)>) {
+        let Some((generation, delay)) = timer else { return };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tx.send(Event::Compress { generation });
+        });
     }
 
     fn frame(&self, request_id: u64, flags: u16, message: Message) -> Vec<u8> {
@@ -764,5 +841,38 @@ impl Session {
             sub.s.start_with_ack(incarnation, revision, known, &mut fx);
         }
         self.apply(id, fx, Some(rid));
+    }
+}
+
+#[cfg(test)]
+mod compress_timer_tests {
+    use super::*;
+
+    #[test]
+    fn compress_timer_arms_on_output_and_ignores_superseded_timers() {
+        let mut timer = CompressTimer::default();
+        assert!(!timer.fire(0), "nothing fires before any output");
+        let (first, delay) = timer.on_output().unwrap();
+        assert_eq!(delay, COMPRESS_IDLE_DELAY);
+        let (second, _) = timer.on_output().unwrap();
+        assert!(!timer.fire(first), "output after arming supersedes the earlier timer");
+        assert!(timer.fire(second));
+        assert!(!timer.fire(second), "a timer fires once");
+    }
+
+    #[test]
+    fn compress_timer_continues_pending_and_stops_on_complete_or_unsupported() {
+        let mut timer = CompressTimer::default();
+        let (g, _) = timer.on_output().unwrap();
+        assert!(timer.fire(g));
+        let (g, delay) = timer.after_step(CompressStep::Pending).unwrap();
+        assert_eq!(delay, COMPRESS_STEP_INTERVAL);
+        assert!(timer.fire(g));
+        assert_eq!(timer.after_step(CompressStep::Complete), None);
+
+        let (g, _) = timer.on_output().unwrap();
+        assert!(timer.fire(g));
+        assert_eq!(timer.after_step(CompressStep::Unsupported), None);
+        assert_eq!(timer.on_output(), None, "unsupported platforms never re-arm");
     }
 }

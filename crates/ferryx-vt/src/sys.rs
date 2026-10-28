@@ -266,6 +266,11 @@ pub const DATA_KITTY_IMAGE_STORAGE_LIMIT: c_int = 26;
 pub const DATA_MODE: c_int = 37;
 
 pub const RS_CURSOR_VISUAL_STYLE: c_int = 10;
+
+pub const COMPRESSION_MODE_INCREMENTAL: c_int = 0;
+pub const COMPRESSION_RESULT_UNSUPPORTED: c_int = 0;
+pub const COMPRESSION_RESULT_PENDING: c_int = 1;
+pub const COMPRESSION_RESULT_COMPLETE: c_int = 2;
 pub const RS_CURSOR_VISIBLE: c_int = 11;
 pub const RS_CURSOR_BLINKING: c_int = 12;
 
@@ -307,6 +312,9 @@ extern "C" {
     pub fn ghostty_render_state_free(state: RenderState);
     pub fn ghostty_render_state_update(state: RenderState, terminal: Terminal) -> GhosttyResult;
     pub fn ghostty_render_state_get(state: RenderState, data: c_int, out: *mut c_void) -> GhosttyResult;
+    // Not thread-safe with any other access to the same terminal; the caller serializes.
+    pub fn ghostty_terminal_compression_activity(terminal: Terminal, out_activity: *mut u64) -> GhosttyResult;
+    pub fn ghostty_terminal_compress(terminal: Terminal, mode: c_int, out_result: *mut c_int) -> GhosttyResult;
 }
 
 // Layout guards: sizes of the v1.4 `terminal.h` clipboard structs on 64-bit

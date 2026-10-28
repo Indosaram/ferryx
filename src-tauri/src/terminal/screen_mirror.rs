@@ -169,4 +169,25 @@ mod tests {
         let json = serde_json::to_string(&seed).unwrap();
         assert_eq!(serde_json::from_str::<ScreenSeed>(&json).unwrap(), seed);
     }
+
+    /// Todo 9 decision input: compress the daemon mirror only if a full mirror holds more than
+    /// 1 MiB resident. Prints the measured figure (`--nocapture`) for the evidence log.
+    #[test]
+    fn full_mirror_resident_memory_is_measured() {
+        let mut mirror = ScreenMirror::new(200, 50).unwrap();
+        let mut input = Vec::new();
+        for line in 0..(MIRROR_SCROLLBACK_LINES * 2) {
+            input.extend_from_slice(format!("\x1b[3{}mmirror line {line:06} {}\x1b[0m\r\n", line % 8, "x".repeat(150)).as_bytes());
+        }
+        mirror.feed(&input);
+        let usage = mirror.terminal.memory_usage().unwrap();
+        let resident = usage.primary_resident_bytes + usage.alternate_resident_bytes;
+        eprintln!(
+            "screen mirror 200x50 + {MIRROR_SCROLLBACK_LINES} lines: resident_bytes={resident} pages={} over_1mib={}",
+            usage.primary_pages,
+            resident > 1024 * 1024
+        );
+        assert!(resident > 0);
+        assert!(mirror.terminal.scrollback_rows().unwrap() <= MIRROR_SCROLLBACK_LINES * 2);
+    }
 }

@@ -1,7 +1,7 @@
-use ferryx_vt::{HostTerminal, DEFAULT_SCROLLBACK_LINES, KITTY_IMAGE_STORAGE_LIMIT};
+use ferryx_vt::{CompressStep, HostTerminal, DEFAULT_SCROLLBACK_LINES, KITTY_IMAGE_STORAGE_LIMIT};
 use fxsh::types::{Color, UiEventKind};
 use proptest::prelude::*;
-use session_core::replica::{diff, Replica};
+use session_core::replica::{diff, Replica, S_MAX};
 
 fn text_of(r: &Replica, row: usize) -> String {
     r.screen[row].cells.iter().map(|c| char::from_u32(c.codepoint).filter(|_| c.codepoint != 0).unwrap_or(' ')).collect::<String>().trim_end().to_owned()
@@ -35,7 +35,9 @@ fn scrolled_rows_get_increasing_line_ids_and_eviction_keeps_order() {
 
 #[test]
 fn eviction_from_the_front_keeps_line_ids_and_content_aligned() {
-    let mut t = HostTerminal::new(80, 24, DEFAULT_SCROLLBACK_LINES);
+    // An explicit 10,000-line limit keeps engine eviction (not the S_MAX
+    // trim) the only eviction in play; the default limit is covered below.
+    let mut t = HostTerminal::new(80, 24, 10_000);
     let mut client = t.replica.clone();
     let mut rev = 0;
     let mut next = 0;
@@ -60,6 +62,69 @@ fn eviction_from_the_front_keeps_line_ids_and_content_aligned() {
     let last: String = sb.back().unwrap().1.cells.iter().map(|c| char::from_u32(c.codepoint).filter(|_| c.codepoint != 0).unwrap_or(' ')).collect();
     assert_eq!(last.trim_end(), format!("line {}", next - 24));
     assert_eq!(fxsh::state_digest(&client.to_body()), fxsh::state_digest(&t.replica.to_body()));
+}
+
+#[test]
+fn default_scrollback_is_fifty_thousand_lines() {
+    assert_eq!(DEFAULT_SCROLLBACK_LINES, 50_000);
+}
+
+#[test]
+fn wide_fifty_thousand_row_history_is_trimmed_to_s_max() {
+    // 200 columns of wide glyphs per row: 50,000 such rows encode far beyond
+    // S_MAX, so enforce_limit must evict the oldest replicated rows while the
+    // engine still holds them.
+    let mut t = HostTerminal::new(200, 24, DEFAULT_SCROLLBACK_LINES);
+    let row = "\u{AC00}".repeat(100);
+    let mut evicted_reported = false;
+    let mut fed = 0;
+    while fed < 50_000 {
+        let mut chunk = String::new();
+        for _ in 0..500 {
+            chunk.push_str(&row);
+            chunk.push_str("\r\n");
+            fed += 1;
+        }
+        let adv = t.feed(chunk.as_bytes());
+        evicted_reported |= adv.delta.as_ref().is_some_and(|d| d.scrollback_evicted_before.is_some());
+    }
+    let encoded = fxsh::canonical_encode(&t.replica.to_body()).len();
+    let retained = t.replica.scrollback.len();
+    eprintln!("ferryx-vt wide 50k: engine rows {} retained rows {retained} encoded {encoded} bytes", t.engine.scrollback_rows());
+    assert!(encoded <= S_MAX, "canonical_encode(S) = {encoded} exceeds S_MAX");
+    assert!(evicted_reported, "enforce_limit must report eviction");
+    assert!(retained < t.engine.scrollback_rows(), "S_MAX trim keeps fewer rows than the engine");
+}
+
+#[test]
+fn compress_step_drains_without_changing_replicated_state() {
+    let mut t = HostTerminal::new(80, 24, DEFAULT_SCROLLBACK_LINES);
+    let mut input = String::new();
+    for i in 0..20_000 {
+        input.push_str(&format!("line {i:06} repeated and compressible terminal history\r\n"));
+    }
+    t.feed(input.as_bytes());
+    let before = fxsh::state_digest(&t.replica.to_body());
+    let mut last = CompressStep::Pending;
+    for _ in 0..100_000 {
+        last = t.compress_step();
+        if last != CompressStep::Pending {
+            break;
+        }
+    }
+    assert_ne!(last, CompressStep::Pending, "incremental compression never completed");
+    // Output after compression reads compressed rows back transparently.
+    let adv = t.feed(b"after compression\r\n");
+    assert!(!adv.rewritten);
+    assert_ne!(fxsh::state_digest(&t.replica.to_body()), before);
+    let mut fresh = HostTerminal::new(80, 24, DEFAULT_SCROLLBACK_LINES);
+    fresh.feed(input.as_bytes());
+    fresh.feed(b"after compression\r\n");
+    assert_eq!(
+        t.replica.scrollback.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>(),
+        fresh.replica.scrollback.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(t.replica.screen, fresh.replica.screen);
 }
 
 #[test]

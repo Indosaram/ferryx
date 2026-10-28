@@ -43,7 +43,7 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fontFamily: null,
   macosOptionAsAlt: null,
   fontSize: null,
-  scrollback: 10_000,
+  scrollback: 50_000,
   scrollbackCompression: null,
   shell: null,
 };
@@ -89,7 +89,7 @@ export const FALLBACK_PREFERENCES: TerminalPreferences = {
   status: "absent",
   sourcePath: null,
   defaultShell: null,
-  scrollback: 10_000,
+  scrollback: 50_000,
   scrollbackCompression: true,
 };
 
