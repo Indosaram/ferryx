@@ -693,6 +693,15 @@ impl TurnCollector {
     }
 }
 
+/// True when a session record was emitted before the response that started a prompt (both
+/// carry the reader's [`WORK_SEQUENCE_FIELD`] position). A record without a position is kept.
+fn before_start(event: &Value, accepted_at: u64) -> bool {
+    event
+        .get(WORK_SEQUENCE_FIELD)
+        .and_then(Value::as_u64)
+        .is_some_and(|position| position < accepted_at)
+}
+
 /// A dialog a supervisor session raised is cancelled: nobody answers it, and no decision may
 /// wait on a person.
 fn ui_cancellation(event: &Value) -> Option<Value> {
@@ -1300,7 +1309,7 @@ impl Inner {
             live.since = Some(engine.client.position());
         }
         let client = engine.client.clone();
-        let prompt = client.request(
+        let prompt = client.request_at(
             json!({"type": "prompt", "sessionId": handle, "message": escape_command(message)}),
             self.profile.config.timeouts.request,
         );
@@ -1313,8 +1322,8 @@ impl Inner {
                 return (Err(SupervisorFault::Cancelled), cleanup(engine, handle, events, true, close, reset));
             }
         };
-        let data = match accepted {
-            Ok(data) => data,
+        let (data, accepted_at) = match accepted {
+            Ok(accepted) => accepted,
             // No answer in time: the engine may still accept the prompt later, so the outcome
             // is unknown. The turn is aborted and drained, and the role reopens clean.
             Err(RequestError::Timeout) => {
@@ -1374,6 +1383,12 @@ impl Inner {
                     };
                     if let Some(reply) = ui_cancellation(&event) {
                         let _ = engine.client.send(&reply);
+                    }
+                    // Emitted before this prompt was started: the tail of a turn the engine
+                    // ran on its own (an extension's triggered message) that this prompt
+                    // waited behind. Its answer is not this prompt's.
+                    if before_start(&event, accepted_at) {
+                        continue;
                     }
                     match collector.observe(&event) {
                         Step::More => {}

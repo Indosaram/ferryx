@@ -251,6 +251,12 @@ impl Peer {
                     self.late.lock().unwrap().insert(handle, id.clone());
                     return;
                 }
+                if message.contains("BEHIND") {
+                    // A turn the engine ran on its own (an extension's triggered message) is
+                    // still running; the prompt starts only after it settled.
+                    self.emit(json!({"type": "agent_start", "sessionId": handle}));
+                    self.assistant(&handle, "extension-triggered answer");
+                }
                 let disposition = self
                     .disposition
                     .lock()
@@ -1570,6 +1576,20 @@ async fn failed_launches_back_off_5s_doubling_to_300s_and_reset_after_a_stable_e
 }
 
 #[tokio::test]
+async fn a_turn_the_engine_ran_before_the_prompt_started_never_answers_it() {
+    let harness = Harness::new("behind", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:C9".to_owned(),
+    };
+    let reply = supervisor.converse(&scope, "BEHIND owner work").await.unwrap();
+    assert_eq!(reply, "answer:BEHIND owner work");
+    // The conversation stays in step: the next turn gets its own answer.
+    assert_eq!(supervisor.converse(&scope, "next").await.unwrap(), "answer:next");
+}
+
+#[tokio::test]
 async fn channel_text_starting_with_a_slash_is_never_an_engine_command() {
     let harness = Harness::new("slash", all_capabilities());
     let supervisor = harness.supervisor();
@@ -1778,7 +1798,8 @@ fn the_owned_launch_is_stdio_rpc_in_the_profile_directory() {
             "rpc",
             "--multi-session",
             "--no-model-fallback",
-            "--ttsr-rules-disabled=repetitive-turns"
+            "--ttsr-rules-disabled=repetitive-turns",
+            "--omo-senpi-onboarding-disabled"
         ]
     );
     assert_eq!(spec.cwd, data.join("mhc-supervisor"));

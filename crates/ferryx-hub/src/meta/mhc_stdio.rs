@@ -24,9 +24,9 @@ pub const WORK_REPLY_REQUEST: &str = "supervisor.work_reply";
 pub const WORK_QUEUE: usize = 64;
 /// Error code of the reply to a work request the full queue could not take.
 pub const WORK_BUSY_CODE: &str = "SUPERVISOR_WORK_BUSY";
-/// Field the reader adds to every queued work request: its position in the engine's output
-/// ([`StdioClient::position`]). The engine writes in order, so a request positioned after a
-/// reading taken before a prompt was sent was emitted after that moment.
+/// Field the reader adds to every queued work request, response and session record: its
+/// position in the engine's output ([`StdioClient::position`]). The engine writes in order, so
+/// a record positioned after a reading (or after a prompt's response) was emitted after it.
 pub const WORK_SEQUENCE_FIELD: &str = "fxReceivedAt";
 
 pub type BoxedReader = Box<dyn AsyncRead + Send + Unpin>;
@@ -142,6 +142,8 @@ impl Shared {
         let Some(routes) = guard.as_mut() else {
             return;
         };
+        let mut value = value;
+        value[WORK_SEQUENCE_FIELD] = json!(position);
         if kind == "response" {
             if let Some(sender) = value
                 .get("id")
@@ -155,8 +157,6 @@ impl Shared {
         if kind == "extension_event"
             && value.get("name").and_then(Value::as_str) == Some(WORK_REQUEST_EVENT)
         {
-            let mut value = value;
-            value[WORK_SEQUENCE_FIELD] = json!(position);
             if let Some(work) = &routes.work {
                 match work.try_send(value) {
                     Ok(()) => {}
@@ -378,6 +378,16 @@ impl StdioClient {
     /// Sends one command with a fresh id and waits up to `deadline` for its response.
     /// Returns the response `data` (null when absent).
     pub async fn request(&self, command: Value, deadline: Duration) -> Result<Value, RequestError> {
+        self.request_at(command, deadline).await.map(|(data, _)| data)
+    }
+
+    /// [`Self::request`] that also returns the response's position in the engine's output
+    /// ([`WORK_SEQUENCE_FIELD`]): a session record positioned before it was emitted earlier.
+    pub async fn request_at(
+        &self,
+        command: Value,
+        deadline: Duration,
+    ) -> Result<(Value, u64), RequestError> {
         let mut command = command;
         let id = format!("fx-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         command["id"] = json!(id);
@@ -406,7 +416,11 @@ impl StdioClient {
             Ok(Err(_)) => Err(self.gone_error()),
             Ok(Ok(response)) => {
                 if response.get("success") == Some(&Value::Bool(true)) {
-                    Ok(response.get("data").cloned().unwrap_or(Value::Null))
+                    let at = response
+                        .get(WORK_SEQUENCE_FIELD)
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    Ok((response.get("data").cloned().unwrap_or(Value::Null), at))
                 } else {
                     Err(RequestError::Refused {
                         command: kind,

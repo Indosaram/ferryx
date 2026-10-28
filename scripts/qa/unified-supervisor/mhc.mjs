@@ -355,7 +355,7 @@ export async function awaitEngine(ctx, env, label, predicate, deadlineMs) {
 // ---------------------------------------------------------------------------
 // Restart only the owned engine.
 
-const ENGINE_ARGS = ['--mode', 'rpc', '--multi-session', '--no-model-fallback', '--ttsr-rules-disabled=repetitive-turns'];
+const ENGINE_ARGS = ['--mode', 'rpc', '--multi-session', '--no-model-fallback', '--ttsr-rules-disabled=repetitive-turns', '--omo-senpi-onboarding-disabled'];
 
 function argvOf(probe) {
   if (Array.isArray(probe.argv)) return probe.argv;

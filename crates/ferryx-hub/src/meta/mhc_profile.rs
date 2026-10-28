@@ -1,7 +1,7 @@
 //! Launch profile and durable session identities of the retained mhc supervisor engine.
 //!
 //! The engine always runs as `mhc --mode rpc --multi-session --no-model-fallback
-//! --ttsr-rules-disabled=repetitive-turns` over stdio, in
+//! --ttsr-rules-disabled=repetitive-turns --omo-senpi-onboarding-disabled` over stdio, in
 //! the fixed profile directory `<data>/mhc-supervisor`, whatever directory the hub itself was
 //! started from. Its native memory identity is pinned by a profile-local `.omo/omo.jsonc`; no
 //! global configuration is written. Session roles get their policy from host-supplied session
@@ -28,12 +28,18 @@ pub const DEFAULT_MHC_BIN: &str = "mhc";
 /// session legitimately answers the same verdict for an unchanged goal, and that guard aborts
 /// a streamed turn that repeats the previous persisted answer, so every repeated verdict was
 /// lost as a fault. The other stream rules stay on.
-pub const LAUNCH_ARGS: [&str; 5] = [
+///
+/// `--omo-senpi-onboarding-disabled` turns off the omo onboarding component (mhc
+/// maho-omo-onboarding component.rs:15-20): on the first session it ever opens it triggers its
+/// own model turn ("Read the onboarding skill ... Greet the user first.") in the supervisor's
+/// identity, which a supervisor session has no use for.
+pub const LAUNCH_ARGS: [&str; 6] = [
     "--mode",
     "rpc",
     "--multi-session",
     "--no-model-fallback",
     "--ttsr-rules-disabled=repetitive-turns",
+    "--omo-senpi-onboarding-disabled",
 ];
 /// Capabilities the engine must advertise before any session opens: the host baseline the
 /// client relies on, then the plan's supervisor capabilities. `memory_forget` also stands for
