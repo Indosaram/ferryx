@@ -43,6 +43,7 @@ import {
 } from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
+import type { AttentionPrompts } from "../features/ferryx/attention/attentionPrompts";
 import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
@@ -110,6 +111,8 @@ export type SidebarAttention = {
   onOpen: (row: AttentionRow) => void;
   onDismiss: (row: AttentionRow) => void;
   onDismissAll: () => void;
+  /** Lets a needs-you row answer its pane's prompt inline. */
+  prompts?: AttentionPrompts;
   inboxOpen: boolean;
   onInboxOpenChange: (open: boolean) => void;
 };
