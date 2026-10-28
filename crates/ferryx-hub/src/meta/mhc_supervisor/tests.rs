@@ -257,6 +257,18 @@ impl Peer {
                     self.emit(json!({"type": "agent_start", "sessionId": handle}));
                     self.assistant(&handle, "extension-triggered answer");
                 }
+                if message.contains("WORK_EARLY") {
+                    // The turn's own tool call reaches the hub before the prompt's `started`
+                    // response is read.
+                    let durable = self.handles.lock().unwrap()[&handle].clone();
+                    self.emit(json!({"type": "extension_event", "sessionId": handle,
+                        "name": "supervisor.work_request", "data": {
+                            "requestId": "work-early", "sessionId": durable, "action": "submit",
+                            "payload": {"title": "ship it", "requirements": ["tests pass"], "worker": "pty"}}}));
+                    self.emit(ok(json!({"disposition": "started"})));
+                    self.emit(json!({"type": "agent_start", "sessionId": handle}));
+                    return;
+                }
                 let disposition = self
                     .disposition
                     .lock()
@@ -1576,6 +1588,32 @@ async fn failed_launches_back_off_5s_doubling_to_300s_and_reset_after_a_stable_e
 }
 
 #[tokio::test]
+async fn a_tool_call_of_the_prompts_own_turn_read_before_started_is_executed() {
+    let harness = Harness::new("work-early", all_capabilities());
+    let supervisor = harness.supervisor();
+    let handler = Arc::new(RecordingWork::default());
+    supervisor.set_work_handler(handler.clone());
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:C9".to_owned(),
+    };
+    let reply: Value = serde_json::from_str(
+        &supervisor
+            .converse_in_turn(&scope, Some(7), "WORK_EARLY please")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    // The handler ran for this turn, and its reply reached the engine and ended the turn.
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["requestId"], "work-early");
+    let calls = handler.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].turn, Some(7));
+    assert_eq!(calls[0].scope, scope);
+}
+
+#[tokio::test]
 async fn a_turn_the_engine_ran_before_the_prompt_started_never_answers_it() {
     let harness = Harness::new("behind", all_capabilities());
     let supervisor = harness.supervisor();
@@ -1803,6 +1841,21 @@ fn the_owned_launch_is_stdio_rpc_in_the_profile_directory() {
         ]
     );
     assert_eq!(spec.cwd, data.join("mhc-supervisor"));
+    // The stdio host forwards extension RPC events (the work-tool requests) only when its
+    // client capabilities, read from the environment, name them.
+    for name in [
+        "MAHO_RPC_CLIENT_CAPABILITIES",
+        "SENPI_RPC_CLIENT_CAPABILITIES",
+        "PI_RPC_CLIENT_CAPABILITIES",
+    ] {
+        assert!(
+            spec.env
+                .iter()
+                .any(|(key, value)| key == name && value == "extension_events"),
+            "{name} in {:?}",
+            spec.env
+        );
+    }
 }
 
 #[tokio::test]

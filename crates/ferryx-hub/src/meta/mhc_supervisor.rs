@@ -121,6 +121,8 @@ impl Default for ProcessLauncher {
 pub struct LaunchSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Set on top of the hub child environment.
+    pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
 }
 
@@ -156,6 +158,7 @@ impl ProcessLauncher {
         Ok(LaunchSpec {
             program,
             args: profile.launch_args(),
+            env: profile.launch_env(),
             cwd: profile.cwd().to_path_buf(),
         })
     }
@@ -171,6 +174,7 @@ impl EngineLauncher for ProcessLauncher {
         let mut command = crate::child_env::command(&spec.program);
         command
             .args(&spec.args)
+            .envs(spec.env.iter().map(|(key, value)| (key, value)))
             .current_dir(&spec.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
