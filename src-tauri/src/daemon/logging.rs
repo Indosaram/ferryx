@@ -13,6 +13,8 @@ use std::sync::{
 use tokio::sync::mpsc;
 
 const MAX_BYTES: u64 = 1024 * 1024;
+/// `daemon.log.1` ..= `daemon.log.{N}`; with the live file, disk use stays near `(N + 1) * MAX_BYTES`.
+const ROTATED_GENERATIONS: usize = 3;
 const MAX_RECORD: usize = 8192;
 
 enum Message {
@@ -45,7 +47,7 @@ pub(crate) struct DaemonLogging {
 
 impl DaemonLogging {
     pub(crate) async fn start() -> anyhow::Result<Self> {
-        let file = crate::ipc::run_blocking(|| {
+        let (file, path) = crate::ipc::run_blocking(|| {
             open_log().map_err(|e| {
                 crate::ipc::error::IpcError::internal(format!("daemon log initialization: {e}"))
             })
@@ -75,7 +77,7 @@ impl DaemonLogging {
             )
             .try_init()?;
         let task = tokio::spawn(async move {
-            let mut file = file;
+            let (mut file, mut path) = (file, path);
             while let Some(message) = rx.recv().await {
                 let (mut bytes, stop) = match message {
                     Message::Record(bytes) => (bytes, false),
@@ -88,14 +90,14 @@ impl DaemonLogging {
                     );
                 }
                 let written = crate::ipc::run_blocking(move || {
-                    append_bounded(&mut file, &bytes).map_err(|e| {
+                    append_bounded(&mut file, &path, &bytes).map_err(|e| {
                         crate::ipc::error::IpcError::internal(format!("daemon log write: {e}"))
                     })?;
-                    Ok(file)
+                    Ok((file, path))
                 })
                 .await;
-                file = match written {
-                    Ok(file) => file,
+                (file, path) = match written {
+                    Ok(state) => state,
                     Err(error) => {
                         report_failure(&anyhow::anyhow!("{error:?}"));
                         return;
@@ -137,8 +139,8 @@ pub(crate) fn signal_record(signal: i32) -> String {
 
 /// Appends one durable record to the private daemon log.
 pub(crate) fn append_record(record: &str) {
-    if let Ok(mut file) = open_log() {
-        let _ = append_bounded(&mut file, record.as_bytes());
+    if let Ok((mut file, path)) = open_log() {
+        let _ = append_bounded(&mut file, &path, record.as_bytes());
     }
 }
 
@@ -210,7 +212,7 @@ pub(crate) fn report_failure(error: &anyhow::Error) {
     let _ = stderr.flush();
 }
 
-fn open_log() -> io::Result<std::fs::File> {
+fn open_log() -> io::Result<(std::fs::File, std::path::PathBuf)> {
     use std::path::PathBuf;
     let base = std::env::var_os("FERRYX_DATA_DIR")
         .map(PathBuf::from)
@@ -259,7 +261,8 @@ fn open_log() -> io::Result<std::fs::File> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options.open(dir.join("daemon.log"))?;
+    let path = dir.join("daemon.log");
+    let file = options.open(&path)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::other("daemon log must be a regular file"));
     }
@@ -268,10 +271,14 @@ fn open_log() -> io::Result<std::fs::File> {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(file)
+    Ok((file, path))
 }
 
-fn append_bounded(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
+fn append_bounded(
+    file: &mut std::fs::File,
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> io::Result<()> {
     #[cfg(test)]
     if std::env::var("FERRYX_LOGGING_FIXTURE").as_deref() == Ok("write_failure") {
         return Err(io::Error::new(
@@ -279,11 +286,11 @@ fn append_bounded(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
             "fixture disk full",
         ));
     }
-    // A shared file (including during handover); lock before checking size or truncating.
+    // A shared file (including during handover); lock before checking size or rotating.
     file.lock()?;
     let result = (|| {
         if file.metadata()?.len() + bytes.len() as u64 > MAX_BYTES {
-            file.set_len(0)?;
+            rotate(file, path)?;
         }
         file.seek(io::SeekFrom::End(0))?;
         file.write_all(bytes)?;
@@ -291,6 +298,55 @@ fn append_bounded(file: &mut std::fs::File, bytes: &[u8]) -> io::Result<()> {
     })();
     let unlocked = file.unlock();
     result.and(unlocked)
+}
+
+fn rotated_path(path: &std::path::Path, generation: usize) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{generation}"));
+    name.into()
+}
+
+fn ignore_not_found(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Moves the full log into `daemon.log.1` (older generations shift up, the oldest falls off) and
+/// leaves `file` empty. Caller holds `file.lock()`.
+///
+/// Copy-then-truncate rather than rename: during a handover both daemons hold an fd on
+/// `daemon.log`, so renaming it would leave the other writer appending into `daemon.log.1`
+/// forever; truncating the shared inode under the lock moves every holder to the fresh log.
+fn rotate(file: &mut std::fs::File, path: &std::path::Path) -> io::Result<()> {
+    for generation in (1..ROTATED_GENERATIONS).rev() {
+        // Renaming a symlink moves the link itself; it never touches the target.
+        ignore_not_found(std::fs::rename(
+            rotated_path(path, generation),
+            rotated_path(path, generation + 1),
+        ))?;
+    }
+    let first = rotated_path(path, 1);
+    ignore_not_found(std::fs::remove_file(&first))?;
+    let mut options = std::fs::OpenOptions::new();
+    // create_new (O_EXCL) refuses any entry that reappeared, symlink or not.
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut rotated = options.open(&first)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        rotated.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.seek(io::SeekFrom::Start(0))?;
+    io::copy(file, &mut rotated)?;
+    rotated.flush()?;
+    file.set_len(0)
 }
 
 #[cfg(test)]
@@ -321,18 +377,85 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn full_log_discards_old_records_before_appending() {
-        // Given: an existing log at its disk limit, including across daemon restarts.
+    fn fixture_log() -> (tempfile::TempDir, std::path::PathBuf, std::fs::File) {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
         // Fresh worktrees have no target/ inside the manifest dir (CARGO_TARGET_DIR may
-        // point elsewhere); tempfile_in requires the directory to exist.
+        // point elsewhere); tempdir_in requires the directory to exist.
         std::fs::create_dir_all(&root).unwrap();
-        let mut file = tempfile::tempfile_in(root).unwrap();
+        let dir = tempfile::tempdir_in(root).unwrap();
+        let path = dir.path().join("daemon.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        (dir, path, file)
+    }
+
+    /// Writes `marker` and pads the log to exactly its disk limit.
+    fn fill_to_limit(file: &mut std::fs::File, marker: &str) {
+        file.set_len(0).unwrap();
+        file.seek(io::SeekFrom::Start(0)).unwrap();
+        file.write_all(marker.as_bytes()).unwrap();
         file.set_len(MAX_BYTES).unwrap();
+    }
+
+    #[test]
+    fn full_log_rotates_old_records_into_first_generation() {
+        // Given: an existing log at its disk limit, including across daemon restarts.
+        let (_dir, path, mut file) = fixture_log();
+        fill_to_limit(&mut file, "relay_warning=old\n");
         // When: another record is persisted.
-        append_bounded(&mut file, b"reason=manual_reset\n").unwrap();
-        // Then: the retained file contains only the new record, not an unbounded archive.
+        append_bounded(&mut file, &path, b"reason=manual_reset\n").unwrap();
+        // Then: the history survives in daemon.log.1 and the live log holds only the new record.
+        let rotated = std::fs::read(rotated_path(&path, 1)).unwrap();
+        assert_eq!(rotated.len() as u64, MAX_BYTES);
+        assert!(rotated.starts_with(b"relay_warning=old\n"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"reason=manual_reset\n");
         assert_eq!(file.metadata().unwrap().len(), 20);
+    }
+
+    #[test]
+    fn rotation_caps_the_generation_count() {
+        let (_dir, path, mut file) = fixture_log();
+        for generation in 0..5 {
+            fill_to_limit(&mut file, &format!("generation={generation}\n"));
+            append_bounded(&mut file, &path, b"next\n").unwrap();
+        }
+        // Newest first: .1 holds the last full log, .3 the oldest kept; nothing beyond.
+        for (rotated, generation) in [(1, 4), (2, 3), (3, 2)] {
+            let content = std::fs::read(rotated_path(&path, rotated)).unwrap();
+            assert!(
+                content.starts_with(format!("generation={generation}\n").as_bytes()),
+                "daemon.log.{rotated}"
+            );
+        }
+        assert!(!rotated_path(&path, ROTATED_GENERATIONS + 1).exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"next\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotated_log_is_private_and_never_follows_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path, mut file) = fixture_log();
+        // A planted daemon.log.1 symlink must be replaced, not written through.
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, rotated_path(&path, 1)).unwrap();
+        fill_to_limit(&mut file, "old\n");
+        append_bounded(&mut file, &path, b"new\n").unwrap();
+        let first = rotated_path(&path, 1);
+        let metadata = std::fs::symlink_metadata(&first).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        // The displaced link shifted to .2 as a link; its target is still never written.
+        assert!(std::fs::symlink_metadata(rotated_path(&path, 2))
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 }
