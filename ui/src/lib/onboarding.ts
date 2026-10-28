@@ -19,14 +19,16 @@ export const ONBOARDING_VERSION = 1;
  * when the feature that needs it is first used (notifications on the first
  * notify, Full Disk Access when a read hits a TCC-protected path); Settings >
  * Permissions remains the place to review all of them.
+ *
+ * The product comes first; signing in is the last step and can be skipped.
  */
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
-  "account",
   "intro",
   "features",
   "agents",
   "cli",
   "project",
+  "account",
 ];
 
 export const OPEN_ONBOARDING_EVENT = "ferryx:open-onboarding";

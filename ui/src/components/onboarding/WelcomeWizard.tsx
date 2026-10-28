@@ -75,6 +75,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const [stepIndex, setStepIndex] = useState(() =>
     clampStepIndex(initialStepIndex, steps.length),
   );
+  const [accountLinked, setAccountLinked] = useState(() =>
+    doneSteps.includes("account"),
+  );
 
   const panelRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -83,6 +86,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const currentStep = steps[currentStepIndex];
   const isFirst = currentStepIndex === 0;
   const isLast = currentStepIndex === steps.length - 1;
+  const finishingWithoutAccount = currentStep === "account" && !accountLinked;
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
@@ -102,7 +106,10 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   };
 
   const handleFinish = () => {
-    onStepCompleted(currentStep);
+    // Skipping sign-in must not record the account step as completed.
+    if (!finishingWithoutAccount) {
+      onStepCompleted(currentStep);
+    }
     onFinish();
   };
 
@@ -143,9 +150,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const getLedeText = (step: OnboardingStepId): string => {
     switch (step) {
       case "account":
-        return "Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone.";
+        return "Optional. Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone.";
       case "intro":
-        return "A short setup, then we'll get your first project open.";
+        return "A short tour and setup. Signing in comes last and is optional.";
       case "features":
         return "The parts you'll use every day.";
       case "agents":
@@ -160,7 +167,14 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const renderStepContent = () => {
     switch (currentStep) {
       case "account":
-        return <AccountStep onLinked={() => onStepCompleted("account")} />;
+        return (
+          <AccountStep
+            onLinked={() => {
+              setAccountLinked(true);
+              onStepCompleted("account");
+            }}
+          />
+        );
       case "intro":
         return <IntroStep steps={steps} />;
       case "features":
@@ -328,7 +342,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   onClick={handleFinish}
                   className="min-w-24"
                 >
-                  Done
+                  {finishingWithoutAccount ? "Finish without signing in" : "Done"}
                 </Button>
               ) : (
                 <Button

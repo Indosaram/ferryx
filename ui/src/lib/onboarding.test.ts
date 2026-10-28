@@ -202,12 +202,12 @@ describe("onboarding exports and constants", () => {
   it("exports expected constants and step order", () => {
     expect(ONBOARDING_VERSION).toBe(1);
     expect(ONBOARDING_STEP_ORDER).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "account",
     ]);
     expect(OPEN_ONBOARDING_EVENT).toBe("ferryx:open-onboarding");
   });
@@ -659,12 +659,12 @@ describe("wizardSteps", () => {
       accountLinked: true,
     };
     expect(wizardSteps(ctx)).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "account",
     ]);
   });
 
@@ -691,12 +691,12 @@ describe("wizardSteps", () => {
       accountLinked: true,
     };
     expect(wizardSteps(ctx)).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "account",
     ]);
   });
 });
@@ -721,12 +721,12 @@ describe("satisfiedOnboardingSteps", () => {
       accountLinked: true,
     };
     expect(satisfiedOnboardingSteps(state, ctx)).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "account",
     ]);
   });
 
@@ -759,7 +759,7 @@ describe("satisfiedOnboardingSteps", () => {
       projectCount: 0,
       accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["account", "cli"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["cli", "account"]);
   });
 });
 
@@ -886,11 +886,11 @@ describe("features step", () => {
     };
     expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
     expect(satisfiedOnboardingSteps(upgraded, satisfiedCtx)).toEqual([
-      "account",
       "intro",
       "agents",
       "cli",
       "project",
+      "account",
     ]);
 
     const doneState = markOnboardingStepsCompleted(
@@ -933,6 +933,8 @@ describe("account step", () => {
     const ctx = { permissions: null, agents: null, cli: null, projectCount: 1, accountLinked: false };
     expect(isOnboardingStepSatisfied("account", ctx)).toBe(false);
     expect(isOnboardingStepSatisfied("account", { ...ctx, accountLinked: true })).toBe(true);
-    expect(wizardSteps(ctx)[0]).toBe("account");
+    const steps = wizardSteps(ctx);
+    expect(steps[0]).toBe("intro");
+    expect(steps[steps.length - 1]).toBe("account");
   });
 });

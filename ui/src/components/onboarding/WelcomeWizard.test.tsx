@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedAgent } from "../../lib/agentsSettings";
-import type { OnboardingStepId } from "../../lib/onboarding";
+import { ONBOARDING_STEP_ORDER, type OnboardingStepId } from "../../lib/onboarding";
 import { WelcomeWizard, type WelcomeWizardProps } from "./WelcomeWizard";
 
 vi.mock("./FeaturesStep", () => ({
@@ -15,6 +15,12 @@ vi.mock("./AgentsCliStep", () => ({
 
 vi.mock("./CliStep", () => ({
   CliStep: () => <div data-testid="mock-cli-step" />,
+}));
+
+vi.mock("./AccountStep", () => ({
+  AccountStep: ({ onLinked }: { onLinked?: () => void }) => (
+    <button type="button" data-testid="mock-account-link" onClick={() => onLinked?.()} />
+  ),
 }));
 
 const mockAgents: readonly ResolvedAgent[] = [
@@ -320,6 +326,76 @@ describe("WelcomeWizard", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Choose your default agent");
     expect(screen.getByTestId("mock-agents-step")).toBeDefined();
     expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe("Step 3 of 4");
+  });
+
+  it("opens on the intro step and ends on the account step", () => {
+    const props = createDefaultProps({ steps: ONBOARDING_STEP_ORDER });
+    render(<WelcomeWizard {...props} />);
+
+    expect(screen.getByTestId("onboarding-rail-intro").getAttribute("aria-current")).toBe("step");
+    expect(screen.getByTestId("onboarding-step-indicator").textContent).toBe(
+      `Step 1 of ${ONBOARDING_STEP_ORDER.length}`,
+    );
+    const railIds = screen
+      .getAllByTestId(/^onboarding-rail-/)
+      .map((row) => row.getAttribute("data-testid"));
+    expect(railIds[0]).toBe("onboarding-rail-intro");
+    expect(railIds[railIds.length - 1]).toBe("onboarding-rail-account");
+  });
+
+  it("finishes from an unlinked account step without completing the account step", () => {
+    const onStepCompleted = vi.fn();
+    const onFinish = vi.fn();
+    const steps = ONBOARDING_STEP_ORDER;
+    const props = createDefaultProps({
+      steps,
+      initialStepIndex: steps.length - 1,
+      onStepCompleted,
+      onFinish,
+    });
+    render(<WelcomeWizard {...props} />);
+
+    expect(screen.getByTestId("onboarding-rail-account").getAttribute("aria-current")).toBe("step");
+    const finishButton = screen.getByTestId("onboarding-finish");
+    expect(finishButton.textContent).toBe("Finish without signing in");
+
+    fireEvent.click(finishButton);
+
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(onStepCompleted).not.toHaveBeenCalledWith("account");
+  });
+
+  it("shows Done on the account step once this computer is linked", () => {
+    const onStepCompleted = vi.fn();
+    const onFinish = vi.fn();
+    const steps = ONBOARDING_STEP_ORDER;
+    const props = createDefaultProps({
+      steps,
+      initialStepIndex: steps.length - 1,
+      onStepCompleted,
+      onFinish,
+    });
+    render(<WelcomeWizard {...props} />);
+
+    fireEvent.click(screen.getByTestId("mock-account-link"));
+    expect(onStepCompleted).toHaveBeenCalledWith("account");
+    const finishButton = screen.getByTestId("onboarding-finish");
+    expect(finishButton.textContent).toBe("Done");
+
+    fireEvent.click(finishButton);
+    expect(onFinish).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Done on the account step when it is already linked", () => {
+    const steps = ONBOARDING_STEP_ORDER;
+    const props = createDefaultProps({
+      steps,
+      doneSteps: ["account"],
+      initialStepIndex: steps.length - 1,
+    });
+    render(<WelcomeWizard {...props} />);
+
+    expect(screen.getByTestId("onboarding-finish").textContent).toBe("Done");
   });
 
   it("returns null when steps is empty", () => {
