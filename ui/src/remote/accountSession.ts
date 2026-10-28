@@ -973,19 +973,30 @@ function isNewerEpoch(next: string, pinned: string): boolean {
   return next !== pinned;
 }
 
-export async function openTunnel(
+/**
+ * Not `async` on purpose: it returns openAccountTunnel's own promise, so the caller holds the
+ * open tunnel in the microtask after it opens. An async wrapper that returns a promise adds two
+ * more, and an owner that closes in between (a suspension right after a worktree opened) could
+ * not reach the tunnel yet. Validation failures still arrive as a rejection.
+ */
+export function openTunnel(
   params: OpenTunnelParams,
 ): Promise<{ transport: TunnelTransport; close: () => void }> {
   const relayOrigin = normalizeAccountOrigin(params.relayOrigin);
   if (!relayOrigin) {
-    throw new AccountSessionError("INVALID_RELAY_ORIGIN", "Relay origin must be https (http only for localhost)");
+    return Promise.reject(new AccountSessionError("INVALID_RELAY_ORIGIN", "Relay origin must be https (http only for localhost)"));
   }
-  verifyMachineAttachKeyPin(params.machineId, params.enrollmentEpoch, params.machineAttachPublicKey);
-  const socketUrl = buildAttachSocketUrl(
-    relayOrigin,
-    params.sessionId,
-    params.localKeyPair,
-  );
+  let socketUrl: string;
+  try {
+    verifyMachineAttachKeyPin(params.machineId, params.enrollmentEpoch, params.machineAttachPublicKey);
+    socketUrl = buildAttachSocketUrl(
+      relayOrigin,
+      params.sessionId,
+      params.localKeyPair,
+    );
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return openAccountTunnel({
     socketUrl,
     machineId: params.machineId,

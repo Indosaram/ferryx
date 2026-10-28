@@ -959,10 +959,13 @@ describe("accountSession client module", () => {
     expect(httpClose).toHaveBeenCalledTimes(1);
     expect(tunnelCloseSpy).toHaveBeenCalledTimes(1);
 
-    const lateSocket = { readyState: 1, send: vi.fn(), close: vi.fn(), onclose: null, onmessage: null, onerror: null };
+    // openAccountWebSocket wraps the socket's close, so the spy is kept apart to see the
+    // underlying socket really closed.
+    const lateClose = vi.fn();
+    const lateSocket = { readyState: 1, send: vi.fn(), close: lateClose, onclose: null, onmessage: null, onerror: null };
     upgraded(lateSocket);
     await expect(opening).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
-    expect(lateSocket.close).toHaveBeenCalled();
+    expect(lateClose).toHaveBeenCalledTimes(1);
     expect(tunnelCloseSpy).toHaveBeenCalledTimes(1);
   });
 
