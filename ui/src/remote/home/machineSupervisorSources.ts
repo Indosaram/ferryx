@@ -3,7 +3,7 @@
 // frames reach a small per-machine frame bus from the active connection's events socket, which
 // RemoteApp owns, and from one events socket per other reachable machine
 // (useMachineEventSockets).
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { planLimitStateFromCloseEvent, planLimitStateFromError, type AccountMachineView, type PlanLimitState } from "../accountSession";
 import type { TunnelTransport, TunnelWebSocket } from "../attachTunnel";
@@ -167,6 +167,34 @@ export type MachineEventSocketsInput = {
 /** Longest wait before reopening a machine's events socket after it closed or failed. */
 export const MACHINE_EVENTS_RETRY_MAX_MS = 10_000;
 
+/** How long the page may stay hidden before the per-machine events sockets close. */
+export const MACHINE_EVENTS_HIDDEN_GRACE_MS = 30_000;
+
+/**
+ * False once the page has been hidden for `graceMs`; true again the moment it shows. A quick app
+ * switch keeps the sockets; a phone left in a pocket stops holding one tunnel per machine.
+ */
+export function usePageActive(graceMs: number): boolean {
+  const [active, setActive] = useState(() => typeof document === "undefined" || document.visibilityState !== "hidden");
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const update = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      if (document.visibilityState === "hidden") timer = setTimeout(() => setActive(false), graceMs);
+      else setActive(true);
+    };
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [graceMs]);
+  return active;
+}
+
 /**
  * Keeps one events socket open per reachable machine that no active connection covers, and
  * relays its frames to the bus. Without it a signed-in account that has not opened a worktree
@@ -174,14 +202,17 @@ export const MACHINE_EVENTS_RETRY_MAX_MS = 10_000;
  * surface admitted, or the dispatcher moved, would stay stale until the next manual action.
  * The daemon opens each subscription with an `inventoryInvalidated {reason: subscribe}`
  * boundary, which makes every view refetch once. A suspension or plan limit stops the retries
- * and is reported through `onPlanLimit`, like the active connection's socket does.
+ * and is reported through `onPlanLimit`, like the active connection's socket does. While the
+ * page stays hidden past MACHINE_EVENTS_HIDDEN_GRACE_MS the sockets close; showing it again
+ * reopens them, and the subscribe boundary refetches what changed meanwhile.
  */
 export function useMachineEventSockets({ enabled, machines, linkFor, skip, open, bus, onPlanLimit }: MachineEventSocketsInput): void {
+  const pageActive = usePageActive(MACHINE_EVENTS_HIDDEN_GRACE_MS);
   const openRef = useRef(open);
   openRef.current = open;
   const onPlanLimitRef = useRef(onPlanLimit);
   onPlanLimitRef.current = onPlanLimit;
-  const targets = enabled
+  const targets = enabled && pageActive
     ? machines.flatMap((machine) => {
         if (machine.online === false || machine.machineId === skip) return [];
         const link = linkFor(machine.machineId);

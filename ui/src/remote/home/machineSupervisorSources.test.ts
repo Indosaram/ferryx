@@ -8,6 +8,7 @@ import type { TunnelMessageEvent, TunnelWebSocket } from "../attachTunnel";
 import { isSupervisorChangedFrame } from "../remoteSupervisor";
 import {
   createSupervisorFrameBus,
+  MACHINE_EVENTS_HIDDEN_GRACE_MS,
   MACHINE_EVENTS_RETRY_MAX_MS,
   useMachineEventSockets,
   type MachineEventSocketsInput,
@@ -89,6 +90,35 @@ describe("useMachineEventSockets", () => {
 
     hook.unmount();
     expect(opened[1].socket.closed).toBe(true);
+  });
+
+  it("closes the sockets after the page stays hidden and reopens them when it shows", async () => {
+    vi.useFakeTimers();
+    let visibility: DocumentVisibilityState = "visible";
+    const spy = vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    try {
+      const { opened } = render();
+      await act(async () => {});
+      expect(opened).toHaveLength(1);
+
+      visibility = "hidden";
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      // A quick app switch keeps the socket.
+      await act(async () => { await vi.advanceTimersByTimeAsync(MACHINE_EVENTS_HIDDEN_GRACE_MS - 1); });
+      expect(opened[0].socket.closed).toBe(false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(opened[0].socket.closed).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(MACHINE_EVENTS_RETRY_MAX_MS); });
+      expect(opened).toHaveLength(1);
+
+      visibility = "visible";
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      await act(async () => {});
+      expect(opened).toHaveLength(2);
+      expect(opened[1].machineId).toBe("studio");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("reports the exact suspension close and never reopens that socket", async () => {
