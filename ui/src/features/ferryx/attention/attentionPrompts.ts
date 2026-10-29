@@ -27,6 +27,7 @@ export function desktopAttentionPrompts(
   backendSessionOf: (row: AttentionRow) => string | null,
   onAnswered: (row: AttentionRow) => void,
 ): AttentionPrompts {
+  const pushes = promptPushes();
   return {
     read: async (row) => {
       const sessionId = backendSessionOf(row);
@@ -52,20 +53,51 @@ export function desktopAttentionPrompts(
     },
     onAnswered,
     subscribe: (row, listener) => {
-      let unlisten: (() => void) | null = null;
-      let active = true;
-      void onAgentPromptChanged((sessionId) => {
-        if (sessionId === backendSessionOf(row)) listener();
-      }).then(
-        (stop) => {
-          if (active) unlisten = stop;
-          else stop();
-        },
-        () => undefined,
-      );
+      const sessionId = backendSessionOf(row);
+      if (!sessionId) return () => undefined;
+      return pushes.add(sessionId, listener);
+    },
+  };
+}
+
+/**
+ * One `agentPromptChanged` listener for every row, dispatched by daemon session id. It is attached
+ * while any row listens and detached when the last one leaves.
+ */
+function promptPushes() {
+  const listeners = new Map<string, Set<() => void>>();
+  let unlisten: (() => void) | null = null;
+  let attaching = false;
+  const dispatch = (sessionId: string) => {
+    for (const listener of [...(listeners.get(sessionId) ?? [])]) listener();
+  };
+  const attach = () => {
+    if (unlisten || attaching) return;
+    attaching = true;
+    void onAgentPromptChanged(dispatch).then(
+      (stop) => {
+        attaching = false;
+        if (listeners.size > 0) unlisten = stop;
+        else stop();
+      },
+      () => {
+        attaching = false;
+      },
+    );
+  };
+  return {
+    add(sessionId: string, listener: () => void): () => void {
+      const set = listeners.get(sessionId) ?? new Set();
+      set.add(listener);
+      listeners.set(sessionId, set);
+      attach();
       return () => {
-        active = false;
-        unlisten?.();
+        set.delete(listener);
+        if (set.size === 0 && listeners.get(sessionId) === set) listeners.delete(sessionId);
+        if (listeners.size === 0 && unlisten) {
+          unlisten();
+          unlisten = null;
+        }
       };
     },
   };

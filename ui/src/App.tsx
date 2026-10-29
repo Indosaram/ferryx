@@ -21,7 +21,7 @@ import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
-import { buildAttentionRows, liveActivityLookup, type AttentionRow } from "./features/ferryx/attention/attentionModel";
+import { buildAttentionRows, buildPromptCandidateRows, liveActivityLookup, type AttentionRow } from "./features/ferryx/attention/attentionModel";
 import { desktopAttentionPrompts } from "./features/ferryx/attention/attentionPrompts";
 import { agentHistoryProviderLabel, type AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
@@ -2113,6 +2113,12 @@ function WorkspaceApp({
     // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
     [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
   );
+  // Working panes whose daemon may still read a prompt (row 21): the Inbox probes them.
+  const attentionCandidates = useMemo(
+    () => buildPromptCandidateRows(notificationInbox.entries, liveActivityLookup(state, listWorkspaceSnapshots())),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the same inputs attentionRows reads
+    [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
+  );
   // Publishes what the Sidebar draws, Inbox rows included (declared here, after attentionRows). The
   // published rows carry each pane's backend session id so a remote can open that exact pane.
   const publishedAttentionRows = useMemo(
@@ -2615,9 +2621,10 @@ function WorkspaceApp({
     onDismiss: (row) => dismissAttentionRows([row]),
     onDismissAll: () => dismissAttentionRows(attentionRows),
     prompts: attentionPrompts,
+    candidates: attentionCandidates,
     inboxOpen: isInboxOpen,
     onInboxOpenChange: setIsInboxOpen,
-  }), [attentionPrompts, attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
+  }), [attentionCandidates, attentionPrompts, attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;

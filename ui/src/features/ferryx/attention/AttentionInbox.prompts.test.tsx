@@ -52,7 +52,7 @@ const MENU = {
   needsConfirmation: false,
 };
 
-function Harness({ initial = [waiting] }: { initial?: AttentionRow[] }) {
+function Harness({ initial = [waiting], candidates }: { initial?: AttentionRow[]; candidates?: AttentionRow[] }) {
   const [rows, setRows] = useState(initial);
   const prompts = useMemo(
     () => desktopAttentionPrompts(
@@ -61,7 +61,11 @@ function Harness({ initial = [waiting] }: { initial?: AttentionRow[] }) {
     ),
     [],
   );
-  return <AttentionInbox rows={rows} onOpen={vi.fn()} prompts={prompts} now={NOW} />;
+  return <AttentionInbox rows={rows} {...(candidates ? { candidates } : {})} onOpen={vi.fn()} prompts={prompts} now={NOW} />;
+}
+
+function promptReads() {
+  return core.invoke.mock.calls.filter(([command]) => command === "cmd_agent_prompt_get").map(([, args]) => args);
 }
 
 function answerCalls() {
@@ -195,6 +199,37 @@ describe("AttentionInbox prompt answers", () => {
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
     });
     expect(answerCalls()[0]?.[1]).toMatchObject({ answer: { text: "use bun" } });
+  });
+
+  it("lists a working pane as needing you once the daemon reads a prompt on it", async () => {
+    core.invoke.mockImplementation(async (command: string) => (command === "cmd_agent_prompt_get" ? MENU : null));
+    render(<Harness initial={[]} candidates={[{ ...waiting, id: "ws-1:pane-w", sessionId: "pane-w" }]} />);
+
+    expect(await screen.findAllByTestId("attention-prompt-option")).toHaveLength(3);
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "needs-you");
+  });
+
+  it("lists no row for a working pane the daemon reads no prompt on", async () => {
+    core.invoke.mockResolvedValue(null);
+    render(<Harness initial={[]} candidates={[{ ...waiting, id: "ws-1:pane-w", sessionId: "pane-w" }]} />);
+    await waitFor(() => expect(core.invoke).toHaveBeenCalledWith("cmd_agent_prompt_get", { sessionId: "daemon-pane-w" }));
+    await act(async () => {});
+    expect(screen.queryByTestId("attention-row")).not.toBeInTheDocument();
+    expect(screen.getByTestId("attention-inbox-empty")).toBeInTheDocument();
+  });
+
+  it("re-reads only the done row whose session a push names, through one listener", async () => {
+    core.invoke.mockResolvedValue(null);
+    const done = (id: string): AttentionRow => ({ ...waiting, id: `ws-1:${id}`, sessionId: id, state: "done" });
+    render(<Harness initial={[done("pane-a"), done("pane-b")]} />);
+    await waitFor(() => expect(promptReads()).toHaveLength(2));
+    await waitFor(() => expect(events.handlers.get("agentPromptChanged")?.size).toBe(1));
+
+    await act(async () => {
+      events.emit("agentPromptChanged", { sessionId: "daemon-pane-b" });
+    });
+    await waitFor(() => expect(promptReads()).toHaveLength(3));
+    expect(promptReads()[2]).toEqual({ sessionId: "daemon-pane-b" });
   });
 
   it("drops the row when an agentPromptChanged push finds the card answered elsewhere", async () => {
