@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 import { runHostScript, runProcess, quoteSh, quotePowerShell } from "./release-hosts.mjs";
 import { verifyMinisign } from "./minisign-verify.mjs";
@@ -623,6 +624,7 @@ mkdir -p "$source_dir/src-tauri/vendor"
 cp -R "$ghostty_dir" "$source_dir/src-tauri/vendor/ghostty"
 node "$source_dir/scripts/sync-version.mjs" --tag ${quoteSh(plan.tag)}
 bun install --cwd "$source_dir/ui" --frozen-lockfile
+bun "$source_dir/scripts/fetch-mhc.mjs" --target x86_64-unknown-linux-gnu --prune
 mkdir "$out_dir"
 ${targetDirCode}
 export SOURCE_DATE_EPOCH=${quoteSh(String(plan.sourceDateEpoch))}
@@ -697,6 +699,7 @@ Remove-Item -LiteralPath (Join-Path $sourceDir 'src-tauri/vendor/ghostty') -Recu
 Copy-Item -LiteralPath $ghosttyDir -Destination (Join-Path $sourceDir 'src-tauri/vendor/ghostty') -Recurse
 node (Join-Path $sourceDir 'scripts/sync-version.mjs') --tag ${quotePowerShell(plan.tag)}; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 bun install --cwd (Join-Path $sourceDir 'ui') --frozen-lockfile; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+bun (Join-Path $sourceDir 'scripts/fetch-mhc.mjs') --target x86_64-pc-windows-msvc --prune; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Path $outDir | Out-Null
 ${targetDirCode}
 $env:SOURCE_DATE_EPOCH = ${quotePowerShell(String(plan.sourceDateEpoch))}
@@ -836,7 +839,8 @@ export function recreateDmgFromApp({ appPath, dmgPath, stagingDir, exec = macExe
  * notarizes the DMG from that final app so the image never ships the bundler's
  * pre-signing copy of the embedded helpers.
  *
- * Signing is inside-out: loose Mach-O files, then every nested bundle under
+ * Signing is inside-out: loose Mach-O files (the bundled bun with
+ * BUN_ENTITLEMENTS, see machoEntitlements), then every nested bundle under
  * Contents/Helpers/*.app (signed as a bundle), then the outer app. No --deep.
  * `entitlements` is the outer-entitlements file recorded by
  * assembleDaemonHelper (scripts/macos-daemon-helper.mjs): when it is non-empty
@@ -864,7 +868,7 @@ export function finalizeMacosBundle({
       if (!itemPath) continue;
       const fileType = exec("file", ["-b", itemPath]).stdout;
       if (fileType.includes("Mach-O")) {
-        exec("codesign", [...codesignArgs(signingIdentity), itemPath]);
+        exec("codesign", [...codesignArgs(signingIdentity, machoEntitlements(appPath, itemPath)), itemPath]);
       }
     }
     for (const bundlePath of nestedHelperBundles(appPath)) {
@@ -939,6 +943,31 @@ export function finalizeMacosBundle({
   }
 
   return { appPath, dmgPath, notarizations };
+}
+
+/**
+ * Entitlements the committed plist grants the bundled bun runtime (mhc's eval kernel): JavaScriptCore
+ * needs JIT and unsigned executable memory under the hardened runtime, the same set Oven signs its
+ * own release with. Kept in src-tauri/resources/mhc/bun.entitlements.plist.
+ */
+export const BUN_ENTITLEMENTS = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "src-tauri",
+  "resources",
+  "mhc",
+  "bun.entitlements.plist",
+);
+
+/**
+ * Per-binary entitlements for a loose Mach-O inside the app: the bundled bun
+ * (Contents/Resources/mhc/<triple>/bun/bun) gets BUN_ENTITLEMENTS; every other
+ * file, including the bundled mhc binaries, is signed without entitlements.
+ */
+export function machoEntitlements(appPath, itemPath) {
+  const relative = itemPath.slice(appPath.length).replace(/\\/g, "/");
+  return /^\/Contents\/Resources\/mhc\/[^/]+\/bun\/bun$/.test(relative) ? BUN_ENTITLEMENTS : null;
 }
 
 /** Nested bundles under Contents/Helpers, in a stable order. */
@@ -1109,6 +1138,12 @@ export async function buildHost({
 
       // Frozen UI install
       execFileSync("bun", ["install", "--cwd", "ui", "--frozen-lockfile"], {
+        cwd: isolatedSource,
+        stdio: "pipe",
+      });
+
+      // Verified mhc + bun for both slices of the universal app (Contents/Resources/mhc/<triple>)
+      execFileSync("bun", ["scripts/fetch-mhc.mjs", "--target", "universal-apple-darwin", "--prune"], {
         cwd: isolatedSource,
         stdio: "pipe",
       });
