@@ -21,9 +21,10 @@
 //! owner. A claim, a move into `ready` (which would allow a claim) and a released claim's
 //! `dispatching -> ready` reset are refused or skipped while another dispatch is in flight
 //! (`DISPATCH_IN_FLIGHT`); a partial unique index enforces the same invariant in the schema.
-//! Only [`resolve_uncertain_delivery`] releases an uncertain dispatch for a resend; its row and
-//! evidence stay. A claim given back before transmission is `released`: never sent, never in
-//! flight.
+//! Only the owner releases an uncertain dispatch ([`resolve_uncertain_delivery`], or the
+//! owner's `resolve_delivery` request in [`request`]); its row and evidence stay, and it is
+//! never transmitted again: a resend is a new dispatch with its own request id. A claim given
+//! back before transmission is `released`: never sent, never in flight.
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -320,7 +321,9 @@ impl RunState {
     /// pause, or its dependencies resolved), `waiting_children`/`waiting_event` (waits are
     /// still pending) and `delivery_uncertain` (an unresolved uncertain delivery remains). An
     /// owner approval releases `awaiting_owner` the same way (a hold placed at verify time goes
-    /// back to `verifying`), so those moves are listed from `awaiting_owner` too.
+    /// back to `verifying`), so those moves are listed from `awaiting_owner` too. The owner's
+    /// `delivered` answer to an uncertain delivery records its run settled, so
+    /// `delivery_uncertain` reaches `verifying` (or waiting, with dependencies pending).
     pub fn can_transition_to(self, to: RunState) -> bool {
         use RunState::*;
         if self.is_terminal() || self == to {
@@ -345,12 +348,23 @@ impl RunState {
             WaitingChildren | WaitingEvent => {
                 matches!(
                     self,
-                    Running | Verifying | WaitingChildren | WaitingEvent | Paused | AwaitingOwner
+                    Running
+                        | Verifying
+                        | WaitingChildren
+                        | WaitingEvent
+                        | Paused
+                        | AwaitingOwner
+                        | DeliveryUncertain
                 )
             }
             Verifying => matches!(
                 self,
-                Running | WaitingChildren | WaitingEvent | Paused | AwaitingOwner
+                Running
+                    | WaitingChildren
+                    | WaitingEvent
+                    | Paused
+                    | AwaitingOwner
+                    | DeliveryUncertain
             ),
             Completed => self == Verifying,
             DeliveryUncertain => matches!(self, Dispatching | Running | Paused | AwaitingOwner),
@@ -2289,7 +2303,8 @@ async fn require_nothing_in_flight(
 /// allows the move. `dispatching` is entered only by [`claim_dispatch`]; `running` only with a
 /// live run; `ready` only while no dispatch is in flight (`DISPATCH_IN_FLIGHT`), so a busy
 /// worker never gets a second instruction; an unresolved uncertain delivery leaves
-/// `delivery_uncertain` only through [`resolve_uncertain_delivery`] or a live run. Entering an
+/// `delivery_uncertain` only through the owner's resolution ([`resolve_uncertain_delivery`],
+/// the `resolve_delivery` request) or a live run. Entering an
 /// owner hold (`paused`, `awaiting_owner`, `cancelled`) bumps the
 /// revision and supersedes every unsent intent of an older revision, so a decision made before
 /// the hold can never dispatch; cancelling also cancels pending waits. All in one transaction.
@@ -2393,7 +2408,15 @@ async fn transition_goal_in(
             goal_id: goal_id.to_owned(),
         });
     }
-    if to == RunState::Ready {
+    // Ready would allow a claim; from delivery_uncertain, verifying or waiting is only the
+    // owner's `delivered` answer, which first records the uncertain dispatch settled.
+    if to == RunState::Ready
+        || (goal.run_state == RunState::DeliveryUncertain
+            && matches!(
+                to,
+                RunState::Verifying | RunState::WaitingChildren | RunState::WaitingEvent
+            ))
+    {
         require_nothing_in_flight(conn, goal_id).await?;
     }
     let revision = if to.is_owner_hold() {
@@ -2800,15 +2823,7 @@ pub async fn resolve_uncertain_delivery(
         });
     }
     let now = now_rfc3339();
-    sqlx::query(
-        "UPDATE supervisor_dispatches SET owner_resolved_at = ?, updated_at = ?
-         WHERE goal_id = ? AND state = 'uncertain' AND owner_resolved_at IS NULL",
-    )
-    .bind(&now)
-    .bind(&now)
-    .bind(goal_id)
-    .execute(&mut *tx)
-    .await?;
+    mark_uncertain_resolved(&mut tx, goal_id, &now).await?;
     let to = if expected_state == RunState::DeliveryUncertain {
         RunState::Ready
     } else {
@@ -2842,6 +2857,26 @@ pub async fn resolve_uncertain_delivery(
         updated_at: now,
         ..goal
     })
+}
+
+/// Marks every unresolved `uncertain` dispatch of the goal resolved by the owner, inside the
+/// caller's transaction: row, code and evidence stay, but it no longer counts as in flight.
+/// Returns how many were marked.
+async fn mark_uncertain_resolved(
+    conn: &mut SqliteConnection,
+    goal_id: &str,
+    now: &str,
+) -> Result<u64, SupervisorError> {
+    let marked = sqlx::query(
+        "UPDATE supervisor_dispatches SET owner_resolved_at = ?, updated_at = ?
+         WHERE goal_id = ? AND state = 'uncertain' AND owner_resolved_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(goal_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(marked.rows_affected())
 }
 
 /// Restart reconciliation, run once before any dispatcher starts: a `claimed` row cannot tell

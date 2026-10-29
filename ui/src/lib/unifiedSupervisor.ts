@@ -282,7 +282,7 @@ export function goalWaitLine(goal: UnifiedGoal): string {
     case "degraded":
       return `Degraded${detail}. Nothing is sent automatically.`;
     case "delivery_uncertain":
-      return `The last instruction may not have arrived${detail}. It is never resent on its own.`;
+      return `The last instruction may not have arrived${detail}. It is never resent on its own: check the worker, then say whether it got the instruction.`;
     case "completed":
       return "Completed: the requirements were verified.";
     case "cancelled":
@@ -294,7 +294,15 @@ export function goalWaitLine(goal: UnifiedGoal): string {
   return next ? `${line} Next check at ${next}.` : line;
 }
 
-export type GoalControls = { pause: boolean; resume: boolean; cancel: boolean; approve: boolean; correct: boolean };
+export type GoalControls = {
+  pause: boolean;
+  resume: boolean;
+  cancel: boolean;
+  approve: boolean;
+  correct: boolean;
+  /** The owner's answer to an uncertain delivery (request.rs `resolve_delivery`). */
+  resolveDelivery: boolean;
+};
 
 /** Which owner controls a goal offers in its current state. The hub still decides. */
 export function goalControls(goal: UnifiedGoal): GoalControls {
@@ -307,6 +315,7 @@ export function goalControls(goal: UnifiedGoal): GoalControls {
     // An approval never restores a revoked grant nor raises a spent budget (request.rs `approve`).
     approve: goal.runState === "awaiting_owner" && !detail.startsWith("GRANT_REVOKED") && !detail.startsWith("TURN_LIMIT"),
     correct: open,
+    resolveDelivery: goal.runState === "delivery_uncertain",
   };
 }
 
@@ -331,7 +340,7 @@ export function newRequestId(surface: SupervisorSurface, action: string): string
   return `${surface}-${action}-${random}`;
 }
 
-export type GoalAction = "pause" | "resume" | "cancel" | "approve" | "correct";
+export type GoalAction = "pause" | "resume" | "cancel" | "approve" | "correct" | "resolve_delivery";
 
 /** A goal action always carries the goal's revision as the compare-and-set. */
 export function goalEnvelope(

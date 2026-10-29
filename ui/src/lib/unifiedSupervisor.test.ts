@@ -95,7 +95,20 @@ describe("goal wait line and controls", () => {
     expect(goalControls(goal({ runState: "awaiting_owner", stateDetail: "GRANT_REVOKED: y" })).approve).toBe(false);
     expect(goalControls(goal({ runState: "awaiting_owner", stateDetail: "TURN_LIMIT: z" })).approve).toBe(false);
     expect(goalControls(goal({ runState: "paused" }))).toMatchObject({ pause: false, resume: true, cancel: true });
-    expect(goalControls(goal({ runState: "completed" }))).toEqual({ pause: false, resume: false, cancel: false, approve: false, correct: false });
+    expect(goalControls(goal({ runState: "completed" }))).toEqual({
+      pause: false,
+      resume: false,
+      cancel: false,
+      approve: false,
+      correct: false,
+      resolveDelivery: false,
+    });
+  });
+
+  it("offers the delivery answer only while the delivery is uncertain", () => {
+    expect(goalControls(goal({ runState: "delivery_uncertain" })).resolveDelivery).toBe(true);
+    expect(goalControls(goal({ runState: "running" })).resolveDelivery).toBe(false);
+    expect(goalControls(goal({ runState: "paused" })).resolveDelivery).toBe(false);
   });
 });
 
