@@ -1001,6 +1001,7 @@ async fn get_workspace_state(
         .unwrap_or(RemoteActiveDesktopSelection {
             workspace_id: Some(active_ws.clone()),
             attention_inventory: Vec::new(),
+            session_attention: Vec::new(),
             worktree_slug: None,
             worktree_label: None,
             session_id: None,
@@ -1027,6 +1028,19 @@ async fn get_workspace_state(
                 }
             }
             active_context.terminal_tabs = filtered_tabs;
+            let mut filtered_attention = Vec::new();
+            for entry in active_context.session_attention {
+                if matches!(
+                    services
+                        .sessions
+                        .machine_only_async(&entry.backend_session_id)
+                        .await,
+                    Ok(false)
+                ) {
+                    filtered_attention.push(entry);
+                }
+            }
+            active_context.session_attention = filtered_attention;
             let svc_for_cat = Arc::clone(services);
             let machine_catalog = crate::ipc::run_blocking(move || {
                 svc_for_cat
@@ -1040,6 +1054,9 @@ async fn get_workspace_state(
                     active_context.attention_inventory.retain(|item| {
                         !catalog.workspaces.contains_key(&item.workspace_id)
                     });
+                    active_context.session_attention.retain(|item| {
+                        !catalog.workspaces.contains_key(&item.workspace_id)
+                    });
                     if let Some(ref ws) = active_context.workspace_id {
                         if catalog.workspaces.contains_key(ws) {
                             active_context.workspace_id = None;
@@ -1050,6 +1067,7 @@ async fn get_workspace_state(
                 }
                 Err(_) => {
                     active_context.attention_inventory.clear();
+                    active_context.session_attention.clear();
                     active_context.workspace_id = None;
                     active_context.worktree_slug = None;
                     active_context.worktree_label = None;
@@ -1241,6 +1259,7 @@ async fn get_workspace_state(
         None
     };
 
+    let session_attention = std::mem::take(&mut active_context.session_attention);
     Ok(Json(RemoteWorkspaceState {
         projects,
         active_context,
@@ -1248,6 +1267,7 @@ async fn get_workspace_state(
         active_workspace_id: active_ws,
         worktrees,
         sessions,
+        session_attention,
     }))
 }
 
@@ -9922,6 +9942,7 @@ mod tests {
         *state.active_selection.write() = Some(RemoteActiveDesktopSelection {
             workspace_id: Some("workspace-a".to_string()),
             attention_inventory: Vec::new(),
+            session_attention: Vec::new(),
             worktree_slug: None,
             worktree_label: None,
             session_id: None,

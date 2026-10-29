@@ -541,6 +541,28 @@ export function deriveFocusedTerminal(
           worktreeLabel: worktree.branch?.replace(/^refs\/heads\//, "") ?? null, state: attention };
       });
     });
+  // Every waiting or unseen-done session of every project, so the phone Inbox spans the host.
+  const sessionAttention = [[workspaceId, state] as const, ...snapshots.filter(([id]) => id !== workspaceId)]
+    .flatMap(([id, snapshot]) =>
+      [snapshot.layout, ...Object.values(snapshot.worktreeLayouts ?? {})].flatMap((ownerLayout) =>
+        ownerLayout.tabs.filter(isTerminalTab).flatMap((tab) => [...getTabSessionIds(snapshot, tab.id)].flatMap((sessionId) => {
+          const activity = snapshot.activityBySessionId?.[sessionId];
+          const paneSession = snapshot.sessions[sessionId];
+          const backendSessionId = paneSession?.backendSessionId;
+          if (!backendSessionId || !activity || activity.seen || (activity.state !== "waiting" && activity.state !== "done")) return [];
+          const panePath = paneSession.worktreePath ?? paneSession.cwd;
+          const paneWorktree = panePath ? snapshot.worktrees.find((wt) => wt.path === panePath) : undefined;
+          return [{
+            backendSessionId,
+            workspaceId: id,
+            worktreeSlug: (paneWorktree ? worktreeIdentity(paneWorktree) : null)?.slug ?? null,
+            state: activity.state,
+            ...(activity.agentType ? { agentType: activity.agentType } : {}),
+          }];
+        })),
+      ),
+    )
+    .filter((entry, index, all) => all.findIndex((other) => other.backendSessionId === entry.backendSessionId) === index);
   const focusedGroup = state.layout.focusedGroupId
     ? state.layout.tabGroups?.[state.layout.focusedGroupId]
     : undefined;
@@ -620,6 +642,7 @@ export function deriveFocusedTerminal(
   return {
     workspaceId,
     attentionInventory,
+    ...(sessionAttention.length > 0 ? { sessionAttention } : {}),
     worktreeSlug: worktreeSlug ?? null,
     worktreeLabel: worktreeLabel ?? null,
     backendSessionId: session?.backendSessionId ?? null,

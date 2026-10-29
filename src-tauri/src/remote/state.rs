@@ -1288,6 +1288,10 @@ impl RemoteGatewayState {
             selection
                 .attention_inventory
                 .retain(|entry| !private_workspace(&entry.workspace_id));
+            selection.session_attention.retain(|entry| {
+                !private_workspace(&entry.workspace_id)
+                    && !services.sessions.machine_only(&entry.backend_session_id)
+            });
         }
         let session_id = selection.session_id.clone();
         let payload = serde_json::to_value(&selection).unwrap_or(serde_json::Value::Null);

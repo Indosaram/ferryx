@@ -149,6 +149,28 @@ export function remoteInboxEntries(input: {
     });
   }
 
+  // Every project's waiting sessions the desktop publishes, beyond the mirrored view.
+  for (const item of model.sessionAttention ?? []) {
+    const option = model.options.find(
+      (candidate) => candidate.workspaceId === item.workspaceId && candidate.worktreeSlug === item.worktreeSlug && !candidate.sessionId,
+    );
+    const worktreeLabel = option?.worktreeLabel ?? item.worktreeSlug;
+    add({
+      key: inboxKey(machineId, item.sessionId),
+      sessionId: item.sessionId,
+      tabId: null,
+      workspaceId: item.workspaceId,
+      worktreeSlug: item.worktreeSlug,
+      worktreeLabel,
+      state: item.state,
+      ...whoAndText(item.agentType, `Session ${item.sessionId.slice(0, 8)}`),
+      location: formatAttentionLocation(labelOf(item.workspaceId), worktreeLabel ?? undefined),
+      agentType: item.agentType,
+      machineId,
+      readable: true,
+    });
+  }
+
   for (const option of model.options) {
     // Account options are listed through their inventory rows below.
     if (option.machineId || option.unavailable || !option.sessionId) continue;
@@ -227,21 +249,21 @@ export function useRemoteInbox({
   transportRef.current = transport;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
-  // Sessions whose prompt went away (answered, here or elsewhere) while their state still says waiting.
+  // Rows (machine plus session) whose prompt went away (answered, here or elsewhere) while their state still says waiting.
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
-  // Bumped per session on a push, so the row's prompt panel reads again.
+  // Bumped per row on a push, so the row's prompt panel reads again.
   const [revisions, setRevisions] = useState<Readonly<Record<string, number>>>({});
-  // The prompt each session was last known to show.
+  // The prompt each row was last known to show.
   const knownRef = useRef(new Map<string, string>());
 
-  const hide = useCallback((sessionId: string) => {
-    setHidden((prev) => (prev.has(sessionId) ? prev : new Set(prev).add(sessionId)));
+  const hide = useCallback((key: string) => {
+    setHidden((prev) => (prev.has(key) ? prev : new Set(prev).add(key)));
   }, []);
-  const unhide = useCallback((sessionId: string) => {
+  const unhide = useCallback((key: string) => {
     setHidden((prev) => {
-      if (!prev.has(sessionId)) return prev;
+      if (!prev.has(key)) return prev;
       const next = new Set(prev);
-      next.delete(sessionId);
+      next.delete(key);
       return next;
     });
   }, []);
@@ -249,28 +271,38 @@ export function useRemoteInbox({
   // A hidden row's waiting episode is over once its state moves on: the next one shows again.
   useEffect(() => {
     if (hidden.size === 0) return;
-    for (const sessionId of hidden) {
-      const entry = entries.find((candidate) => candidate.sessionId === sessionId);
+    for (const key of hidden) {
+      const entry = entries.find((candidate) => candidate.key === key);
       if (entry?.state === "waiting") continue;
-      knownRef.current.delete(sessionId);
-      unhide(sessionId);
+      knownRef.current.delete(key);
+      unhide(key);
     }
   }, [entries, hidden, unhide]);
 
   const push = useCallback(
     (change: RemoteInboxPromptChange) => {
-      const known = knownRef.current.get(change.sessionId);
-      if (change.promptId === null) {
-        // Only a prompt this Inbox saw can be answered elsewhere; a pane no reader knows keeps its row.
-        if (known !== undefined) {
-          knownRef.current.delete(change.sessionId);
-          hide(change.sessionId);
+      // The push comes from the connected host: it names only that host's readable rows.
+      const keys = entriesRef.current
+        .filter((entry) => entry.readable && entry.sessionId === change.sessionId)
+        .map((entry) => entry.key);
+      for (const key of keys) {
+        const known = knownRef.current.get(key);
+        if (change.promptId === null) {
+          // Only a prompt this Inbox saw can be answered elsewhere; a pane no reader knows keeps its row.
+          if (known !== undefined) {
+            knownRef.current.delete(key);
+            hide(key);
+          }
+        } else if (change.promptId !== known) {
+          knownRef.current.delete(key);
+          unhide(key);
         }
-      } else if (change.promptId !== known) {
-        knownRef.current.delete(change.sessionId);
-        unhide(change.sessionId);
       }
-      setRevisions((prev) => ({ ...prev, [change.sessionId]: (prev[change.sessionId] ?? 0) + 1 }));
+      setRevisions((prev) => {
+        const next: Record<string, number> = { ...prev };
+        for (const key of keys) next[key] = (next[key] ?? 0) + 1;
+        return next;
+      });
     },
     [hide, unhide],
   );
@@ -278,7 +310,7 @@ export function useRemoteInbox({
   const refreshAll = useCallback(() => {
     setRevisions((prev) => {
       const next: Record<string, number> = { ...prev };
-      for (const entry of entriesRef.current) next[entry.sessionId] = (next[entry.sessionId] ?? 0) + 1;
+      for (const entry of entriesRef.current) next[entry.key] = (next[entry.key] ?? 0) + 1;
       return next;
     });
   }, []);
@@ -288,12 +320,12 @@ export function useRemoteInbox({
       // Every waiting session is listed, the one on screen included: the Inbox is its own view.
       sortAttentionRows(
         entries.flatMap((entry): AttentionRow[] =>
-          hidden.has(entry.sessionId)
+          hidden.has(entry.key)
             ? []
             : [
                 {
                   id: entry.key,
-                  revision: revisions[entry.sessionId] ?? 0,
+                  revision: revisions[entry.key] ?? 0,
                   workspaceId: entry.workspaceId,
                   sessionId: entry.sessionId,
                   state: entry.state === "waiting" ? "needs-you" : "done",
@@ -328,10 +360,10 @@ export function useRemoteInbox({
           // The card this Inbox saw is gone: it was answered somewhere. A waiting pane whose card
           // this Inbox never saw keeps its row even on a null read: no reader may know its prompt
           // (an unknown menu, a bell), and hiding it would lose the only sign it needs the user.
-          if (read.prompt === null && knownRef.current.delete(row.sessionId)) hide(row.sessionId);
+          if (read.prompt === null && knownRef.current.delete(row.id)) hide(row.id);
           return null;
         }
-        knownRef.current.set(row.sessionId, read.prompt.id);
+        knownRef.current.set(row.id, read.prompt.id);
         return agentPromptFromReference(read.prompt, read.screenRevision);
       },
       answer: async (row, prompt, answer) => {
@@ -346,7 +378,7 @@ export function useRemoteInbox({
         if (referencePromptErrorIsStale(outcome)) return "stale";
         throw outcome;
       },
-      onAnswered: (row) => hide(row.sessionId),
+      onAnswered: (row) => hide(row.id),
     };
   }, [hide]);
 
