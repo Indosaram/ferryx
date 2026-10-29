@@ -1787,6 +1787,47 @@ describe("App project workspace flow", () => {
     }
   });
 
+  it("starts the agent chosen for a worktree created in a non-active project after the switch", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta" },
+    ];
+    const betaWorktree = {
+      path: "/repos/beta/.orca-worktrees/beta/agent-beta",
+      head: "abc1234",
+      branch: "refs/heads/orca/beta/agent-beta",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+    }));
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "beta-main", isCurrent: true }], tags: [] });
+    native.createWorktree.mockResolvedValue(betaWorktree);
+    native.spawnTerminal.mockResolvedValue("spawn-beta-agent");
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to beta" }));
+    await screen.findByRole("heading", { name: "Add Worktree · beta" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Worktree slug" }), { target: { value: "agent-beta" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: "claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+
+    expect(await screen.findByText("Active project beta")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(native.writeTerminal).toHaveBeenCalledWith({ sessionId: "spawn-beta-agent", data: "claude\r" }),
+    );
+    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ cwd: betaWorktree.path }));
+  });
+
   it("starts the agent chosen in Add Worktree in the new worktree, not the active one", async () => {
     const projects = [{ workspaceId: "alpha", repoRoot: "/repos/alpha" }];
     const created = {
