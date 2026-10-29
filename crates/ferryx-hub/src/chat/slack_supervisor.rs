@@ -1276,7 +1276,6 @@ mod tests {
     fn slack_config(allow_all_users: bool) -> SlackTurnConfig {
         SlackTurnConfig {
             omo: OmoClientConfig::new("ws://127.0.0.1:9"),
-            token_path: None,
             allowed_users: vec!["UOWNER".into()],
             free_channels: Vec::new(),
             default_model: None,
