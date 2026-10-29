@@ -292,7 +292,7 @@ fn kitty_rgb_expansion_limit_does_not_block_text_frames() {
     // Exercise both initial capture and the unchanged-image cache path while
     // real text updates continue. A parser rejection or dropping all images
     // cannot satisfy these assertions.
-    for text in [b' ', b'X'] {
+    for text in *b" X" {
         terminal.feed(b"\x1b[5;1H\x1b[38;2;0;255;0;48;2;0;255;0m").expect("green text style");
         terminal.feed(&[text]).expect("subsequent text update");
         let snapshot = terminal.render_snapshot().expect("RGB expansion must not abort text snapshot");

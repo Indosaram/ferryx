@@ -163,6 +163,7 @@ fn registration_survives_isolated_service_restart() {
         eprintln!("RESTART isolated service");
         assert!(restored.workspace_registry().contains("plain"), "plain registration lost on restart");
         assert!(restored.workspace_registry().contains("git"), "Git registration lost on restart");
+        #[cfg(unix)]
         let services = restored.remote_state().machine_services.as_ref().unwrap();
         let machine = owner.join("machine");
         std::fs::create_dir(&machine).unwrap();
