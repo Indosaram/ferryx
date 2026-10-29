@@ -1892,16 +1892,24 @@ describe("App project workspace flow", () => {
     expect(native.createWorktree).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("onboarding-try-create"));
 
-    await waitFor(() =>
-      expect(native.writeTerminal).toHaveBeenCalledWith({ sessionId: "spawn-try-agent", data: "claude\r" }),
-    );
+    await waitFor(() => expect(workspace.openTab).toHaveBeenCalledWith(created, "Claude", expect.anything()));
     expect(native.createWorktree).toHaveBeenCalledWith({
       workspaceId: "alpha",
       worktree: { wsId: "alpha", slug: "try-ferryx" },
       baseRef: "HEAD",
     });
     expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(created);
-    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(expect.objectContaining({ cwd: created.path }));
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: created.path,
+        startup: { kind: "agentLaunch", command: "claude", args: [] },
+      }),
+    );
+    expect(workspace.openTab).toHaveBeenCalledWith(created, "Claude", {
+      sessionId: "spawn-try-agent",
+      daemonEpoch: "epoch-try",
+      incarnation: "inc-try",
+    });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Welcome to Ferryx" })).toBeNull());
   }, 15000);
 
