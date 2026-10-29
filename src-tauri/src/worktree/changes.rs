@@ -3,8 +3,8 @@
 //! Every path a caller passes is relative to the worktree root and is jailed to it; Git sees it
 //! as a literal pathspec after `--`. Pushes never force.
 
-use crate::worktree::git::run_git;
-use crate::worktree::model::WorktreeError;
+use crate::worktree::git::{parse_status_porcelain, run_git};
+use crate::worktree::model::{DirtyState, WorktreeError};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -91,28 +91,32 @@ fn jailed_path(root: &Path, raw: &str) -> Result<String, GitChangeError> {
     if relative.is_empty() {
         return Err(invalid_path(raw, "path must name a file or directory"));
     }
-    // A symlinked parent may still point outside the worktree; resolve what exists.
-    let joined = root.join(relative.join("/"));
-    let mut existing = joined.as_path();
-    while !existing.exists() {
-        match existing.parent() {
-            Some(parent) => existing = parent,
-            None => break,
+    // A symlinked or junctioned parent may still point outside the worktree. Resolve the
+    // nearest entry that exists (a file may legitimately not exist yet) and fail closed when
+    // it cannot be resolved.
+    let canonical_root = std::fs::canonicalize(root).map_err(WorktreeError::Io)?;
+    let outside = || -> GitChangeError {
+        WorktreeError::PathOutsideWorkspace {
+            path: PathBuf::from(raw),
+            root: canonical_root.clone(),
+        }
+        .into()
+    };
+    // Walk down from the root instead of up from the target, so the walk can never climb
+    // above the root whatever its spelling (trailing separator, case on Windows).
+    let mut existing = root.to_path_buf();
+    for part in &relative {
+        let next = existing.join(part);
+        match std::fs::symlink_metadata(&next) {
+            Ok(_) => existing = next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return Err(outside()),
         }
     }
-    if let (Ok(resolved), Ok(canonical_root)) = (
-        std::fs::canonicalize(existing),
-        std::fs::canonicalize(root),
-    ) {
-        if !resolved.starts_with(&canonical_root) {
-            return Err(WorktreeError::PathOutsideWorkspace {
-                path: PathBuf::from(raw),
-                root: canonical_root,
-            }
-            .into());
-        }
+    match std::fs::canonicalize(&existing) {
+        Ok(resolved) if resolved.starts_with(&canonical_root) => Ok(relative.join("/")),
+        _ => Err(outside()),
     }
-    Ok(relative.join("/"))
 }
 
 fn jailed_paths(root: &Path, paths: &[String]) -> Result<Vec<String>, GitChangeError> {
@@ -154,8 +158,64 @@ pub fn git_diff(
         args.push(sha.clone());
     }
     args.push("--".into());
-    args.extend(file);
-    Ok(run_git(worktree, &args)?)
+    args.extend(file.clone());
+    let patch = run_git(worktree, &args)?;
+    match (scope, file) {
+        (GitDiffScope::WorkingTree, Some(file)) if patch.is_empty() => {
+            untracked_preview(worktree, &file)
+        }
+        _ => Ok(patch),
+    }
+}
+
+/// File list for the Changes panel. Unlike the sidebar dirty check, untracked directories are
+/// expanded to their files (`-uall`) so each new file can be selected and previewed.
+pub fn git_changes_status(worktree: &Path) -> Result<DirtyState, GitChangeError> {
+    let output = run_git(worktree, &["status", "--porcelain", "-uall"])?;
+    Ok(parse_status_porcelain(&output))
+}
+
+/// Largest untracked file shown as a preview patch.
+const UNTRACKED_PREVIEW_LIMIT: u64 = 1024 * 1024;
+
+/// Shows an untracked text file as an all-added patch without staging it. Returns an empty
+/// patch for tracked, ignored, binary or oversized files.
+fn untracked_preview(worktree: &Path, file: &str) -> Result<String, GitChangeError> {
+    let listed = run_git(
+        worktree,
+        &["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", file],
+    )?;
+    if !listed.split('\0').any(|entry| entry == file) {
+        return Ok(String::new());
+    }
+    let path = worktree.join(file);
+    let metadata = std::fs::symlink_metadata(&path).map_err(WorktreeError::Io)?;
+    if !metadata.is_file() || metadata.len() > UNTRACKED_PREVIEW_LIMIT {
+        return Ok(String::new());
+    }
+    let bytes = std::fs::read(&path).map_err(WorktreeError::Io)?;
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(String::new());
+    };
+    if text.contains('\0') {
+        return Ok(String::new());
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut patch = format!(
+        "diff --git a/{file} b/{file}\nnew file mode 100644\n--- /dev/null\n+++ b/{file}\n"
+    );
+    if !lines.is_empty() {
+        patch.push_str(&format!("@@ -0,0 +1,{} @@\n", lines.len()));
+        for line in &lines {
+            patch.push('+');
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        if !text.ends_with('\n') {
+            patch.push_str("\\ No newline at end of file\n");
+        }
+    }
+    Ok(patch)
 }
 
 pub fn git_stage(worktree: &Path, paths: &[String]) -> Result<(), GitChangeError> {
@@ -197,10 +257,21 @@ fn config_value(worktree: &Path, key: &str) -> Result<Option<String>, GitChangeE
     }
 }
 
-fn is_rejection(stderr: &str) -> bool {
-    ["[rejected]", "[remote rejected]", "non-fast-forward", "fetch first"]
-        .iter()
-        .any(|marker| stderr.contains(marker))
+/// `push --porcelain` prints one stdout line per ref, and its first character is the flag. `!`
+/// means the ref was rejected. Unlike the summary text, the flag is never translated.
+fn is_rejection(porcelain_stdout: &str) -> bool {
+    porcelain_stdout.lines().any(|line| line.starts_with('!'))
+}
+
+fn push_error(error: WorktreeError) -> GitChangeError {
+    match error {
+        WorktreeError::GitError { stderr, stdout, .. } if is_rejection(&stdout) => {
+            GitChangeError::PushRejected {
+                stderr: if stderr.is_empty() { stdout } else { stderr },
+            }
+        }
+        error => error.into(),
+    }
 }
 
 /// Pushes the current branch to its upstream, or to `origin` with `-u` when it has none.
@@ -240,21 +311,12 @@ pub fn git_push(worktree: &Path) -> Result<GitPushResult, GitChangeError> {
         args.push("-u");
     }
     args.extend([remote.as_str(), refspec.as_str()]);
-    match run_git(worktree, &args) {
-        Ok(_) => Ok(GitPushResult {
-            remote,
-            branch,
-            set_upstream,
-        }),
-        Err(WorktreeError::GitError { stderr, stdout, .. })
-            if is_rejection(&stderr) || is_rejection(&stdout) =>
-        {
-            Err(GitChangeError::PushRejected {
-                stderr: if stderr.is_empty() { stdout } else { stderr },
-            })
-        }
-        Err(error) => Err(error.into()),
-    }
+    run_git(worktree, &args).map_err(push_error)?;
+    Ok(GitPushResult {
+        remote,
+        branch,
+        set_upstream,
+    })
 }
 
 #[cfg(test)]
@@ -331,6 +393,39 @@ mod tests {
     }
 
     #[test]
+    fn untracked_files_preview_as_added_lines_without_staging() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        fs::create_dir(repo.join("dir")).unwrap();
+        fs::write(repo.join("dir/new.txt"), "alpha\nbeta").unwrap();
+        let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some("dir/new.txt")).unwrap();
+        assert!(patch.contains("+++ b/dir/new.txt"), "{patch}");
+        assert!(patch.contains("@@ -0,0 +1,2 @@\n+alpha\n+beta\n"), "{patch}");
+        assert!(patch.contains("No newline at end of file"), "{patch}");
+        assert_eq!(run_git(&repo, &["diff", "--cached", "--name-only"]).unwrap(), "");
+
+        // Ignored and binary files stay empty; a clean tracked file has no preview either.
+        fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(repo.join("ignored.txt"), "secret\n").unwrap();
+        fs::write(repo.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        for quiet in ["ignored.txt", "blob.bin", "file.txt"] {
+            let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some(quiet)).unwrap();
+            assert!(patch.is_empty(), "{quiet}: {patch}");
+        }
+    }
+
+    #[test]
+    fn changes_status_lists_files_inside_new_untracked_directories() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        fs::create_dir(repo.join("dir")).unwrap();
+        fs::write(repo.join("dir/new.txt"), "fresh\n").unwrap();
+        let paths: Vec<String> =
+            git_changes_status(&repo).unwrap().files.into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, vec!["dir/new.txt".to_string()]);
+        let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some(&paths[0])).unwrap();
+        assert!(patch.contains("+fresh"), "{patch}");
+    }
+
+    #[test]
     fn commit_refuses_an_empty_index_or_message() {
         let (_dir, repo, _bare) = repo_with_bare_remote();
         assert!(matches!(git_commit(&repo, "msg"), Err(GitChangeError::NothingToCommit)));
@@ -374,6 +469,60 @@ mod tests {
     }
 
     #[test]
+    fn new_files_in_existing_or_new_directories_are_allowed() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        fs::create_dir(repo.join("sub")).unwrap();
+        assert_eq!(jailed_path(&repo, "sub/new.txt").unwrap(), "sub/new.txt");
+        assert_eq!(jailed_path(&repo, "fresh/dir/new.txt").unwrap(), "fresh/dir/new.txt");
+        assert_eq!(jailed_path(&repo, "file.txt").unwrap(), "file.txt");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn root_with_trailing_backslash_allows_new_nested_dirs() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        let spelled = PathBuf::from(format!("{}\\", repo.display()));
+        assert_eq!(jailed_path(&spelled, "new\\nested\\file.txt").unwrap(), "new/nested/file.txt");
+        let upper = PathBuf::from(repo.display().to_string().to_uppercase());
+        assert_eq!(jailed_path(&upper, "new/nested/file.txt").unwrap(), "new/nested/file.txt");
+    }
+
+    #[test]
+    fn unresolvable_paths_are_refused() {
+        let (dir, repo, _bare) = repo_with_bare_remote();
+        let missing = dir.path().join("missing-target");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&missing, repo.join("dangling")).unwrap();
+            std::os::unix::fs::symlink(repo.join("loop"), repo.join("loop")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(repo.join("dangling"))
+                .arg(&missing)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let mut bad_paths = vec!["dangling/new.txt"];
+        if cfg!(unix) {
+            bad_paths.push("loop/x");
+        }
+        for bad in bad_paths {
+            let result = git_stage(&repo, &[bad.to_string()]);
+            assert!(
+                matches!(
+                    result,
+                    Err(GitChangeError::Worktree(WorktreeError::PathOutsideWorkspace { .. }))
+                ),
+                "{bad}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn diverged_push_is_rejected_without_force() {
         let (dir, repo, bare) = repo_with_bare_remote();
         git_push(&repo).unwrap();
@@ -392,6 +541,29 @@ mod tests {
         let result = git_push(&repo);
         assert!(matches!(result, Err(GitChangeError::PushRejected { .. })), "{result:?}");
         assert_eq!(run_git(&bare, &["rev-parse", "main"]).unwrap(), remote_head);
+    }
+
+    #[test]
+    fn push_rejection_is_read_from_the_porcelain_flag_not_the_locale() {
+        let failed = |stdout: &str, stderr: &str| WorktreeError::GitError {
+            command: "git push --porcelain".into(),
+            stderr: stderr.into(),
+            stdout: stdout.into(),
+            code: Some(1),
+        };
+        // German Git: no English marker anywhere in stderr.
+        let stderr = "Fehler: Einige Referenzen konnten nicht nach 'origin' versendet werden";
+        let rejected = push_error(failed(
+            "To ../remote.git\n!\trefs/heads/main:refs/heads/main\t[abgewiesen] (zuerst holen)\nDone",
+            stderr,
+        ));
+        assert!(
+            matches!(&rejected, GitChangeError::PushRejected { stderr: s } if s == stderr),
+            "{rejected:?}"
+        );
+        // A failure with no rejected ref (auth, network) stays a plain Git error.
+        let other = push_error(failed("", "fatal: Authentifizierung fehlgeschlagen [rejected]"));
+        assert!(matches!(other, GitChangeError::Worktree(WorktreeError::GitError { .. })), "{other:?}");
     }
 
     #[test]

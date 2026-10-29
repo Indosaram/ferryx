@@ -297,10 +297,6 @@ export async function bootTrace(
   }).catch(() => {});
 }
 
-export async function listProjectBranches(workspaceId: string) {
-  return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
-}
-
 /// Local branches and tags usable as a worktree base ref (no remote branches).
 export async function listProjectRefs(workspaceId: string) {
   return invokeCommand<ProjectRefs>("cmd_project_refs", { request: { workspaceId } });
@@ -458,42 +454,46 @@ export type GitDiffScope =
 
 export type GitPushResult = { remote: string; branch: string; setUpstream: boolean };
 
+/**
+ * Which checkout a Changes command targets: a managed worktree by identity, or (with no
+ * identity) the main checkout or an unmanaged worktree by its path inside the project root.
+ */
+export type ChangesTarget = { workspaceId: string; worktree: WorktreeIdentity } | { workspaceId: string; worktreePath: string };
+
+function changesTarget(request: ChangesTarget) {
+  return "worktree" in request
+    ? { workspaceId: request.workspaceId, worktree: request.worktree }
+    : { workspaceId: request.workspaceId, worktreePath: request.worktreePath };
+}
+
+/** Status of a Changes target; managed worktrees go through the dirty-state tracking path. */
+export async function getChangesStatus(request: ChangesTarget) {
+  return invokeCommand<DirtyState>("cmd_worktree_changes_status", { request: changesTarget(request) });
+}
+
 /** Unified patch text; `file` is relative to the worktree root. */
-export async function getWorktreeDiff(request: WorktreeStatusRequest & { scope: GitDiffScope; file?: string | null }) {
+export async function getWorktreeDiff(request: ChangesTarget & { scope: GitDiffScope; file?: string | null }) {
   return invokeCommand<string>("cmd_worktree_diff", {
-    request: {
-      workspaceId: request.workspaceId,
-      worktree: request.worktree,
-      scope: request.scope,
-      file: request.file ?? null,
-    },
+    request: { ...changesTarget(request), scope: request.scope, file: request.file ?? null },
   });
 }
 
-export async function stageWorktreePaths(request: WorktreeStatusRequest & { paths: string[] }) {
-  await invokeCommand<void>("cmd_worktree_stage", {
-    request: { workspaceId: request.workspaceId, worktree: request.worktree, paths: request.paths },
-  });
+export async function stageWorktreePaths(request: ChangesTarget & { paths: string[] }) {
+  await invokeCommand<void>("cmd_worktree_stage", { request: { ...changesTarget(request), paths: request.paths } });
 }
 
-export async function unstageWorktreePaths(request: WorktreeStatusRequest & { paths: string[] }) {
-  await invokeCommand<void>("cmd_worktree_unstage", {
-    request: { workspaceId: request.workspaceId, worktree: request.worktree, paths: request.paths },
-  });
+export async function unstageWorktreePaths(request: ChangesTarget & { paths: string[] }) {
+  await invokeCommand<void>("cmd_worktree_unstage", { request: { ...changesTarget(request), paths: request.paths } });
 }
 
 /** Commits the staged changes; resolves to the new sha. Rejects with `GIT_NOTHING_TO_COMMIT`. */
-export async function commitWorktree(request: WorktreeStatusRequest & { message: string }) {
-  return invokeCommand<string>("cmd_worktree_commit", {
-    request: { workspaceId: request.workspaceId, worktree: request.worktree, message: request.message },
-  });
+export async function commitWorktree(request: ChangesTarget & { message: string }) {
+  return invokeCommand<string>("cmd_worktree_commit", { request: { ...changesTarget(request), message: request.message } });
 }
 
 /** Pushes without force; rejects with `GIT_PUSH_REJECTED` or `GIT_NO_REMOTE`. */
-export async function pushWorktree(request: WorktreeStatusRequest) {
-  return invokeCommand<GitPushResult>("cmd_worktree_push", {
-    request: { workspaceId: request.workspaceId, worktree: request.worktree },
-  });
+export async function pushWorktree(request: ChangesTarget) {
+  return invokeCommand<GitPushResult>("cmd_worktree_push", { request: changesTarget(request) });
 }
 
 export async function previewWorktreeDelete(request: WorktreeStatusRequest) {
