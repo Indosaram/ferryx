@@ -285,7 +285,39 @@ export function assertIsolatedRoot(path, label, context = {}) {
 // Config.
 
 export const CONFIG_REQUIRED = Object.freeze(['ferryxCli', 'ferryxApp', 'mhcBin', 'dataRoot', 'memoryRoot', 'projectRoot', 'ownerPrincipal']);
-export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', 'ferryxUiDist', '$schema', '$comment']);
+export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', 'ferryxUiDist', 'realEngine', '$schema', '$comment']);
+// Optional object fields, validated by their own checks instead of the string rule.
+const OBJECT_FIELDS = new Set(['realEngine']);
+const REAL_ENGINE_FIELDS = Object.freeze({
+  required: ['provider', 'api', 'baseUrl', 'model', 'apiKeyEnv', 'workerCli', 'workerBin', 'workerBaseUrl', 'workerModel'],
+  optional: ['workerApiKeyEnv'],
+});
+
+// realEngine (real-autonomy, plan todo 17): a real supervisor provider and a real worker CLI.
+// Only env var NAMES are configured; key values never appear in config or evidence.
+function checkRealEngine(value, context) {
+  if (typeof value !== 'object' || Array.isArray(value)) throw new HarnessError('CONFIG_INVALID', 'realEngine must be an object or null');
+  const all = [...REAL_ENGINE_FIELDS.required, ...REAL_ENGINE_FIELDS.optional];
+  const unknown = Object.keys(value).filter((key) => !all.includes(key));
+  if (unknown.length > 0) throw new HarnessError('CONFIG_INVALID', `realEngine has unknown field(s): ${unknown.join(', ')}`);
+  const missing = REAL_ENGINE_FIELDS.required.filter((key) => typeof value[key] !== 'string' || value[key].trim() === '');
+  if (missing.length > 0) throw new HarnessError('CONFIG_INVALID', `realEngine is missing field(s): ${missing.join(', ')}`);
+  if (!['openai-completions', 'anthropic-messages'].includes(value.api)) throw new HarnessError('CONFIG_INVALID', 'realEngine.api must be openai-completions or anthropic-messages');
+  if (value.workerCli !== 'claude') throw new HarnessError('CONFIG_INVALID', 'realEngine.workerCli must be claude (the hook-integrated worker this scenario drives)');
+  for (const key of ['apiKeyEnv', 'workerApiKeyEnv']) {
+    if (value[key] !== undefined && !/^[A-Z][A-Z0-9_]*$/.test(value[key])) throw new HarnessError('CONFIG_INVALID', `realEngine.${key} must be an env var NAME (A-Z, 0-9, _), never a key value`);
+  }
+  for (const key of ['baseUrl', 'workerBaseUrl']) {
+    let url;
+    try { url = new URL(value[key]); } catch { throw new HarnessError('CONFIG_INVALID', `realEngine.${key} is not a URL`); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new HarnessError('CONFIG_INVALID', `realEngine.${key} must be an http(s) URL without credentials`);
+  }
+  if (!isAbsolute(value.workerBin) || value.workerBin.startsWith('~')) throw new HarnessError('CONFIG_INVALID', 'realEngine.workerBin must be an absolute path');
+  assertNotProduction(value.workerBin, 'realEngine.workerBin', context);
+  let info;
+  try { info = statSync(value.workerBin); } catch { throw new HarnessError('CONFIG_INVALID', `realEngine.workerBin ${value.workerBin} does not exist`); }
+  if (!info.isFile()) throw new HarnessError('CONFIG_INVALID', `realEngine.workerBin ${value.workerBin} is not a file`);
+}
 const BINARY_FIELDS = ['ferryxCli', 'ferryxApp', 'mhcBin'];
 // Binaries only some scenarios need; validated like BINARY_FIELDS when present.
 const OPTIONAL_BINARY_FIELDS = ['ferryxRelay'];
@@ -309,6 +341,7 @@ export function loadConfig(path, context = {}) {
   if (missing.length > 0) throw new HarnessError('CONFIG_INVALID', `missing required field(s): ${missing.join(', ')}`);
   for (const key of CONFIG_OPTIONAL) {
     if (config[key] === undefined || config[key] === null) continue;
+    if (OBJECT_FIELDS.has(key)) { checkRealEngine(config[key], context); continue; }
     if (typeof config[key] !== 'string' || config[key].trim() === '') throw new HarnessError('CONFIG_INVALID', `${key} must be a non-empty string or null`);
   }
   for (const key of [...BINARY_FIELDS, ...ROOT_FIELDS]) {
@@ -1619,7 +1652,9 @@ function makeContext({ name, runId, configInfo, evidence, journal, owned, signal
       return { ...result, json };
     },
     // Isolated daemon; readiness is a barrier armed before the spawn.
-    startDaemon: async ({ deadlineMs = 60_000, env, ready } = {}) => {
+    // `executable` defaults to ferryxCli; real-autonomy runs the daemon from ferryxApp, the binary
+    // that dispatches the agent-hook reporter its installed hooks name.
+    startDaemon: async ({ deadlineMs = 60_000, env, ready, executable = config.ferryxCli } = {}) => {
       const runtimeDir = join(dataRoot.path, 'runtime');
       mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
       let readiness = null;
@@ -1635,7 +1670,7 @@ function makeContext({ name, runId, configInfo, evidence, journal, owned, signal
         readiness.catch(() => { /* raced below */ });
       }
       const cursor = journal.cursor();
-      const handle = await owned.spawn('daemon', config.ferryxCli, ['--daemon'], { env: env ?? ctx.productEnv(), cwd: dataRoot.path, graceMs: 10_000 });
+      const handle = await owned.spawn('daemon', executable, ['--daemon'], { env: env ?? ctx.productEnv(), cwd: dataRoot.path, graceMs: 10_000 });
       const local = new AbortController();
       const forward = () => local.abort(signal.reason);
       signal.addEventListener('abort', forward, { once: true });

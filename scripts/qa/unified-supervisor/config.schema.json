@@ -19,6 +19,24 @@
     "projectRoot": { "type": "string", "minLength": 1, "description": "Task-owned project/worktree root for the qa-supervisor fixture project." },
     "pairedHostId": { "type": ["string", "null"], "minLength": 1, "description": "Paired host id for remote scenarios (remote-delivery, channels)." },
     "ownerPrincipal": { "type": "string", "pattern": "^\\S+$", "description": "Authenticated owner principal used by fixtures, e.g. qa-owner. The admission scenario sets up the isolated installation's supervisor identity for it." },
+    "realEngine": {
+      "type": ["object", "null"],
+      "description": "Opt-in real engines for the real-autonomy scenario (plan todo 17). Without it that scenario refuses with PREREQUISITE_MISSING and --all leaves it out (summary.json excluded). Only env var NAMES are configured: the runner reads the key values from its own environment and never writes them to disk or evidence. The isolated daemon runs from ferryxApp, which must then be the ferryx executable (it dispatches the agent-hook reporter the daemon installs into <run HOME>/.claude/settings.json).",
+      "additionalProperties": false,
+      "required": ["provider", "api", "baseUrl", "model", "apiKeyEnv", "workerCli", "workerBin", "workerBaseUrl", "workerModel"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "description": "mhc provider name written to the run-local models.json and FERRYX_HUB_MHC_PROVIDER." },
+        "api": { "enum": ["openai-completions", "anthropic-messages"], "description": "mhc provider API shape." },
+        "baseUrl": { "type": "string", "format": "uri", "description": "Supervisor provider base URL, e.g. http://100.91.254.71:18801/v1 (mahoquot-gateway, OpenAI-compatible)." },
+        "model": { "type": "string", "minLength": 1, "description": "Supervisor model id (FERRYX_HUB_MHC_MODEL), e.g. claude-sonnet-5." },
+        "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Name of the env var holding the supervisor provider key; models.json apiKey is this name." },
+        "workerCli": { "const": "claude", "description": "The hook-integrated worker CLI driven in the pane." },
+        "workerBin": { "type": "string", "minLength": 1, "description": "Absolute path of the claude executable, e.g. /home/indo/.local/bin/claude." },
+        "workerBaseUrl": { "type": "string", "format": "uri", "description": "ANTHROPIC_BASE_URL for the worker, e.g. http://100.91.254.71:18801 (Anthropic-compatible)." },
+        "workerModel": { "type": "string", "minLength": 1, "description": "Worker model id passed as claude --model." },
+        "workerApiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Env var holding the worker key (ANTHROPIC_AUTH_TOKEN); defaults to apiKeyEnv." }
+      }
+    },
     "slackChannel": { "type": ["string", "null"], "pattern": "^[CDG][A-Z0-9]{6,}$", "description": "Dedicated QA Slack channel approved in the current execution session; omit or null when no approval exists." }
   }
 }

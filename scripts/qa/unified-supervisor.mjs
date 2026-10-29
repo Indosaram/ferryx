@@ -39,7 +39,7 @@ import { NONCE_ENV, NONCE_FILE, selfTest } from './unified-supervisor/self-test.
 const SCRIPT = fileURLToPath(import.meta.url);
 const QA_DIR = join(dirname(SCRIPT), 'unified-supervisor');
 const REPO_ROOT = resolve(dirname(SCRIPT), '..', '..');
-const SCRIPTS = [SCRIPT, ...['harness.mjs', 'scenarios.mjs', 'mhc.mjs', 'memory-usage.mjs', 'surfaces.mjs', 'self-test.mjs', 'self-test-units.mjs', 'fixture-sleeper.mjs', 'fixture-worker.mjs', 'fixture-mhc-filter.mjs', 'config.schema.json'].map((name) => join(QA_DIR, name))];
+const SCRIPTS = [SCRIPT, ...['harness.mjs', 'scenarios.mjs', 'mhc.mjs', 'memory-usage.mjs', 'surfaces.mjs', 'self-test.mjs', 'self-test-units.mjs', 'fixture-sleeper.mjs', 'fixture-worker.mjs', 'fixture-mhc-filter.mjs', 'real-autonomy.mjs', 'config.schema.json'].map((name) => join(QA_DIR, name))];
 const USAGE = 'usage: bun scripts/qa/unified-supervisor.mjs (--scenario NAME | --all | --self-test | --cleanup) [--config <json>] --evidence <dir> [--force-evidence] [--force-owner]';
 
 export function writeOut(stream, text) {
@@ -193,16 +193,20 @@ async function runLocked(opts, interrupts, { scenario, configInfo, argv, lock })
   }
   evidence.writeJson('receipts.json', receipts);
   const results = [];
+  const excluded = [];
   for (const [name, entry] of Object.entries(SCENARIOS)) {
     // A self-test child exercises --all over planned scenarios only; a skipped one is still not a PASS.
     if (opts.internal && entry.implemented) { results.push({ name, status: 'SKIPPED', reason: 'self-test child runs planned scenarios only' }); continue; }
     if (interrupts.count > 0) { results.push({ name, status: 'INTERRUPTED', exitCode: EXIT.INTERRUPTED, reason: 'not started after an interrupt' }); continue; }
+    // An opt-in scenario (real-autonomy) runs under --all only when its config field is set;
+    // otherwise it is left out of the deterministic set and listed in summary.json `excluded`.
+    if (entry.optIn && !configInfo.config[entry.optIn]) { excluded.push({ name, reason: `opt-in: config.${entry.optIn} is not set` }); continue; }
     results.push(await runScenario({ name, scenario: entry, configInfo, evidence: evidence.child(name), receipts, interrupts, argv }));
   }
   const aggregate = aggregateExit(results);
   const exitCode = finalExitCode(aggregate.exitCode, interrupts.faults);
   const status = exitCode === aggregate.exitCode ? aggregate.status : 'HARNESS_ERROR';
-  evidence.writeJson('summary.json', { schema: SCHEMA, mode: 'all', status, exitCode, results, faults: interrupts.faults, finishedAt: new Date().toISOString() });
+  evidence.writeJson('summary.json', { schema: SCHEMA, mode: 'all', status, exitCode, results, excluded, faults: interrupts.faults, finishedAt: new Date().toISOString() });
   await writeOut(process.stdout, `${JSON.stringify({ unifiedSupervisor: { mode: 'all', status, exitCode, evidence: evidence.dir } })}\n`);
   return exitCode;
 }

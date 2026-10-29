@@ -21,6 +21,7 @@ import { runSlackLeg } from './slack.mjs';
 import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-usage.mjs';
 import { LEGACY_REQUIRED_ASSERTIONS } from './legacy.mjs';
 import { CORRECTION_REQUIRED_ASSERTIONS } from './correction.mjs';
+import { REAL_AUTONOMY_REQUIRED_ASSERTIONS } from './real-autonomy.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -2495,6 +2496,18 @@ const correctionDeps = Object.freeze({
 });
 const loadCorrection = async () => import('./correction.mjs');
 
+// The real-autonomy scenario (todo 17, F1 D-1, real-autonomy.mjs) reuses these helpers.
+const realAutonomyDeps = Object.freeze({
+  onPath,
+  freeLoopbackPort,
+  registerWorkspace,
+  openHubReader,
+  waitForChange,
+  awaitEngine,
+  heldStates: HELD_STATES,
+});
+const loadRealAutonomy = async () => import('./real-autonomy.mjs');
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -2533,6 +2546,23 @@ export const SCENARIOS = Object.freeze({
       { clause: 'remote-run', reason: 'a run on a paired host is held REMOTE_CHECK_UNAVAILABLE, not graded', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/completion.rs a_remote_run_is_never_checked_against_the_local_checkout' },
     ],
     run: runAutonomy,
+  }),
+  'real-autonomy': Object.freeze({
+    implemented: true,
+    task: '17',
+    // Opt-in: needs config.realEngine; --all skips it without that, and a direct run refuses
+    // with PREREQUISITE_MISSING. Never part of the deterministic set.
+    optIn: 'realEngine',
+    summary: 'Autonomy with a real supervisor model (mhc on the configured provider) and a real Claude Code worker in the dispatched pane reporting through the product hooks: admitted, worker turn(s), verifier fails then passes, goal completed by the model decision with no owner message',
+    deadlineMs: 25 * 60_000,
+    requiredAssertions: REAL_AUTONOMY_REQUIRED_ASSERTIONS,
+    notCovered: [
+      { clause: 'second-worker-turn-forced', reason: 'a real worker may fix the forced first failure inside its own turn (it runs verify.sh twice), so a second dispatch is allowed but not required; the corrective-dispatch path is proven by autonomy', coveredBy: 'scripts/qa/unified-supervisor/scenarios.mjs autonomy' },
+      { clause: 'codex-worker', reason: 'only Claude Code is driven; codex uses the same ClaudeGroups hook shape (hooks.json) but is not exercised here', coveredBy: 'src-tauri/src/cli/agent_hook.rs fixture tests' },
+      { clause: 'network-isolation-proof', reason: 'peers are sampled every second from /proc on Linux only; a sub-second connection can be missed', coveredBy: null },
+      { clause: 'remote-run', reason: 'the worker runs on this host only', coveredBy: 'remote-delivery' },
+    ],
+    run: (ctx) => loadRealAutonomy().then((module) => module.runRealAutonomy(ctx, realAutonomyDeps)),
   }),
   correction: Object.freeze({
     implemented: true,
