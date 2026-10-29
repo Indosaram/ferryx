@@ -80,23 +80,28 @@ fn close_fence_for(grace: Duration) -> Duration {
 /// no character-type locale at all (e.g. a launchd-spawned GUI daemon without LANG).
 /// Returns `None` when the child already receives an explicit locale via `LC_ALL`,
 /// `LC_CTYPE`, or a non-empty `LANG`; explicit settings are never overridden.
-pub fn utf8_locale_override<E>(get_env: E) -> Option<(&'static str, &'static str)>
+/// The override is the user's system locale when it resolves to an installed UTF-8 locale,
+/// and the platform default otherwise.
+pub fn utf8_locale_override<E>(get_env: E) -> Option<(&'static str, String)>
 where
     E: Fn(&'static str) -> Option<std::ffi::OsString>,
 {
-    utf8_locale_override_for(get_env, cfg!(target_os = "windows"))
+    utf8_locale_override_for(get_env, cfg!(target_os = "windows"), system_locale)
 }
 
 /// Windows console encoding is governed by the console code page, not by `LANG`/`LC_*`: ConPTY
 /// shells (cmd.exe, PowerShell, pwsh) ignore these variables entirely, so an override written
 /// into a Windows pane would be dead logic. The platform decision is a parameter so it stays
-/// testable from every host.
-fn utf8_locale_override_for<E>(
+/// testable from every host, and so is the system locale, which is consulted only once the
+/// environment is known to select no locale.
+fn utf8_locale_override_for<E, S>(
     get_env: E,
     is_windows: bool,
-) -> Option<(&'static str, &'static str)>
+    system: S,
+) -> Option<(&'static str, String)>
 where
     E: Fn(&'static str) -> Option<std::ffi::OsString>,
+    S: FnOnce() -> Option<String>,
 {
     if is_windows {
         return None;
@@ -106,12 +111,180 @@ where
             return None;
         }
     }
-    let locale = if cfg!(target_os = "macos") {
-        "en_US.UTF-8"
-    } else {
-        "C.UTF-8"
-    };
+    let locale = system().unwrap_or_else(|| {
+        if cfg!(target_os = "macos") {
+            "en_US.UTF-8"
+        } else {
+            "C.UTF-8"
+        }
+        .to_string()
+    });
     Some(("LANG", locale))
+}
+
+/// The user's system locale as an installed UTF-8 locale name, resolved once per process. The
+/// lookup runs subprocesses, so [`prewarm_system_locale`] starts it on its own thread when the
+/// manager is built; a spawn that arrives first waits for that single resolution.
+fn system_locale() -> Option<String> {
+    static SYSTEM_LOCALE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SYSTEM_LOCALE
+        .get_or_init(|| resolve_system_locale(&HostLocaleSource))
+        .clone()
+}
+
+/// Resolves the system locale off the async runtime, once, when the first manager is built.
+fn prewarm_system_locale() {
+    if cfg!(target_os = "windows") {
+        return;
+    }
+    static PREWARM: std::sync::Once = std::sync::Once::new();
+    PREWARM.call_once(|| {
+        if let Err(error) = std::thread::Builder::new()
+            .name("pty-locale".into())
+            .spawn(|| {
+                system_locale();
+            })
+        {
+            tracing::warn!("could not start the PTY locale lookup thread: {error}");
+        }
+    });
+}
+
+/// Where the system locale comes from; injected so each platform's resolution is testable on
+/// every host.
+trait LocaleSource {
+    fn is_macos(&self) -> bool;
+    fn read_file(&self, path: &str) -> Option<String>;
+    /// Stdout of a successful command; `None` when it cannot run or fails.
+    fn command_stdout(&self, program: &str, args: &[&str]) -> Option<String>;
+}
+
+struct HostLocaleSource;
+
+impl LocaleSource for HostLocaleSource {
+    fn is_macos(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
+    fn read_file(&self, path: &str) -> Option<String> {
+        std::fs::read_to_string(path).ok()
+    }
+
+    fn command_stdout(&self, program: &str, args: &[&str]) -> Option<String> {
+        let output = std::process::Command::new(program)
+            .args(args)
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+/// macOS: the `AppleLocale` preference. Linux and other unix: `LANG` from `/etc/locale.conf`,
+/// then `/etc/default/locale`, then `localectl status`. The result is used only when `locale -a`
+/// lists it, because an uninstalled locale breaks readline and agents.
+fn resolve_system_locale(source: &dyn LocaleSource) -> Option<String> {
+    let preferred = if source.is_macos() {
+        source
+            .command_stdout("defaults", &["read", "-g", "AppleLocale"])
+            .and_then(|raw| apple_locale_to_posix(&raw))
+    } else {
+        ["/etc/locale.conf", "/etc/default/locale"]
+            .into_iter()
+            .find_map(|path| {
+                source
+                    .read_file(path)
+                    .and_then(|text| parse_lang_assignment(&text))
+            })
+            .or_else(|| {
+                source
+                    .command_stdout("localectl", &["status"])
+                    .and_then(|text| parse_localectl_lang(&text))
+            })
+    }?;
+    let candidate = utf8_locale_name(&preferred)?;
+    let installed = source.command_stdout("locale", &["-a"])?;
+    locale_is_installed(&candidate, &installed).then_some(candidate)
+}
+
+/// `ko_KR` -> `ko_KR`, `en_GB@rg=gbzzzz` -> `en_GB`, `zh-Hans_CN` -> `zh_CN`. A bare language
+/// (`en`) names no region, so it has no POSIX locale to map to.
+fn apple_locale_to_posix(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let raw = raw.split('@').next().unwrap_or(raw);
+    let (language, region) = raw.rsplit_once('_')?;
+    let language = language.split('-').next().unwrap_or(language);
+    let valid_language =
+        (2..=3).contains(&language.len()) && language.bytes().all(|b| b.is_ascii_lowercase());
+    let valid_region = (region.len() == 2 && region.bytes().all(|b| b.is_ascii_uppercase()))
+        || (region.len() == 3 && region.bytes().all(|b| b.is_ascii_digit()));
+    (valid_language && valid_region).then(|| format!("{language}_{region}"))
+}
+
+/// The `LANG=` value of a shell-style locale file (`/etc/locale.conf`, `/etc/default/locale`).
+fn parse_lang_assignment(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            line.strip_prefix("export ")
+                .unwrap_or(line)
+                .strip_prefix("LANG=")
+        })
+        .map(|value| {
+            value
+                .trim()
+                .trim_matches(|c: char| c == '"' || c == '\'')
+                .to_string()
+        })
+        .find(|value| !value.is_empty())
+}
+
+/// The `LANG=` entry of `localectl status` (`System Locale: LANG=de_DE.UTF-8`).
+fn parse_localectl_lang(text: &str) -> Option<String> {
+    text.lines()
+        .map(|line| {
+            let line = line.trim();
+            line.strip_prefix("System Locale:").unwrap_or(line).trim()
+        })
+        .find_map(parse_lang_assignment)
+}
+
+/// The UTF-8 form of a locale name: `de_DE`, `de_DE.ISO-8859-1` and `de_DE.utf8` all become
+/// `de_DE.UTF-8`, keeping any modifier. `C`/`POSIX` and malformed names yield `None`, which
+/// leaves the platform default in place.
+fn utf8_locale_name(name: &str) -> Option<String> {
+    let (name, modifier) = match name.split_once('@') {
+        Some((name, modifier)) => (name, Some(modifier)),
+        None => (name, None),
+    };
+    let base = name.split('.').next().unwrap_or(name);
+    if base.is_empty()
+        || base == "C"
+        || base == "POSIX"
+        || !base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    Some(match modifier {
+        Some(modifier) => format!("{base}.UTF-8@{modifier}"),
+        None => format!("{base}.UTF-8"),
+    })
+}
+
+/// Whether `locale -a` lists the locale, comparing codesets the way glibc normalises them
+/// (`UTF-8`, `utf8` and `utf-8` name the same codeset).
+fn locale_is_installed(candidate: &str, locale_a: &str) -> bool {
+    fn normalise(name: &str) -> String {
+        name.trim().to_ascii_lowercase().replace("utf-8", "utf8")
+    }
+    let wanted = normalise(candidate);
+    locale_a.lines().any(|line| normalise(line) == wanted)
 }
 
 pub fn apply_session_env(
@@ -338,6 +511,7 @@ impl Default for PtyManager {
 
 impl PtyManager {
     pub fn new() -> Self {
+        prewarm_system_locale();
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             cwd_probe_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -562,7 +736,8 @@ impl PtyManager {
 
         // A Dock/launchd-launched daemon inherits no LANG/LC_* at all: PTY children then run
         // in the "C" locale and compute CJK widths per byte, which desyncs line editors
-        // (zsh/bash) from the terminal grid while typing CJK text. Any UTF-8 locale fixes it.
+        // (zsh/bash) from the terminal grid while typing CJK text. The user's own installed
+        // system locale is used when it resolves, a UTF-8 default otherwise.
         if let Some((key, value)) = utf8_locale_override(std::env::var_os) {
             cmd.env(key, value);
         }
@@ -2114,11 +2289,14 @@ mod tests {
     #[test]
     fn utf8_locale_override_injected_when_environment_selects_no_locale() {
         let empty: fn(&str) -> Option<std::ffi::OsString> = |_| None;
-        let (key, value) = utf8_locale_override(empty).expect("override must be produced");
+        let (key, value) =
+            utf8_locale_override_for(empty, false, || None).expect("override must be produced");
         assert_eq!(key, "LANG");
         assert!(value.ends_with("UTF-8"), "locale must be UTF-8: {value}");
         if cfg!(target_os = "macos") {
             assert_eq!(value, "en_US.UTF-8");
+        } else {
+            assert_eq!(value, "C.UTF-8");
         }
     }
 
@@ -2138,7 +2316,8 @@ mod tests {
                 }
             };
             assert!(
-                utf8_locale_override(lookup).is_none(),
+                utf8_locale_override_for(lookup, false, || panic!("system locale consulted"))
+                    .is_none(),
                 "explicit {set_key} must suppress the override"
             );
         }
@@ -2164,13 +2343,194 @@ mod tests {
         // ConPTY shells read the console code page, not LANG, so a Windows pane must receive no
         // override at all. The decision is asserted on every host, not only on Windows.
         let empty: fn(&str) -> Option<std::ffi::OsString> = |_| None;
-        assert_eq!(utf8_locale_override_for(empty, true), None);
+        let system = || Some("ko_KR.UTF-8".to_string());
+        assert_eq!(utf8_locale_override_for(empty, true, system), None);
 
         let with_lang = |k: &str| (k == "LANG").then(|| std::ffi::OsString::from("ko_KR.UTF-8"));
-        assert_eq!(utf8_locale_override_for(with_lang, true), None);
+        assert_eq!(utf8_locale_override_for(with_lang, true, system), None);
 
         // The unix branch is untouched: with no locale in the environment the override lands.
-        assert!(utf8_locale_override_for(empty, false).is_some());
+        assert!(utf8_locale_override_for(empty, false, system).is_some());
+    }
+
+    struct FakeLocaleSource {
+        macos: bool,
+        files: Vec<(&'static str, &'static str)>,
+        commands: Vec<(&'static str, &'static str)>,
+    }
+
+    impl LocaleSource for FakeLocaleSource {
+        fn is_macos(&self) -> bool {
+            self.macos
+        }
+        fn read_file(&self, path: &str) -> Option<String> {
+            self.files
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, t)| t.to_string())
+        }
+        fn command_stdout(&self, program: &str, args: &[&str]) -> Option<String> {
+            let line = std::iter::once(program)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.commands
+                .iter()
+                .find(|(c, _)| *c == line)
+                .map(|(_, t)| t.to_string())
+        }
+    }
+
+    fn override_with(source: &FakeLocaleSource) -> String {
+        let empty: fn(&str) -> Option<std::ffi::OsString> = |_| None;
+        utf8_locale_override_for(empty, false, || resolve_system_locale(source))
+            .expect("override must be produced")
+            .1
+    }
+
+    fn platform_default() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "en_US.UTF-8"
+        } else {
+            "C.UTF-8"
+        }
+    }
+
+    #[test]
+    fn macos_apple_locale_ko_kr_becomes_the_installed_utf8_locale() {
+        let source = FakeLocaleSource {
+            macos: true,
+            files: vec![],
+            commands: vec![
+                ("defaults read -g AppleLocale", "ko_KR\n"),
+                ("locale -a", "C\nPOSIX\nen_US.UTF-8\nko_KR.UTF-8\n"),
+            ],
+        };
+        assert_eq!(override_with(&source), "ko_KR.UTF-8");
+    }
+
+    #[test]
+    fn macos_apple_locale_with_script_and_modifier_maps_to_language_region() {
+        assert_eq!(
+            apple_locale_to_posix("en_GB@rg=gbzzzz\n").as_deref(),
+            Some("en_GB")
+        );
+        assert_eq!(
+            apple_locale_to_posix("zh-Hans_CN").as_deref(),
+            Some("zh_CN")
+        );
+        assert_eq!(apple_locale_to_posix("es_419").as_deref(), Some("es_419"));
+        assert_eq!(apple_locale_to_posix("en"), None);
+        assert_eq!(apple_locale_to_posix("garbage value"), None);
+    }
+
+    #[test]
+    fn an_uninstalled_system_locale_falls_back_to_the_default() {
+        let macos = FakeLocaleSource {
+            macos: true,
+            files: vec![],
+            commands: vec![
+                ("defaults read -g AppleLocale", "ko_KR"),
+                ("locale -a", "C\nen_US.UTF-8\n"),
+            ],
+        };
+        assert_eq!(override_with(&macos), platform_default());
+
+        let linux = FakeLocaleSource {
+            macos: false,
+            files: vec![("/etc/locale.conf", "LANG=xx_YY.UTF-8\n")],
+            commands: vec![("locale -a", "C\nC.utf8\nPOSIX\nde_DE.utf8\n")],
+        };
+        assert_eq!(override_with(&linux), platform_default());
+
+        // When `locale -a` cannot run at all nothing is known to be installed either.
+        let unverifiable = FakeLocaleSource {
+            macos: false,
+            files: vec![("/etc/locale.conf", "LANG=de_DE.UTF-8\n")],
+            commands: vec![],
+        };
+        assert_eq!(override_with(&unverifiable), platform_default());
+    }
+
+    #[test]
+    fn linux_etc_locale_conf_supplies_its_lang() {
+        let source = FakeLocaleSource {
+            macos: false,
+            files: vec![
+                (
+                    "/etc/locale.conf",
+                    "# system locale\nLC_TIME=en_DK.UTF-8\nLANG=\"de_DE.UTF-8\"\n",
+                ),
+                ("/etc/default/locale", "LANG=fr_FR.UTF-8\n"),
+            ],
+            commands: vec![
+                ("localectl status", "System Locale: LANG=es_ES.UTF-8\n"),
+                (
+                    "locale -a",
+                    "C\nC.utf8\nPOSIX\nde_DE.utf8\nfr_FR.utf8\nes_ES.utf8\n",
+                ),
+            ],
+        };
+        assert_eq!(override_with(&source), "de_DE.UTF-8");
+    }
+
+    #[test]
+    fn linux_falls_back_to_etc_default_locale_then_localectl() {
+        let default_locale = FakeLocaleSource {
+            macos: false,
+            files: vec![("/etc/default/locale", "export LANG=fr_FR.UTF-8\n")],
+            commands: vec![("locale -a", "C.utf8\nfr_FR.utf8\n")],
+        };
+        assert_eq!(override_with(&default_locale), "fr_FR.UTF-8");
+
+        let localectl = FakeLocaleSource {
+            macos: false,
+            files: vec![],
+            commands: vec![
+                (
+                    "localectl status",
+                    "   System Locale: LANG=es_ES.UTF-8\n       VC Keymap: es\n",
+                ),
+                ("locale -a", "C.utf8\nes_ES.utf8\n"),
+            ],
+        };
+        assert_eq!(override_with(&localectl), "es_ES.UTF-8");
+    }
+
+    #[test]
+    fn a_non_utf8_or_c_system_locale_is_normalised_or_ignored() {
+        assert_eq!(
+            utf8_locale_name("de_DE.ISO-8859-1").as_deref(),
+            Some("de_DE.UTF-8")
+        );
+        assert_eq!(
+            utf8_locale_name("de_DE.utf8").as_deref(),
+            Some("de_DE.UTF-8")
+        );
+        assert_eq!(
+            utf8_locale_name("sr_RS@latin").as_deref(),
+            Some("sr_RS.UTF-8@latin")
+        );
+        assert_eq!(utf8_locale_name("C"), None);
+        assert_eq!(utf8_locale_name("POSIX"), None);
+        assert_eq!(utf8_locale_name("$(id)"), None);
+        assert!(locale_is_installed(
+            "sr_RS.UTF-8@latin",
+            "sr_RS.utf8@latin\n"
+        ));
+        assert!(!locale_is_installed("de_DE.UTF-8", "de_DE.iso88591\n"));
+    }
+
+    #[test]
+    fn a_user_set_locale_is_never_replaced_by_the_system_locale() {
+        for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            let lookup = move |k: &str| (k == key).then(|| std::ffi::OsString::from("ja_JP.UTF-8"));
+            assert_eq!(
+                utf8_locale_override_for(lookup, false, || Some("ko_KR.UTF-8".to_string())),
+                None,
+                "a user-set {key} must be left alone"
+            );
+        }
     }
 
     #[test]
