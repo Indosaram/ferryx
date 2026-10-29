@@ -196,6 +196,34 @@ describe("UnifiedSupervisorSection", () => {
     expect(requests[0]!.envelope).toMatchObject({ action: "cancel", expectedRevision: 3 });
   });
 
+  it("offers both answers to an uncertain delivery and sends the chosen outcome with the revision", async () => {
+    const uncertain = view({ goals: [{ ...GOAL, runState: "delivery_uncertain", stateDetail: "SEND_TIMEOUT: d-1 was sent", revision: 5 }] });
+    const { requests } = await renderSection({ view: uncertain });
+    expect(screen.getByTestId("supervisor-goal-wait").textContent).toContain("never resent on its own");
+    expect(screen.queryByTestId("supervisor-approve")).toBeNull();
+    fireEvent.click(screen.getByTestId("supervisor-resolve-not-delivered"));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.envelope).toMatchObject({
+      goalId: "g-1",
+      expectedRevision: 5,
+      action: "resolve_delivery",
+      payload: { outcome: "not_delivered" },
+    });
+    expect((screen.getByTestId("supervisor-resolve-delivered") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => {
+      requests[0]!.answer.resolve({ kind: "ok", value: { goalId: "g-1", runState: "ready", revision: 6 } });
+      await requests[0]!.answer.promise;
+    });
+    fireEvent.click(screen.getByTestId("supervisor-resolve-delivered"));
+    expect(requests[1]!.envelope).toMatchObject({ action: "resolve_delivery", expectedRevision: 5, payload: { outcome: "delivered" } });
+  });
+
+  it("offers no delivery answer for a running goal", async () => {
+    await renderSection();
+    expect(screen.queryByTestId("supervisor-resolve-delivered")).toBeNull();
+    expect(screen.queryByTestId("supervisor-resolve-not-delivered")).toBeNull();
+  });
+
   it("shows a paused goal with resume", async () => {
     const { requests } = await renderSection({ view: view({ goals: [{ ...GOAL, runState: "paused", stateDetail: "OWNER_PAUSED: by phone", revision: 4 }] }) });
     expect(screen.queryByTestId("supervisor-pause")).toBeNull();

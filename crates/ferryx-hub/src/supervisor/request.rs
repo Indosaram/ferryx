@@ -9,18 +9,20 @@
 //! 409 revision/ownership conflict, 503 capability/engine unavailable. A malformed envelope
 //! or payload is refused before anything is read or written.
 //!
-//! Goal actions (`correct`, `pause`, `resume`, `cancel`, `approve`, `depend`) need `goalId`
-//! and `expectedRevision`, and the caller has to own the goal. Pause and cancel are
-//! separate owner holds: a pause gates unsent work and keeps the worker; a cancel ends the
-//! goal, cancels its own waits and fails the waits of parents on it (the wake scheduler
+//! Goal actions (`correct`, `pause`, `resume`, `cancel`, `approve`, `resolve_delivery`,
+//! `depend`) need `goalId` and `expectedRevision`, and the caller has to own the goal. Pause
+//! and cancel are separate owner holds: a pause gates unsent work and keeps the worker; a
+//! cancel ends the goal, cancels its own waits and fails the waits of parents on it (the wake scheduler
 //! turns that into `DEPENDENCY_FAILED`). It also stops the worker's live run when the adapter
 //! can reach agent control. A pause records the state it interrupted; a resume restores it or
 //! the state its facts moved to (see [`resume`]). `approve` releases an `awaiting_owner` hold
 //! under the grant the goal already has. It never widens that grant: more operations need a
 //! new submission with explicit owner choices. It switches a supervised goal to `full` for
-//! its remaining turns (reported as `modeChanged`). Pause, resume, approve and correct each
-//! commit in one write transaction under the revision compare-and-set (a 409 writes nothing);
-//! `depend` checks the revision inside the wait's transaction.
+//! its remaining turns (reported as `modeChanged`). `resolve_delivery` is the owner's answer to
+//! a `delivery_uncertain` goal (see [`resolve_delivery`]): `delivered` or `not_delivered`; the
+//! uncertain dispatch itself is never transmitted again. Pause, resume, approve, correct and
+//! resolve_delivery each commit in one write transaction under the revision compare-and-set (a
+//! 409 writes nothing); `depend` checks the revision inside the wait's transaction.
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -34,7 +36,7 @@ use super::dispatcher::{GRANT_REVOKED, TURN_LIMIT};
 use super::memory::{ForgetPayload, TeachPayload};
 use super::wakes::{self, DependencyError};
 use super::{
-    execution_binding_of, goal_of, identity_of, waits_of, ChannelProvider, RunState,
+    execution_binding_of, goal_of, identity_of, waits_of, ChannelProvider, Receipt, RunState,
     SupervisorError, SupervisorGoal, WaitState, WaitTarget,
 };
 use crate::agent_control::{AgentControl, AgentOp, LOCAL_HOST_ID};
@@ -55,6 +57,13 @@ pub const OWNER_APPROVED: &str = "OWNER_APPROVED";
 pub const OWNER_DECISION_NEEDED: &str = "OWNER_DECISION_NEEDED";
 /// An approve that would release a goal with nothing to do next (409; nothing changes).
 pub const NOTHING_TO_RELEASE: &str = "NOTHING_TO_RELEASE";
+/// `state_detail` prefix after the owner confirmed an uncertain instruction reached the worker.
+pub const OWNER_CONFIRMED_DELIVERED: &str = "OWNER_CONFIRMED_DELIVERED";
+/// `state_detail` prefix after the owner confirmed an uncertain instruction was not typed.
+pub const OWNER_CONFIRMED_NOT_DELIVERED: &str = "OWNER_CONFIRMED_NOT_DELIVERED";
+/// Run id prefix of a run the owner confirmed but no observer attributed:
+/// `owner-confirmed:<request id>`.
+pub const OWNER_CONFIRMED_RUN_PREFIX: &str = "owner-confirmed:";
 
 /// Longest correction or teach text.
 const MAX_TEXT_CHARS: usize = 64_000;
@@ -207,6 +216,7 @@ pub enum Action {
     Resume,
     Cancel,
     Approve,
+    ResolveDelivery,
     Teach,
     Forget,
     Depend,
@@ -223,6 +233,7 @@ impl Action {
             "resume" => Self::Resume,
             "cancel" => Self::Cancel,
             "approve" => Self::Approve,
+            "resolve_delivery" => Self::ResolveDelivery,
             "teach" => Self::Teach,
             "forget" => Self::Forget,
             "depend" => Self::Depend,
@@ -245,6 +256,7 @@ impl Action {
                 | Self::Resume
                 | Self::Cancel
                 | Self::Approve
+                | Self::ResolveDelivery
                 | Self::Depend
         )
     }
@@ -284,6 +296,31 @@ struct CorrectPayload {
     /// Replaces the goal's requirements when given.
     #[serde(default)]
     requirements: Option<Vec<RequirementSpec>>,
+}
+
+/// The owner's answer to an uncertain delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryOutcome {
+    /// The worker got the instruction: its run is graded, nothing is sent again.
+    Delivered,
+    /// The instruction was never typed: it goes out again as a new dispatch.
+    NotDelivered,
+}
+
+impl DeliveryOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::NotDelivered => "not_delivered",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveDeliveryPayload {
+    outcome: DeliveryOutcome,
 }
 
 #[derive(Deserialize)]
@@ -385,6 +422,7 @@ pub async fn handle(
         | Action::Resume
         | Action::Cancel
         | Action::Approve
+        | Action::ResolveDelivery
         | Action::Depend => {
             let mut answer = goal_action(pool, context, &envelope, action).await?;
             learn(pool, context, &envelope, action, &mut answer);
@@ -554,6 +592,7 @@ enum GoalPayload {
     Correct(CorrectPayload),
     Reason(Option<String>),
     Empty,
+    Resolve(DeliveryOutcome),
     Depend(WaitTarget),
 }
 
@@ -577,6 +616,10 @@ fn goal_payload(action: Action, value: &Value) -> Result<GoalPayload, RequestFai
         Action::Resume | Action::Approve => {
             let _: EmptyPayload = payload(value)?;
             GoalPayload::Empty
+        }
+        Action::ResolveDelivery => {
+            let resolve: ResolveDeliveryPayload = payload(value)?;
+            GoalPayload::Resolve(resolve.outcome)
         }
         Action::Depend => {
             let depend: DependPayload = payload(value)?;
@@ -651,6 +694,12 @@ async fn goal_action(
             let grant = admission::goal_grant(pool, goal_id).await?;
             extra.insert("grant".into(), json!(grant));
             extra.insert("modeChanged".into(), json!(mode_changed));
+        }
+        GoalPayload::Resolve(outcome) => {
+            let resolved = resolve_delivery(pool, &goal, expected, outcome, by).await?;
+            extra.insert("outcome".into(), json!(outcome.as_str()));
+            extra.insert("resolvedRequestId".into(), json!(resolved.uncertain));
+            extra.insert("dispatchRequestId".into(), json!(resolved.resend));
         }
         GoalPayload::Correct(correct) => {
             let dispatch = correct_goal(pool, &goal, expected, &correct).await?;
@@ -1029,6 +1078,194 @@ async fn requeue_unsent(
     )
     .await?;
     Ok(())
+}
+
+/// What an owner resolution of an uncertain delivery wrote.
+struct Resolved {
+    /// The uncertain dispatch the owner answered for. Never transmitted again.
+    uncertain: String,
+    /// The new dispatch carrying the same instruction (`not_delivered` only).
+    resend: Option<String>,
+}
+
+/// The owner's answer to a `delivery_uncertain` goal, in one write transaction under the
+/// revision compare-and-set (a 409 writes nothing). It answers for the goal's unresolved
+/// uncertain dispatch on the current execution generation, the one in flight; every
+/// unresolved uncertain dispatch of the goal is marked owner-resolved (rows, codes and
+/// evidence kept) so none counts as in flight any more. Refused with `DISPATCH_IN_FLIGHT`
+/// while a dispatch is claimed, accepted or started (that is not uncertain), and with
+/// [`NOTHING_TO_RELEASE`] when there is no such uncertain dispatch.
+///
+/// - `not_delivered`: the owner saw that the worker never got it. The goal revision is bumped
+///   (any decision made before is fenced), the same instruction is queued as a new dispatch
+///   with its own request id at the new revision (followed by any correction queued while
+///   the delivery was uncertain, which the bump supersedes), and the goal moves to `ready`
+///   for the dispatcher. The uncertain dispatch's id is never transmitted again. A late
+///   start for it is still recorded ([`super::record_receipt`]): before the new dispatch is
+///   claimed it makes the old one the live run (the new claim is then `DISPATCH_IN_FLIGHT`),
+///   after the claim it is `RECEIPT_OUT_OF_ORDER` evidence only.
+/// - `delivered`: the owner saw that the worker got it. Nothing is sent. The dispatch is
+///   recorded settled on the bound session under the run id
+///   `owner-confirmed:<request id>` (or the run its evidence already names), so the settle
+///   wake grades it like any finished run: the goal moves to `verifying`, or to waiting while
+///   dependencies are pending. Grading still needs Ferryx's own checks and an idle pane; the
+///   owner's word proves no requirement.
+async fn resolve_delivery(
+    pool: &SqlitePool,
+    goal: &SupervisorGoal,
+    expected: i64,
+    outcome: DeliveryOutcome,
+    by: &str,
+) -> Result<Resolved, RequestFailure> {
+    let goal_id = goal.goal_id.as_str();
+    let mut tx = pool.begin_write().await?;
+    let current = super::require_goal(&mut tx, goal_id).await?;
+    super::check_revision(&current, expected)?;
+    if current.run_state != RunState::DeliveryUncertain {
+        return Err(SupervisorError::StateConflict {
+            goal_id: goal_id.to_owned(),
+            expected: RunState::DeliveryUncertain,
+            actual: current.run_state,
+        }
+        .into());
+    }
+    let busy: Option<String> = sqlx::query_scalar(
+        "SELECT d.request_id FROM supervisor_dispatches d
+         JOIN supervisor_execution_bindings b
+           ON b.goal_id = d.goal_id AND b.generation = d.generation
+         WHERE d.goal_id = ? AND d.state IN ('claimed','accepted','started')
+         ORDER BY d.id LIMIT 1",
+    )
+    .bind(goal_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(request_id) = busy {
+        return Err(SupervisorError::DispatchInFlight {
+            goal_id: goal_id.to_owned(),
+            request_id,
+        }
+        .into());
+    }
+    let binding = super::require_binding(&mut tx, goal_id).await?;
+    let uncertain: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT request_id, instruction, run_id FROM supervisor_dispatches
+         WHERE goal_id = ? AND generation = ? AND state = 'uncertain'
+           AND owner_resolved_at IS NULL
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(goal_id)
+    .bind(binding.generation)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((uncertain, instruction, recorded_run)) = uncertain else {
+        return Err(RequestFailure::new(
+            NOTHING_TO_RELEASE,
+            format!("goal {goal_id} has no unresolved uncertain delivery to answer for"),
+        ));
+    };
+    let now = crate::storage::now_rfc3339();
+    super::mark_uncertain_resolved(&mut tx, goal_id, &now).await?;
+    let resend = match outcome {
+        DeliveryOutcome::NotDelivered => {
+            // A correction queued while the delivery was uncertain is carried after the
+            // instruction it corrects, as a correction carries a never-transmitted original.
+            let queued: Option<String> = sqlx::query_scalar(
+                "SELECT instruction FROM supervisor_dispatches WHERE goal_id = ? AND state = 'ready'
+                 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(goal_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let instruction = match queued {
+                Some(queued) => format!("{}\n\n{queued}", instruction.trim_end()),
+                None => instruction,
+            };
+            if instruction.chars().count() > super::MAX_BODY_CHARS {
+                return Err(RequestFailure::invalid(format!(
+                    "the resent instruction with the queued correction would exceed {} \
+                     characters; correct the goal instead",
+                    super::MAX_BODY_CHARS
+                )));
+            }
+            let revised = super::revise_goal_in(&mut tx, goal_id, expected).await?;
+            let dispatch = super::insert_dispatch(
+                &mut tx,
+                goal_id,
+                revised.revision,
+                binding.generation,
+                &instruction,
+                &now,
+            )
+            .await?;
+            let detail = format!(
+                "{OWNER_CONFIRMED_NOT_DELIVERED}: {uncertain} was not typed; {} at revision {} \
+                 carries the same instruction (by {by})",
+                dispatch.request_id, revised.revision
+            );
+            super::transition_goal_in(
+                &mut tx,
+                goal_id,
+                revised.revision,
+                RunState::DeliveryUncertain,
+                RunState::Ready,
+                Some(&detail),
+            )
+            .await?;
+            Some(dispatch.request_id)
+        }
+        DeliveryOutcome::Delivered => {
+            let Some(session) = binding.provider_session_id else {
+                return Err(RequestFailure::new(
+                    NOTHING_TO_RELEASE,
+                    format!("goal {goal_id} has no bound worker session to grade"),
+                ));
+            };
+            let run_id =
+                recorded_run.unwrap_or_else(|| format!("{OWNER_CONFIRMED_RUN_PREFIX}{uncertain}"));
+            let settled = Receipt::Settled {
+                run_id,
+                provider_session_id: session,
+            };
+            super::validate_receipt(&settled)?;
+            if let super::AppliedReceipt::EvidenceOnly(error) =
+                super::apply_receipt(&mut tx, &uncertain, binding.generation, &settled).await?
+            {
+                return Err(error.into());
+            }
+            let pending: Vec<String> = sqlx::query_scalar(
+                "SELECT kind FROM supervisor_waits WHERE goal_id = ? AND state = 'pending'",
+            )
+            .bind(goal_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            let to = if pending.is_empty() {
+                RunState::Verifying
+            } else if pending.iter().any(|kind| kind == "child_goal") {
+                RunState::WaitingChildren
+            } else {
+                RunState::WaitingEvent
+            };
+            let detail = format!(
+                "{OWNER_CONFIRMED_DELIVERED}: {uncertain} reached the worker; its run is graded, \
+                 nothing is resent (by {by})"
+            );
+            super::transition_goal_in(
+                &mut tx,
+                goal_id,
+                expected,
+                RunState::DeliveryUncertain,
+                to,
+                Some(&detail),
+            )
+            .await?;
+            None
+        }
+    };
+    tx.commit().await?;
+    super::changes::announce(goal_id);
+    wakes::poke();
+    super::dispatcher::poke();
+    Ok(Resolved { uncertain, resend })
 }
 
 /// A correction's queued intent, and whether it carries the never-transmitted instruction it

@@ -14,9 +14,10 @@ use crate::supervisor::request::{
 use crate::supervisor::wakes::{StateHandler, WakeScheduler};
 use crate::supervisor::{
     admit_request, admit_request_with, attach_session, bind_project_host, claim_dispatch,
-    confirm_claim_before_transmit, create_project, ensure_identity, goal_of, record_receipt,
-    transition_goal, waits_of, AdmitRequest, AdmitTerms, ChannelProvider, ExecutionKind,
-    ExecutionTarget, Receipt, RunState, WaitState, DEFAULT_TURN_LIMIT,
+    confirm_claim_before_transmit, create_project, ensure_identity, execution_binding_of, goal_of,
+    ready_dispatches, record_receipt, transition_goal, waits_of, AdmitRequest, AdmitTerms,
+    ChannelProvider, ExecutionKind, ExecutionTarget, Receipt, RunState, WaitState,
+    DEFAULT_TURN_LIMIT,
 };
 
 const OWNER: &str = "slack:T1:U-owner";
@@ -1370,4 +1371,314 @@ async fn cancel_clears_the_pre_pause_state() {
             .await
             .unwrap();
     assert_eq!(held, (None, None));
+}
+
+/// Claims and transmits the ready intent without any start receipt, so the goal holds
+/// `delivery_uncertain` exactly as the dispatcher leaves it. Returns the uncertain request id.
+async fn make_uncertain(pool: &SqlitePool, goal_id: &str) -> String {
+    let request_id = claim(pool, goal_id).await;
+    confirm_claim_before_transmit(pool, &request_id)
+        .await
+        .unwrap();
+    let uncertain = Receipt::Uncertain {
+        code: "SEND_TIMEOUT".into(),
+    };
+    record_receipt(pool, &request_id, 1, &uncertain)
+        .await
+        .unwrap();
+    let (_, revision) = state(pool, goal_id).await;
+    transition_goal(
+        pool,
+        goal_id,
+        revision,
+        RunState::Dispatching,
+        RunState::DeliveryUncertain,
+        Some("SEND_TIMEOUT"),
+    )
+    .await
+    .unwrap();
+    request_id
+}
+
+/// `(state, owner_resolved_at, run_id, instruction)` of one dispatch.
+async fn dispatch_row(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> (String, Option<String>, Option<String>, String) {
+    sqlx::query_as(
+        "SELECT state, owner_resolved_at, run_id, instruction FROM supervisor_dispatches
+         WHERE request_id = ?",
+    )
+    .bind(request_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn resolve_not_delivered_queues_a_new_dispatch_and_never_resends_the_uncertain_one() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let goal_id = admit(&fixture, "u1").await;
+    let uncertain = make_uncertain(pool, &goal_id).await;
+    let (_, _, _, instruction) = dispatch_row(pool, &uncertain).await;
+    // Before the owner answers, nothing leaves delivery_uncertain and nothing is claimable.
+    assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
+
+    let answer = handle(
+        pool,
+        &context(OWNER),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "not_delivered"}),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer["action"], "resolve_delivery");
+    assert_eq!(answer["outcome"], "not_delivered");
+    assert_eq!(answer["runState"], "ready", "{answer}");
+    assert_eq!(
+        answer["revision"], 2,
+        "the answer fences decisions made before it"
+    );
+    assert_eq!(answer["resolvedRequestId"], uncertain.as_str());
+    let resend = answer["dispatchRequestId"].as_str().unwrap().to_owned();
+    assert_ne!(resend, uncertain, "a resend is a new dispatch id");
+    assert!(answer["stateDetail"]
+        .as_str()
+        .unwrap()
+        .starts_with("OWNER_CONFIRMED_NOT_DELIVERED"));
+
+    // The uncertain dispatch keeps its row and evidence, resolved, and is never claimable.
+    let (old_state, resolved, _, _) = dispatch_row(pool, &uncertain).await;
+    assert_eq!(old_state, "uncertain");
+    assert!(resolved.is_some());
+    let refused = claim_dispatch(pool, &uncertain, 2, 1).await.unwrap_err();
+    assert_eq!(refused.code(), "NOT_CLAIMABLE", "{refused}");
+
+    // The new intent carries the same instruction at the new revision and is what goes out.
+    let (new_state, _, _, new_instruction) = dispatch_row(pool, &resend).await;
+    assert_eq!(new_state, "ready");
+    assert_eq!(new_instruction, instruction);
+    let ready = ready_dispatches(pool, 10).await.unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(
+        (ready[0].request_id.as_str(), ready[0].goal_revision),
+        (resend.as_str(), 2)
+    );
+    claim_dispatch(pool, &resend, 2, 1).await.unwrap();
+    assert_eq!(state(pool, &goal_id).await, (RunState::Dispatching, 2));
+
+    // A replayed answer at the old revision is a conflict and changes nothing.
+    let before = fingerprint(pool).await;
+    let stale = handle(
+        pool,
+        &context(OWNER),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "not_delivered"}),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (stale.code.as_str(), stale.status),
+        ("REVISION_CONFLICT", 409)
+    );
+    assert_eq!(fingerprint(pool).await, before);
+}
+
+#[tokio::test]
+async fn resolve_delivered_grades_the_run_without_any_new_dispatch() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let goal_id = admit(&fixture, "u2").await;
+    let uncertain = make_uncertain(pool, &goal_id).await;
+    let dispatches_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_dispatches WHERE goal_id = ?")
+            .bind(&goal_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
+    let answer = handle(
+        pool,
+        &context(OWNER),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "delivered"}),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer["outcome"], "delivered");
+    assert_eq!(answer["runState"], "verifying", "{answer}");
+    assert_eq!(answer["revision"], 1);
+    assert!(answer["dispatchRequestId"].is_null());
+    assert!(answer["stateDetail"]
+        .as_str()
+        .unwrap()
+        .starts_with("OWNER_CONFIRMED_DELIVERED"));
+
+    // The uncertain dispatch is recorded settled on the bound session; nothing new exists.
+    let (settled, resolved, run_id, _) = dispatch_row(pool, &uncertain).await;
+    assert_eq!(settled, "settled");
+    assert!(resolved.is_some());
+    assert_eq!(
+        run_id.as_deref(),
+        Some(format!("owner-confirmed:{uncertain}").as_str())
+    );
+    let dispatches_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_dispatches WHERE goal_id = ?")
+            .bind(&goal_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(dispatches_after, dispatches_before, "nothing is resent");
+    assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
+    let binding = execution_binding_of(pool, &goal_id).await.unwrap().unwrap();
+    assert_eq!(binding.run_id, None, "no run stays live");
+
+    // Answering again finds the goal no longer uncertain.
+    let again = handle(
+        pool,
+        &context(OWNER),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "delivered"}),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (again.code.as_str(), again.status),
+        ("REVISION_CONFLICT", 409)
+    );
+}
+
+#[tokio::test]
+async fn a_stale_or_misplaced_resolution_is_refused_and_writes_nothing() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let goal_id = admit(&fixture, "u3").await;
+    // Not uncertain yet: the goal is ready.
+    let not_uncertain = handle(
+        pool,
+        &context(OWNER),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "delivered"}),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (not_uncertain.code.as_str(), not_uncertain.status),
+        ("REVISION_CONFLICT", 409)
+    );
+
+    let uncertain = make_uncertain(pool, &goal_id).await;
+    let before = fingerprint(pool).await;
+    for (revision, payload, code, status) in [
+        (
+            0,
+            json!({"outcome": "not_delivered"}),
+            "REVISION_CONFLICT",
+            409,
+        ),
+        (2, json!({"outcome": "delivered"}), "REVISION_CONFLICT", 409),
+        (1, json!({}), "INVALID_REQUEST", 400),
+        (1, json!({"outcome": "resend"}), "INVALID_REQUEST", 400),
+        (
+            1,
+            json!({"outcome": "delivered", "requestId": "x"}),
+            "INVALID_REQUEST",
+            400,
+        ),
+    ] {
+        let refused = handle(
+            pool,
+            &context(OWNER),
+            goal_call("resolve_delivery", &goal_id, revision, payload.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (refused.code.as_str(), refused.status),
+            (code, status),
+            "{revision} {payload}"
+        );
+    }
+    let missing_revision = handle(
+        pool,
+        &context(OWNER),
+        json!({"requestId": "r", "goalId": goal_id, "action": "resolve_delivery",
+            "payload": {"outcome": "delivered"}}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing_revision.status, 400);
+    assert_eq!(fingerprint(pool).await, before);
+    let (old_state, resolved, _, _) = dispatch_row(pool, &uncertain).await;
+    assert_eq!((old_state.as_str(), resolved), ("uncertain", None));
+    assert_eq!(
+        state(pool, &goal_id).await,
+        (RunState::DeliveryUncertain, 1)
+    );
+}
+
+#[tokio::test]
+async fn only_the_goal_owner_resolves_an_uncertain_delivery() {
+    let fixture = fixture().await;
+    let pool = &fixture.pool;
+    let goal_id = admit(&fixture, "u4").await;
+    let uncertain = make_uncertain(pool, &goal_id).await;
+    let before = fingerprint(pool).await;
+    for outcome in ["delivered", "not_delivered"] {
+        let refused = handle(
+            pool,
+            &context(STRANGER),
+            goal_call("resolve_delivery", &goal_id, 1, json!({"outcome": outcome})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (refused.code.as_str(), refused.status),
+            ("UNAUTHORIZED", 403),
+            "{outcome}"
+        );
+    }
+    // A second owner on the same hub cannot answer for the first owner's goal.
+    ensure_identity(pool, STRANGER).await.unwrap();
+    let refused = handle(
+        pool,
+        &context(STRANGER),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "not_delivered"}),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!((refused.code.as_str(), refused.status), ("FORBIDDEN", 403));
+    assert_eq!(fingerprint(pool).await, before);
+    let (old_state, resolved, _, _) = dispatch_row(pool, &uncertain).await;
+    assert_eq!((old_state.as_str(), resolved), ("uncertain", None));
+    assert_eq!(
+        state(pool, &goal_id).await,
+        (RunState::DeliveryUncertain, 1)
+    );
 }

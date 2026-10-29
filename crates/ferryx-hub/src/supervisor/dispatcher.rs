@@ -32,8 +32,8 @@
 //! released claim is never transmitted. A claim left behind by a dispatcher that
 //! stopped (crash, `hub stop`) cannot be proven untransmitted, so [`Dispatcher::run`] first
 //! calls [`reconcile_claims_after_restart`] (retried with a bounded backoff), which holds it
-//! `delivery_uncertain`. It is resent only after the owner's
-//! [`super::resolve_uncertain_delivery`].
+//! `delivery_uncertain`. It is never resent: the owner answers it (the `resolve_delivery`
+//! request, or [`super::resolve_uncertain_delivery`]), and a resend is a new dispatch.
 //! The dispatcher never advances an execution generation: rebinding a worker is the
 //! reattach policy's job, not the first dispatch's.
 //!
@@ -825,8 +825,8 @@ impl Dispatcher {
     ///   (already-seen readings through the [`IdleLedger`]).
     /// - Anything else (no receipt, a receipt for another request or session, an unknown
     ///   outcome) records accepted when the target confirmed it, then uncertain, and holds
-    ///   `delivery_uncertain`. It is never resent: that needs
-    ///   [`super::resolve_uncertain_delivery`].
+    ///   `delivery_uncertain`. It is never resent; the owner answers it (the
+    ///   `resolve_delivery` request, or [`super::resolve_uncertain_delivery`]).
     ///
     /// Returns `Err` only from a hold, i.e. when nothing was sent.
     async fn settle_transmission(

@@ -453,8 +453,32 @@ function GoalCard({
       <p data-testid="supervisor-goal-wait" className="min-w-0 break-words leading-snug text-foreground/90">{goalWaitLine(goal)}</p>
       <span data-testid="supervisor-goal-grant" className="text-muted-foreground">Allowed: {grant}</span>
       {notice ? <NoticeLine notice={notice} /> : null}
-      {controls.pause || controls.resume || controls.cancel || controls.approve || controls.correct ? (
+      {controls.pause || controls.resume || controls.cancel || controls.approve || controls.correct || controls.resolveDelivery ? (
         <div className="flex min-w-0 flex-wrap gap-1">
+          {controls.resolveDelivery ? (
+            <>
+              <ActionButton
+                testId="supervisor-resolve-delivered"
+                touch={touch}
+                disabled={disabled}
+                busy={isBusy("resolve_delivery")}
+                onClick={() => void onAction(goal, "resolve_delivery", { outcome: "delivered" })}
+                label="The worker got the instruction: check its run, send nothing again"
+              >
+                Worker got it
+              </ActionButton>
+              <ActionButton
+                testId="supervisor-resolve-not-delivered"
+                touch={touch}
+                disabled={disabled}
+                busy={isBusy("resolve_delivery")}
+                onClick={() => void onAction(goal, "resolve_delivery", { outcome: "not_delivered" })}
+                label="The instruction never arrived: send it again as a new instruction"
+              >
+                Not received, send again
+              </ActionButton>
+            </>
+          ) : null}
           {controls.approve ? (
             <ActionButton testId="supervisor-approve" touch={touch} disabled={disabled} busy={isBusy("approve")} onClick={() => void onAction(goal, "approve")} label={`Approve within the grant (${grant})`}>
               Approve ({grant})
