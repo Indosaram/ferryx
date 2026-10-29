@@ -207,6 +207,14 @@ export async function runRealAutonomy(ctx, deps) {
     const addresses = await lookup(url.hostname, { all: true }).catch(() => []);
     for (const { address } of addresses) allowed.push({ ip: address, port });
   }
+  // The worker CLI's own vendor endpoints (Claude Code checks downloads.claude.ai at start even
+  // with the autoupdater off). Allowed only for the worker's own process and reported apart:
+  // Ferryx and mhc must reach nothing but the gateway.
+  const vendor = [];
+  for (const hostname of ['downloads.claude.ai']) {
+    const addresses = await lookup(hostname, { all: true }).catch(() => []);
+    for (const { address } of addresses) vendor.push({ ip: address, port: 443, hostname });
+  }
 
   // Versions (no secrets): the worker CLI and mhc, with the isolated HOME.
   const probeEnv = ctx.productEnv({ DISABLE_AUTOUPDATER: '1', CLAUDE_CONFIG_DIR: join(data, 'version-probe', '.claude') });
@@ -334,7 +342,12 @@ export async function runRealAutonomy(ctx, deps) {
   const sampler = setInterval(() => { sample().catch(() => { /* a pid vanished mid-scan */ }); }, SAMPLE_MS);
   try {
     const engine = await deps.awaitEngine(ctx, env, 'real-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 180_000);
-    ctx.assert('engine-ready-on-configured-model', engine?.engine?.state === 'ready' && JSON.stringify(engine).includes(real.model), { engine, model: real.model });
+    // The engine status names no model; the profile it loaded names exactly one, and every
+    // recorded engine call's model is checked in decision-by-real-model.
+    const profileModels = (models.providers?.[real.provider]?.models ?? []).map((entry) => entry.id);
+    ctx.assert('engine-ready-on-configured-model', engine?.engine?.state === 'ready' && engine?.engine?.profileCwd?.startsWith(home)
+      && Object.keys(models.providers ?? {}).length === 1 && JSON.stringify(profileModels) === JSON.stringify([real.model]),
+    { engine, model: real.model, profileModels });
     const registered = await deps.registerWorkspace(ctx, join(data, 'runtime', 'daemon.sock'), WORKSPACE_ID, realpathSync(workspaceRoot));
     ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
 
@@ -404,9 +417,12 @@ export async function runRealAutonomy(ctx, deps) {
     const graded = judge.filter((call) => ['gap_assess', 'convergence_check'].includes(call.purpose));
     const modelCalls = hub.all('SELECT id, cause, purpose, role, goal_id, provider, model, outcome, input_tokens, output_tokens FROM supervisor_model_calls ORDER BY id');
     // models.json names one provider and one model, and fallback is off: every ok engine call
-    // ran on the configured real model.
-    ctx.assert('decision-by-real-model', graded.length >= 2 && graded.every((call) => String(call.kind).startsWith('mhc_') && call.outcome === 'ok' && !call.used_fallback)
+    // ran on the configured real model. The hub records its retained mhc engine's grading with
+    // used_fallback = 1 by convention (usage.rs counts mhc_ kinds as judge calls, never as omo
+    // fallbacks), so the kind, not that flag, says the engine decided.
+    ctx.assert('decision-by-real-model', graded.length >= 2 && graded.every((call) => String(call.kind).startsWith('mhc_') && call.outcome === 'ok')
       && modelCalls.some((call) => call.outcome === 'ok')
+      && modelCalls.every((call) => call.provider === real.provider)
       && modelCalls.every((call) => call.model === null || call.model === real.model || String(call.model).endsWith(`/${real.model}`)),
     { judge, modelCalls, model: real.model });
     ctx.assert('every-engine-call-has-a-cause', modelCalls.length >= 1 && modelCalls.every((call) => typeof call.cause === 'string' && call.cause.length > 0 && call.cause !== 'unattributed'), { modelCalls });
@@ -426,9 +442,12 @@ export async function runRealAutonomy(ctx, deps) {
 
     await sample();
     clearInterval(sampler);
-    const rogue = [...peers.values()].filter((peer) => !isLoopback(peer.ip) && !allowed.some((entry) => entry.ip === peer.ip && entry.port === peer.port));
+    const workerComm = real.workerBin.split('/').at(-1);
+    const external = [...peers.values()].filter((peer) => !isLoopback(peer.ip) && !allowed.some((entry) => entry.ip === peer.ip && entry.port === peer.port));
+    const workerVendor = external.filter((peer) => peer.comm === workerComm && vendor.some((entry) => entry.ip === peer.ip && entry.port === peer.port));
+    const rogue = external.filter((peer) => !workerVendor.includes(peer));
     ctx.assert('no-network-peers-other-than-gateway', PLATFORM === 'linux' && family.size > 1 && rogue.length === 0,
-      { platform: PLATFORM, allowed, peers: [...peers.values()], rogue, note: 'sampled every second from /proc of the daemon family; a connection shorter than the interval can be missed' });
+      { platform: PLATFORM, allowed, vendor, peers: [...peers.values()], workerVendor, rogue, note: 'sampled every second from /proc of the daemon family; a connection shorter than the interval can be missed; workerVendor lists the worker CLI\'s own vendor endpoints, allowed for that process only' });
 
     // Cleanup: the daemon goes, and with it every process of its family (panes, claude, mhc).
     await ctx.terminate(mcp, 'cleanup');
