@@ -251,8 +251,15 @@ pub fn classify_windows_clipboard(
     format_ids: &[u32],
     format_names: &[String],
 ) -> NativeTerminalClipboardContent {
+    let has_image_data = format_ids
+        .iter()
+        .any(|&id| matches!(id, CF_BITMAP_ID | CF_DIB_ID | CF_DIBV5_ID))
+        || format_names.iter().any(|name| {
+            let name = name.to_ascii_lowercase();
+            name == "png" || name.starts_with("image/") || name == "jfif"
+        });
     if let Some(text) = text {
-        if !text.is_empty() {
+        if !text.is_empty() && !(has_image_data && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
@@ -276,6 +283,20 @@ pub fn classify_windows_clipboard(
     NativeTerminalClipboardContent::Empty
 }
 
+/// Browsers and chat apps publish the copied image's address as text beside the image. A lone
+/// URL next to real image data is that locator, not text the user meant to paste.
+pub fn is_image_locator_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("file://")
+        || lower.starts_with("data:image/")
+}
+
 fn is_image_pasteboard_type(t: &str) -> bool {
     t.starts_with("public.png")
         || t.starts_with("public.tiff")
@@ -292,12 +313,12 @@ pub fn classify_clipboard_content(
     text: Option<String>,
     types: &[String],
 ) -> NativeTerminalClipboardContent {
+    let has_image = types.iter().any(|t| is_image_pasteboard_type(t));
     if let Some(text) = text {
-        if !text.is_empty() {
+        if !text.is_empty() && !(has_image && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
-    let has_image = types.iter().any(|t| is_image_pasteboard_type(t));
     if has_image {
         return NativeTerminalClipboardContent::Image;
     }
@@ -414,7 +435,7 @@ pub fn classify_linux_clipboard(
         return NativeTerminalClipboardContent::Image;
     }
     if let Some(text) = text {
-        if !text.is_empty() {
+        if !text.is_empty() && !(has_image && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
@@ -5008,6 +5029,33 @@ mod tests {
         assert_eq!(
             classify_clipboard_content(Some("".to_string()), &[]),
             NativeTerminalClipboardContent::Empty
+        );
+    }
+
+    #[test]
+    fn test_classify_clipboard_content_treats_a_lone_url_beside_image_data_as_the_image() {
+        let url = Some("https://cdn.example.com/a.png".to_string());
+        assert_eq!(
+            classify_clipboard_content(url.clone(), &["public.png".to_string(), "public.utf8-plain-text".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        // Without image data the URL is just text.
+        assert_eq!(
+            classify_clipboard_content(url, &["public.utf8-plain-text".to_string()]),
+            NativeTerminalClipboardContent::Text { text: "https://cdn.example.com/a.png".to_string() }
+        );
+        // Real prose beside an image is still the user's text.
+        assert_eq!(
+            classify_clipboard_content(Some("see https://x.dev".to_string()), &["public.png".to_string()]),
+            NativeTerminalClipboardContent::Text { text: "see https://x.dev".to_string() }
+        );
+        assert_eq!(
+            classify_windows_clipboard(Some("https://x.dev/i.jpg".to_string()), &[CF_UNICODETEXT_ID, CF_DIB_ID], &[]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_linux_clipboard(Some("https://x.dev/i.jpg".to_string()), &["text/plain".to_string(), "image/jpeg".to_string()]),
+            NativeTerminalClipboardContent::Image
         );
     }
 

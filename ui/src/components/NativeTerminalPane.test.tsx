@@ -2881,6 +2881,99 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(rightPastes).toHaveLength(1);
   });
 
+  it("routes AppKit-consumed Cmd+V to the pane whose focus sink holds DOM focus when the last-focused id is stale", async () => {
+    const leftSession = createSession("term-session-native-stale-left");
+    const rightSession = createSession("term-session-native-stale-right");
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_native_terminal_clipboard_content") return { kind: "text", text: "pasted" };
+      return undefined;
+    });
+
+    const { getAllByTestId } = await renderNative(<div>
+        <NativeTerminalPane sessionId="term-session-native-stale-left" session={leftSession} />
+        <NativeTerminalPane sessionId="term-session-native-stale-right" session={rightSession} />
+      </div>);
+    const [leftSink, rightSink] = getAllByTestId("native-terminal-focus-sink");
+    act(() => {
+      leftSink.focus();
+    });
+    // A native focus event names the right pane, but its sink cannot take DOM focus (the surface
+    // is mid-relayout), so DOM focus stays in the left sink while the last-focused id moves right.
+    rightSink.focus = () => undefined;
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.focusListeners) listener("term-session-native-stale-right");
+    });
+    expect(document.activeElement).toBe(leftSink);
+    tauriCoreMocks.invoke.mockClear();
+
+    act(() => {
+      for (const listener of nativeTerminalEventMocks.pasteListeners) listener();
+    });
+
+    await waitFor(() => {
+      const pastes = tauriCoreMocks.invoke.mock.calls.filter(([cmd]) => cmd === "cmd_native_terminal_paste");
+      expect(pastes).toEqual([["cmd_native_terminal_paste", { sessionId: "term-session-native-stale-left", text: "pasted" }]]);
+    });
+  });
+
+  it("pastes the image, not its address, when a DOM paste carries a lone URL beside image data", async () => {
+    const sessionId = "term-session-dom-url-image";
+    const session = createSession(sessionId);
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_local_paste_clipboard_image") return { localPath: "/tmp/ferryx-paste/u.png", byteLength: 1 };
+      return undefined;
+    });
+
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", {
+      value: {
+        getData: (type: string) => (type === "text/plain" ? "https://cdn.example.com/cat.png" : ""),
+        items: [{ kind: "string", type: "text/plain" }, { kind: "file", type: "image/png" }],
+      },
+    });
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId });
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", { sessionId, text: "/tmp/ferryx-paste/u.png " });
+    });
+    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_paste", {
+      sessionId,
+      text: "https://cdn.example.com/cat.png",
+    });
+  });
+
+  it("treats a pane whose session already names its agent as an agent before activity arrives", async () => {
+    const sessionId = "term-session-agent-type-before-activity";
+    const session = { ...createSession(sessionId), agentType: "claude" };
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_local_paste_clipboard_image") return null;
+      return undefined;
+    });
+
+    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
+    const textarea = getByTestId("native-terminal-focus-sink");
+    textarea.focus();
+    tauriCoreMocks.invoke.mockClear();
+
+    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEvent, "clipboardData", { value: { getData: () => "" } });
+    act(() => {
+      textarea.dispatchEvent(pasteEvent);
+    });
+
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId, agentPaste: true });
+    });
+  });
+
   it("leaves AppKit-consumed Cmd+V to an external editable instead of a terminal", () => {
     const session = createSession("term-session-native-menu-external-input");
     const { getByTestId } = render(

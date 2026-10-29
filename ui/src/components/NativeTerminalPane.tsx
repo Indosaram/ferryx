@@ -467,6 +467,29 @@ function closestVisibleTerminalPane(target: EventTarget | null): Element | null 
     : null;
 }
 
+function isNativeTerminalFocusSink(el: Element | null): boolean {
+  return el?.getAttribute("data-testid") === "native-terminal-focus-sink";
+}
+
+/**
+ * Browsers and chat apps put the copied image's address beside the image, so a lone URL next to
+ * image data is the image's locator rather than text the user meant to paste.
+ */
+function isImageLocatorText(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length > 0 && !/\s/.test(trimmed) && /^(https?:\/\/|file:\/\/|data:image\/)/i.test(trimmed);
+}
+
+/** The text a DOM paste should insert; empty when the clipboard is really an image. */
+function clipboardTextToPaste(data: DataTransfer | null | undefined): string {
+  const text = data?.getData("text/plain") || data?.getData("text") || "";
+  if (!text) return "";
+  const hasImage = Array.from(data?.items ?? []).some(
+    (item) => item.kind === "file" && item.type.startsWith("image/"),
+  );
+  return hasImage && isImageLocatorText(text) ? "" : text;
+}
+
 function quoteShellPath(path: string): string {
   if (/[\s'"\\$`!*?[\]();&|<>]/.test(path)) {
     return `'${path.replace(/'/g, `'\\''`)}'`;
@@ -1974,7 +1997,11 @@ export function NativeTerminalPane({
   // Local agents (omo, Claude Code, Codex) attach an image only when they read the clipboard on
   // their own paste chord; a pasted temp-file path reaches them as plain text. Windows agents
   // bind image paste to a different chord than 0x16, so they keep the path.
-  const agentReadsLocalClipboard = activity?.isAgent === true && !isWindowsHost();
+  // Title/screen activity arrives after the agent starts drawing, so the session's own agent
+  // identity also counts; otherwise a paste right after launch reached the agent as a path.
+  const agentReadsLocalClipboard =
+    !isWindowsHost() &&
+    (activity?.isAgent === true || Boolean(session?.agentType || session?.providerSession));
 
   const pasteClipboardImage = useCallback(() => {
     if (remoteWorkspaceId) {
@@ -2589,7 +2616,7 @@ export function NativeTerminalPane({
       event.preventDefault();
       inputRef.current?.focus();
 
-      const text = event.clipboardData?.getData("text/plain") || event.clipboardData?.getData("text");
+      const text = clipboardTextToPaste(event.clipboardData);
       if (text) {
         sendPaste(text);
       } else {
@@ -2636,15 +2663,18 @@ export function NativeTerminalPane({
         targetSessionId,
         activeElement,
       });
-      if (
-        activeEl &&
-        activeEl !== inputRef.current &&
-        activeEl !== document.body &&
-        isEditableElement(activeEl)
-      ) {
-        return;
+      // A terminal's own focus sink is a textarea, so it must not read as an external editor:
+      // when DOM focus sits in one pane's sink while the last-focused id names another, the sink
+      // owner would defer to the id and the id's pane to the "editor", and the paste AppKit
+      // already consumed reached no one.
+      if (activeEl && isNativeTerminalFocusSink(activeEl)) {
+        if (activeEl !== inputRef.current) return;
+      } else {
+        if (activeEl && activeEl !== document.body && isEditableElement(activeEl)) {
+          return;
+        }
+        if (fallbackSessionId !== targetSessionId) return;
       }
-      if (fallbackSessionId !== targetSessionId) return;
 
       inputRef.current?.focus();
       performNativePasteFallback();
@@ -3984,7 +4014,7 @@ export function NativeTerminalPane({
               return;
             }
             event.preventDefault();
-            const text = event.clipboardData?.getData("text/plain") || event.clipboardData?.getData("text");
+            const text = clipboardTextToPaste(event.clipboardData);
             if (text) {
               sendPaste(text);
             } else {
