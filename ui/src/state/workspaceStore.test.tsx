@@ -327,6 +327,26 @@ describe("useWorkspaceStore terminal ownership", () => {
     }
   });
 
+  it("keeps a pre-spawned backend's daemon epoch and incarnation on the opened tab's session", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ workspaceId: "ws-main", initialWorktrees: [worktree], services }),
+    );
+    await act(async () => {
+      await result.current.openTab(worktree, "Claude", {
+        sessionId: "agent-backend",
+        daemonEpoch: "epoch-9",
+        incarnation: "life:agent-backend",
+      });
+    });
+
+    const session = Object.values(result.current.state.sessions).find(
+      (candidate) => candidate.backendSessionId === "agent-backend",
+    );
+    expect(session).toMatchObject({ daemonEpoch: "epoch-9", incarnation: "life:agent-backend" });
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+  });
+
   it("forwards a per-tab shell override to the backend spawn", async () => {
     const { services } = createServices();
     const { result } = renderHook(() =>
@@ -1713,6 +1733,7 @@ describe("worktree tab and session isolation", () => {
         backendSessionId: "backend-new-123",
         lifecycle: "running",
         processState: "running",
+        exitCode: null,
         reconnectLifecycle: "idle",
         reconnectError: null,
         backendUnavailableReason: null,

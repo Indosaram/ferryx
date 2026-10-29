@@ -59,7 +59,7 @@ function formatCountdown(seconds: number): string {
 }
 
 /** Mints a one-time pairing code for the chosen role and counts down to its expiry. */
-function PairDeviceCard({ disabled }: { disabled: boolean }) {
+export function PairDeviceCard({ disabled, className = "mt-8 space-y-3" }: { disabled: boolean; className?: string }) {
   const [role, setRole] = useState<PairingRole>("view");
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number; role: PairingRole } | null>(null);
   const [remaining, setRemaining] = useState(0);
@@ -93,7 +93,7 @@ function PairDeviceCard({ disabled }: { disabled: boolean }) {
   const live = pairing !== null && !expired;
 
   return (
-    <section aria-label="Pair a device" className="mt-8 space-y-3">
+    <section aria-label="Pair a device" className={className}>
       <h3 className="text-[12px] font-semibold">Pair a device</h3>
       <Card className="space-y-3 rounded-lg border border-border bg-card p-3 shadow-none">
         <p className="text-[11px] text-muted-foreground">

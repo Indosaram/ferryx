@@ -89,6 +89,13 @@ pub fn owner_post(mode: NotifyMode, kind: &str) -> bool {
     )
 }
 
+/// Whether a posted notice asks the owner to act now, so it goes to the owner DM. Everything
+/// else that is posted (failures, crashes, remediation, results) is informational and goes to
+/// the home channel only.
+pub fn owner_actionable(kind: &str) -> bool {
+    matches!(kind, "question" | "blocked" | "approval")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotifyPolicy {
     pub notify_after: Duration,
@@ -622,6 +629,18 @@ mod tests {
         assert!(!owner_post(NotifyMode::Actionable, "working"));
         assert!(owner_post(NotifyMode::All, "completion"));
         assert!(owner_post(NotifyMode::All, "progress"));
+        for kind in ["question", "blocked", "approval"] {
+            assert!(owner_actionable(kind), "{kind}");
+        }
+        for kind in [
+            "failure",
+            "crash",
+            "remediation",
+            "completion",
+            "origin_result",
+        ] {
+            assert!(!owner_actionable(kind), "{kind}");
+        }
         assert_eq!(NotifyMode::parse(" ALL "), Some(NotifyMode::All));
         assert_eq!(
             NotifyMode::parse("actionable"),

@@ -2,15 +2,26 @@ import React, { useState } from "react";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { suggestDeviceName } from "./deviceIdentity";
 
-/** Reads `details.remainingAttempts` from a structured pairing failure, if the gateway sent one. */
-async function remainingAttempts(res: Response): Promise<number | null> {
+/** Path of the phone pairing entry; the desktop's QR code opens it. */
+export const PAIR_ROUTE_PATH = "/pair";
+
+export function isPairRoute(pathname: string): boolean {
+  return pathname.replace(/\/+$/, "") === PAIR_ROUTE_PATH;
+}
+
+/** The structured fields of a refused pair exchange: the machine `code` and `details.remainingAttempts`. */
+async function pairingFailure(res: Response): Promise<{ code: string | null; remainingAttempts: number | null }> {
   try {
     const body: unknown = await res.json();
-    const details = body && typeof body === "object" ? (body as { details?: unknown }).details : undefined;
+    const row = body && typeof body === "object" ? (body as { code?: unknown; details?: unknown }) : {};
+    const details = row.details;
     const value = details && typeof details === "object" ? (details as { remainingAttempts?: unknown }).remainingAttempts : undefined;
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
+    return {
+      code: typeof row.code === "string" ? row.code : null,
+      remainingAttempts: typeof value === "number" && Number.isFinite(value) ? value : null,
+    };
   } catch {
-    return null;
+    return { code: null, remainingAttempts: null };
   }
 }
 
@@ -45,14 +56,15 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       });
 
       if (!res.ok) {
-        if (res.status === 429) {
+        const failure = await pairingFailure(res);
+        if (res.status === 429 || failure.code === "pairing_rate_limited") {
           throw new Error("Too many attempts. Wait a moment, then request a new code in Ferryx Desktop.");
         }
-        if (res.status === 401) {
+        if (failure.code === "PIN_EXPIRED") {
           throw new Error("Code expired. Ask for a new code in Ferryx Desktop settings.");
         }
-        const remaining = await remainingAttempts(res);
-        if (remaining !== null) {
+        const remaining = failure.remainingAttempts;
+        if (failure.code === "INVALID_PIN" && remaining !== null) {
           throw new Error(`Wrong code. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`);
         }
         throw new Error(`Pairing failed (${res.status})`);

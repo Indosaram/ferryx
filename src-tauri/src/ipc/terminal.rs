@@ -99,6 +99,17 @@ pub(crate) fn select_requested_cwd(requested: Option<PathBuf>) -> Option<PathBuf
     }
 }
 
+/// A daemon without the agent-launch capability gets a structured refusal, never the attempt.
+fn require_agent_launch(supported: bool) -> Result<(), IpcError> {
+    if supported {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        IpcErrorCode::Unsupported,
+        "The running daemon cannot start an agent as the pane's startup command",
+    ))
+}
+
 /// A QA run may pin the shell the product spawns panes with.
 ///
 /// The QA harness serves the frontend on the same origin the host user's real app uses, and
@@ -4302,7 +4313,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()), request.workspace_id, crate::daemon::session_service::SpawnOptions { worktree: request.worktree.clone(), cwd: request.cwd.clone().map(|p| p.to_string_lossy().to_string()), cols, rows, shell: None }, Some(TerminalStartup::RemoteSsh { host_store_path }), None)
             .await?
     } else if is_paired_workspace {
-        if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
+        // A paired host spawns only a shell or an agent resume; never drop an agent launch silently.
+        if matches!(
+            request.startup,
+            Some(TerminalStartup::RemoteSsh { .. } | TerminalStartup::AgentLaunch { .. })
+        ) {
             return Err(crate::ssh::projects::unsupported());
         }
 
@@ -4927,6 +4942,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         let client_request_id = request
             .client_request_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // An older daemon refuses an agent launch with an untyped malformed-request error; give
+        // the UI a structured UNSUPPORTED instead so it can fall back to typing the command.
+        if matches!(request.startup, Some(TerminalStartup::AgentLaunch { .. })) {
+            require_agent_launch(daemon_client.supports_agent_launch().await)?;
+        }
         // `qa_pinned_shell` lets a QA run pin the shell; see its doc comment.
         let effective_shell = request.shell.filter(|s| !s.trim().is_empty()).or_else(|| {
             qa_pinned_shell().or_else(|| {
@@ -5674,6 +5694,13 @@ pub(crate) fn map_client_error(
 mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;
+
+    #[test]
+    fn agent_launch_on_a_daemon_without_the_capability_is_refused_as_unsupported() {
+        assert!(require_agent_launch(true).is_ok());
+        let refusal = require_agent_launch(false).expect_err("older daemon must be refused");
+        assert_eq!(refusal.code, IpcErrorCode::Unsupported);
+    }
 
     #[test]
     fn pane_liveness_pump_generation_stale_teardown_preserves_new_binding() {

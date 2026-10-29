@@ -84,6 +84,7 @@ import {
   getLaunchableAgents,
   loadAgentSettings,
   mergeDetections,
+  splitAgentArgs,
   type AgentSettings,
 } from "./lib/agentsSettings";
 import {
@@ -99,6 +100,7 @@ import {
   getCliLauncherStatus,
   getAccountEnrollmentStatus,
   getInitialProject,
+  listRemoteDevices,
   getSystemPermissionsStatus,
   isTauriRuntime,
   listWorktrees,
@@ -123,8 +125,8 @@ import {
   unregisterProject,
   saveSession,
   setBadgeCount,
-  spawnTerminal,
   spawnTerminalDetailed,
+  closeTerminal,
   retryPairedSession,
   retryTerminalRemoteSession,
   getTerminalRemoteStatus,
@@ -2702,16 +2704,46 @@ function WorkspaceApp({
           kind: "newTab",
           groupId: stateRef.current.layout.focusedGroupId ?? null,
         }).catch(() => null);
-        const backendSessionId = await spawnTerminal({
+        const spawnRequest = {
           workspaceId: activeProjectRef.current.workspaceId,
           worktree: worktreeIdentity(targetWorktree),
           cwd: targetWorktree.path,
           ...initialGridFields(agentGrid),
-        });
-        const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
-        await openTab(targetWorktree, label, backendSessionId);
+        };
         const fullCommand = `${agent.command} ${agent.args}`.trim();
-        if (fullCommand) {
+        // argv[0] is the configured command verbatim (it may be a path with spaces or
+        // backslashes); only the argument string is split.
+        const command = agent.command.trim();
+        const args = splitAgentArgs(agent.args);
+        // The agent is the pane's startup command, so it cannot race the shell's own startup the
+        // way typed input does (PSReadLine drops early keystrokes). A backend that refuses the
+        // startup kind (an older daemon, a paired host) still gets the agent typed into a shell.
+        let typeCommand = false;
+        let spawned;
+        try {
+          spawned = await spawnTerminalDetailed(
+            command ? { ...spawnRequest, startup: { kind: "agentLaunch", command, args } } : spawnRequest,
+          );
+        } catch (error) {
+          if (!command || toIpcError(error).code !== "UNSUPPORTED") throw error;
+          spawned = await spawnTerminalDetailed(spawnRequest);
+          typeCommand = true;
+        }
+        const backendSessionId = spawned.sessionId;
+        const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
+        // The pane needs the daemon epoch and incarnation to form its attach tuple; a bare id
+        // leaves the tab blank and unable to accept input.
+        const tabId = await openTab(targetWorktree, label, {
+          sessionId: backendSessionId,
+          daemonEpoch: spawned.daemonEpoch ?? null,
+          incarnation: spawned.session?.incarnation ?? null,
+        });
+        // openTab does not own a pre-spawned backend, so a discarded tab would orphan the PTY.
+        if (tabId === null) {
+          await closeTerminal(backendSessionId);
+          return;
+        }
+        if (typeCommand) {
           await writeTerminal({ sessionId: backendSessionId, data: `${fullCommand}\r` });
         }
       } catch (error) {
@@ -3197,10 +3229,11 @@ function WorkspaceApp({
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (activeRemoteHostRef.current) return;
-      const [permissions, cli, enrollment] = await Promise.all([
+      const [permissions, cli, enrollment, devices] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3212,6 +3245,7 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
       };
       const state = loadOnboardingState();
       if (shouldAutoOpenOnboarding(state, ctx)) {
@@ -3230,10 +3264,11 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     const handleOpenOnboarding = async () => {
-      const [permissions, cli, enrollment] = await Promise.all([
+      const [permissions, cli, enrollment, devices] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3245,6 +3280,7 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
       setOnboardingInitialStepIndex(0);
@@ -4374,7 +4410,7 @@ function WorkspaceApp({
                 kind: "newTab",
                 groupId: stateRef.current.layout.focusedGroupId ?? null,
               }).catch(() => null);
-              const backendSessionId = await spawnTerminal({
+              const spawned = await spawnTerminalDetailed({
                 workspaceId: project.workspaceId,
                 worktree: targetWorktree ? worktreeIdentity(targetWorktree) : null,
                 cwd: entry.cwd || targetWorktree?.path || project.repoRoot,
@@ -4395,7 +4431,11 @@ function WorkspaceApp({
               });
               const label = agentHistoryProviderLabel(entry.provider);
               if (targetWorktree) {
-                await openTab(targetWorktree, label, backendSessionId);
+                await openTab(targetWorktree, label, {
+                  sessionId: spawned.sessionId,
+                  daemonEpoch: spawned.daemonEpoch ?? null,
+                  incarnation: spawned.session?.incarnation ?? null,
+                });
               }
               setHistoryProject(null);
             } catch (error) {

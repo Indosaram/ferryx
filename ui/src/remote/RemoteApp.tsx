@@ -13,7 +13,7 @@ import {
   getRemoteAuthToken,
   setRemoteAuthToken,
 } from "../lib/remoteClient";
-import { remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
+import { remoteHostKey, remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 import { MobileHostDrawer } from "./MobileHostDrawer";
 import {
   contextName,
@@ -103,6 +103,7 @@ import {
 
 import { AccountLoginPage } from "./AccountLoginPage";
 import { ApprovePage, isApproveRoute } from "./ApprovePage";
+import { isPairRoute, PairingPage } from "./PairingPage";
 import {
   useAccountWorktrees,
   type AccountWorktreeOption,
@@ -1095,9 +1096,43 @@ export const RemoteApp: React.FC = () => {
   const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">("chat");
   // Hooks stay above every early return. The /approve route is fixed for the page's lifetime.
   const [approveRoute] = useState(() => isApproveRoute(window.location.pathname));
+  // The /pair route is the desktop QR target: a phone exchanges a desktop pairing code there.
+  const [pairRoute, setPairRoute] = useState(() => isPairRoute(window.location.pathname));
   if (approveRoute) {
     // The approval link points at the account origin itself, not at a saved host.
     return <ApprovePage relayUrl={window.location.origin} />;
+  }
+  if (pairRoute) {
+    const origin = window.location.origin;
+    // The desktop marks a relay link; a relay reaches the machine only under /host/<machineId>.
+    const viaRelay = new URLSearchParams(window.location.search).get("relay") === "1";
+    return (
+      <PairingPage
+        transportUrl={origin}
+        onPaired={(token, metadata) => {
+          const machineId = optionalString(metadata?.machineId);
+          const displayName = optionalString(metadata?.displayName);
+          if (viaRelay && machineId && displayName) {
+            remoteHostStore.upsertHost({
+              machineId,
+              displayName,
+              relayOrigin: origin,
+              deviceToken: token,
+              lastSeenAt: Date.now(),
+              directHints: [],
+            });
+            remoteHostStore.setActiveHost(remoteHostKey(origin, machineId));
+          } else {
+            // A direct gateway serves its API at the page origin: the same-origin connection reads this slot.
+            remoteHostStore.setActiveHost(null);
+            setRemoteAuthToken(token, `local:${origin}`);
+          }
+          // Leave the pairing route so a reload opens the paired host, not a fresh code form.
+          window.history.replaceState(null, "", "/");
+          setPairRoute(false);
+        }}
+      />
+    );
   }
   const bypassSavedHost = magicLinkOverridden;
   const host = bypassSavedHost ? null : selectActiveHost(state);

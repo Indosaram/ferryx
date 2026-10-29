@@ -685,6 +685,15 @@ export type SplitPaneOptions = {
 
 export type TabSplitEdge = "left" | "right" | "top" | "bottom";
 
+/** A backend session spawned by the caller before opening its tab. The daemon epoch and
+ *  incarnation are required for the pane's durable attach tuple, so callers must pass the
+ *  identity reported by the detailed spawn rather than a bare session id. */
+export type PreSpawnedBackend = {
+  sessionId: string;
+  daemonEpoch: string | null;
+  incarnation: string | null;
+};
+
 export {
   clearHmrWorkspaceState,
   getHmrWorkspaceState,
@@ -1282,15 +1291,15 @@ export function useWorkspaceStore({
   }, [dispatch, dispatchToOwner]);
 
   const createSpawnedTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
+    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string) => {
       await services.ensureTerminalEvents();
       // The detailed spawn is the only one that reports the session's incarnation and the daemon
       // epoch, and a pane without an incarnation can never form the durable seven-field attach
       // tuple, so its native surface attach fails until reconciliation happens to fill it in.
       // Use the detailed path wherever the transport provides it (the split path already does).
-      let daemonEpoch: string | null = null;
-      let incarnation: string | null = null;
-      let backendSessionId = backendSessionIdOverride;
+      let daemonEpoch: string | null = backendOverride?.daemonEpoch ?? null;
+      let incarnation: string | null = backendOverride?.incarnation ?? null;
+      let backendSessionId = backendOverride?.sessionId;
       if (!backendSessionId) {
         // Measured before the spawn: the new tab will fill the focused group's body.
         const grid = await measureFor(services, {
@@ -1348,16 +1357,16 @@ export function useWorkspaceStore({
   );
 
   const openTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
+    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string) => {
       const capturedWorktreePath = worktree.path;
       switchDebug("terminal.open.start", {
         workspaceId,
         worktreePath: capturedWorktreePath,
         tabCount: stateRef.current.layout.tabs.length,
         sessionCount: Object.keys(stateRef.current.sessions).length,
-        backendOverride: backendSessionIdOverride ?? null,
+        backendOverride: backendOverride?.sessionId ?? null,
       });
-      const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride, shell);
+      const binding = await createSpawnedTab(worktree, label, backendOverride, shell);
       // The active project can change while the spawn is in flight; landing this
       // tab now would inject one project's worktree into another's state, and
       // dropping it silently would orphan the backend PTY we just created.
@@ -1379,7 +1388,7 @@ export function useWorkspaceStore({
           worktreePath: capturedWorktreePath,
           backendSessionId: binding.session.backendSessionId,
         });
-        if (backendSessionIdOverride === undefined) {
+        if (backendOverride === undefined) {
           await closeBackendSession(binding.session, services);
         }
         return null;

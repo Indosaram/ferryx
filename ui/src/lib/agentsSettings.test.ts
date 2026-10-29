@@ -1,5 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { splitAgentArgs } from "./agentsSettings";
+
+describe("splitAgentArgs", () => {
+  it("keeps quoted arguments whole and backslashes literal", () => {
+    expect(splitAgentArgs(`--append-system-prompt "a b" --name 'c d'  ""`)).toEqual([
+      "--append-system-prompt", "a b", "--name", "c d", "",
+    ]);
+    expect(splitAgentArgs(`-c "say \\"hi\\"" 'it'"'"'s'`)).toEqual(["-c", `say "hi"`, "it's"]);
+    expect(splitAgentArgs(`--config C:\\Users\\me\\cfg.toml --dir "C:\\Program Files\\X\\bin"`)).toEqual([
+      "--config", "C:\\Users\\me\\cfg.toml", "--dir", "C:\\Program Files\\X\\bin",
+    ]);
+    expect(splitAgentArgs("  ")).toEqual([]);
+  });
+});
+
 import {
   AGENT_CANDIDATES,
   AGENTS_SETTINGS_CHANGED_EVENT,
