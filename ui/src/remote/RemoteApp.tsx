@@ -683,6 +683,8 @@ const CHAT_NO_READER_WARNING =
 
 const CHAT_RETENTION_WARNING = "Older messages are hidden to keep the phone view responsive.";
 const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in the message box.";
+const CHAT_VIEW_ONLY_WARNING =
+  "View-only access: this device cannot type into a pane. That message was not delivered. It is back in the message box.";
 const CHAT_OUTCOME_UNKNOWN_WARNING =
   "That message may have reached the session, but the host did not confirm it. It is back in the message box and will not be sent again on its own.";
 const CHAT_STOP_REFUSED_WARNING =
@@ -3940,7 +3942,10 @@ export const RemoteHostConnection: React.FC<{
           setChatStagedFiles((prev) => prev.filter((entry) => !mentioned(entry)));
           setChatWarnings((prev) =>
             prev.filter(
-              (warning) => warning !== CHAT_SEND_FAILED_WARNING && warning !== CHAT_OUTCOME_UNKNOWN_WARNING,
+              (warning) =>
+                warning !== CHAT_SEND_FAILED_WARNING &&
+                warning !== CHAT_OUTCOME_UNKNOWN_WARNING &&
+                warning !== CHAT_VIEW_ONLY_WARNING,
             ),
           );
         }
@@ -3970,11 +3975,14 @@ export const RemoteHostConnection: React.FC<{
         return false;
       }
       // A refusal or an uncertain outcome removes the unconfirmed echo and restores the draft.
-      setChatComposerNotice(
-        referenceIsOutcomeUnknown(outcome.code)
-          ? CHAT_OUTCOME_UNKNOWN_WARNING
-          : CHAT_SEND_FAILED_WARNING,
-      );
+      // FORBIDDEN is the host's role refusal, whatever the pane runs, so it names the View role.
+      const refusal =
+        outcome.code === "FORBIDDEN"
+          ? CHAT_VIEW_ONLY_WARNING
+          : referenceIsOutcomeUnknown(outcome.code)
+            ? CHAT_OUTCOME_UNKNOWN_WARNING
+            : CHAT_SEND_FAILED_WARNING;
+      setChatComposerNotice(refusal);
       setChatMessages((prev) => prev.filter((message) => message.id !== pending.id));
       if (heldId === undefined) {
         const current = referenceDrafts.read(target).text;
@@ -3986,12 +3994,7 @@ export const RemoteHostConnection: React.FC<{
       } else {
         endHeldSend();
       }
-      setChatWarnings((prev) =>
-        withChatWarning(
-          prev,
-          referenceIsOutcomeUnknown(outcome.code) ? CHAT_OUTCOME_UNKNOWN_WARNING : CHAT_SEND_FAILED_WARNING,
-        ),
-      );
+      setChatWarnings((prev) => withChatWarning(prev, refusal));
       return false;
     },
     [chatMutationBody, chatTargetIsCurrent, releaseStagedChatFiles],
