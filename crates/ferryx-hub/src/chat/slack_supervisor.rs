@@ -4,6 +4,11 @@
 //! supervisor (`supervisor_channel_bindings`), runs as a turn of the retained mhc conversation
 //! for that scope instead of the omo app-server. Everything else keeps the legacy path.
 //!
+//! - An owner-led thread binds itself: once cut over, the owner's message that addresses the
+//!   bot (an `app_mention`) and roots its thread (a top-level message, or a reply whose
+//!   `parent_user_id` is the owner) creates the thread-scoped binding of that thread, never a
+//!   channel-wide one. Nobody else's message creates or uses it.
+//!
 //! - Authorization is never widened: the message already passed `slack_turn::admit` (owner
 //!   allowlist, channel scoping), and the sender must additionally be the owner of a
 //!   supervisor identity (`slack:<team>:<user>`). A non-owner or an unbound channel returns
@@ -528,8 +533,71 @@ async fn owner_principal(pool: &SqlitePool, team: Option<&str>, user: &str) -> O
     }
 }
 
+/// The thread an owner-led message roots: the owner addressed the bot, and the thread's root
+/// is this message or, per the event, another message of the owner. `None` when the root's
+/// author is not known from the event.
+fn owner_led_thread(admitted: &Admitted) -> Option<String> {
+    let event = &admitted.event;
+    let mention = format!("<@{}>", admitted.bot_user);
+    let addressed = event.get("type").and_then(Value::as_str) == Some("app_mention")
+        || (!admitted.bot_user.is_empty()
+            && event
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains(&mention)));
+    if admitted.dm || !addressed {
+        return None;
+    }
+    match super::slack_turn::reply_thread_ts(event) {
+        None => Some(admitted.message_ts.clone()),
+        Some(root)
+            if event.get("parent_user_id").and_then(Value::as_str)
+                == Some(admitted.user.as_str()) =>
+        {
+            Some(root.to_owned())
+        }
+        Some(_) => None,
+    }
+}
+
+/// Binds the owner-led thread `thread` to the owner's supervisor; an existing binding of the
+/// address is kept as it is.
+async fn bind_owner_thread(
+    pool: &SqlitePool,
+    admitted: &Admitted,
+    team: Option<&str>,
+    principal: &str,
+    thread: &str,
+) -> Option<String> {
+    let identity = match crate::supervisor::identity_of(pool, principal).await {
+        Ok(identity) => identity?,
+        Err(error) => {
+            tracing::warn!(%error, "the owner's supervisor was not read; the thread is not bound");
+            return None;
+        }
+    };
+    let address = crate::supervisor::ChannelAddress {
+        provider: ChannelProvider::Slack,
+        workspace_id: team.unwrap_or_default().to_owned(),
+        account_id: admitted.bot_user.clone(),
+        channel_id: admitted.channel.clone(),
+        thread_id: thread.to_owned(),
+        owner_principal: principal.to_owned(),
+    };
+    match crate::supervisor::bind_channel(pool, &identity.supervisor_id, &address, None, None)
+        .await
+    {
+        Ok(binding) => Some(binding.binding_id),
+        Err(error) => {
+            tracing::warn!(%error, "the owner-led thread was not bound; the message keeps the legacy turn");
+            None
+        }
+    }
+}
+
 /// Whether this admitted Slack message is the owner's and belongs to the supervisor: the
-/// owner's DM, or a channel/thread the owner bound. `None` keeps the legacy path.
+/// owner's DM, a channel/thread the owner bound, or an owner-led thread (bound here). `None`
+/// keeps the legacy path.
 pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
     if admitted.event.is_null() || admitted.message_ts.is_empty() {
         return None;
@@ -546,7 +614,13 @@ pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
             return None;
         }
     }
-    let thread = admitted.key.thread_id.clone().unwrap_or_default();
+    let led = owner_led_thread(admitted);
+    let thread = admitted
+        .key
+        .thread_id
+        .clone()
+        .or_else(|| led.clone())
+        .unwrap_or_default();
     let binding: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT binding_id, project_id FROM supervisor_channel_bindings
          WHERE provider = 'slack' AND channel_id = ? AND thread_id IN (?, '')
@@ -561,6 +635,14 @@ pub async fn route(pool: &SqlitePool, admitted: &Admitted) -> Option<Routed> {
     .ok()
     .flatten();
     let owner_dm = admitted.dm && admitted.key.user_id == admitted.user;
+    let binding = match (binding, led) {
+        (None, Some(led)) if !owner_dm => {
+            bind_owner_thread(pool, admitted, team.as_deref(), &principal, &led)
+                .await
+                .map(|id| (id, None))
+        }
+        (binding, _) => binding,
+    };
     if !owner_dm && binding.is_none() {
         return None;
     }
@@ -1262,6 +1344,22 @@ mod tests {
             .collect()
     }
 
+    /// (channel, thread) of every channel binding.
+    async fn bindings(pool: &SqlitePool) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT channel_id, thread_id FROM supervisor_channel_bindings ORDER BY created_at",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn thread_message(user: &str, channel: &str, ts: &str, root: &str, text: &str) -> Value {
+        json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
+            "type": "message", "team": "T1", "user": user, "channel": channel,
+            "ts": ts, "thread_ts": root, "parent_user_id": "UOWNER", "text": text}})
+    }
+
     #[tokio::test]
     async fn owner_dm_work_becomes_one_admitted_goal_and_a_duplicate_delivery_adds_nothing() {
         let (pool, _, _) = owner_pool().await;
@@ -1441,12 +1539,23 @@ mod tests {
             None,
             "a binding does not admit others"
         );
-        let owner_unbound = event("UOWNER", "CFREE", "7401.000003");
+        // Without a mention, a message in an unbound channel (admitted as a known thread) is
+        // not the supervisor's.
+        let owner_unbound = admit(
+            &config,
+            &json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
+                "type": "message", "team": "T1", "user": "UOWNER", "channel": "CFREE",
+                "ts": "7401.000003", "text": WORK}}),
+            "UBOT",
+            true,
+        )
+        .unwrap();
         assert_eq!(
             route(&pool, &owner_unbound).await,
             None,
             "an unbound channel is not widened"
         );
+        assert_eq!(bindings(&pool).await.len(), 1, "nothing was bound");
 
         // The owner's bound-channel message is answered in its own thread and admits one goal.
         let fake = FakeConversation::new(&pool, true, "On it.");
@@ -1521,6 +1630,128 @@ mod tests {
         assert!(replies
             .iter()
             .all(|reply| reply["thread_ts"] == "7501.000001"));
+    }
+
+    #[tokio::test]
+    async fn an_owner_mention_in_a_channel_binds_its_thread_and_follow_ups_reuse_it() {
+        let (pool, _, _) = owner_pool().await;
+        let config = slack_config(false);
+        let fake = FakeConversation::new(&pool, true, "On it.");
+        let conversation: Arc<dyn SupervisorConversation> = fake.clone();
+        let root = mention("UOWNER", "CLED", "7901.000001", WORK);
+        let follow = thread_message(
+            "UOWNER",
+            "CLED",
+            "7901.000002",
+            "7901.000001",
+            "and the tests too",
+        );
+        let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
+        let (first, second) = with_test_api(base, "xoxb-test".into(), async {
+            TEST_CONVERSATION
+                .scope(conversation, async {
+                    let first = admit(&config, &root, "UBOT", false).expect("owner mention");
+                    let first_route = route(&pool, &first).await.expect("owner-led thread");
+                    assert!(handle(&config, &pool, first).await);
+                    let known = crate::chat::slack_turn::known_thread(&pool, &follow).await;
+                    let second = admit(&config, &follow, "UBOT", known).expect("thread reply");
+                    let second_route = route(&pool, &second).await.expect("bound thread");
+                    assert!(handle(&config, &pool, second).await);
+                    (first_route, second_route)
+                })
+                .await
+        })
+        .await;
+        assert_eq!(
+            bindings(&pool).await,
+            vec![("CLED".to_owned(), "7901.000001".to_owned())],
+            "one thread-scoped binding, never a channel-wide one"
+        );
+        assert!(first.channel_binding_id.is_some());
+        assert_eq!(first.channel_binding_id, second.channel_binding_id);
+        assert_eq!(first.scope, second.scope, "one conversation per thread");
+        assert_eq!(fake.turns(), 2, "both owner messages reached the supervisor");
+        assert_eq!(goals(&pool).await, 2, "each owner message admitted its goal");
+        let sources: Vec<String> = sqlx::query_scalar(
+            "SELECT source_message_id FROM supervisor_requests ORDER BY source_message_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sources, ["CLED/7901.000001", "CLED/7901.000002"]);
+        let replies = posted(&calls);
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert!(replies
+            .iter()
+            .all(|reply| reply["channel"] == "CLED" && reply["thread_ts"] == "7901.000001"));
+    }
+
+    #[tokio::test]
+    async fn an_owner_led_thread_admits_no_one_else_and_no_other_thread() {
+        let (pool, _, _) = owner_pool().await;
+        let config = slack_config(true);
+        let admitted =
+            |payload: &Value, known: bool| admit(&config, payload, "UBOT", known).unwrap();
+        // A foreign user's mention binds nothing.
+        let foreign = admitted(&mention("UOTHER", "CLED2", "7911.000001", WORK), false);
+        assert_eq!(route(&pool, &foreign).await, None);
+        assert!(bindings(&pool).await.is_empty(), "a stranger binds nothing");
+        // The owner's mention binds its thread only.
+        let root = admitted(&mention("UOWNER", "CLED2", "7911.000002", WORK), false);
+        assert!(route(&pool, &root).await.is_some());
+        // A foreign reply, mentioned or not, in the owner's thread is not routed.
+        let mut foreign_mention =
+            thread_message("UOTHER", "CLED2", "7911.000003", "7911.000002", "<@UBOT> do it");
+        foreign_mention["event"]["type"] = json!("app_mention");
+        let foreign_reply = admitted(&foreign_mention, true);
+        assert_eq!(route(&pool, &foreign_reply).await, None);
+        let foreign_plain = admitted(
+            &thread_message("UOTHER", "CLED2", "7911.000004", "7911.000002", "do it"),
+            true,
+        );
+        assert_eq!(route(&pool, &foreign_plain).await, None);
+        // Another thread of the same channel is not routed without its own owner-led root.
+        let other_thread = admitted(
+            &thread_message("UOWNER", "CLED2", "7911.000006", "7911.000005", "more"),
+            true,
+        );
+        assert_eq!(route(&pool, &other_thread).await, None);
+        // A mention in a thread whose root author the event does not name binds nothing.
+        let mut unknown_root = thread_message(
+            "UOWNER",
+            "CLED2",
+            "7911.000008",
+            "7911.000007",
+            "<@UBOT> pick this up",
+        );
+        unknown_root["event"]["type"] = json!("app_mention");
+        unknown_root["event"]
+            .as_object_mut()
+            .unwrap()
+            .remove("parent_user_id");
+        assert_eq!(route(&pool, &admitted(&unknown_root, false)).await, None);
+        assert_eq!(
+            bindings(&pool).await,
+            vec![("CLED2".to_owned(), "7911.000002".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn before_cutover_an_owner_mention_keeps_the_legacy_turn_and_binds_nothing() {
+        let (pool, _, _) = owner_pool().await;
+        // Legacy work on the hub keeps the unified intake closed until a cutover.
+        crate::supervisor::cutover::note_import(&pool).await.unwrap();
+        let config = slack_config(false);
+        let root = admit(
+            &config,
+            &mention("UOWNER", "CLED3", "7921.000001", WORK),
+            "UBOT",
+            false,
+        )
+        .unwrap();
+        assert_eq!(route(&pool, &root).await, None);
+        assert!(bindings(&pool).await.is_empty());
+        assert_eq!(goals(&pool).await, 0);
     }
 
     #[tokio::test]
