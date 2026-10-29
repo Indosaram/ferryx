@@ -623,6 +623,23 @@ pub async fn cmd_remote_get_active_selection(
     }
 }
 
+/// The desktop window's native focus, reported by the GUI. Phone pushes are held while it is
+/// focused; the GUI re-reports while focused because a stale report counts as unfocused.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_remote_set_window_focused(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    focused: bool,
+) -> Result<(), IpcError> {
+    match &manager.inner {
+        RemoteGatewayManagerInner::Daemon(client) => client.remote_set_window_focused(focused).await,
+        RemoteGatewayManagerInner::State { state, .. } => {
+            state.set_desktop_window_focused(focused);
+            Ok(())
+        }
+    }
+}
+
 fn get_local_ip() -> Option<String> {
     use std::net::UdpSocket;
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;

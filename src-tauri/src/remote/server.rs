@@ -22,7 +22,6 @@ use crate::remote::protocol::{
     RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
     RemoteTerminalTabInfo, RemoteWorkspaceState, RemoteWorktreeInfo,
 };
-use crate::remote::push::{global_push_store, PushSubscriptionInfo};
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
 };
@@ -3817,18 +3816,71 @@ struct PushUnsubscribeRequest {
     endpoint: String,
 }
 
+/// The calling paired device, or the 401 every push route answers without a valid bearer.
+fn push_device(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+) -> Result<DeviceInfo, (StatusCode, String)> {
+    let token =
+        extract_token(headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))
+}
+
+fn push_store_error(error: crate::remote::push::PushStoreError) -> (StatusCode, String) {
+    use crate::remote::push::PushStoreError;
+    let status = match error {
+        PushStoreError::InvalidEndpoint => StatusCode::BAD_REQUEST,
+        PushStoreError::ForeignEndpoint => StatusCode::FORBIDDEN,
+        PushStoreError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, error.to_string())
+}
+
+/// Runs a push store write on a blocking worker: the store persists to disk.
+async fn push_store_write<T: Send + 'static>(
+    state: &Arc<RemoteGatewayState>,
+    write: impl FnOnce(&crate::remote::push::PushStore) -> Result<T, crate::remote::push::PushStoreError>
+        + Send
+        + 'static,
+) -> Result<T, (StatusCode, String)> {
+    let push = Arc::clone(&state.push);
+    crate::ipc::run_blocking(move || Ok(write(&push.store)))
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.message))?
+        .map_err(push_store_error)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VapidPublicKeyResponse {
+    public_key: String,
+}
+
+async fn push_vapid_public_key(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Json<VapidPublicKeyResponse>, (StatusCode, String)> {
+    push_device(&state, &headers)?;
+    let keys = state
+        .push
+        .vapid()
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(VapidPublicKeyResponse {
+        public_key: keys.public_key().to_string(),
+    }))
+}
+
 async fn push_subscribe(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Json(payload): Json<PushSubscriptionInfo>,
+    Json(payload): Json<crate::remote::push::PushSubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token =
-        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
-        .auth_manager
-        .validate_token(&token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
-    global_push_store().subscribe(payload);
+    let device = push_device(&state, &headers)?;
+    push_store_write(&state, move |store| store.subscribe(&device.id, payload)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3837,14 +3889,70 @@ async fn push_unsubscribe(
     headers: HeaderMap,
     Json(payload): Json<PushUnsubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token =
-        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
-        .auth_manager
-        .validate_token(&token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
-    global_push_store().unsubscribe(&payload.endpoint);
+    let device = push_device(&state, &headers)?;
+    push_store_write(&state, move |store| store.unsubscribe(&device.id, &payload.endpoint)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn push_preferences(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::remote::push::PushPreferences>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let device = push_device(&state, &headers)?;
+    let updated =
+        push_store_write(&state, move |store| store.set_preferences(&device.id, &payload)).await?;
+    if updated == 0 {
+        return Err((StatusCode::NOT_FOUND, "No push subscription for this device".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PushTestResponse {
+    sent: usize,
+    delivered: usize,
+    removed: usize,
+}
+
+/// Sends one test push to every subscription of the calling device. Desktop focus does not
+/// hold it back: the user asked for it.
+async fn push_test(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Json<PushTestResponse>, (StatusCode, String)> {
+    use crate::remote::push::{AgentStateNotification, SendOutcome};
+    let device = push_device(&state, &headers)?;
+    let targets = state.push.store.for_device(&device.id);
+    if targets.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "No push subscription for this device".into()));
+    }
+    let notification = AgentStateNotification {
+        agent_id: String::new(),
+        agent_name: "Ferryx".into(),
+        worktree: None,
+        state: "test".into(),
+        title: "Test alert".into(),
+        body: "Phone alerts are working.".into(),
+    };
+    let outcomes = futures_util::future::join_all(
+        targets.iter().map(|sub| state.push.send(sub, &notification)),
+    )
+    .await;
+    let delivered = outcomes.iter().filter(|o| **o == SendOutcome::Delivered).count();
+    let removed = outcomes.iter().filter(|o| **o == SendOutcome::Gone).count();
+    if delivered == 0 && removed < outcomes.len() {
+        let reason = outcomes
+            .iter()
+            .find_map(|outcome| match outcome {
+                SendOutcome::Failed(reason) => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, reason));
+    }
+    Ok(Json(PushTestResponse { sent: outcomes.len(), delivered, removed }))
 }
 
 pub(super) fn machine_error(status: StatusCode, code: &str) -> Response {
@@ -7715,8 +7823,11 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             "/api/v1/workspace/dag",
             get(super::dag_api::ws_dag_handler),
         )
+        .route("/api/v1/push/test", post(push_test))
+        .route("/api/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
+        .route("/api/push/preferences", post(push_preferences))
         .fallback(remote_fallback)
         .method_not_allowed_fallback(remote_method_not_allowed)
         .layer(axum::middleware::from_fn_with_state(
@@ -9717,12 +9828,14 @@ mod tests {
         let subscribe_result = push_subscribe(
             State(Arc::clone(&state)),
             HeaderMap::new(),
-            Json(PushSubscriptionInfo {
-                endpoint: "https://push.example.com/sub/unauth".to_string(),
+            Json(crate::remote::push::PushSubscribeRequest {
+                endpoint: "https://fcm.googleapis.com/fcm/send/unauth".to_string(),
                 keys: crate::remote::push::PushSubscriptionKeys {
                     p256dh: "p256dh-key".to_string(),
                     auth: "auth-key".to_string(),
                 },
+                phone_needs_input: true,
+                phone_finished_mode: crate::remote::push::FinishedMode::LongTurns,
             }),
         )
         .await;
@@ -9733,7 +9846,7 @@ mod tests {
             State(Arc::clone(&state)),
             HeaderMap::new(),
             Json(PushUnsubscribeRequest {
-                endpoint: "https://push.example.com/sub/unauth".to_string(),
+                endpoint: "https://fcm.googleapis.com/fcm/send/unauth".to_string(),
             }),
         )
         .await;
@@ -9742,10 +9855,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         assert!(
-            global_push_store()
-                .list_subscriptions()
-                .iter()
-                .all(|sub| sub.endpoint != "https://push.example.com/sub/unauth"),
+            state.push.store.list_subscriptions().is_empty(),
             "unauthenticated request must not have registered a subscription"
         );
     }

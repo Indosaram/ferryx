@@ -614,6 +614,9 @@ pub struct AuthManager {
     /// remote-control device, and is never handed out via pairing.
     machine_tokens: Arc<RwLock<std::collections::HashSet<String>>>,
     revocations: Arc<RwLock<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
+    /// Called with the device id after a revocation is durable, so stores keyed by device id
+    /// (push subscriptions) drop that device's records too.
+    revocation_hooks: Arc<RwLock<Vec<RevocationHook>>>,
     persistence_path: Option<PathBuf>,
     last_persisted_at: Arc<RwLock<Instant>>,
     #[cfg(test)]
@@ -622,6 +625,8 @@ pub struct AuthManager {
     #[cfg(test)]
     clock: Arc<std::sync::atomic::AtomicU64>,
 }
+
+pub type RevocationHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl Default for AuthManager {
     fn default() -> Self {
@@ -657,6 +662,7 @@ impl AuthManager {
             token_meta: Arc::new(RwLock::new(persisted.token_meta)),
             machine_tokens: Arc::new(RwLock::new(std::collections::HashSet::new())),
             revocations: Arc::new(RwLock::new(HashMap::new())),
+            revocation_hooks: Arc::new(RwLock::new(Vec::new())),
             persistence_path,
             last_persisted_at: Arc::new(RwLock::new(Instant::now())),
             #[cfg(test)]
@@ -1339,8 +1345,17 @@ impl AuthManager {
                 // Once snapshot is durable, clear journal entry
                 let _ = clear_revocation_journal(path, device_id);
             }
+            let hooks = self.revocation_hooks.read().clone();
+            for hook in hooks {
+                hook(device_id);
+            }
         }
         Ok(changed)
+    }
+
+    /// Registers a callback run with the device id after each successful revocation.
+    pub fn on_device_revoked(&self, hook: RevocationHook) {
+        self.revocation_hooks.write().push(hook);
     }
 
     #[cfg(test)]

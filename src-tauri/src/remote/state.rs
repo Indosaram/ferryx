@@ -820,6 +820,12 @@ pub struct RemoteGatewayState {
     agent_control_path: Option<PathBuf>,
     /// Bounded audit of agent-control calls, including the device id. Not the workspace journal.
     pub agent_control_audit: Arc<crate::agent_control::policy::AgentControlAudit>,
+    /// Phone push: VAPID keys and subscriptions keyed by paired device, beside the auth store.
+    pub push: Arc<crate::remote::push::PushService>,
+    /// Last desktop window-focus report from the GUI and when it arrived. Selection is not
+    /// focus: this is the native window's own focus, and a stale report counts as unfocused.
+    desktop_window_focus: RwLock<Option<(bool, std::time::Instant)>>,
+    push_dispatch_started: std::sync::atomic::AtomicBool,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
@@ -1032,6 +1038,15 @@ impl RemoteGatewayState {
         ));
         let agent_control_audit =
             Arc::new(crate::agent_control::policy::AgentControlAudit::default());
+        let push = Arc::new(crate::remote::push::PushService::new(identity_dir.as_deref()));
+        {
+            let push = Arc::clone(&push);
+            auth_manager.on_device_revoked(Arc::new(move |device_id: &str| {
+                if let Err(error) = push.store.revoke_device(device_id) {
+                    tracing::warn!("dropping a revoked device's push subscriptions failed: {error}");
+                }
+            }));
+        }
         Self {
             config: RwLock::new(config),
             identity_dir,
@@ -1055,6 +1070,9 @@ impl RemoteGatewayState {
             agent_control_policy,
             agent_control_path,
             agent_control_audit,
+            push,
+            desktop_window_focus: RwLock::new(None),
+            push_dispatch_started: std::sync::atomic::AtomicBool::new(false),
             active_selection: RwLock::new(None),
             active_selection_tx,
             ssh_store_path: RwLock::new(None),
@@ -1343,6 +1361,115 @@ impl RemoteGatewayState {
                 serde_json::json!({"workspaceId": workspace_id, "worktreeSlug": worktree_slug}),
             );
         }
+    }
+
+    /// Records the desktop GUI's native window focus. Phone pushes are held while it is focused;
+    /// a report older than [`crate::remote::push::DESKTOP_FOCUS_STALE`] counts as unfocused.
+    pub fn set_desktop_window_focused(&self, focused: bool) {
+        *self.desktop_window_focus.write() = Some((focused, std::time::Instant::now()));
+    }
+
+    pub fn desktop_window_focus_suppresses_push(&self) -> bool {
+        crate::remote::push::desktop_focus_suppresses(
+            *self.desktop_window_focus.read(),
+            std::time::Instant::now(),
+        )
+    }
+
+    /// Starts the task that turns agent transitions into phone pushes. Idempotent per state.
+    pub fn start_push_dispatch(self: &Arc<Self>) {
+        if self.push_dispatch_started.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("phone push dispatch not started: no async runtime");
+            return;
+        };
+        if self.push_dispatch_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mut events = self.agent_events.subscribe();
+        let state = Arc::downgrade(self);
+        runtime.spawn(async move {
+            let mut turns = crate::remote::push::TurnTracker::default();
+            loop {
+                let observation = match events.recv().await {
+                    Ok(observation) => observation,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "push dispatch lagged behind agent events");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                };
+                let Some(state) = state.upgrade() else { return };
+                let Some(kind) = turns.observe(
+                    &observation.session_id,
+                    observation.state,
+                    std::time::Instant::now(),
+                ) else {
+                    continue;
+                };
+                state.dispatch_push(&observation.session_id, kind).await;
+            }
+        });
+    }
+
+    /// Sends `kind` for `session_id` to every subscription that wants it, unless the desktop
+    /// window is focused or the session is machine-private. Returns how many sends were made.
+    pub async fn dispatch_push(&self, session_id: &str, kind: crate::remote::push::PushKind) -> usize {
+        if self.desktop_window_focus_suppresses_push() {
+            return 0;
+        }
+        if self
+            .machine_services
+            .as_ref()
+            .is_some_and(|services| services.sessions.machine_only(session_id))
+        {
+            return 0;
+        }
+        let targets: Vec<_> = self
+            .push
+            .store
+            .list_subscriptions()
+            .into_iter()
+            .filter(|sub| kind.wanted_by(sub))
+            .collect();
+        if targets.is_empty() {
+            return 0;
+        }
+        let (agent, worktree) = self.push_labels(session_id).await;
+        let notification = kind.notification(session_id, &agent, worktree.as_deref());
+        let sends = targets.iter().map(|sub| self.push.send(sub, &notification));
+        let outcomes = futures_util::future::join_all(sends).await;
+        for outcome in &outcomes {
+            if let crate::remote::push::SendOutcome::Failed(error) = outcome {
+                tracing::warn!("phone push failed: {error}");
+            }
+        }
+        outcomes.len()
+    }
+
+    /// Agent and worktree names for a push. The desktop's tab list names the agent; the
+    /// session backend names the worktree. Nothing from the screen is read.
+    async fn push_labels(&self, session_id: &str) -> (String, Option<String>) {
+        let tab = self.active_selection.read().as_ref().and_then(|selection| {
+            selection
+                .terminal_tabs
+                .iter()
+                .find(|tab| tab.session_id.as_deref() == Some(session_id))
+                .cloned()
+        });
+        let details = self.session_backend.describe_session(session_id).await.ok();
+        let agent = tab
+            .as_ref()
+            .and_then(|tab| tab.agent_type.clone())
+            .filter(|agent| !agent.trim().is_empty())
+            .unwrap_or_else(|| "Agent".to_string());
+        let worktree = tab
+            .and_then(|tab| tab.worktree_label.or(tab.worktree_slug))
+            .or_else(|| details.and_then(|details| details.worktree_label))
+            .filter(|label| !label.trim().is_empty());
+        (agent, worktree)
     }
 
     pub fn set_active_selection_opt(&self, selection: Option<RemoteActiveDesktopSelection>) {

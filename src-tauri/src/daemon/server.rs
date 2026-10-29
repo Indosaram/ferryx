@@ -3836,6 +3836,7 @@ impl DaemonServer {
             Arc::clone(&session_service.workspace_service.machine_events),
         );
         session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
+        remote_state.start_push_dispatch();
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -7490,6 +7491,10 @@ impl DaemonServer {
                 Ok(DaemonRequest::RemoteGetActiveSelection) => {
                     let selection = self.remote_state.active_selection.read().clone();
                     DaemonResponse::RemoteGetActiveSelectionOk { selection }
+                }
+                Ok(DaemonRequest::RemoteSetWindowFocused { focused }) => {
+                    self.remote_state.set_desktop_window_focused(focused);
+                    DaemonResponse::RemoteSetWindowFocusedOk
                 }
                 Ok(DaemonRequest::SubscribeRemoteEvents) => {
                     let mut events = self.remote_event_tx.subscribe();

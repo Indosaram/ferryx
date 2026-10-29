@@ -621,6 +621,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::ResetAgentState { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
+            | DaemonRequest::RemoteSetWindowFocused { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
             | DaemonRequest::RetryPairedSession { .. }
             | DaemonRequest::PairedRecoveryOutcome { .. }
@@ -739,6 +740,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteRevokeDevice { .. } => "remoteRevokeDevice",
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
+        DaemonRequest::RemoteSetWindowFocused { .. } => "remoteSetWindowFocused",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::UpgradeBinary { .. } => "upgradeBinary",
         DaemonRequest::PrepareHandover => "prepareHandover",
@@ -4947,6 +4949,22 @@ impl DaemonClient {
             DaemonResponse::RemoteSetActiveSelectionOk => Ok(()),
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn remote_set_window_focused(&self, focused: bool) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::RemoteSetWindowFocused { focused })
+            .await?;
+        match resp {
+            DaemonResponse::RemoteSetWindowFocusedOk => Ok(()),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::DaemonUpgradeRequired, message))
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
