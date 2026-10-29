@@ -139,6 +139,58 @@ fn release_adopted_ownership(
     }
 }
 
+/// The desktop event for one `agentPromptChanged` frame. A frame that is not a JSON object is
+/// logged and skipped: relaying it as a null payload would tell no row anything.
+fn prompt_changed_event(frame: &str) -> Option<DaemonRemoteEvent> {
+    match serde_json::from_str::<serde_json::Value>(frame) {
+        Ok(payload) if payload.is_object() => Some(DaemonRemoteEvent {
+            event: crate::agent_control::events::AGENT_PROMPT_CHANGED_FRAME.to_string(),
+            payload,
+        }),
+        Ok(_) => {
+            tracing::warn!(frame, "agentPromptChanged frame is not an object; not relayed");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "agentPromptChanged frame is not JSON; not relayed");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_changed_event_tests {
+    use super::*;
+
+    #[test]
+    fn a_malformed_prompt_frame_is_not_relayed_as_null() {
+        assert!(prompt_changed_event("{not json").is_none());
+        assert!(prompt_changed_event("null").is_none());
+        assert!(prompt_changed_event("").is_none());
+    }
+
+    #[test]
+    fn a_filter_frame_is_relayed_with_its_session() {
+        let observation = crate::agent_control::events::AgentObservation {
+            sequence: 1,
+            session_id: "s-1".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: Some("p-1".into()),
+            kind: None,
+            screen_revision: Some("r-1".into()),
+        };
+        let frame = crate::agent_control::events::PromptChangeFilter::default()
+            .frame(&observation)
+            .expect("a first reading sends a frame");
+        let event = prompt_changed_event(&frame).expect("a filter frame is relayed");
+        assert_eq!(event.event, "agentPromptChanged");
+        assert_eq!(event.payload["sessionId"], "s-1");
+        assert_eq!(event.payload["promptId"], "p-1");
+    }
+}
+
 #[cfg(test)]
 mod pane_reader_rollback_tests {
     use super::*;
@@ -3865,11 +3917,9 @@ impl DaemonServer {
                     match observations.recv().await {
                         Ok(observation) => {
                             let Some(frame) = filter.frame(&observation) else { continue };
-                            let payload = serde_json::from_str(&frame).unwrap_or(serde_json::Value::Null);
-                            let _ = prompt_tx.send(DaemonRemoteEvent {
-                                event: crate::agent_control::events::AGENT_PROMPT_CHANGED_FRAME.to_string(),
-                                payload,
-                            });
+                            if let Some(event) = prompt_changed_event(&frame) {
+                                let _ = prompt_tx.send(event);
+                            }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => break,
