@@ -509,3 +509,53 @@ mod macos_signature {
         assert!(dir_names(&root).is_empty());
     }
 }
+
+fn write_bundled_mhc(mhc: &Path, marker: &[u8]) -> PathBuf {
+    let triple = mhc.join(ferryx_hub::meta::supervisor::host_triple());
+    let binary = triple.join("mhc").join(if cfg!(windows) { "mhc.exe" } else { "mhc" });
+    write_exe(&binary, marker);
+    write_exe(&triple.join("mhc/skills/demo/SKILL.md"), b"skill");
+    write_exe(&triple.join("bun").join(if cfg!(windows) { "bun.exe" } else { "bun" }), b"bun");
+    binary
+}
+
+#[test]
+fn bundled_mhc_is_staged_into_a_generation_and_never_overwritten() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_mhc = temp.path().join("app/mhc");
+    write_bundled_mhc(&app_mhc, b"mhc v1");
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+
+    ensure_bundled_mhc(&generation, &app_mhc).unwrap();
+
+    let staged_dir = generation.join(ferryx_hub::meta::supervisor::BUNDLED_MHC_DIR);
+    let staged = ferryx_hub::meta::supervisor::bundled_mhc_in(&staged_dir).expect("staged mhc");
+    assert_eq!(fs::read(&staged).unwrap(), b"mhc v1");
+    let triple_dir = staged_dir.join(ferryx_hub::meta::supervisor::host_triple());
+    assert_eq!(fs::read(triple_dir.join("mhc/skills/demo/SKILL.md")).unwrap(), b"skill");
+    // The staged daemon resolves its own copy (Windows/Linux generation layout: `<key>/ferryx`).
+    assert_eq!(
+        ferryx_hub::meta::supervisor::bundled_mhc_dir_near(&generation.join(DAEMON_FILE_NAME)),
+        Some(staged_dir.clone())
+    );
+    // No temp dir is left behind, and a later app's payload never replaces the staged one.
+    let mut names = dir_names(&staged_dir);
+    names.retain(|name| name.contains(TMP_MARKER));
+    assert!(names.is_empty(), "leftover temp dirs: {names:?}");
+    let replacement = temp.path().join("app2/mhc");
+    write_bundled_mhc(&replacement, b"mhc v2");
+    ensure_bundled_mhc(&generation, &replacement).unwrap();
+    assert_eq!(fs::read(&staged).unwrap(), b"mhc v1");
+}
+
+#[test]
+fn a_missing_mhc_payload_leaves_no_partial_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+
+    let error = ensure_bundled_mhc(&generation, &temp.path().join("absent")).unwrap_err();
+
+    assert!(matches!(error, RuntimeStageError::Io { .. }));
+    let staged_dir = generation.join(ferryx_hub::meta::supervisor::BUNDLED_MHC_DIR);
+    assert!(dir_names(&staged_dir).is_empty());
+}

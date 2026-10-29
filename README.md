@@ -249,6 +249,25 @@ bun install --cwd ui
 bun install --cwd site
 ```
 
+### Fetch the bundled agent runtime (mhc + bun)
+
+The hub runs its Slack, cron and judge turns through [mhc](https://github.com/Indosaram/mhc),
+and mhc's eval and bash tools need [bun](https://github.com/oven-sh/bun). Every desktop package
+ships both. The versions and their sha256 values are pinned in `src-tauri/resources/mhc/pin.json`.
+One command downloads both from their public GitHub releases for your machine. It verifies the
+mhc minisign signature and the sha256 of both files, then places them in the gitignored
+`src-tauri/resources/mhc/payload/<target triple>/`:
+
+```bash
+bun scripts/fetch-mhc.mjs
+```
+
+The command is idempotent: it skips a download that is already present and verified.
+`--target <triple>` fetches for another platform, and `--target universal-apple-darwin` fetches
+both macOS slices. Release builds run it automatically: `cargo tauri build` calls it from
+`beforeBuildCommand`. A dev build works without it. The hub then uses `FERRYX_HUB_MHC_BIN`
+when set, else `mhc` from your PATH.
+
 ### Run the desktop app
 
 The Tauri shell starts the UI dev server defined in `src-tauri/tauri.conf.json`:

@@ -4,6 +4,7 @@
  *
  * Runs from a clean detached worktree at merged main HEAD:
  *   1. bun install for the UI workspace
+ *   1b. bun scripts/fetch-mhc.mjs: the pinned, verified mhc + bun (Contents/Resources/mhc)
  *   2. cargo tauri build --bundles app with APPLE_SIGNING_IDENTITY + updater key
  *      and an isolated CARGO_TARGET_DIR
  *   3. assembleDaemonHelper: add the signed Contents/Helpers/Ferryx Daemon.app
@@ -165,6 +166,14 @@ if (checkOnly) process.exit(0);
 const install = run("bun", ["install", "--cwd", path.join(worktree, "ui"), "--frozen-lockfile"]);
 if (install.exit !== 0) {
   console.error(`bun install failed:\n${install.out.slice(-2000)}`);
+  process.exit(1);
+}
+
+// 1b. The pinned mhc + bun for this Mac's triple (verified; skipped when already present). The
+// build's beforeBuildCommand runs the same fetch; doing it here fails fast before the long build.
+const fetchMhc = run("bun", [path.join(worktree, "scripts/fetch-mhc.mjs"), "--prune"]);
+if (fetchMhc.exit !== 0) {
+  console.error("fetch-mhc failed: the bundled mhc could not be fetched and verified");
   process.exit(1);
 }
 

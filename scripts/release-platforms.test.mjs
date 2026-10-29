@@ -20,6 +20,8 @@ import {
   submitForNotarization,
   recreateDmgFromApp,
   finalizeMacosBundle,
+  machoEntitlements,
+  BUN_ENTITLEMENTS,
 } from "./lib/release-platforms.mjs";
 import { parseReceipt } from "./lib/release-contract.mjs";
 
@@ -535,6 +537,11 @@ test("remote builders: generated scripts enforce exact isolated build and artifa
   assert.match(windows, /--bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
   assert.doesNotMatch(windows, /signer sign/);
   assert.doesNotMatch(windows, /signer --help/);
+  // Every package carries the pinned, verified mhc + bun for its target before bundling.
+  assert.match(linux, /bun "\$source_dir\/scripts\/fetch-mhc\.mjs" --target x86_64-unknown-linux-gnu --prune\n/);
+  assert.ok(linux.indexOf("fetch-mhc.mjs") < linux.indexOf("bun tauri build"), "linux fetch precedes the bundle");
+  assert.match(windows, /bun \(Join-Path \$sourceDir 'scripts\/fetch-mhc\.mjs'\) --target x86_64-pc-windows-msvc --prune; if \(\$LASTEXITCODE -ne 0\)/);
+  assert.ok(windows.indexOf("fetch-mhc.mjs") < windows.indexOf("build-msix.ps1"), "windows fetch precedes MSIX and NSIS");
 });
 
 test("buildHost: fails closed when a custom runner returns no result", async () => {
@@ -1333,3 +1340,67 @@ writeFileSync(target + ".sig", sig);
   }
 });
 
+
+test("finalizeMacosBundle: bundled mhc binaries get the Developer ID signature, bun also gets its JIT entitlements", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-mhc-sign-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const payload = join(fixture.appPath, "Contents", "Resources", "mhc", "aarch64-apple-darwin");
+    const mhcFiles = ["mhc", "mhc-launcher", "lsp-daemon", "ast-grep-mcp", "omo-git-bash", "senpi-desktop-engine"];
+    mkdirSync(join(payload, "mhc"), { recursive: true });
+    mkdirSync(join(payload, "bun"), { recursive: true });
+    for (const name of mhcFiles) writeFileSync(join(payload, "mhc", name), `macho:${name}`);
+    writeFileSync(join(payload, "bun", "bun"), "macho:bun");
+
+    finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: null,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      exec: fixture.exec,
+    });
+
+    const signs = fixture.calls.filter((c) => c.startsWith("codesign --force"));
+    const signFor = (file) => signs.find((c) => c.endsWith(file));
+    for (const name of mhcFiles) {
+      const call = signFor(join(payload, "mhc", name));
+      assert.ok(call, `bundled ${name} is in the signed set`);
+      assert.match(call, /--options runtime --timestamp --sign Developer ID Application: Indo Yoon \(5DUM8WPB4C\)/);
+      assert.doesNotMatch(call, /--entitlements/, `${name} gets no entitlements`);
+    }
+    const bun = signFor(join(payload, "bun", "bun"));
+    assert.ok(bun, "bundled bun is in the signed set");
+    assert.ok(bun.includes(`--entitlements ${BUN_ENTITLEMENTS}`), bun);
+    assert.match(bun, /--options runtime --timestamp/);
+    const outer = signs.find((c) => c.endsWith(fixture.appPath));
+    assert.doesNotMatch(outer, /--entitlements/, "the outer app does not inherit bun's entitlements");
+    const signedOrder = (file) => signs.findIndex((c) => c.endsWith(file));
+    assert.ok(signedOrder(join(payload, "bun", "bun")) < signedOrder(fixture.appPath), "bun is sealed before the outer app");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("machoEntitlements: only Contents/Resources/mhc/<triple>/bun/bun gets the bun entitlements", () => {
+  const app = "/b/Ferryx.app";
+  assert.equal(machoEntitlements(app, `${app}/Contents/Resources/mhc/x86_64-apple-darwin/bun/bun`), BUN_ENTITLEMENTS);
+  for (const other of [
+    "/Contents/MacOS/ferryx",
+    "/Contents/Resources/mhc/x86_64-apple-darwin/mhc/mhc",
+    "/Contents/Resources/mhc/x86_64-apple-darwin/mhc/bun",
+    "/Contents/Resources/helpers/aarch64-apple-darwin/ferryx-remote-helper",
+    "/Contents/Helpers/Ferryx Daemon.app/Contents/MacOS/ferryx",
+  ]) {
+    assert.equal(machoEntitlements(app, `${app}${other}`), null, other);
+  }
+  const plist = readFileSync(BUN_ENTITLEMENTS, "utf8");
+  for (const key of [
+    "com.apple.security.cs.allow-jit",
+    "com.apple.security.cs.allow-unsigned-executable-memory",
+    "com.apple.security.cs.disable-executable-page-protection",
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.security.cs.allow-dyld-environment-variables",
+  ]) {
+    assert.ok(plist.includes(`<key>${key}</key>`), key);
+  }
+});

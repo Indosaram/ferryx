@@ -625,6 +625,7 @@ pub async fn run_turn(
     progress: Option<UnboundedSender<String>>,
 ) -> Result<TurnOutcome> {
     let stored_id = request.thread_id.clone();
+    let binary = PathBuf::from(&config.binary);
     let (child_path, _guard, session_path) = tokio::task::spawn_blocking(move || -> Result<_> {
         let path = crate::child_env::child_path().to_owned();
         // A private guard must never write into the running user's ~/.ferryx/hub.
@@ -632,9 +633,8 @@ pub async fn run_turn(
         std::fs::create_dir(&dir)?;
         let guard = GuardDirectory(dir);
         let bin = super::supervisor::install_launchctl_guard(&guard.0)?;
-        let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(&path));
-        let path = std::env::join_paths(paths).map_err(|e| HubError::message(e.to_string()))?;
+        let path = super::supervisor::mhc_child_path(&binary, vec![bin], &path)
+            .map_err(|e| HubError::message(e.to_string()))?;
         Ok((path, guard, resume_path(stored_id.as_deref())))
     })
     .await

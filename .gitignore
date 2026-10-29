@@ -45,3 +45,8 @@ mobile/keystore.properties
 keystore.properties
 *.jks
 *.keystore
+
+# Bundled mhc + bun, fetched by scripts/fetch-mhc.mjs from pinned public releases (never committed)
+/src-tauri/resources/mhc/payload/*
+!/src-tauri/resources/mhc/payload/.gitkeep
+/src-tauri/resources/mhc/.staging-*

@@ -1204,7 +1204,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let watch_server = Arc::clone(&launch.server);
     // The omo session poller reports omo panes (by omo session id, on every host), so the pane
     // observer leaves them to it instead of sending a second notice under the pane id.
-    let omo_polled = ferryx_hub::sessions::omo_poll::enabled() && ferryx_hub::sessions::omo_poll::binary().is_some();
+    let omo_polled = ferryx_hub::sessions::omo_poll::enabled();
     tasks.push(tokio::spawn(ferryx_hub::sessions::omo_poll::run(Arc::clone(&launch.hub))));
     tasks.push(tokio::spawn(async move {
         let mut agents = std::collections::HashMap::new();

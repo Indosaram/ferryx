@@ -2,29 +2,29 @@
 //!
 //! The daemon's agent observer only sees Ferryx panes on this machine. omo sessions also run in
 //! plain terminals and on other hosts (`OMON_SESSION_HOSTS`), and omo reports a pending
-//! `ask_user_question` over its RPC socket, not on the screen. Every interval the hub runs
-//! `omo-gateway sessions overview --json` (local plus every configured host in one call) and feeds
-//! each session to [`Hub::ingest`], so a question, a terminal-only question, or a watched
-//! session's finished turn becomes the same owner notice a Ferryx pane produces.
+//! `ask_user_question` over its RPC socket, not on the screen. Every interval the hub reads
+//! every session on this machine and on every configured host ([`super::omo_probe`], the
+//! native port of `omo-gateway sessions overview`) and feeds each one to [`Hub::ingest`], so a
+//! question, a terminal-only question, or a watched session's finished turn becomes the same
+//! owner notice a Ferryx pane produces.
 //!
-//! `FERRYX_HUB_OMO_SESSIONS=off` turns it off. `FERRYX_HUB_OMO_SESSIONS_BIN` names the
-//! `omo-gateway` binary (default `~/.ferryx/hub/bin/omo-gateway`); `FERRYX_HUB_OMO_POLL_SECS` sets the
-//! interval (default 60, minimum 10).
+//! `FERRYX_HUB_OMO_SESSIONS=off` turns it off; `FERRYX_HUB_OMO_POLL_SECS` sets the interval
+//! (default 60, minimum 10).
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 use sqlx::SqlitePool;
 
+use super::omo_probe::{self, MachineSnapshot};
 use super::watch::{compact, Observation};
 use crate::error::{HubError, Result};
 use crate::hub::Hub;
 
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 const MIN_INTERVAL: Duration = Duration::from_secs(10);
-/// One overview call reads every host with its own per-host bound; this caps the whole call.
+/// Every host is read concurrently with its own bound; this caps the whole poll.
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub fn enabled() -> bool {
@@ -45,17 +45,6 @@ pub fn interval() -> Duration {
         .map(Duration::from_secs)
         .filter(|interval| *interval >= MIN_INTERVAL)
         .unwrap_or(DEFAULT_INTERVAL)
-}
-
-pub fn binary() -> Option<PathBuf> {
-    let path = crate::hub_env::var_os("FERRYX_HUB_OMO_SESSIONS_BIN")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            crate::hub_env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".ferryx/hub/bin/omo-gateway"))
-        })?;
-    path.is_file().then_some(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,49 +175,42 @@ pub async fn apply(hub: &Arc<Hub>, overview: &Value) -> Result<usize> {
     Ok(observed)
 }
 
-async fn overview(binary: &PathBuf) -> Result<Value> {
-    let mut command = crate::child_env::command(binary);
-    command
-        .args(["sessions", "overview", "--json"])
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    if let Some(home) = crate::hub_env::var_os("HOME") {
-        command.current_dir(home);
-    }
-    let output = tokio::time::timeout(CALL_TIMEOUT, command.output())
-        .await
-        .map_err(|_| HubError::message("omo sessions overview timed out"))??;
-    if !output.status.success() {
-        return Err(HubError::message(format!(
-            "omo sessions overview exited {}: {}",
-            output.status,
-            compact(String::from_utf8_lossy(&output.stderr).trim(), 300)
-        )));
-    }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| HubError::message(format!("omo sessions overview is not JSON: {error}")))
+/// One overview in the shape `omo-gateway sessions overview --json` printed:
+/// `{"snapshots": [[machine, {"Ok": snapshot} | {"Err": message}], ...]}`.
+pub fn overview_value(
+    snapshots: &[(String, std::result::Result<MachineSnapshot, String>)],
+) -> Result<Value> {
+    let snapshots = serde_json::to_value(snapshots)
+        .map_err(|error| HubError::message(format!("omo sessions overview: {error}")))?;
+    Ok(serde_json::json!({ "snapshots": snapshots }))
 }
 
-/// Poll forever. Returns at once when the poller is off or `omo-gateway` is not installed.
+async fn overview() -> Result<Value> {
+    let hosts = omo_probe::configured_hosts().await;
+    let rpc_dir = omo_probe::default_rpc_dir();
+    let snapshots = tokio::time::timeout(
+        CALL_TIMEOUT,
+        omo_probe::snapshot_all(rpc_dir.as_deref(), &hosts),
+    )
+    .await
+    .map_err(|_| HubError::message("omo sessions overview timed out"))?;
+    overview_value(&snapshots)
+}
+
+/// Poll forever. Returns at once when the poller is off.
 pub async fn run(hub: Arc<Hub>) {
     if !enabled() {
         tracing::info!("omo session poller is off (FERRYX_HUB_OMO_SESSIONS)");
         return;
     }
-    let Some(binary) = binary() else {
-        tracing::warn!(
-            "omo session poller has no omo-gateway binary; omo session questions are not reported"
-        );
-        return;
-    };
     let every = interval();
-    tracing::info!(binary = %binary.display(), interval_secs = every.as_secs(), "omo session poller started");
+    tracing::info!(interval_secs = every.as_secs(), "omo session poller started");
     let mut ticker = tokio::time::interval(every);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut failing = false;
     loop {
         ticker.tick().await;
-        let result = match overview(&binary).await {
+        let result = match overview().await {
             Ok(value) => apply(&hub, &value).await,
             Err(error) => Err(error),
         };
@@ -380,6 +362,47 @@ mod tests {
         let stored = notices(&pool).await;
         assert_eq!(stored.len(), 1, "{stored:?}");
         assert_eq!(stored[0].1, "question");
+    }
+
+    #[test]
+    fn native_snapshots_have_the_shape_parse_overview_reads() {
+        let local = MachineSnapshot {
+            sessions: vec![omo_probe::LiveSession {
+                session_id: "s-1".into(),
+                routing_id: "s-1".into(),
+                endpoint_kind: "tui".into(),
+                name: Some("Release".into()),
+                blocking_question: true,
+                message_count: 4,
+                questions: vec![omo_probe::PendingQuestion {
+                    request_id: "call_1".into(),
+                    questions: vec![omo_probe::QuestionItem {
+                        id: "q1".into(),
+                        header: None,
+                        question: Some("Ship?".into()),
+                        options: vec!["Yes".into(), "No".into()],
+                    }],
+                }],
+                ..Default::default()
+            }],
+            errors: vec![],
+        };
+        let value = overview_value(&[
+            ("local".into(), Ok(local)),
+            ("omarchy".into(), Err("probe timed out".into())),
+        ])
+        .unwrap();
+        let polls = parse_overview(&value).unwrap();
+        assert_eq!(polls.len(), 2);
+        assert_eq!(polls[1].machine, "omarchy");
+        assert_eq!(polls[1].sessions, Err("\"probe timed out\"".into()));
+        let sessions = polls[0].sessions.as_ref().unwrap();
+        let observed = observation("local", &sessions[0], &HashSet::new()).unwrap();
+        assert_eq!(observed.target, "local:s-1");
+        assert_eq!(observed.name, "Release");
+        assert_eq!(observed.message_count, 4);
+        assert_eq!(observed.question.as_deref(), Some("Ship? [Yes / No]"));
+        assert!(!observed.blocking_question, "a question outranks the block flag");
     }
 
     #[test]
