@@ -32,6 +32,8 @@ import { MobileTopBar, type MobileTopBarActivityState } from "./chat/MobileTopBa
 import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
 import { MobileSheet } from "./chat/MobileSheet";
+import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
+import type { PushRequest } from "../lib/pushSubscription";
 import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
 import { useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
 import { capRetainedMessages } from "./agentConversation";
@@ -682,6 +684,8 @@ const CHAT_NO_READER_WARNING =
 
 const CHAT_RETENTION_WARNING = "Older messages are hidden to keep the phone view responsive.";
 const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in the message box.";
+const CHAT_VIEW_ONLY_WARNING =
+  "View-only access: this device cannot type into a pane. That message was not delivered. It is back in the message box.";
 const CHAT_OUTCOME_UNKNOWN_WARNING =
   "That message may have reached the session, but the host did not confirm it. It is back in the message box and will not be sent again on its own.";
 const CHAT_STOP_REFUSED_WARNING =
@@ -1254,6 +1258,7 @@ export const RemoteHostConnection: React.FC<{
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [phoneAlertsOpen, setPhoneAlertsOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
   const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
@@ -3972,7 +3977,10 @@ export const RemoteHostConnection: React.FC<{
           setChatStagedFiles((prev) => prev.filter((entry) => !mentioned(entry)));
           setChatWarnings((prev) =>
             prev.filter(
-              (warning) => warning !== CHAT_SEND_FAILED_WARNING && warning !== CHAT_OUTCOME_UNKNOWN_WARNING,
+              (warning) =>
+                warning !== CHAT_SEND_FAILED_WARNING &&
+                warning !== CHAT_OUTCOME_UNKNOWN_WARNING &&
+                warning !== CHAT_VIEW_ONLY_WARNING,
             ),
           );
         }
@@ -4002,11 +4010,14 @@ export const RemoteHostConnection: React.FC<{
         return false;
       }
       // A refusal or an uncertain outcome removes the unconfirmed echo and restores the draft.
-      setChatComposerNotice(
-        referenceIsOutcomeUnknown(outcome.code)
-          ? CHAT_OUTCOME_UNKNOWN_WARNING
-          : CHAT_SEND_FAILED_WARNING,
-      );
+      // FORBIDDEN is the host's role refusal, whatever the pane runs, so it names the View role.
+      const refusal =
+        outcome.code === "FORBIDDEN"
+          ? CHAT_VIEW_ONLY_WARNING
+          : referenceIsOutcomeUnknown(outcome.code)
+            ? CHAT_OUTCOME_UNKNOWN_WARNING
+            : CHAT_SEND_FAILED_WARNING;
+      setChatComposerNotice(refusal);
       setChatMessages((prev) => prev.filter((message) => message.id !== pending.id));
       if (heldId === undefined) {
         const current = referenceDrafts.read(target).text;
@@ -4018,12 +4029,7 @@ export const RemoteHostConnection: React.FC<{
       } else {
         endHeldSend();
       }
-      setChatWarnings((prev) =>
-        withChatWarning(
-          prev,
-          referenceIsOutcomeUnknown(outcome.code) ? CHAT_OUTCOME_UNKNOWN_WARNING : CHAT_SEND_FAILED_WARNING,
-        ),
-      );
+      setChatWarnings((prev) => withChatWarning(prev, refusal));
       return false;
     },
     [chatMutationBody, chatTargetIsCurrent, releaseStagedChatFiles],
@@ -4482,6 +4488,63 @@ export const RemoteHostConnection: React.FC<{
       setCreationError(error instanceof Error ? error.message : "Worktree creation request failed");
     }
   }, [model.context.workspaceId, token, transportBaseUrl, selectContext]);
+
+  /* Phone alerts speak to the paired gateway with this device's bearer. */
+  const phonePushRequest = useCallback<PushRequest>((path, init = {}) => {
+    if (!token) return Promise.reject(new Error("This device is not paired."));
+    return remoteFetch(transportBaseUrl, path, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${token}` },
+    });
+  }, [token, transportBaseUrl]);
+
+  /* A tapped phone alert names a backend session: the service worker focuses this window and
+     posts it, or opens `/#session=<id>`. It is opened once the session appears in the model. */
+  const [alertSessionId, setAlertSessionId] = useState<string | null>(() => {
+    const match = /^#session=([^&]+)$/.exec(window.location.hash);
+    if (!match) return null;
+    window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    const worker = navigator.serviceWorker;
+    if (!worker) return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; sessionId?: unknown } | null;
+      if (data?.type === "ferryx:open-session" && typeof data.sessionId === "string" && data.sessionId) {
+        setAlertSessionId(data.sessionId);
+      }
+    };
+    worker.addEventListener("message", onMessage);
+    return () => worker.removeEventListener("message", onMessage);
+  }, []);
+  useEffect(() => {
+    if (!alertSessionId || !token || pending) return;
+    const workspaceId = model.context.workspaceId;
+    if (model.context.activeTerminal?.sessionId === alertSessionId) {
+      setAlertSessionId(null);
+      return;
+    }
+    const tab = model.context.terminalTabs?.find((row) => row.sessionId === alertSessionId);
+    const option = model.options.find((row) => row.sessionId === alertSessionId && !row.unavailable);
+    const target: RemoteContextOption | null = option
+      ?? (tab && workspaceId
+        ? {
+            workspaceId: tab.workspaceId ?? workspaceId,
+            worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
+            worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
+            tabId: tab.id,
+            sessionId: alertSessionId,
+          }
+        : null);
+    if (!target) return;
+    setAlertSessionId(null);
+    void selectContext(target);
+  }, [alertSessionId, token, pending, model, selectContext]);
 
   if ((!token && !accountSessionToken) || magicLinkActive) {
     return (
@@ -5325,6 +5388,7 @@ export const RemoteHostConnection: React.FC<{
           void createWorktree();
         }}
         onOpenMachines={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
+        onOpenPhoneAlerts={token ? () => setPhoneAlertsOpen(true) : undefined}
         onSignOut={isAccountMode ? handleSignOut : undefined}
         connectionLabel={
           accountPreselection
@@ -5336,6 +5400,20 @@ export const RemoteHostConnection: React.FC<{
         buildStamp={BUILD_STAMP}
         disabled={pending !== null || !model.context.workspaceId}
       />
+
+      {token ? (
+        <MobileSheet
+          open={phoneAlertsOpen}
+          onOpenChange={setPhoneAlertsOpen}
+          title="Phone alerts"
+          ariaLabel="Phone alerts"
+          testId="phone-alerts-sheet"
+        >
+          <div className="px-2 pb-3">
+            <PhoneAlertsSettings request={phonePushRequest} />
+          </div>
+        </MobileSheet>
+      ) : null}
 
       {isAccountMode ? (
         <AccountSheet

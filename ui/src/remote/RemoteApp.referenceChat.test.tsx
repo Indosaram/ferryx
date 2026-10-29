@@ -484,6 +484,40 @@ describe("reference chat lane (task 12)", () => {
     expect(bubbles[0]).toHaveTextContent("what changed in the parser?");
   });
 
+  it("a FORBIDDEN send on a plain shell pane names the View role, not the missing agent", async () => {
+    setWidth(390);
+    const harness = installFetch({
+      state: () => ({
+        activeContext: {
+          ...remoteState.activeContext,
+          activeTerminal: { sessionId: SESSION_ID, title: "zsh", running: true },
+          terminalTabs: [{ id: "tab-main", sessionId: SESSION_ID, label: "zsh", activityState: "idle", worktreeLabel: "main" }],
+        },
+      }),
+      submit: () => ({
+        ok: false,
+        error: { code: "FORBIDDEN", message: "a view-only device cannot type into a pane", retryable: false },
+      }),
+    });
+    render(<RemoteApp />);
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no transcript reader/i);
+    });
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "ls" } });
+    const submitted = harness.whenCalled("/submit");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await submitted;
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/View-only access: this device cannot type into a pane/);
+    });
+    expect(screen.getByTestId("chat-composer-warning")).not.toHaveTextContent(/runs no agent/);
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("ls");
+  });
+
   it("ui-reference-logic-r17-1: a send that fails on the current pane ends its draft send", async () => {
     setWidth(390);
     // the spy calls through: it only records which target the composer's send began on

@@ -22,7 +22,6 @@ use crate::remote::protocol::{
     RemoteSelectWorkspaceRequest, RemoteSelectionRequestPayload, RemoteTerminalSession,
     RemoteTerminalTabInfo, RemoteWorkspaceState, RemoteWorktreeInfo,
 };
-use crate::remote::push::{global_push_store, PushSubscriptionInfo};
 use crate::remote::state::{
     RemoteGatewayState, RemoteNetworkMode, REMOTE_ACTIVE_SELECTION_CHANGED_EVENT,
 };
@@ -1731,6 +1730,11 @@ fn delete_worktree_blocking(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// A static relay machine token (`FERRYX_MACHINE_TOKEN`) is set in this process.
+pub fn machine_token_configured() -> bool {
+    std::env::var("FERRYX_MACHINE_TOKEN").is_ok_and(|token| !token.trim().is_empty())
+}
+
 async fn list_devices(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -1769,6 +1773,58 @@ async fn revoke_device(
         Ok(false) => Err((StatusCode::NOT_FOUND, "Device not found".into())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
+}
+
+#[derive(Deserialize)]
+struct SetDevicePermissionRequest {
+    permission: DevicePermission,
+}
+
+/// POST /api/v1/devices/{id}/permission. Only a Control device may change a role, and over HTTP
+/// only to View: promotion to Control is owner-only via IPC. The caller is authorized before the
+/// body is read.
+async fn set_device_permission(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(device_id): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<DeviceInfo>, (StatusCode, String)> {
+    let token =
+        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    let device = state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
+    if device.permission != DevicePermission::Control {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "View-only device cannot change device permissions".into(),
+        ));
+    }
+    let request: SetDevicePermissionRequest = serde_json::from_slice(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid permission request: {e}")))?;
+    if request.permission == DevicePermission::Control {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Granting control is only allowed on this computer".into(),
+        ));
+    }
+    let auth = Arc::clone(&state.auth_manager);
+    crate::ipc::run_blocking(move || Ok(auth.set_device_permission(&device_id, request.permission)))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .map_err(|e| match e {
+            crate::remote::auth::PermissionChangeError::NotFound => {
+                (StatusCode::NOT_FOUND, "Device not found".into())
+            }
+            crate::remote::auth::PermissionChangeError::MachineRequiresControl => {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            }
+            crate::remote::auth::PermissionChangeError::Auth(e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })
 }
 
 async fn ws_events_handler(
@@ -3817,18 +3873,71 @@ struct PushUnsubscribeRequest {
     endpoint: String,
 }
 
+/// The calling paired device, or the 401 every push route answers without a valid bearer.
+fn push_device(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+) -> Result<DeviceInfo, (StatusCode, String)> {
+    let token =
+        extract_token(headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
+    state
+        .auth_manager
+        .validate_token(&token)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))
+}
+
+fn push_store_error(error: crate::remote::push::PushStoreError) -> (StatusCode, String) {
+    use crate::remote::push::PushStoreError;
+    let status = match error {
+        PushStoreError::InvalidEndpoint => StatusCode::BAD_REQUEST,
+        PushStoreError::ForeignEndpoint => StatusCode::FORBIDDEN,
+        PushStoreError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, error.to_string())
+}
+
+/// Runs a push store write on a blocking worker: the store persists to disk.
+async fn push_store_write<T: Send + 'static>(
+    state: &Arc<RemoteGatewayState>,
+    write: impl FnOnce(&crate::remote::push::PushStore) -> Result<T, crate::remote::push::PushStoreError>
+        + Send
+        + 'static,
+) -> Result<T, (StatusCode, String)> {
+    let push = Arc::clone(&state.push);
+    crate::ipc::run_blocking(move || Ok(write(&push.store)))
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.message))?
+        .map_err(push_store_error)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VapidPublicKeyResponse {
+    public_key: String,
+}
+
+async fn push_vapid_public_key(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Json<VapidPublicKeyResponse>, (StatusCode, String)> {
+    push_device(&state, &headers)?;
+    let keys = state
+        .push
+        .vapid()
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(VapidPublicKeyResponse {
+        public_key: keys.public_key().to_string(),
+    }))
+}
+
 async fn push_subscribe(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-    Json(payload): Json<PushSubscriptionInfo>,
+    Json(payload): Json<crate::remote::push::PushSubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token =
-        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
-        .auth_manager
-        .validate_token(&token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
-    global_push_store().subscribe(payload);
+    let device = push_device(&state, &headers)?;
+    push_store_write(&state, move |store| store.subscribe(&device.id, payload)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3837,14 +3946,70 @@ async fn push_unsubscribe(
     headers: HeaderMap,
     Json(payload): Json<PushUnsubscribeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let token =
-        extract_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Missing auth token".into()))?;
-    let _device = state
-        .auth_manager
-        .validate_token(&token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token".into()))?;
-    global_push_store().unsubscribe(&payload.endpoint);
+    let device = push_device(&state, &headers)?;
+    push_store_write(&state, move |store| store.unsubscribe(&device.id, &payload.endpoint)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn push_preferences(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::remote::push::PushPreferences>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let device = push_device(&state, &headers)?;
+    let updated =
+        push_store_write(&state, move |store| store.set_preferences(&device.id, &payload)).await?;
+    if updated == 0 {
+        return Err((StatusCode::NOT_FOUND, "No push subscription for this device".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PushTestResponse {
+    sent: usize,
+    delivered: usize,
+    removed: usize,
+}
+
+/// Sends one test push to every subscription of the calling device. Desktop focus does not
+/// hold it back: the user asked for it.
+async fn push_test(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Json<PushTestResponse>, (StatusCode, String)> {
+    use crate::remote::push::{AgentStateNotification, SendOutcome};
+    let device = push_device(&state, &headers)?;
+    let targets = state.push.store.for_device(&device.id);
+    if targets.is_empty() || state.auth_manager.live_device(&device.id).is_none() {
+        return Err((StatusCode::NOT_FOUND, "No push subscription for this device".into()));
+    }
+    let notification = AgentStateNotification {
+        agent_id: String::new(),
+        agent_name: "Ferryx".into(),
+        worktree: None,
+        state: "test".into(),
+        title: "Test alert".into(),
+        body: "Phone alerts are working.".into(),
+    };
+    let outcomes = futures_util::future::join_all(
+        targets.iter().map(|sub| state.push.send(sub, &notification)),
+    )
+    .await;
+    let delivered = outcomes.iter().filter(|o| **o == SendOutcome::Delivered).count();
+    let removed = outcomes.iter().filter(|o| **o == SendOutcome::Gone).count();
+    if delivered == 0 && removed < outcomes.len() {
+        let reason = outcomes
+            .iter()
+            .find_map(|outcome| match outcome {
+                SendOutcome::Failed(reason) => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, reason));
+    }
+    Ok(Json(PushTestResponse { sent: outcomes.len(), delivered, removed }))
 }
 
 pub(super) fn machine_error(status: StatusCode, code: &str) -> Response {
@@ -7484,16 +7649,27 @@ fn web_origin(url: &str) -> Option<String> {
 
 /// Whether a cross-origin browser call may read this gateway's response.
 ///
-/// Only `/api/v1/*` (minus the health probe) answers cross-origin; health and static assets stay
-/// same-origin. Admitted origins: the gateway's own origin, the default relay and the configured
-/// relay override, and the origins of this machine's saved paired hosts. Never with credentials.
+/// Only `/api/v1/*` (minus the health probe and the push registration routes) answers
+/// cross-origin; health, push registration and static assets stay same-origin, as the
+/// `/api/push/*` aliases always were. Admitted origins: the gateway's own origin, the default
+/// relay and the configured relay override, and the origins of this machine's saved paired
+/// hosts. Never with credentials.
 pub(crate) fn cors_origin_allowed(
     state: &RemoteGatewayState,
     origin: &axum::http::HeaderValue,
     parts: &axum::http::request::Parts,
 ) -> bool {
     let path = parts.uri.path();
-    if !path.starts_with("/api/v1/") || path == "/api/v1/health" {
+    if !path.starts_with("/api/v1/")
+        || path == "/api/v1/health"
+        || matches!(
+            path,
+            "/api/v1/push/vapid-public-key"
+                | "/api/v1/push/subscribe"
+                | "/api/v1/push/unsubscribe"
+                | "/api/v1/push/preferences"
+        )
+    {
         return false;
     }
     let Ok(origin) = origin.to_str() else {
@@ -7705,6 +7881,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{id}/revoke", post(revoke_device))
+        .route("/api/v1/devices/{id}/permission", post(set_device_permission))
         .route("/api/v1/socket-ticket", post(issue_socket_ticket))
         .route("/api/v1/events", get(ws_events_handler))
         .route("/api/v1/terminal/{sessionId}", get(ws_terminal_handler))
@@ -7715,8 +7892,15 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             "/api/v1/workspace/dag",
             get(super::dag_api::ws_dag_handler),
         )
+        .route("/api/v1/push/test", post(push_test))
+        .route("/api/v1/push/vapid-public-key", get(push_vapid_public_key))
+        .route("/api/v1/push/subscribe", post(push_subscribe))
+        .route("/api/v1/push/unsubscribe", post(push_unsubscribe))
+        .route("/api/v1/push/preferences", post(push_preferences))
+        .route("/api/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
+        .route("/api/push/preferences", post(push_preferences))
         .fallback(remote_fallback)
         .method_not_allowed_fallback(remote_method_not_allowed)
         .layer(axum::middleware::from_fn_with_state(
@@ -9717,12 +9901,14 @@ mod tests {
         let subscribe_result = push_subscribe(
             State(Arc::clone(&state)),
             HeaderMap::new(),
-            Json(PushSubscriptionInfo {
-                endpoint: "https://push.example.com/sub/unauth".to_string(),
+            Json(crate::remote::push::PushSubscribeRequest {
+                endpoint: "https://fcm.googleapis.com/fcm/send/unauth".to_string(),
                 keys: crate::remote::push::PushSubscriptionKeys {
                     p256dh: "p256dh-key".to_string(),
                     auth: "auth-key".to_string(),
                 },
+                phone_needs_input: true,
+                phone_finished_mode: crate::remote::push::FinishedMode::LongTurns,
             }),
         )
         .await;
@@ -9733,7 +9919,7 @@ mod tests {
             State(Arc::clone(&state)),
             HeaderMap::new(),
             Json(PushUnsubscribeRequest {
-                endpoint: "https://push.example.com/sub/unauth".to_string(),
+                endpoint: "https://fcm.googleapis.com/fcm/send/unauth".to_string(),
             }),
         )
         .await;
@@ -9742,12 +9928,77 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         assert!(
-            global_push_store()
-                .list_subscriptions()
-                .iter()
-                .all(|sub| sub.endpoint != "https://push.example.com/sub/unauth"),
+            state.push.store.list_subscriptions().is_empty(),
             "unauthenticated request must not have registered a subscription"
         );
+    }
+
+    /// The relay forwards only `/api/v1/*`, so each push route must answer there with the same
+    /// handler and auth as its `/api/push/*` alias, never the router's 404.
+    #[tokio::test]
+    async fn push_routes_answer_under_api_v1_like_their_aliases() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let code = state
+            .auth_manager
+            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&code, "PushRouteClient")
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let router = create_remote_router(Arc::clone(&state));
+            async move { axum::serve(listener, router).await.unwrap() }
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let endpoint = "https://fcm.googleapis.com/fcm/send/route-test";
+        let routes = [
+            ("vapid-public-key", None, StatusCode::OK),
+            (
+                "subscribe",
+                Some(serde_json::json!({
+                    "endpoint": endpoint,
+                    "keys": { "p256dh": "p256dh-key", "auth": "auth-key" },
+                })),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "preferences",
+                Some(serde_json::json!({ "phoneNeedsInput": false })),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "unsubscribe",
+                Some(serde_json::json!({ "endpoint": endpoint })),
+                StatusCode::NO_CONTENT,
+            ),
+        ];
+        for prefix in ["/api/v1/push", "/api/push"] {
+            for (route, body, authorized) in &routes {
+                let path = format!("{prefix}/{route}");
+                let request = |bearer: Option<&str>| {
+                    let url = format!("http://{addr}{path}");
+                    let mut request = match body {
+                        Some(body) => http.post(url).json(body),
+                        None => http.get(url),
+                    };
+                    if let Some(bearer) = bearer {
+                        request = request.bearer_auth(bearer);
+                    }
+                    request.send()
+                };
+                let anonymous = request(None).await.unwrap().status();
+                assert_eq!(anonymous, StatusCode::UNAUTHORIZED, "{path} without a token");
+                let paired = request(Some(&token)).await.unwrap().status();
+                assert_eq!(paired, *authorized, "{path} with a paired token");
+            }
+        }
+
+        server.abort();
     }
 
     #[tokio::test]

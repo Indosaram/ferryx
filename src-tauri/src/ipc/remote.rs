@@ -1,7 +1,7 @@
 // allow: SIZE_OK — IPC remote gateway command handlers and forwarding bridge within constrained write scope
 use crate::daemon::client::DaemonClient;
 use crate::ipc::IpcError;
-use crate::remote::auth::{DeviceInfo, DevicePermission};
+use crate::remote::auth::{DeviceInfo, DevicePermission, PairingWindowStatus};
 use crate::remote::protocol::{
     RemoteActiveDesktopSelection, RemoteTerminalTabInfo, RemoteWorktreeAttention,
 };
@@ -163,6 +163,43 @@ pub struct RemoteGatewayStatusResponse {
     /// Non-empty means the desktop shows its persistent insecure-transport banner.
     #[serde(default)]
     pub insecure_modes: Vec<String>,
+    /// A static relay machine token is set in the gateway process.
+    #[serde(default)]
+    pub token_configured: bool,
+    /// Who can reach the listener: this computer, the local network, or the relay.
+    pub bind_scope: RemoteBindScope,
+    /// True while the relay is connected or an insecure transport mode is in effect.
+    pub public_exposure: bool,
+    #[serde(default)]
+    pub pairing_window: PairingWindowStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteBindScope {
+    Loopback,
+    Lan,
+    Relay,
+}
+
+/// Where the gateway is reachable from. The relay wins whenever it carries traffic; otherwise a
+/// listener bound to a loopback address (or no listener) is this computer only.
+pub fn remote_bind_scope(
+    mode: RemoteNetworkMode,
+    bound_address: Option<&str>,
+    relay_connected: Option<bool>,
+) -> RemoteBindScope {
+    if mode == RemoteNetworkMode::Relay || relay_connected == Some(true) {
+        return RemoteBindScope::Relay;
+    }
+    let loopback = bound_address
+        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+        .is_none_or(|address| address.ip().is_loopback());
+    if loopback {
+        RemoteBindScope::Loopback
+    } else {
+        RemoteBindScope::Lan
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +246,13 @@ pub async fn cmd_remote_status(
                     insecure_modes.push(mode);
                 }
             }
+            let bind_scope = remote_bind_scope(
+                status.mode,
+                status.bound_address.as_deref(),
+                status.relay_connected,
+            );
+            let public_exposure =
+                status.relay_connected == Some(true) || !insecure_modes.is_empty();
             Ok(RemoteGatewayStatusResponse {
                 enabled: status.is_running,
                 mode: status.mode,
@@ -223,6 +267,10 @@ pub async fn cmd_remote_status(
                 gate_status: status.gate_status,
                 gate_reason: status.gate_reason,
                 insecure_modes,
+                token_configured: status.token_configured,
+                bind_scope,
+                public_exposure,
+                pairing_window: status.pairing_window.unwrap_or_default(),
             })
         }
         RemoteGatewayManagerInner::State {
@@ -241,7 +289,14 @@ pub async fn cmd_remote_status(
                 let relay_client = state.relay_client.read();
                 crate::remote::relay_client::relay_connection_flags(relay_client.as_ref())
             };
+            let bind_scope =
+                remote_bind_scope(config.mode, bound_address.as_deref(), relay_connected);
+            let public_exposure = relay_connected == Some(true) || !local_insecure.is_empty();
             Ok(RemoteGatewayStatusResponse {
+                token_configured: crate::remote::server::machine_token_configured(),
+                bind_scope,
+                public_exposure,
+                pairing_window: state.auth_manager.pairing_window_status(),
                 enabled: is_running,
                 mode: config.mode,
                 port: config.port,
@@ -455,6 +510,53 @@ pub async fn cmd_remote_device_revoke(
     }
 }
 
+/// Owner-only role change for a paired device. Remote devices use
+/// `POST /api/v1/devices/{id}/permission`, which requires a Control caller and only downgrades.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_remote_device_set_permission(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    device_id: String,
+    permission: DevicePermission,
+) -> Result<DeviceInfo, IpcError> {
+    set_device_permission(&manager, device_id, permission).await
+}
+
+pub(crate) async fn set_device_permission(
+    manager: &RemoteGatewayManager,
+    device_id: String,
+    permission: DevicePermission,
+) -> Result<DeviceInfo, IpcError> {
+    match &manager.inner {
+        RemoteGatewayManagerInner::Daemon(client) => {
+            client.remote_set_device_permission(&device_id, permission).await
+        }
+        RemoteGatewayManagerInner::State { state, .. } => {
+            let auth = Arc::clone(&state.auth_manager);
+            crate::ipc::run_blocking(move || {
+                auth.set_device_permission(&device_id, permission)
+                    .map_err(|error| match error {
+                        crate::remote::auth::PermissionChangeError::NotFound => IpcError::new(
+                            crate::ipc::error::IpcErrorCode::NotFound,
+                            error.to_string(),
+                        ),
+                        crate::remote::auth::PermissionChangeError::MachineRequiresControl => {
+                            IpcError::new(
+                                crate::ipc::error::IpcErrorCode::InvalidArgument,
+                                error.to_string(),
+                            )
+                        }
+                        crate::remote::auth::PermissionChangeError::Auth(_) => IpcError::new(
+                            crate::ipc::error::IpcErrorCode::IoError,
+                            error.to_string(),
+                        ),
+                    })
+            })
+            .await
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetActiveDesktopSelectionRequest {
@@ -620,6 +722,23 @@ pub async fn cmd_remote_get_active_selection(
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => client.remote_get_active_selection().await,
         RemoteGatewayManagerInner::State { state, .. } => Ok(state.active_selection()),
+    }
+}
+
+/// The desktop window's native focus, reported by the GUI. Phone pushes are held while it is
+/// focused; the GUI re-reports while focused because a stale report counts as unfocused.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_remote_set_window_focused(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    focused: bool,
+) -> Result<(), IpcError> {
+    match &manager.inner {
+        RemoteGatewayManagerInner::Daemon(client) => client.remote_set_window_focused(focused).await,
+        RemoteGatewayManagerInner::State { state, .. } => {
+            state.set_desktop_window_focused(focused);
+            Ok(())
+        }
     }
 }
 

@@ -285,3 +285,77 @@ async fn pairing_budget_is_global_atomic_and_rotation_cannot_reset_it() {
     assert!(state.auth_manager.list_devices().is_empty());
     server.stop().await;
 }
+
+#[tokio::test]
+async fn view_device_cannot_raise_its_own_permission() {
+    let state = state();
+    let (view_token, view) = pair(&state, DevicePermission::View);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+    let (status, body) = server
+        .request(
+            "POST",
+            &format!("/api/v1/devices/{}/permission", view.id),
+            Some(&view_token),
+            Some(r#"{"permission":"control"}"#),
+        )
+        .await;
+    server.stop().await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        state.auth_manager.validate_token(&view_token).unwrap().permission,
+        DevicePermission::View
+    );
+}
+
+#[tokio::test]
+async fn control_device_changes_another_device_role() {
+    let state = state();
+    let (control_token, _) = pair(&state, DevicePermission::Control);
+    let (target_token, target) = pair(&state, DevicePermission::Control);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+    let (status, body) = server
+        .request(
+            "POST",
+            &format!("/api/v1/devices/{}/permission", target.id),
+            Some(&control_token),
+            Some(r#"{"permission":"view"}"#),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (missing, _) = server
+        .request(
+            "POST",
+            "/api/v1/devices/unknown/permission",
+            Some(&control_token),
+            Some(r#"{"permission":"view"}"#),
+        )
+        .await;
+    server.stop().await;
+    assert_eq!(missing, 404);
+    assert_eq!(
+        state.auth_manager.validate_token(&target_token).unwrap().permission,
+        DevicePermission::View
+    );
+}
+
+#[tokio::test]
+async fn control_device_cannot_promote_another_device_over_http() {
+    let state = state();
+    let (control_token, _) = pair(&state, DevicePermission::Control);
+    let (target_token, target) = pair(&state, DevicePermission::View);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+    let (status, body) = server
+        .request(
+            "POST",
+            &format!("/api/v1/devices/{}/permission", target.id),
+            Some(&control_token),
+            Some(r#"{"permission":"control"}"#),
+        )
+        .await;
+    server.stop().await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        state.auth_manager.validate_token(&target_token).unwrap().permission,
+        DevicePermission::View
+    );
+}

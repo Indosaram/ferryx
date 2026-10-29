@@ -13,6 +13,7 @@ function deferred<T>() {
 vi.mock("./tauri", () => ({
   dispatchNotification: vi.fn(() => Promise.resolve({ submitted: true })),
   playNotificationSound: vi.fn(() => Promise.resolve({ played: true })),
+  reportDesktopWindowFocus: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
@@ -54,6 +55,25 @@ describe("nativeWindowFocus", () => {
     } finally {
       window.removeEventListener("ferryx:window-focused", focusedListener);
     }
+  });
+
+  it("reports native focus to the daemon when a focus event arrives", async () => {
+    let focusCallback: ((event: { payload: boolean }) => void) | undefined;
+    const subscribed = deferred<void>();
+    onFocusChangedMock.mockImplementation((cb: (event: { payload: boolean }) => void) => {
+      focusCallback = cb;
+      subscribed.resolve();
+      return Promise.resolve(() => {});
+    });
+
+    const { startNativeWindowFocusTracking } = await import("./nativeWindowFocus");
+    const { reportDesktopWindowFocus } = await import("./tauri");
+    startNativeWindowFocusTracking();
+    await subscribed.promise;
+
+    if (!focusCallback) throw new Error("Focus subscription was not registered");
+    focusCallback({ payload: true });
+    expect(reportDesktopWindowFocus).toHaveBeenCalledWith(true);
   });
 
   it("finishes subscription before querying and retains an event newer than the snapshot", async () => {

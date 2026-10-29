@@ -11,9 +11,11 @@ import {
   listRemoteDevices,
   revokeRemoteDevice,
   setAgentControlSettings,
+  setRemoteDevicePermission,
   setDirectAutoTrustDisabled,
   type AgentControlSettings,
   type DeviceInfo,
+  type DevicePermission,
   type DirectAutoTrustStatus,
   type RemoteGatewayStatus,
 } from "../../lib/tauri";
@@ -32,8 +34,6 @@ const DEFAULT_RELAY_PLACEHOLDER = DEFAULT_RELAY_ORIGIN;
 
 type PairingGatewayStatus = RemoteGatewayStatus & {
   machineId?: string;
-  relayConnected?: boolean;
-  controlChannelConnected?: boolean;
 };
 
 const ACCESS_DESCRIPTION = "Controls incoming device access only. Outbound machines and workspace sessions are unaffected. Device access is not a machine-project grant.";
@@ -58,8 +58,75 @@ function formatCountdown(seconds: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+const REACH_LABELS = {
+  loopback: "this computer only",
+  lan: "devices on your local network",
+  relay: "anywhere, through the relay",
+} as const;
+
+function exposureLabel(status: RemoteGatewayStatus): string {
+  if (!status.publicExposure) return "none";
+  if (status.relayConnected) return "via relay";
+  return `insecure transport (${(status.insecureModes ?? []).join(", ")})`;
+}
+
+/** Plain-language facts about who can reach this machine right now. Always visible. */
+function AccessFactsCard({ status, statusError, onPairingExpired }: {
+  status: PairingGatewayStatus | null;
+  statusError: boolean;
+  onPairingExpired: () => void;
+}) {
+  const scope = status?.enabled ? status.bindScope ?? "loopback" : null;
+  const pairing = status?.pairingWindow;
+  const [pairingLeft, setPairingLeft] = useState(0);
+  useEffect(() => {
+    if (!pairing?.open || pairing.secondsLeft <= 0) { setPairingLeft(0); return; }
+    const expiresAt = Date.now() + pairing.secondsLeft * 1000;
+    setPairingLeft(pairing.secondsLeft);
+    const timer = window.setInterval(() => {
+      const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      setPairingLeft(left);
+      if (left === 0) { window.clearInterval(timer); onPairingExpired(); }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairing, onPairingExpired]);
+  const pairingOpen = Boolean(pairing?.open) && pairingLeft > 0;
+  return (
+    <section aria-label="Access" className="mb-6 space-y-3">
+      <h3 className="text-[12px] font-semibold">Access</h3>
+      <Card className="rounded-lg border border-border bg-card p-3 shadow-none">
+        {statusError || !status ? (
+          <p className="text-[12px] text-muted-foreground">Access facts unavailable.</p>
+        ) : (
+          <ul className="space-y-1 text-[12px] text-foreground">
+            <li data-testid="access-fact-reach" data-scope={scope ?? "off"}>
+              Reachable from: {scope ? REACH_LABELS[scope] : "nobody, remote access is off"}
+            </li>
+            <li data-testid="access-fact-listen">
+              Listens on: {status.enabled && status.boundAddress ? status.boundAddress : "not listening"}
+            </li>
+            <li data-testid="access-fact-exposure" data-exposed={String(Boolean(status.publicExposure))}>
+              Public exposure: {exposureLabel(status)}
+            </li>
+            <li data-testid="access-fact-token" data-configured={String(Boolean(status.tokenConfigured))}>
+              Machine token: {status.tokenConfigured ? "set on this computer" : "not set"}
+            </li>
+            <li data-testid="access-fact-pairing" data-open={String(pairingOpen)}>
+              Pairing: {pairingOpen ? `a code is live for ${formatCountdown(pairingLeft)}` : "closed, no live code"}
+            </li>
+          </ul>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 /** Mints a one-time pairing code for the chosen role and counts down to its expiry. */
-export function PairDeviceCard({ disabled, className = "mt-8 space-y-3" }: { disabled: boolean; className?: string }) {
+export function PairDeviceCard({ disabled, className = "mt-8 space-y-3", onMinted }: {
+  disabled: boolean;
+  className?: string;
+  onMinted?: () => void;
+}) {
   const [role, setRole] = useState<PairingRole>("view");
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number; role: PairingRole } | null>(null);
   const [remaining, setRemaining] = useState(0);
@@ -82,6 +149,7 @@ export function PairDeviceCard({ disabled, className = "mt-8 space-y-3" }: { dis
       const created = await createPairingCode(minted);
       setPairing({ code: created.code, expiresAt: Date.now() + created.expiresInSeconds * 1000, role: minted });
       setRemaining(created.expiresInSeconds);
+      onMinted?.();
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to create a pairing code"));
     } finally {
@@ -242,6 +310,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
   statusRef.current = status;
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+  const [roleBusyId, setRoleBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [relayUrl, setRelayUrl] = useState("");
@@ -339,6 +408,20 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
     }
   };
 
+  const handleRoleChange = async (dev: DeviceInfo, permission: DevicePermission) => {
+    if (dev.permission === permission) return;
+    setActionError(null);
+    setRoleBusyId(dev.id);
+    try {
+      const updated = await setRemoteDevicePermission(dev.id, permission);
+      setDevices((current) => current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+    } catch (error: unknown) {
+      setActionError(errorMessage(error, "Failed to change the device role"));
+    } finally {
+      setRoleBusyId(null);
+    }
+  };
+
   const handleRevoke = async (deviceId: string) => {
     setActionError(null);
     try {
@@ -350,13 +433,11 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
     }
   };
 
+  const refreshAfterPairingChange = useCallback(() => { void refreshStatus(); }, [refreshStatus]);
+
   if (detailsOnly) return <section aria-label="Gateway diagnostics" className="space-y-2 text-sm">
     {statusError ? <p role="alert">Gateway status unavailable.</p> : null}
-    <dl><dt>Configured mode</dt><dd>{status?.mode ?? "Unavailable"}</dd>
-      <dt>Effective relay</dt><dd>{status?.relayUrl ?? "None"}</dd>
-      <dt>Local endpoint / port</dt><dd>{status?.boundAddress ?? status?.localIp ?? "Unavailable"} / {status?.port ?? "Unavailable"}</dd>
-      <dt>Listener</dt><dd>{status?.enabled ? "Running" : "Stopped"}</dd>
-      <dt>Relay / control channel</dt><dd>{String(status?.relayConnected ?? false)} / {String(status?.controlChannelConnected ?? false)}</dd></dl>
+    <AccessFactsCard status={status} statusError={statusError} onPairingExpired={refreshAfterPairingChange} />
     {status?.gateStatus && typeof status.gateStatus === "object" && "insecureLanGated" in status.gateStatus ? (
       <p data-testid="gateway-gate-warning" role="note">
         Direct LAN access is gated: {status.gateStatus.insecureLanGated.reason}. Only loopback and trusted-overlay connections are accepted.
@@ -392,6 +473,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
             : status.localIp || status.boundAddress ? "Local Ready" : "Connecting"}
         </Badge>
       ) : null}
+      <AccessFactsCard status={status} statusError={statusError} onPairingExpired={refreshAfterPairingChange} />
       <div className="border-y border-border">
         <SettingRow
           label="Allow remote access"
@@ -463,7 +545,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
         ) : null}
       </div>
 
-      <PairDeviceCard disabled={!status?.enabled || statusError} />
+      <PairDeviceCard disabled={!status?.enabled || statusError} onMinted={refreshAfterPairingChange} />
 
       <div className="mt-8 space-y-3">
         <h3 className="text-[12px] font-semibold">Authorized Devices</h3>
@@ -479,14 +561,24 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
                     <span className="text-[13px] font-medium text-foreground">{dev.name || dev.id}</span>
                     <Badge
                       variant="secondary"
-                      className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] uppercase text-muted-foreground shadow-none"
+                      data-testid="device-access-scope"
+                      data-scope={dev.accessScope ?? "mirror"}
+                      className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground shadow-none"
                     >
-                      {dev.permission}
+                      {dev.accessScope === "machine" ? "Paired machine" : "Mirror"}
                     </Badge>
                   </div>
                   <div className="text-[11px] text-muted-foreground">
                     {dev.lastSeenAt ? `Last active ${new Date(dev.lastSeenAt).toLocaleString()}` : `Device ID: ${dev.id}`}
                   </div>
+                  <SegmentedControl<DevicePermission>
+                    label={`Role for ${dev.name || dev.id}`}
+                    value={dev.permission}
+                    options={ROLE_OPTIONS.map((option) => ({ ...option, ariaLabel: `${option.label} for ${dev.name || dev.id}` }))}
+                    onChange={(permission) => void handleRoleChange(dev, permission)}
+                    disabled={roleBusyId === dev.id || dev.accessScope === "machine"}
+                    className="mt-1 max-w-56"
+                  />
                 </div>
                 {confirmRevokeId === dev.id ? (
                   <div className="flex items-center gap-1.5">

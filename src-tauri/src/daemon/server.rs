@@ -3836,6 +3836,7 @@ impl DaemonServer {
             Arc::clone(&session_service.workspace_service.machine_events),
         );
         session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
+        remote_state.start_push_dispatch();
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -6938,6 +6939,10 @@ impl DaemonServer {
                             })
                             .await
                             .unwrap_or_default(),
+                            token_configured: crate::remote::server::machine_token_configured(),
+                            pairing_window: Some(
+                                self.remote_state.auth_manager.pairing_window_status(),
+                            ),
                         },
                     }
                 }
@@ -7481,6 +7486,35 @@ impl DaemonServer {
                         Err(err) => daemon_error(format!("Failed to persist revocation: {err}"),),
                     }
                 }
+                Ok(DaemonRequest::RemoteSetDevicePermission { device_id, permission }) => {
+                    let auth = Arc::clone(&self.remote_state.auth_manager);
+                    match crate::ipc::run_blocking(move || {
+                        Ok(auth.set_device_permission(&device_id, permission))
+                    })
+                    .await
+                    {
+                        Ok(Ok(device)) => DaemonResponse::RemoteSetDevicePermissionOk { device },
+                        Ok(Err(err)) => {
+                            let code = match err {
+                                crate::remote::auth::PermissionChangeError::NotFound => "NOT_FOUND",
+                                crate::remote::auth::PermissionChangeError::MachineRequiresControl => {
+                                    "INVALID_ARGUMENT"
+                                }
+                                crate::remote::auth::PermissionChangeError::Auth(_) => "IO_ERROR",
+                            };
+                            DaemonResponse::Error {
+                                message: err.to_string(),
+                                code: Some(code.to_string()),
+                                details: None,
+                            }
+                        }
+                        Err(err) => DaemonResponse::Error {
+                            message: err.to_string(),
+                            code: Some("INTERNAL_ERROR".into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {
                     if let Some(path) = ssh_store_path {
                         *self.remote_state.ssh_store_path.write() = Some(path);
@@ -7491,6 +7525,10 @@ impl DaemonServer {
                 Ok(DaemonRequest::RemoteGetActiveSelection) => {
                     let selection = self.remote_state.active_selection.read().clone();
                     DaemonResponse::RemoteGetActiveSelectionOk { selection }
+                }
+                Ok(DaemonRequest::RemoteSetWindowFocused { focused }) => {
+                    self.remote_state.set_desktop_window_focused(focused);
+                    DaemonResponse::RemoteSetWindowFocusedOk
                 }
                 Ok(DaemonRequest::SubscribeRemoteEvents) => {
                     let mut events = self.remote_event_tx.subscribe();

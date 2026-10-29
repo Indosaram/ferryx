@@ -1323,12 +1323,27 @@ export type RemoteGatewayStatus = {
   gateReason?: string | null;
   /** Insecure transport modes in effect (`direct`, `relay`); non-empty shows the red banner. */
   insecureModes?: string[];
+  relayConnected?: boolean;
+  controlChannelConnected?: boolean;
+  /** A static relay machine token is set in the gateway process. */
+  tokenConfigured?: boolean;
+  /** Who can reach the listener. */
+  bindScope?: RemoteBindScope;
+  /** True while the relay is connected or an insecure transport mode is in effect. */
+  publicExposure?: boolean;
+  pairingWindow?: { open: boolean; secondsLeft: number };
 };
+
+export type RemoteBindScope = "loopback" | "lan" | "relay";
+
+export type DevicePermission = "view" | "control";
 
 export type DeviceInfo = {
   id: string;
   name: string;
-  permission: "view" | "control";
+  permission: DevicePermission;
+  /** "machine" devices drive this computer as a paired host and must keep Control. */
+  accessScope?: "mirror" | "machine";
   createdAt: number;
   lastSeenAt: number;
   revoked: boolean;
@@ -1377,6 +1392,11 @@ export async function listRemoteDevices(): Promise<DeviceInfo[]> {
 
 export async function revokeRemoteDevice(deviceId: string): Promise<boolean> {
   return invokeCommand<boolean>("cmd_remote_device_revoke", { deviceId });
+}
+
+/** Owner-only role change for a paired device (desktop IPC). */
+export async function setRemoteDevicePermission(deviceId: string, permission: DevicePermission): Promise<DeviceInfo> {
+  return invokeCommand<DeviceInfo>("cmd_remote_device_set_permission", { deviceId, permission });
 }
 
 /** One agent-control call a paired device or the owner made, as the daemon audited it. */
@@ -1596,6 +1616,11 @@ export type FocusedTerminalPayload = {
   tabs?: RemoteTerminalTabInfo[];
   terminalTabs?: RemoteTerminalTabInfo[];
 };
+
+export async function reportDesktopWindowFocus(focused: boolean): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_remote_set_window_focused", { focused });
+}
 
 export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {
   if (!isTauri()) return;
