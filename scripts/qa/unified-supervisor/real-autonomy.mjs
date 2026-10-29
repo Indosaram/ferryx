@@ -5,8 +5,8 @@
 //
 // - Supervisor model: the hub's retained mhc engine with a run-local models.json whose only
 //   provider is `realEngine.provider` at `realEngine.baseUrl` (e.g. mahoquot-gateway). The
-//   provider's apiKey field holds the NAME of the env var (`realEngine.apiKeyEnv`), which mhc
-//   resolves from its environment (omo convention: an all-caps apiKey is an env var name), so
+//   provider's apiKey field holds a `${NAME}` reference to the env var (`realEngine.apiKeyEnv`),
+//   which mhc resolves from its environment, so
 //   the key value is never written to disk or evidence. Model fallback is off.
 // - Worker: Claude Code (`realEngine.workerCli` = "claude"), the agent Ferryx integrates through
 //   lifecycle hooks (src-tauri/src/daemon/agent_hook_install.rs, ferryx_scope/ssh/agent_hook_core.rs).
@@ -264,7 +264,8 @@ export async function runRealAutonomy(ctx, deps) {
   // Real-provider mhc profile (the stub variant is mhc.mjs prepareEngineEnv).
   const agentDir = join(home, '.omo', 'agent');
   mkdirSync(agentDir, { recursive: true });
-  const models = { providers: { [real.provider]: { api: real.api, baseUrl: real.baseUrl, apiKey: real.apiKeyEnv,
+  // mhc resolves config values as `$NAME`/`${NAME}` templates; a bare name would be a literal key.
+  const models = { providers: { [real.provider]: { api: real.api, baseUrl: real.baseUrl, apiKey: `\${${real.apiKeyEnv}}`,
     models: [{ id: real.model, contextWindow: CONTEXT_WINDOW, maxTokens: 8192 }] } } };
   writeFileSync(join(agentDir, 'models.json'), `${JSON.stringify(models, null, 2)}\n`, { mode: 0o600 });
   writeFileSync(join(agentDir, 'settings.json'), `${JSON.stringify({ retry: { modelFallback: false } }, null, 2)}\n`, { mode: 0o600 });
