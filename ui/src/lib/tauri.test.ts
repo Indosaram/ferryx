@@ -23,6 +23,11 @@ import {
   getTerminalPreferences,
   setTerminalAppearance,
   getWorktreeStatus,
+  getWorktreeDiff,
+  stageWorktreePaths,
+  unstageWorktreePaths,
+  commitWorktree,
+  pushWorktree,
   listProjectBranches,
   listProjectRefs,
   previewGitHubIssue,
@@ -466,6 +471,37 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenNthCalledWith(4, "cmd_worktree_delete_destructive", {
       request: { ...request, deleteBranch: true },
     });
+  });
+
+  it("wraps worktree diff, stage, unstage, commit and push commands", async () => {
+    core.invoke
+      .mockResolvedValueOnce("+line")
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce("abc123")
+      .mockResolvedValueOnce({ remote: "origin", branch: "feature", setUpstream: true });
+    const request = { workspaceId: "workspace-main", worktree: { wsId: "ws-main", slug: "feature" } };
+
+    await expect(getWorktreeDiff({ ...request, scope: { kind: "staged" } })).resolves.toBe("+line");
+    await stageWorktreePaths({ ...request, paths: ["a.txt"] });
+    await unstageWorktreePaths({ ...request, paths: ["a.txt"] });
+    await expect(commitWorktree({ ...request, message: "msg" })).resolves.toBe("abc123");
+    await expect(pushWorktree(request)).resolves.toEqual({ remote: "origin", branch: "feature", setUpstream: true });
+
+    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_worktree_diff", {
+      request: { ...request, scope: { kind: "staged" }, file: null },
+    });
+    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_worktree_stage", { request: { ...request, paths: ["a.txt"] } });
+    expect(core.invoke).toHaveBeenNthCalledWith(3, "cmd_worktree_unstage", { request: { ...request, paths: ["a.txt"] } });
+    expect(core.invoke).toHaveBeenNthCalledWith(4, "cmd_worktree_commit", { request: { ...request, message: "msg" } });
+    expect(core.invoke).toHaveBeenNthCalledWith(5, "cmd_worktree_push", { request });
+  });
+
+  it("surfaces structured git change error codes", async () => {
+    core.invoke.mockRejectedValueOnce({ code: "GIT_NOTHING_TO_COMMIT", message: "Nothing is staged to commit" });
+    await expect(
+      commitWorktree({ workspaceId: "w", worktree: { wsId: "ws", slug: "s" }, message: "m" }),
+    ).rejects.toMatchObject({ code: "GIT_NOTHING_TO_COMMIT", details: { command: "cmd_worktree_commit" } });
   });
 
   it("wraps worktree disk scan commands and progress listener", async () => {
