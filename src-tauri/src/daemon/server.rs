@@ -189,6 +189,36 @@ mod prompt_changed_event_tests {
         assert_eq!(event.payload["sessionId"], "s-1");
         assert_eq!(event.payload["promptId"], "p-1");
     }
+
+    /// The daemon relays an agent-bus prompt change to its desktop subscribers.
+    #[tokio::test]
+    async fn a_published_prompt_change_reaches_the_desktop_event_stream() {
+        let server = DaemonServer::new();
+        let mut desktop = server.remote_event_tx.subscribe();
+        server.remote_state.agent_events.publish(crate::agent_control::events::ObservationDraft {
+            session_id: "relay-pane".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: Some("relay-prompt".into()),
+            kind: None,
+            screen_revision: Some("relay-rev".into()),
+            workspace_id: None,
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match desktop.recv().await {
+                    Ok(event) if event.event == "agentPromptChanged" => return event,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => panic!("the desktop stream closed"),
+                }
+            }
+        })
+        .await
+        .expect("agentPromptChanged reaches the desktop stream");
+        assert_eq!(event.payload["sessionId"], "relay-pane");
+        assert_eq!(event.payload["promptId"], "relay-prompt");
+    }
 }
 
 #[cfg(test)]
