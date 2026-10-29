@@ -1733,6 +1733,7 @@ describe("worktree tab and session isolation", () => {
         backendSessionId: "backend-new-123",
         lifecycle: "running",
         processState: "running",
+        exitCode: null,
         reconnectLifecycle: "idle",
         reconnectError: null,
         backendUnavailableReason: null,

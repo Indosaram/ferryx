@@ -10,7 +10,7 @@ import {
 import type { LandingLocale } from "@/lib/locale";
 
 export function Features({ locale, basePath }: { locale: LandingLocale; basePath: string }) {
-  const visuals = [SupervisorVisual, GhosttyVisual, AgentsVisual, SplitVisual, MobileVisual, ZeroElectronVisual, PersistenceVisual];
+  const visuals = [GhosttyVisual, AgentsVisual, SplitVisual, MobileVisual, ZeroElectronVisual, PersistenceVisual, SupervisorVisual];
 
   return (
     <section id="features" className="py-24 sm:py-28 border-t border-line bg-page-raised relative">

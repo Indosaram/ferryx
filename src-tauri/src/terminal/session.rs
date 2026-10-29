@@ -904,13 +904,17 @@ impl PtySession {
 
                 reader_phase_task.store(PtyReaderPhase::BeforeRead.as_raw(), Ordering::Release);
                 match reader.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        tracing::info!(session_id = %metrics_session_id, "PTY reader ended: EOF");
+                        break;
+                    }
                     Ok(n) => {
                         reader_phase_task.store(PtyReaderPhase::AfterRead.as_raw(), Ordering::Release);
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
                         reader_phase_task.store(PtyReaderPhase::BeforeSend.as_raw(), Ordering::Release);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            tracing::info!(session_id = %metrics_session_id, "PTY reader ended: output receiver dropped");
                             break;
                         }
                         reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
@@ -947,10 +951,14 @@ impl PtySession {
                             && std::io::Error::last_os_error().kind()
                                 != std::io::ErrorKind::Interrupted
                         {
+                            tracing::info!(session_id = %metrics_session_id, error = %std::io::Error::last_os_error(), "PTY reader ended: poll failed");
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(error) => {
+                        tracing::info!(session_id = %metrics_session_id, %error, "PTY reader ended: read failed");
+                        break;
+                    }
                 }
             }
             reader_finished_task.store(true, Ordering::Release);
@@ -2316,13 +2324,17 @@ impl PtySession {
 
                 reader_phase_task.store(PtyReaderPhase::BeforeRead.as_raw(), Ordering::Release);
                 match reader.read(&mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        tracing::info!(session_id = %metrics_session_id, "adopted PTY reader ended: EOF");
+                        break;
+                    }
                     Ok(n) => {
                         reader_phase_task.store(PtyReaderPhase::AfterRead.as_raw(), Ordering::Release);
                         record_output_millis(&task_last_output_at);
                         crate::terminal::metrics::record_pty_read(&metrics_session_id, n);
                         reader_phase_task.store(PtyReaderPhase::BeforeSend.as_raw(), Ordering::Release);
                         if reader_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            tracing::info!(session_id = %metrics_session_id, "adopted PTY reader ended: output receiver dropped");
                             break;
                         }
                         reader_phase_task.store(PtyReaderPhase::AfterSend.as_raw(), Ordering::Release);
@@ -2345,10 +2357,14 @@ impl PtySession {
                             && std::io::Error::last_os_error().kind()
                                 != std::io::ErrorKind::Interrupted
                         {
+                            tracing::info!(session_id = %metrics_session_id, error = %std::io::Error::last_os_error(), "adopted PTY reader ended: poll failed");
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(error) => {
+                        tracing::info!(session_id = %metrics_session_id, %error, "adopted PTY reader ended: read failed");
+                        break;
+                    }
                 }
             }
             reader_finished_task.store(true, Ordering::Release);

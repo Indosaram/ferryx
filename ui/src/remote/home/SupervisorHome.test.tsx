@@ -66,6 +66,17 @@ describe("SupervisorHome", () => {
     expect(screen.getByRole("button", { name: "Pause Docs" })).toBeEnabled();
   });
 
+  it("shows a later change from another surface once the snapshot confirmed the pause", async () => {
+    const lanes = (paused: boolean) => [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "k", title: "Docs", paused })] }) })];
+    const { rerender, props } = renderHome({ machines: lanes(false) });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Pause Docs" })));
+    // The machine confirms the pause, then the desktop resumes the lane.
+    rerender(<SupervisorHome {...props} machines={lanes(true)} />);
+    expect(screen.getByRole("button", { name: "Resume Docs" })).toBeEnabled();
+    rerender(<SupervisorHome {...props} machines={lanes(false)} />);
+    expect(screen.getByRole("button", { name: "Pause Docs" })).toBeEnabled();
+  });
+
   it("tells the person to update Ferryx on an unsupported machine", () => {
     renderHome({ machines: [fixtureMachine({ machineId: "old-mac", label: "Old Mac", state: "unsupported", snapshot: null })] });
     const section = screen.getByTestId("supervisor-machine-old-mac");
