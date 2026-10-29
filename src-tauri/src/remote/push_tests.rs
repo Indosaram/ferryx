@@ -353,6 +353,49 @@ async fn published_agent_events_drive_the_dispatcher() {
     assert_eq!(mock.decrypt(&delivery)["state"], "waiting_input");
 }
 
+#[tokio::test]
+async fn a_stalled_push_service_does_not_hold_up_later_alerts() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let keys = MockPush::start(StatusCode::CREATED).await;
+    // A push service that accepts the request and then never answers until released.
+    let (tx, mut arrivals) = mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+        .route(
+            "/push/{id}",
+            post(
+                |AxState((tx, release)): AxState<(mpsc::UnboundedSender<()>, Arc<tokio::sync::Notify>)>| async move {
+                    let _ = tx.send(());
+                    release.notified().await;
+                    StatusCode::CREATED
+                },
+            ),
+        )
+        .with_state((tx, Arc::clone(&release)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let device = paired_device(&state);
+    let mut subscription = keys.subscription("stall", true, FinishedMode::Off);
+    subscription.endpoint = format!("http://{addr}/push/stall");
+    state.push.store.subscribe(&device, subscription).unwrap();
+    state.start_push_dispatch();
+
+    state.agent_events.publish(draft("s1", AgentControlState::Blocked));
+    state.agent_events.publish(draft("s2", AgentControlState::Blocked));
+    // The first send is still parked in the service; the second must arrive anyway, well
+    // before the 15 s send timeout would free a serial dispatcher.
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(10), arrivals.recv())
+            .await
+            .expect("both alerts reach the push service while the first is stalled")
+            .expect("an arrival");
+    }
+    release.notify_waiters();
+    server.abort();
+}
+
 #[test]
 fn unknown_between_two_blocked_readings_is_one_wait() {
     let mut turns = TurnTracker::default();

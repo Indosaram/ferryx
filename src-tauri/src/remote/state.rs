@@ -826,6 +826,8 @@ pub struct RemoteGatewayState {
     /// focus: this is the native window's own focus, and a stale report counts as unfocused.
     desktop_window_focus: RwLock<Option<(bool, std::time::Instant)>>,
     push_dispatch_started: std::sync::atomic::AtomicBool,
+    /// Bounds concurrent push dispatches so a slow push service never stalls the event loop.
+    push_dispatch_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     pub(crate) machine_owned_override: RwLock<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>,
     pub workspace_registry: WorkspaceRegistry,
@@ -1083,6 +1085,7 @@ impl RemoteGatewayState {
             push,
             desktop_window_focus: RwLock::new(None),
             push_dispatch_started: std::sync::atomic::AtomicBool::new(false),
+            push_dispatch_slots: Arc::new(tokio::sync::Semaphore::new(PUSH_DISPATCH_SLOTS)),
             #[cfg(test)]
             machine_owned_override: RwLock::new(None),
             active_selection: RwLock::new(None),
@@ -1421,7 +1424,17 @@ impl RemoteGatewayState {
                 ) else {
                     continue;
                 };
-                state.dispatch_push(&observation.session_id, kind).await;
+                // Sending runs on its own task: a slow push service must not delay the next
+                // observation. Past the bound the alert is dropped and logged, not queued.
+                let Ok(slot) = Arc::clone(&state.push_dispatch_slots).try_acquire_owned() else {
+                    tracing::warn!("phone push dropped: too many sends in flight");
+                    continue;
+                };
+                let session_id = observation.session_id.clone();
+                tokio::spawn(async move {
+                    let _slot = slot;
+                    state.dispatch_push(&session_id, kind).await;
+                });
             }
         });
     }
@@ -1600,6 +1613,9 @@ impl RemoteGatewayState {
         Ok(self.agent_control_settings())
     }
 }
+
+/// Concurrent push dispatches in flight before new alerts are dropped.
+const PUSH_DISPATCH_SLOTS: usize = 16;
 
 /// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device
 /// sees machine-owned sessions; a Mirror device sees mirrored (desktop) sessions only.
