@@ -6959,7 +6959,7 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_hdr_async(
                 tcp,
-                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                crate::remote::InspectHandshake(|request: &tokio_tungstenite::tungstenite::handshake::server::Request| {
                     assert_eq!(request.uri().path(), "/api/v1/terminal/t1");
                     assert_eq!(
                         request.uri().query(),
@@ -6969,8 +6969,7 @@ mod tests {
                         request.headers()["authorization"],
                         "Bearer test-device-token"
                     );
-                    Ok(response)
-                },
+                }),
             )
             .await
             .unwrap();

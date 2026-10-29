@@ -25,7 +25,7 @@ pub(super) async fn read(
     let id = uuid::Uuid::new_v4().to_string();
     let _admission = match super::workspace_api::admit(state.clone(), headers, false, &id).await {
         Ok(admission) => admission,
-        Err(refusal) => return refusal,
+        Err(refusal) => return refusal.into(),
     };
     let probes = probes(&state);
     let sampler = Arc::clone(&SAMPLER);

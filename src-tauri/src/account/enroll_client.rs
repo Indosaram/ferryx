@@ -114,7 +114,7 @@ fn now_secs() -> u64 {
 pub async fn enroll_machine(
     account_origin: &str,
     enrollment_code: &str,
-) -> Result<AccountEnrollmentRecord, EnrollError> {
+) -> Result<AccountEnrollmentRecord, Box<EnrollError>> {
     enroll_machine_named(account_origin, enrollment_code, None).await
 }
 
@@ -124,7 +124,7 @@ pub async fn enroll_machine_named(
     account_origin: &str,
     enrollment_code: &str,
     display_name: Option<&str>,
-) -> Result<AccountEnrollmentRecord, EnrollError> {
+) -> Result<AccountEnrollmentRecord, Box<EnrollError>> {
     let origin = account_origin.trim_end_matches('/');
     let dir = canonical_remote_dir()
         .ok_or_else(|| EnrollError::local("ACCOUNT_IDENTITY_DIR_UNRESOLVED", "cannot resolve identity dir"))?;
@@ -153,7 +153,7 @@ pub async fn enroll_machine_named(
         .await
         .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
     if status != 200 {
-        return Err(EnrollError::remote(status, &body));
+        return Err(EnrollError::remote(status, &body).into());
     }
     let challenge: serde_json::Value = serde_json::from_str(&body)
         .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))?;
@@ -199,7 +199,7 @@ pub async fn enroll_machine_named(
         .await
         .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
     if status != 200 {
-        return Err(EnrollError::remote(status, &body));
+        return Err(EnrollError::remote(status, &body).into());
     }
     let enrolled: AccountEnrollResponse = serde_json::from_str(&body)
         .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))?;
@@ -232,7 +232,7 @@ pub async fn request_machine_grant(
     device_label: &str,
     installation_id: &str,
     grant_scope: AccountGrantScope,
-) -> Result<AccountGrantResponse, EnrollError> {
+) -> Result<AccountGrantResponse, Box<EnrollError>> {
     let record = load_enrollment_record().ok_or_else(|| {
         EnrollError::local("ACCOUNT_NOT_ENROLLED", "run ferryx-cli account enroll first")
     })?;
@@ -273,10 +273,10 @@ pub async fn request_machine_grant(
         .await
         .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
     if status != 200 {
-        return Err(EnrollError::remote(status, &body));
+        return Err(EnrollError::remote(status, &body).into());
     }
     serde_json::from_str(&body)
-        .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))
+        .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string())).map_err(Box::new)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,7 +292,7 @@ pub struct DeviceAuthClientResponse {
 pub async fn request_device_auth(
     account_origin: &str,
     email: &str,
-) -> Result<DeviceAuthClientResponse, EnrollError> {
+) -> Result<DeviceAuthClientResponse, Box<EnrollError>> {
     let origin = account_origin.trim_end_matches('/');
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -311,16 +311,16 @@ pub async fn request_device_auth(
         .await
         .map_err(|e| EnrollError::local("ACCOUNT_UNREACHABLE", e.to_string()))?;
     if status != 200 {
-        return Err(EnrollError::remote(status, &body));
+        return Err(EnrollError::remote(status, &body).into());
     }
     serde_json::from_str(&body)
-        .map_err(|e| EnrollError::local("ACCOUNT_BAD_RESPONSE", e.to_string()))
+        .map_err(|e| EnrollError::local("ACCOUNT_BAD_RESPONSE", e.to_string())).map_err(Box::new)
 }
 
 pub async fn poll_device_auth(
     account_origin: &str,
     device_code: &str,
-) -> Result<Option<String>, EnrollError> {
+) -> Result<Option<String>, Box<EnrollError>> {
     let origin = account_origin.trim_end_matches('/');
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -339,7 +339,7 @@ pub async fn poll_device_auth(
         .await
         .map_err(|e| EnrollError::local("ACCOUNT_UNREACHABLE", e.to_string()))?;
     if status != 200 {
-        return Err(EnrollError::remote(status, &body));
+        return Err(EnrollError::remote(status, &body).into());
     }
     let val: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| EnrollError::local("ACCOUNT_BAD_RESPONSE", e.to_string()))?;
@@ -360,12 +360,11 @@ fn requested_display_name(display_name: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-#[allow(clippy::result_large_err)]
-fn account_http_client() -> Result<reqwest::Client, EnrollError> {
+fn account_http_client() -> Result<reqwest::Client, Box<EnrollError>> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|error| EnrollError::local("ACCOUNT_CLIENT_FAILED", error.to_string()))
+        .map_err(|error| EnrollError::local("ACCOUNT_CLIENT_FAILED", error.to_string())).map_err(Box::new)
 }
 
 /// Error code the account service answers a machine-request poll with when the client polls
@@ -400,7 +399,7 @@ pub async fn create_machine_request(
     account_origin: &str,
     email: Option<&str>,
     display_name: Option<&str>,
-) -> Result<MachineRequestClientResponse, EnrollError> {
+) -> Result<MachineRequestClientResponse, Box<EnrollError>> {
     let origin = account_origin.trim_end_matches('/');
     let dir = canonical_remote_dir()
         .ok_or_else(|| EnrollError::local("ACCOUNT_IDENTITY_DIR_UNRESOLVED", "cannot resolve identity dir"))?;
@@ -428,10 +427,10 @@ pub async fn create_machine_request(
         .await
         .map_err(|error| EnrollError::local("ACCOUNT_UNREACHABLE", error.to_string()))?;
     if !(200..300).contains(&status) {
-        return Err(EnrollError::remote(status, &body));
+        return Err(EnrollError::remote(status, &body).into());
     }
     serde_json::from_str(&body)
-        .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))
+        .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string())).map_err(Box::new)
 }
 
 /// Polls one machine request. `slow_down` is an answer, not an error; an expired request is
@@ -439,7 +438,7 @@ pub async fn create_machine_request(
 pub async fn poll_machine_request(
     account_origin: &str,
     device_code: &str,
-) -> Result<MachineRequestPoll, EnrollError> {
+) -> Result<MachineRequestPoll, Box<EnrollError>> {
     let origin = account_origin.trim_end_matches('/');
     let response = account_http_client()?
         .post(format!("{origin}/api/account/v1/machine-requests/poll"))
@@ -456,8 +455,7 @@ pub async fn poll_machine_request(
 }
 
 /// Classifies one poll response by its HTTP status and structured body.
-#[allow(clippy::result_large_err)]
-pub fn parse_machine_request_poll(status: u16, body: &str) -> Result<MachineRequestPoll, EnrollError> {
+pub fn parse_machine_request_poll(status: u16, body: &str) -> Result<MachineRequestPoll, Box<EnrollError>> {
     if !(200..300).contains(&status) {
         let error = EnrollError::remote(status, body);
         let rfc_error = serde_json::from_str::<serde_json::Value>(body)
@@ -468,7 +466,7 @@ pub fn parse_machine_request_poll(status: u16, body: &str) -> Result<MachineRequ
         {
             return Ok(MachineRequestPoll::SlowDown);
         }
-        return Err(error);
+        return Err(error.into());
     }
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| EnrollError::local("ACCOUNT_BAD_RESPONSE", error.to_string()))?;
@@ -481,11 +479,11 @@ pub fn parse_machine_request_poll(status: u16, body: &str) -> Result<MachineRequ
             .map(|code| MachineRequestPoll::Approved {
                 enrollment_code: code.to_string(),
             })
-            .ok_or_else(|| EnrollError::local("ACCOUNT_BAD_RESPONSE", "approved poll had no enrollmentCode")),
+            .ok_or_else(|| EnrollError::local("ACCOUNT_BAD_RESPONSE", "approved poll had no enrollmentCode").into()),
         other => Err(EnrollError::local(
             "ACCOUNT_BAD_RESPONSE",
             format!("unknown machine request status {other:?}"),
-        )),
+        ).into()),
     }
 }
 

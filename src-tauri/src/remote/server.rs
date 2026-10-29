@@ -407,7 +407,7 @@ async fn pair_exchange(
     peer: Option<axum::Extension<axum::extract::ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(payload): Json<PairExchangeRequest>,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let identity = load_gateway_identity(Arc::clone(&state)).await?;
     let source = pairing_peer(peer.map(|axum::Extension(info)| info.0), &headers);
     let (token, device) = state
@@ -3835,6 +3835,29 @@ pub(super) fn authenticate_machine_request(
         .map_err(|_| Box::new(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")))
 }
 
+/// The response an HTTP adapter refuses a request with, boxed so `Result<_, Refusal>` stays
+/// pointer-sized. It renders exactly the response it wraps.
+#[derive(Debug)]
+pub(crate) struct Refusal(Box<Response>);
+
+impl From<Response> for Refusal {
+    fn from(response: Response) -> Self {
+        Self(Box::new(response))
+    }
+}
+
+impl From<Refusal> for Response {
+    fn from(refusal: Refusal) -> Self {
+        *refusal.0
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
 /// The identity fields the capability document publishes for reference-chat clients.
 ///
 /// `referenceHostId` is the owning host's OWN reference-chat identity — `FERRYX_HOST_ID` where
@@ -3874,7 +3897,7 @@ fn reference_chat_capability_identity(
 async fn get_capabilities(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     // Authentication precedes even the identity-file lookup. No workspace or
     // session service is probed or advertised until its implementation ships.
     authenticate_machine_request(&state, &headers).map_err(|response| *response)?;
@@ -3931,7 +3954,7 @@ async fn get_capabilities(
 
 pub(super) async fn load_gateway_identity(
     state: Arc<RemoteGatewayState>,
-) -> Result<crate::remote::auth::MachineIdentity, Response> {
+) -> Result<crate::remote::auth::MachineIdentity, Refusal> {
     crate::ipc::run_blocking(move || {
         #[cfg(test)]
         if let Some(probe) = state.identity_probe.read().clone() {
@@ -3951,6 +3974,7 @@ pub(super) async fn load_gateway_identity(
             StatusCode::SERVICE_UNAVAILABLE,
             "MACHINE_SERVICE_UNAVAILABLE",
         )
+        .into()
     })
 }
 
@@ -3958,19 +3982,19 @@ async fn list_sessions(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     uri: axum::http::Uri,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let auth_state = state.clone();
     let auth_headers = headers.clone();
     // This is an existing legacy route: until a grant selects the machine
     // projection, retain its original missing/invalid-credential response.
     let device = crate::ipc::run_blocking(move || {
-        Ok((|| {
+        Ok((|| -> Result<DeviceInfo, Refusal> {
             let token = extract_token(&auth_headers)
                 .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing auth token").into_response())?;
             auth_state
                 .auth_manager
                 .validate_token(&token)
-                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response())
+                .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or revoked token").into_response().into())
         })())
     })
     .await
@@ -3987,7 +4011,7 @@ async fn list_sessions(
         list_legacy_sessions(State(state), headers)
             .await
             .map(IntoResponse::into_response)
-            .map_err(IntoResponse::into_response)
+            .map_err(|error| error.into_response().into())
     }
 }
 
@@ -3998,7 +4022,7 @@ async fn list_sessions(
 pub(super) async fn project_body(
     request: axum::extract::Request,
     admission: &super::workspace_api::Admission,
-) -> Result<axum::body::Bytes, Response> {
+) -> Result<axum::body::Bytes, Refusal> {
     use axum::extract::FromRequest;
     let mut revoked = admission.revoked.clone();
     let deadline = admission
@@ -4006,16 +4030,17 @@ pub(super) async fn project_body(
         .min(std::time::Instant::now() + Duration::from_secs(10));
     let extracted = tokio::select! {
         biased;
-        _ = revoked.wait_for(|v| *v) => return Err(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")),
+        _ = revoked.wait_for(|v| *v) => return Err(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED").into()),
         result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), axum::body::Bytes::from_request(request, &())) => result.map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?,
     };
     extracted.map_err(|error| {
         let too_large = error.status() == StatusCode::PAYLOAD_TOO_LARGE;
-        if too_large {
+        let response = if too_large {
             machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE")
         } else {
             machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST")
-        }
+        };
+        response.into()
     })
 }
 
@@ -4023,7 +4048,7 @@ async fn worktree_mutation_boundary(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     request: axum::extract::Request,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let deadline = std::time::Instant::now() + Duration::from_secs(40);
     let auth_state = state.clone();
     let auth_headers = headers.clone();
@@ -4103,7 +4128,7 @@ async fn worktree_mutation_boundary(
     .map_err(|_| machine_error(StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"))?
     .map_err(|_| machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"))?;
     let worker = crate::ipc::run_blocking(move || {
-        Ok(crate::worktree::git::with_git_budget(budget, || {
+        Ok(crate::worktree::git::with_git_budget(budget, || -> Result<Response, Refusal> {
             let auth_state = state.clone();
             let token = extract_token(&headers)
                 .ok_or_else(|| machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
@@ -4326,7 +4351,7 @@ async fn register_project_boundary(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     request: axum::extract::Request,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let admission = super::workspace_api::admit(
         state.clone(),
         headers.clone(),
@@ -4360,7 +4385,7 @@ async fn unregister_project_boundary(
     path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>,
     headers: HeaderMap,
     request: axum::extract::Request,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let admission = super::workspace_api::admit(
         state.clone(),
         headers.clone(),
@@ -4382,7 +4407,7 @@ async fn operation_boundary(
     State(state): State<Arc<RemoteGatewayState>>,
     path: Result<AxumPath<String>, axum::extract::rejection::PathRejection>,
     headers: HeaderMap,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let id = path
         .as_ref()
         .ok()
@@ -4403,7 +4428,7 @@ async fn paste_upload_boundary(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     request: axum::extract::Request,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let admission = super::workspace_api::admit(
         state.clone(),
         headers.clone(),
@@ -4461,7 +4486,7 @@ async fn paste_upload_boundary(
             return Err(machine_error(
                 StatusCode::BAD_REQUEST,
                 "INVALID_REQUEST: offset and totalBytes must both be present or both absent",
-            ));
+            ).into());
         }
     };
 
@@ -4478,7 +4503,7 @@ async fn file_read_boundary(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     request: axum::extract::Request,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     use crate::paired_host::file_read as fr;
     let admission = super::workspace_api::admit(
         state.clone(),
@@ -4509,7 +4534,7 @@ async fn file_read_boundary(
         Err(error) => Err(machine_error(
             StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
             error.code(),
-        )),
+        ).into()),
     }
 }
 
@@ -4520,13 +4545,13 @@ async fn file_read_boundary(
 async fn ensure_file_read_session_is_host_local(
     backend: &dyn crate::remote::backend::RemoteSessionBackend,
     req: &super::machine_protocol::FileReadRequest,
-) -> Result<(), Response> {
+) -> Result<(), Refusal> {
     let Some(id) = req.session_id.as_deref() else {
         return Ok(());
     };
     // A session relayed from another paired host runs its shell on a third machine.
     if crate::terminal::paired_runtime::Runtime::owns(id) {
-        return Err(machine_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_PATH"));
+        return Err(machine_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_PATH").into());
     }
     // Fail closed: a session this host cannot describe cannot be proven host-local.
     let details = backend
@@ -4539,7 +4564,7 @@ async fn ensure_file_read_session_is_host_local(
                 || ws.starts_with("ssh:")
                 || ws.starts_with("daemon:") =>
         {
-            Err(machine_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_PATH"))
+            Err(machine_error(StatusCode::BAD_REQUEST, "UNSUPPORTED_PATH").into())
         }
         _ => Ok(()),
     }
@@ -4552,7 +4577,7 @@ async fn ensure_file_read_session_is_host_local(
 async fn file_read_session_base(
     backend: &dyn crate::remote::backend::RemoteSessionBackend,
     req: &super::machine_protocol::FileReadRequest,
-) -> Result<Option<PathBuf>, Response> {
+) -> Result<Option<PathBuf>, Refusal> {
     use crate::paired_host::file_read as fr;
     let Some(id) = req.session_id.as_deref() else {
         return Ok(None);
@@ -4572,7 +4597,7 @@ async fn file_read_session_base(
         .ok()
         .and_then(|details| details.worktree_path)
         .map(Some)
-        .ok_or_else(|| machine_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND"))
+        .ok_or_else(|| machine_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND").into())
 }
 
 /// A live shell cwd replaces the desktop-supplied cwd, which is only the session's
@@ -5961,7 +5986,7 @@ async fn reference_chat_read_context(
     session_id: &str,
     query: &ReferenceChatReadQuery,
     registry_required: bool,
-) -> Result<ReferenceChatRead, Response> {
+) -> Result<ReferenceChatRead, Refusal> {
     reference_chat_read_context_with(state, headers, session_id, query, registry_required, true)
         .await
 }
@@ -5976,7 +6001,7 @@ async fn reference_chat_read_context_with(
     query: &ReferenceChatReadQuery,
     registry_required: bool,
     require_live: bool,
-) -> Result<ReferenceChatRead, Response> {
+) -> Result<ReferenceChatRead, Refusal> {
     let device = authenticate_machine_request(state, headers).map_err(|response| *response)?;
     if let Some(named) = query
         .backend_session_id
@@ -5988,7 +6013,7 @@ async fn reference_chat_read_context_with(
             return Err(reference_chat_error(
                 ScopeErrorCode::Forbidden,
                 "the query names a different backend session than the route",
-            ));
+            ).into());
         }
     }
     let target = reference_chat_target(
@@ -6011,7 +6036,7 @@ async fn reference_chat_read_context_with(
         return Err(reference_chat_error(
             ScopeErrorCode::InvalidRequest,
             "the session id is not a session id",
-        ));
+        ).into());
     }
     let registry_id = query
         .registry_id
@@ -6022,7 +6047,7 @@ async fn reference_chat_read_context_with(
         return Err(reference_chat_error(
             ScopeErrorCode::InvalidRequest,
             "the request names no registry id for this pane",
-        ));
+        ).into());
     }
     let identity = reference_chat_identity(state, &target, registry_id).await;
     Ok(ReferenceChatRead { device, target, identity })
@@ -6034,13 +6059,13 @@ async fn reference_chat_mutation_context<P>(
     headers: &HeaderMap,
     session_id: &str,
     body: &ReferenceChatMutation<P>,
-) -> Result<(DeviceInfo, reference_types::ReferenceTargetRef), Response> {
+) -> Result<(DeviceInfo, reference_types::ReferenceTargetRef), Refusal> {
     let device = authenticate_machine_request(state, headers).map_err(|response| *response)?;
     if body.request_id.trim().is_empty() {
         return Err(reference_chat_error(
             ScopeErrorCode::InvalidRequest,
             "a mutation names no request id",
-        ));
+        ).into());
     }
     let named = body.target.as_ref().ok_or_else(|| {
         reference_chat_error(ScopeErrorCode::InvalidRequest, "a mutation names no target")
@@ -6049,7 +6074,7 @@ async fn reference_chat_mutation_context<P>(
         return Err(reference_chat_error(
             ScopeErrorCode::Forbidden,
             "the mutation target names a different backend session than the route",
-        ));
+        ).into());
     }
     let named_epoch = named.epoch.0.to_string();
     let target = reference_chat_target(
@@ -6519,7 +6544,7 @@ fn reference_chat_sweep_recorded_staging(state: &RemoteGatewayState) {
 async fn reference_chat_mutation_body<P: serde::de::DeserializeOwned>(
     request: axum::extract::Request,
     state: &Arc<RemoteGatewayState>,
-) -> Result<(HeaderMap, P), Response> {
+) -> Result<(HeaderMap, P), Refusal> {
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
     authenticate_machine_request(state, &headers).map_err(|response| *response)?;
@@ -6575,7 +6600,7 @@ where
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
     {
         Ok(read) => read,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     // The pane's agent rotated its conversation (e.g. /new) since the caller read its session
     // rows: the caller's provider session is stale, never served in place of the current one.
@@ -6662,7 +6687,7 @@ async fn reference_chat_screen(
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
         Ok(read) => read,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     match reference_chat_snapshot_screen(&state, &read.target).await {
         Ok(snapshot) => ([(header::CACHE_CONTROL, "no-store")], Json(snapshot)).into_response(),
@@ -6688,7 +6713,7 @@ async fn reference_chat_prompt(
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await
     {
         Ok(read) => read,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     let snapshot = match reference_chat_snapshot_screen(&state, &read.target).await {
         Ok(snapshot) => snapshot,
@@ -6760,12 +6785,12 @@ pub(crate) async fn reference_chat_submit_with_clock(
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     let (device, target) =
         match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
             Ok(context) => context,
-            Err(response) => return response,
+            Err(response) => return response.into(),
         };
     if device.permission != DevicePermission::Control {
         return reference_chat_error(
@@ -6873,12 +6898,12 @@ async fn reference_chat_stop(
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     let (device, target) =
         match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
             Ok(context) => context,
-            Err(response) => return response,
+            Err(response) => return response.into(),
         };
     if device.permission != DevicePermission::Control {
         return reference_chat_error(
@@ -6919,12 +6944,12 @@ pub(crate) async fn reference_chat_answer(
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     let (device, target) =
         match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
             Ok(context) => context,
-            Err(response) => return response,
+            Err(response) => return response.into(),
         };
     if device.permission != DevicePermission::Control {
         return reference_chat_error(
@@ -6991,12 +7016,12 @@ pub(crate) async fn reference_chat_stage_file_with_runtime(
     .await
     {
         Ok(parsed) => parsed,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     let (device, target) =
         match reference_chat_mutation_context(&state, &headers, &session_id, &body).await {
             Ok(context) => context,
-            Err(response) => return response,
+            Err(response) => return response.into(),
         };
     if device.permission != DevicePermission::Control {
         return reference_chat_error(
@@ -7201,7 +7226,7 @@ async fn reference_chat_list_files(
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
         Ok(read) => read,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     let target_key = reference_types::reference_draft_key(&read.target);
     let mut files = {
@@ -7244,7 +7269,7 @@ async fn reference_chat_preview_file(
     let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await
     {
         Ok(read) => read,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     let runtime = reference_chat_runtime();
     let entry = {
@@ -7327,7 +7352,7 @@ async fn reference_chat_delete_file(
     .await
     {
         Ok(read) => read,
-        Err(response) => return response,
+        Err(response) => return response.into(),
     };
     if read.device.permission != DevicePermission::Control {
         return reference_chat_error(
@@ -9191,7 +9216,7 @@ mod tests {
         ));
         let response = get_capabilities(State(state), HeaderMap::new())
             .await
-            .unwrap_err();
+            .unwrap_err().into_response();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             response
@@ -9263,7 +9288,7 @@ mod tests {
             "identity work must run off reactor"
         );
         released.unwrap();
-        let response = response.unwrap().unwrap().unwrap_err();
+        let response = response.unwrap().unwrap().unwrap_err().into_response();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -9279,7 +9304,7 @@ mod tests {
         assert_eq!(
             get_capabilities(State(state), headers)
                 .await
-                .unwrap_err()
+                .unwrap_err().into_response()
                 .status(),
             StatusCode::UNAUTHORIZED
         );
@@ -9311,7 +9336,7 @@ mod tests {
             .unwrap();
         let response = super::super::session_api::create(State(state), headers, request)
             .await
-            .unwrap_err();
+            .unwrap_err().into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -11537,12 +11562,11 @@ mod tests {
             if let Ok((stream, _)) = listener.accept().await {
                 let has_auth_header = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let has_auth_header_cb = std::sync::Arc::clone(&has_auth_header);
-                let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                let callback = crate::remote::InspectHandshake(move |req: &tokio_tungstenite::tungstenite::handshake::server::Request| {
                     if req.headers().contains_key("authorization") {
                         has_auth_header_cb.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
-                    Ok(resp)
-                };
+                });
                 if let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await {
                     let is_token = has_auth_header.load(std::sync::atomic::Ordering::SeqCst);
                     let mut authed = is_token;

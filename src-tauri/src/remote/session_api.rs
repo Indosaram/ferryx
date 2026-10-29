@@ -1,5 +1,5 @@
 //! Machine HTTP adapters. PTYs are created only by DaemonSessionService.
-use super::{machine_protocol::*, state::RemoteGatewayState, workspace_api};
+use super::{machine_protocol::*, server::Refusal, state::RemoteGatewayState, workspace_api};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -157,7 +157,7 @@ pub(super) async fn create(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     request: axum::extract::Request,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     mutation(state, headers, request, None).await
 }
 pub(super) async fn close(
@@ -165,7 +165,7 @@ pub(super) async fn close(
     path: Result<Path<String>, axum::extract::rejection::PathRejection>,
     headers: HeaderMap,
     request: axum::extract::Request,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     // Keep malformed path rejection behind authenticated admission too.
     mutation(state, headers, request, Some(path.map(|p| p.0))).await
 }
@@ -174,7 +174,7 @@ async fn mutation(
     headers: HeaderMap,
     request: axum::extract::Request,
     path: Option<Result<String, axum::extract::rejection::PathRejection>>,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let fallback = uuid::Uuid::new_v4().to_string();
     let admission = workspace_api::admit(state.clone(), headers.clone(), true, &fallback).await?;
     let body = super::server::project_body(request, &admission).await?;
@@ -359,11 +359,11 @@ async fn mutation(
     });
     tokio::select! {
         biased;
-        _ = revoked.wait_for(|v| *v) => Err(failure("UNAUTHORIZED", &operation_id)),
+        _ = revoked.wait_for(|v| *v) => Err(failure("UNAUTHORIZED", &operation_id).into()),
         result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task) => match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(failure("OPERATION_OUTCOME_UNKNOWN", &operation_id)),
-            Err(_) => Err(failure("TIMEOUT", &operation_id)),
+            Ok(Ok(result)) => result.map_err(Refusal::from),
+            Ok(Err(_)) => Err(failure("OPERATION_OUTCOME_UNKNOWN", &operation_id).into()),
+            Err(_) => Err(failure("TIMEOUT", &operation_id).into()),
         }
     }
 }
@@ -372,7 +372,7 @@ pub(super) async fn list(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
     uri: axum::http::Uri,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     // `workspaceId` scopes the listing; an absent query lists every workspace.
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -388,7 +388,7 @@ pub(super) async fn detail(
     State(state): State<Arc<RemoteGatewayState>>,
     path: Result<Path<String>, axum::extract::rejection::PathRejection>,
     headers: HeaderMap,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     read(state, headers, Some(path.map(|p| p.0)), None).await
 }
 async fn read(
@@ -396,7 +396,7 @@ async fn read(
     headers: HeaderMap,
     path: Option<Result<String, axum::extract::rejection::PathRejection>>,
     workspace: Option<String>,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     let id = uuid::Uuid::new_v4().to_string();
     let admission = workspace_api::admit(state.clone(), headers, false, &id).await?;
     let path = path
@@ -442,12 +442,12 @@ async fn read(
     });
     tokio::select! {
         biased;
-        _ = revoked.wait_for(|v| *v) => Err(failure("UNAUTHORIZED", &id)),
+        _ = revoked.wait_for(|v| *v) => Err(failure("UNAUTHORIZED", &id).into()),
         result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task) => match result {
             Ok(Ok(Ok(response))) => Ok(response),
-            Ok(Ok(Err(code))) => Err(failure(&code, &id)),
-            Ok(Err(_)) => Err(failure("MACHINE_SERVICE_UNAVAILABLE", &id)),
-            Err(_) => Err(failure("TIMEOUT", &id)),
+            Ok(Ok(Err(code))) => Err(failure(&code, &id).into()),
+            Ok(Err(_)) => Err(failure("MACHINE_SERVICE_UNAVAILABLE", &id).into()),
+            Err(_) => Err(failure("TIMEOUT", &id).into()),
         }
     }
 }
