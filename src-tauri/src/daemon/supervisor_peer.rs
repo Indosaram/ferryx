@@ -34,9 +34,13 @@
 //! `proc_pidinfo(PROC_PIDTBSDINFO)` and `getsid`. Every read is a blocking syscall and runs
 //! on a blocking thread, never on a Tokio worker.
 //!
-//! Windows fallback: the loopback TCP transport has no peer pid. A connection that presented
-//! the transport token is trusted (`TokenAuthenticated`). That is weaker than the POSIX check:
-//! a pane process that reads the token file itself is not told apart.
+//! Windows: the daemon listens on loopback TCP, which carries no peer pid, and the transport
+//! token only proves the peer can read a file a pane process of the same user can read too.
+//! The desktop app reaches the daemon over the same TCP and token, so neither it nor the CLI
+//! or `ferryx-cli mcp` can be told apart from a worker pane. A `TokenAuthenticated`
+//! connection is therefore refused every gated request with `FORBIDDEN`, like an `Unknown`
+//! peer: on Windows the supervisor cannot be mutated over the daemon socket (not from the
+//! desktop app either) until the transport can prove the owner's origin. Reads stay served.
 use std::collections::HashSet;
 
 /// How deep a parent chain is followed before the walk gives up (and refuses).
@@ -61,8 +65,8 @@ pub enum PeerOrigin {
     /// The transport carries no peer pid (in-process pairs in tests, a platform without peer
     /// credentials, or a peer that exited before accept finished). Gated requests are refused.
     Unknown,
-    /// The transport authenticated the peer another way (Windows token transport, documented
-    /// above).
+    /// The peer presented the transport token but its process is unknown (Windows loopback
+    /// TCP, documented above). Gated requests are refused.
     TokenAuthenticated,
 }
 
@@ -120,7 +124,7 @@ pub fn peer_pid(fd: std::os::unix::io::RawFd) -> Option<u32> {
                 &mut len,
             )
         } == 0;
-        return (ok && cred.pid > 0).then_some(cred.pid as u32);
+        (ok && cred.pid > 0).then_some(cred.pid as u32)
     }
     #[cfg(target_os = "macos")]
     {
@@ -136,9 +140,9 @@ pub fn peer_pid(fd: std::os::unix::io::RawFd) -> Option<u32> {
                 &mut len,
             )
         } == 0;
-        return (ok && pid > 0).then_some(pid as u32);
+        (ok && pid > 0).then_some(pid as u32)
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = fd;
         None
@@ -181,12 +185,12 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
         let session = field(3).ok_or(ProcError::Unreadable)?;
         let tty = field(4).ok_or(ProcError::Unreadable)?;
         let start = field(19).ok_or(ProcError::Unreadable)?;
-        return Ok(ProcInfo {
+        Ok(ProcInfo {
             ppid: u32::try_from(ppid).unwrap_or(0),
             session: u32::try_from(session).ok().filter(|session| *session > 0),
             tty: u64::try_from(tty).ok().filter(|tty| *tty != 0),
             start: u64::try_from(start).unwrap_or(0),
-        });
+        })
     }
     #[cfg(target_os = "macos")]
     {
@@ -214,7 +218,7 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
         // SAFETY: getsid only reads the process table.
         let session = unsafe { libc::getsid(pid as libc::pid_t) };
         const NODEV: u32 = u32::MAX;
-        return Ok(ProcInfo {
+        Ok(ProcInfo {
             ppid: info.pbi_ppid,
             session: (session > 0).then_some(session as u32),
             tty: (info.e_tdev != NODEV && info.e_tdev != 0).then_some(u64::from(info.e_tdev)),
@@ -222,9 +226,9 @@ pub fn proc_info(pid: u32) -> Result<ProcInfo, ProcError> {
                 .pbi_start_tvsec
                 .saturating_mul(1_000_000)
                 .saturating_add(info.pbi_start_tvusec),
-        });
+        })
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         Err(ProcError::Unreadable)
@@ -277,7 +281,9 @@ impl PaneSet {
 /// Why a peer may not mutate supervisor state, or `None` when it may.
 pub fn refusal(origin: PeerOrigin, panes: &PaneSet, table: &impl ProcTable) -> Option<String> {
     let peer = match origin {
-        PeerOrigin::TokenAuthenticated => return None,
+        PeerOrigin::TokenAuthenticated => {
+            return Some("this connection proved only the transport token, which a Ferryx pane process can read too, and the daemon cannot identify its process, so it may not change the supervisor".into())
+        }
         PeerOrigin::Unknown => {
             return Some("the daemon cannot identify this connection's process, so it may not change the supervisor".into())
         }
@@ -442,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_unreadable_peers_are_refused_and_token_peers_are_not() {
+    fn unknown_or_unreadable_peers_are_refused() {
         let mut procs = world();
         let panes = PaneSet::of([200], &procs);
         assert!(refusal(PeerOrigin::Unknown, &panes, &procs).is_some());
@@ -471,10 +477,17 @@ mod tests {
         );
         procs.unreadable.insert(245);
         assert!(refusal(peer(250), &panes, &procs).is_some());
-        assert_eq!(
-            refusal(PeerOrigin::TokenAuthenticated, &panes, &procs),
-            None
-        );
+    }
+
+    /// A token alone (Windows loopback TCP) does not tell the owner from a pane process that
+    /// read the token file: refused whatever the pane set, even with no panes at all.
+    #[test]
+    fn a_token_authenticated_peer_is_refused() {
+        let procs = world();
+        for panes in [PaneSet::default(), PaneSet::of([200], &procs)] {
+            assert!(refusal(PeerOrigin::TokenAuthenticated, &panes, &procs)
+                .is_some_and(|why| why.contains("transport token")));
+        }
     }
 
     /// hidepid: a live process without a /proc entry for us is unreadable (the walk ends

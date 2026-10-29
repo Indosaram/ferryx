@@ -172,20 +172,31 @@ fn engine_failure(error: MemoryRequestError) -> RequestFailure {
     }
 }
 
+/// The fields of one `supervisor_memory_sources` row.
+struct Provenance<'a> {
+    source_id: &'a str,
+    identity: &'a SupervisorIdentity,
+    adapter: ChannelProvider,
+    source_message_id: &'a str,
+    action: &'a str,
+    project_id: Option<&'a str>,
+    body: &'a str,
+    target: Option<&'a str>,
+}
+
 /// One provenance row, inserted once per source id. A replay with the same body is the same
 /// request; a different body under the same source id is `REQUEST_CONFLICT` (409).
-#[allow(clippy::too_many_arguments)]
-async fn provenance(
-    pool: &SqlitePool,
-    source_id: &str,
-    identity: &SupervisorIdentity,
-    adapter: ChannelProvider,
-    source_message_id: &str,
-    action: &str,
-    project_id: Option<&str>,
-    body: &str,
-    target: Option<&str>,
-) -> Result<(), RequestFailure> {
+async fn provenance(pool: &SqlitePool, row: Provenance<'_>) -> Result<(), RequestFailure> {
+    let Provenance {
+        source_id,
+        identity,
+        adapter,
+        source_message_id,
+        action,
+        project_id,
+        body,
+        target,
+    } = row;
     let hash = crate::usage::sha256_hex(&format!("{action}\u{0}{}\u{0}{body}", target.unwrap_or("")));
     let now = crate::storage::now_rfc3339();
     sqlx::query(
@@ -294,14 +305,16 @@ pub async fn teach(
     let action = if payload.replaces.is_some() { "correct" } else { "teach" };
     provenance(
         pool,
-        &source_id,
-        &identity,
-        context.adapter,
-        request_id,
-        action,
-        project_id,
-        &text,
-        payload.replaces.as_deref(),
+        Provenance {
+            source_id: &source_id,
+            identity: &identity,
+            adapter: context.adapter,
+            source_message_id: request_id,
+            action,
+            project_id,
+            body: &text,
+            target: payload.replaces.as_deref(),
+        },
     )
     .await?;
     let answer = match &payload.replaces {
@@ -360,14 +373,16 @@ pub async fn forget(
     let source_id = format!("{}:{request_id}", context.adapter);
     provenance(
         pool,
-        &source_id,
-        &identity,
-        context.adapter,
-        request_id,
-        "forget",
-        None,
-        "",
-        Some(&payload.memory_id),
+        Provenance {
+            source_id: &source_id,
+            identity: &identity,
+            adapter: context.adapter,
+            source_message_id: request_id,
+            action: "forget",
+            project_id: None,
+            body: "",
+            target: Some(&payload.memory_id),
+        },
     )
     .await?;
     let mut data = json!({"sourceId": source_id, "receiptId": payload.memory_id});
@@ -519,14 +534,16 @@ where
     let source_id = format!("{adapter}:{source_message_id}");
     if let Err(failure) = provenance(
         pool,
-        &source_id,
-        &identity,
-        adapter,
-        source_message_id,
-        "ingest",
-        project_id,
-        &learnable,
-        None,
+        Provenance {
+            source_id: &source_id,
+            identity: &identity,
+            adapter,
+            source_message_id,
+            action: "ingest",
+            project_id,
+            body: &learnable,
+            target: None,
+        },
     )
     .await
     {

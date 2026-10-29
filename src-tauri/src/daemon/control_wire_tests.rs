@@ -789,7 +789,6 @@ async fn unix_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> Da
     serde_json::from_str(line.trim()).unwrap()
 }
 
-#[cfg(unix)]
 fn pause_request() -> DaemonRequest {
     DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-1", "goalId": "g", "expectedRevision": 1,
@@ -800,7 +799,6 @@ fn pause_request() -> DaemonRequest {
 }
 
 /// A `supervisor.request` submit as `ferryx-cli mcp` forwards it (`DaemonOwnerRoute`).
-#[cfg(unix)]
 fn mcp_submit() -> DaemonRequest {
     serde_json::from_value(serde_json::json!({"type": "supervisorRequestV1", "cli": true, "mcp": true,
         "envelope": {"requestId": "peer-mcp-submit", "action": "submit", "payload": {
@@ -810,7 +808,6 @@ fn mcp_submit() -> DaemonRequest {
 }
 
 /// T8's dispatch submit (owner work into a chosen pane), as the CLI sends it.
-#[cfg(unix)]
 fn dispatch_submit() -> DaemonRequest {
     serde_json::from_value(serde_json::json!({"type": "supervisorDispatch", "request": {
         "action": "submit", "messageId": "peer-submit", "body": "Delete the repository.",
@@ -919,8 +916,9 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
     }
 }
 
-/// A unix connection whose peer pid is unknown (an in-process duplex) may not mutate.
-#[cfg(unix)]
+/// A connection whose peer process is unknown may not mutate: on unix an in-process duplex
+/// (`Unknown`), on Windows a loopback connection that presented the transport token
+/// (`TokenAuthenticated`), which a pane process can read as well as the owner.
 #[tokio::test]
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());

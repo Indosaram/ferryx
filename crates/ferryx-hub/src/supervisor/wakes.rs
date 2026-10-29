@@ -424,6 +424,14 @@ struct StateEvent {
     generation: Option<i64>,
 }
 
+/// The turn `WakeScheduler::deliver` opened: its id, a cached judge score for the same wake
+/// set, and the sorted wake ids it consumes.
+struct OpenTurn<'a> {
+    turn_id: i64,
+    cached: Option<f64>,
+    ids: &'a [i64],
+}
+
 /// A wake set the scheduler decided to admit.
 struct Batch {
     wakes: Vec<PendingWake>,
@@ -1297,24 +1305,37 @@ impl WakeScheduler {
         };
         crate::usage::with_cause(
             attribution,
-            self.deliver_turn(goal, generation, batch, turn_id, cached, &ids, now, report),
+            self.deliver_turn(
+                goal,
+                generation,
+                batch,
+                OpenTurn {
+                    turn_id,
+                    cached,
+                    ids: &ids,
+                },
+                now,
+                report,
+            ),
         )
         .await
     }
 
     /// The judged and handled part of [`Self::deliver`] for one open turn.
-    #[allow(clippy::too_many_arguments)]
     async fn deliver_turn(
         &self,
         goal: &SupervisorGoal,
         generation: i64,
         batch: Batch,
-        turn_id: i64,
-        cached: Option<f64>,
-        ids: &[i64],
+        turn: OpenTurn<'_>,
         now: DateTime<Utc>,
         report: &mut TickReport,
     ) -> Result<bool, SupervisorError> {
+        let OpenTurn {
+            turn_id,
+            cached,
+            ids,
+        } = turn;
         if let Some(judge) = self.judge.as_ref().filter(|_| batch.judged) {
             let score = match cached {
                 Some(score) => score,
