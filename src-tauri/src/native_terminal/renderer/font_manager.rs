@@ -337,14 +337,16 @@ impl FontManager {
         {
             let family = self.font_family.clone();
             crate::native_terminal::renderer::directwrite_raster::rasterize_to_alpha_buffer(
-                &family,
+                &crate::native_terminal::renderer::directwrite_raster::AlphaGlyphRequest {
+                    family: &family,
+                    width,
+                    height,
+                    font_size: effective_font_size,
+                    bold,
+                    italic,
+                },
                 text,
                 &mut buffer,
-                width,
-                height,
-                effective_font_size,
-                bold,
-                italic,
             );
         }
 

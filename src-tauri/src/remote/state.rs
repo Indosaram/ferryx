@@ -1241,7 +1241,7 @@ impl RemoteGatewayState {
         self.snapshot_build_completed.notified()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_snapshot_post_build_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         *self.snapshot_post_build_hook.write() = hook;
     }

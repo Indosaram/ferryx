@@ -269,6 +269,7 @@ pub fn reconcile_login_registration() -> Result<bool> {
 /// no new GUI that would register it, so without this the next login starts the retired
 /// predecessor. A daemon that is not a staged runtime copy (dev build), a user who opted out, or
 /// an unsupported runtime is a no-op. Never starts, stops or reloads a job.
+#[cfg(unix)]
 pub(crate) fn register_running_generation_for_login() -> Result<bool> {
     if user_opted_out() || !supported() {
         return Ok(false);
@@ -633,13 +634,6 @@ mod backend {
     /// `/Run`, `/End` or `/Delete`.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
         task::register_for_login(env, executable)
-    }
-
-    pub fn register_staged_for_login(
-        env: Env<'_>,
-        staged: &crate::daemon::runtime_stage::StagedRuntime,
-    ) -> Result<bool> {
-        task::register_staged_for_login(env, staged)
     }
 
     pub fn reload(env: Env<'_>) -> Result<()> {

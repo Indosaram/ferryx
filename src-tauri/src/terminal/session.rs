@@ -253,6 +253,7 @@ fn all_process_ids() -> Vec<libc::pid_t> {
 
 pub(crate) enum ProcessHandle {
     Spawned(Box<dyn Child + Send + Sync>),
+    #[cfg(unix)]
     Adopted(AdoptedProcess),
 }
 
@@ -285,6 +286,7 @@ impl ProcessHandle {
     pub fn pid(&self) -> Option<u32> {
         match self {
             Self::Spawned(child) => child.process_id(),
+            #[cfg(unix)]
             Self::Adopted(adopted) => Some(adopted.pid),
         }
     }
@@ -292,6 +294,7 @@ impl ProcessHandle {
     pub fn process_group(&self) -> Option<u32> {
         match self {
             Self::Spawned(_) => None,
+            #[cfg(unix)]
             Self::Adopted(adopted) => adopted.process_group,
         }
     }
@@ -329,8 +332,6 @@ impl ProcessHandle {
                     )))
                 }
             }
-            #[cfg(not(unix))]
-            Self::Adopted(_) => Err(PtyError::Other("Adopted process not supported on this platform".into())),
         }
     }
 }
@@ -1943,12 +1944,10 @@ impl PtySession {
                     Ok(code)
                 }
             }
-            #[cfg(not(unix))]
-            ProcessHandle::Adopted(_) => Ok(None),
         }
     }
 
-    #[cfg(any(test, windows))]
+    #[cfg(all(test, unix))]
     pub(crate) fn wait_and_reap(&self) -> Result<Option<i32>, PtyError> {
         let mut child_slot = self.child.lock();
         let Some(mut process) = child_slot.take() else {
@@ -1975,8 +1974,6 @@ impl PtySession {
                 };
                 Ok(code)
             }
-            #[cfg(not(unix))]
-            ProcessHandle::Adopted(_) => Ok(None),
         };
         self.reaped.store(true, Ordering::Release);
         result
@@ -2779,7 +2776,7 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_reader_tests {
     use super::*;
-    use portable_pty::{native_pty_system, CommandBuilder, PtySystem};
+    use portable_pty::{native_pty_system, CommandBuilder};
 
     fn size() -> PtySize {
         PtySize {

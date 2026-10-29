@@ -22,6 +22,7 @@ pub(crate) fn control_disabled_for_qa() -> bool {
     false
 }
 
+#[cfg(unix)]
 pub(crate) fn control_socket_path() -> PathBuf {
     get_runtime_dir().join(control::CONTROL_SOCKET_FILE)
 }

@@ -889,6 +889,7 @@ pub struct BridgeConnection {
     writer: Option<BufWriter<tokio::process::ChildStdin>>,
     reader: Option<BufReader<BridgeReaderStream>>,
     child_guard: Option<BridgeChildGuard>,
+    #[cfg(unix)]
     stderr_fd: Option<RawFd>,
     stderr_capture: Arc<std::sync::Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
@@ -1090,8 +1091,6 @@ impl BridgeConnection {
                 }
             }
         };
-        #[cfg(not(unix))]
-        let stderr_fd = None;
 
         let stderr_capture = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stderr_sink = Arc::clone(&stderr_capture);
@@ -1122,6 +1121,7 @@ impl BridgeConnection {
             writer: Some(BufWriter::new(stdin)),
             reader: Some(BufReader::new(BridgeReaderStream::Child(stdout))),
             child_guard: Some(guard()),
+            #[cfg(unix)]
             stderr_fd,
             stderr_capture,
             stderr_task: Some(stderr_task),
@@ -2949,6 +2949,7 @@ mod transfer_tests {
         #[cfg(windows)]
         let guard = OwnedProcessGuard::from_child(&child, canonical_powershell_path());
         let mut conn = BridgeConnection::from_child(child).expect("from_child");
+        #[cfg(unix)]
         let pid = conn.child_id().expect("child pid");
 
         // Manually poison connection
@@ -2985,6 +2986,7 @@ mod transfer_tests {
         #[cfg(windows)]
         let guard = OwnedProcessGuard::from_child(&child, canonical_powershell_path());
         let mut conn = BridgeConnection::from_child(child).expect("from_child");
+        #[cfg(unix)]
         let pid = conn.child_id().expect("child pid");
 
         // Process is alive

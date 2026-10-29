@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
+#[cfg(unix)]
 async fn wait_for_session_removal(manager: &PtyManager, session_id: &str) {
     let removal = manager.removal_notify();
     timeout(Duration::from_secs(5), async {

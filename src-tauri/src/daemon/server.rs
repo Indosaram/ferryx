@@ -4,15 +4,18 @@ mod machine_gateway;
 // Server side of the frozen control-v1 channel (todo 15).
 #[path = "control_server.rs"]
 mod control_server;
+#[cfg(any(unix, test))]
 use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
     AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
-    DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire,
+    DaemonResponse, DaemonStreamMessage, HistorySegmentWire,
     DAEMON_PROTOCOL_VERSION,
 };
+#[cfg(any(unix, test))]
+use crate::daemon::protocol::DaemonSessionDetails;
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
@@ -45,6 +48,7 @@ use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
+#[cfg(any(unix, test))]
 async fn rollback_transferred_readers<R, A, D>(
     relinquish: R,
     abort: impl FnOnce() -> A,
@@ -73,6 +77,7 @@ where
 /// client-request ownership a transferred session keeps, and installing it is what makes this
 /// daemon an authoritative owner *before* it takes the PTY master. A record that disagrees with the
 /// predecessor's declaration, or is missing, refuses the session so the predecessor keeps it.
+#[cfg(any(unix, test))]
 fn adopt_transferred_ownership(
     metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
     session_id: &str,
@@ -108,6 +113,7 @@ fn adopt_transferred_ownership(
 /// retirement): the adopted sessions are relinquished first, then the predecessor is told to
 /// abort. The abort is what resumes the readers it paused for the export; without it the
 /// predecessor keeps serving every session with its output frozen.
+#[cfg(any(unix, test))]
 async fn release_after_unconfirmed_commit<R, A>(
     relinquish: R,
     abort: impl FnOnce() -> A,
@@ -129,6 +135,7 @@ where
 
 /// Drops the ownership records a successor installed for sessions it handed back to the
 /// predecessor: a relinquished session must not leave this daemon claiming its workspace.
+#[cfg(any(unix, test))]
 fn release_adopted_ownership(
     metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
     session_ids: &[String],
@@ -1256,12 +1263,6 @@ impl DaemonLockFile {
         std::mem::forget(self);
         file
     }
-
-    /// Constructs a `DaemonLockFile` from an already-locked file handle received
-    /// during handover transfer.
-    pub(crate) fn from_locked_file(file: File) -> Self {
-        Self { file }
-    }
 }
 
 #[cfg(windows)]
@@ -1307,10 +1308,6 @@ impl DaemonLockFile {
         std::mem::forget(self);
         file
     }
-
-    pub(crate) fn from_locked_file(file: File) -> Self {
-        Self { _file: file }
-    }
 }
 
 #[derive(Debug)]
@@ -1330,6 +1327,7 @@ impl DaemonLockFiles {
     }
 
     /// Adopts pre-locked files received via handover descriptor transfer.
+    #[cfg(unix)]
     pub(crate) fn from_locked_files(persistent: Option<File>, legacy: File) -> Self {
         Self {
             _persistent: persistent.map(DaemonLockFile::from_locked_file),
@@ -1405,7 +1403,7 @@ fn lock_file_with_optional_wait_internal<F: FnMut()>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn acquire_daemon_locks(
     persistent_path: Option<&Path>,
     legacy_path: &Path,
@@ -3578,6 +3576,7 @@ fn request_session_id(request: &DaemonRequest) -> Option<&str> {
 /// shortfall is not a warning: committing retires the predecessor, and each undelivered session
 /// dies with the PTY master fd it still owned. Aborting instead leaves the predecessor serving all
 /// of them, which is always the survivable outcome.
+#[cfg(unix)]
 pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
     if accepted >= offered {
         return Ok(());
@@ -3611,6 +3610,7 @@ async fn refresh_cors_saved_host_origins(
 ///
 /// `owned == 0` means the peer is an older daemon that does not send the field; fall back to
 /// the delivery-only check rather than aborting every handover with such a predecessor.
+#[cfg(unix)]
 pub(crate) fn handover_delivery_verdict_owned(
     owned: usize,
     offered: usize,
@@ -3630,6 +3630,7 @@ pub(crate) fn handover_delivery_verdict_owned(
 /// Sessions the predecessor listed but did not export, whose durable remote snapshot lets the
 /// successor restore them after commit. An older predecessor counts these in `owned` even
 /// though only local PTYs travel over the handover socket.
+#[cfg(unix)]
 pub(crate) fn handover_restorable_unexported(
     listed: &[String],
     exported: &std::collections::HashSet<String>,
@@ -3649,6 +3650,7 @@ pub(crate) fn handover_restorable_unexported(
 /// `owned` although only local PTYs travel; those that the successor restores from the durable
 /// snapshot are not casualties. A newer predecessor already reports local PTYs only, so nothing
 /// is credited, and crediting it anyway would zero `owned` and disable the owned check.
+#[cfg(unix)]
 pub(crate) fn handover_effective_owned(
     owned: usize,
     listed_unique: usize,
@@ -3950,7 +3952,7 @@ impl DaemonServer {
     }
 
     /// Parks every later Close handler after its response flush (see close_park).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_close_park_for_test(
         &self,
         park: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
@@ -7564,8 +7566,8 @@ impl DaemonServer {
                         }
                     }
                 }
+                #[cfg(unix)]
                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
-                    #[cfg(unix)]
                     {
                         crate::daemon::handover_request::note_transfer_started();
                         if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
@@ -7721,13 +7723,11 @@ impl DaemonServer {
                             }
                         }
                     }
-                    #[cfg(not(unix))]
-                    {
-                        DaemonResponse::HandoverRejected {
-                            reason: "Session transfer unsupported on non-Unix".to_string(),
-                        }
-                    }
                 }
+                #[cfg(not(unix))]
+                Ok(DaemonRequest::TransferSessions { .. }) => DaemonResponse::HandoverRejected {
+                    reason: "Session transfer unsupported on non-Unix".to_string(),
+                },
                 Ok(DaemonRequest::CommitHandover { .. }) => {
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
@@ -9361,7 +9361,7 @@ mod live_relay_apply_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
     let norm_repo = repo_root.replace('\\', "/");
     let norm_root = root.replace('\\', "/");

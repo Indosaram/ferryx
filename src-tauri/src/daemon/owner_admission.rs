@@ -4,7 +4,9 @@
 //! Absent owner may be started; an Alive or Unknown owner is never reloaded,
 //! replaced, or killed.
 
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

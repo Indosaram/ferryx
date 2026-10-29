@@ -3699,7 +3699,7 @@ async fn download_cli_artifact_from_candidate_dirs(
     axum::response::Redirect::temporary(&github_url).into_response()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn download_artifact_router(
     candidate_dirs: Vec<std::path::PathBuf>,
 ) -> axum::Router {

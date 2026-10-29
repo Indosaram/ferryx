@@ -463,7 +463,7 @@ impl PairedHostService {
         service.loopback_http = true;
         service
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn test_capture(
         &self,
         host: String,

@@ -707,6 +707,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn issue_json(number: u64, title: &str, repository: &str, body: &str) -> String {
         serde_json::json!({
             "number": number,
