@@ -201,10 +201,21 @@ fn config_value(worktree: &Path, key: &str) -> Result<Option<String>, GitChangeE
     }
 }
 
-fn is_rejection(stderr: &str) -> bool {
-    ["[rejected]", "[remote rejected]", "non-fast-forward", "fetch first"]
-        .iter()
-        .any(|marker| stderr.contains(marker))
+/// `push --porcelain` prints one stdout line per ref, and its first character is the flag. `!`
+/// means the ref was rejected. Unlike the summary text, the flag is never translated.
+fn is_rejection(porcelain_stdout: &str) -> bool {
+    porcelain_stdout.lines().any(|line| line.starts_with('!'))
+}
+
+fn push_error(error: WorktreeError) -> GitChangeError {
+    match error {
+        WorktreeError::GitError { stderr, stdout, .. } if is_rejection(&stdout) => {
+            GitChangeError::PushRejected {
+                stderr: if stderr.is_empty() { stdout } else { stderr },
+            }
+        }
+        error => error.into(),
+    }
 }
 
 /// Pushes the current branch to its upstream, or to `origin` with `-u` when it has none.
@@ -244,21 +255,12 @@ pub fn git_push(worktree: &Path) -> Result<GitPushResult, GitChangeError> {
         args.push("-u");
     }
     args.extend([remote.as_str(), refspec.as_str()]);
-    match run_git(worktree, &args) {
-        Ok(_) => Ok(GitPushResult {
-            remote,
-            branch,
-            set_upstream,
-        }),
-        Err(WorktreeError::GitError { stderr, stdout, .. })
-            if is_rejection(&stderr) || is_rejection(&stdout) =>
-        {
-            Err(GitChangeError::PushRejected {
-                stderr: if stderr.is_empty() { stdout } else { stderr },
-            })
-        }
-        Err(error) => Err(error.into()),
-    }
+    run_git(worktree, &args).map_err(push_error)?;
+    Ok(GitPushResult {
+        remote,
+        branch,
+        set_upstream,
+    })
 }
 
 #[cfg(test)]
@@ -450,6 +452,29 @@ mod tests {
         let result = git_push(&repo);
         assert!(matches!(result, Err(GitChangeError::PushRejected { .. })), "{result:?}");
         assert_eq!(run_git(&bare, &["rev-parse", "main"]).unwrap(), remote_head);
+    }
+
+    #[test]
+    fn push_rejection_is_read_from_the_porcelain_flag_not_the_locale() {
+        let failed = |stdout: &str, stderr: &str| WorktreeError::GitError {
+            command: "git push --porcelain".into(),
+            stderr: stderr.into(),
+            stdout: stdout.into(),
+            code: Some(1),
+        };
+        // German Git: no English marker anywhere in stderr.
+        let stderr = "Fehler: Einige Referenzen konnten nicht nach 'origin' versendet werden";
+        let rejected = push_error(failed(
+            "To ../remote.git\n!\trefs/heads/main:refs/heads/main\t[abgewiesen] (zuerst holen)\nDone",
+            stderr,
+        ));
+        assert!(
+            matches!(&rejected, GitChangeError::PushRejected { stderr: s } if s == stderr),
+            "{rejected:?}"
+        );
+        // A failure with no rejected ref (auth, network) stays a plain Git error.
+        let other = push_error(failed("", "fatal: Authentifizierung fehlgeschlagen [rejected]"));
+        assert!(matches!(other, GitChangeError::Worktree(WorktreeError::GitError { .. })), "{other:?}");
     }
 
     #[test]
