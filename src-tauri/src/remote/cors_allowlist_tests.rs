@@ -57,6 +57,16 @@ async fn cors_rejects_an_unlisted_origin_and_allows_the_relay_origin() {
         );
     }
 
+    // The phone's "Send test" is an authenticated /api/v1 call like the rest, so the relay origin
+    // may preflight it; only registration below stays same-origin.
+    assert_eq!(
+        preflight(&http, addr, "/api/v1/push/test", crate::remote::state::DEFAULT_RELAY_URL)
+            .await
+            .as_deref(),
+        Some(crate::remote::state::DEFAULT_RELAY_URL)
+    );
+    assert_eq!(preflight(&http, addr, "/api/v1/push/test", "https://evil.example").await, None);
+
     // Health, push registration and anything outside /api/v1 stay same-origin, even for the relay.
     for same_origin_only in [
         "/api/v1/health",
