@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteApp } from "./RemoteApp";
-import { remoteHostStore } from "../state/remoteHostStore";
+import { remoteHostKey, remoteHostStore } from "../state/remoteHostStore";
 import { clearStoredAccountSessionToken } from "./accountSession";
 
 /** The gateway's structured pair-exchange refusal (src-tauri/src/remote/server.rs pairing_failure). */
@@ -65,6 +65,51 @@ describe("RemoteApp pairing entry", () => {
 
     expect(await screen.findByText("Code expired. Ask for a new code in Ferryx Desktop settings.")).toBeInTheDocument();
     expect(screen.queryByText(/attempts? left/)).toBeNull();
+  });
+
+  it("INVALID_PIN on a non-400 status still shows attempts left: the code decides, not the status", async () => {
+    window.history.replaceState(null, "", "/pair");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(refusal(401, "INVALID_PIN", 2)));
+    await act(async () => { render(<RemoteApp />); });
+
+    await submitCode("000000");
+
+    expect(await screen.findByText("Wrong code. 2 attempts left.")).toBeInTheDocument();
+  });
+
+  it("a bare 401 without PIN_EXPIRED shows the generic failure, not the expired text", async () => {
+    window.history.replaceState(null, "", "/pair");
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(new Response("", { status: 401 })));
+    await act(async () => { render(<RemoteApp />); });
+
+    await submitCode("000000");
+
+    expect(await screen.findByText("Pairing failed (401)")).toBeInTheDocument();
+    expect(screen.queryByText(/Code expired/)).toBeNull();
+  });
+
+  it("relay=1 stores the token on the relay host keyed by machine id, not the page-origin slot", async () => {
+    window.history.replaceState(null, "", "/pair?relay=1");
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).includes("/api/v1/pair/exchange")) {
+        return Response.json({ token: "relay-token", machineId: "m-9", displayName: "Desk" });
+      }
+      return new Response("{}", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () => { render(<RemoteApp />); });
+
+    await submitCode("482913");
+
+    const origin = window.location.origin;
+    const key = remoteHostKey(origin, "m-9");
+    const state = remoteHostStore.getState();
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/pair/exchange", expect.objectContaining({ method: "POST" }));
+    expect(state.activeHostId).toBe(key);
+    expect(state.hosts[key]?.deviceToken).toBe("relay-token");
+    expect(localStorage.getItem(`ferryx_remote_token_local:${origin}`)).toBeNull();
+    expect(window.location.pathname).toBe("/");
+    expect(window.location.search).toBe("");
   });
 
   it("a successful exchange stores the device token and leaves the pairing route", async () => {
