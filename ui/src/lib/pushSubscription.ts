@@ -115,7 +115,7 @@ export async function registerPushSubscription(
       return false;
     }
 
-    const res = await request("/api/push/subscribe", jsonPost({
+    const res = await request("/api/v1/push/subscribe", jsonPost({
       endpoint: json.endpoint,
       keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
       ...(options.preferences ?? {}),
@@ -159,7 +159,7 @@ export async function enablePhoneAlerts(
     if (permission !== "granted") return "dismissed";
   }
   try {
-    const res = await request("/api/push/vapid-public-key");
+    const res = await request("/api/v1/push/vapid-public-key");
     if (!res.ok) return "error";
     const body = (await res.json()) as { publicKey?: unknown };
     if (typeof body.publicKey !== "string" || !body.publicKey) return "error";
@@ -177,7 +177,7 @@ export async function disablePhoneAlerts(request: PushRequest): Promise<PhoneAle
     const registration = await pushRegistration();
     const subscription = await registration?.pushManager.getSubscription();
     if (subscription) {
-      const res = await request("/api/push/unsubscribe", jsonPost({ endpoint: subscription.endpoint }));
+      const res = await request("/api/v1/push/unsubscribe", jsonPost({ endpoint: subscription.endpoint }));
       if (!res.ok) return "error";
       await subscription.unsubscribe();
     }
@@ -192,7 +192,7 @@ export async function updatePhoneAlertPreferences(
   preferences: PhoneAlertPreferences,
 ): Promise<boolean> {
   try {
-    const res = await request("/api/push/preferences", jsonPost(preferences));
+    const res = await request("/api/v1/push/preferences", jsonPost(preferences));
     return res.ok;
   } catch {
     return false;

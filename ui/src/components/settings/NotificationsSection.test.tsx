@@ -328,7 +328,7 @@ describe("PhoneAlertsSettings", () => {
 
   function gateway() {
     return vi.fn(async (path: string, _init?: RequestInit) => {
-      if (path === "/api/push/vapid-public-key") return new Response(JSON.stringify({ publicKey: "AQID" }), { status: 200 });
+      if (path === "/api/v1/push/vapid-public-key") return new Response(JSON.stringify({ publicKey: "AQID" }), { status: 200 });
       if (path === "/api/v1/push/test") return new Response(JSON.stringify({ sent: 1, delivered: 1, removed: 0 }), { status: 200 });
       return new Response(null, { status: 204 });
     });
@@ -358,7 +358,7 @@ describe("PhoneAlertsSettings", () => {
       fireEvent.change(screen.getByRole("combobox", { name: /finishes/i }), { target: { value: "everyTurn" } });
     });
     expect(loadNotificationSettings().phoneFinishedMode).toBe("everyTurn");
-    expect(request).toHaveBeenCalledWith("/api/push/preferences", expect.objectContaining({
+    expect(request).toHaveBeenCalledWith("/api/v1/push/preferences", expect.objectContaining({
       body: JSON.stringify({ phoneNeedsInput: true, phoneFinishedMode: "everyTurn" }),
     }));
 

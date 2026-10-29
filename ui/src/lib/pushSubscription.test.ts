@@ -108,7 +108,7 @@ describe("phone alerts", () => {
     const requestPermission = installNotification("default", "granted");
     const { pushManager } = installPushManager();
     const request = vi.fn(async (path: string) =>
-      path === "/api/push/vapid-public-key" ? jsonResponse({ publicKey: "AQID" }) : new Response(null, { status: 204 }));
+      path === "/api/v1/push/vapid-public-key" ? jsonResponse({ publicKey: "AQID" }) : new Response(null, { status: 204 }));
 
     await expect(enablePhoneAlerts(request, PREFS)).resolves.toBe("enabled");
 
@@ -119,7 +119,7 @@ describe("phone alerts", () => {
       applicationServerKey: new Uint8Array([1, 2, 3]),
     });
     expect(requestPermission.mock.invocationCallOrder[0]).toBeLessThan(pushManager.subscribe.mock.invocationCallOrder[0]);
-    const subscribeCall = request.mock.calls.find(([path]) => path === "/api/push/subscribe") as unknown as [string, RequestInit];
+    const subscribeCall = request.mock.calls.find(([path]) => path === "/api/v1/push/subscribe") as unknown as [string, RequestInit];
     expect(JSON.parse(String(subscribeCall[1].body))).toEqual({
       endpoint: "https://fcm.googleapis.com/fcm/send/abc",
       keys: { p256dh: "p256dh-key", auth: "auth-key" },
@@ -164,7 +164,7 @@ describe("phone alerts", () => {
     };
     const { pushManager } = installPushManager(stale);
     const request = vi.fn(async (path: string) =>
-      path === "/api/push/vapid-public-key" ? jsonResponse({ publicKey: "AQID" }) : new Response(null, { status: 204 }));
+      path === "/api/v1/push/vapid-public-key" ? jsonResponse({ publicKey: "AQID" }) : new Response(null, { status: 204 }));
 
     await expect(enablePhoneAlerts(request, PREFS)).resolves.toBe("enabled");
     expect(stale.unsubscribe).toHaveBeenCalledTimes(1);
@@ -174,14 +174,16 @@ describe("phone alerts", () => {
   it("posts preference changes and keeps the browser subscription when the gateway refuses removal", async () => {
     const request = vi.fn(async () => new Response(null, { status: 204 }));
     await expect(updatePhoneAlertPreferences(request, { phoneNeedsInput: false, phoneFinishedMode: "everyTurn" })).resolves.toBe(true);
-    expect(request).toHaveBeenCalledWith("/api/push/preferences", expect.objectContaining({
+    expect(request).toHaveBeenCalledWith("/api/v1/push/preferences", expect.objectContaining({
       method: "POST",
       body: JSON.stringify({ phoneNeedsInput: false, phoneFinishedMode: "everyTurn" }),
     }));
 
     const existing = { endpoint: "https://fcm.googleapis.com/x", unsubscribe: vi.fn(async () => true) };
     installPushManager(existing);
-    await expect(disablePhoneAlerts(vi.fn(async () => new Response(null, { status: 500 })))).resolves.toBe("error");
+    const refuse = vi.fn(async () => new Response(null, { status: 500 }));
+    await expect(disablePhoneAlerts(refuse)).resolves.toBe("error");
+    expect(refuse).toHaveBeenCalledWith("/api/v1/push/unsubscribe", expect.objectContaining({ method: "POST" }));
     expect(existing.unsubscribe).not.toHaveBeenCalled();
   });
 });
