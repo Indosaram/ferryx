@@ -448,6 +448,17 @@ jobs:
         if: matrix.os_name == 'linux'
         run: cargo build --manifest-path remote-helper/Cargo.toml
 
+      # The P19 overlay gate suites need a CGNAT address on a non-loopback interface, as in the
+      # precheck job. On Linux add it to the default-route interface as a /32.
+      - name: Provision overlay address for host-dependent suites
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          OVERLAY_ADDRESS=100.64.1.2
+          interface=$(ip -o -4 route show default | awk '{print $5; exit}')
+          sudo -n ip addr add "$OVERLAY_ADDRESS/32" dev "$interface"
+          ip -o -4 addr show | grep "$OVERLAY_ADDRESS" && echo "PROVISION overlay_alias=present on $interface"
+
       # Suites that cannot run on a hosted runner, each skipped with the reason it was measured
       # to fail. They stay verified on real hosts: the renderer contract suite on GPU hardware,
       # the gateway suites on a tailnet, the PTY saturation suites on a real kernel buffer.
