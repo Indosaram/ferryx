@@ -259,7 +259,7 @@ async fn install_key_issue_then_enroll_succeeds_and_records_consumption() {
     assert!(issued["keyId"].as_str().unwrap().starts_with("ik_"));
     assert_eq!(
         issued["installCommand"]["sh"],
-        format!("curl -fsSL {ORIGIN}/install.sh | sh -s -- --key {key}")
+        format!("curl -fsSL '{ORIGIN}/install.sh' | FERRYX_ORIGIN='{ORIGIN}' sh -s -- --key {key}")
     );
     assert!(issued["installCommand"]["ps1"].as_str().unwrap().contains(&key));
     let expires_at = issued["expiresAt"].as_u64().unwrap();

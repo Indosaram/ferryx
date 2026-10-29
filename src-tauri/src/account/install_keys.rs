@@ -74,12 +74,32 @@ pub fn new_install_key() -> String {
     format!("{INSTALL_KEY_PREFIX}{}", random_token())
 }
 
+/// One-liners for the origin that issued `key`. The downloaded script defaults to the hosted
+/// relay, so any other origin is passed to it as `FERRYX_ORIGIN` (quoted for each shell);
+/// the hosted origin keeps the short commands.
 pub fn install_command(origin: &str, key: &str) -> InstallCommand {
     let origin = origin.trim_end_matches('/');
-    InstallCommand {
-        sh: format!("curl -fsSL {origin}/install.sh | sh -s -- --key {key}"),
-        ps1: format!("& ([scriptblock]::Create((irm {origin}/install.ps1))) -Key {key}"),
+    if origin == crate::remote::state::DEFAULT_RELAY_URL {
+        return InstallCommand {
+            sh: format!("curl -fsSL {origin}/install.sh | sh -s -- --key {key}"),
+            ps1: format!("& ([scriptblock]::Create((irm {origin}/install.ps1))) -Key {key}"),
+        };
     }
+    let sh_url = crate::ssh::direct::quote_posix(&format!("{origin}/install.sh"));
+    let sh_origin = crate::ssh::direct::quote_posix(origin);
+    let ps1_url = quote_powershell(&format!("{origin}/install.ps1"));
+    let ps1_origin = quote_powershell(origin);
+    InstallCommand {
+        sh: format!("curl -fsSL {sh_url} | FERRYX_ORIGIN={sh_origin} sh -s -- --key {key}"),
+        ps1: format!(
+            "$env:FERRYX_ORIGIN={ps1_origin}; & ([scriptblock]::Create((irm {ps1_url}))) -Key {key}"
+        ),
+    }
+}
+
+/// PowerShell single-quoted string literal: `'` is escaped by doubling.
+fn quote_powershell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// `POST /api/account/v1/install-keys`
@@ -271,10 +291,54 @@ mod tests {
         assert_eq!(key.len(), 4 + 64);
         assert!(key[4..].chars().all(|c| c.is_ascii_hexdigit()));
         let command = install_command("https://relay.test/", "fxk_abc");
-        assert_eq!(command.sh, "curl -fsSL https://relay.test/install.sh | sh -s -- --key fxk_abc");
+        assert_eq!(
+            command.sh,
+            "curl -fsSL 'https://relay.test/install.sh' | FERRYX_ORIGIN='https://relay.test' sh -s -- --key fxk_abc"
+        );
         assert_eq!(
             command.ps1,
-            "& ([scriptblock]::Create((irm https://relay.test/install.ps1))) -Key fxk_abc"
+            "$env:FERRYX_ORIGIN='https://relay.test'; & ([scriptblock]::Create((irm 'https://relay.test/install.ps1'))) -Key fxk_abc"
+        );
+    }
+
+    #[test]
+    fn hosted_origin_commands_are_unchanged() {
+        for origin in ["https://relay.ferryx.dev", "https://relay.ferryx.dev/"] {
+            let command = install_command(origin, "fxk_abc");
+            assert_eq!(
+                command.sh,
+                "curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key fxk_abc"
+            );
+            assert_eq!(
+                command.ps1,
+                "& ([scriptblock]::Create((irm https://relay.ferryx.dev/install.ps1))) -Key fxk_abc"
+            );
+        }
+    }
+
+    #[test]
+    fn self_hosted_origin_is_carried_into_both_commands() {
+        let command = install_command("http://127.0.0.1:8787", "fxk_abc");
+        assert_eq!(
+            command.sh,
+            "curl -fsSL 'http://127.0.0.1:8787/install.sh' | FERRYX_ORIGIN='http://127.0.0.1:8787' sh -s -- --key fxk_abc"
+        );
+        assert_eq!(
+            command.ps1,
+            "$env:FERRYX_ORIGIN='http://127.0.0.1:8787'; & ([scriptblock]::Create((irm 'http://127.0.0.1:8787/install.ps1'))) -Key fxk_abc"
+        );
+    }
+
+    #[test]
+    fn origin_needing_quoting_is_escaped_per_shell() {
+        let command = install_command("https://it's.example/a b;$(x)", "fxk_abc");
+        assert_eq!(
+            command.sh,
+            "curl -fsSL 'https://it'\\''s.example/a b;$(x)/install.sh' | FERRYX_ORIGIN='https://it'\\''s.example/a b;$(x)' sh -s -- --key fxk_abc"
+        );
+        assert_eq!(
+            command.ps1,
+            "$env:FERRYX_ORIGIN='https://it''s.example/a b;$(x)'; & ([scriptblock]::Create((irm 'https://it''s.example/a b;$(x)/install.ps1'))) -Key fxk_abc"
         );
     }
 }

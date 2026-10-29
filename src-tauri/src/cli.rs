@@ -2342,7 +2342,7 @@ fn account_cli_origin(origin: Option<String>) -> Result<String, AccountCliError>
     match origin {
         Some(value) => crate::account::origin::normalize_account_origin(&value)
             .map_err(|error| AccountCliError::usage(error.to_string())),
-        None => crate::account::origin::account_origin()
+        None => crate::account::origin::cli_account_origin()
             .map_err(|error| AccountCliError::usage(error.to_string())),
     }
 }

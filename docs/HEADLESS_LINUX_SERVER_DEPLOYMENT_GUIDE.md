@@ -1,9 +1,13 @@
 # Headless Linux Server Deployment Guide for Ferryx
 
-> **Current setup (2026-09-28):** Prefer the standalone `ferryx-cli` installer below and
-> `ferryx-cli account login --email you@example.com --origin https://your-account-service.example`
-> for headless machine enrollment. Run `ferryx-cli --daemon` under a service manager or in
-> a dedicated terminal. The legacy `ferryx pair generate` / `ferryx remote pair generate`
+> **Current setup (2026-10-28):** Run the installer with the install key from the desktop's
+> Settings > Remote > Add Machine > Install command:
+> `curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>` (for a
+> self-hosted relay the copied command also sets the origin:
+> `curl -fsSL 'https://relay.example.com/install.sh' | FERRYX_ORIGIN='https://relay.example.com' sh -s -- --key <install-key>`). It verifies
+> `ferryx-cli` (x86_64, glibc 2.17+) against the release `SHA256SUMS` and runs `ferryx-cli up`,
+> which enrolls the machine and keeps the daemon running under a systemd user service (or a
+> detached daemon); do not start `ferryx-cli --daemon` by hand. The legacy `ferryx pair generate` / `ferryx remote pair generate`
 > instructions in sections 6-7 are historical and now return `ACCOUNT_LOGIN_REQUIRED`;
 > they cannot issue new PINs. The older GUI binary dependency discussion below applies
 > to `ferryx`, not to the standalone `ferryx-cli`.
@@ -469,9 +473,12 @@ When created, it writes `~/.ferryx/remote/identity.json` with permissions `0600`
 
 ### Step 2: Enrolling the headless machine
 
-Run `ferryx-cli account login --email you@example.com --origin https://your-account-service.example`
-on the headless host, then open the authorization link sent to that address. The command waits
-for approval and enrolls the existing daemon identity. If `FERRYX_ACCOUNT_ORIGIN` is set, omit
+Run `ferryx-cli up --email you@example.com --origin https://your-account-service.example`
+on the headless host, then open the approval URL it prints (with its code) and approve the
+machine. The command waits for approval, enrolls the existing daemon identity, and keeps the
+daemon running. With a single-use install key, pipe it in instead:
+`printf '%s\n' "$KEY" | ferryx-cli up --key-stdin --origin https://your-account-service.example`
+(or set `FERRYX_INSTALL_KEY` and pass `--key-env`). If `FERRYX_ACCOUNT_ORIGIN` is set, omit
 `--origin`. `ferryx pair generate` and `ferryx remote pair generate` no longer issue codes:
 they return `ACCOUNT_LOGIN_REQUIRED` (exit status 2). See [account service](account-service.md)
 for the alternate one-time enrollment-code path.
@@ -743,7 +750,7 @@ The server returns plain text error bodies (`src-tauri/src/remote/server.rs:354-
 Expired codes may be pruned before lookup, resulting in `Invalid pairing code`.
 
 **Resolution:**
-The current CLI cannot mint a replacement PIN. Re-enroll through `ferryx-cli account login`
+The current CLI cannot mint a replacement PIN. Re-enroll through `ferryx-cli up`
 or request a new account-issued grant through the desktop account flow. If you exceed 5 failed
 attempts on the legacy PIN exchange, the window enters rate limiting (`pairing_rate_limited`,
 HTTP 429); waiting for it to expire does not revive an expired PIN.

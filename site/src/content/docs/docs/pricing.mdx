@@ -107,6 +107,8 @@ If an existing account enters an overdue or over-capacity state (for example, if
 Organizations running their own infrastructure can deploy `ferryx-relay` in self-hosted mode:
 ```bash
 export FERRYX_DEPLOYMENT_MODE="selfhost"
+export FERRYX_ACCOUNT_ORIGIN="https://relay.example.com"
+export FERRYX_MAIL_WEBHOOK_URL="https://hooks.example.com/send-email"
 ferryx-relay --port 8787
 ```
 In self-hosted mode, commercial billing, Lemon Squeezy integration, and machine limits are completely disabled. See the [Self-Hosted Relay Operations Guide](/docs/self-hosted-relay/) for step-by-step instructions.
