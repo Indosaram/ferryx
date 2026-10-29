@@ -411,6 +411,128 @@ fn url_selection_at(
     }))
 }
 
+/// True for scripts written without spaces between words and particles (Hangul, CJK,
+/// kana, fullwidth forms). Ghostty's word selection only splits on boundary
+/// codepoints, so `matrix부` would otherwise select as one word.
+fn is_wide_script(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x1100..=0x11FF
+            | 0x2E80..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7FF
+            | 0xF900..=0xFAFF
+            | 0xFF00..=0xFFEF
+            | 0x20000..=0x3FFFF
+    )
+}
+
+/// Index range `[start, end)` of the same-script run containing `pressed`.
+///
+/// `classes` holds one entry per cell; `None` (a blank cell, such as a wide glyph's
+/// spacer) takes the class of the cell before it.
+fn script_run(classes: &[Option<bool>], pressed: usize) -> (usize, usize) {
+    let mut resolved = Vec::with_capacity(classes.len());
+    let mut last = classes.iter().flatten().next().copied().unwrap_or(false);
+    for class in classes {
+        if let Some(class) = class {
+            last = *class;
+        }
+        resolved.push(last);
+    }
+    let target = resolved[pressed];
+    let mut start = pressed;
+    while start > 0 && resolved[start - 1] == target {
+        start -= 1;
+    }
+    let mut end = pressed + 1;
+    while end < resolved.len() && resolved[end] == target {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// Narrow a double-click word selection to the script run under `grid_ref`, so a
+/// double click on `matrix` in `matrix부` selects only `matrix`.
+fn script_run_selection(
+    handle: NonNull<GhosttyTerminalImpl>,
+    grid_ref: GhosttyGridRef,
+    selection: &GhosttySelection,
+) -> Result<Option<GhosttySelection>, NativeTerminalError> {
+    let mut ordered = GhosttySelection::default();
+    // SAFETY: Category: Foreign Selection Ordering.
+    // Invariant: selection is a fresh snapshot from this terminal and no mutation has occurred.
+    let result = unsafe {
+        ghostty_terminal_selection_ordered(
+            handle.as_ptr(),
+            selection,
+            GHOSTTY_SELECTION_ORDER_FORWARD,
+            &mut ordered,
+        )
+    };
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_selection_ordered(ScriptRun)")?;
+    let start = screen_point(
+        handle,
+        &ordered.start,
+        "ghostty_terminal_point_from_grid_ref(ScriptRunStart)",
+    )?;
+    let end = screen_point(
+        handle,
+        &ordered.end,
+        "ghostty_terminal_point_from_grid_ref(ScriptRunEnd)",
+    )?;
+    let pressed = screen_point(
+        handle,
+        &grid_ref,
+        "ghostty_terminal_point_from_grid_ref(ScriptRunPressed)",
+    )?;
+    // Same bound as the URL scan: a word never needs more than a few wrapped rows.
+    const MAX_WORD_SCAN_ROWS: u32 = 8;
+    if end.y.saturating_sub(start.y) > MAX_WORD_SCAN_ROWS {
+        return Ok(None);
+    }
+
+    let cols = super::queries::query_cols(handle)?;
+    let mut cells: Vec<(u16, u32)> = Vec::new();
+    let mut classes: Vec<Option<bool>> = Vec::new();
+    for row in start.y..=end.y {
+        let first_col = if row == start.y { start.x } else { 0 };
+        let last_col = if row == end.y {
+            end.x
+        } else {
+            cols.saturating_sub(1)
+        };
+        for col in first_col..=last_col {
+            let text = screen_cell_text(handle, col, row)?;
+            // Blank cells read as " "; inside a word they are wide-glyph spacers.
+            classes.push(
+                text.chars()
+                    .find(|ch| !ch.is_whitespace())
+                    .map(is_wide_script),
+            );
+            cells.push((col, row));
+        }
+    }
+    let Some(pressed_index) = cells
+        .iter()
+        .position(|&(col, row)| col == pressed.x && row == pressed.y)
+    else {
+        return Ok(None);
+    };
+    let (run_start, run_end) = script_run(&classes, pressed_index);
+    if run_start == 0 && run_end == cells.len() {
+        return Ok(None);
+    }
+    let (start_col, start_row) = cells[run_start];
+    let (end_col, end_row) = cells[run_end - 1];
+    Ok(Some(GhosttySelection {
+        size: std::mem::size_of::<GhosttySelection>(),
+        start: screen_ref(handle, start_col, start_row)?,
+        end: screen_ref(handle, end_col, end_row)?,
+        rectangle: false,
+    }))
+}
+
 /// Current click count of an active gesture (0 when inactive).
 fn gesture_click_count(
     gesture: &SelectionGestureGuard,
@@ -777,9 +899,13 @@ pub fn apply_mouse_gesture(
             if event_res == GHOSTTY_SUCCESS {
                 // The gesture owns single/double/triple-click behavior. Double click on a
                 // URL must select the whole URL rather than the word fragment Ghostty's
-                // word boundaries produce (`:` and `/` split `https://host/path`).
+                // word boundaries produce (`:` and `/` split `https://host/path`), and
+                // a plain word stops where Latin text meets Hangul/CJK.
                 let widened = if gesture_click_count(gesture, terminal)? == 2 {
-                    url_selection_at(terminal, grid_ref)?
+                    match url_selection_at(terminal, grid_ref)? {
+                        Some(url) => Some(url),
+                        None => script_run_selection(terminal, grid_ref, &selection)?,
+                    }
                 } else {
                     None
                 };

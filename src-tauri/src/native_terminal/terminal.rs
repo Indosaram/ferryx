@@ -1446,6 +1446,54 @@ mod tests {
     }
 
     #[test]
+    fn native_terminal_double_click_stops_at_latin_hangul_boundary() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed("'us/f1-ui-matrix부' x\r\n".as_bytes())
+            .expect("write mixed-script line");
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let double_click = |terminal: &mut NativeTerminal, x: f32, base_ns: u64| {
+            let event = |action, time_ns| MouseEvent {
+                action,
+                button: (action == MouseAction::Press).then_some(MouseButton::Left),
+                position: MousePosition { x, y: 10.0 },
+                modifiers: Default::default(),
+                size: Some(size),
+                timestamp_ns: Some(time_ns),
+            };
+            for (action, time_ns) in [
+                (MouseAction::Press, base_ns),
+                (MouseAction::Release, base_ns + 50_000_000),
+                (MouseAction::Press, base_ns + 200_000_000),
+                (MouseAction::Release, base_ns + 250_000_000),
+            ] {
+                terminal
+                    .handle_mouse_gesture(&event(action, time_ns))
+                    .expect("double click gesture");
+            }
+            terminal.selection_text().expect("query word selection")
+        };
+
+        // Column 12 is inside "matrix"; column 16 is the wide Hangul cell.
+        let latin = double_click(&mut terminal, 125.0, 1_000_000_000).expect("latin selection");
+        assert!(latin.ends_with("matrix"), "got {latin:?}");
+        assert!(!latin.contains('부'), "got {latin:?}");
+        assert_eq!(
+            double_click(&mut terminal, 165.0, 5_000_000_000),
+            Some("부".to_string())
+        );
+    }
+
+    #[test]
     fn native_terminal_double_click_selects_url_across_a_soft_wrap() {
         // 20 columns forces the URL to soft-wrap onto a second row.
         let mut terminal = NativeTerminal::new(20, 24).expect("create native terminal");
