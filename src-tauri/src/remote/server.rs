@@ -7563,6 +7563,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             )),
         )
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
+        .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(
             "/api/v1/supervisor/pause",
             post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(

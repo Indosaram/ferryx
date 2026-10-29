@@ -3,7 +3,15 @@
 import { useCallback, useMemo } from "react";
 
 import type { AccountConnection } from "../accountSession";
-import { setRemoteLanePaused, SUPERVISOR_OFFLINE, useRemoteSupervisor, type LanePauseResult, type RemoteSupervisorLane } from "../remoteSupervisor";
+import {
+  setRemoteLanePaused,
+  startRemoteSupervisor,
+  SUPERVISOR_OFFLINE,
+  useRemoteSupervisor,
+  type HubStartResult,
+  type LanePauseResult,
+  type RemoteSupervisorLane,
+} from "../remoteSupervisor";
 import type { UseAccountWorktreesResult } from "../useAccountWorktrees";
 import { useMachineSupervisorSources, type MachineLink, type SupervisorFrameBus } from "./machineSupervisorSources";
 import type { SupervisorMachineView } from "./phoneHomeModel";
@@ -20,6 +28,7 @@ export type PhoneSupervisor = {
   readonly lanes: RemoteSupervisorLane[];
   readonly now: number;
   readonly setPaused: (machineId: string, laneKey: string, paused: boolean) => Promise<LanePauseResult>;
+  readonly startHub: (machineId: string) => Promise<HubStartResult>;
   readonly resync: (machineId?: string) => void;
 };
 
@@ -74,5 +83,18 @@ export function usePhoneSupervisor({ enabled, discovery, active, bus }: PhoneSup
     [fetchFor, resync],
   );
 
-  return { machines, lanes: feed.lanes, now: feed.now, setPaused, resync };
+  const startHub = useCallback(
+    async (machineId: string): Promise<HubStartResult> => {
+      const fetchLike = fetchFor(machineId);
+      if (!fetchLike) {
+        return { kind: "error", code: SUPERVISOR_OFFLINE, message: "This computer is not connected right now.", status: null };
+      }
+      const result = await startRemoteSupervisor(fetchLike);
+      if (result.kind === "ok") resync(machineId);
+      return result;
+    },
+    [fetchFor, resync],
+  );
+
+  return { machines, lanes: feed.lanes, now: feed.now, setPaused, startHub, resync };
 }

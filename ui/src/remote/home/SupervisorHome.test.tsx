@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, within, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { LanePauseResult } from "../remoteSupervisor";
+import type { HubStartResult, LanePauseResult } from "../remoteSupervisor";
 import { fixtureAction, fixtureLane, fixtureMachine, fixtureSnapshot } from "./phoneHomeFixtures";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
 
@@ -89,6 +89,26 @@ describe("SupervisorHome", () => {
     renderHome({ machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })] });
     expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("The supervisor is not running on Studio. Start it with ferryx hub start.");
     expect(screen.getByTestId("supervisor-home-headline")).toHaveTextContent("off");
+  });
+
+  it("starts a stopped hub from the phone and disables the button until the machine answers", async () => {
+    let answer!: (result: HubStartResult) => void;
+    const onStartHub = vi.fn(() => new Promise<HubStartResult>((resolve) => { answer = resolve; }));
+    renderHome({ onStartHub, machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: true, running: false } }) })] });
+    const button = screen.getByTestId("supervisor-hub-start");
+    fireEvent.click(button);
+    expect(onStartHub).toHaveBeenCalledWith("m1");
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(onStartHub).toHaveBeenCalledTimes(1);
+    await act(async () => answer({ kind: "ok", started: true }));
+    expect(button).toBeEnabled();
+  });
+
+  it("offers no start button where this machine has no hub at all", () => {
+    renderHome({ onStartHub: vi.fn(), machines: [fixtureMachine({ machineId: "m1", label: "Studio", snapshot: fixtureSnapshot({ hub: { available: false, running: false } }) })] });
+    expect(screen.queryByTestId("supervisor-hub-start")).toBeNull();
+    expect(screen.getByTestId("supervisor-hub-off")).toHaveTextContent("ferryx hub start");
   });
 
   it("opens the lane's session on that machine when its card is tapped", () => {

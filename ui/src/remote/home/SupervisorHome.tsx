@@ -1,12 +1,12 @@
 // The phone's default home: what the hub supervisor on each computer drives, its pause, and
 // what it typed. Mirrors the desktop SupervisorPanelView, laid out as touch cards per machine.
-import { Eye, Pause, Play } from "lucide-react";
+import { Eye, Pause, Play, Power } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
 import { actingSessionIds, type SupervisorLane } from "../../lib/supervisorModel";
-import type { LanePauseResult } from "../remoteSupervisor";
+import type { HubStartResult, LanePauseResult } from "../remoteSupervisor";
 import {
   actionText,
   clock,
@@ -25,6 +25,8 @@ export type SupervisorHomeProps = {
   readonly needsYou: ReadonlySet<string>;
   readonly onSetPaused: (machineId: string, laneKey: string, paused: boolean) => Promise<LanePauseResult>;
   readonly onOpenLane: (machineId: string, sessionId: string) => void;
+  /** Starts a stopped hub on that machine. Absent: the home only says how to start it. */
+  readonly onStartHub?: (machineId: string) => Promise<HubStartResult>;
 };
 
 const SECTION_LABEL = "px-1 text-[12px] font-medium text-chat-foreground-secondary";
@@ -133,8 +135,9 @@ function LaneCard({
   );
 }
 
-export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLane }: SupervisorHomeProps) {
+export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLane, onStartHub }: SupervisorHomeProps) {
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
+  const [starting, setStarting] = useState<ReadonlySet<string>>(() => new Set());
   // The lane's paused value the person asked for, shown until the next snapshot settles it.
   const [optimistic, setOptimistic] = useState<ReadonlyMap<string, boolean>>(() => new Map());
   // Once a snapshot shows the asked-for value the override has done its job: drop it, so a later
@@ -157,6 +160,20 @@ export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLan
   const recent = recentActions(machines);
   const readable = machines.filter((machine) => machine.snapshot);
   const anySupervisor = readable.some((machine) => machine.snapshot!.hub.available);
+
+  const startHub = async (machineId: string) => {
+    if (!onStartHub || starting.has(machineId)) return;
+    setStarting((prev) => new Set(prev).add(machineId));
+    const result = await onStartHub(machineId);
+    setStarting((prev) => {
+      const copy = new Set(prev);
+      copy.delete(machineId);
+      return copy;
+    });
+    if (result.kind === "error") {
+      toast.error("Could not start the supervisor", { description: `${result.code}: ${result.message}` });
+    }
+  };
 
   const togglePause = async (machineId: string, lane: SupervisorLane) => {
     const id = `${machineId}\u0000${lane.key}`;
@@ -215,9 +232,28 @@ export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLan
               <h2 className={cn(SECTION_LABEL, "truncate")}>{machine.label}</h2>
               {snapshot ? null : <MachineStateNote machine={machine} />}
               {hubOff ? (
-                <p data-testid="supervisor-hub-off" className="rounded-xl bg-chat-surface px-3 py-3 text-[13px] leading-snug text-chat-foreground-secondary">
-                  The supervisor is not running on {machine.label}. Start it with <span className="font-mono text-chat-foreground">ferryx hub start</span>.
-                </p>
+                <div data-testid="supervisor-hub-off" className="flex min-w-0 items-center gap-2 rounded-xl bg-chat-surface px-3 py-2 text-[13px] leading-snug text-chat-foreground-secondary">
+                  {onStartHub && snapshot.hub.available ? (
+                    <>
+                      <span className="min-w-0 flex-1">The supervisor is stopped on {machine.label}.</span>
+                      <button
+                        type="button"
+                        data-testid="supervisor-hub-start"
+                        aria-busy={starting.has(machine.machineId) || undefined}
+                        disabled={starting.has(machine.machineId)}
+                        onClick={() => void startHub(machine.machineId)}
+                        className="flex h-11 shrink-0 items-center gap-1.5 rounded-lg bg-chat-surface-raised px-3 font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                      >
+                        <Power aria-hidden="true" className="size-3.5" />
+                        Start
+                      </button>
+                    </>
+                  ) : (
+                    <span className="min-w-0 py-1">
+                      The supervisor is not running on {machine.label}. Start it with <span className="font-mono text-chat-foreground">ferryx hub start</span>.
+                    </span>
+                  )}
+                </div>
               ) : snapshot && snapshot.lanes.length === 0 ? (
                 <p className="rounded-xl bg-chat-surface px-3 py-3 text-[13px] leading-snug text-chat-foreground-secondary">
                   {snapshot.watched.length > 0
