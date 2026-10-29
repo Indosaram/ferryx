@@ -3853,6 +3853,31 @@ impl DaemonServer {
             });
         }));
 
+        // A prompt card that appears, moves or goes away (answered on the phone, say) reaches the
+        // desktop Inbox as `agentPromptChanged`, so its rows re-read the prompt without waiting
+        // for the pane's activity to flip.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let mut observations = remote_state.agent_events.subscribe();
+            let prompt_tx = remote_event_tx.clone();
+            runtime.spawn(async move {
+                let mut filter = crate::agent_control::events::PromptChangeFilter::default();
+                loop {
+                    match observations.recv().await {
+                        Ok(observation) => {
+                            let Some(frame) = filter.frame(&observation) else { continue };
+                            let payload = serde_json::from_str(&frame).unwrap_or(serde_json::Value::Null);
+                            let _ = prompt_tx.send(DaemonRemoteEvent {
+                                event: crate::agent_control::events::AGENT_PROMPT_CHANGED_FRAME.to_string(),
+                                payload,
+                            });
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
         // P14: inventory transitions that originate inside the daemon-owned
         // PairedHostService (not just renderer-driven pair/migrate/forget)
         // must reach the desktop. The sink feeds the daemon's remote-event

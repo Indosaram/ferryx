@@ -2,6 +2,7 @@ import {
   answerAgentPrompt,
   getAgentPrompt,
   isStructuredIpcError,
+  onAgentPromptChanged,
   type AgentPrompt,
   type AgentPromptAnswer,
 } from "../../../lib/tauri";
@@ -17,6 +18,8 @@ export type AttentionPrompts = {
   answer: (row: AttentionRow, prompt: AgentPrompt, answer: AgentPromptAnswer) => Promise<AttentionPromptOutcome>;
   /** The answer went out: the row is no longer waiting on the user. */
   onAnswered: (row: AttentionRow) => void;
+  /** Calls `listener` whenever the daemon says the prompt behind `row`'s pane changed. */
+  subscribe?: (row: AttentionRow, listener: () => void) => () => void;
 };
 
 /** The desktop's prompts, read from and answered on the daemon session that backs each row's pane. */
@@ -48,5 +51,22 @@ export function desktopAttentionPrompts(
       }
     },
     onAnswered,
+    subscribe: (row, listener) => {
+      let unlisten: (() => void) | null = null;
+      let active = true;
+      void onAgentPromptChanged((sessionId) => {
+        if (sessionId === backendSessionOf(row)) listener();
+      }).then(
+        (stop) => {
+          if (active) unlisten = stop;
+          else stop();
+        },
+        () => undefined,
+      );
+      return () => {
+        active = false;
+        unlisten?.();
+      };
+    },
   };
 }

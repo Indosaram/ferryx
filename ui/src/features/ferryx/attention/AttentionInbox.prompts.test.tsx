@@ -4,6 +4,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const core = vi.hoisted(() => ({ invoke: vi.fn(), isTauri: vi.fn(() => true) }));
 vi.mock("@tauri-apps/api/core", () => core);
+const events = vi.hoisted(() => {
+  const handlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
+  return {
+    handlers,
+    listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+      const set = handlers.get(name) ?? new Set();
+      set.add(handler);
+      handlers.set(name, set);
+      return () => set.delete(handler);
+    }),
+    emit(name: string, payload: unknown) {
+      for (const handler of handlers.get(name) ?? []) handler({ payload });
+    },
+  };
+});
+vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import { AttentionInbox } from "./AttentionInbox";
 import type { AttentionRow } from "./attentionModel";
@@ -55,6 +71,7 @@ function answerCalls() {
 beforeEach(() => {
   core.invoke.mockReset();
   core.isTauri.mockReturnValue(true);
+  events.handlers.clear();
 });
 afterEach(cleanup);
 
@@ -178,6 +195,36 @@ describe("AttentionInbox prompt answers", () => {
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
     });
     expect(answerCalls()[0]?.[1]).toMatchObject({ answer: { text: "use bun" } });
+  });
+
+  it("drops the row when an agentPromptChanged push finds the card answered elsewhere", async () => {
+    let card: typeof MENU | null = MENU;
+    core.invoke.mockImplementation(async (command: string) => (command === "cmd_agent_prompt_get" ? card : null));
+    render(<Harness />);
+    expect(await screen.findAllByTestId("attention-prompt-option")).toHaveLength(3);
+    await waitFor(() => expect(events.handlers.get("agentPromptChanged")?.size ?? 0).toBeGreaterThan(0));
+
+    card = null;
+    await act(async () => {
+      events.emit("agentPromptChanged", { sessionId: "daemon-other" });
+    });
+    expect(screen.getByTestId("attention-row")).toBeInTheDocument();
+
+    await act(async () => {
+      events.emit("agentPromptChanged", { sessionId: "daemon-pane-1" });
+    });
+    await waitFor(() => expect(screen.queryByTestId("attention-row")).not.toBeInTheDocument());
+    expect(answerCalls()).toHaveLength(0);
+  });
+
+  it("shows no answer buttons for a multi-select card the daemon reports as unanswerable", async () => {
+    // The daemon's prompt view is null for a multi-select card (agent_control_service prompt_view).
+    core.invoke.mockResolvedValue(null);
+    render(<Harness />);
+    await waitFor(() => expect(core.invoke).toHaveBeenCalledWith("cmd_agent_prompt_get", { sessionId: "daemon-pane-1" }));
+    await act(async () => {});
+    expect(screen.queryByTestId("attention-prompt-option")).not.toBeInTheDocument();
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "needs-you");
   });
 
   it("shows a finished row whose pane holds a daemon prompt as needing you, with its answers", async () => {

@@ -66,10 +66,19 @@ function usePromptedRows(rows: readonly AttentionRow[], prompts: AttentionPrompt
   const [prompted, setPrompted] = useState<ReadonlySet<string>>(() => new Set());
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+  const [pushes, setPushes] = useState(0);
   const doneKey = rows
     .filter((row) => row.state === "done")
     .map((row) => `${row.id}\u0000${row.revision}\u0000${row.text ?? ""}`)
     .join("\u0001");
+
+  useEffect(() => {
+    if (!prompts?.subscribe) return;
+    const stops = rowsRef.current
+      .filter((row) => row.state === "done")
+      .map((row) => prompts.subscribe!(row, () => setPushes((count) => count + 1)));
+    return () => stops.forEach((stop) => stop());
+  }, [doneKey, prompts]);
 
   useEffect(() => {
     const done = rowsRef.current.filter((row) => row.state === "done");
@@ -86,7 +95,7 @@ function usePromptedRows(rows: readonly AttentionRow[], prompts: AttentionPrompt
     return () => {
       current = false;
     };
-  }, [doneKey, prompts]);
+  }, [doneKey, prompts, pushes]);
 
   if (prompted.size === 0) return rows;
   let promoted = false;
@@ -289,15 +298,29 @@ function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: At
   promptsRef.current = prompts;
   const rowRef = useRef(row);
   rowRef.current = row;
+  const shownRef = useRef<AgentPrompt | null>(null);
+  shownRef.current = prompt;
+  const [pushes, setPushes] = useState(0);
+
+  // The daemon's agentPromptChanged push: re-read now rather than wait for the activity to flip.
+  useEffect(
+    () => promptsRef.current.subscribe?.(rowRef.current, () => setPushes((count) => count + 1)),
+    [row.workspaceId, row.sessionId],
+  );
 
   useEffect(() => {
     let current = true;
+    const pushed = pushes > 0;
     setStale(false);
     setError(null);
     setConfirming(null);
     void promptsRef.current.read(rowRef.current).then(
       (next) => {
-        if (current) setPrompt(next);
+        if (!current) return;
+        // A pushed re-read that finds the card gone means it was answered elsewhere (the phone,
+        // the pane): the row no longer waits on the user.
+        if (pushed && !next && shownRef.current) promptsRef.current.onAnswered(rowRef.current);
+        setPrompt(next);
       },
       () => {
         if (current) setPrompt(null);
@@ -306,8 +329,8 @@ function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: At
     return () => {
       current = false;
     };
-    // Re-read on the row's own moves: its entry revision, and the activity detail it shows.
-  }, [row.workspaceId, row.sessionId, row.revision, row.text]);
+    // Re-read on the row's own moves: its entry revision, the activity detail it shows, and pushes.
+  }, [row.workspaceId, row.sessionId, row.revision, row.text, pushes]);
 
   if (stale) {
     return (
