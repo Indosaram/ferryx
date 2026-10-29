@@ -1,9 +1,11 @@
 # Headless Linux Server Deployment Guide for Ferryx
 
-> **Current setup (2026-09-28):** Prefer the standalone `ferryx-cli` installer below and
-> `ferryx-cli account login --email you@example.com --origin https://your-account-service.example`
-> for headless machine enrollment. Run `ferryx-cli --daemon` under a service manager or in
-> a dedicated terminal. The legacy `ferryx pair generate` / `ferryx remote pair generate`
+> **Current setup (2026-10-28):** Run the installer with the install key from the desktop's
+> Settings > Remote > Add Machine > Install command:
+> `curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>`. It verifies
+> `ferryx-cli` (x86_64, glibc 2.17+) against the release `SHA256SUMS` and runs `ferryx-cli up`,
+> which enrolls the machine and keeps the daemon running under a systemd user service (or a
+> detached daemon); do not start `ferryx-cli --daemon` by hand. The legacy `ferryx pair generate` / `ferryx remote pair generate`
 > instructions in sections 6-7 are historical and now return `ACCOUNT_LOGIN_REQUIRED`;
 > they cannot issue new PINs. The older GUI binary dependency discussion below applies
 > to `ferryx`, not to the standalone `ferryx-cli`.
@@ -414,7 +416,7 @@ chmod 0600 ~/.ferryx/remote/remote-config.json
 
 ### Verifying Gateway Configuration
 
-Use the CLI to inspect the persisted configuration:
+Use the CLI to inspect the gateway:
 
 ```bash
 ferryx remote status
@@ -422,7 +424,7 @@ ferryx remote status
 
 Output:
 ```text
-status=ok port=43821 mode=localNetwork
+status=ok port=43821 daemon=running mode=localNetwork relayConnected=false
 ```
 
 For JSON format:
@@ -433,12 +435,13 @@ ferryx remote status --json
 
 Output:
 ```json
-{"status":"ok","port":43821,"mode":"localNetwork"}
+{"status":"ok","port":43821,"daemon":"running","mode":"relay","relayConnected":true,"relayUrl":"https://relay.ferryx.dev","relayUrlSource":"default"}
 ```
 
-Persisted status versus live health:
-The `ferryx remote status` command reads static configuration from `~/.ferryx/remote/remote-config.json` (`src-tauri/src/cli.rs:361`).
-It prints `status=ok` along with the configured port and mode, but does not query the running daemon over IPC. It returns `status=ok` even if the daemon is stopped or if the gateway failed to bind due to network interface errors.
+Live status versus saved config:
+`ferryx remote status` asks the running daemon over its local socket and reports the live mode, whether the relay tunnel is connected (`relayConnected`), and the relay URL in effect with its source (`config` for a saved URL, `default` for the built-in relay).
+When no daemon answers it prints `status=daemonNotRunning` (`"status":"daemonNotRunning"`, `"daemon":"notRunning"`, `"relayConnected":null`) with the mode saved in `~/.ferryx/remote/remote-config.json`; nothing live is claimed. A daemon that owns the socket but does not answer (for example one still running an older protocol version after an upgrade) is reported as `status=daemonUnreachable` (`"daemon":"unreachable"`).
+`ferryx-cli up` and `ferryx account enroll` turn relay mode on after enrolling when the saved mode is `off`; a `localNetwork` or `tailscale` mode chosen earlier is left unchanged.
 To confirm that the remote gateway is actively listening, inspect open TCP sockets directly:
 ```bash
 ss -tulpn | grep 43821
@@ -469,9 +472,12 @@ When created, it writes `~/.ferryx/remote/identity.json` with permissions `0600`
 
 ### Step 2: Enrolling the headless machine
 
-Run `ferryx-cli account login --email you@example.com --origin https://your-account-service.example`
-on the headless host, then open the authorization link sent to that address. The command waits
-for approval and enrolls the existing daemon identity. If `FERRYX_ACCOUNT_ORIGIN` is set, omit
+Run `ferryx-cli up --email you@example.com --origin https://your-account-service.example`
+on the headless host, then open the approval URL it prints (with its code) and approve the
+machine. The command waits for approval, enrolls the existing daemon identity, and keeps the
+daemon running. With a single-use install key, pipe it in instead:
+`printf '%s\n' "$KEY" | ferryx-cli up --key-stdin --origin https://your-account-service.example`
+(or set `FERRYX_INSTALL_KEY` and pass `--key-env`). If `FERRYX_ACCOUNT_ORIGIN` is set, omit
 `--origin`. `ferryx pair generate` and `ferryx remote pair generate` no longer issue codes:
 they return `ACCOUNT_LOGIN_REQUIRED` (exit status 2). See [account service](account-service.md)
 for the alternate one-time enrollment-code path.
@@ -743,7 +749,7 @@ The server returns plain text error bodies (`src-tauri/src/remote/server.rs:354-
 Expired codes may be pruned before lookup, resulting in `Invalid pairing code`.
 
 **Resolution:**
-The current CLI cannot mint a replacement PIN. Re-enroll through `ferryx-cli account login`
+The current CLI cannot mint a replacement PIN. Re-enroll through `ferryx-cli up`
 or request a new account-issued grant through the desktop account flow. If you exceed 5 failed
 attempts on the legacy PIN exchange, the window enters rate limiting (`pairing_rate_limited`,
 HTTP 429); waiting for it to expire does not revive an expired PIN.

@@ -177,6 +177,86 @@ describe("AddMachineModal - SSH connection and import", () => {
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(screen.getByRole("radio", { name: "Import SSH Config" })).toHaveAttribute("aria-checked", "true");
   });
+
+  async function submitSshForm() {
+    vi.mocked(invoke).mockClear();
+    render(<AddMachineModal isOpen={true} onClose={() => {}} onSuccess={() => {}} initialMethod="ssh" />);
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "dev" } });
+    fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "dev.example" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Connect SSH Machine" })); });
+  }
+
+  const fingerprint = "SHA256:QC8NK7dHes+PsoxIbE/WpRKLdTd8DwAUUbcIg2HU4pg";
+
+  it("shows the fingerprint for an unknown host key and trusts it only after confirmation", async () => {
+    let trusted = false;
+    vi.mocked(invoke).mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
+        case "cmd_ssh_test_connection":
+          return trusted
+            ? { host: args?.host, reachable: true, checkedAt: 1 }
+            : { host: args?.host, reachable: false, checkedAt: 1, lastError: "Host key verification failed.",
+                diagnostic: { code: "HOST_KEY_UNKNOWN", message: "Host key verification failed.", details: { stage: "host_key" } } };
+        case "cmd_ssh_scan_host_key":
+          return { keys: [{ keyType: "ssh-ed25519", fingerprintSha256: fingerprint, line: "dev.example ssh-ed25519 AAAA" }] };
+        case "cmd_ssh_trust_host_key": trusted = true; return undefined;
+        case "cmd_ssh_update_host": return [args?.host];
+        default: return undefined;
+      }
+    });
+    await submitSshForm();
+
+    expect(screen.getByTestId("ssh-host-key-fingerprint")).toHaveTextContent(fingerprint);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "cmd_ssh_trust_host_key")).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "cmd_ssh_update_host")).toBe(false);
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Trust and Connect" })); });
+
+    const trustCall = vi.mocked(invoke).mock.calls.find(([command]) => command === "cmd_ssh_trust_host_key");
+    expect(trustCall?.[1]).toMatchObject({ fingerprintSha256: fingerprint, host: { hostname: "dev.example" } });
+    expect(await screen.findByText(/connected and verified/)).toBeInTheDocument();
+  });
+
+  it("explains a changed host key without offering to trust it", async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
+        case "cmd_ssh_test_connection":
+          return { host: args?.host, reachable: false, checkedAt: 1, lastError: "REMOTE HOST IDENTIFICATION HAS CHANGED",
+                   diagnostic: { code: "HOST_KEY_CHANGED", message: "changed", details: { stage: "host_key" } } };
+        default: return undefined;
+      }
+    });
+    await submitSshForm();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/does not match the trusted one/);
+    expect(screen.queryByTestId("ssh-host-key-confirm")).toBeNull();
+    const commands = vi.mocked(invoke).mock.calls.map(([command]) => command);
+    expect(commands).not.toContain("cmd_ssh_scan_host_key");
+    expect(commands).not.toContain("cmd_ssh_trust_host_key");
+  });
+
+  it("reports a rejected trust call as a changed key", async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
+        case "cmd_ssh_test_connection":
+          return { host: args?.host, reachable: false, checkedAt: 1,
+                   diagnostic: { code: "HOST_KEY_UNKNOWN", message: "unknown", details: { stage: "host_key" } } };
+        case "cmd_ssh_scan_host_key":
+          return { keys: [{ keyType: "ssh-ed25519", fingerprintSha256: fingerprint, line: "dev.example ssh-ed25519 AAAA" }] };
+        case "cmd_ssh_trust_host_key":
+          throw { code: "HOST_KEY_CHANGED", message: "different key", details: { stage: "host_key" } };
+        default: return undefined;
+      }
+    });
+    await submitSshForm();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Trust and Connect" })); });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/does not match the trusted one/);
+    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "cmd_ssh_update_host")).toBe(false);
+  });
 });
 
 describe("AddMachineModal - enrollment code step", () => {

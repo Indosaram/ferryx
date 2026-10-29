@@ -841,7 +841,10 @@ fn gateway_path(segments: &[String], query: &[(String, String)]) -> Result<Strin
 }
 
 pub struct MachineClient {
+    /// Relay origins: honors the HTTP proxy policy.
     http: reqwest::Client,
+    /// The published direct path: never proxied, however its address looks.
+    direct_http: reqwest::Client,
 }
 impl Default for MachineClient {
     fn default() -> Self {
@@ -850,14 +853,27 @@ impl Default for MachineClient {
 }
 impl MachineClient {
     pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .no_proxy()
+        Self::with_relay_proxy(crate::remote::relay_client::proxy::reqwest_proxy())
+    }
+    /// Proxy use is decided by path kind, not by address: only relay traffic may cross the
+    /// HTTP proxy; the direct path never does.
+    fn with_relay_proxy(proxy: reqwest::Proxy) -> Self {
+        let builder = || {
+            reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(65))
-                .build()
-                .expect("native machine HTTP"),
+        };
+        Self {
+            http: builder().proxy(proxy).build().expect("native machine HTTP"),
+            direct_http: builder().no_proxy().build().expect("native machine HTTP"),
+        }
+    }
+    fn http_for(&self, relay: bool) -> &reqwest::Client {
+        if relay {
+            &self.http
+        } else {
+            &self.direct_http
         }
     }
     /// Reattach never creates a session. Authorization and target validation use
@@ -998,7 +1014,15 @@ impl MachineClient {
                 .map(|socket| (socket, None));
         }
         let first = self
-            .open_socket_at(&base.url, lease, segments, query, ticket_target, max_frame)
+            .open_socket_at(
+                &base.url,
+                false,
+                lease,
+                segments,
+                query,
+                ticket_target,
+                max_frame,
+            )
             .await;
         match (first, base.direct_epoch) {
             (Err(error), Some(epoch)) if super::direct_client::is_transport_failure(&error) => {
@@ -1030,7 +1054,15 @@ impl MachineClient {
         let Some(attach) = lease.attach() else {
             super::secure_http::warn_repair_required(&host.host_id, lease.generation().0);
             return self
-                .open_socket_at(relay, lease, segments, query, ticket_target, max_frame)
+                .open_socket_at(
+                    relay,
+                    true,
+                    lease,
+                    segments,
+                    query,
+                    ticket_target,
+                    max_frame,
+                )
                 .await;
         };
         let path = gateway_path(segments, query)?;
@@ -1056,16 +1088,27 @@ impl MachineClient {
         match result {
             Err(error) if error.code == "E2E_UNSUPPORTED" => {
                 super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
-                self.open_socket_at(relay, lease, segments, query, ticket_target, max_frame)
-                    .await
+                self.open_socket_at(
+                    relay,
+                    true,
+                    lease,
+                    segments,
+                    query,
+                    ticket_target,
+                    max_frame,
+                )
+                .await
             }
             other => other,
         }
     }
 
+    /// `relay` is the path kind: only a relay socket may go through the HTTP proxy.
+    #[allow(clippy::too_many_arguments)]
     async fn open_socket_at(
         &self,
         base: &Url,
+        relay: bool,
         lease: &CredentialLease,
         segments: &[String],
         query: &[(String, String)],
@@ -1080,7 +1123,10 @@ impl MachineClient {
         url.query_pairs_mut()
             .extend_pairs(query.iter().map(|(k, v)| (k, v)));
         // Mint a single-use socket ticket if the endpoint supports it (relay requires one).
-        if let Some(ticket) = self.socket_ticket(base, lease, ticket_target).await? {
+        if let Some(ticket) = self
+            .socket_ticket(base, relay, lease, ticket_target)
+            .await?
+        {
             url.query_pairs_mut().append_pair("ticket", &ticket);
         }
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -1110,7 +1156,7 @@ impl MachineClient {
             .max_frame_size(Some(max_frame));
         let socket = tokio::select! { biased;
             _ = cancelled.changed() => return Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
-            result = tokio::time::timeout(Duration::from_secs(30), super::secure_http::connect_net_websocket(request, config)) =>
+            result = tokio::time::timeout(Duration::from_secs(30), super::secure_http::connect_net_websocket(request, config, relay)) =>
                 result.map_err(|_| ClientError::local("TIMEOUT"))?.map_err(|e| {
                     tracing::error!("Failed to connect to paired host websocket: {:?}", e);
                     ClientError::local("HOST_UNAVAILABLE")
@@ -1125,6 +1171,7 @@ impl MachineClient {
     async fn socket_ticket(
         &self,
         base: &Url,
+        relay: bool,
         lease: &CredentialLease,
         target: &str,
     ) -> Result<Option<String>> {
@@ -1135,7 +1182,7 @@ impl MachineClient {
             .extend(["api", "v1", "socket-ticket"]);
         let body = serde_json::json!({ "target": target }).to_string();
         let mut request = self
-            .http
+            .http_for(relay)
             .post(url)
             .bearer_auth(lease.token()?)
             .header("content-type", "application/json")
@@ -1231,7 +1278,7 @@ impl MachineClient {
         if base.direct_epoch.is_none() {
             return self.http_relay(host, base.url, lease, route, directory).await;
         }
-        let first = self.http_at(base.url, lease, route, directory).await;
+        let first = self.http_at(base.url, false, lease, route, directory).await;
         match (first, base.direct_epoch) {
             (Err(error), Some(epoch)) if super::direct_client::is_transport_failure(&error) => {
                 super::direct_client::report_direct_loss(host, epoch);
@@ -1260,13 +1307,13 @@ impl MachineClient {
             Some(attach) => match self.http_secure(host, attach, lease, route, directory).await {
                 Err(error) if error.code == "E2E_UNSUPPORTED" => {
                     super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
-                    self.http_at(relay, lease, route, directory).await
+                    self.http_at(relay, true, lease, route, directory).await
                 }
                 other => other,
             },
             None => {
                 super::secure_http::warn_repair_required(&host.host_id, lease.generation().0);
-                self.http_at(relay, lease, route, directory).await
+                self.http_at(relay, true, lease, route, directory).await
             }
         }
     }
@@ -1349,9 +1396,11 @@ impl MachineClient {
         Ok((response.body, rotated))
     }
 
+    /// `relay` is the path kind: only a relay request may go through the HTTP proxy.
     async fn http_at(
         &self,
         base: Url,
+        relay: bool,
         lease: &CredentialLease,
         route: &Route,
         directory: bool,
@@ -1370,7 +1419,7 @@ impl MachineClient {
                 .extend_pairs(route.query.iter().map(|(k, v)| (k, v)));
         }
         let mut request = self
-            .http
+            .http_for(relay)
             .request(route.method.clone(), url)
             .bearer_auth(lease.token()?);
         if is_relay {

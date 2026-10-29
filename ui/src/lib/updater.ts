@@ -12,12 +12,13 @@ export type UpdateChannel = "stable" | "beta";
 /**
  * Update manifests per channel. They mirror `STABLE_UPDATE_ENDPOINT` and `BETA_UPDATE_ENDPOINT` in
  * src-tauri/src/ipc/updater.rs, which picks the endpoint from the channel this module sends; the UI
- * never sends a URL. Beta falls back to the stable manifest when no beta manifest is published.
+ * never sends a URL. Beta reads the fixed `beta` release tag (`releases/latest` never resolves to a
+ * prerelease) and falls back to the stable manifest when no beta manifest is published.
  */
 export const UPDATE_ENDPOINTS: Record<UpdateChannel, readonly string[]> = {
   stable: ["https://github.com/Indosaram/ferryx/releases/latest/download/latest.json"],
   beta: [
-    "https://github.com/Indosaram/ferryx/releases/latest/download/latest-beta.json",
+    "https://github.com/Indosaram/ferryx/releases/download/beta/latest-beta.json",
     "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json",
   ],
 };

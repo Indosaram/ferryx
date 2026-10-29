@@ -40,17 +40,9 @@ where
         return Ok("ssh".to_string());
     }
 
-    if let Some(paths) = path_env {
-        for dir in split_path_list(&paths, is_windows) {
-            for candidate in ["ssh.exe", "ssh.cmd", "ssh"] {
-                let candidate_path = dir.join(candidate);
-                if file_exists(&candidate_path) {
-                    return Ok(candidate_path.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-
+    // The native Win32-OpenSSH client wins over PATH: a Git-for-Windows or MSYS `ssh` earlier on
+    // PATH speaks POSIX paths, its own agent and its own known_hosts, so the Windows client is
+    // taken first (System32, then a Program Files install) and PATH is only the fallback.
     let sys_root = system_root.as_deref().unwrap_or(r"C:\Windows");
     let sys32_ssh = PathBuf::from(sys_root)
         .join("System32")
@@ -66,6 +58,17 @@ where
             .join("ssh.exe");
         if file_exists(&prog_ssh) {
             return Ok(prog_ssh.to_string_lossy().into_owned());
+        }
+    }
+
+    if let Some(paths) = path_env {
+        for dir in split_path_list(&paths, is_windows) {
+            for candidate in ["ssh.exe", "ssh.cmd", "ssh"] {
+                let candidate_path = dir.join(candidate);
+                if file_exists(&candidate_path) {
+                    return Ok(candidate_path.to_string_lossy().into_owned());
+                }
+            }
         }
     }
 
@@ -258,6 +261,26 @@ mod tests {
         )
         .expect("should fall back to ProgramFiles");
         assert_eq!(Path::new(&resolved_prog), program_files);
+
+        // Resolution order: System32 OpenSSH, then Program Files OpenSSH, then PATH. An MSYS or
+        // Git ssh on PATH never shadows the native client.
+        let msys = Path::new(r"C:\msys64\usr\bin").join("ssh.exe");
+        let msys_path = || Some(OsString::from(r"C:\msys64\usr\bin"));
+        let all = [sys32.clone(), program_files.clone(), msys.clone()];
+        let resolve_with = |present: &[PathBuf]| {
+            resolve_ssh_program_platform(
+                true,
+                msys_path(),
+                Some(r"C:\Windows".into()),
+                Some(r"C:\Program Files".into()),
+                |p| present.iter().any(|candidate| candidate == p),
+            )
+            .map(PathBuf::from)
+            .expect("resolves")
+        };
+        assert_eq!(resolve_with(&all), sys32);
+        assert_eq!(resolve_with(&all[1..]), program_files);
+        assert_eq!(resolve_with(&all[2..]), msys);
 
         let err = resolve_ssh_program_platform(
             true,

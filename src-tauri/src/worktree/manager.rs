@@ -1,6 +1,7 @@
 use crate::worktree::git::{
     git_branch_delete, git_branch_is_ancestor_of_head, git_status_porcelain, git_worktree_add,
-    git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree, run_git,
+    git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree,
+    rev_parse_verify_args, run_git, GitUnavailableReason,
 };
 use crate::worktree::model::{
     BranchDeletionPreview, CreateWorktreeOptions, DirtyState, ExternalWorktree, OrcaWorktreeInfo,
@@ -91,6 +92,8 @@ impl WriterLeaseRegistry {
 pub struct WorktreeManager {
     repo_root: PathBuf,
     git_backed: bool,
+    /// Why the folder is plain (terminal-only); `None` when it is Git-backed.
+    git_unavailable: Option<GitUnavailableReason>,
     /// `<data>/worktree-settings.json`; `None` when no data directory resolves.
     settings_path: Option<PathBuf>,
     writer_leases: WriterLeaseRegistry,
@@ -117,6 +120,7 @@ impl WorktreeManager {
         Self {
             repo_root: root,
             git_backed: false,
+            git_unavailable: None,
             settings_path: None,
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
@@ -136,17 +140,32 @@ impl WorktreeManager {
         }
 
         // Plain-folder mode: a non-Git directory is a valid (terminal-only)
-        // workspace root; only worktree operations are unavailable.
-        let (repo_root, git_backed) = match run_git(&canonical, &["rev-parse", "--show-toplevel"]) {
-            Ok(top_level) => match fs::canonicalize(PathBuf::from(top_level.trim())) {
-                Ok(git_root) => (git_root, true),
-                Err(_) => (canonical, false),
-            },
-            Err(_) => (canonical, false),
-        };
+        // workspace root; only worktree operations are unavailable. The reason is
+        // kept so the UI can tell "install Git" apart from "not a repository".
+        let (repo_root, git_backed, git_unavailable) =
+            match run_git(&canonical, &["rev-parse", "--show-toplevel"]) {
+                Ok(top_level) => match fs::canonicalize(PathBuf::from(top_level.trim())) {
+                    Ok(git_root) => (git_root, true, None),
+                    Err(error) => (
+                        canonical,
+                        false,
+                        Some(GitUnavailableReason::GitFailed {
+                            message: error.to_string(),
+                        }),
+                    ),
+                },
+                Err(error) => {
+                    let reason = GitUnavailableReason::classify(&error);
+                    if reason != GitUnavailableReason::NotARepository {
+                        tracing::warn!(path = %canonical.display(), ?reason, "folder opened without Git");
+                    }
+                    (canonical, false, Some(reason))
+                }
+            };
         Ok(Self {
             repo_root,
             git_backed,
+            git_unavailable,
             settings_path: naming::settings_path(),
             writer_leases: WriterLeaseRegistry::default(),
             delete_lock: Arc::new(Mutex::new(())),
@@ -241,6 +260,11 @@ impl WorktreeManager {
     /// require it). Plain-folder workspaces are terminal-only.
     pub fn is_git_backed(&self) -> bool {
         self.git_backed
+    }
+
+    /// Why worktree operations are unavailable; `None` for a Git-backed root.
+    pub fn git_unavailable(&self) -> Option<&GitUnavailableReason> {
+        self.git_unavailable.as_ref()
     }
 
     fn require_git_backed(&self) -> Result<(), WorktreeError> {
@@ -521,12 +545,7 @@ impl WorktreeManager {
         }
         let commit = run_git(
             &self.repo_root,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{base}^{{commit}}"),
-            ],
+            &rev_parse_verify_args(&format!("{base}^{{commit}}")),
         )?;
         let parent = options
             .path
@@ -891,12 +910,7 @@ impl WorktreeManager {
         let branch = branch.to_owned();
         let head = run_git(
             &self.repo_root,
-            &[
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("refs/heads/{branch}^{{commit}}"),
-            ],
+            &rev_parse_verify_args(&format!("refs/heads/{branch}^{{commit}}")),
         )?
         .trim()
         .to_owned();

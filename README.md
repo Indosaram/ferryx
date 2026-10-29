@@ -31,22 +31,34 @@ ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electro
 | Platform | Package | |
 | :--- | :--- | :--- |
 | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | Microsoft Store (Primary) / Installer (Secondary) | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) / [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
+| **Windows** | Microsoft Store (x64, signed, auto-updating) | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
-| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64 only; arm64: [build from source](CONTRIBUTING.md#build-prerequisites)) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
+| **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x86_64 only, glibc 2.17+) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
 
-The macOS, Windows, and Linux links resolve against the latest release. Local release assembly
+The macOS and Linux links resolve against the latest release. Windows installs come from the
+Microsoft Store; a release may additionally attach a direct `.exe` installer
+(not code-signed), so check the [release page](https://github.com/Indosaram/ferryx/releases/latest)
+for it rather than relying on a fixed link. Local release assembly
 stages the headless `ferryx-cli` beside the Linux AppImage and `.deb` (as
 `ferryx-cli-linux-amd64`) and, when the universal macOS CLI is present, as
 `ferryx-cli-darwin-universal`, so the one-line installer above resolves a current artifact when
-the release publishes one and otherwise fails closed. No prebuilt `ferryx-cli` exists for Linux
-arm64; the installer exits with code 2 there and points to the source build. The installers
-check the downloaded `ferryx-cli` against the release's `SHA256SUMS` and refuse a mismatch.
-Verify other downloads with the checksums published alongside the binaries:
+the release publishes one and otherwise fails closed.
+
+Linux builds are x86_64 only. The AppImage and `.deb` need glibc 2.35 or newer and WebKitGTK 4.1
+with GTK 3 (Ubuntu 22.04 or later); the headless `ferryx-cli` needs glibc 2.17 or newer. There
+are no Linux or Windows ARM64 builds: on Linux arm64, on musl-based distributions such as
+Alpine, and on Windows ARM64 the installers stop with exit code 2 and say why.
+
+The installers check the downloaded `ferryx-cli` against the release's `SHA256SUMS` and refuse
+a mismatch. Every release publishes `SHA256SUMS` and its minisign signature
+`SHA256SUMS.minisig` beside the binaries; check a download with:
 
 ```bash
-sha256sum -c SHA256SUMS.txt
+# The key is the app's updater key (the `pubkey` in src-tauri/tauri.conf.json). minisign:
+# https://jedisct1.github.io/minisign/ (Ubuntu 22.04 does not package it; use its release build).
+minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm
+sha256sum -c SHA256SUMS --ignore-missing
 ```
 
 ## Speed. Isolation. Total control.
@@ -106,19 +118,48 @@ machine enrollment, and the separate desktop account and gateway settings.
 - Outbound encrypted relay tunnel: no inbound SSH, open ports, or public IP needed
 - Native terminal split-panes and remote Git worktrees run directly on the machine
 
+Before you pair, know what you are turning on (details in [SECURITY.md](SECURITY.md) and the
+[privacy declaration](site/src/content/docs/privacy.md)):
+
+- A machine Control grant is code execution: the paired desktop can browse raw filesystem paths
+  and run programs as the daemon's OS user. Only pair machines and desktops you control.
+- Automatic direct trust is on by default: machines your account attests are trusted for the
+  direct path. Pin keys manually (`ferryx direct-trust`) or set `FERRYX_DIRECT_AUTO_TRUST=0`.
+- Local network mode is plain HTTP and WebSockets with control enabled; the LAN listener only
+  starts after an explicit insecure opt-in. Use it only on a network you trust or behind a
+  TLS-terminating proxy.
+- The direct path asks public STUN servers (`stun.l.google.com:19302`,
+  `stun.cloudflare.com:3478`) for each machine's public address. Set `FERRYX_STUN_SERVERS=off`
+  on a machine to stop its lookups and keep its sessions on the relay, or list your own
+  `host:port` servers (IPv4 address or hostname).
+
 ```bash
 # 1. One-line install ferryx-cli on the remote machine (Linux x64, macOS)
 curl -fsSL https://relay.ferryx.dev/install.sh | bash
+# The installer verifies the binary against the release SHA256SUMS, installs it to
+# ~/.local/bin (/usr/local/bin as root), then runs `ferryx-cli up`. Without an install key,
+# `up` prints an approval URL and code: open the URL, or enter the code in the desktop app under
+# Settings > Remote > Add Machine > Approve a machine. `up` waits for the approval.
 
-# 2. Start the headless PTY daemon in a dedicated service or terminal;
-#    use a second terminal for step 3 while this foreground process runs.
-ferryx-cli --daemon
+# 2. Or skip the approval: Settings > Remote > Add Machine > Install command shows this line
+#    with a single-use install key filled in.
+curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>
 
-# 3. Link machine to your account via email magic link (no open ports or GUI PIN copying needed)
-ferryx-cli account login --email you@example.com --origin https://your-account-service.example
-# Open the authorization link in your email; the command waits for approval.
-# --origin may be omitted when FERRYX_ACCOUNT_ORIGIN is configured.
+# 3. Check that the daemon is kept running (systemd user unit with linger on Linux, launchd on
+#    macOS; a detached daemon where no service manager is available).
+ferryx-cli service status
 ```
+
+`ferryx-cli up` enrolls the machine with your account and keeps its daemon running; you never
+start `ferryx-cli --daemon` yourself. Installer options: `--key <key>` (single-use install key,
+passed to `ferryx-cli` in `FERRYX_INSTALL_KEY`, never as an argument), `--email <address>` (account
+email hint for the approval request), `--no-up` (install the binary only) and `--json`. With
+`--no-up`, or when no key, no email and no terminal are present, the installer prints the `up`
+command to run later: `ferryx-cli up --origin https://relay.ferryx.dev`. Run by hand, `up` needs
+`--origin` or `FERRYX_ACCOUNT_ORIGIN`; there is no built-in default. On Windows (x64), use
+`irm https://relay.ferryx.dev/install.ps1 | iex`, or the PowerShell line the Install command
+shows. For a self-hosted relay, set the origin for the installer as well:
+`curl -fsSL https://relay.example.com/install.sh | FERRYX_ORIGIN=https://relay.example.com sh -s -- --key <install-key>`.
 
 ### Zero Electron overhead
 
@@ -226,11 +267,11 @@ unmeasured performance claims:
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) 1.1+
-- [Rust](https://www.rust-lang.org/) stable (at least 1.82)
-- [Node.js](https://nodejs.org/) 20+
+- [Bun](https://bun.sh/) 1.1+ (the only JavaScript runtime the repository uses; Node.js is not needed)
+- [Rust](https://www.rust-lang.org/) stable (at least 1.89, the `rust-version` in `src-tauri/Cargo.toml`)
 - [Zig](https://ziglang.org/download/) 0.16.0 (required for the pinned Ghostty build)
-- [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
+- [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/) as a Cargo subcommand, since `cargo tauri dev` runs it:
+  `cargo install tauri-cli --version "^2" --locked`
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
 [Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop app. The

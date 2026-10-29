@@ -15,6 +15,9 @@ This repository hosts the unified Ferryx public web presence and documentation e
 Production is `https://ferryx.dev`, served by Cloudflare Workers Static Assets.
 Run `bun run --cwd site deploy` after checking the production build. The command
 sets the production origin and deploys both the apex site and the `www` redirect.
+The Windows direct installer (`Ferryx_x64-setup.exe`) is optional per release, so the site
+links only the Microsoft Store by default. Set `PUBLIC_FERRYX_WINDOWS_INSTALLER=true` for the
+build only after confirming the latest release lists that asset; otherwise the link would 404.
 Local development keeps the site at `http://localhost:14173/`.
 
 See [the hosting runbook](../docs/SITE_DOMAIN_MIGRATION.md) for routing and

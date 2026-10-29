@@ -415,6 +415,69 @@ where
     "sh".to_string()
 }
 
+/// The user's login shell: `SHELL` when set, else the passwd entry's shell. A GUI or systemd
+/// launch often has no `SHELL`, and the passwd entry is what a terminal login would start.
+pub(crate) fn login_shell_program() -> Option<String> {
+    choose_login_shell(std::env::var("SHELL").ok(), passwd_shell())
+}
+
+fn choose_login_shell(shell_env: Option<String>, passwd: Option<String>) -> Option<String> {
+    shell_env
+        .map(|shell| shell.trim().to_string())
+        .filter(|shell| !shell.is_empty())
+        .or_else(|| {
+            // Service accounts carry `nologin`/`false`, which would close every pane at once.
+            passwd.filter(|shell| {
+                let name = shell.rsplit('/').next().unwrap_or_default();
+                shell.starts_with('/') && name != "nologin" && name != "false"
+            })
+        })
+}
+
+#[cfg(unix)]
+fn passwd_shell() -> Option<String> {
+    let mut buffer = vec![0u8; 16 * 1024];
+    // SAFETY:
+    // Category: Foreign Function Interface (FFI).
+    // Invariant: `passwd` is a zeroed C POD and `buffer` stays alive and writable for
+    // `buffer.len()` bytes for the whole call; getpwuid_r writes only inside them and sets
+    // `result` to null or to `&passwd`. `pw_shell` then points into `buffer`, which outlives the
+    // copy below, and is a NUL-terminated string when non-null.
+    unsafe {
+        let mut passwd = std::mem::zeroed::<libc::passwd>();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let code = libc::getpwuid_r(
+            libc::getuid(),
+            &mut passwd,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        );
+        if code != 0 || result.is_null() || passwd.pw_shell.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(passwd.pw_shell)
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    }
+}
+
+/// Windows has no passwd database; its default shell comes from PATH (pwsh/powershell).
+#[cfg(not(unix))]
+fn passwd_shell() -> Option<String> {
+    None
+}
+
+/// Process environment lookup for shell resolution, with `SHELL` falling back to the passwd
+/// entry so a launch without `SHELL` still starts the user's own shell.
+fn shell_resolution_env(var: &str) -> Option<String> {
+    if var == "SHELL" {
+        return login_shell_program();
+    }
+    std::env::var(var).ok()
+}
+
 #[cfg(test)]
 type PathDiscovery = std::sync::Arc<dyn Fn() -> Vec<std::path::PathBuf> + Send + Sync>;
 #[cfg(test)]
@@ -440,6 +503,20 @@ pub(crate) fn legacy_search_paths() -> Vec<std::path::PathBuf> {
         return discovery();
     }
     crate::ipc::agents::search_paths()
+}
+
+/// How long a resumed agent missing from the process PATH waits for login-PATH discovery right
+/// after daemon start: the 2 s the pre-discovery lookup blocked for.
+const AGENT_RESUME_LOGIN_PATH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Resolves a resumed agent's program. Callers run on a blocking worker (spawn_blocking).
+fn resolve_resume_agent(program: &str) -> Option<std::path::PathBuf> {
+    // A test that pinned PATH discovery owns the whole search space.
+    #[cfg(test)]
+    if PATH_DISCOVERY.with(|slot| slot.borrow().is_some()) {
+        return crate::ipc::agents::resolve_binary(program, &legacy_search_paths());
+    }
+    crate::ipc::agents::resolve_discovered_binary_within(program, AGENT_RESUME_LOGIN_PATH_WAIT)
 }
 
 fn is_on_path(exe: &str) -> bool {
@@ -593,13 +670,11 @@ pub fn resolve_startup_command(
         startup,
         TargetPlatform::CURRENT,
         is_on_path,
-        |var| std::env::var(var).ok(),
+        shell_resolution_env,
     )?;
     if let Some(TerminalStartup::AgentResume { .. }) = startup {
         if !plan.program.contains('/') && !plan.program.contains('\\') {
-            if let Some(resolved) =
-                crate::ipc::agents::resolve_binary(&plan.program, &legacy_search_paths())
-            {
+            if let Some(resolved) = resolve_resume_agent(&plan.program) {
                 plan.program = resolved.to_string_lossy().to_string();
             }
         }
@@ -607,7 +682,7 @@ pub fn resolve_startup_command(
             preference,
             TargetPlatform::CURRENT,
             is_on_path,
-            |var| std::env::var(var).ok(),
+            shell_resolution_env,
         );
         plan = wrap_agent_with_return_shell(plan, return_shell, TargetPlatform::CURRENT, |path| {
             std::path::Path::new(path).exists()
@@ -709,9 +784,12 @@ where
 }
 
 pub fn resolve_shell_command(preference: Option<&str>) -> CommandBuilder {
-    let plan = resolve_shell_command_pure(preference, TargetPlatform::CURRENT, is_on_path, |var| {
-        std::env::var(var).ok()
-    });
+    let plan = resolve_shell_command_pure(
+        preference,
+        TargetPlatform::CURRENT,
+        is_on_path,
+        shell_resolution_env,
+    );
     let mut cmd = CommandBuilder::new(&plan.program);
     for arg in &plan.args {
         cmd.arg(arg);
@@ -1026,6 +1104,27 @@ mod tests {
         let blank_env =
             resolve_linux_default_shell(Some("   ".to_string()), |_: &str| false, |_: &str| false);
         assert_eq!(blank_env, "sh");
+    }
+
+    #[test]
+    fn login_shell_falls_back_to_the_passwd_shell_when_shell_is_unset() {
+        let passwd = || Some("/usr/bin/fish".to_string());
+        assert_eq!(choose_login_shell(Some(" /bin/zsh ".into()), passwd()).as_deref(), Some("/bin/zsh"));
+        assert_eq!(choose_login_shell(None, passwd()).as_deref(), Some("/usr/bin/fish"));
+        assert_eq!(choose_login_shell(Some("  ".into()), passwd()).as_deref(), Some("/usr/bin/fish"));
+        for unusable in ["/usr/sbin/nologin", "/bin/false", "fish", ""] {
+            assert_eq!(choose_login_shell(None, Some(unusable.into())), None, "{unusable}");
+        }
+        assert_eq!(choose_login_shell(None, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passwd_shell_reads_the_current_user_entry() {
+        // A container uid without a passwd entry legitimately has none.
+        if let Some(shell) = passwd_shell() {
+            assert!(shell.starts_with('/'), "{shell}");
+        }
     }
 
     #[test]
@@ -1487,6 +1586,83 @@ mod tests {
         let cmd = resolve_startup_command(None, Some(&startup))
             .expect("resolve omo startup command builder");
         let _ = cmd;
+    }
+
+    // `agy` (antigravity) stands in for an agent installed only on the login PATH.
+    #[cfg(unix)]
+    fn antigravity_resume() -> TerminalStartup {
+        TerminalStartup::AgentResume {
+            agent_type: "antigravity".to_string(),
+            provider_session: AgentProviderSession {
+                launcher: None,
+                key: AgentProviderSessionKey::SessionId,
+                id: "sess-agy-late-path".to_string(),
+                transcript_path: None,
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_agy_not_on_process_path() {
+        let process_path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            crate::ipc::agents::resolve_binary("agy", &process_path),
+            None,
+            "precondition: this host has agy on its process PATH"
+        );
+    }
+
+    /// An agent only on the login PATH, resumed before discovery published, still resolves to
+    /// its absolute path once discovery publishes (the auto-resume right after daemon start).
+    #[cfg(unix)]
+    #[test]
+    fn local_resume_resolves_an_agent_from_a_login_path_published_later() {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_agy_not_on_process_path();
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agy");
+        std::fs::write(&agent, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let login = crate::ipc::agents::PendingLoginPath::default();
+        let publisher = {
+            let login = login.clone();
+            let dir = root.path().as_os_str().to_owned();
+            std::thread::spawn(move || login.publish(Some(dir)))
+        };
+        let cmd = crate::ipc::agents::with_login_path(&login, || {
+            resolve_startup_command(None, Some(&antigravity_resume()))
+        })
+        .expect("resolve antigravity resume");
+        publisher.join().unwrap();
+        assert!(
+            cmd.get_argv()
+                .iter()
+                .any(|arg| arg.as_os_str() == agent.as_os_str()),
+            "{:?}",
+            cmd.get_argv()
+        );
+    }
+
+    /// Discovery that never publishes holds the local resume for the bounded wait only; the
+    /// agent then stays a bare name for the shell to report.
+    #[cfg(unix)]
+    #[test]
+    fn local_resume_wait_for_an_unpublished_login_path_is_bounded() {
+        assert_agy_not_on_process_path();
+        let login = crate::ipc::agents::PendingLoginPath::default();
+        let started = std::time::Instant::now();
+        let cmd = crate::ipc::agents::with_login_path(&login, || {
+            resolve_startup_command(None, Some(&antigravity_resume()))
+        })
+        .expect("resolve antigravity resume");
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(10), "{elapsed:?}");
+        assert!(
+            cmd.get_argv().iter().any(|arg| arg == "agy"),
+            "{:?}",
+            cmd.get_argv()
+        );
     }
 
     #[test]

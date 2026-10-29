@@ -7,7 +7,7 @@ import {
 } from "../../lib/tauri";
 import {
   AccountSessionError,
-  getConfiguredAccountOrigin,
+  getConfiguredAccountOriginUnchecked,
   getStoredAccountSessionToken,
   issueEnrollmentCode,
 } from "../../remote/accountSession";
@@ -61,7 +61,7 @@ function describeError(error: unknown): { code: string; message: string } {
 }
 
 export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.Element {
-  const accountOrigin = origin ?? getConfiguredAccountOrigin();
+  const accountOrigin = origin ?? getConfiguredAccountOriginUnchecked();
   const depsRef = useRef<AccountStepDeps>({ ...DEFAULT_DEPS, ...deps });
   const onLinkedRef = useRef(onLinked);
   onLinkedRef.current = onLinked;

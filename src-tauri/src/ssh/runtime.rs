@@ -28,10 +28,52 @@ pub struct RemoteEnvironment {
     pub home: String,
     pub temp: String,
     pub git: bool,
+    /// The remote `$XDG_RUNTIME_DIR`, reported only when logind lingers the user: a short,
+    /// per-user 0700 directory for the helper socket when the home path is too long for
+    /// `sun_path`. Without linger logind removes it at logout, taking the socket with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_dir: Option<String>,
+    /// Operating system the probe reported (`uname -s`, or `Windows`). Empty when unknown,
+    /// for example in an environment serialized by an older build.
+    #[serde(default)]
+    pub os: String,
+    /// CPU architecture the probe reported (`uname -m`, or the native Windows
+    /// `PROCESSOR_ARCHITECTURE`). Empty when unknown; helper selection then fails.
+    #[serde(default)]
+    pub arch: String,
 }
 
 pub fn error(code: IpcErrorCode, stage: &str, message: &str) -> IpcError {
     IpcError::new(code, message).with_details(serde_json::json!({"stage": stage}))
+}
+
+/// Whether OpenSSH reported the server as new: no key of the presented type is known for it in any
+/// known_hosts file it consulted ("No <type> host key is known for <host> ...").
+pub fn host_key_is_new(stderr: &str) -> bool {
+    stderr
+        .to_ascii_lowercase()
+        .lines()
+        .any(|line| line.contains("no ") && line.contains(" host key is known for "))
+}
+
+/// Classifies OpenSSH stderr that reports a host-key verification failure. Only OpenSSH's explicit
+/// "No <type> host key is known" line is an unknown key the user may trust. A bare "Host key
+/// verification failed" is also what a changed key prints under `LogLevel FATAL` and what an
+/// untrusted ProxyJump hop prints, so it is reported like a changed key and never offered trust.
+pub fn host_key_failure(stderr: &str) -> Option<IpcErrorCode> {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("remote host identification has changed")
+        || (lower.contains("host key for ") && lower.contains(" has changed"))
+    {
+        return Some(IpcErrorCode::HostKeyChanged);
+    }
+    if host_key_is_new(stderr) {
+        return Some(IpcErrorCode::HostKeyUnknown);
+    }
+    if lower.contains("host key verification failed") {
+        return Some(IpcErrorCode::HostKeyChanged);
+    }
+    None
 }
 
 pub fn powershell_data(value: &str) -> String {
@@ -203,15 +245,20 @@ where
         match executor {
             RemoteExecutor::Sh => format!(
                 "os=$(uname -s) || exit; case \"$os\" in Linux|Darwin|FreeBSD|OpenBSD|NetBSD) ;; *) exit 2;; esac; \
-                 g=0; command -v git >/dev/null 2>&1 && g=1; printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000%s\\000' \
-                 posix \"$os\" \"$HOME\" \"${{TMPDIR:-/tmp}}\" \"$g\""
+                 arch=$(uname -m) || exit; \
+                 {agent_dir}g=0; command -v git >/dev/null 2>&1 && g=1; \
+                 rd=; [ -n \"${{XDG_RUNTIME_DIR:-}}\" ] && [ \"$(loginctl show-user \"$(id -u)\" -p Linger --value 2>/dev/null)\" = yes ] && rd=$XDG_RUNTIME_DIR; \
+                 printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000%s\\000%s\\000%s\\000' \
+                 posix \"$os\" \"$HOME\" \"${{TMPDIR:-/tmp}}\" \"$g\" \"$arch\" \"$rd\"",
+                agent_dir = direct::REMOTE_AGENT_DIR_PREFLIGHT,
             ),
             RemoteExecutor::Powershell | RemoteExecutor::Pwsh => format!(
                 "if ([Environment]::OSVersion.Platform -ne 'Win32NT') {{ exit 2 }}; \
                  $g='0'; if (Get-Command git -ErrorAction SilentlyContinue) {{ $g='1' }}; \
                  $ds=''; $k=Get-ItemProperty 'HKLM:\\SOFTWARE\\OpenSSH' -ErrorAction SilentlyContinue; \
                  if ($k -and $k.DefaultShell) {{ $ds=[string]$k.DefaultShell }}; \
-                 [Console]::Write(('{marker}','windows',$PSVersionTable.PSVersion.ToString(),$HOME,[IO.Path]::GetTempPath(),$g,$ds,'' -join [char]0))"
+                 $a=$env:PROCESSOR_ARCHITEW6432; if (-not $a) {{ $a=$env:PROCESSOR_ARCHITECTURE }}; \
+                 [Console]::Write(('{marker}','windows',$PSVersionTable.PSVersion.ToString(),$HOME,[IO.Path]::GetTempPath(),$g,$ds,[string]$a,'' -join [char]0))"
             ),
         }
     };
@@ -247,7 +294,7 @@ where
                 let fields = parse_fields(
                     &output,
                     &marker,
-                    if executor == RemoteExecutor::Sh { 5 } else { 6 },
+                    7,
                 )?;
                 let platform = match (executor, fields[0]) {
                     (RemoteExecutor::Sh, "posix") => RemotePlatform::Posix,
@@ -275,6 +322,20 @@ where
                         ))
                     }
                 };
+                let (os, arch) = match platform {
+                    RemotePlatform::Posix => (fields[1], fields[5]),
+                    RemotePlatform::Windows => ("Windows", fields[6]),
+                };
+                // Refuse an OS without a helper here, so a connection test reports it instead
+                // of passing and failing later at helper selection.
+                super::helper_assets::require_helper_os(os)?;
+                if arch.trim().is_empty() {
+                    return Err(error(
+                        IpcErrorCode::ParseError,
+                        "environment",
+                        "SSH environment probe did not report the CPU architecture",
+                    ));
+                }
                 let mut environment = RemoteEnvironment {
                     platform,
                     executor,
@@ -282,6 +343,14 @@ where
                     home: fields[2].into(),
                     temp: fields[3].into(),
                     git,
+                    // Only an absolute, control-free POSIX path is usable as a socket root.
+                    runtime_dir: (platform == RemotePlatform::Posix
+                        && fields[6].starts_with('/')
+                        && platform.validate_path(fields[6]).is_ok())
+                    .then(|| fields[6].trim_end_matches('/').to_string())
+                    .filter(|dir| !dir.is_empty()),
+                    os: os.into(),
+                    arch: arch.into(),
                 };
 
                 // Windows terminals must open the shell the host configured via the
@@ -297,9 +366,11 @@ where
                             if !remaining.is_zero() {
                                 let script2 = probe_script(preferred);
                                 if let Ok(output2) = run(preferred, script2, remaining).await {
-                                    environment = parse_fields(&output2, &marker, 6)
+                                    environment = parse_fields(&output2, &marker, 7)
                                         .ok()
-                                        .filter(|fields| fields[0] == "windows")
+                                        .filter(|fields| {
+                                            fields[0] == "windows" && !fields[6].trim().is_empty()
+                                        })
                                         .and_then(|fields| {
                                             RemotePlatform::Windows
                                                 .validate_path(fields[2])
@@ -319,6 +390,9 @@ where
                                                 home: fields[2].into(),
                                                 temp: fields[3].into(),
                                                 git,
+                                                runtime_dir: None,
+                                                os: "Windows".into(),
+                                                arch: fields[6].into(),
                                             })
                                         })
                                         .unwrap_or(environment);
@@ -341,25 +415,33 @@ where
                 // host key verification failure, authentication failure). In that case, subsequent
                 // executor probes will also fail identically, so fail immediately.
                 if exit_code == Some(255) {
-                    let authentication_failed = host.auth_method == super::SshAuthMethod::Password
-                        && err
-                            .details
-                            .as_ref()
-                            .and_then(|v| v.get("stderr"))
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|text| text.contains("Permission denied"));
+                    let stderr = err
+                        .details
+                        .as_ref()
+                        .and_then(|v| v.get("stderr"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let host_key = host_key_failure(stderr);
+                    let authentication_failed = host_key.is_none()
+                        && host.auth_method == super::SshAuthMethod::Password
+                        && stderr.contains("Permission denied");
                     if authentication_failed {
                         if let Some(generation) = credential_generation.as_deref() {
                             super::password::clear_generation(host, generation)?;
                         }
                     }
+                    let stage = if host_key.is_some() {
+                        "host_key"
+                    } else if authentication_failed {
+                        "authentication"
+                    } else {
+                        "environment"
+                    };
+                    if let Some(code) = host_key {
+                        err.code = code;
+                    }
                     if let Some(details) = err.details.as_mut() {
-                        details["stage"] = if authentication_failed {
-                            "authentication"
-                        } else {
-                            "environment"
-                        }
-                        .into();
+                        details["stage"] = stage.into();
                         details["executor"] = executor.program().into();
                     }
                     return Err(err);
@@ -448,7 +530,7 @@ mod tests {
                 let marker = script.split("FERRYX_ENV_V1_").nth(1).unwrap().split('\'').next().unwrap();
                 tokio::time::timeout(budget, async {
                     tokio::time::sleep(Duration::from_millis(4300)).await;
-                    format!("FERRYX_ENV_V1_{marker}\0windows\05.1\0C:\\Users\\test\0C:\\Temp\01\0\0").into_bytes()
+                    format!("FERRYX_ENV_V1_{marker}\0windows\05.1\0C:\\Users\\test\0C:\\Temp\01\0\0AMD64\0").into_bytes()
                 })
                 .await
                 .map_err(|_| error(IpcErrorCode::IoError, "transport", "probe deadline"))
@@ -458,6 +540,94 @@ mod tests {
         .unwrap();
         assert_eq!(environment.platform, RemotePlatform::Windows);
         assert!(environment.git);
+        assert_eq!((environment.os.as_str(), environment.arch.as_str()), ("Windows", "AMD64"));
+    }
+
+    fn sh_reply(script: &str, fields: &[&str]) -> Vec<u8> {
+        let marker = script.split("FERRYX_ENV_V1_").nth(1).unwrap().split('\\').next().unwrap();
+        // Login rc files may print anything before the frame.
+        let mut out = b"Welcome!\nlast login: today\n\0stray\0FERRYX_ENV_V1_bogus\0".to_vec();
+        for field in std::iter::once(format!("FERRYX_ENV_V1_{marker}").as_str()).chain(fields.iter().copied()) {
+            out.extend_from_slice(field.as_bytes());
+            out.push(0);
+        }
+        out
+    }
+
+    async fn detect_sh_reply(fields: &'static [&'static str]) -> Result<RemoteEnvironment, IpcError> {
+        detect_with(&probe_host(), Some(RemotePlatform::Posix), |executor, script, _| {
+            assert_eq!(executor, RemoteExecutor::Sh);
+            assert!(script.contains("uname -m"));
+            std::future::ready(Ok(sh_reply(&script, fields)))
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn posix_probe_reports_os_and_arch_through_rc_file_noise() {
+        let environment =
+            detect_sh_reply(&["posix", "Linux", "/home/u", "/tmp", "1", "aarch64", ""]).await.unwrap();
+        assert_eq!((environment.os.as_str(), environment.arch.as_str()), ("Linux", "aarch64"));
+        assert_eq!(environment.version, "Linux");
+        assert_eq!(
+            crate::ipc::ssh::resolve_remote_target_triple(&environment).unwrap(),
+            "aarch64-unknown-linux-musl"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_reply_without_arch_errors_instead_of_defaulting() {
+        // The pre-arch frame carries five fields; it must not parse as a valid environment.
+        let failure = detect_sh_reply(&["posix", "Linux", "/home/u", "/tmp", "1"]).await.unwrap_err();
+        assert_eq!(failure.code, IpcErrorCode::ParseError);
+        let failure =
+            detect_sh_reply(&["posix", "Linux", "/home/u", "/tmp", "1", "", ""]).await.unwrap_err();
+        assert_eq!(failure.code, IpcErrorCode::ParseError);
+    }
+
+    #[tokio::test]
+    async fn bsd_is_refused_at_detection_with_the_helper_reason() {
+        let failure =
+            detect_sh_reply(&["posix", "FreeBSD", "/home/u", "/tmp", "1", "amd64", ""]).await.unwrap_err();
+        assert_eq!(failure.code, IpcErrorCode::Unsupported);
+        let details = failure.details.unwrap();
+        assert_eq!(details["reason"], "no_helper_for_os");
+        assert_eq!(details["stage"], "environment");
+        assert!(failure.message.contains("no remote helper for this OS"));
+    }
+
+    #[tokio::test]
+    async fn posix_probe_reports_runtime_dir_only_when_absolute() {
+        for (value, expected) in [
+            ("/run/user/1000", Some("/run/user/1000")),
+            ("/run/user/1000/", Some("/run/user/1000")),
+            ("", None),
+            ("relative/dir", None),
+        ] {
+            let environment = detect_with(
+                &probe_host(),
+                Some(RemotePlatform::Posix),
+                |executor, script, _| {
+                    assert_eq!(executor, RemoteExecutor::Sh);
+                    assert!(script.contains("-p Linger --value"), "{script}");
+                    let marker = script
+                        .split("FERRYX_ENV_V1_")
+                        .nth(1)
+                        .unwrap()
+                        .split('\\')
+                        .next()
+                        .unwrap()
+                        .to_string();
+                    std::future::ready(Ok(format!(
+                        "FERRYX_ENV_V1_{marker}\0posix\0Linux\0/home/u\0/tmp\01\0x86_64\0{value}\0"
+                    )
+                    .into_bytes()))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(environment.runtime_dir.as_deref(), expected, "{value:?}");
+        }
     }
 
     #[tokio::test]
@@ -599,6 +769,32 @@ mod tests {
         assert_ne!(exit_code, Some(255));
     }
 
+    /// The POSIX detect probe precedes every pane, so it pre-creates the agent-forward directory
+    /// before sshd binds the first pane's -R forward; the probe's fields are unchanged.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn posix_probe_precreates_private_agent_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().to_path_buf();
+        let environment = detect_with(&probe_host(), Some(RemotePlatform::Posix), |executor, script, _| {
+            assert_eq!(executor, RemoteExecutor::Sh);
+            let output = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            std::future::ready(Ok(output.stdout))
+        })
+        .await
+        .unwrap();
+        assert_eq!(environment.platform, RemotePlatform::Posix);
+        assert_eq!(environment.home, home.to_str().unwrap());
+        let mode = std::fs::metadata(home.join(".ferryx/a")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700);
+    }
+
     #[tokio::test]
     async fn exit_code_255_aborts_detection_immediately_without_probing_other_executors() {
         let mut probed = Vec::new();
@@ -624,6 +820,51 @@ mod tests {
         );
         let details = failure.details.unwrap();
         assert_eq!(details["exitCode"], 255);
+    }
+
+    #[tokio::test]
+    async fn host_key_failures_report_their_own_code_and_stage() {
+        let samples = [
+            // Bare line: a changed key under LogLevel FATAL, or an untrusted ProxyJump hop.
+            ("Host key verification failed.\r\n", IpcErrorCode::HostKeyChanged),
+            (
+                "No ED25519 host key is known for example.test and you have requested strict checking.\nHost key verification failed.\n",
+                IpcErrorCode::HostKeyUnknown,
+            ),
+            (
+                "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nHost key for example.test has changed and you have requested strict checking.\nHost key verification failed.\n",
+                IpcErrorCode::HostKeyChanged,
+            ),
+        ];
+        for (stderr, code) in samples {
+            let failure = detect_with(&probe_host(), Some(RemotePlatform::Posix), |_, _, _| {
+                std::future::ready(Err(error(IpcErrorCode::IoError, "execution", "ssh failed")
+                    .with_details(serde_json::json!({ "exitCode": 255, "stderr": stderr }))))
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(failure.code, code, "{stderr}");
+            assert_eq!(failure.details.unwrap()["stage"], "host_key", "{stderr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn password_permission_denied_still_reports_authentication() {
+        let host = SshHost {
+            auth_method: super::super::SshAuthMethod::Password,
+            ..probe_host()
+        };
+        let failure = detect_with(&host, Some(RemotePlatform::Posix), |_, _, _| {
+            std::future::ready(Err(error(IpcErrorCode::IoError, "execution", "ssh failed")
+                .with_details(serde_json::json!({
+                    "exitCode": 255,
+                    "stderr": "user@example.test: Permission denied (password)."
+                }))))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(failure.code, IpcErrorCode::IoError);
+        assert_eq!(failure.details.unwrap()["stage"], "authentication");
     }
 
     #[tokio::test]

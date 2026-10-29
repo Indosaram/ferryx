@@ -1405,12 +1405,66 @@ fn lock_file_with_optional_wait_internal<F: FnMut()>(
     }
 }
 
+/// The instance-lock deadline of a declared successor that follows its predecessor (todo 27,
+/// Windows idle upgrade): the `wait` window starts once the predecessor process ended, not when the
+/// successor started, because the predecessor leaves only after its in-flight requests drained.
+/// A predecessor still running after `bound` is not leaving: Err, and no lock is attempted. Without
+/// a predecessor handle (already gone) the window starts now. `now` is the clock, injectable so a
+/// drain longer than the window is testable without waiting for it.
+#[cfg(any(windows, test))]
+fn successor_lock_deadline(
+    wait: std::time::Duration,
+    predecessor: Option<&mut dyn crate::daemon::handover::PredecessorExit>,
+    bound: std::time::Duration,
+    now: &dyn Fn() -> std::time::Instant,
+) -> Result<std::time::Instant, String> {
+    if let Some(predecessor) = predecessor {
+        if !predecessor.wait_exit(bound) {
+            return Err(format!(
+                "The predecessor daemon was still running after {bound:?}; it keeps serving and \
+                 this successor exits without taking the instance lock"
+            ));
+        }
+    }
+    Ok(now() + wait)
+}
+
 pub(crate) fn acquire_daemon_locks(
     persistent_path: Option<&Path>,
     legacy_path: &Path,
 ) -> Result<DaemonLockFiles, String> {
     let deadline = crate::daemon::handover::successor_wait_from_env()
         .map(|wait| std::time::Instant::now() + wait);
+    // The Windows idle-upgrade predecessor waits for this line before it retires (todo 27). The
+    // write never panics: the predecessor closes its end once it has read the line. The
+    // predecessor's process handle is opened first, while it is certainly alive (it waits for
+    // this line), and the lock window starts only once that process ended: it leaves only after
+    // its in-flight requests drained, which can outlast any fixed window.
+    #[cfg(windows)]
+    let deadline = match crate::daemon::handover::successor_wait_from_env() {
+        Some(wait) => {
+            use std::io::Write as _;
+            let mut predecessor = crate::daemon::handover::predecessor_from_env();
+            {
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    crate::daemon::handover::SUCCESSOR_WAITING_TOKEN
+                );
+                let _ = stdout.flush();
+            }
+            Some(successor_lock_deadline(
+                wait,
+                predecessor
+                    .as_mut()
+                    .map(|p| p as &mut dyn crate::daemon::handover::PredecessorExit),
+                crate::daemon::handover::PREDECESSOR_EXIT_BOUND,
+                &std::time::Instant::now,
+            )?)
+        }
+        None => deadline,
+    };
     let persistent = if let Some(path) = persistent_path {
         let parent = path
             .parent()
@@ -1427,6 +1481,103 @@ pub(crate) fn acquire_daemon_locks(
         _persistent: persistent,
         _legacy: locked,
     })
+}
+
+#[cfg(test)]
+mod successor_lock_deadline_tests {
+    use super::*;
+    use crate::daemon::handover::{PredecessorExit, PREDECESSOR_EXIT_BOUND};
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    /// A predecessor whose exit the test controls: wait_exit runs the drain (advancing the test
+    /// clock and releasing the predecessor's locks) and reports whether it exited.
+    struct ControlledPredecessor<F: FnMut(std::time::Duration) -> bool>(F);
+
+    impl<F: FnMut(std::time::Duration) -> bool> PredecessorExit for ControlledPredecessor<F> {
+        fn wait_exit(&mut self, bound: std::time::Duration) -> bool {
+            (self.0)(bound)
+        }
+    }
+
+    const WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// Round 3 (D1-residual): the predecessor drains for 25 s, longer than the 15 s window. The
+    /// window starts at its exit, so the successor still takes the lock it releases then. The
+    /// clock is the test's own; nothing depends on wall-clock timing.
+    #[test]
+    fn successor_takes_the_lock_after_a_drain_longer_than_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("daemon.lock");
+        let mut predecessor_locks =
+            Some(acquire_daemon_locks(None, &lock).expect("predecessor owns the lock"));
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let mut drain = ControlledPredecessor(|bound: std::time::Duration| {
+            assert_eq!(bound, PREDECESSOR_EXIT_BOUND);
+            // The in-flight request takes 25 s; the predecessor then exits and its locks go.
+            clock.set(clock.get() + std::time::Duration::from_secs(25));
+            drop(predecessor_locks.take());
+            true
+        });
+        let deadline = successor_lock_deadline(
+            WINDOW,
+            Some(&mut drain as &mut dyn PredecessorExit),
+            PREDECESSOR_EXIT_BOUND,
+            &|| clock.get(),
+        )
+        .expect("the predecessor exited");
+        assert_eq!(deadline, start + std::time::Duration::from_secs(40));
+        assert!(
+            deadline > start + WINDOW,
+            "a window fixed at the successor's start would have expired during the drain"
+        );
+        assert!(
+            predecessor_locks.is_none(),
+            "the drain released the predecessor's locks"
+        );
+        // The lock the predecessor released is taken within a window that starts at its exit.
+        let deadline = successor_lock_deadline(
+            WINDOW,
+            Some(&mut ControlledPredecessor(|_: std::time::Duration| true)
+                as &mut dyn PredecessorExit),
+            PREDECESSOR_EXIT_BOUND,
+            &Instant::now,
+        )
+        .unwrap();
+        lock_file_with_optional_wait(&lock, Some(deadline)).expect("successor takes over");
+    }
+
+    /// A predecessor still running after the bound is not leaving: the successor gives up
+    /// without attempting the lock, so the predecessor keeps the endpoint.
+    #[test]
+    fn successor_gives_up_without_the_lock_when_the_predecessor_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("daemon.lock");
+        let _predecessor = acquire_daemon_locks(None, &lock).expect("predecessor owns the lock");
+        let error = successor_lock_deadline(
+            WINDOW,
+            Some(&mut ControlledPredecessor(|_: std::time::Duration| false)
+                as &mut dyn PredecessorExit),
+            PREDECESSOR_EXIT_BOUND,
+            &Instant::now,
+        )
+        .unwrap_err();
+        assert!(error.contains("still running"), "{error}");
+        assert!(
+            acquire_daemon_locks(None, &lock).is_err(),
+            "the predecessor still owns it"
+        );
+    }
+
+    /// A predecessor that is already gone (no handle): the window starts now.
+    #[test]
+    fn successor_without_a_predecessor_handle_starts_the_window_now() {
+        let now = Instant::now();
+        let deadline =
+            successor_lock_deadline(WINDOW, None, PREDECESSOR_EXIT_BOUND, &|| now).unwrap();
+        assert_eq!(deadline, now + WINDOW);
+    }
 }
 
 fn remove_stale_socket_after_lock(path: &Path) -> Result<(), String> {
@@ -2051,6 +2202,10 @@ pub struct DaemonServer {
     /// RetirementGuard drops, the handler notifies .0 ("parked") and waits on .1 ("release").
     #[cfg(test)]
     close_park: std::sync::OnceLock<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
+    /// The successor an accepted idle upgrade started (todo 27). The retirement task leaves only
+    /// while it still runs; one that ended cancels the retirement.
+    #[cfg(any(not(unix), test))]
+    idle_successor: Mutex<Option<control_server::IdleSuccessor>>,
 }
 
 #[cfg(test)]
@@ -3890,6 +4045,8 @@ impl DaemonServer {
             _catalog_fixture: catalog_fixture,
             #[cfg(test)]
             close_park: std::sync::OnceLock::new(),
+            #[cfg(any(not(unix), test))]
+            idle_successor: Mutex::new(None),
         }
     }
 
@@ -4856,6 +5013,9 @@ impl DaemonServer {
     ) -> Result<(), String> {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
+        // Login-shell PATH discovery sources the user's rc chain; start it now so the first
+        // session spawn finds it ready instead of resolving agents against the bare process PATH.
+        crate::ipc::agents::prewarm_login_path();
 
         // HandoverCandidate admission (todo 8). A successor generation's OS job runs plain
         // `--daemon`; before any lock is taken it reads the predecessor's handover-request.json.
@@ -8382,72 +8542,21 @@ impl DaemonServer {
         DaemonResponse::UpgradeScheduled
     }
 
+    /// Protocol-5 UpgradeBinary on Windows, sent only by GUIs older than the control channel. The
+    /// idle upgrade lives on control-v1 RequestUpgrade (todo 27), which validates a staged
+    /// generation and exits only after its reply is flushed; this request names no generation, so
+    /// it never replaces the daemon, whatever the session count.
     #[cfg(not(unix))]
     async fn handle_upgrade_binary(
         self: &Arc<Self>,
         _new_binary_path: Option<String>,
     ) -> DaemonResponse {
-        let live_sessions = self.terminal_service.list_sessions().len();
-        match crate::daemon::handover::upgrade_action(live_sessions, false) {
-            crate::daemon::handover::UpgradeAction::Proceed => {
-                if !crate::daemon::handover::idle_upgrade_requested() {
-                    tracing::warn!(
-                        live_sessions,
-                        "Daemon upgrade requested on a platform without session transfer; \
-                         Ferryx must be restarted to finish updating (set \
-                         FERRYX_DAEMON_IDLE_UPGRADE=1 to allow an idle daemon restart)"
-                    );
-                    return DaemonResponse::UpgradeUnsupported;
-                }
-                let exe = match std::env::current_exe() {
-                    Ok(exe) => exe,
-                    Err(error) => {
-                        tracing::warn!(%error, "Daemon upgrade aborted: current executable unknown");
-                        return DaemonResponse::UpgradeUnsupported;
-                    }
-                };
-                // The successor waits for our instance lock, so it must be running before we
-                // release it. No session is live here, so the exit cannot cost a terminal.
-                let mut successor = std::process::Command::new(&exe);
-                successor
-                    .arg("--daemon")
-                    .env("FERRYX_DAEMON_SUCCESSOR", "1")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                crate::util::detach_launched_child(&mut successor);
-                let spawned = successor.spawn();
-                match spawned {
-                    Ok(child) => {
-                        tracing::warn!(
-                            pid = child.id(),
-                            live_sessions,
-                            "Restarting idle daemon: successor spawned, releasing locks and exiting"
-                        );
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            std::process::exit(0);
-                        });
-                        DaemonResponse::UpgradeScheduled
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, live_sessions, "Idle daemon restart failed to spawn a successor");
-                        DaemonResponse::UpgradeUnsupported
-                    }
-                }
-            }
-            crate::daemon::handover::UpgradeAction::Refuse { live_sessions } => {
-                // `UpgradeUnsupported` carries no field, so the restart instruction has to
-                // travel in the log: this is the only place the user learns why the update
-                // did not finish.
-                tracing::warn!(
-                    live_sessions,
-                    "Daemon upgrade refused: this platform cannot transfer live sessions; \
-                     restart Ferryx to finish updating"
-                );
-                DaemonResponse::UpgradeUnsupported
-            }
-        }
+        tracing::warn!(
+            live_sessions = self.terminal_service.list_sessions().len(),
+            "UpgradeBinary refused on this platform: updates finish through control-v1 \
+             RequestUpgrade when no session is open; otherwise restart Ferryx to finish updating"
+        );
+        DaemonResponse::UpgradeUnsupported
     }
 
     pub fn handle_register_workspace(

@@ -23,7 +23,9 @@ pub fn validate_host(host: &SshHost) -> Result<(), IpcError> {
                 .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
     };
     if !token(&host.hostname, "._-:[]")
-        || host.username.as_deref().is_some_and(|u| !token(u, "._-"))
+        // `DOMAIN\user` and `user@corp.com` are real account names; OpenSSH splits the
+        // destination at its last `@`, and argv never passes through a shell.
+        || host.username.as_deref().is_some_and(|u| !token(u, "._-@\\"))
         || host.port == Some(0)
         || host
             .jump_host
@@ -161,22 +163,64 @@ pub fn ssh_plan(
     })
 }
 
+/// Longest remote agent-socket path placed in the private directory; macOS caps `sun_path` at
+/// 104 bytes and Linux at 108, so longer homes keep the legacy shared-`/tmp` path.
+const REMOTE_AGENT_SOCKET_MAX: usize = 100;
+
+/// Where a pane's forwarded agent-state socket lives on the remote: `(directory, socket)`.
+///
+/// With the remote home known it is `<home>/.ferryx/a/<sid>.sock`, inside a 0700 directory only
+/// the user can create entries in, so no other local user can pre-bind or squat the name the way
+/// a predictable `/tmp` path allows. Without a home, or when the path would overflow the Unix
+/// socket limit, the legacy `/tmp/ferryx-agent-<sid>.sock` is kept.
+pub(crate) fn remote_agent_socket(remote_home: Option<&str>, sid: &str) -> (Option<String>, String) {
+    if let Some(home) = remote_home.map(|h| h.trim_end_matches('/')).filter(|h| h.starts_with('/')) {
+        let dir = format!("{home}/.ferryx/a");
+        let sock = format!("{dir}/{sid}.sock");
+        if sock.len() <= REMOTE_AGENT_SOCKET_MAX {
+            return (Some(dir), sock);
+        }
+    }
+    (None, format!("/tmp/ferryx-agent-{sid}.sock"))
+}
+
+/// POSIX `sh` fragment that creates `$HOME/.ferryx/a` (umask 077, mode 0700) ahead of the first
+/// pane. sshd binds a pane's `-R` StreamLocal forward before the pane command runs, so the
+/// environment-detect probe, which precedes every pane, runs this. It never fails the caller,
+/// prints nothing, and leaves a symlink or a non-directory at that path untouched.
+pub(crate) const REMOTE_AGENT_DIR_PREFLIGHT: &str = "case \"$HOME\" in /*) d=\"$HOME/.ferryx/a\"; \
+     if [ ! -L \"$d\" ] && { [ -d \"$d\" ] || [ ! -e \"$d\" ]; }; then \
+     (umask 077; mkdir -p \"$d\" && chmod 700 \"$d\") >/dev/null 2>&1; fi;; esac; ";
+
 pub fn shell_plan_with_session(
     host: &SshHost,
     root: &str,
     session_id: Option<&str>,
     local_agent_socket: Option<&str>,
+    remote_home: Option<&str>,
 ) -> Result<ShellCommandPlan, IpcError> {
     validate_remote_path(root)?;
     let remote_command = match (session_id, local_agent_socket) {
         (Some(sid), Some(_)) => {
-            let remote_sock = format!("/tmp/ferryx-agent-{sid}.sock");
+            let (dir, remote_sock) = remote_agent_socket(remote_home, sid);
+            // sshd binds the forward before this command runs; the detect probe already ran
+            // REMOTE_AGENT_DIR_PREFLIGHT, this is a backstop for the panes that follow.
+            let mkdir = dir
+                .map(|dir| {
+                    // Same guard as the preflight: a symlink or non-directory is never followed.
+                    format!(
+                        "d={dir}; if [ ! -L \"$d\" ] && {{ [ -d \"$d\" ] || [ ! -e \"$d\" ]; }}; then \
+                         (umask 077; mkdir -p \"$d\" && chmod 700 \"$d\") >/dev/null 2>&1; fi; ",
+                        dir = quote_posix(&dir)
+                    )
+                })
+                .unwrap_or_default();
             // The forward ends at the daemon's unix agent-state listener, which also answers herdr
             // `pane.report_agent` lines (server.rs `serve_agent_state_connection`), so crush's
             // built-in herdr reporter can use it as on a local pane (pty.rs `apply_herdr_env`). A
             // remote shell that already has HERDR_ENV runs real herdr and keeps its own variables.
             format!(
-                "export FERRYX_SESSION_ID={sid} FERRYX_AGENT_STATE_SOCKET={sock}; \
+                "{mkdir}export FERRYX_SESSION_ID={sid} FERRYX_AGENT_STATE_SOCKET={sock}; \
                  [ -n \"${{HERDR_ENV:-}}\" ] || export HERDR_ENV=1 HERDR_SOCKET_PATH={sock} HERDR_PANE_ID={sid}; \
                  cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
                 quote_posix(root),
@@ -202,7 +246,7 @@ pub fn shell_plan_with_session(
     let mut plan = ssh_plan(host, remote_command, true)?;
 
     if let (Some(sid), Some(local_sock)) = (session_id, local_agent_socket) {
-        let remote_sock = format!("/tmp/ferryx-agent-{sid}.sock");
+        let (_, remote_sock) = remote_agent_socket(remote_home, sid);
         plan.args.splice(
             0..0,
             [
@@ -217,7 +261,7 @@ pub fn shell_plan_with_session(
 }
 
 pub fn shell_plan(host: &SshHost, root: &str) -> Result<ShellCommandPlan, IpcError> {
-    shell_plan_with_session(host, root, None, None)
+    shell_plan_with_session(host, root, None, None, None)
 }
 
 pub async fn ensure_remote_extension_installed(host: &SshHost) -> Result<(), IpcError> {

@@ -12,6 +12,10 @@
 //!   must pass `codesign --verify --strict`; nothing here builds or edits a bundle.
 //! - Linux: `<root>/<key>/ferryx` (source: the AppImage path when running from one).
 //! - Windows: `<root>\\<key>\\ferryx.exe`.
+//!
+//! Beside the executable (outside any bundle) every generation also gets copies of the remote
+//! helper assets (`<key>/helpers`) and the web UI (`<key>/ui/dist`), so a daemon running from its
+//! staged copy needs nothing from the app install.
 
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -34,6 +38,10 @@ pub const STAGED_AT_FILE: &str = ".staged-at";
 /// copy of the app's remote helper assets (`manifest.json` plus one binary per target): the staged
 /// daemon installs SSH helpers from here, since it no longer runs from the app install.
 pub const HELPER_ASSETS_DIR: &str = "helpers";
+/// Dir inside every generation (outside any bundle) holding a copy of the app's built web UI, so
+/// the remote server of a staged daemon serves the real client instead of the placeholder page.
+/// Same relative path as the app bundle resource (`tauri.conf.json` `bundle.resources`).
+pub const UI_DIST_DIR: &str = "ui/dist";
 /// Generations that garbage collection always keeps, newest first.
 pub const KEEP_NEWEST: usize = 2;
 const TMP_MARKER: &str = ".tmp-";
@@ -149,15 +157,22 @@ pub fn platform_source(source_exe: &Path) -> Result<StageSource, RuntimeStageErr
 /// Stages the runtime for `source_exe` under `root` for this build's version. Blocking: async
 /// callers go through [`stage_runtime_blocking`].
 pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, RuntimeStageError> {
-    let staged = stage_from(root, &platform_source(source_exe)?, env!("CARGO_PKG_VERSION"))?;
+    let staged = stage_from(
+        root,
+        &platform_source(source_exe)?,
+        env!("CARGO_PKG_VERSION"),
+    )?;
     let generation = root.join(&staged.key);
     // The running process is the app being staged (or a staged generation of it); an AppImage
     // `source_exe` sits outside its mounted image, so look next to the live executable first.
-    let assets = std::env::current_exe()
-        .ok()
-        .and_then(|exe| helper_assets_dir_near(&exe))
-        .or_else(|| helper_assets_dir_near(source_exe));
-    match assets {
+    let running_exe = std::env::current_exe().ok();
+    let find = |near: fn(&Path) -> Option<PathBuf>| {
+        running_exe
+            .as_deref()
+            .and_then(near)
+            .or_else(|| near(source_exe))
+    };
+    match find(helper_assets_dir_near) {
         Some(assets) => {
             if let Err(error) = ensure_helper_assets(&generation, &assets) {
                 tracing::warn!(%error, generation = %staged.key, "Could not stage the remote helper assets; SSH helper installs from this daemon will fail");
@@ -165,6 +180,16 @@ pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, Ru
         }
         None => {
             tracing::warn!(source = %source_exe.display(), "No remote helper assets next to the daemon source; SSH helper installs from this daemon will fail");
+        }
+    }
+    match find(ui_dist_dir_near) {
+        Some(dist) => {
+            if let Err(error) = ensure_ui_dist(&generation, &dist) {
+                tracing::warn!(%error, generation = %staged.key, "Could not stage the web UI; this daemon's remote server will show its placeholder page");
+            }
+        }
+        None => {
+            tracing::warn!(source = %source_exe.display(), "No web UI next to the daemon source; this daemon's remote server will show its placeholder page");
         }
     }
     Ok(staged)
@@ -187,26 +212,81 @@ pub fn helper_assets_dir_near(executable: &Path) -> Option<PathBuf> {
     .find(|dir| dir.join("manifest.json").is_file())
 }
 
+/// Where the built web UI may sit relative to `executable`, in lookup order: an app install
+/// (macOS `Contents/Resources/ui/dist`, Windows `<install dir>/ui/dist` or `resources/ui/dist`,
+/// Linux deb or AppImage `usr/lib/Ferryx/ui/dist`) or a staged generation (`<key>/ui/dist`: next
+/// to a Linux/Windows staged executable, beside the sealed bundle on macOS).
+pub fn ui_dist_candidates(executable: &Path) -> Vec<PathBuf> {
+    let Some(exe_dir) = executable.parent() else {
+        return Vec::new();
+    };
+    let mut candidates = vec![
+        exe_dir.join("../Resources").join(UI_DIST_DIR),
+        exe_dir.join(UI_DIST_DIR),
+        exe_dir.join("resources").join(UI_DIST_DIR),
+        exe_dir.join("../lib/Ferryx").join(UI_DIST_DIR),
+        exe_dir.join("../lib").join(UI_DIST_DIR),
+    ];
+    // macOS staged generation: `<key>/Ferryx Daemon.app/Contents/MacOS/ferryx` -> `<key>/ui/dist`.
+    let generation = exe_dir
+        .parent()
+        .and_then(Path::parent)
+        .filter(|bundle| bundle.file_name() == Some(OsStr::new(HELPER_BUNDLE_NAME)))
+        .and_then(Path::parent);
+    if let Some(generation) = generation {
+        candidates.push(generation.join(UI_DIST_DIR));
+    }
+    candidates
+}
+
+/// The first of [`ui_dist_candidates`] that holds an `index.html`.
+pub fn ui_dist_dir_near(executable: &Path) -> Option<PathBuf> {
+    ui_dist_candidates(executable)
+        .into_iter()
+        .find(|dir| dir.join("index.html").is_file())
+}
+
 /// Copies `assets` into `<generation>/helpers` unless it is already there. Also backfills
 /// generations staged before helper assets were staged. The copy lands complete (temp dir, then
 /// rename) and an existing assets dir is never overwritten.
 pub fn ensure_helper_assets(generation: &Path, assets: &Path) -> Result<(), RuntimeStageError> {
-    let destination = generation.join(HELPER_ASSETS_DIR);
-    if destination.join("manifest.json").is_file() {
+    ensure_tree_copy(&generation.join(HELPER_ASSETS_DIR), "manifest.json", assets)
+}
+
+/// Copies the built web UI `dist` into `<generation>/ui/dist` unless it is already there, with the
+/// guarantees of [`ensure_helper_assets`] (it also backfills older generations).
+pub fn ensure_ui_dist(generation: &Path, dist: &Path) -> Result<(), RuntimeStageError> {
+    ensure_tree_copy(&generation.join(UI_DIST_DIR), "index.html", dist)
+}
+
+/// Copies `source` to `destination` unless `destination/<marker>` is already a file: a temp dir
+/// next to `destination`, fsync, then rename, so the copy lands complete and is never overwritten.
+fn ensure_tree_copy(
+    destination: &Path,
+    marker: &str,
+    source: &Path,
+) -> Result<(), RuntimeStageError> {
+    if destination.join(marker).is_file() {
         return Ok(());
     }
+    let parent = destination.parent().unwrap_or(Path::new(""));
+    let name = destination
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    fs::create_dir_all(parent).map_err(io_error(format!("create {}", parent.display())))?;
     static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
-    let tmp = generation.join(format!(
-        "{HELPER_ASSETS_DIR}{TMP_MARKER}{}-{}",
+    let tmp = parent.join(format!(
+        "{name}{TMP_MARKER}{}-{}",
         std::process::id(),
         NEXT_TMP.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = copy_tree(assets, &tmp)
+    let result = copy_tree(source, &tmp)
         .and_then(|()| sync_dir(&tmp).map_err(io_error(format!("sync {}", tmp.display()))))
-        .and_then(|()| match fs::rename(&tmp, &destination) {
-            Ok(()) => sync_dir(generation).map_err(io_error(format!("sync {}", generation.display()))),
+        .and_then(|()| match fs::rename(&tmp, destination) {
+            Ok(()) => sync_dir(parent).map_err(io_error(format!("sync {}", parent.display()))),
             // Another stager won the rename.
-            Err(_) if destination.join("manifest.json").is_file() => Ok(()),
+            Err(_) if destination.join(marker).is_file() => Ok(()),
             Err(error) => Err(io_error(format!("rename {} to {}", tmp.display(), destination.display()))(error)),
         });
     if tmp.exists() {
@@ -545,6 +625,49 @@ pub fn collect_garbage(root: &Path, usage: &dyn RuntimeUsage) -> Result<Vec<Stri
     Ok(removed)
 }
 
+/// Generations among `job_keys` (generations that still have a registered OS job) whose job a
+/// supervisor may delete once it lost login autostart, so a job naming an old runtime no longer
+/// blocks [`collect_garbage`]. Kept: the [`KEEP_NEWEST`] newest generations by staged-at under
+/// `root` (a job whose generation dir is gone counts as oldest), `current` even when it is older
+/// (an older app registering never costs a newer generation its job), and every generation a
+/// running process executes from. When the process table cannot be read nothing is returned: a
+/// job whose generation may be live stays.
+pub fn superseded_job_keys(
+    root: &Path,
+    job_keys: &[String],
+    current: &str,
+    usage: &dyn RuntimeUsage,
+) -> Vec<String> {
+    let mut newest_first: Vec<&String> = job_keys.iter().collect();
+    newest_first.sort_by_key(|key| std::cmp::Reverse(staged_at(&root.join(key))));
+    let older: Vec<&String> = newest_first
+        .into_iter()
+        .skip(KEEP_NEWEST)
+        .filter(|key| key.as_str() != current)
+        .collect();
+    if older.is_empty() {
+        return Vec::new();
+    }
+    let running: Vec<PathBuf> = match usage.running_executables() {
+        Ok(running) => running.iter().map(|path| normalized(path)).collect(),
+        Err(error) => {
+            tracing::warn!(%error, "Cannot list running processes; keeping every daemon generation job");
+            return Vec::new();
+        }
+    };
+    // The root, not the generation dir, is resolved: a removed generation dir has no canonical form.
+    let root = normalized(root);
+    older
+        .into_iter()
+        .filter(|key| {
+            // Same comparison form as `running`: on Windows the key's case is folded too.
+            let dir = comparison_form(&root.join(key), cfg!(windows));
+            !running.iter().any(|path| path.starts_with(&dir))
+        })
+        .cloned()
+        .collect()
+}
+
 fn staged_at(dir: &Path) -> u128 {
     fs::read_to_string(dir.join(STAGED_AT_FILE))
         .ok()
@@ -556,16 +679,17 @@ fn staged_at(dir: &Path) -> u128 {
 /// 8.3 short names on Windows) and, on Windows, drops the verbatim prefix and case.
 fn normalized(path: &Path) -> PathBuf {
     let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    #[cfg(windows)]
-    {
-        let text = resolved.to_string_lossy();
-        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
-        PathBuf::from(text.to_lowercase())
+    comparison_form(&resolved, cfg!(windows))
+}
+
+/// The case- and prefix-insensitive form Windows paths are compared in (`windows`), else `path`.
+fn comparison_form(path: &Path, windows: bool) -> PathBuf {
+    if !windows {
+        return path.to_path_buf();
     }
-    #[cfg(not(windows))]
-    {
-        resolved
-    }
+    let text = path.to_string_lossy();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    PathBuf::from(text.to_lowercase())
 }
 
 #[cfg(target_os = "macos")]

@@ -181,8 +181,11 @@ describe("accountSession onboarding client", () => {
 
   it("an invalid origin never receives the token", async () => {
     fetchMock.mockResolvedValue(jsonResponse([]));
-    await listPendingMachineRequests("http://evil.example", token);
-    expect(lastCall().url.startsWith("http://evil.example")).toBe(false);
+    await expect(listPendingMachineRequests("http://evil.example", token)).rejects.toMatchObject({
+      code: "INVALID_ACCOUNT_ORIGIN",
+      details: { origin: "http://evil.example" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("normalizeUserCode upper-cases, strips separators and re-inserts the dash", () => {

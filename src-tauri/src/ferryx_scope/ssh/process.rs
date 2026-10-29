@@ -425,19 +425,20 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
         let current_exe =
             std::env::current_exe().map_err(|e| format!("REMOTE_RUNTIME_INVALID: {e}"))?;
         #[cfg(target_os = "linux")]
-        {
-            match try_systemd_unit(&current_exe, &root, &host) {
-                Ok(()) => {
-                    println!("{}", json!({"event":"ready","protocol":1}));
-                    std::io::stdout().flush().map_err(|e| e.to_string())?;
-                    return Ok(());
-                }
-                Err(UnitLaunchError::Unavailable(reason)) => {
-                    eprintln!("SSH_HELPER_UNIT_FALLBACK: {reason}");
-                }
-                Err(UnitLaunchError::Failed(message)) => return Err(message),
+        let unit_fallback = match try_systemd_unit(&current_exe, &root, &host) {
+            Ok(()) => {
+                println!("{}", json!({"event":"ready","protocol":1}));
+                std::io::stdout().flush().map_err(|e| e.to_string())?;
+                return Ok(());
             }
-        }
+            Err(UnitLaunchError::Unavailable(reason)) => {
+                eprintln!("SSH_HELPER_UNIT_FALLBACK: {reason}");
+                Some(reason)
+            }
+            Err(UnitLaunchError::Failed(message)) => return Err(message),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let unit_fallback: Option<String> = None;
         let mut command = std::process::Command::new(&current_exe);
         let root_str = root
             .to_str()
@@ -496,7 +497,12 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
         let _ = std::fs::remove_file(&log_path);
         match outcome {
             SpawnWait::Ready => {
-                println!("{}", json!({"event":"ready","protocol":1}));
+                let mut ready = json!({"event":"ready","protocol":1});
+                if let Some(reason) = unit_fallback {
+                    ready["launch"] = "setsid".into();
+                    ready["unitFallback"] = reason.into();
+                }
+                println!("{ready}");
                 std::io::stdout().flush().map_err(|e| e.to_string())?;
                 Ok(())
             }
@@ -593,23 +599,46 @@ fn valid_env_name(name: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+/// The only variables the helper unit receives from the starting SSH session. `systemd-run
+/// --setenv=K=V` puts each value on a command line other local users can read and freezes it
+/// into a unit that outlives the connection, so connection state (`SSH_*`, `XDG_SESSION_*`),
+/// per-pane agent variables and credentials never qualify; everything else the unit needs comes
+/// from the user manager's own environment.
+#[cfg(any(target_os = "linux", test))]
+const FORWARDED_ENV_KEYS: [&str; 16] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "FERRYX_HELPER_HYGIENE_SECS",
+    "FERRYX_REMOTE_ROOT",
+];
+
+#[cfg(any(target_os = "linux", test))]
+fn forwarded_env_key(key: &str) -> bool {
+    FORWARDED_ENV_KEYS.contains(&key) || (key.starts_with("LC_") && valid_env_name(key))
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn forwarded_env(env: &[(OsString, OsString)]) -> Vec<(String, String)> {
-    const DENY: [&str; 5] = [
-        "SSH_CONNECTION",
-        "SSH_CLIENT",
-        "SSH_TTY",
-        "SSH_SESSION_ID",
-        "SSH_ASKPASS",
-    ];
     env.iter()
         .filter_map(|(key, value)| {
             let key = key.to_str()?;
-            if DENY.contains(&key) || !valid_env_name(key) {
+            if !forwarded_env_key(key) {
                 return None;
             }
             let value = value.to_str()?;
-            if value.is_empty() {
+            if value.is_empty() || value.contains(['\n', '\r']) {
                 return None;
             }
             Some((key.to_string(), value.to_string()))
@@ -664,9 +693,51 @@ fn unit_active_state(unit: &str) -> Result<String, UnitLaunchError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Why a transient user unit would not survive the SSH session, from the `loginctl show-user
+/// -p Linger` answer: `None` when linger is on, else the reason the unit path is skipped. A user
+/// manager without linger is stopped by logind when the user's last session ends, taking every
+/// unit (and the helper with its PTYs) down with it; the setsid path survives that.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn linger_blocker(status: Result<(bool, &str, &str), &str>) -> Option<String> {
+    match status {
+        Ok((true, stdout, _)) if stdout.trim().eq_ignore_ascii_case("linger=yes") => None,
+        Ok((true, stdout, _)) => Some(format!(
+            "LINGER_DISABLED: loginctl reports {} (enable with `loginctl enable-linger`)",
+            match stdout.trim() {
+                "" => "no Linger value",
+                value => value,
+            }
+        )),
+        Ok((false, _, stderr)) => Some(format!("LINGER_UNKNOWN: loginctl: {}", stderr.trim())),
+        Err(error) => Some(format!("LINGER_UNKNOWN: loginctl: {error}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linger_check() -> Result<(), UnitLaunchError> {
+    // SAFETY: getuid has no arguments, pointers, or caller preconditions.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let output = std::process::Command::new("loginctl")
+        .args(["show-user", &uid, "-p", "Linger"])
+        .output();
+    let blocker = match &output {
+        Ok(output) => linger_blocker(Ok((
+            output.status.success(),
+            &String::from_utf8_lossy(&output.stdout),
+            &String::from_utf8_lossy(&output.stderr),
+        ))),
+        Err(error) => linger_blocker(Err(&error.to_string())),
+    };
+    match blocker {
+        Some(reason) => Err(UnitLaunchError::Unavailable(reason)),
+        None => Ok(()),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn try_systemd_unit(exe: &Path, root: &Path, host: &str) -> Result<(), UnitLaunchError> {
     let unit = helper_unit_name(host, root);
+    linger_check()?;
     let active = matches!(
         unit_active_state(&unit)?.as_str(),
         "active" | "activating" | "reloading"

@@ -1,22 +1,22 @@
 ---
 title: "Installing Ferryx on Windows and Reading SmartScreen"
-description: "x64 installer walkthrough: SmartScreen warnings, SHA-256 verification, and what the MSIX package is not. Claims map to Ferryx docs and cited sources only."
+description: "Microsoft Store install first, then the unsigned .exe some releases attach: SmartScreen, SHA-256 checks, and what the MSIX is not."
 ---
 
-**Installing Ferryx on Windows and Reading SmartScreen.** x64 installer walkthrough: SmartScreen warnings, SHA-256 verification, and what the MSIX package is not. Claims map to Ferryx docs and cited sources only.
+**Installing Ferryx on Windows and Reading SmartScreen.** Microsoft Store install first, then the unsigned `.exe` some releases attach: SmartScreen warnings, SHA-256 verification, and what the MSIX package is not. Claims map to Ferryx docs and cited sources only.
 
 ![ferryx-install-windows cover](/images/blog/ferryx-install-windows/cover.png)
 
 ## Installer download
 
-The [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`) is Ferryx's signed Windows channel. The Store signs the MSIX package it publishes, so a Store install shows no SmartScreen warning, and Store installs are updated by the Store rather than by Ferryx's own updater. Ferryx does not buy a separate code-signing certificate; the standalone GitHub release `Ferryx_x64-setup.exe` remains available as a secondary direct installer and is not code-signed.
+The [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`) is Ferryx's signed Windows channel. The Store signs the MSIX package it publishes, so a Store install shows no SmartScreen warning, and Store installs are updated by the Store rather than by Ferryx's own updater. Ferryx does not buy a separate code-signing certificate; some GitHub releases also attach a standalone `.exe` installer as a secondary direct option, and it is not code-signed.
 
 ## SmartScreen warning
 
 Install in this order:
 
 1. **Microsoft Store (signed, recommended).** Install from the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4), or run `winget install --source msstore 9NLHQL5JNLM4` in a terminal. SmartScreen does not warn on a Store install.
-2. **GitHub installer (unsigned).** Download `Ferryx_x64-setup.exe` and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest). Before running the installer, check its hash in PowerShell: `Get-FileHash .\Ferryx_x64-setup.exe -Algorithm SHA256` must match the `Ferryx_x64-setup.exe` line in `SHA256SUMS.txt`.
+2. **GitHub installer (unsigned, when the release attaches one).** If the [latest release](https://github.com/Indosaram/ferryx/releases/latest) lists a `.exe` installer, download it with `SHA256SUMS`. Before running it, check its hash in PowerShell: `Get-FileHash .\<installer>.exe -Algorithm SHA256` must match that file's line in `SHA256SUMS`. `SHA256SUMS.minisig` signs that list with the app's updater key; check it with `minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm` if you have minisign.
 3. **Expect the SmartScreen prompt for the unsigned installer.** Because the `.exe` has no Authenticode signature, Windows shows "Windows protected your PC". Run it only if the hash matched: choose **More info**, then **Run anyway**. The installer installs for the current user and updates itself in place.
 
 The `Ferryx_x64.msix` attached to GitHub releases is the unsigned package that is submitted to the Store. It is not a sideloading installer, so install from the Store or the `.exe` instead.
@@ -38,7 +38,7 @@ The `Ferryx_x64.msix` attached to GitHub releases is the unsigned package that i
 
 ## How this fits Ferryx today
 
-Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
+Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64, through the Microsoft Store; some releases also attach a direct `.exe`), and Linux (x86_64 AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
 ![Installing Ferryx on Windows and Reading SmartScreen illustration](/images/blog/ferryx-install-windows/body-1.png)
 
@@ -62,7 +62,7 @@ Ferryx ships calendar-versioned releases quickly; check that your version matche
 
 ## Limits and non-goals
 
-Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), Windows builds are not code-signed yet so SmartScreen warns on first run, and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
+Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), the direct Windows `.exe` that some releases attach is not code-signed, so SmartScreen warns on it (the Microsoft Store build is signed), and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
 
 ## How to verify these claims
 

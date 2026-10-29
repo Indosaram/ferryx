@@ -20,8 +20,20 @@ import {
   submitForNotarization,
   recreateDmgFromApp,
   finalizeMacosBundle,
+  measureMacosFloors,
+  parseFloorResult,
 } from "./lib/release-platforms.mjs";
-import { parseReceipt } from "./lib/release-contract.mjs";
+import { evaluateFloors, parseReceipt } from "./lib/release-contract.mjs";
+
+// Floor measurements of a conforming macOS build (notarized; x86_64 minos at or below 10.15,
+// arm64 at the 11.0 Apple Silicon floor).
+const NOTARIZED = (target) => ({ target, spctlStatus: 0, spctl: `${target}: accepted\nsource=Notarized Developer ID`, staplerStatus: 0 });
+const AD_HOC = (target) => ({ target, spctlStatus: 3, spctl: `${target}: rejected\nsource=no usable signature`, staplerStatus: 65 });
+const MAC_FLOORS = {
+  "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] },
+  dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app"), NOTARIZED("dmg")] },
+  "cli-darwin-universal": { minos: { x86_64: "10.13", arm64: "11.0" } },
+};
 
 test("release-platforms: exports required APIs", () => {
   assert.equal(typeof probeMacbook, "function");
@@ -313,6 +325,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       return {
         exitCode: 0,
         toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
+        floors: MAC_FLOORS,
       };
     };
 
@@ -321,6 +334,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       config,
       runDir,
       runner: mockRunner,
+      macosMinimum: "10.15",
     });
 
     assert.equal(receipt.host, "macbook");
@@ -414,6 +428,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       return {
         exitCode: 0,
         toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
+        floors: MAC_FLOORS,
       };
     };
 
@@ -422,6 +437,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       config,
       runDir,
       runner: mockRunner,
+      macosMinimum: "10.15",
     });
 
     assert.equal(receipt.host, "macbook");
@@ -521,6 +537,20 @@ test("remote builders: generated scripts enforce exact isolated build and artifa
   assert.doesNotMatch(linux, /signer sign/);
   assert.doesNotMatch(linux, /signer --help/);
   assert.match(linux, /test -s/);
+  // The standalone CLI links against the glibc 2.17 floor; the desktop bundles are built in an
+  // Ubuntu 22.04 (glibc 2.35, webkit2gtk-4.1) container.
+  assert.match(linux, /cargo zigbuild .*--no-default-features --bin ferryx-cli --target x86_64-unknown-linux-gnu\.2\.17/);
+  assert.match(linux, /docker build .*packaging\/linux\/bundle\.Dockerfile/);
+  assert.match(linux, /docker run --rm [\s\S]*"\$bundle_image" bun tauri build --bundles appimage,deb/);
+  assert.doesNotMatch(linux, /^bun tauri build/m);
+  assert.match(linux, /linuxBuilder/);
+  // Floor gate input: GLIBC_ maxima measured in the bundle image over every ELF of each artifact.
+  assert.match(linux, /objdump -T/);
+  assert.match(linux, /--appimage-extract/);
+  assert.match(linux, /dpkg-deb -x "\$OUT_DIR\/Ferryx_amd64\.deb"/);
+  assert.match(linux, /-v "\$out_dir:\$out_dir:ro" .*"\$bundle_image" bash "\$floor_dir\/scan\.sh"/s);
+  assert.match(linux, /---FLOOR_RESULT---/);
+  assert.ok(linux.indexOf("---FLOOR_RESULT---") < linux.indexOf("---BUILD_RESULT---"));
 
   const windows = createWindowsBuildScript({
     workspaceDir: "C:/release root/run", plan,
@@ -533,6 +563,47 @@ test("remote builders: generated scripts enforce exact isolated build and artifa
   assert.match(windows, /-SkipSigning/);
   assert.match(windows, /--bundles nsis/);
   assert.match(windows, /--bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
+  assert.match(windows, /cargo build --manifest-path \(Join-Path \$sourceDir 'src-tauri\/Cargo\.toml'\) --release --no-default-features --bin ferryx-cli\n  \$cliBuildExit = \$LASTEXITCODE\n/);
+  assert.match(windows, /if \(\$cliBuildExit -ne 0\) \{ exit \$cliBuildExit \}/);
+  // Only the CLI build links the CRT statically (it skips tauri-build's static VC runtime): RUSTFLAGS
+  // gains +crt-static right before it and is restored before the NSIS desktop build.
+  assert.equal((windows.match(/target-feature=\+crt-static/g) ?? []).length, 1);
+  const setFlags = windows.indexOf("$env:RUSTFLAGS = (@($prevRustflags, '-C target-feature=+crt-static') | Where-Object { $_ }) -join ' '");
+  const cliBuild = windows.indexOf("--bin ferryx-cli\n");
+  const restore = windows.indexOf("} finally {\n  if ($null -eq $prevRustflags) { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue } else { $env:RUSTFLAGS = $prevRustflags }\n}");
+  assert.ok(setFlags > windows.indexOf("bun tauri build --no-bundle"), "desktop build runs without the CLI flags");
+  assert.ok(setFlags < cliBuild && cliBuild < restore, "+crt-static is scoped to the CLI cargo build");
+  assert.ok(restore < windows.indexOf("--bundles nsis"), "RUSTFLAGS is restored before the NSIS build");
+  assert.doesNotMatch(linux, /crt-static/);
+  assert.match(windows, /Copy-Item -LiteralPath \$cliExe -Destination \(Join-Path \$outDir 'ferryx-cli-windows-amd64\.exe'\)/);
+  // The CLI path keeps its backslash (a single one in the JS template became a form feed).
+  assert.ok(windows.includes("$cliExe = Join-Path $cargoTarget 'release\\ferryx-cli.exe'"));
+  assert.ok(!windows.includes("\f"), "generated PowerShell must not contain a form feed");
+  // CARGO_ENCODED_RUSTFLAGS (even empty) would silently override RUSTFLAGS: refuse before any build.
+  const encodedGuard = windows.indexOf("if (Test-Path Env:CARGO_ENCODED_RUSTFLAGS) { throw ");
+  assert.ok(encodedGuard > 0 && encodedGuard < windows.indexOf("bun tauri build"), "CARGO_ENCODED_RUSTFLAGS guard runs before the first build");
+  assert.equal((windows.match(/CARGO_ENCODED_RUSTFLAGS\)? \{ throw/g) ?? []).length, 1);
+  assert.doesNotMatch(windows, /if \(\$env:CARGO_ENCODED_RUSTFLAGS\)/);
+  const storeOnly = createWindowsBuildScript({
+    workspaceDir: "C:/release root/run", plan: { ...plan, channels: { nsisMigration: false } },
+    hostConfig: {},
+  });
+  // Floor gate input: dumpbin /dependents of the executables that actually ship. The NSIS build
+  // rebuilds every bin in target\release, so the CLI is measured as its shipped copy and the MSIX
+  // ferryx.exe as a copy taken before the NSIS rebuild.
+  for (const script of [windows, storeOnly]) {
+    assert.match(script, /& \$dumpbin \/nologo \/dependents \$Path/);
+    assert.ok(script.includes("$cliDependents = Get-FerryxDependents (Join-Path $outDir 'ferryx-cli-windows-amd64.exe')"));
+    assert.ok(script.includes("$appDependents = Get-FerryxDependents $msixAppExe\n"));
+    assert.doesNotMatch(script, /Get-FerryxDependents \$cliExe/);
+    assert.ok(script.indexOf("$msixAppExe = $executables[0].FullName\n") > script.indexOf("build-msix.ps1"));
+    assert.match(script, /Write-Output '---FLOOR_RESULT---'/);
+  }
+  const msixCopy = windows.indexOf("$msixAppExe = Join-Path $workspace 'floor-msix-ferryx.exe'\nCopy-Item -LiteralPath $executables[0].FullName -Destination $msixAppExe\n");
+  assert.ok(msixCopy > windows.indexOf("build-msix.ps1") && msixCopy < windows.indexOf("--bundles nsis"), "MSIX exe kept before the NSIS rebuild");
+  assert.ok(windows.indexOf("$floors['nsis'] = @{ dependents = (Get-FerryxDependents $executables[0].FullName) }") > windows.indexOf("--bundles nsis"));
+  assert.doesNotMatch(storeOnly, /\$floors\['nsis'\]/);
+  assert.doesNotMatch(storeOnly, /floor-msix-ferryx\.exe/);
   assert.doesNotMatch(windows, /signer sign/);
   assert.doesNotMatch(windows, /signer --help/);
 });
@@ -710,6 +781,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
           rust: "1.92.0",
           tauri: "2.10.1",
         },
+        floors: MAC_FLOORS,
       };
     };
 
@@ -718,6 +790,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
       config,
       runDir,
       runner: mockRunner,
+      macosMinimum: "10.15",
     });
 
     assert.equal(receipt.host, "macbook");
@@ -729,6 +802,18 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
     const savedReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
     const validated = parseReceipt(savedReceipt, plan);
     assert.equal(validated.runId, plan.runId);
+    // The floor gate results are recorded in the receipt: every macOS floor passed, no waiver.
+    assert.equal(validated.floors.waiver, null);
+    assert.deepEqual(
+      validated.floors.checks.map((c) => `${c.kind}/${c.check}/${c.pass}`).sort(),
+      [
+        "cli-darwin-universal/macos-minos/true",
+        "dmg/macos-minos/true",
+        "dmg/notarization/true",
+        "macos-updater/macos-minos/true",
+        "macos-updater/notarization/true",
+      ],
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -791,12 +876,6 @@ if [ "$1" = "--version" ]; then
   echo "1.4.0"
 elif [ "$1" = "install" ]; then
   exit 0
-elif [ "$1" = "tauri" ] && [ "$2" = "build" ]; then
-  mkdir -p "$CARGO_TARGET_DIR/release/bundle/appimage"
-  mkdir -p "$CARGO_TARGET_DIR/release/bundle/deb"
-  printf "ELF_MOCK_APPIMAGE_BYTES" > "$CARGO_TARGET_DIR/release/bundle/appimage/Ferryx_1.0.0_amd64.AppImage"
-  printf "DEB_MOCK_BYTES" > "$CARGO_TARGET_DIR/release/bundle/deb/Ferryx_1.0.0_amd64.deb"
-  exit 0
 fi
 `;
     writeFileSync(join(binDir, "bun"), bunScript);
@@ -814,15 +893,38 @@ fi
     const cargoScript = `#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then
   echo "cargo 1.92.0 (mock)"
-elif [ "$1" = "build" ]; then
+elif [ "$1" = "tauri" ] && [ "$2" = "--version" ]; then
+  echo "tauri-cli 2.10.1"
+elif [ "$1" = "zigbuild" ]; then
+  mkdir -p "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release"
   printf "%s\n" "$*" >> "$CARGO_TARGET_DIR/cargo-build-args.log"
-  mkdir -p "$CARGO_TARGET_DIR/release"
-  printf "ELF_MOCK_CLI_BYTES" > "$CARGO_TARGET_DIR/release/ferryx-cli"
+  printf "ELF_MOCK_CLI_BYTES" > "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/ferryx-cli"
   exit 0
 fi
 `;
     writeFileSync(join(binDir, "cargo"), cargoScript);
     chmodSync(join(binDir, "cargo"), 0o755);
+
+    // Mock docker: the container bundle build writes into the CARGO_TARGET_DIR passed with -e.
+    const dockerScript = `#!/usr/bin/env bash
+printf "%s\n" "$*" >> "$(dirname "$0")/docker-args.log"
+if [ "$1" = "image" ]; then
+  echo "sha256:mockimage"
+elif [ "$1" = "run" ] && [[ "$*" == *floor-scan/scan.sh ]]; then
+  echo "---FLOOR_RESULT---"
+  echo '{"cli-linux-amd64":{"glibc":"2.17"},"appimage":{"glibc":"2.35"},"deb":{"glibc":"2.35"}}'
+elif [ "$1" = "run" ]; then
+  for arg in "$@"; do
+    case "$arg" in CARGO_TARGET_DIR=*) target="\${arg#CARGO_TARGET_DIR=}" ;; esac
+  done
+  mkdir -p "$target/release/bundle/appimage" "$target/release/bundle/deb"
+  printf "ELF_MOCK_APPIMAGE_BYTES" > "$target/release/bundle/appimage/Ferryx_1.0.0_amd64.AppImage"
+  printf "DEB_MOCK_BYTES" > "$target/release/bundle/deb/Ferryx_1.0.0_amd64.deb"
+fi
+exit 0
+`;
+    writeFileSync(join(binDir, "docker"), dockerScript);
+    chmodSync(join(binDir, "docker"), 0o755);
 
     const plan = {
       commitSha: sourceSha,
@@ -856,8 +958,21 @@ fi
     assert.equal(existsSync(tarGzFile), false, "AppImage.tar.gz must NOT be created");
     // The standalone Linux CLI must build without the desktop feature, so it links no GTK/WebKit.
     const cargoBuildArgs = readFileSync(join(workspaceDir, "cargo-target", "cargo-build-args.log"), "utf8");
-    assert.match(cargoBuildArgs, /--release --no-default-features --bin ferryx-cli/);
+    assert.match(cargoBuildArgs, /zigbuild .*--release --no-default-features --bin ferryx-cli --target x86_64-unknown-linux-gnu\.2\.17/);
+    const dockerArgs = readFileSync(join(binDir, "docker-args.log"), "utf8");
+    assert.match(dockerArgs, /^run --rm .* bun tauri build --bundles appimage,deb$/m);
+    assert.match(dockerArgs, /^run --rm .*:ro .* bash \S*\/floor-scan\/scan\.sh$/m);
+    assert.deepEqual(parseFloorResult(runRes), {
+      "cli-linux-amd64": { glibc: "2.17" },
+      appimage: { glibc: "2.35" },
+      deb: { glibc: "2.35" },
+    });
+    assert.equal(existsSync(join(workspaceDir, "floor-scan")), false, "floor scan scratch must be removed");
     assert.match(runRes, /---BUILD_RESULT---/);
+    const buildResult = JSON.parse(runRes.split("---BUILD_RESULT---")[1].trim());
+    assert.equal(buildResult.tauri, "2.10.1");
+    assert.match(buildResult.linuxBuilder, /ubuntu-22\.04 glibc-2\.35 image=sha256:mockimage/);
+    assert.match(buildResult.linuxBuilder, /x86_64-unknown-linux-gnu\.2\.17/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1333,3 +1448,239 @@ writeFileSync(target + ".sig", sig);
   }
 });
 
+
+test("floor gate: evaluateFloors accepts conforming artifacts and rejects each violated floor by name", () => {
+  const winOk = ["KERNEL32.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "WebView2Loader.dll"];
+  const ok = evaluateFloors({
+    kinds: ["cli-linux-amd64", "appimage", "deb", "macos-updater", "dmg", "cli-darwin-universal", "msix", "nsis", "cli-windows-amd64"],
+    measurements: {
+      "cli-linux-amd64": { glibc: "2.17" },
+      appimage: { glibc: "2.35" },
+      deb: { glibc: "2.34" },
+      ...MAC_FLOORS,
+      msix: { dependents: winOk },
+      nsis: { dependents: winOk },
+      "cli-windows-amd64": { dependents: ["KERNEL32.dll", "ucrtbase.dll"] },
+    },
+    macosMinimum: "10.15",
+  });
+  assert.equal(ok.length, 11);
+  assert.deepEqual(ok.filter((c) => !c.pass), []);
+
+  const bad = evaluateFloors({
+    kinds: ["cli-linux-amd64", "appimage", "deb", "dmg", "cli-darwin-universal", "msix", "cli-windows-amd64"],
+    measurements: {
+      "cli-linux-amd64": { glibc: "2.18" },
+      appimage: { glibc: "2.38" },
+      deb: { glibc: "" },
+      dmg: { minos: { x86_64: "11.0", arm64: "12.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] },
+      "cli-darwin-universal": { minos: null },
+      msix: { dependents: ["KERNEL32.dll", "VCRUNTIME140.dll", "MSVCP140.dll"] },
+      "cli-windows-amd64": {},
+    },
+    macosMinimum: "10.15",
+  });
+  const reasons = Object.fromEntries(bad.map((c) => [`${c.kind} ${c.check}`, c.pass ? "PASS" : c.reason]));
+  assert.equal(reasons["cli-linux-amd64 glibc"], "requires GLIBC_2.18, above the GLIBC_2.17 floor");
+  assert.equal(reasons["appimage glibc"], "requires GLIBC_2.38, above the GLIBC_2.35 floor");
+  assert.equal(reasons["deb glibc"], "no GLIBC_ symbol version was measured");
+  assert.equal(
+    reasons["dmg macos-minos"],
+    "x86_64 slice declares minos 11.0, above the configured minimum 10.15; arm64 slice declares minos 12.0, above 11.0 (the Apple Silicon floor)",
+  );
+  assert.match(reasons["dmg notarization"], /app: spctl does not report Notarized Developer ID \(app: rejected source=no usable signature\)/);
+  assert.match(reasons["dmg notarization"], /dmg: stapler validate failed \(exit 65\)/);
+  assert.equal(reasons["cli-darwin-universal macos-minos"], "no LC_BUILD_VERSION minos was measured");
+  assert.equal(reasons["msix crt"], "depends on VCRUNTIME140.dll, MSVCP140.dll (Visual C++ runtime, absent on a clean Windows)");
+  assert.equal(reasons["cli-windows-amd64 crt"], "no dumpbin /dependents output was captured");
+  // A DMG whose app was notarized but whose image was never checked still fails.
+  const [halfChecked] = evaluateFloors({
+    kinds: ["dmg"],
+    measurements: { dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] } },
+    macosMinimum: "10.15",
+  }).filter((c) => c.check === "notarization");
+  assert.equal(halfChecked.reason, "dmg: not checked");
+  assert.throws(
+    () => evaluateFloors({ kinds: ["dmg"], measurements: {}, macosMinimum: null }),
+    /macOS minimum system version must be a dotted version/,
+  );
+});
+
+test("parseFloorResult: reads the measurement line and fails closed without one", () => {
+  const out = 'noise\n---FLOOR_RESULT---\n{"msix":{"dependents":["KERNEL32.dll"]}}\n---BUILD_RESULT---\n{"node":"1"}\n';
+  assert.deepEqual(parseFloorResult(out), { msix: { dependents: ["KERNEL32.dll"] } });
+  assert.throws(() => parseFloorResult("---BUILD_RESULT---\n{}\n"), /did not return floor measurements/);
+});
+
+test("measureMacosFloors: takes the highest minos per architecture over every Mach-O file and probes spctl and stapler", () => {
+  const buildVersion = (minos) => `Load command 9\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n platform 1\n    minos ${minos}\n      sdk 15.0\n`;
+  const fakeExec = (x86AppMinos) => {
+    const calls = [];
+    const archs = {
+      "/A.app/Contents/MacOS/ferryx": "x86_64 arm64",
+      "/A.app/Contents/Helpers/ghostty-helper": "x86_64",
+      "/out/ferryx-cli": "x86_64 arm64",
+    };
+    const otool = {
+      "x86_64 /A.app/Contents/MacOS/ferryx": buildVersion(x86AppMinos),
+      "arm64 /A.app/Contents/MacOS/ferryx": buildVersion("11.0"),
+      "x86_64 /A.app/Contents/Helpers/ghostty-helper": "Load command 8\n      cmd LC_VERSION_MIN_MACOSX\n  cmdsize 16\n  version 10.13\n      sdk 10.14\n",
+      "x86_64 /out/ferryx-cli": buildVersion("10.15"),
+      "arm64 /out/ferryx-cli": buildVersion("11.0"),
+    };
+    const exec = (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (command === "find") return { status: 0, stdout: "/A.app/Contents/MacOS/ferryx\n/A.app/Contents/Info.plist\n/A.app/Contents/Helpers/ghostty-helper\n", stderr: "" };
+      if (command === "file") return { status: 0, stdout: args[1].endsWith(".plist") ? "XML 1.0 document" : "Mach-O universal binary", stderr: "" };
+      if (command === "lipo") return { status: 0, stdout: `${archs[args[1]]}\n`, stderr: "" };
+      if (command === "otool") return { status: 0, stdout: otool[`${args[1]} ${args[3]}`], stderr: "" };
+      if (command === "spctl") return { status: 3, stdout: "", stderr: `${args.at(-1)}: rejected\nsource=no usable signature` };
+      if (command === "xcrun") return { status: 65, stdout: "", stderr: "does not have a ticket stapled to it" };
+      throw new Error(`unexpected ${command}`);
+    };
+    return { exec, calls };
+  };
+
+  const { exec, calls } = fakeExec("10.15");
+  const m = measureMacosFloors({ appPath: "/A.app", dmgPath: "/A.dmg", cliPath: "/out/ferryx-cli", exec });
+  // The helper's LC_VERSION_MIN_MACOSX 10.13 is below the app's 10.15, so x86_64 stays 10.15.
+  assert.deepEqual(m.dmg.minos, { x86_64: "10.15", arm64: "11.0" });
+  assert.deepEqual(m["macos-updater"].minos, { x86_64: "10.15", arm64: "11.0" });
+  assert.deepEqual(m["cli-darwin-universal"].minos, { x86_64: "10.15", arm64: "11.0" });
+  assert.deepEqual(m.dmg.notarization.map((p) => [p.target, p.spctlStatus, p.staplerStatus]), [["app", 3, 65], ["dmg", 3, 65]]);
+  assert.ok(calls.includes("lipo -archs /A.app/Contents/MacOS/ferryx"));
+  assert.ok(calls.includes("otool -arch arm64 -l /A.app/Contents/MacOS/ferryx"));
+  assert.ok(calls.includes("spctl -a -vvv -t install /A.dmg"));
+  assert.ok(calls.includes("xcrun stapler validate /A.app"));
+  assert.ok(!calls.some((c) => c.includes("Info.plist") && (c.startsWith("otool") || c.startsWith("lipo"))));
+  // A universal build: arm64 at 11.0 meets the Apple Silicon floor; only the unsigned state fails.
+  assert.deepEqual(
+    evaluateFloors({ kinds: ["dmg", "cli-darwin-universal"], measurements: m, macosMinimum: "10.15" }).map((c) => `${c.kind} ${c.check} ${c.pass}`),
+    ["dmg macos-minos true", "dmg notarization false", "cli-darwin-universal macos-minos true"],
+  );
+
+  // An Intel slice built for macOS 12 breaks the advertised 10.15 floor.
+  const tooNew = measureMacosFloors({ appPath: "/A.app", exec: fakeExec("12.0").exec });
+  const [minosCheck] = evaluateFloors({ kinds: ["macos-updater"], measurements: tooNew, macosMinimum: "10.15" });
+  assert.equal(minosCheck.reason, "x86_64 slice declares minos 12.0, above the configured minimum 10.15");
+});
+
+function createFloorGateRun(tmp, platformSubdir) {
+  const runDir = join(tmp, "run");
+  for (const d of ["receipts", "bundles", join("artifacts", platformSubdir)]) mkdirSync(join(runDir, d), { recursive: true });
+  writeFileSync(join(runDir, "bundles", "source.bundle"), "FIXTURE_SOURCE_BUNDLE");
+  writeFileSync(join(runDir, "bundles", "ghostty.bundle"), "FIXTURE_GHOSTTY_BUNDLE");
+  writeFileSync(join(runDir, "plan.json"), JSON.stringify({
+    schemaVersion: 1,
+    runId: "rel-run-floor-gate",
+    repo: "Indosaram/ferryx",
+    commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
+    tag: "v2026.09.08.1",
+    appVersion: "2026.908.1",
+    msixVersion: "2026.908.1.0",
+    channels: { store: true, nsisMigration: false },
+    requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+    sourceDateEpoch: 1788868800,
+    createdAt: "2026-09-08T12:00:00.000Z",
+  }));
+  const hostRoot = join(tmp, "host-root");
+  mkdirSync(hostRoot);
+  return { runDir, hostRoot };
+}
+
+const macRunner = (floors) => async ({ artifactsOutDir }) => {
+  writeFileSync(join(artifactsOutDir, "Ferryx.app.tar.gz"), "MOCK_APP_CONTENT");
+  writeFileSync(join(artifactsOutDir, "Ferryx.app.tar.gz.sig"), "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
+  writeFileSync(join(artifactsOutDir, "Ferryx_universal.dmg"), "MOCK_DMG_CONTENT");
+  writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+  return { exitCode: 0, toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" }, floors };
+};
+
+test("buildHost floor gate: an ad-hoc signed macOS build aborts with the named reason and writes no receipt", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-floor-gate-mac-"));
+  try {
+    const { runDir, hostRoot } = createFloorGateRun(tmp, "darwin");
+    const config = {
+      schemaVersion: 1, repository: join(tmp, "no-repo"), ghosttyRepository: join(tmp, "no-ghostty"), repo: "Indosaram/ferryx",
+      hosts: { macbook: { platform: "darwin", ssh: null, root: hostRoot, minFreeBytes: 1024 } },
+    };
+    const adHoc = {
+      "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app")] },
+      dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] },
+      "cli-darwin-universal": { minos: { x86_64: "10.15", arm64: "11.0" } },
+    };
+    await assert.rejects(
+      () => buildHost({ hostName: "macbook", config, runDir, runner: macRunner(adHoc), macosMinimum: "10.15", floorWaiver: null }),
+      (err) => {
+        assert.match(err.message, /^Release floor gate failed on host 'macbook': /);
+        assert.match(err.message, /dmg notarization: app: spctl does not report Notarized Developer ID/);
+        assert.match(err.message, /macos-updater notarization: app: spctl does not report Notarized Developer ID \([^)]*\); app: stapler validate failed \(exit 65\)/);
+        assert.match(err.message, /FERRYX_RELEASE_FLOOR_WAIVER="<reason>"/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(runDir, "receipts", "build-receipt-macbook.json")), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("buildHost floor gate: a local dev build may opt out explicitly; the waiver and failures are recorded", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-floor-gate-waiver-"));
+  try {
+    const { runDir, hostRoot } = createFloorGateRun(tmp, "darwin");
+    const config = {
+      schemaVersion: 1, repository: join(tmp, "no-repo"), ghosttyRepository: join(tmp, "no-ghostty"), repo: "Indosaram/ferryx",
+      hosts: { macbook: { platform: "darwin", ssh: null, root: hostRoot, minFreeBytes: 1024 } },
+    };
+    const adHoc = { ...MAC_FLOORS, dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] } };
+    const receipt = await buildHost({
+      hostName: "macbook", config, runDir, runner: macRunner(adHoc), macosMinimum: "10.15", floorWaiver: "local QA build, not for publishing",
+    });
+    assert.equal(receipt.floors.waiver, "local QA build, not for publishing");
+    assert.deepEqual(receipt.floors.checks.filter((c) => !c.pass).map((c) => `${c.kind}/${c.check}`), ["dmg/notarization"]);
+    const saved = parseReceipt(readFileSync(join(runDir, "receipts", "build-receipt-macbook.json"), "utf8"));
+    assert.equal(saved.floors.waiver, "local QA build, not for publishing");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("buildHost floor gate: a Linux CLI needing GLIBC_2.38 aborts the omaki build", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-floor-gate-linux-"));
+  try {
+    const { runDir, hostRoot } = createFloorGateRun(tmp, "linux");
+    // A non-ssh platform keeps the fixture runner local; the gate is host-independent.
+    const config = {
+      schemaVersion: 1, repository: join(tmp, "no-repo"), ghosttyRepository: join(tmp, "no-ghostty"), repo: "Indosaram/ferryx",
+      hosts: { omaki: { platform: "fixture", ssh: null, root: hostRoot, minFreeBytes: 1024 } },
+    };
+    const linuxRunner = (floors) => async ({ artifactsOutDir }) => {
+      writeFileSync(join(artifactsOutDir, "Ferryx_amd64.AppImage"), "MOCK_APPIMAGE");
+      writeFileSync(join(artifactsOutDir, "Ferryx_amd64.AppImage.sig"), "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
+      writeFileSync(join(artifactsOutDir, "Ferryx_amd64.deb"), "MOCK_DEB");
+      writeFileSync(join(artifactsOutDir, "ferryx-cli-linux-amd64"), "MOCK_CLI");
+      return { exitCode: 0, toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" }, floors };
+    };
+    const linuxFloors = (cli) => ({ "cli-linux-amd64": { glibc: cli }, appimage: { glibc: "2.35" }, deb: { glibc: "2.35" } });
+    await assert.rejects(
+      () => buildHost({ hostName: "omaki", config, runDir, runner: linuxRunner(linuxFloors("2.38")), floorWaiver: null }),
+      /Release floor gate failed on host 'omaki': cli-linux-amd64 glibc: requires GLIBC_2\.38, above the GLIBC_2\.17 floor\./,
+    );
+    assert.equal(existsSync(join(runDir, "receipts", "build-receipt-omaki.json")), false);
+
+    // The same build with conforming measurements passes and records three glibc results.
+    rmSync(join(runDir, "artifacts", "linux"), { recursive: true, force: true });
+    mkdirSync(join(runDir, "artifacts", "linux"));
+    rmSync(join(hostRoot, "rel-run-floor-gate"), { recursive: true, force: true });
+    const receipt = await buildHost({ hostName: "omaki", config, runDir, runner: linuxRunner(linuxFloors("2.17")), floorWaiver: null });
+    assert.deepEqual(receipt.floors.checks.map((c) => `${c.kind} ${c.measured}<=${c.limit} ${c.pass}`).sort(), [
+      "appimage 2.35<=2.35 true",
+      "cli-linux-amd64 2.17<=2.17 true",
+      "deb 2.35<=2.35 true",
+    ]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

@@ -473,7 +473,8 @@ mod backend {
     }
 
     /// The plist half of login registration: `job` gets `RunAtLoad` true, every other generation
-    /// in the agents dir loses its load-time launch. No runtime garbage collection.
+    /// in the agents dir loses its load-time launch, and the idle plists of superseded generations
+    /// are deleted ([`superseded_labels`]). No runtime garbage collection.
     pub(super) fn login_registration_with(
         launchctl: &dyn generation::Launchctl,
         uid: u32,
@@ -483,8 +484,36 @@ mod backend {
         let dir = agents_dir(env)?;
         let base = label_base(env);
         let mut changed = generation::register_newest_for_login(job)?;
-        changed |= generation::retire_older_generations(launchctl, uid, &dir, &base, &job.label)?;
+        let deletable = superseded_labels(&dir, &base, &job.label);
+        changed |= generation::retire_older_generations(
+            launchctl, uid, &dir, &base, &job.label, &deletable,
+        )?;
         Ok((changed, dir, base))
+    }
+
+    /// Labels of the generations whose plist may be deleted (`runtime_stage::superseded_job_keys`):
+    /// never `newest_label`, the next newest generation, or one a process runs from. Nothing when
+    /// the runtime root or the agents dir cannot be read.
+    fn superseded_labels(dir: &Path, base: &str, newest_label: &str) -> Vec<String> {
+        let prefix = format!("{base}.");
+        let (Some(root), Some(current), Ok(plists)) = (
+            crate::daemon::server::daemon_runtime_root(),
+            newest_label.strip_prefix(&prefix),
+            generation::generation_plists(dir, base),
+        ) else {
+            return Vec::new();
+        };
+        let keys: Vec<String> = plists
+            .iter()
+            .filter_map(|(label, _)| label.strip_prefix(&prefix).map(str::to_string))
+            .collect();
+        let usage = runtime_stage::SystemRuntimeUsage {
+            registered_job_executables: Vec::new(),
+        };
+        runtime_stage::superseded_job_keys(&root, &keys, current, &usage)
+            .iter()
+            .map(|key| generation::generation_label(base, key))
+            .collect()
     }
 
     /// Every executable a registered job references is kept, including the legacy job's. When any
@@ -617,7 +646,7 @@ mod backend {
 
     /// The Store owns an MSIX install's lifecycle, so it never gets a task.
     pub fn install_supported() -> bool {
-        task::supported_for_install(crate::ipc::updater::updater_managed_externally())
+        task::supported_for_install(crate::ipc::updater::store_install())
     }
 
     /// The Task Scheduler is part of every supported Windows install.
@@ -752,8 +781,9 @@ mod backend {
     }
 
     /// Writes this build's generation unit and enables it for login without `--now`; older
-    /// generations are disabled without `--now`. A running unit is untouched. Garbage collection
-    /// runs after registration, so the unit just written already protects its runtime.
+    /// generations are disabled without `--now`. A running unit is untouched. Then the idle,
+    /// disabled units of superseded generations are deleted and garbage collection runs, so the unit
+    /// just written already protects its runtime and a deleted unit no longer protects an old one.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
         let (base, name, path, staged) = generation_unit(env, executable)?;
         register_unit_for_login(&base, &name, &path, &staged)
@@ -770,9 +800,27 @@ mod backend {
     fn register_unit_for_login(base: &str, name: &str, path: &Path, staged: &Path) -> Result<bool> {
         let rewritten = supervisor_linux::register_for_login(base, name, path, staged)?;
         if let Some(unit_dir) = path.parent() {
+            remove_superseded_units(unit_dir, base, name);
             collect_runtime_garbage(unit_dir);
         }
         Ok(rewritten)
+    }
+
+    /// Deletes superseded generation units (`supervisor_linux::remove_superseded_units`); a failure
+    /// only keeps their runtimes until the next registration.
+    fn remove_superseded_units(unit_dir: &Path, base: &str, newest: &str) {
+        let Some(root) = crate::daemon::server::daemon_runtime_root() else {
+            return;
+        };
+        match supervisor_linux::remove_superseded_units(&root, unit_dir, base, newest) {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(?removed, "Removed superseded daemon generation units")
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "Could not remove superseded daemon generation units")
+            }
+        }
     }
 
     /// The legacy single unit `<base>.service`: disabled without `--now` for an Alive/Unknown

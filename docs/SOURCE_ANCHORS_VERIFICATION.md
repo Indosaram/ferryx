@@ -10,25 +10,25 @@ Line numbers refer to this worktree's checkout.
 
 | # | Claim (as written in the docs) | Source anchor | Status |
 |---|---|---|---|
-| 1 | The remote gateway port is fixed to `43821`; the daemon overwrites any custom port | `src-tauri/src/daemon/server.rs:2440` (`config.port = REMOTE_GATEWAY_PORT;`) | VERIFIED |
+| 1 | The remote gateway port is fixed to `43821`; the daemon overwrites any custom port | `src-tauri/src/daemon/server.rs:8467` (`config.port = REMOTE_GATEWAY_PORT;`) | VERIFIED |
 | 2 | The config parser accepts a `"port"` key for wire compatibility only | `src-tauri/src/remote/state.rs:57`, `:425`, `:869`; test assertion at `:1046` | VERIFIED |
 | 3 | The gateway never binds the wildcard address `0.0.0.0` | `src-tauri/src/remote/server.rs:2248` (explicit rationale comment), `:2309` | VERIFIED (see caveat below) |
 | 4 | A custom relay address can be supplied via `FERRYX_RELAY_URL` | `src-tauri/src/daemon/server.rs:1956`, `:2008`; `src-tauri/src/ipc/remote.rs:310` | VERIFIED |
-| 5 | `View`-permission clients can observe output but their input is discarded | `src-tauri/src/remote/server.rs:1484`, `:1857` (`can_control`), guards at `:963`, `:1090`, `:1136` | VERIFIED |
-| 6 | Pairing codes expire after 60 seconds | `src-tauri/src/remote/auth.rs:196` (`PAIRING_EXPIRY = Duration::from_secs(60)`) | VERIFIED |
-| 7 | Pairing failure budget is 5 attempts | `src-tauri/src/remote/auth.rs:197` (`PAIRING_FAILURE_BUDGET: u8 = 5`) | VERIFIED |
-| 8 | Paired devices expire after 30 days idle | `src-tauri/src/remote/auth.rs:199` (`DEVICE_IDLE_EXPIRY_SECS = 30 * 24 * 60 * 60`) | VERIFIED |
+| 5 | `View`-permission clients can observe output but their input is discarded | `src-tauri/src/remote/server.rs:2902`, `:3414` (`can_control`), guards at `:1645`, `:1691`, `:1735` | VERIFIED |
+| 6 | Pairing codes expire after 60 seconds | `src-tauri/src/remote/auth.rs:264` (`PAIRING_EXPIRY = Duration::from_secs(60)`) | VERIFIED |
+| 7 | Pairing failure budget is 5 attempts | `src-tauri/src/remote/auth.rs:278` (`PAIRING_FAILURE_BUDGET: u32 = 5`) | VERIFIED |
+| 8 | Paired devices expire after 30 days idle | `src-tauri/src/remote/auth.rs:287` (`DEVICE_IDLE_EXPIRY_SECS = 30 * 24 * 60 * 60`) | VERIFIED |
 | 9 | No third-party metrics/telemetry tooling in `src-tauri` or `ui` | Word-boundary search for posthog/mixpanel/amplitude/sentry/datadog/segment over `src-tauri/src` and `ui/src`: no product matches; `src-tauri/Cargo.toml` and `ui/package.json` declare no analytics or telemetry dependency | VERIFIED |
-| 10 | The CLI exposes `remote status` and `remote pair` but no subcommand to enable network mode | `src-tauri/src/cli.rs:318` (`Some("status")`), `:322` (`Some("pair")`); no `"enable"` arm present | VERIFIED |
-| 11 | Lock files are created with mode `0600` and the `O_NOFOLLOW` flag to prevent symlink attacks | `src-tauri/src/daemon/server.rs:547` (`options.mode(0o600)`), `:548` (`custom_flags(libc::O_NOFOLLOW)`); re-asserted at `:556`. Manifest writes use the same pair at `src-tauri/src/daemon/manifest.rs:28` | VERIFIED |
-| 12 | The runtime directory resolves `FERRYX_RUNTIME_DIR` first, else `/tmp/rorca-<UID>` | `src-tauri/src/daemon/server.rs:128` (`std::env::var_os("FERRYX_RUNTIME_DIR")`), second resolver at `:142` | VERIFIED |
-| 13 | The daemon refuses a runtime directory whose mode is not `700` | `src-tauri/src/daemon/server.rs:479` (`if mode != 0o700`), operator-facing message at `:481`; the directory is created `0o700` at `:514` and re-checked at `:525` | VERIFIED |
-| 14 | Pairing PINs are randomly generated 6-digit codes | `src-tauri/src/remote/auth.rs:376` (`gen_range(100_000..=999_999)`), zero-padded at `:377` (`format!("{pin:06}")`) | VERIFIED |
+| 10 | The CLI exposes `remote status` and `remote pair` but no subcommand to enable network mode | `src-tauri/src/cli.rs:2240` (`Some("status")`), `:2244` (`Some("pair")`); no `"enable"` arm present | VERIFIED |
+| 11 | Lock files are created with mode `0600` and the `O_NOFOLLOW` flag to prevent symlink attacks | `src-tauri/src/daemon/server.rs:1137` (`options.mode(0o600)`), `:1138` (`custom_flags(libc::O_NOFOLLOW)`); re-asserted at `:1146`. Manifest writes use the same pair at `src-tauri/src/daemon/manifest.rs:28` | VERIFIED |
+| 12 | The runtime directory resolves `FERRYX_RUNTIME_DIR` first, else `/tmp/ferryx-<UID>` (the legacy `/tmp/rorca-<UID>` is also served for one release) | `src-tauri/src/daemon/server.rs:544` (`std::env::var_os("FERRYX_RUNTIME_DIR")`), legacy resolver at `:561`, Windows resolver at `:634` | VERIFIED |
+| 13 | The daemon refuses a runtime directory whose mode is not `700` | `src-tauri/src/daemon/server.rs:1069` (`if mode != 0o700`), operator-facing message at `:1071`; the directory is created `0o700` at `:1104` and re-checked at `:1115` | VERIFIED |
+| 14 | Pairing PINs are randomly generated 6-digit codes | `src-tauri/src/remote/auth.rs:724` (`gen_range(100_000..=999_999)`), zero-padded at `:725` (`format!("{pin:06}")`) | VERIFIED |
 | 15 | Direct LAN connections use plain HTTP/WS; TLS is not terminated on the local listener | `src-tauri/src/remote/server.rs:2209`, `:2225` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 16 | Software update polling checks GitHub releases periodically in desktop builds | `ui/src/App.tsx:261`, `src-tauri/tauri.conf.json:36`, `ui/src/lib/updater.ts:167` | AUTHORING NODE (PENDING LEAD REVIEW) |
-| 17 | Software update checks are skipped when updates are managed externally | `src-tauri/src/ipc/updater.rs:6` (`updater_managed_externally`) | AUTHORING NODE (PENDING LEAD REVIEW) |
-| 18 | Pair CLI command supports list, generate, and approve, not revocation | `src-tauri/src/cli.rs:152` (`PAIR_USAGE`), `:221`, `:240`, `:282` | AUTHORING NODE (PENDING LEAD REVIEW) |
-| 19 | Device revocation is executed through the user interface or API | `src-tauri/src/ipc/remote.rs:354` (`remote_revoke_device`) | AUTHORING NODE (PENDING LEAD REVIEW) |
+| 17 | Software update checks are skipped when updates are managed externally | `src-tauri/src/ipc/updater.rs:67` (`updater_managed_externally`) | AUTHORING NODE (PENDING LEAD REVIEW) |
+| 18 | Pair CLI command parses list, generate, and approve, not revocation; generate now only reports that an account login is required | `src-tauri/src/cli.rs:2104` (`PAIR_USAGE`), `:2190`, `:2201`, `:2204` | AUTHORING NODE (PENDING LEAD REVIEW) |
+| 19 | Device revocation is executed through the user interface or API | `src-tauri/src/ipc/remote.rs:446` (`remote_revoke_device`) | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 20 | Persistent session layout is saved to session_state.json on disk | `src-tauri/src/daemon/server.rs:321`, `:322` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 21 | UI preferences and tokens stay in browser/webview localStorage | `ui/src/App.tsx:2826`, `ui/src/lib/terminalSettings.ts:316`, `ui/src/lib/remoteClient.ts:17` | AUTHORING NODE (PENDING LEAD REVIEW) |
 | 22 | Source builds activate native-terminal and require pinned Ghostty submodule | `src-tauri/Cargo.toml:49`, `src-tauri/native_terminal/build_ghostty.rs:6`, `:7` | AUTHORING NODE (PENDING LEAD REVIEW) |

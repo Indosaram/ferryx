@@ -43,6 +43,129 @@ fn generation_key() -> Option<String> {
     Some(crate::daemon::owner_admission::current_generation_key())
 }
 
+/// The command that starts the staged successor generation of an idle upgrade (todo 27):
+/// `<staged exe> --daemon`, detached, with FERRYX_DAEMON_SUCCESSOR=1 so it waits for this
+/// daemon's instance lock instead of failing fast, and announces that wait on stdout
+/// (handover::SUCCESSOR_WAITING_TOKEN). It follows this daemon's process (PREDECESSOR_PID_ENV)
+/// and starts its lock window only once this daemon has left, however long the in-flight drain
+/// takes. It inherits the runtime and data dir overrides but not this daemon's watchdog identity:
+/// that watchdog stops on the retirement marker this daemon leaves.
+#[cfg(not(unix))]
+fn idle_successor_command(executable: &Path) -> tokio::process::Command {
+    use crate::daemon::owner_admission::{SUPERVISOR_PID_ENV, SUPERVISOR_START_ENV};
+    let mut successor = tokio::process::Command::new(executable);
+    successor
+        .arg("--daemon")
+        .env("FERRYX_DAEMON_SUCCESSOR", "1")
+        .env(
+            crate::daemon::handover::PREDECESSOR_PID_ENV,
+            std::process::id().to_string(),
+        )
+        .env_remove(SUPERVISOR_PID_ENV)
+        .env_remove(SUPERVISOR_START_ENV);
+    crate::util::detach_launched_child(successor.as_std_mut());
+    successor
+}
+
+/// Bound on the successor's readiness announcement. It is printed before the successor's first
+/// lock attempt, so a working successor announces within its own startup time.
+#[cfg(not(unix))]
+const SUCCESSOR_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long before the successor's own give-up time this daemon stops committing to leave (todo
+/// 27, round 4). The successor stops following this daemon PREDECESSOR_EXIT_BOUND after it
+/// announced; a retirement that starts later than this margin before that instant could have the
+/// successor give up while the marker is written and the daemon shuts down, leaving none. The
+/// margin covers the marker write, the graceful shutdown and the process exit.
+#[cfg(any(not(unix), test))]
+const SUCCESSOR_GIVE_UP_MARGIN: Duration = Duration::from_secs(10);
+
+/// The running successor of an accepted idle upgrade.
+#[cfg(any(not(unix), test))]
+pub(super) struct IdleSuccessor {
+    pub(super) child: tokio::process::Child,
+    /// Taken right before the spawn, so it is never later than the successor's announcement,
+    /// from which the successor's own PREDECESSOR_EXIT_BOUND runs.
+    pub(super) spawned_at: std::time::Instant,
+}
+
+/// Whether an accepted successor still running at `now` gives up too soon for this daemon to
+/// leave: it stops following this daemon no earlier than spawned_at + `bound`, and never takes
+/// the lock after that.
+#[cfg(any(not(unix), test))]
+fn successor_gives_up_too_soon(
+    spawned_at: std::time::Instant,
+    now: std::time::Instant,
+    bound: Duration,
+    margin: Duration,
+) -> bool {
+    now + margin >= spawned_at + bound
+}
+
+/// Starts the successor and waits, bounded, for the event that proves it will take over: its
+/// SUCCESSOR_WAITING_TOKEN line, printed once it is alive and blocked on this daemon's instance
+/// lock. Owning the endpoint cannot be the signal, because the successor only gets the lock after
+/// this daemon exits. A successor that ends (stdout EOF) or stays silent until the deadline is a
+/// failure; it holds no lock then, and a silent one is stopped so it cannot take over later.
+/// Returns the running successor, whose handle the daemon keeps until it retires, or the typed
+/// refusal reason with a detail for the log.
+#[cfg(any(not(unix), test))]
+async fn start_announced_successor(
+    mut command: tokio::process::Command,
+    ready_timeout: Duration,
+) -> Result<IdleSuccessor, (&'static str, String)> {
+    use crate::daemon::handover::SUCCESSOR_WAITING_TOKEN;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let spawned_at = std::time::Instant::now();
+    let mut child = command.spawn().map_err(|error| {
+        (
+            control::REASON_SUCCESSOR_NOT_STARTED,
+            format!("spawn failed: {error}"),
+        )
+    })?;
+    let pid = child.id().unwrap_or_default();
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.start_kill();
+        return Err((
+            control::REASON_SUCCESSOR_NOT_STARTED,
+            "no stdout pipe".into(),
+        ));
+    };
+    let mut lines = BufReader::new(stdout).lines();
+    let announced = tokio::time::timeout(ready_timeout, async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim() == SUCCESSOR_WAITING_TOKEN {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    match announced {
+        Ok(true) => Ok(IdleSuccessor { child, spawned_at }),
+        Ok(false) => {
+            // stdout closed without the announcement: the successor ended (or gave up its
+            // stdout); it never reached the lock wait.
+            let _ = child.start_kill();
+            let status = child.wait().await;
+            Err((
+                control::REASON_SUCCESSOR_EXITED,
+                format!("successor {pid} ended before announcing readiness: {status:?}"),
+            ))
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            Err((
+                control::REASON_SUCCESSOR_NOT_READY,
+                format!("successor {pid} did not announce readiness within {ready_timeout:?}"),
+            ))
+        }
+    }
+}
+
 /// What the connection handler must do after its response is written and flushed.
 enum AfterFlush {
     Nothing,
@@ -178,22 +301,43 @@ impl DaemonServer {
     /// waits until a Retiring daemon is empty (nothing spawning or in flight, every response
     /// already flushed, and nothing live unless a Shutdown confirmed those sessions), then writes
     /// the marker into runtime_dir, shuts down gracefully and exits 0. The retiring_signalled
-    /// swap in handover.rs makes the signal one-shot, so this runs at most once.
+    /// swap in handover.rs makes the signal one-shot, so this exits at most once; a retirement
+    /// cancelled because the idle-upgrade successor ended re-arms the signal and waits again.
     pub(crate) fn spawn_control_retirement_task_in(self: &Arc<Self>, runtime_dir: PathBuf) {
         let server = Arc::clone(self);
         let ready = self.handover_manager.retiring_ready();
         tokio::spawn(async move {
-            ready.notified().await;
-            let reason = if server.handover_manager.control_shutdown_requested() {
-                "control-v1 Shutdown"
-            } else {
-                "control-v1 RetireWhenIdle"
-            };
-            server.finish_control_retirement(&runtime_dir, reason).await;
+            loop {
+                ready.notified().await;
+                let reason = if server.handover_manager.control_shutdown_requested() {
+                    "control-v1 Shutdown"
+                } else {
+                    "control-v1 RetireWhenIdle"
+                };
+                if server.finish_control_retirement(&runtime_dir, reason).await {
+                    break;
+                }
+            }
         });
     }
 
-    async fn finish_control_retirement(&self, runtime_dir: &Path, reason: &str) {
+    /// Writes the marker, shuts down gracefully and runs the retirement action; true once it did.
+    /// After an accepted idle upgrade the successor must still be running at this point: it is
+    /// the daemon that takes over. One that ended (it gave up on the lock, or crashed) cancels the
+    /// retirement before anything is torn down, so this daemon reopens session creation and keeps
+    /// serving instead of leaving the machine without a daemon (todo 27, round 3). So does one
+    /// that is about to give up on its own (round 4): leaving then could end both daemons.
+    async fn finish_control_retirement(&self, runtime_dir: &Path, reason: &str) -> bool {
+        #[cfg(any(not(unix), test))]
+        if let Some(detail) = self.idle_successor_gone(std::time::Instant::now()) {
+            tracing::warn!(
+                %detail,
+                "Retirement cancelled: the idle-upgrade successor ended before this daemon left; \
+                 session creation reopens and this daemon keeps serving"
+            );
+            self.handover_manager.reopen_after_successor_exit();
+            return false;
+        }
         let runtime_dir = runtime_dir.to_path_buf();
         let marker_reason = reason.to_string();
         if let Err(error) = crate::ipc::run_blocking(move || {
@@ -214,6 +358,43 @@ impl DaemonServer {
         }
         self.shutdown_gracefully(reason).await;
         self.handover_manager.run_retirement_action();
+        true
+    }
+
+    /// Why an accepted idle upgrade's successor cannot take over from a daemon leaving at `now`:
+    /// it is no longer running, or it gives up following this daemon within
+    /// SUCCESSOR_GIVE_UP_MARGIN. None while it can, or when no idle upgrade was accepted. An
+    /// unreadable state counts as gone: staying keeps a daemon, leaving might not. The record is
+    /// cleared whenever a reason is returned.
+    #[cfg(any(not(unix), test))]
+    fn idle_successor_gone(&self, now: std::time::Instant) -> Option<String> {
+        use crate::daemon::handover::PREDECESSOR_EXIT_BOUND;
+        let mut slot = self.idle_successor.lock();
+        let successor = slot.as_mut()?;
+        let pid = successor.child.id();
+        let detail = match successor.child.try_wait() {
+            Ok(None)
+                if successor_gives_up_too_soon(
+                    successor.spawned_at,
+                    now,
+                    PREDECESSOR_EXIT_BOUND,
+                    SUCCESSOR_GIVE_UP_MARGIN,
+                ) =>
+            {
+                // It is still waiting for this daemon's exit and holds no lock; stopped so it
+                // cannot take over later, alongside the successor of a later upgrade.
+                let _ = successor.child.start_kill();
+                format!(
+                    "successor {pid:?} stops following this daemon {PREDECESSOR_EXIT_BOUND:?} \
+                     after it started, within {SUCCESSOR_GIVE_UP_MARGIN:?} from now"
+                )
+            }
+            Ok(None) => return None,
+            Ok(Some(status)) => format!("successor {pid:?} exited: {status}"),
+            Err(error) => format!("successor {pid:?} state unreadable: {error}"),
+        };
+        *slot = None;
+        Some(detail)
     }
 
     async fn handle_control_connection<S>(self: Arc<Self>, stream: S, expected_token: Option<&str>)
@@ -246,16 +427,15 @@ impl DaemonServer {
                 Err(_) => return,
             };
             let (reply, after) = match control::decode_request(&line) {
-                // RequestUpgrade needs the async handover path (todo 8); every other op is decided
-                // synchronously below.
+                // RequestUpgrade needs the async handover path (todo 8) or, on Windows, the idle
+                // upgrade (todo 27); every other op is decided synchronously below.
                 Ok(ControlRequest::RequestUpgrade {
                     staged_executable,
                     generation_key,
-                }) => (
+                }) => {
                     self.control_request_upgrade(staged_executable, generation_key)
-                        .await,
-                    AfterFlush::Nothing,
-                ),
+                        .await
+                }
                 Ok(request) => self.dispatch_control(request),
                 Err(error) => (error.reply(), AfterFlush::Nothing),
             };
@@ -344,6 +524,7 @@ impl DaemonServer {
                     ControlReply::Failed(ControlFailure {
                         code: control::CODE_COUNT_CHANGED.to_string(),
                         live: Some(live),
+                        reason: None,
                     }),
                     AfterFlush::Nothing,
                 ),
@@ -358,14 +539,164 @@ impl DaemonServer {
         }
     }
 
-    /// Windows has no handover candidate: the live owner is never replaced by an upgrade.
+    /// Windows has no handover candidate (todo 27): a daemon with live sessions is never
+    /// replaced, and an idle one hands its endpoint to the staged successor generation
+    /// (idle_request_upgrade). FERRYX_DAEMON_IDLE_UPGRADE=0 keeps the refusal-only behavior.
     #[cfg(not(unix))]
     async fn control_request_upgrade(
         self: &Arc<Self>,
-        _staged_executable: String,
-        _generation_key: Option<String>,
-    ) -> ControlReply {
-        ControlReply::Failed(ControlFailure::code(CODE_UPGRADE_UNSUPPORTED))
+        staged_executable: String,
+        generation_key: Option<String>,
+    ) -> (ControlReply, AfterFlush) {
+        if !crate::daemon::handover::idle_upgrade_requested() {
+            tracing::warn!(
+                "RequestUpgrade refused: FERRYX_DAEMON_IDLE_UPGRADE disables the idle upgrade; \
+                 restart Ferryx to finish updating"
+            );
+            return (
+                ControlReply::Failed(ControlFailure::code(CODE_UPGRADE_UNSUPPORTED)),
+                AfterFlush::Nothing,
+            );
+        }
+        self.idle_request_upgrade(
+            staged_executable,
+            generation_key,
+            idle_successor_command,
+            SUCCESSOR_READY_TIMEOUT,
+        )
+        .await
+    }
+
+    /// RequestUpgrade on a daemon without session transfer (todo 27). The staged executable must
+    /// lie in the generation dir named by generation_key under daemon_runtime_root(), as on Unix.
+    /// With a live session the upgrade is refused with UPGRADE_REFUSED carrying the live count,
+    /// which the GUI turns into "restart to finish updating". With none, the zero-count Shutdown
+    /// gate closes session creation atomically, the successor built by `successor` is started and
+    /// must announce, within `ready_timeout`, that it is waiting for this daemon's instance lock
+    /// (start_announced_successor). Only then does the reply ask the connection handler to
+    /// retire: the single retirement task exits once the reply is flushed and nothing is in
+    /// flight, instead of after a fixed sleep. A successor that cannot be started, ends at once or
+    /// stays silent reopens the gate and the daemon keeps serving; the refusal carries the typed
+    /// reason.
+    #[cfg(any(not(unix), test))]
+    async fn idle_request_upgrade<F>(
+        self: &Arc<Self>,
+        staged_executable: String,
+        generation_key: Option<String>,
+        successor: F,
+        ready_timeout: Duration,
+    ) -> (ControlReply, AfterFlush)
+    where
+        F: FnOnce(&Path) -> tokio::process::Command,
+    {
+        use crate::daemon::handover::{upgrade_action, HandoverStatus, UpgradeAction};
+        let refuse = |code: &str, live: Option<u32>| {
+            let failure = ControlFailure {
+                code: code.to_string(),
+                live,
+                reason: None,
+            };
+            (ControlReply::Failed(failure), AfterFlush::Nothing)
+        };
+        let Some(key) = generation_key else {
+            tracing::warn!("RequestUpgrade refused: no generation_key");
+            return refuse(control::CODE_BAD_REQUEST, None);
+        };
+        let Some(root) = daemon_runtime_root() else {
+            return refuse(CODE_UPGRADE_UNSUPPORTED, None);
+        };
+        let executable = PathBuf::from(&staged_executable);
+        let checked = {
+            let (executable, key) = (executable.clone(), key.clone());
+            crate::ipc::run_blocking(move || {
+                crate::daemon::handover_request::validate_staged_executable(
+                    &root,
+                    &executable,
+                    &key,
+                )
+                .map_err(crate::ipc::IpcError::internal)?;
+                Ok(crate::daemon::handover_request::own_generation_key())
+            })
+            .await
+        };
+        let own_key = match checked {
+            Ok(own_key) => own_key,
+            Err(error) => {
+                tracing::warn!(%error, staged_executable, "RequestUpgrade refused: staged executable rejected");
+                return refuse(control::CODE_BAD_REQUEST, None);
+            }
+        };
+        if own_key.as_deref() == Some(key.as_str()) {
+            tracing::info!(generation_key = %key, "RequestUpgrade refused: already running this generation");
+            return refuse(control::CODE_UPGRADE_REFUSED, None);
+        }
+        let live = crate::daemon::handover::live_session_count(&self.terminal_service);
+        if let UpgradeAction::Refuse { live_sessions } = upgrade_action(live as usize, false) {
+            tracing::warn!(
+                live_sessions,
+                "RequestUpgrade refused: this platform cannot transfer live sessions; \
+                 restart Ferryx to finish updating"
+            );
+            return refuse(control::CODE_UPGRADE_REFUSED, Some(live));
+        }
+        if self.handover_manager.status() != HandoverStatus::Active {
+            return refuse(control::CODE_UPGRADE_REFUSED, None);
+        }
+        // Same atomic gate as Shutdown { confirm_live_sessions: 0 }: no session can appear after
+        // this count, and a session that appeared since the check above refuses the upgrade.
+        match self
+            .handover_manager
+            .control_shutdown(&self.terminal_service, 0)
+        {
+            ShutdownDecision::Proceed { .. } => {}
+            ShutdownDecision::CountChanged { live, .. } => {
+                return refuse(control::CODE_UPGRADE_REFUSED, Some(live));
+            }
+            ShutdownDecision::Refuse(code) => {
+                tracing::info!(code, "RequestUpgrade refused by the session gate");
+                return refuse(control::CODE_UPGRADE_REFUSED, None);
+            }
+        }
+        match start_announced_successor(successor(&executable), ready_timeout).await {
+            Ok(successor) => {
+                let pid = successor.child.id();
+                // Checked by the retirement task right before this daemon leaves.
+                *self.idle_successor.lock() = Some(successor);
+                tracing::info!(
+                    successor_pid = ?pid,
+                    generation_key = %key,
+                    "RequestUpgrade accepted with no live session: successor generation is waiting \
+                     for the instance lock; exiting once this reply is flushed"
+                );
+                (ControlReply::UpgradeAccepted, AfterFlush::Shutdown)
+            }
+            Err((reason, detail)) => {
+                tracing::warn!(
+                    reason,
+                    %detail,
+                    "RequestUpgrade refused: successor not ready; the daemon keeps serving"
+                );
+                self.handover_manager.reopen_after_idle_upgrade_failure();
+                let failure = ControlFailure {
+                    code: control::CODE_UPGRADE_REFUSED.to_string(),
+                    live: None,
+                    reason: Some(reason.to_string()),
+                };
+                (ControlReply::Failed(failure), AfterFlush::Nothing)
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn control_request_upgrade(
+        self: &Arc<Self>,
+        staged_executable: String,
+        generation_key: Option<String>,
+    ) -> (ControlReply, AfterFlush) {
+        let reply = self
+            .control_request_handover(staged_executable, generation_key)
+            .await;
+        (reply, AfterFlush::Nothing)
     }
 
     /// RequestUpgrade { staged_executable, generation_key } (todo 8). (a) the staged executable
@@ -375,7 +706,7 @@ impl DaemonServer {
     /// predecessor keeps serving everything until the candidate commits; any refusal leaves it
     /// Active. No in-place re-exec and no child process of this daemon is ever used here.
     #[cfg(unix)]
-    async fn control_request_upgrade(
+    async fn control_request_handover(
         self: &Arc<Self>,
         staged_executable: String,
         generation_key: Option<String>,

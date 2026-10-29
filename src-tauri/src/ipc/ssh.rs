@@ -138,7 +138,7 @@ mod tailscale_sync_tests {
 
     #[tokio::test]
     async fn target_reports_authentication_and_provisioning_failures() {
-        let env = crate::ssh::runtime::RemoteEnvironment { platform: crate::ssh::runtime::RemotePlatform::Posix, executor: crate::ssh::runtime::RemoteExecutor::Sh, version: "Linux".into(), home: "/home/test".into(), temp: "/tmp".into(), git: true };
+        let env = crate::ssh::runtime::RemoteEnvironment { platform: crate::ssh::runtime::RemotePlatform::Posix, executor: crate::ssh::runtime::RemoteExecutor::Sh, version: "Linux".into(), home: "/home/test".into(), temp: "/tmp".into(), git: true, runtime_dir: None, os: "Linux".into(), arch: "x86_64".into() };
         let h = host("test", "host", crate::ssh::SshHostSource::Tailscale);
         let failed = sync_tailscale_target_with(h.clone(), || async { Err(IpcError::new(IpcErrorCode::IoError, "authentication failed")) }, |_| async { panic!("must not provision after failed detection") }).await.unwrap();
         assert!(!failed.reachable);
@@ -471,14 +471,23 @@ pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
     };
     // Non-installing helper check, only when the host is reachable. Any probe
     // failure (timeout, transport error) classifies to Unknown, never an Err.
-    let helper = match &environment {
-        Some(environment) => Some(crate::ssh::helper_setup::probe_ready(&host, environment).await),
-        None => None,
+    // A present helper that cannot run stays Missing (so setup reinstalls it) but
+    // reports why through last_error instead of reading as plain "not installed".
+    let (helper, helper_exec_failure) = match &environment {
+        Some(environment) => {
+            let (state, exec_failure) =
+                crate::ssh::helper_setup::probe_ready_detailed(&host, environment).await;
+            (Some(state), exec_failure)
+        }
+        None => (None, None),
     };
     SshTargetSummary {
         host,
         reachable,
-        last_error: diagnostic.as_ref().map(|e| e.message.clone()),
+        last_error: diagnostic
+            .as_ref()
+            .map(|e| e.message.clone())
+            .or(helper_exec_failure),
         environment,
         helper,
         diagnostic,
@@ -504,6 +513,29 @@ pub async fn cmd_ssh_test_connection(
         clear_password_in_daemon(&daemon_client, host).await?;
     }
     Ok(summary)
+}
+
+/// Connects once with host-key acceptance redirected into a private temporary file and reports
+/// the keys the server presented, for the user to compare before trusting.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_scan_host_key(
+    host: SshHost,
+) -> Result<crate::ssh::host_key::HostKeyScan, IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::scan(&host).await
+}
+
+/// Pins the host key into the user's known_hosts only when a fresh scan still presents the
+/// fingerprint the user confirmed.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_trust_host_key(
+    host: SshHost,
+    fingerprint_sha256: String,
+) -> Result<(), IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::trust(&host, fingerprint_sha256).await
 }
 
 #[cfg(feature = "desktop")]
@@ -805,20 +837,19 @@ pub async fn cmd_ssh_install_ferryx_node<R: Runtime>(
     parse_node_install_report(&output)
 }
 
+fn parse_helper_target(
+    target_triple: &str,
+) -> Result<crate::ssh::helper_assets::HelperTarget, IpcError> {
+    crate::ssh::helper_assets::HelperTarget::from_triple(target_triple).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!("Unsupported target triple for helper asset: '{target_triple}'"),
+        )
+    })
+}
+
 pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, IpcError> {
-    let parsed_target = match target_triple {
-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
-        _ => {
-            return Err(IpcError::new(
-                IpcErrorCode::Unsupported,
-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
-            ));
-        }
-    };
+    let parsed_target = parse_helper_target(target_triple)?;
 
     let mut helper_dir_candidates = Vec::new();
 
@@ -858,19 +889,7 @@ pub fn bundled_helper_path<R: Runtime>(
     app: &AppHandle<R>,
     target_triple: &str,
 ) -> Result<PathBuf, IpcError> {
-    let parsed_target = match target_triple {
-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
-        _ => {
-            return Err(IpcError::new(
-                IpcErrorCode::Unsupported,
-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
-            ));
-        }
-    };
+    let parsed_target = parse_helper_target(target_triple)?;
 
     let mut helper_dir_candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -924,50 +943,19 @@ pub fn bundled_helper_version<R: Runtime>(app: &AppHandle<R>) -> Option<String> 
     None
 }
 
-pub async fn resolve_remote_target_triple(
-    host: &SshHost,
+/// Helper target for a detected remote, from the OS and architecture the environment probe
+/// reported. Fails rather than guessing when either is missing or has no helper build.
+pub fn resolve_remote_target_triple(
     env: &crate::ssh::runtime::RemoteEnvironment,
 ) -> Result<String, IpcError> {
-    match env.platform {
-        crate::ssh::runtime::RemotePlatform::Windows => Ok("x86_64-pc-windows-msvc".to_string()),
-        crate::ssh::runtime::RemotePlatform::Posix => {
-            let script = "uname -s; uname -m";
-            let plan = crate::ssh::direct::ssh_plan(host, env.executor.command(script), false)?;
-            let output =
-                crate::ssh::direct::bounded_output(&plan, std::time::Duration::from_secs(3))
-                    .await
-                    .map_err(|e| {
-                        IpcError::new(
-                            IpcErrorCode::Unsupported,
-                            format!("Failed to determine remote architecture: {e}"),
-                        )
-                    })?;
-            let text = std::str::from_utf8(&output).map_err(|_| {
-                IpcError::new(
-                    IpcErrorCode::Unsupported,
-                    "Remote architecture probe returned non-UTF8 output",
-                )
-            })?;
-            let lines: Vec<&str> = text
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect();
-            let (os, arch) = match lines.as_slice() {
-                [os, arch, ..] => (*os, *arch),
-                [os] => (*os, "x86_64"),
-                _ => {
-                    return Err(IpcError::new(
-                        IpcErrorCode::Unsupported,
-                        "Could not detect remote operating system or architecture for provisioning",
-                    ));
-                }
-            };
-
-            let target = crate::ssh::helper_assets::resolve_target_from_probe(os, arch)?;
-            Ok(target.triple().to_string())
-        }
+    if env.os.trim().is_empty() || env.arch.trim().is_empty() {
+        return Err(IpcError::new(
+            IpcErrorCode::Unsupported,
+            "Could not detect remote operating system or architecture for provisioning",
+        ));
     }
+    let target = crate::ssh::helper_assets::resolve_target_from_probe(&env.os, &env.arch)?;
+    Ok(target.triple().to_string())
 }
 
 pub async fn ensure_qualified_ssh_helper(
@@ -986,7 +974,7 @@ pub async fn ensure_qualified_ssh_helper(
         return Ok(location);
     }
 
-    let target_triple = resolve_remote_target_triple(host, environment).await?;
+    let target_triple = resolve_remote_target_triple(environment)?;
     let binary_path = crate::ipc::run_blocking(move || {
         resolve_bundled_helper_binary(&target_triple)
     })
@@ -1221,7 +1209,7 @@ pub async fn cmd_ssh_helper_update_state<R: Runtime>(
         None
     };
 
-    let bundled_path = match resolve_remote_target_triple(&host, &env).await {
+    let bundled_path = match resolve_remote_target_triple(&env) {
         Ok(triple) => bundled_helper_path(&app, &triple).ok(),
         Err(_) => None,
     };
@@ -1398,6 +1386,43 @@ pub async fn cmd_ssh_delete_remote_worktree<R: Runtime>(
 mod tests {
     use super::*;
     use crate::ssh::{SshAuthMethod, SshHostSource};
+
+    fn probed_environment(os: &str, arch: &str) -> crate::ssh::runtime::RemoteEnvironment {
+        crate::ssh::runtime::RemoteEnvironment {
+            platform: crate::ssh::runtime::RemotePlatform::Posix,
+            executor: crate::ssh::runtime::RemoteExecutor::Sh,
+            version: os.into(),
+            home: "/home/u".into(),
+            temp: "/tmp".into(),
+            git: true,
+            runtime_dir: None,
+            os: os.into(),
+            arch: arch.into(),
+        }
+    }
+
+    #[test]
+    fn remote_target_follows_the_probed_architecture() {
+        for (os, arch, triple) in [
+            ("Linux", "aarch64", "aarch64-unknown-linux-musl"),
+            ("Linux", "x86_64", "x86_64-unknown-linux-musl"),
+            ("Darwin", "arm64", "aarch64-apple-darwin"),
+            ("Windows", "AMD64", "x86_64-pc-windows-msvc"),
+        ] {
+            assert_eq!(resolve_remote_target_triple(&probed_environment(os, arch)).unwrap(), triple);
+        }
+    }
+
+    #[test]
+    fn remote_target_fails_instead_of_assuming_x86_64() {
+        // An OS-only probe (the old one-line reply) or an unknown arch must not pick a helper.
+        for (os, arch) in [("Linux", ""), ("", ""), ("Linux", "armv7l"), ("Windows", "ARM64")] {
+            let err = resolve_remote_target_triple(&probed_environment(os, arch)).unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::Unsupported, "{os}/{arch}");
+        }
+        let err = resolve_remote_target_triple(&probed_environment("FreeBSD", "amd64")).unwrap_err();
+        assert_eq!(err.details.unwrap()["reason"], "no_helper_for_os");
+    }
 
     #[test]
     fn store_round_trips_through_json() {

@@ -874,12 +874,9 @@ pub async fn mutate_worktree(
                         }
                         let commit = crate::worktree::run_git(
                             manager.repo_root(),
-                            &[
-                                "rev-parse",
-                                "--verify",
-                                "--end-of-options",
-                                &format!("{base}^{{commit}}"),
-                            ],
+                            &crate::worktree::rev_parse_verify_args(&format!(
+                                "{base}^{{commit}}"
+                            )),
                         )
                         .map_err(|error| match error {
                             WorktreeError::GitError { .. } => "BASE_REF_UNAVAILABLE".into(),

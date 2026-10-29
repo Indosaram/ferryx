@@ -3,7 +3,7 @@ title: "Ferryx vs Conductor: A Conductor Alternative on Windows and Linux"
 description: Conductor is macOS only. Compare it with Ferryx on platforms, local worktrees, session survival, agent support, and Conductor Cloud's paid sandboxes.
 ---
 
-The first question most people ask about [Conductor](https://www.conductor.build/) has a documented answer: it doesn't run on your machine unless that machine is a Mac. Conductor's install page states plainly, *"Conductor is not available for Windows or Linux yet"* ([conductor.build/docs/installation](https://www.conductor.build/docs/installation), checked 2026-10-24). [Ferryx](https://github.com/Indosaram/ferryx) ships a macOS universal DMG, an x64 Windows installer, and x86_64 AppImage and .deb packages for Linux, so the same workspace runs on all three.
+The first question most people ask about [Conductor](https://www.conductor.build/) has a documented answer: it doesn't run on your machine unless that machine is a Mac. Conductor's install page states plainly, *"Conductor is not available for Windows or Linux yet"* ([conductor.build/docs/installation](https://www.conductor.build/docs/installation), checked 2026-10-24). [Ferryx](https://github.com/Indosaram/ferryx) ships a macOS universal DMG, an x64 Windows build through the Microsoft Store (some releases also attach a direct `.exe`), and x86_64 AppImage and .deb packages for Linux, so the same workspace runs on all three.
 
 That's the practical difference. The rest of this page covers what Conductor actually is, since its headline and its shipping product emphasise different things, and where the two tools genuinely diverge.
 
@@ -12,7 +12,7 @@ That's the practical difference. The rest of this page covers what Conductor act
 | | Ferryx | Conductor |
 | :--- | :--- | :--- |
 | macOS | Universal DMG | Yes, the only supported platform |
-| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (signed) and x64 `.exe` installer | Not available yet |
+| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (x64, signed); some releases also attach a direct `.exe` | Not available yet |
 | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | Not available yet |
 | Licensing | Source-available under the Ferryx License, free for individuals and small companies | Closed source; free tier plus paid plans from $50/mo |
 | Agents | Any command you can start in a shell; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Claude Code, Codex, Cursor, and OpenCode |

@@ -35,7 +35,7 @@ Ferryx is a source-available desktop app (Ferryx License) built with Rust and Ta
 - An embedded browser. Browser tabs use native WebViews and sit beside terminal panes, keeping docs or a dashboard next to the agents instead of in another window.
 - Session lifetime. A headless Rust PTY daemon owns the pseudoterminals, so closing or reloading the GUI doesn't kill running agent processes. Output is buffered in a 512 KiB ring buffer with monotonic sequence numbers, and reconnecting replays the output you missed.
 - A phone client. An authenticated mobile remote client renders the terminal with a custom DOM grid, no xterm.js involved, so a running session can be checked from a phone.
-- Packaging. macOS ships as a universal DMG, Windows as an x64 installer, Linux as AppImage and .deb.
+- Packaging. macOS ships as a universal DMG, Windows through the Microsoft Store (x64; some releases also attach a direct `.exe`), Linux as x86_64 AppImage and .deb.
 
 That list is the whole argument. None of it adds capability over tmux; it removes manual steps and keeps state visible without hand-arranged windows. The two items the tmux-side tools don't cover are the daemon owning the PTYs independently of any client, and the phone client.
 

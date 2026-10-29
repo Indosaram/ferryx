@@ -18,6 +18,7 @@ import {
   storeAccountOrigin,
   clearStoredAccountOrigin,
   getConfiguredAccountOrigin,
+  getConfiguredAccountOriginUnchecked,
   resolveAccountOrigin,
   DEFAULT_ACCOUNT_ORIGIN,
   ACCOUNT_ORIGIN_PROBE_STORAGE_KEY,
@@ -925,9 +926,10 @@ describe("accountSession client module", () => {
       clearStoredAccountOrigin();
     });
 
-    it("defaults to DEFAULT_RELAY_ORIGIN when no origin is configured", () => {
+    it("defaults a web build to its page origin when no origin is configured", () => {
       expect(getStoredAccountOrigin()).toBeNull();
-      expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
+      expect(getConfiguredAccountOrigin()).toBe(window.location.origin);
+      expect(getConfiguredAccountOrigin()).not.toBe(DEFAULT_RELAY_ORIGIN);
     });
 
     it("stores, retrieves, and clears configured account origin", () => {
@@ -937,7 +939,7 @@ describe("accountSession client module", () => {
 
       clearStoredAccountOrigin();
       expect(getStoredAccountOrigin()).toBeNull();
-      expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
+      expect(getConfiguredAccountOrigin()).toBe(window.location.origin);
     });
 
     it("does not expose a session issued by one account origin to another", () => {
@@ -1211,10 +1213,20 @@ describe("accountSession review hardening", () => {
     clearStoredAccountOrigin();
   });
 
-  it("never sends the account token to an invalid stored or passed origin", async () => {
+  it("an invalid stored or passed origin errors instead of defaulting, and never receives the token", async () => {
     window.localStorage.setItem("ferryx.account.origin", "http://evil.example");
     expect(getStoredAccountOrigin()).toBeNull();
-    expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
+    let configuredError: unknown;
+    try {
+      getConfiguredAccountOrigin();
+    } catch (err) {
+      configuredError = err;
+    }
+    expect(configuredError).toBeInstanceOf(AccountSessionError);
+    expect((configuredError as AccountSessionError).code).toBe("INVALID_ACCOUNT_ORIGIN");
+    expect((configuredError as AccountSessionError).details).toEqual({ origin: "http://evil.example" });
+    expect(getConfiguredAccountOriginUnchecked()).toBe("http://evil.example");
+    expect(getStoredAccountSessionToken()).toBeNull();
     expect(() => storeAccountOrigin("https://user:pw@relay.example.com")).toThrow(AccountSessionError);
 
     const urls: string[] = [];
@@ -1222,8 +1234,15 @@ describe("accountSession review hardening", () => {
       urls.push(String(input));
       return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
     });
-    await listMachines("http://evil.example", sessionToken);
-    expect(urls).toEqual([`${DEFAULT_RELAY_ORIGIN}/api/account/v1/machines`]);
+    await expect(listMachines("http://evil.example", sessionToken)).rejects.toMatchObject({
+      code: "INVALID_ACCOUNT_ORIGIN",
+      details: { origin: "http://evil.example" },
+    });
+    await expect(listMachines("", sessionToken)).rejects.toMatchObject({ code: "INVALID_ACCOUNT_ORIGIN" });
+    await expect(requestLogin("https://relay.example.com/path", "a@b.test")).rejects.toMatchObject({
+      code: "INVALID_ACCOUNT_ORIGIN",
+    });
+    expect(urls).toEqual([]);
   });
 
   it("times out a hung account call and does not cache a timed-out origin probe", async () => {

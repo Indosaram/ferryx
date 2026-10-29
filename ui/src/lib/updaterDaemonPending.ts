@@ -10,6 +10,11 @@ export type DaemonUpdatePending = {
   runningVersion: string | null;
   /** Live sessions from control Inventory; null when they cannot be counted. */
   liveSessions: number | null;
+  /**
+   * Same-protocol update (todo 27): the running service could not hand over because terminals
+   * are live, keeps serving this version, and only a restart finishes the update.
+   */
+  restartRequired?: boolean;
 };
 
 export type RestartPreviousOutcome =
@@ -19,6 +24,8 @@ export type RestartPreviousOutcome =
   | { outcome: "unavailable" };
 
 export const DAEMON_UPDATE_PENDING = "DAEMON_UPDATE_PENDING";
+/** Desktop event carrying a restart-required DAEMON_UPDATE_PENDING error (todo 27). */
+export const DAEMON_RESTART_REQUIRED_EVENT = "daemon-update-restart-required";
 
 /** Reads the structured details of a DAEMON_UPDATE_PENDING error; null for any other error. */
 export function daemonUpdatePendingFrom(error: {
@@ -32,6 +39,7 @@ export function daemonUpdatePendingFrom(error: {
   return {
     runningVersion: typeof version === "string" ? version : null,
     liveSessions: typeof live === "number" && Number.isInteger(live) && live >= 0 ? live : null,
+    ...(details.restartRequired === true ? { restartRequired: true } : {}),
   };
 }
 
@@ -71,4 +79,17 @@ export async function rereadDaemonUpdatePending(): Promise<DaemonUpdatePending> 
     "cmd_daemon_update_pending_status",
   );
   return { runningVersion: status.runningVersion, liveSessions: status.liveSessions };
+}
+
+/**
+ * The restart-required signal recorded before this window started listening for
+ * DAEMON_RESTART_REQUIRED_EVENT; null when no update waits for a restart. Sends nothing to the
+ * running service.
+ */
+export async function fetchDaemonRestartRequired(): Promise<{
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+} | null> {
+  return invoke("cmd_daemon_restart_required");
 }

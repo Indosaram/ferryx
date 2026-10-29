@@ -209,6 +209,8 @@ vi.mock("./lib/tauri", () => ({
   getInitialProject: native.getInitialProject,
   getSystemPermissionsStatus: native.getSystemPermissionsStatus,
   getCliLauncherStatus: native.getCliLauncherStatus,
+  // WelcomeWizard probes Git on its project step (task 35).
+  getGitProbe: vi.fn(async () => null),
   getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" as const })),
   installCliLauncher: native.installCliLauncher,
   listProjectBranches: native.listProjectBranches,
