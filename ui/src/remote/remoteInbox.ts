@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AgentPrompt, AgentPromptAnswer } from "../lib/tauri";
-import { buildRemoteAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
+import { formatAttentionLocation, sortAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
 import type { AttentionPrompts } from "../features/ferryx/attention/attentionPrompts";
-import type { RemoteTerminalTabInfo } from "./RemoteSessionList";
+import type { RemoteWorkspaceModel } from "./RemoteSessionList";
+import { INBOX_WHY, type InboxRow } from "./home/phoneHomeModel";
 import {
   referenceNativeKindFromRegistryId,
   referenceNativeKindIsNative,
@@ -61,8 +62,139 @@ function referenceAnswerOf(answer: AgentPromptAnswer): ReferencePromptAnswerPayl
   return "key" in answer ? { optionIndex: Number(answer.key) } : { customText: answer.text };
 }
 
-function nativeRegistryId(tab: RemoteTerminalTabInfo | undefined): string | null {
-  const agentType = tab?.agentType?.trim();
+/**
+ * One waiting or finished session on the host, wherever it runs: a pane of the mirrored view, a
+ * session row of another worktree or project, or (account mode) any machine's inventory row.
+ */
+export type RemoteInboxEntry = {
+  /** Row identity: machine (empty for a direct pairing) and session. */
+  key: string;
+  sessionId: string;
+  /** The mirrored pane that shows this session, when the current view has one. */
+  tabId: string | null;
+  workspaceId: string;
+  worktreeSlug: string | null;
+  worktreeLabel: string | null;
+  state: "waiting" | "done";
+  who: string;
+  text?: string;
+  location?: string;
+  at?: number;
+  agentType: string | null;
+  supervisorLabel?: string;
+  /** Account machine owning the session; null on a direct pairing. */
+  machineId: string | null;
+  /** The prompt routes of the connected host can read this session's card. */
+  readable: boolean;
+};
+
+function inboxKey(machineId: string | null, sessionId: string): string {
+  return `${machineId ?? ""}\u0000${sessionId}`;
+}
+
+function inboxState(value: string | null | undefined): "waiting" | "done" | null {
+  return value === "waiting" || value === "done" ? value : null;
+}
+
+function whoAndText(agentType: string | null | undefined, label: string): { who: string; text?: string } {
+  const agent = agentType?.trim();
+  return { who: agent || label, ...(agent && label !== agent ? { text: label } : {}) };
+}
+
+/**
+ * Every waiting or finished session the phone knows of on the host, not only the desktop's active
+ * selection: the mirrored panes first (their activity is the freshest), then every session row of
+ * any worktree or project, then (account mode) every machine's inventory. One row per session.
+ */
+export function remoteInboxEntries(input: {
+  model: RemoteWorkspaceModel;
+  /** The account machine the mirrored view belongs to; null on a direct pairing. */
+  machineId: string | null;
+  accountRows: readonly InboxRow[];
+}): RemoteInboxEntry[] {
+  const { model, machineId } = input;
+  const context = model.context;
+  const labelOf = (workspaceId: string) => {
+    const option = model.options.find(
+      (candidate) => candidate.workspaceId === workspaceId && (candidate.projectLabel || candidate.workspaceLabel),
+    );
+    return option?.projectLabel ?? option?.workspaceLabel ?? workspaceId;
+  };
+  const entries: RemoteInboxEntry[] = [];
+  const seen = new Set<string>();
+  const add = (entry: RemoteInboxEntry) => {
+    if (seen.has(entry.key)) return;
+    seen.add(entry.key);
+    entries.push(entry);
+  };
+
+  for (const tab of context.terminalTabs ?? []) {
+    const state = inboxState(tab.activityState);
+    const workspaceId = tab.workspaceId ?? context.workspaceId;
+    if (!state || !tab.sessionId || !workspaceId) continue;
+    const worktreeLabel = tab.worktreeLabel ?? context.worktreeLabel ?? null;
+    add({
+      key: inboxKey(machineId, tab.sessionId),
+      sessionId: tab.sessionId,
+      tabId: tab.id,
+      workspaceId,
+      worktreeSlug: tab.worktreeSlug !== undefined ? tab.worktreeSlug : context.worktreeSlug,
+      worktreeLabel,
+      state,
+      ...whoAndText(tab.agentType, tab.label),
+      location: formatAttentionLocation(labelOf(workspaceId), worktreeLabel ?? undefined),
+      agentType: tab.agentType ?? null,
+      machineId,
+      readable: true,
+    });
+  }
+
+  for (const option of model.options) {
+    // Account options are listed through their inventory rows below.
+    if (option.machineId || option.unavailable || !option.sessionId) continue;
+    const state = inboxState(option.attention ?? option.activityState);
+    if (!state) continue;
+    const label = option.sessionLabel ?? `Session ${option.sessionId.slice(0, 8)}`;
+    add({
+      key: inboxKey(null, option.sessionId),
+      sessionId: option.sessionId,
+      tabId: null,
+      workspaceId: option.workspaceId,
+      worktreeSlug: option.worktreeSlug,
+      worktreeLabel: option.worktreeLabel,
+      state,
+      ...whoAndText(option.agentType, label),
+      location: formatAttentionLocation(labelOf(option.workspaceId), option.worktreeLabel ?? undefined),
+      agentType: option.agentType ?? null,
+      machineId: null,
+      readable: true,
+    });
+  }
+
+  for (const row of input.accountRows) {
+    add({
+      key: inboxKey(row.machineId, row.sessionId),
+      sessionId: row.sessionId,
+      tabId: null,
+      workspaceId: row.option.workspaceId,
+      worktreeSlug: row.option.worktreeSlug,
+      worktreeLabel: row.option.worktreeLabel,
+      state: row.kind === "done" ? "done" : "waiting",
+      ...whoAndText(row.agentType, row.title),
+      location: row.where,
+      ...(row.observedAt !== null ? { at: row.observedAt } : {}),
+      agentType: row.agentType,
+      ...(row.kind === "held" ? { supervisorLabel: INBOX_WHY.held } : {}),
+      machineId: row.machineId,
+      readable: row.machineId === machineId,
+    });
+  }
+  return entries;
+}
+
+function nativeRegistryId(entry: RemoteInboxEntry | undefined): string | null {
+  if (!entry?.readable) return null;
+  const agentType = entry.agentType?.trim();
   if (!agentType) return null;
   return referenceNativeKindIsNative(referenceNativeKindFromRegistryId(agentType)) ? agentType : null;
 }
@@ -79,25 +211,22 @@ export type RemoteInbox = {
 };
 
 /**
- * The phone's Inbox: one row per waiting or finished session of the mirrored list, each needs-you
- * row answered in place through the prompt routes the chat's card uses. A row answered here or on
- * another device leaves at once; it comes back only for a new prompt or a new waiting episode.
+ * The phone's one Inbox, shown both on the home and in the session sheet: one row per waiting or
+ * finished session on the host, each needs-you row answered in place through the prompt routes
+ * the chat's card uses. A row answered here or on another device leaves at once; it comes back
+ * only for a new prompt or a new waiting episode.
  */
 export function useRemoteInbox({
-  workspaceId,
-  workspaceLabel,
-  tabs,
+  entries,
   transport,
 }: {
-  workspaceId: string | null | undefined;
-  workspaceLabel: string | null | undefined;
-  tabs: readonly RemoteTerminalTabInfo[];
+  entries: readonly RemoteInboxEntry[];
   transport: RemoteInboxTransport;
 }): RemoteInbox {
   const transportRef = useRef(transport);
   transportRef.current = transport;
-  const tabsRef = useRef(tabs);
-  tabsRef.current = tabs;
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
   // Sessions whose prompt went away (answered, here or elsewhere) while their state still says waiting.
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set());
   // Bumped per session on a push, so the row's prompt panel reads again.
@@ -121,12 +250,12 @@ export function useRemoteInbox({
   useEffect(() => {
     if (hidden.size === 0) return;
     for (const sessionId of hidden) {
-      const tab = tabs.find((candidate) => candidate.sessionId === sessionId);
-      if (tab?.activityState === "waiting") continue;
+      const entry = entries.find((candidate) => candidate.sessionId === sessionId);
+      if (entry?.state === "waiting") continue;
       knownRef.current.delete(sessionId);
       unhide(sessionId);
     }
-  }, [hidden, tabs, unhide]);
+  }, [entries, hidden, unhide]);
 
   const push = useCallback(
     (change: RemoteInboxPromptChange) => {
@@ -149,29 +278,42 @@ export function useRemoteInbox({
   const refreshAll = useCallback(() => {
     setRevisions((prev) => {
       const next: Record<string, number> = { ...prev };
-      for (const tab of tabsRef.current) {
-        if (tab.sessionId) next[tab.sessionId] = (next[tab.sessionId] ?? 0) + 1;
-      }
+      for (const entry of entriesRef.current) next[entry.sessionId] = (next[entry.sessionId] ?? 0) + 1;
       return next;
     });
   }, []);
 
-  const rows = useMemo(() => {
-    if (!workspaceId) return [];
-    const bySession = new Map(tabs.map((tab) => [tab.id, tab] as const));
-    // Every waiting session is listed, the one on screen included: the Inbox is its own view.
-    return buildRemoteAttentionRows(workspaceId, workspaceLabel ?? workspaceId, tabs, null).flatMap((row) => {
-      const sessionId = bySession.get(row.id)?.sessionId;
-      if (!sessionId || hidden.has(sessionId)) return [];
-      return [{ ...row, sessionId, revision: revisions[sessionId] ?? 0 }];
-    });
-  }, [hidden, revisions, tabs, workspaceId, workspaceLabel]);
+  const rows = useMemo(
+    () =>
+      // Every waiting session is listed, the one on screen included: the Inbox is its own view.
+      sortAttentionRows(
+        entries.flatMap((entry): AttentionRow[] =>
+          hidden.has(entry.sessionId)
+            ? []
+            : [
+                {
+                  id: entry.key,
+                  revision: revisions[entry.sessionId] ?? 0,
+                  workspaceId: entry.workspaceId,
+                  sessionId: entry.sessionId,
+                  state: entry.state === "waiting" ? "needs-you" : "done",
+                  who: entry.who,
+                  ...(entry.location ? { location: entry.location } : {}),
+                  ...(entry.text ? { text: entry.text } : {}),
+                  ...(entry.at !== undefined ? { at: entry.at } : {}),
+                  ...(entry.supervisorLabel ? { supervisorLabel: entry.supervisorLabel } : {}),
+                },
+              ],
+        ),
+      ),
+    [entries, hidden, revisions],
+  );
 
   const prompts = useMemo<AttentionPrompts>(() => {
-    const tabOf = (row: AttentionRow) => tabsRef.current.find((tab) => tab.id === row.id);
+    const entryOf = (row: AttentionRow) => entriesRef.current.find((entry) => entry.key === row.id);
     return {
       read: async (row) => {
-        const registryId = nativeRegistryId(tabOf(row));
+        const registryId = nativeRegistryId(entryOf(row));
         if (!registryId) return null;
         let read: RemoteInboxPromptRead | null;
         try {
@@ -193,7 +335,7 @@ export function useRemoteInbox({
         return agentPromptFromReference(read.prompt, read.screenRevision);
       },
       answer: async (row, prompt, answer) => {
-        const registryId = nativeRegistryId(tabOf(row));
+        const registryId = nativeRegistryId(entryOf(row));
         if (!registryId) return "stale";
         const outcome = await transportRef.current.answer(row.sessionId, registryId, {
           promptId: prompt.promptId,

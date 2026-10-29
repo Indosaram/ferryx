@@ -74,7 +74,7 @@ function promptOf(session: string, kind = "question"): Record<string, unknown> {
 
 type Call = { url: string; method: string; body: unknown };
 
-function installFetch(prompts: Record<string, Record<string, unknown>>): Call[] {
+function installFetch(prompts: Record<string, Record<string, unknown>>, workspaceState: unknown = state): Call[] {
   const calls: Call[] = [];
   vi.stubGlobal(
     "fetch",
@@ -92,7 +92,7 @@ function installFetch(prompts: Record<string, Record<string, unknown>>): Call[] 
           sessions: ["sess-main", "sess-a", "sess-b"].map((sessionId) => ({ sessionId, daemonEpoch: DAEMON_EPOCH, running: true })),
         });
       }
-      if (url.includes("/api/v1/workspace/state")) return jsonResponse(state);
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(workspaceState);
       if (url.includes("/reference-chat/") && url.includes("/prompt")) {
         const session = Object.keys(prompts).find((id) => url.includes(`/reference-chat/${id}/`));
         return jsonResponse(session ? prompts[session] : { prompt: null, screenRevision: "rev-0", cols: 80, rows: 24 });
@@ -138,6 +138,25 @@ describe("phone Inbox (todo 9)", () => {
     const rows = within(sheet).getAllByTestId("attention-row");
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.getAttribute("data-attention-state") === "needs-you")).toBe(true);
+  });
+
+  it("lists waiting sessions of other worktrees too, not only the desktop's active selection", async () => {
+    const hostState = {
+      ...state,
+      contexts: [
+        { workspaceId: "ferryx", worktreeSlug: "feat-c", worktreeLabel: "feat-c", sessionId: "sess-c", attention: "waiting" },
+        { workspaceId: "docs", worktreeSlug: "feat-d", worktreeLabel: "feat-d", sessionId: "sess-d", attention: "waiting" },
+      ],
+    };
+    const calls = installFetch({ "sess-a": promptOf("sess-a"), "sess-b": promptOf("sess-b") }, hostState);
+    render(<RemoteApp />);
+    await waitFor(() => expect(screen.getByTestId("mobile-inbox-badge")).toHaveTextContent("4"));
+    const sheet = await openInbox();
+    const rows = within(sheet).getAllByTestId("attention-row");
+    expect(rows).toHaveLength(4);
+    expect(within(sheet).getByText("ferryx / feat-c")).toBeInTheDocument();
+    expect(within(sheet).getByText("docs / feat-d")).toBeInTheDocument();
+    expect(calls.some((call) => call.url.includes("/workspace/select"))).toBe(false);
   });
 
   it("answers inline through the prompt route and removes the row", async () => {

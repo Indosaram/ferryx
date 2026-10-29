@@ -1,21 +1,23 @@
-// Cross-machine needs-you list: every session waiting on the person, then finished ones.
+// The phone's one Inbox on the home: the same rows the session sheet shows (every waiting or
+// finished session on the host), each needs-you row answerable in place.
 import { Inbox } from "lucide-react";
 
-import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
-import { cn } from "../../lib/cn";
-import { INBOX_WHY, relativeTime, type InboxRow } from "./phoneHomeModel";
+import { AttentionInbox } from "../../features/ferryx/attention/AttentionInbox";
+import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
+import type { AttentionPrompts } from "../../features/ferryx/attention/attentionPrompts";
 
 export type InboxHomeProps = {
-  readonly rows: readonly InboxRow[];
+  readonly rows: readonly AttentionRow[];
+  readonly prompts?: AttentionPrompts;
   readonly now: number;
   readonly loading: boolean;
-  readonly onOpen: (row: InboxRow) => void;
+  readonly onOpen: (row: AttentionRow) => void;
 };
 
-export function InboxHome({ rows, now, loading, onOpen }: InboxHomeProps) {
+export function InboxHome({ rows, prompts, now, loading, onOpen }: InboxHomeProps) {
   return (
     <div data-testid="inbox-home" className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-chat-screen scrollbar-sleek">
-      <div className="flex w-full flex-col gap-3 px-4 pb-6 pt-4">
+      <div className="flex w-full flex-1 flex-col gap-3 px-4 pb-6 pt-4">
         <h1 className="px-1 text-[17px] font-semibold text-chat-foreground">Inbox</h1>
         {rows.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-2xl bg-chat-surface px-4 py-8 text-center">
@@ -28,47 +30,7 @@ export function InboxHome({ rows, now, loading, onOpen }: InboxHomeProps) {
             )}
           </div>
         ) : (
-          <ul className="flex flex-col gap-2">
-            {rows.map((row) => {
-              const logo = resolveAgentLogo(row.agentType);
-              return (
-                <li key={row.key}>
-                  <button
-                    type="button"
-                    data-testid="inbox-row"
-                    data-machine-id={row.machineId}
-                    data-session-id={row.sessionId}
-                    data-kind={row.kind}
-                    onClick={() => onOpen(row)}
-                    className="flex min-h-11 w-full min-w-0 items-start gap-3 rounded-xl bg-chat-surface px-3 py-3 text-left transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={cn(
-                        "mt-1.5 size-2 shrink-0 rounded-full",
-                        row.kind === "done" ? "bg-status-success" : "bg-status-warning",
-                      )}
-                    />
-                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        {logo ? (
-                          <img src={logo} alt="" className={cn("size-4 shrink-0", isMonochromeAgentLogo(row.agentType) && "agent-tab-logo--monochrome opacity-80")} />
-                        ) : null}
-                        <span className="min-w-0 flex-1 truncate text-[15px] font-medium text-chat-foreground">{row.title}</span>
-                        {row.observedAt ? (
-                          <span className="shrink-0 text-[12px] tabular-nums text-chat-foreground-secondary">{relativeTime(row.observedAt, now)}</span>
-                        ) : null}
-                      </span>
-                      <span className="min-w-0 truncate text-[13px] text-chat-foreground-secondary">{row.where}</span>
-                      <span className={cn("text-[13px]", row.kind === "done" ? "text-chat-foreground-secondary" : "text-status-warning")}>
-                        {INBOX_WHY[row.kind]}
-                      </span>
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+          <AttentionInbox compact rows={rows} prompts={prompts} now={now} onOpen={onOpen} />
         )}
       </div>
     </div>
