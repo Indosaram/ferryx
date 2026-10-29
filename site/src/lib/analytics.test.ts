@@ -64,6 +64,7 @@ describe('analytics contract — build configuration', () => {
       legacyScript: null,
       googleVerification: '',
       bingVerification: '',
+      cloudflareBeaconToken: '',
     });
   });
 
@@ -80,6 +81,7 @@ describe('analytics contract — build configuration', () => {
       legacyScript: { src: 'https://plausible.io/js/script.js', domain: 'ferryx.dev' },
       googleVerification: 'gsc-token',
       bingVerification: 'bing-token',
+      cloudflareBeaconToken: '',
     });
   });
 

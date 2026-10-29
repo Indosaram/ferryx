@@ -9,6 +9,7 @@ import {
   startAnalytics,
 } from './analyticsRuntime';
 import { MICROSOFT_STORE_SEARCH_URL, PLATFORMS } from './downloads';
+import { CONSENT_REGION_ATTRIBUTE } from './consentRegion';
 
 // jsdom is already vendored for the desktop UI test suite; the site adds no dependency for it.
 // Loading it once keeps the DOM contract tests honest about real capture-phase delegation.
@@ -39,10 +40,12 @@ interface Harness {
 
 let harness: Harness | null = null;
 
-function mount(options: { measurementId?: string; stored?: string; url?: string } = {}): Harness {
+function mount(
+  options: { measurementId?: string; stored?: string; url?: string; region?: 'required' | 'not-required' } = {},
+): Harness {
   const measurementId = options.measurementId ?? MEASUREMENT_ID;
   const dom = new JSDOM(
-    `<!doctype html><html><head></head><body><main></main>` +
+    `<!doctype html><html${options.region ? ` ${CONSENT_REGION_ATTRIBUTE}="${options.region}"` : ''}><head></head><body><main></main>` +
       `<div id="${CONSENT_HOST_ID}" data-measurement-id="${measurementId}" hidden>` +
       consentMarkup({ privacyHref: '/privacy/' }) +
       `</div></body></html>`,
@@ -247,6 +250,55 @@ describe('analytics runtime — consent gate', () => {
     expect(updates.length).toBeGreaterThan(0);
     expect(updates.at(-1)![2]).toMatchObject({ analytics_storage: 'denied' });
     expect((h.win as unknown as Record<string, unknown>)[`ga-disable-${MEASUREMENT_ID}`]).toBe(true);
+  });
+});
+
+describe('analytics runtime — region gate', () => {
+  test('an opt-in region asks first and contacts nobody', () => {
+    const h = mount({ region: 'required' });
+    expect(h.panel.hasAttribute('hidden')).toBe(false);
+    expect(h.gtagScripts().length).toBe(0);
+    expect(h.networkRequests).toEqual([]);
+  });
+
+  test('outside opt-in regions the tag loads on arrival without a prompt or a stored choice', () => {
+    const h = mount({ region: 'not-required' });
+    expect(h.panel.hasAttribute('hidden')).toBe(true);
+    expect(h.reopen.hasAttribute('hidden')).toBe(false);
+    expect(h.gtagScripts().length).toBe(1);
+    expect(h.gtagCalls().filter((args) => args[0] === 'event' && args[1] === 'page_view').length).toBe(1);
+    expect(storedChoice(h)).toBeNull();
+  });
+
+  test('outside opt-in regions a stored refusal still wins', () => {
+    const h = mount({ region: 'not-required', stored: 'denied' });
+    expect(h.gtagScripts().length).toBe(0);
+    expect(h.networkRequests).toEqual([]);
+  });
+
+  test('outside opt-in regions declining stops measurement and downloads are not recorded', () => {
+    const h = mount({ region: 'not-required' });
+    click(h.reopen);
+    click(h.decline);
+    expect(storedChoice(h)).toBe('denied');
+    expect((h.win as unknown as Record<string, unknown>)[`ga-disable-${MEASUREMENT_ID}`]).toBe(true);
+    const before = h.gtagCalls().length;
+    const link = h.doc.createElement('a');
+    link.href = PLATFORMS.macos.defaultAsset.url;
+    link.textContent = 'Download';
+    h.doc.body.appendChild(link);
+    click(link);
+    expect(h.gtagCalls().length).toBe(before);
+  });
+
+  test('outside opt-in regions download clicks are measured before any choice', () => {
+    const h = mount({ region: 'not-required' });
+    const link = h.doc.createElement('a');
+    link.href = PLATFORMS.macos.defaultAsset.url;
+    link.textContent = 'Download';
+    h.doc.body.appendChild(link);
+    click(link);
+    expect(h.gtagCalls().some((args) => args[0] === 'event' && args[1] === 'download_click')).toBe(true);
   });
 });
 

@@ -44,6 +44,8 @@ export interface SiteAnalyticsConfig {
   readonly legacyScript: { readonly src: string; readonly domain: string } | null;
   readonly googleVerification: string;
   readonly bingVerification: string;
+  /** Cookieless Cloudflare Web Analytics site token; empty disables the beacon. */
+  readonly cloudflareBeaconToken: string;
 }
 
 function text(value: unknown): string {
@@ -62,6 +64,7 @@ export interface SiteAnalyticsEnv {
   readonly PUBLIC_ANALYTICS_DOMAIN?: unknown;
   readonly PUBLIC_GSC_VERIFICATION?: unknown;
   readonly PUBLIC_BING_VERIFICATION?: unknown;
+  readonly PUBLIC_CF_BEACON_TOKEN?: unknown;
 }
 
 export function resolveSiteAnalyticsConfig(env: SiteAnalyticsEnv): SiteAnalyticsConfig {
@@ -72,6 +75,7 @@ export function resolveSiteAnalyticsConfig(env: SiteAnalyticsEnv): SiteAnalytics
     legacyScript: legacySrc && legacyDomain ? { src: legacySrc, domain: legacyDomain } : null,
     googleVerification: text(env.PUBLIC_GSC_VERIFICATION),
     bingVerification: text(env.PUBLIC_BING_VERIFICATION),
+    cloudflareBeaconToken: /^[a-f0-9]{32}$/.test(text(env.PUBLIC_CF_BEACON_TOKEN)) ? text(env.PUBLIC_CF_BEACON_TOKEN) : '',
   };
 }
 

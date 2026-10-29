@@ -10,6 +10,7 @@ import {
   sanitizePageLocation,
   type ConsentChoice,
 } from './analytics';
+import { CONSENT_REGION_ATTRIBUTE } from './consentRegion';
 
 /** Id of the element that carries the build-time measurement id and the consent UI. */
 export const CONSENT_HOST_ID = 'ferryx-analytics-consent';
@@ -34,7 +35,7 @@ export function consentMarkup({ privacyHref, language = 'en' }: ConsentMarkupOpt
   if (language === 'zh-cn') {
     return `<div class="ferryx-consent__panel" role="dialog" aria-labelledby="${TITLE_ID}" aria-describedby="${DESCRIPTION_ID}" data-consent-panel hidden>
   <h2 class="ferryx-consent__title" id="${TITLE_ID}">网站分析</h2>
-  <p class="ferryx-consent__text" id="${DESCRIPTION_ID}">Ferryx 使用 Google Analytics 了解本网站的页面访问和下载情况。在您作出选择之前，不会加载或存储任何分析数据。无论您如何选择，Ferryx 桌面应用都不发送遥测数据，网站功能也不会改变。<a class="ferryx-consent__link" href="${privacyHref}">隐私声明（英文）</a></p>
+  <p class="ferryx-consent__text" id="${DESCRIPTION_ID}">Ferryx 使用 Google Analytics 了解本网站的页面访问和下载情况。您可以随时允许或拒绝。无论您如何选择，Ferryx 桌面应用都不发送遥测数据，网站功能也不会改变。<a class="ferryx-consent__link" href="${privacyHref}">隐私声明（英文）</a></p>
   <div class="ferryx-consent__actions">
     <button class="${BUTTON_CLASS}" type="button" data-consent-action="granted">允许分析</button>
     <button class="${BUTTON_CLASS}" type="button" data-consent-action="denied">拒绝分析</button>
@@ -44,7 +45,7 @@ export function consentMarkup({ privacyHref, language = 'en' }: ConsentMarkupOpt
   }
   return `<div class="ferryx-consent__panel" role="dialog" aria-labelledby="${TITLE_ID}" aria-describedby="${DESCRIPTION_ID}" data-consent-panel hidden>
   <h2 class="ferryx-consent__title" id="${TITLE_ID}">Website analytics</h2>
-  <p class="ferryx-consent__text" id="${DESCRIPTION_ID}">Ferryx can measure which pages and downloads this site sends people to, using Google Analytics. Nothing is loaded or stored until you choose. The Ferryx desktop app sends no telemetry either way, and the site works the same whichever you pick. <a class="ferryx-consent__link" href="${privacyHref}">Privacy declaration</a></p>
+  <p class="ferryx-consent__text" id="${DESCRIPTION_ID}">Ferryx can measure which pages and downloads this site sends people to, using Google Analytics. You can allow or decline at any time. The Ferryx desktop app sends no telemetry either way, and the site works the same whichever you pick. <a class="ferryx-consent__link" href="${privacyHref}">Privacy declaration</a></p>
   <div class="ferryx-consent__actions">
     <button class="${BUTTON_CLASS}" type="button" data-consent-action="granted">Allow analytics</button>
     <button class="${BUTTON_CLASS}" type="button" data-consent-action="denied">Decline analytics</button>
@@ -104,10 +105,12 @@ function persistChoice(win: Window, choice: ConsentChoice): void {
 }
 
 /**
- * Wires the consent control and, only after an explicit grant, the Google tag.
+ * Wires the consent control and the Google tag.
  *
- * Nothing here contacts Google, defines `dataLayer`, or writes storage before the visitor
- * accepts; an unset or malformed `PUBLIC_GA_MEASUREMENT_ID` disables the whole surface.
+ * In the EEA, UK and Switzerland (and whenever the region is unknown) nothing contacts Google,
+ * defines `dataLayer`, or writes storage before the visitor accepts. Elsewhere the tag loads
+ * on arrival and the choice control stays available to decline. An unset or malformed
+ * `PUBLIC_GA_MEASUREMENT_ID` disables the whole surface.
  */
 export function startAnalytics(win: Window = window): void {
   const doc = win.document;
@@ -127,7 +130,11 @@ export function startAnalytics(win: Window = window): void {
   if (!panel || !accept || !decline || !reopen) return;
 
   let choice = readStoredChoice(win);
-  let panelOpen = choice === null;
+  // The Worker marks visitors outside the EEA, UK and Switzerland; anything else, including a
+  // page served without the Worker, keeps the opt-in prompt.
+  const optOutRegion = doc.documentElement.getAttribute(CONSENT_REGION_ATTRIBUTE) === 'not-required';
+  const measureByDefault = choice === null && optOutRegion;
+  let panelOpen = choice === null && !optOutRegion;
   let tagLoaded = false;
   let pageViewSent = false;
 
@@ -251,7 +258,7 @@ export function startAnalytics(win: Window = window): void {
   doc.addEventListener(
     'click',
     (event) => {
-      if (choice !== 'granted' || !tagLoaded) return;
+      if (!(choice === 'granted' || (choice === null && measureByDefault)) || !tagLoaded) return;
       const anchor = (event.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
       if (!anchor) return;
       const target = classifyDownloadTarget(anchor.href);
@@ -264,5 +271,5 @@ export function startAnalytics(win: Window = window): void {
   );
 
   render();
-  if (choice === 'granted') grant();
+  if (choice === 'granted' || measureByDefault) grant();
 }

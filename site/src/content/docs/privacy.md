@@ -1,7 +1,7 @@
 ---
 title: Ferryx Privacy Declaration
-description: "How Ferryx handles data: local-first storage, remote gateway traffic, pairing tokens, consent-gated website analytics, and zero desktop telemetry."
-lastUpdated: 2026-10-24
+description: "How Ferryx handles data: local-first storage, remote gateway traffic, pairing tokens, region-aware website analytics, and zero desktop telemetry."
+lastUpdated: 2026-10-29
 prev: false
 next: false
 ---
@@ -42,14 +42,15 @@ Inspecting `src-tauri` and `ui` source code confirms the absence of desktop anal
 
 This section covers `https://ferryx.dev` only. The desktop application is unaffected by every choice described here and sends no analytics either way.
 
-The website can use Google Analytics 4, and only with your explicit permission:
+The website uses Google Analytics 4. Whether it asks first depends on where you visit from:
 
-- **Off until you choose:** The page ships an inert `<template>` with the consent choice and nothing else. No Google script is requested, no `dataLayer` is created, and nothing is written to `localStorage` before you press a button (`site/src/lib/analyticsRuntime.ts:100-137,230-244`).
+- **EEA, United Kingdom and Switzerland: off until you choose.** The site's Cloudflare Worker reads the country Cloudflare assigns to the request and marks the page (`site/worker.js`, `site/src/lib/consentRegion.ts`). For these countries, and whenever the country is missing or unknown, the page shows the consent choice and nothing else: no Google script is requested, no `dataLayer` is created, and nothing is written to `localStorage` before you press a button. The country is used only to pick this behaviour and is not stored.
+- **Everywhere else: on by default, with an opt-out.** Google Analytics loads when the page opens. The "Analytics choice" button at the end of every page lets you decline, and a refusal is remembered on later visits.
 - **Equal choice, reversible:** "Allow analytics" and "Decline analytics" are the same control with the same styling and size. Your answer is stored under `ferryx.site.analytics-consent` in `localStorage`, and an "Analytics choice" button at the end of every page reopens the panel so you can change your mind. Withdrawing consent sets `ga-disable-<measurement id>` and sends a `denied` consent update, which stops further measurement for the page (`site/src/lib/analyticsRuntime.ts:186-220`).
 - **Declining costs you nothing:** Every part of the site behaves identically with analytics declined.
 - **Builds without an ID measure nothing:** The tag only exists when the site is built with a valid `PUBLIC_GA_MEASUREMENT_ID` (format `G-XXXXXXXXXX`). Local development builds, forks, and previews without that variable ship no consent panel and make no Google requests (`site/src/lib/analytics.ts:53-56`, `site/src/components/SiteAnalytics.astro:11-13,112-119`).
 
-When you allow analytics, the site records:
+When analytics is active, the site records:
 
 - **`page_view`:** Sent once per page load, replacing the automatic page view so the reported URL can be sanitized first (`site/src/lib/analyticsRuntime.ts:161-184`).
 - **`download_click`:** Sent when you click a release artifact link (including `.dmg`, `.exe`, `.AppImage`, `.deb`, and versioned `ferryx-cli` artifacts), with the parameters `platform`, `asset_id`, `destination`, and `link_location` (`site/src/lib/analytics.ts`). The classifier also recognises Microsoft Store links, but the current menu offers the GitHub Windows installer, not a Store listing. Opening the GitHub releases listing page is not recorded as a download.
@@ -57,10 +58,12 @@ When you allow analytics, the site records:
 What is deliberately not collected:
 
 - **URL query strings:** Before any measurement is sent, the page URL is rebuilt with only the campaign parameters `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, and `utm_id`. Every other query parameter is discarded, so search terms, e-mail addresses, or tokens that ride along in a link never reach Google (`site/src/lib/analytics.ts:19-26,88-104`).
-- **Advertising and cross-site signals:** Consent defaults deny `ad_storage`, `ad_user_data`, `ad_personalization`, and `analytics_storage`; accepting grants `analytics_storage` only. The tag is configured with `allow_google_signals: false` and `allow_ad_personalization_signals: false` (`site/src/lib/analyticsRuntime.ts:152-176`).
+- **Advertising and cross-site signals:** Consent defaults deny `ad_storage`, `ad_user_data`, `ad_personalization`, and `analytics_storage`; activating analytics grants `analytics_storage` only. The tag is configured with `allow_google_signals: false` and `allow_ad_personalization_signals: false` (`site/src/lib/analyticsRuntime.ts:152-176`).
 - **Outbound link rewriting:** Download links are never rewritten with tracking parameters; the URL you click is the URL in the page.
 
-Google Analytics receives the request metadata any web request carries, including your IP address, which Google uses for coarse geolocation before discarding it, and a first-party cookie identifier set only after you accept. Clearing site data for `ferryx.dev` removes both the cookie and your stored choice, and the panel will ask again.
+Google Analytics receives the request metadata any web request carries, including your IP address, which Google uses for coarse geolocation before discarding it, and a first-party cookie identifier set when analytics is active (after you accept in the regions listed above, on arrival elsewhere). Clearing site data for `ferryx.dev` removes both the cookie and your stored choice.
+
+The site also uses Cloudflare Web Analytics, which sets no cookies and stores nothing on your device, to count page views, referrers and countries for every visitor. It records no identifier that follows you between visits.
 
 A self-hosted, cookieless analytics script is also supported for forks: it renders only when both `PUBLIC_ANALYTICS_SRC` and `PUBLIC_ANALYTICS_DOMAIN` build environment variables are set (`site/src/components/SiteAnalytics.astro:106-110`). Neither variable is required by, nor related to, the Google Analytics path above.
 

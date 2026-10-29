@@ -105,6 +105,11 @@ const consentStyles = `
 {config.googleVerification && <meta name="google-site-verification" content={config.googleVerification} />}
 {config.bingVerification && <meta name="msvalidate.01" content={config.bingVerification} />}
 {
+  config.cloudflareBeaconToken && (
+    <script is:inline defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon={JSON.stringify({ token: config.cloudflareBeaconToken })} />
+  )
+}
+{
   config.legacyScript && (
     <script is:inline defer src={config.legacyScript.src} data-domain={config.legacyScript.domain} />
   )
