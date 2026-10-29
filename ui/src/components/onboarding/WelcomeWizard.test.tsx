@@ -459,7 +459,7 @@ describe("WelcomeWizard", () => {
       expect(remoteCalls.enableRemoteGateway).toHaveBeenCalledTimes(1);
       expect(screen.queryByTestId("onboarding-phone-enable")).toBeNull();
       expect(screen.getByRole("button", { name: "Pair a device" })).toBeDefined();
-      expect(screen.getByTestId("onboarding-phone-url").textContent).toBe("http://192.168.0.5:43821");
+      expect(screen.getByTestId("onboarding-phone-url").textContent).toBe("http://192.168.0.5:43821/pair");
     });
 
     it("shows the issued code with a countdown", async () => {
