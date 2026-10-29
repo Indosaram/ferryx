@@ -122,6 +122,18 @@ describe("ChangesPanel", () => {
     expect(core.invoke).not.toHaveBeenCalledWith("cmd_worktree_stage", expect.anything());
   });
 
+  it("addresses the main checkout by path when it has no managed identity", async () => {
+    mockIpc({ status: () => ({ isDirty: true, files: [{ statusCode: " M", path: "README.md" }] }) });
+    render(<ChangesPanel workspaceId="workspace-main" worktree={null} worktreePath="/repo" />);
+
+    await waitFor(() => expect(screen.queryAllByTestId("diff-row").length).toBeGreaterThan(0));
+    const pathTarget = { workspaceId: "workspace-main", worktreePath: "/repo" };
+    expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_status", { request: pathTarget });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_diff", {
+      request: { ...pathTarget, scope: { kind: "workingTree" }, file: "README.md" },
+    });
+  });
+
   it("stages a working-tree file when its checkbox is ticked and refreshes", async () => {
     let staged = false;
     mockIpc({

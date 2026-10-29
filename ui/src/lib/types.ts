@@ -438,14 +438,15 @@ export type FileTab = {
   pinned?: boolean;
 };
 
-/** Git changes of one managed worktree: file list, diff, stage, commit and push. */
+/** Git changes of one checkout: file list, diff, stage, commit and push. A `null` identity
+ * (the main checkout or an unmanaged worktree) addresses the checkout by `worktreePath`. */
 export type ChangesTab = {
   kind: "changes";
   id: string;
   label: string;
   workspaceId: string;
   worktreePath: string;
-  worktree: WorktreeIdentity;
+  worktree: WorktreeIdentity | null;
   pinned?: boolean;
 };
 
@@ -592,7 +593,7 @@ export type ChangesPaneContent = {
   readonly kind: "changes";
   readonly workspaceId: string;
   readonly worktreePath: string;
-  readonly worktree: WorktreeIdentity;
+  readonly worktree: WorktreeIdentity | null;
 };
 
 export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent | FilePaneContent | ChangesPaneContent;
@@ -936,7 +937,7 @@ export interface PersistedTab {
   changes?: {
     workspaceId: string;
     worktreePath: string;
-    worktree: WorktreeIdentity;
+    worktree: WorktreeIdentity | null;
   };
   file?: {
     path: string;

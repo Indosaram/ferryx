@@ -2395,11 +2395,13 @@ export function useWorkspaceStore({
     [dispatch],
   );
 
-  /** Opens (or focuses) the Changes tab of a managed worktree in that worktree's layout. */
+  /**
+   * Opens (or focuses) the Changes tab of a checkout in that worktree's layout. The main
+   * checkout and unmanaged worktrees have no identity; the backend resolves them by path.
+   */
   const openChangesTab = useCallback(
     (worktree: Worktree, ownerWorkspaceId: string): string | null => {
       const identity = worktreeIdentity(worktree);
-      if (!identity) return null;
       const snapshot = stateRef.current;
       const isChangesFor = (tab: WorkspaceTab) =>
         tab.kind === "changes" && tab.worktreePath === worktree.path && tab.workspaceId === ownerWorkspaceId;

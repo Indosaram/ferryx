@@ -3134,7 +3134,7 @@ function WorkspaceApp({
       if (activeRemoteHostRef.current) return;
       const ownerId = resolveWorktreeOwnerId(worktree, projectsRef.current, activeProjectRef.current.workspaceId);
       const owner = projectsRef.current.find((project) => project.workspaceId === ownerId);
-      if (!owner || (owner.target && owner.target.kind !== "local") || !worktreeIdentity(worktree)) return;
+      if (!owner || (owner.target && owner.target.kind !== "local") || owner.gitRoot === null) return;
       if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
         // Tabs live in the owning project's store; switch there first, then open Changes again.
         handleSelectWorktree(worktree);
@@ -3145,9 +3145,7 @@ function WorkspaceApp({
     [handleSelectWorktree, openChangesTab],
   );
   const activeWorktreeCanShowChanges = Boolean(
-    activeWorktree &&
-      worktreeIdentity(activeWorktree) &&
-      (!activeProject.target || activeProject.target.kind === "local"),
+    activeWorktree && activeProject.gitRoot !== null && (!activeProject.target || activeProject.target.kind === "local"),
   );
   const handleShowActiveWorktreeChanges = useCallback(() => {
     const worktree = activeWorktreeRef.current;

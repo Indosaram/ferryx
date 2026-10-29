@@ -844,7 +844,7 @@ export function deserializeWorkspaceState(
 
       if (persistedTab.kind === "changes" || persistedTab.changes) {
         const changes = persistedTab.changes;
-        if (!changes?.worktreePath || !changes.worktree) continue;
+        if (!changes?.worktreePath || changes.worktree === undefined) continue;
         if (knownWorktreePaths.size > 0 && !knownWorktreePaths.has(changes.worktreePath)) continue;
         tabs.push({
           id: persistedTab.id,
@@ -937,7 +937,7 @@ export function deserializeWorkspaceState(
 
       if (persistedTab.kind === "changes" || persistedTab.changes) {
         const changes = persistedTab.changes;
-        if (!changes?.worktreePath || !changes.worktree) continue;
+        if (!changes?.worktreePath || changes.worktree === undefined) continue;
         if (knownWorktreePaths.size > 0 && !knownWorktreePaths.has(changes.worktreePath)) continue;
         const leafId = `leaf-changes:${persistedTab.id}`;
         layoutsByTabId[persistedTab.id] = {

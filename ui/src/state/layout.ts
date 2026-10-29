@@ -773,7 +773,7 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
     }
     if (item.kind === "changes") {
       const changes = item as Partial<ChangesPaneContent>;
-      if (changes.workspaceId && changes.worktreePath && changes.worktree) {
+      if (changes.workspaceId && changes.worktreePath && changes.worktree !== undefined) {
         return createChangesPaneContent({
           workspaceId: changes.workspaceId,
           worktreePath: changes.worktreePath,

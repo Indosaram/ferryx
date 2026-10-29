@@ -181,6 +181,27 @@ describe("WorktreeList actions", () => {
     expect(deleteButtons[0]).toBeEnabled();
   });
 
+  it("offers a visible Show changes button on the main checkout and managed rows", () => {
+    const onShowChanges = vi.fn();
+    render(
+      <WorktreeList
+        worktrees={[rootWorktree, worktree]}
+        repoRoot="/repo"
+        activePath={rootWorktree.path}
+        agents={[]}
+        statuses={{}}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+        onShowChanges={onShowChanges}
+      />,
+    );
+
+    const buttons = screen.getAllByRole("button", { name: "Show changes" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[0]);
+    expect(onShowChanges).toHaveBeenCalledExactlyOnceWith(rootWorktree);
+  });
+
   it("triggers worktree creation from the worktree row action when provided", () => {
     const onCreateWorktree = vi.fn();
     render(
