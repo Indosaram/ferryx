@@ -324,7 +324,8 @@ pub fn audit_op_name(op: &AgentControlOp) -> &'static str {
     match op {
         AgentControlOp::List => "list",
         AgentControlOp::Read { .. } => "read",
-        AgentControlOp::Send { .. } => "send",
+        // A delivery is a send whose reply also carries the start receipt.
+        AgentControlOp::Send { .. } | AgentControlOp::Deliver { .. } => "send",
         AgentControlOp::Answer { .. } => "answer",
         AgentControlOp::Stop { .. } => "stop",
         AgentControlOp::Wait { .. } => "wait",
@@ -336,6 +337,7 @@ pub fn audit_session(op: &AgentControlOp) -> Option<String> {
     match op {
         AgentControlOp::Read { session_id }
         | AgentControlOp::Send { session_id, .. }
+        | AgentControlOp::Deliver { session_id, .. }
         | AgentControlOp::Answer { session_id, .. }
         | AgentControlOp::Stop { session_id, .. }
         | AgentControlOp::Wait { session_id, .. } => Some(session_id.clone()),
@@ -348,6 +350,7 @@ pub fn audit_request(op: &AgentControlOp) -> Option<String> {
         AgentControlOp::Send { request_id, .. }
         | AgentControlOp::Answer { request_id, .. }
         | AgentControlOp::Stop { request_id, .. } => request_id.clone(),
+        AgentControlOp::Deliver { request_id, .. } => Some(request_id.clone()),
         _ => None,
     }
 }
@@ -355,7 +358,7 @@ pub fn audit_request(op: &AgentControlOp) -> Option<String> {
 /// The input an operation types, shortened to one line of at most AUDIT_TEXT_MAX_CHARS.
 pub fn audit_text(op: &AgentControlOp) -> Option<String> {
     let raw = match op {
-        AgentControlOp::Send { text, .. } => text.clone(),
+        AgentControlOp::Send { text, .. } | AgentControlOp::Deliver { text, .. } => text.clone(),
         AgentControlOp::Answer { answer, .. } => match (&answer.custom_text, &answer.option_indices, answer.option_index) {
             (Some(custom), _, _) if !custom.trim().is_empty() => custom.clone(),
             (_, Some(indices), _) if !indices.is_empty() => format!(

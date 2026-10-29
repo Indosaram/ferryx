@@ -18,6 +18,27 @@ pub const TURN_EXCERPT_MAX_CHARS: usize = 240;
 /// Request-id prefix of every supervisor goal-loop send: `hub-goal-{lane}-{turn}`.
 pub const SUPERVISOR_REQUEST_PREFIX: &str = "hub-goal-";
 
+/// The (goal, revision, ordinal) of a unified-supervisor dispatch request id,
+/// `sv-{goal uuid}-r{revision}-d{ordinal}` (see `supervisor::dispatch_request_id`).
+pub fn parse_dispatch_request_id(request_id: &str) -> Option<(&str, i64, i64)> {
+    let rest = request_id.strip_prefix(crate::supervisor::LANE_KEY_PREFIX)?;
+    let (head, ordinal) = rest.rsplit_once("-d")?;
+    let (goal_id, revision) = head.rsplit_once("-r")?;
+    let revision = revision.parse::<i64>().ok().filter(|value| *value > 0)?;
+    let ordinal = ordinal.parse::<i64>().ok().filter(|value| *value > 0)?;
+    uuid::Uuid::parse_str(goal_id).ok()?;
+    Some((goal_id, revision, ordinal))
+}
+
+/// True for a send whose sender records its own turn once the turn is seen starting (the goal
+/// loop's `hub-goal-*` and the supervisor dispatcher's `sv-*`), so acceptance alone records
+/// nothing.
+pub fn records_own_turn(request_id: Option<&str>) -> bool {
+    request_id.is_some_and(|id| {
+        id.starts_with(SUPERVISOR_REQUEST_PREFIX) || parse_dispatch_request_id(id).is_some()
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
     pub lane_key: String,
@@ -38,9 +59,18 @@ pub fn relayed_from_a_person(request_id: Option<&str>) -> bool {
 }
 
 /// Who a send with this request id speaks for, when it drives a lane turn at all.
+/// A supervisor dispatch carrying an admitted request's first instruction is
+/// `submitted_request`; any later dispatch is `supervisor_proposal`.
 pub fn origin_for_request_id(request_id: Option<&str>) -> Option<TurnOrigin> {
     if relayed_from_a_person(request_id) {
         return Some(TurnOrigin::HumanCorrection);
+    }
+    if let Some((_, revision, ordinal)) = request_id.and_then(parse_dispatch_request_id) {
+        return Some(if (revision, ordinal) == (1, 1) {
+            TurnOrigin::SubmittedRequest
+        } else {
+            TurnOrigin::SupervisorProposal
+        });
     }
     request_id
         .filter(|id| id.starts_with(SUPERVISOR_REQUEST_PREFIX))

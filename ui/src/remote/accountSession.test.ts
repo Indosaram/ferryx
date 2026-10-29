@@ -916,6 +916,78 @@ describe("accountSession client module", () => {
     expect(tunnelCloseSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("closes a socket's tunnel exactly once when the connection closes while its upgrade is pending", async () => {
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("/api/v1/attach/session")) {
+        return Promise.resolve(new Response(JSON.stringify({ sessionId: "sess-pending-1" }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("OK", { status: 200 }));
+    });
+    const tunnelCloseSpy = vi.fn();
+    let upgraded!: (ws: any) => void;
+    let upgradeStarted!: () => void;
+    // Resolved when the socket upgrade is in flight: the tunnel is open, the socket is not.
+    const upgrading = new Promise<void>((resolve) => { upgradeStarted = resolve; });
+    vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async () => {
+      return {
+        transport: {
+          fetchLike: vi.fn(),
+          openWebSocket: vi.fn(() => new Promise((resolve) => {
+            upgraded = resolve;
+            upgradeStarted();
+          })),
+        } as any,
+        close: tunnelCloseSpy,
+      };
+    });
+    const machine: AccountMachineView = {
+      machineRecordId: "rec-1", machineId: "mach-1", displayName: "My Laptop", publicKey: "pub-key-1",
+      attachPublicKey: "attach-pub-key-1", relayOrigin: origin, platform: "macos", online: true,
+      enrollmentEpoch: "1", lastSeenAt: 123456789,
+    };
+    const httpClose = vi.fn();
+    const conn = createAccountConnection({
+      relayUrl: origin, accountSessionToken: sessionToken, machine, deviceToken: "device-bearer-token-live",
+      httpTransport: { fetchLike: vi.fn(), openWebSocket: vi.fn() } as any, httpClose, attachKey: { publicKey: "k1", privateKey: "k2" },
+    });
+
+    const opening = conn.openWebSocket("/api/v1/events");
+    await upgrading;
+    // Suspended while the socket upgrade is still pending: its tunnel closes now, not later.
+    conn.close();
+    expect(httpClose).toHaveBeenCalledTimes(1);
+    expect(tunnelCloseSpy).toHaveBeenCalledTimes(1);
+
+    // openAccountWebSocket wraps the socket's close, so the spy is kept apart to see the
+    // underlying socket really closed.
+    const lateClose = vi.fn();
+    const lateSocket = { readyState: 1, send: vi.fn(), close: lateClose, onclose: null, onmessage: null, onerror: null };
+    upgraded(lateSocket);
+    await expect(opening).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+    expect(lateClose).toHaveBeenCalledTimes(1);
+    expect(tunnelCloseSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens no tunnel for a socket whose owner gave up before the session was allocated", async () => {
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify({ sessionId: "sess-late-1" }), { status: 200 })));
+    const openTunnelSpy = vi.spyOn(attachTunnelModule, "openAccountTunnel");
+    let alive = true;
+    const machine: AccountMachineView = {
+      machineRecordId: "rec-1", machineId: "mach-1", displayName: "My Laptop", publicKey: "pub-key-1",
+      attachPublicKey: "attach-pub-key-1", relayOrigin: origin, platform: "macos", online: true,
+      enrollmentEpoch: "1", lastSeenAt: 123456789,
+    };
+    const opening = openAccountWebSocket({
+      relayUrl: origin, accountSessionToken: sessionToken, machine, deviceToken: "device-bearer-token-live",
+      pathAndQuery: "/api/v1/events", attachKey: { publicKey: "k1", privateKey: "k2" }, isAlive: () => alive,
+    });
+    alive = false;
+    await expect(opening).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+    expect(openTunnelSpy).not.toHaveBeenCalled();
+  });
+
   describe("account origin configuration", () => {
     beforeEach(() => {
       clearStoredAccountOrigin();

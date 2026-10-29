@@ -137,6 +137,7 @@ import {
   clearAccountLastSelectedTarget,
   logoutAccountSession,
   createAccountConnection,
+  openAccountWebSocket,
   getStoredAccountEntitlementSnapshot,
   storeAccountEntitlementSnapshot,
   clearStoredAccountEntitlementSnapshot,
@@ -144,6 +145,7 @@ import {
   planLimitStateFromCloseEvent,
   planLimitStateWithEntitlement,
   type AccountConnection,
+  type AccountMachineView,
   type PlanLimitState,
 } from "./accountSession";
 import { PlanLimitNotice } from "./PlanLimitNotice";
@@ -151,7 +153,7 @@ import { deleteAccount } from "./accountSession";
 import { paneSupervision } from "../lib/supervisorModel";
 import { toast } from "sonner";
 import { AccountSheet, getStoredAccountEmail, storeAccountEmail } from "./home/AccountSheet";
-import { createSupervisorFrameBus } from "./home/machineSupervisorSources";
+import { createSupervisorFrameBus, useMachineEventSockets } from "./home/machineSupervisorSources";
 import { DIRECT_SIDEBAR_MACHINE, useRemoteSidebarMachines } from "./useRemoteSidebarMachines";
 import { remoteSupervisorTyping } from "./remoteSidebarLive";
 import { directSidebarInventory } from "./directSidebarInventory";
@@ -2800,12 +2802,30 @@ export const RemoteHostConnection: React.FC<{
   // The supervisor-first phone home exists only for a signed-in account on a narrow layout.
   const phoneHome = !desktopSidebar && isAccountMode && planLimitNotice === null;
   const phoneNav = usePhoneNavigation(phoneHome);
+  const supervisorFeedEnabled = phoneHome || (desktopSidebar && isAccountMode && planLimitNotice === null);
   const phoneSupervisor = usePhoneSupervisor({
     // The phone home and the wide sidebar's Supervisor tab both read it.
-    enabled: phoneHome || (desktopSidebar && isAccountMode && planLimitNotice === null),
+    enabled: supervisorFeedEnabled,
     discovery: accountDiscovery,
     active: activeTunnelConnection,
     bus: supervisorBus,
+  });
+  // The events socket above runs only for the active connection; every other reachable machine
+  // gets its own, so supervisor and sidebar changes reach a home that opened no worktree.
+  const openMachineEvents = useCallback(
+    (machine: AccountMachineView, deviceToken: string, control: { isAlive: () => boolean; onTunnel: (closeTunnel: () => void) => void }) =>
+      openAccountWebSocket({ relayUrl, accountSessionToken: accountSessionToken ?? "", machine, deviceToken, pathAndQuery: "/api/v1/events", ...control }),
+    [relayUrl, accountSessionToken],
+  );
+  useMachineEventSockets({
+    enabled: supervisorFeedEnabled && Boolean(accountSessionToken),
+    machines: accountDiscovery.machines,
+    linkFor: accountDiscovery.peekConnection,
+    skip: activeTunnelConnection && !activeTunnelConnection.isClosed ? activeTunnelConnection.machine.machineId : null,
+    open: openMachineEvents,
+    bus: supervisorBus,
+    // Enabled only without a plan-limit notice, so the notice this sets closes every socket.
+    onPlanLimit: handlePlanLimit,
   });
   const phoneBack = phoneNav.back;
   // A selection backed out of on the Session screen ("Back to Worktrees") leaves no session to
@@ -2873,6 +2893,7 @@ export const RemoteHostConnection: React.FC<{
               needsYou={new Set<string>()}
               onSetPaused={phoneSupervisor.setPaused}
               onStartHub={phoneSupervisor.startHub}
+              unified={phoneSupervisor.unified}
               onOpenLane={(machineId, sessionId) => {
                 const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
                 if (option) void selectAccountOption(option);
@@ -4634,6 +4655,7 @@ export const RemoteHostConnection: React.FC<{
             needsYou: phoneNeedsYou,
             onSetPaused: phoneSupervisor.setPaused,
             onStartHub: phoneSupervisor.startHub,
+            unified: phoneSupervisor.unified,
             onOpenLane: (machineId, sessionId) => {
               const option = optionForSession(accountDiscovery.accountOptions, machineId, sessionId);
               if (!option) {

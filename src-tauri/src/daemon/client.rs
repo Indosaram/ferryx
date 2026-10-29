@@ -625,6 +625,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::RemoteSessionDetails { .. }
             | DaemonRequest::RetryRemoteSession { .. }
             | DaemonRequest::SupervisorSnapshot
+            | DaemonRequest::SupervisorReadV1 { .. }
             | DaemonRequest::AgentControlSettingsGet
     )
 }
@@ -749,9 +750,13 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::AgentControlSettingsSet { .. } => "agentControlSettingsSet",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
+        DaemonRequest::SupervisorDispatch { .. } => "supervisorDispatch",
         DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
+        DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
+        DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
+        DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
     }
 }
 
@@ -949,6 +954,8 @@ const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration
 fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        // A cancel stops the worker's pane before it answers.
+        DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }
@@ -2176,6 +2183,19 @@ impl DaemonClient {
                             .saturating_add(15_000),
                     )
             },
+            // A delivery waits for the pane to be ready, the target's submit, then its turn
+            // start, on top of the paired host's own budget for all three.
+            DaemonRequest::AgentControl {
+                request: crate::agent_control::AgentControlOp::Deliver { observe_ms, .. },
+                ..
+            } => {
+                crate::agent_control::delivery::PANE_READY_WAIT
+                    + crate::agent_control::delivery::observe_deadline(*observe_ms)
+                    + std::time::Duration::from_millis(
+                        crate::remote::reference_chat::input::REFERENCE_SUBMIT_DEADLINE_MS,
+                    )
+                    + std::time::Duration::from_secs(25)
+            }
             DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
             DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. } => {
                 Self::REMOTE_CONTROL_OUTER_TIMEOUT

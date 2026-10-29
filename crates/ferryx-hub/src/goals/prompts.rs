@@ -129,14 +129,27 @@ pub fn turns_block(turns: &[Turn]) -> String {
     block
 }
 
-/// The full gap assessment prompt.
-pub fn gap_assess_prompt(contract: &Contract, evidence: &EvidenceBundle, turns: &[Turn]) -> String {
+/// The stable instruction prefix of every gap assessment: the ownership block, the rules and
+/// the output schema. It is byte-identical for every lane, goal and call, so the provider can
+/// reuse its cached prefix; everything per call follows [`crate::usage::DELTA_MARKER`].
+pub fn gap_assess_prefix() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{GAP_ASSESS_RULES}\n\nOutput schema:\n{GAP_ASSESS_SCHEMA}\n",
+        "{}\n{GAP_ASSESS_RULES}\n\nOutput schema:\n{GAP_ASSESS_SCHEMA}\n\nThe contract, evidence and recent turns of this lane follow.",
         ownership_block(),
-        contract_block(contract),
-        evidence_block(evidence),
-        turns_block(turns),
+    )
+}
+
+/// The full gap assessment prompt: [`gap_assess_prefix`], then this call's delta payload
+/// (contract, evidence, recent turns).
+pub fn gap_assess_prompt(contract: &Contract, evidence: &EvidenceBundle, turns: &[Turn]) -> String {
+    crate::usage::with_delta(
+        &gap_assess_prefix(),
+        &format!(
+            "{}\n{}\n{}",
+            contract_block(contract),
+            evidence_block(evidence),
+            turns_block(turns),
+        ),
     )
 }
 

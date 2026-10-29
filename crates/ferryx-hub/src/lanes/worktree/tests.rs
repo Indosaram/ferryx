@@ -2,6 +2,7 @@ use super::*;
 use crate::lanes::state::insert_lane;
 
 fn repo(name: &str) -> PathBuf {
+    isolate_test_env();
     let base = std::env::temp_dir().join(format!("ferryx-wt-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("app");
@@ -16,7 +17,8 @@ fn repo(name: &str) -> PathBuf {
     std::fs::write(root.join("a.txt"), "a").unwrap();
     run(&root, &["add", "a.txt"]);
     run(&root, &["commit", "-qm", "a"]);
-    std::fs::canonicalize(root).unwrap()
+    // Plain on Windows too, as `create` stores and compares paths.
+    without_verbatim_prefix(std::fs::canonicalize(root).unwrap())
 }
 
 fn run(dir: &Path, args: &[&str]) -> String {
@@ -119,6 +121,12 @@ async fn a_dirty_worktree_refuses_to_close_and_the_lead_is_told() {
     verified(&pool, "gate").await;
     assert!(close(&pool, "gate", None).await.is_err());
     assert!(path.join("a.txt").exists(), "the owner's edit stays");
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM lane_owned_worktrees WHERE lane_key = 'gate'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "registered", "a refused removal releases its claim");
     let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'gate'")
         .fetch_one(&pool)
         .await
@@ -151,4 +159,96 @@ async fn a_subdirectory_or_a_plain_directory_keeps_its_cwd() {
     );
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
     let _ = std::fs::remove_dir_all(plain);
+}
+
+#[tokio::test]
+async fn a_missing_directory_keeps_its_cwd_without_reading_git_messages() {
+    isolate_test_env();
+    let pool = crate::storage::memory().await.unwrap();
+    let missing = std::env::temp_dir()
+        .join(format!("ferryx-wt-missing-{}", std::process::id()))
+        .join("nowhere");
+    assert_eq!(
+        create(&pool, "missing", &missing.to_string_lossy())
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_worktree_that_cannot_be_recorded_is_removed_so_a_retry_succeeds() {
+    let root = repo("unrecorded");
+    let cwd = root.to_string_lossy().into_owned();
+    let pool = crate::storage::memory().await.unwrap();
+    insert_lane(&pool, "ledger", "Ledger", "lead", &cwd, "file a.txt")
+        .await
+        .unwrap();
+    // The tree and branch are created, then recording them fails.
+    sqlx::query(
+        "CREATE TRIGGER refuse_owned BEFORE INSERT ON lane_owned_worktrees
+         BEGIN SELECT RAISE(ABORT, 'refused for the test'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(create(&pool, "ledger", &cwd).await.is_err());
+    let expected = root.parent().unwrap().join("app-lanes").join("ledger");
+    assert!(!expected.exists(), "the unrecorded tree is removed");
+    assert_eq!(run(&root, &["branch", "--list", "lane/ledger"]), "");
+    let lane_cwd: String = sqlx::query_scalar("SELECT cwd FROM lanes WHERE key = 'ledger'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lane_cwd, cwd, "the lane still names its own cwd");
+    let owned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_owned_worktrees")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(owned, 0);
+
+    // Nothing is left behind, so the next attempt does not hit "branch already exists".
+    sqlx::query("DROP TRIGGER refuse_owned")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let path = create(&pool, "ledger", &cwd)
+        .await
+        .unwrap()
+        .expect("worktree");
+    assert_eq!(Path::new(&path), expected);
+    assert_eq!(run(&expected, &["branch", "--show-current"]), "lane/ledger");
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+#[test]
+fn a_windows_verbatim_path_is_stored_in_its_plain_form() {
+    assert_eq!(
+        without_verbatim_prefix(PathBuf::from(r"\\?\C:\code\app-lanes\sv-1")),
+        PathBuf::from(r"C:\code\app-lanes\sv-1")
+    );
+    assert_eq!(
+        without_verbatim_prefix(PathBuf::from(r"\\?\UNC\host\share\app")),
+        PathBuf::from(r"\\host\share\app")
+    );
+    assert_eq!(
+        without_verbatim_prefix(PathBuf::from("/home/owner/app")),
+        PathBuf::from("/home/owner/app")
+    );
+    // Forms with no plain equivalent keep their prefix.
+    for kept in [
+        r"\\?\Volume{4c1b02c1-d990-11dc-99ae-806e6f6e6963}\code\app",
+        r"\\?\GLOBALROOT\Device\HarddiskVolume2\code\app",
+        r"\\?\UNC\host",
+    ] {
+        assert_eq!(without_verbatim_prefix(PathBuf::from(kept)), PathBuf::from(kept));
+    }
+    // So does a path that is valid only with it: longer than MAX_PATH.
+    let long = format!(r"\\?\C:\{}", "d".repeat(300));
+    assert_eq!(without_verbatim_prefix(PathBuf::from(&long)), PathBuf::from(&long));
+    let fits = format!(r"C:\{}", "d".repeat(256));
+    assert_eq!(
+        without_verbatim_prefix(PathBuf::from(format!(r"\\?\{fits}"))),
+        PathBuf::from(fits)
+    );
 }

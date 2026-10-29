@@ -28,6 +28,10 @@ pub const AGENT_CONTROL_CAPABILITY: &str = "agentControlV1";
 /// list/read/send/answer/stop contract. Nothing here bumps the daemon protocol version.
 pub const AGENT_CONTROL_REMOTE_CAPABILITY: &str = "agentControlRemoteV1";
 
+/// Capability for [`AgentControlOp::Deliver`]: a send whose reply carries this machine's own
+/// causal start receipt. A paired host without it is never sent a supervisor dispatch.
+pub const AGENT_CONTROL_RECEIPTS_CAPABILITY: &str = "agentControlReceiptsV1";
+
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_INVALID: i32 = 2;
 pub const EXIT_NOT_FOUND: i32 = 3;
@@ -61,6 +65,17 @@ pub enum AgentControlOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// Send once, then report from this machine's observer whether the pane started a turn
+    /// that only this request can have caused (`agent_control::delivery::deliver`). The reply
+    /// is `{delivery}`; a refusal or an unknown outcome is an error exactly as for `Send`.
+    /// `observe_ms` bounds the wait for the start (0 is the default deadline).
+    Deliver {
+        session_id: String,
+        text: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        observe_ms: u64,
+    },
     /// Block until the observer publishes a matching reading, or the log reports a gap.
     ///
     /// `timeout_ms` is clamped to five minutes by the handler. `after` is the event sequence
@@ -90,7 +105,7 @@ impl AgentControlOp {
     pub fn is_input_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Send { .. } | Self::Answer { .. } | Self::Stop { .. }
+            Self::Send { .. } | Self::Answer { .. } | Self::Stop { .. } | Self::Deliver { .. }
         )
     }
 
@@ -99,6 +114,7 @@ impl AgentControlOp {
             Self::Send { request_id, .. }
             | Self::Answer { request_id, .. }
             | Self::Stop { request_id, .. } => request_id.clone().filter(|id| !id.is_empty()),
+            Self::Deliver { request_id, .. } => Some(request_id.clone()).filter(|id| !id.is_empty()),
             _ => None,
         }
     }
@@ -109,6 +125,9 @@ impl AgentControlOp {
 /// Local list/read/send/answer/stop stay on `agentControlV1`. Anything that crosses a host,
 /// or that reads the observer stream, requires `agentControlRemoteV1`.
 pub fn required_capability(op: &AgentControlOp, host_id: Option<&str>) -> &'static str {
+    if matches!(op, AgentControlOp::Deliver { .. }) {
+        return AGENT_CONTROL_RECEIPTS_CAPABILITY;
+    }
     if host_id.is_some()
         || matches!(
             op,

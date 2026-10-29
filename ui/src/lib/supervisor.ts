@@ -4,6 +4,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { EMPTY_SNAPSHOT, nextSupervisionExpiry, normalizeSnapshot, type SupervisorSnapshot } from "./supervisorModel";
+import type { SupervisorCallResult, UnifiedSupervisorClient, UnifiedSupervisorView } from "./unifiedSupervisor";
 
 export {
   actingSessionIds,
@@ -34,12 +35,15 @@ import type { SupervisorGoalMode } from "./supervisorModel";
 
 export const SUPERVISOR_CHANGED_EVENT = "supervisor_changed";
 let snapshot: SupervisorSnapshot = EMPTY_SNAPSHOT;
+/** The last unified supervisor view the daemon reported, kept while it is unreachable. */
+let lastUnified: UnifiedSupervisorView | null = null;
 let supported = true;
 const listeners = new Set<() => void>();
 let started: Promise<void> | null = null;
 
 function publish(next: SupervisorSnapshot) {
   snapshot = next;
+  if (next.supervisor) lastUnified = next.supervisor;
   for (const listener of listeners) listener();
 }
 
@@ -94,6 +98,41 @@ export function supervisorFeedSupported(): boolean {
   return supported;
 }
 
+/** The last unified supervisor view this desktop saw, or null before the first one. */
+export function getLastUnifiedSupervisor(): UnifiedSupervisorView | null {
+  return lastUnified;
+}
+
+/** A refusal keeps its wire code; the UI branches on `code`, never on the message. */
+async function desktopCall(call: () => Promise<unknown>): Promise<SupervisorCallResult> {
+  try {
+    const value = await call();
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { kind: "error", code: "INVALID_RESPONSE", message: "Supervisor response is not a JSON object", status: null };
+    }
+    return { kind: "ok", value: value as Record<string, unknown> };
+  } catch (error) {
+    const raw = (error && typeof error === "object" ? error : {}) as { code?: unknown; message?: unknown; details?: unknown };
+    const details = raw.details && typeof raw.details === "object" ? (raw.details as { status?: unknown }) : null;
+    return {
+      kind: "error",
+      code: typeof raw.code === "string" && raw.code ? raw.code : "INTERNAL_ERROR",
+      message: typeof raw.message === "string" ? raw.message : String(error),
+      status: typeof details?.status === "number" ? details.status : null,
+    };
+  }
+}
+
+/** The unified supervisor through this desktop's daemon, which owns the hub. */
+export const desktopUnifiedClient: UnifiedSupervisorClient = {
+  request: (envelope) => desktopCall(() => invoke<unknown>("cmd_supervisor_request", { envelope })),
+  conversation: (projectId, after) =>
+    desktopCall(() => invoke<unknown>("cmd_supervisor_read", { request: { view: "conversation", projectId, after } })),
+  memory: () => desktopCall(() => invoke<unknown>("cmd_supervisor_read", { request: { view: "memory" } })),
+  remember: (envelope) => desktopCall(() => invoke<unknown>("cmd_supervisor_request", { envelope })),
+  refresh: () => void refreshSupervisor(),
+};
+
 function subscribe(listener: () => void) {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -114,8 +153,13 @@ export function setSupervisorSnapshotForTest(next: SupervisorSnapshot) {
   publish(next);
 }
 
-/** The live snapshot plus a clock that ticks only when a derived state expires. */
-export function useSupervisor(): { snapshot: SupervisorSnapshot; now: number } {
+/** For tests: forget the last unified view. */
+export function resetLastUnifiedSupervisorForTest() {
+  lastUnified = null;
+}
+
+/** The live snapshot, the last unified view seen, and a clock that ticks only when a derived state expires. */
+export function useSupervisor(): { snapshot: SupervisorSnapshot; now: number; lastUnified: UnifiedSupervisorView | null } {
   const current = useSyncExternalStore(subscribe, () => snapshot, () => snapshot);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -131,5 +175,5 @@ export function useSupervisor(): { snapshot: SupervisorSnapshot; now: number } {
     const timer = setTimeout(() => setNow(Date.now()), expiry - now + 16);
     return () => clearTimeout(timer);
   }, [current, now]);
-  return { snapshot: current, now };
+  return { snapshot: current, now, lastUnified };
 }

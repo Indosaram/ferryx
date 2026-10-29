@@ -1,5 +1,6 @@
 // The hub supervisor's pure model: snapshot shape, per-pane derivation, and expiry timing.
 // No Tauri or transport imports, so the desktop feed and the remote phone client share it.
+import { normalizeUnified, type UnifiedSupervisorView } from "./unifiedSupervisor";
 /** How long a supervisor keystroke keeps its pane bar in the active fill. */
 export const SUPERVISOR_ACTING_MS = 8_000;
 /** A refusal because a person typed stays visible this long (HUMAN_TYPING_WINDOW_MS plus margin). */
@@ -28,6 +29,7 @@ export const SUPERVISOR_STOP_REASONS = [
   "turn_limit",
   "delivery_uncertain",
   "judge_unavailable",
+  "supervisor_degraded",
 ] as const;
 export type SupervisorStopReason = (typeof SUPERVISOR_STOP_REASONS)[number];
 
@@ -38,6 +40,7 @@ export const SUPERVISOR_STOP_REASON_LABELS: Record<SupervisorStopReason, string>
   turn_limit: "Turn limit reached",
   delivery_uncertain: "Instruction may not have arrived",
   judge_unavailable: "Supervisor checker unavailable",
+  supervisor_degraded: "Supervisor engine degraded",
 };
 export const SUPERVISOR_AWAITING_APPROVAL_LABEL = "Next step ready for review";
 /** An unknown reason from a newer daemon still reads as a stop. */
@@ -129,6 +132,8 @@ export type SupervisorSnapshot = {
   watched: string[];
   /** Newest first. */
   actions: SupervisorAction[];
+  /** The unified supervisor (identity, engine health, projects, goals); null or absent for an older daemon or a closed hub. */
+  supervisor?: UnifiedSupervisorView | null;
 };
 
 export type PaneSupervision =
@@ -218,5 +223,6 @@ export function normalizeSnapshot(value: unknown): SupervisorSnapshot {
       : [],
     watched: Array.isArray(raw.watched) ? raw.watched : [],
     actions: Array.isArray(raw.actions) ? raw.actions : [],
+    supervisor: normalizeUnified((value as { supervisor?: unknown }).supervisor),
   };
 }

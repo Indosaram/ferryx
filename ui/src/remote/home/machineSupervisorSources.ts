@@ -1,10 +1,12 @@
 // Adapters from the account's machine connections to useRemoteSupervisor inputs. Each machine
-// answers over its relay tunnel (the active connection or a pooled discovery tunnel). Change frames come from the one events
-// socket RemoteApp already owns, relayed per machine through a small frame bus.
-import { useCallback, useMemo, useRef } from "react";
+// answers over its relay tunnel (the active connection or a pooled discovery tunnel). Change
+// frames reach a small per-machine frame bus from the active connection's events socket, which
+// RemoteApp owns, and from one events socket per other reachable machine
+// (useMachineEventSockets).
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
-import type { AccountMachineView } from "../accountSession";
-import type { TunnelTransport } from "../attachTunnel";
+import { planLimitStateFromCloseEvent, planLimitStateFromError, type AccountMachineView, type PlanLimitState } from "../accountSession";
+import type { TunnelTransport, TunnelWebSocket } from "../attachTunnel";
 import type { RemoteSupervisorMachine, SupervisorFetch, SupervisorHttpResponse } from "../remoteSupervisor";
 
 type FrameHandler = (frame: unknown) => void;
@@ -133,4 +135,138 @@ export function useMachineSupervisorSources(input: SupervisorSourceInput): Super
   const fetchFor = useCallback((machineId: string) => value.fetches.get(machineId) ?? null, [value.fetches]);
 
   return { sources: value.sources, unlinked: value.unlinked, fetchFor, resync };
+}
+
+/**
+ * Opens one machine's `/api/v1/events` socket over its own relay tunnel. `control` lets the
+ * hook stop an open it no longer wants: `isAlive` is checked between steps, and `onTunnel`
+ * hands over the tunnel's close while the upgrade is pending (openAccountWebSocket's options).
+ */
+export type MachineEventsOpener = (
+  machine: AccountMachineView,
+  deviceToken: string,
+  control: { readonly isAlive: () => boolean; readonly onTunnel: (closeTunnel: () => void) => void },
+) => Promise<Pick<TunnelWebSocket, "close" | "onmessage" | "onclose" | "onerror">>;
+
+export type MachineEventSocketsInput = {
+  readonly enabled: boolean;
+  readonly machines: readonly AccountMachineView[];
+  readonly linkFor: (machineId: string) => MachineLink | null;
+  /** The machine whose events the active connection's socket already carries. */
+  readonly skip: string | null;
+  readonly open: MachineEventsOpener;
+  readonly bus: SupervisorFrameBus;
+  /**
+   * A plan limit or suspension seen on one of these sockets (the exact REMOTE_SUSPENDED close,
+   * or a refused open). That socket is not reopened; the caller disables the hook, which
+   * closes the others.
+   */
+  readonly onPlanLimit: (state: PlanLimitState) => void;
+};
+
+/** Longest wait before reopening a machine's events socket after it closed or failed. */
+export const MACHINE_EVENTS_RETRY_MAX_MS = 10_000;
+
+/**
+ * Keeps one events socket open per reachable machine that no active connection covers, and
+ * relays its frames to the bus. Without it a signed-in account that has not opened a worktree
+ * (the phone home, the wide Supervisor tab) never hears `supervisorChanged`: a goal another
+ * surface admitted, or the dispatcher moved, would stay stale until the next manual action.
+ * The daemon opens each subscription with an `inventoryInvalidated {reason: subscribe}`
+ * boundary, which makes every view refetch once. A suspension or plan limit stops the retries
+ * and is reported through `onPlanLimit`, like the active connection's socket does.
+ */
+export function useMachineEventSockets({ enabled, machines, linkFor, skip, open, bus, onPlanLimit }: MachineEventSocketsInput): void {
+  const openRef = useRef(open);
+  openRef.current = open;
+  const onPlanLimitRef = useRef(onPlanLimit);
+  onPlanLimitRef.current = onPlanLimit;
+  const targets = enabled
+    ? machines.flatMap((machine) => {
+        if (machine.online === false || machine.machineId === skip) return [];
+        const link = linkFor(machine.machineId);
+        return link ? [{ machine, deviceToken: link.deviceToken }] : [];
+      })
+    : [];
+  const targetsRef = useRef(targets);
+  targetsRef.current = targets;
+  const key = targets.map(({ machine, deviceToken }) => `${machine.machineId}:${machine.enrollmentEpoch}:${deviceToken}`).join("|");
+
+  useEffect(() => {
+    const cleanups: Array<() => void> = [];
+    for (const { machine, deviceToken } of targetsRef.current) {
+      let disposed = false;
+      let socket: Awaited<ReturnType<MachineEventsOpener>> | null = null;
+      // The tunnel of an open in flight: cleanup closes it at once instead of when it resolves.
+      let pendingTunnel: (() => void) | null = null;
+      let retry: ReturnType<typeof setTimeout> | null = null;
+      let attempt = 0;
+      const reconnect = () => {
+        if (disposed) return;
+        retry = setTimeout(connect, Math.min(MACHINE_EVENTS_RETRY_MAX_MS, 1000 * 2 ** attempt));
+        attempt = Math.min(attempt + 1, 4);
+      };
+      const connect = async () => {
+        retry = null;
+        let current: Awaited<ReturnType<MachineEventsOpener>>;
+        try {
+          current = await openRef.current(machine, deviceToken, {
+            isAlive: () => !disposed,
+            onTunnel: (closeTunnel) => {
+              pendingTunnel = closeTunnel;
+            },
+          });
+        } catch (error) {
+          if (disposed) return;
+          const limit = planLimitStateFromError(error);
+          if (limit) {
+            onPlanLimitRef.current(limit);
+            return;
+          }
+          reconnect();
+          return;
+        } finally {
+          pendingTunnel = null;
+        }
+        if (disposed) {
+          current.close();
+          return;
+        }
+        socket = current;
+        current.onmessage = (event) => {
+          if (disposed) return;
+          attempt = 0;
+          const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
+          bus.emit(machine.machineId, text);
+        };
+        current.onerror = () => {};
+        current.onclose = (event) => {
+          // The server's suspension close is reported from any socket, also one this hook
+          // already let go of (a re-key closes the old sockets while their replacements are
+          // still opening): it may be the only socket the close reaches. It is never reopened.
+          const limit = planLimitStateFromCloseEvent(event);
+          if (socket === current) socket = null;
+          if (limit) {
+            onPlanLimitRef.current(limit);
+            return;
+          }
+          // A socket this hook closed itself (cleanup, a replaced socket) is not reopened.
+          if (disposed || socket !== null) return;
+          reconnect();
+        };
+      };
+      void connect();
+      cleanups.push(() => {
+        disposed = true;
+        if (retry) clearTimeout(retry);
+        socket?.close();
+        socket = null;
+        pendingTunnel?.();
+        pendingTunnel = null;
+      });
+    }
+    return () => {
+      for (const cleanup of cleanups) cleanup();
+    };
+  }, [key, bus]);
 }

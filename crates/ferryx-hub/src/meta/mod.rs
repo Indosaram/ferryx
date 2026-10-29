@@ -1,4 +1,8 @@
 pub mod backend;
+pub mod mhc_fault;
+pub mod mhc_profile;
+pub mod mhc_stdio;
+pub mod mhc_supervisor;
 #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
 pub mod omo_client;
 pub mod pane;

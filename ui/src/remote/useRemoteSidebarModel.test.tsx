@@ -100,6 +100,8 @@ describe("useRemoteSidebarModel", () => {
 
     const model = result.current[0]?.model;
     expect(model?.source).toBe("inventory");
+    // No desktop preference to honour: the Supervisor tab is offered (SidebarView reads this).
+    expect(model?.advancedFeatures).toBe(true);
     expect(model?.projects.map((p) => [p.groupId, p.label, p.worktrees.map((w) => w.label)])).toEqual([
       ["ferryx", "ferryx", ["main", "relay"]],
       ["gone", "gone", ["gone"]],

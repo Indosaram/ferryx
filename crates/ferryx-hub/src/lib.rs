@@ -49,6 +49,7 @@ pub mod schedule;
 pub mod security;
 pub mod sessions;
 pub mod storage;
+pub mod supervisor;
 pub mod table_image;
 pub mod tools;
 pub mod tracker;

@@ -1162,9 +1162,18 @@ impl RelayState {
         }
     }
 
+    /// Makes the control socket registered under `machine_token` reachable as `alias` (the
+    /// machine id a token-authenticated daemon announces): session allocation and grant
+    /// delivery both look the machine up by that id, so both maps get the alias.
+    /// Unregistering the generation retires every name it was bound to.
     pub fn bind_control_alias(&self, machine_token: &str, alias: String) {
+        // One lock order everywhere: `control_channels` before `grant_channels`.
         let mut channels = self.inner.control_channels.lock();
+        let mut grants = self.inner.grant_channels.lock();
         if let Some(channel) = channels.get(machine_token).cloned() {
+            if let Some(grant) = grants.get(machine_token).cloned() {
+                grants.insert(alias.clone(), grant);
+            }
             channels.insert(alias, channel);
         }
     }
@@ -2637,6 +2646,11 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // Supervisor view. The lane key rides in the pause body, never in the path.
             | ("GET", ["supervisor"])
             | ("POST", ["supervisor", "pause" | "start"])
+            // Unified supervisor API (todo 13). The machine authorizes the device and derives
+            // the actor; the relay only admits the route shape.
+            | ("POST", ["supervisor", "request"])
+            | ("GET", ["supervisor", "conversation"])
+            | ("GET" | "POST", ["supervisor", "memory"])
             | ("GET", ["attach"])
     )
 }
@@ -2731,6 +2745,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
         ["agent-control", "events"] => &["after"],
+        ["supervisor", "conversation"] => &["projectId", "after"],
         ["agent-control", "sessions", _, "wait"] => &["until", "after", "timeoutMs", "revision"],
         _ => &[],
     };
@@ -4955,6 +4970,15 @@ mod tests {
         assert!(allowed_http_route(&Method::GET, "supervisor"));
         assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
         assert!(allowed_http_route(&Method::POST, "supervisor/start"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/request"));
+        assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));
+        assert!(allowed_http_route(&Method::GET, "supervisor/memory"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/memory"));
+        assert!(
+            validate_http_query("supervisor/conversation", Some("projectId=p&after=3")).is_ok()
+        );
+        assert!(validate_http_query("supervisor/conversation", Some("actor=x")).is_err());
+        assert!(validate_http_query("supervisor/request", Some("actor=x")).is_err());
         for (method, path) in [
             (Method::GET, "reference-chat/session-1"),
             (Method::GET, "reference-chat/x/secret"),
@@ -4969,6 +4993,10 @@ mod tests {
             (Method::POST, "supervisor/x/y"),
             (Method::GET, "supervisor/x/y"),
             (Method::POST, "supervisor/lane-1/pause"),
+            (Method::GET, "supervisor/request"),
+            (Method::DELETE, "supervisor/memory"),
+            (Method::POST, "supervisor/conversation"),
+            (Method::POST, "supervisor/request/x"),
         ] {
             assert!(
                 !allowed_http_route(&method, path),
@@ -6891,6 +6919,45 @@ mod tests {
             .await
             .is_err());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_grant_for_the_announced_machine_id_reaches_a_token_keyed_control_socket() {
+        // A daemon with FERRYX_MACHINE_TOKEN registers under its bearer token and announces its
+        // account machine id (x-ferryx-machine-id); the account service delivers by that id.
+        let state = test_state(vec![]);
+        let (generation, _notices, mut grants) =
+            state.register_control_channel("operator-token".into());
+        state.bind_control_alias("operator-token", "enrolled-machine".into());
+
+        let probe = state.clone();
+        let deliver = tokio::spawn(async move {
+            probe
+                .deliver_grant_offer(
+                    "enrolled-machine",
+                    crate::remote::account_protocol::AccountGrantOfferEnvelope {
+                        machine_id: "enrolled-machine".into(),
+                        enrollment_epoch: "1".into(),
+                        sealed: "c2VhbGVk".into(),
+                    },
+                )
+                .await
+        });
+        let request = grants.recv().await.expect("grant reaches the token-keyed socket");
+        assert_eq!(request.delivery.machine_id, "enrolled-machine");
+        request
+            .ack
+            .send(AccountGrantOfferDelivered {
+                grant_id: Some("grant-1".into()),
+                status: "ready".into(),
+            })
+            .unwrap();
+        assert_eq!(deliver.await.unwrap().unwrap().status, "ready");
+
+        // Closing the socket retires the alias with it: no stale grant route survives.
+        state.unregister_control_channel("operator-token", generation);
+        assert!(!state.inner.grant_channels.lock().contains_key("enrolled-machine"));
+        assert!(!state.inner.control_channels.lock().contains_key("enrolled-machine"));
     }
 
     #[tokio::test]

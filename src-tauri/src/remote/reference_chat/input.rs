@@ -417,18 +417,30 @@ pub trait ReferenceInputWriter: Send + Sync {
 ///
 /// The pane is addressed by its own backend session id, so the transaction writes to the process
 /// that is already running. Nothing here can create one.
+///
+/// It is also where input marks are written ([crate::agent_control::events::AgentEventBus::note_input]):
+/// right before each write, under the target's step, with the request id it types for. Chat,
+/// agent-control and phone input all type through it, so a supervisor delivery sees every other
+/// input that reached its pane after its own cursor, whenever that input was queued.
 pub struct ReferenceSessionWriter<'a> {
     backend: &'a dyn crate::remote::backend::RemoteSessionBackend,
+    marks: &'a crate::agent_control::events::AgentEventBus,
+    request_id: &'a str,
 }
 
 impl<'a> ReferenceSessionWriter<'a> {
-    pub fn new(backend: &'a dyn crate::remote::backend::RemoteSessionBackend) -> Self {
-        Self { backend }
+    pub fn new(
+        backend: &'a dyn crate::remote::backend::RemoteSessionBackend,
+        marks: &'a crate::agent_control::events::AgentEventBus,
+        request_id: &'a str,
+    ) -> Self {
+        Self { backend, marks, request_id }
     }
 }
 
 impl<'b> ReferenceInputWriter for ReferenceSessionWriter<'b> {
     fn write<'a>(&'a self, session_id: &'a str, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        self.marks.note_input(session_id, Some(self.request_id));
         self.backend.write_input(session_id, data)
     }
 }

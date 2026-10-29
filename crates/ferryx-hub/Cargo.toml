@@ -42,7 +42,7 @@ usvg = "0.48.1"
 resvg = "0.48.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 tower = { version = "0.5", features = ["util"] }
 
 [workspace]

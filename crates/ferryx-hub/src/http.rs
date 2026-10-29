@@ -69,6 +69,7 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         )
         .route("/api/memory", get(api::memory))
         .route("/api/usage", get(usage))
+        .route("/api/usage/supervisor", get(supervisor_usage))
         .route("/api/tools", get(tools))
         .route("/api/skills", get(skills))
         .route("/api/config", get(config))
@@ -107,6 +108,19 @@ async fn usage(
     match crate::usage::render(&state.pool, since, json, chrono::Utc::now()).await {
         Ok(body) if json => ([(header::CONTENT_TYPE, "application/json")], body).into_response(),
         Ok(body) => body.into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    }
+}
+
+/// Supervisor engine calls of the last `since` (default 24h): cause, goal, wake turn, merged
+/// event ids, prefix hash and usage per call; unknown counts are `null`.
+async fn supervisor_usage(
+    State(state): State<HttpState>,
+    axum::extract::Query(query): axum::extract::Query<UsageQuery>,
+) -> Response {
+    let since = query.since.as_deref().unwrap_or("24h");
+    match crate::usage::render_supervisor_calls(&state.pool, since, chrono::Utc::now()).await {
+        Ok(body) => Json(body).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }

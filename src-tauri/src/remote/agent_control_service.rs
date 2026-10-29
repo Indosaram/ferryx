@@ -27,6 +27,14 @@ pub(crate) fn note_human_keystrokes(session_id: &str) {
     crate::hub_runtime::note_lane_keystrokes(session_id, now);
 }
 
+/// Raw keys or a paste chunk are about to reach `session_id` outside the per-pane input queue
+/// (a terminal keystroke, a paste, a mirrored or phone terminal). Every raw write path calls
+/// this right before its bytes go out, so no supervisor delivery attributes the turn they
+/// start to itself, however long ago other panes were typed into.
+pub(crate) fn note_raw_write(bus: &events::AgentEventBus, session_id: &str) {
+    bus.note_input(session_id, None);
+}
+
 fn refuse_if_human_typing(session_id: &str) -> Result<(), ScopeError> {
     let Some(typed_at) = reference_chat_runtime().input.last_raw_input_ms(session_id) else {
         return Ok(());
@@ -211,8 +219,10 @@ fn replay_value(replay: events::AgentReplay) -> serde_json::Value {
     }
 }
 
-fn wait_value(hit: WaitHit) -> serde_json::Value {
-    match hit {
+/// A wait's reply. `instance` is the observer epoch its sequences belong to: a caller holding a
+/// sequence of another epoch (this daemon restarted) cannot order the two.
+fn wait_value(hit: WaitHit, instance: &str) -> serde_json::Value {
+    let mut value = match hit {
         WaitHit::Observation(observation) => serde_json::json!({
             "gap": false,
             "observation": observation.sequenced(),
@@ -226,7 +236,9 @@ fn wait_value(hit: WaitHit) -> serde_json::Value {
             "snapshot": snapshot.iter().map(|event| event.sequenced()).collect::<Vec<_>>(),
             "afterSequence": after_sequence,
         }),
-    }
+    };
+    value["instance"] = serde_json::json!(instance);
+    value
 }
 
 /// Run one operation for the machine owner. The owner socket stays authorized.
@@ -339,51 +351,7 @@ async fn dispatch(
             Ok(serde_json::json!({ "session": entry }))
         }
         AgentControlOp::Send { session_id, text, request_id } => {
-            if text.trim().is_empty() || text.contains('\0') {
-                return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "text must not be empty or contain NUL"));
-            }
-            live(state, &session_id).await?;
-            refuse_if_human_typing(&session_id)?;
-            let hub = Arc::clone(state.terminal_service.output_hub());
-            // A pane this hub does not hold has a paste mode this host cannot read; a multi-line
-            // message would submit its first line on its own, so it is refused untyped.
-            if hub.session_sequence_range(&session_id).is_none()
-                && reference_input::reference_composer_body(&text).contains('\r')
-            {
-                return Err(reference_chat_scope(
-                    ScopeErrorCode::Unsupported,
-                    "this pane's paste mode cannot be read on this host, so a multi-line message cannot be typed as one turn; nothing was typed",
-                ));
-            }
-            let observed = observe(state, &session_id).await?;
-            let agent = registry_agent(&observed);
-            let target = control_target(state, &session_id);
-            let request_id = request_id_or_new(request_id);
-            let authorize = mutation_authorize(session_id.clone(), authorize);
-            let state = Arc::clone(state);
-            let transaction = tokio::spawn(async move {
-                let payload = reference_types::ReferenceSubmitPayload {
-                    text,
-                    attachment_ids: Vec::new(),
-                    origin: reference_types::ReferenceSubmitOrigin::Chat,
-                };
-                let paste_session = session_id.clone();
-                let clock = reference_input::SystemReferenceClock;
-                let submit = reference_input::ReferenceSubmitRequest {
-                    target: &target,
-                    request_id: &request_id,
-                    payload: &payload,
-                    bracketed_paste: &move || hub.is_bracketed_paste_enabled(&paste_session),
-                    blocked_prompt: None,
-                    arrived_at_ms: clock.now_ms(),
-                    last_typed_at_ms: None,
-                    authorize: &*authorize,
-                };
-                let probe = || reference_chat_blocked_prompt(&state, &target, agent.as_deref());
-                let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
-                reference_chat_runtime().input.submit_with_probe(&submit, probe, &writer, &clock).await
-            });
-            joined(transaction.await)
+            send_text(state, session_id, text, request_id, authorize, None).await
         }
         AgentControlOp::Answer { session_id, prompt_id, screen_revision, answer, request_id } => {
             live(state, &session_id).await?;
@@ -420,7 +388,11 @@ async fn dispatch(
                 let runtime = reference_chat_runtime();
                 let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
                 let screen = ReferenceGatewayScreenReader { backend: Arc::clone(&state.session_backend) };
-                let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+                let writer = reference_input::ReferenceSessionWriter::new(
+                    state.session_backend.as_ref(),
+                    &state.agent_events,
+                    &request_id,
+                );
                 let clock = reference_input::SystemReferenceClock;
                 runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
             });
@@ -443,8 +415,26 @@ async fn dispatch(
                 authorize: &*authorize,
                 alive: &alive,
             };
-            let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+            let writer = reference_input::ReferenceSessionWriter::new(
+                state.session_backend.as_ref(),
+                &state.agent_events,
+                &request_id,
+            );
             outcome_result(reference_chat_runtime().input.stop(&stop, &writer).await)
+        }
+        AgentControlOp::Deliver { session_id, text, request_id, observe_ms } => {
+            if request_id.trim().is_empty() {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::InvalidRequest,
+                    "a delivery needs its request id",
+                ));
+            }
+            let deadline = crate::agent_control::delivery::observe_deadline(observe_ms);
+            let report = crate::agent_control::delivery::deliver(
+                state, &session_id, text, request_id, deadline, authorize,
+            )
+            .await?;
+            Ok(serde_json::json!({ "delivery": report }))
         }
         AgentControlOp::Wait {
             session_id,
@@ -471,7 +461,7 @@ async fn dispatch(
             )
             .await;
             match hit {
-                Some(hit) => Ok(wait_value(hit)),
+                Some(hit) => Ok(wait_value(hit, state.agent_events.instance())),
                 None => Err(reference_chat_scope(
                     ScopeErrorCode::Timeout,
                     "the pane did not reach that state before the timeout",
@@ -480,6 +470,85 @@ async fn dispatch(
         }
         AgentControlOp::Events { after } => Ok(replay_value(state.agent_events.replay(after))),
     }
+}
+
+/// Type `text` into `session_id` as one submit: the `Send` operation, and the typing step of a
+/// delivery. Its writer marks the pane's input ledger at each write, under the target's step.
+///
+/// `ready`, given by a delivery, is asked under the step after the blocked-prompt screen read,
+/// right before the first byte: when the pane is no longer observed ready the submit is refused
+/// untyped (`CONTROL_CONFLICT`), so neither a queue wait nor the screen read can make a
+/// delivery type into a pane that became busy, or took other input, meanwhile.
+pub(crate) async fn send_text(
+    state: &Arc<RemoteGatewayState>,
+    session_id: String,
+    text: String,
+    request_id: Option<String>,
+    authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+    ready: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+) -> Result<serde_json::Value, ScopeError> {
+    if text.trim().is_empty() || text.contains('\0') {
+        return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "text must not be empty or contain NUL"));
+    }
+    live(state, &session_id).await?;
+    refuse_if_human_typing(&session_id)?;
+    let hub = Arc::clone(state.terminal_service.output_hub());
+    // A pane this hub does not hold has a paste mode this host cannot read; a multi-line
+    // message would submit its first line on its own, so it is refused untyped.
+    if hub.session_sequence_range(&session_id).is_none()
+        && reference_input::reference_composer_body(&text).contains('\r')
+    {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::Unsupported,
+            "this pane's paste mode cannot be read on this host, so a multi-line message cannot be typed as one turn; nothing was typed",
+        ));
+    }
+    let observed = observe(state, &session_id).await?;
+    let agent = registry_agent(&observed);
+    let target = control_target(state, &session_id);
+    let request_id = request_id_or_new(request_id);
+    let authorize = mutation_authorize(session_id.clone(), authorize);
+    let state = Arc::clone(state);
+    let transaction = tokio::spawn(async move {
+        let payload = reference_types::ReferenceSubmitPayload {
+            text,
+            attachment_ids: Vec::new(),
+            origin: reference_types::ReferenceSubmitOrigin::Chat,
+        };
+        let paste_session = session_id.clone();
+        let clock = reference_input::SystemReferenceClock;
+        let submit = reference_input::ReferenceSubmitRequest {
+            target: &target,
+            request_id: &request_id,
+            payload: &payload,
+            bracketed_paste: &move || hub.is_bracketed_paste_enabled(&paste_session),
+            blocked_prompt: None,
+            arrived_at_ms: clock.now_ms(),
+            last_typed_at_ms: None,
+            authorize: &*authorize,
+        };
+        let probe = || async {
+            let seen = reference_chat_blocked_prompt(&state, &target, agent.as_deref()).await;
+            if !matches!(seen, reference_input::ReferencePromptProbe::Clear) {
+                return seen;
+            }
+            // Asked after the awaited screen read, so a reading or an input that arrived during
+            // it is still seen before the first byte.
+            if ready.as_ref().is_some_and(|ready| !ready()) {
+                return reference_input::ReferencePromptProbe::Blocked(
+                    "the pane is no longer observed ready".to_string(),
+                );
+            }
+            seen
+        };
+        let writer = reference_input::ReferenceSessionWriter::new(
+            state.session_backend.as_ref(),
+            &state.agent_events,
+            &request_id,
+        );
+        reference_chat_runtime().input.submit_with_probe(&submit, probe, &writer, &clock).await
+    });
+    joined(transaction.await)
 }
 
 struct ForwardFailure {
@@ -530,6 +599,9 @@ async fn forward_once(
     host_id: &str,
     op: AgentControlOp,
 ) -> Result<serde_json::Value, ForwardFailure> {
+    // A delivery to a host without causal receipts keeps its own code, so the supervisor holds
+    // it as a missing capability instead of an untyped refusal.
+    let delivery = matches!(op, AgentControlOp::Deliver { .. });
     let known = hosts.list().await.map_err(|error| ForwardFailure {
         code: forward_code(&error.code),
         message: "the paired-host inventory could not be read".into(),
@@ -577,7 +649,11 @@ async fn forward_once(
                 .map(|machine| machine.code.as_str())
                 .unwrap_or(error.code.as_str());
             Err(ForwardFailure {
-                code: forward_code(code),
+                code: if delivery && code == "PAIRED_HOST_CAPABILITY_UNAVAILABLE" {
+                    code.to_string()
+                } else {
+                    forward_code(code)
+                },
                 message: error
                     .machine_error
                     .as_ref()
@@ -671,6 +747,9 @@ pub(crate) struct SendBody {
     text: String,
     #[serde(default)]
     request_id: Option<String>,
+    /// Present on a delivery: send, then wait up to this long for this request's turn start.
+    #[serde(default)]
+    observe_ms: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -781,14 +860,29 @@ pub(crate) async fn http_send(
         }
     };
     let authorize = http_reauthorize(&state, &headers);
+    let op = match (body.observe_ms, body.request_id) {
+        (Some(observe_ms), Some(request_id)) => AgentControlOp::Deliver {
+            session_id,
+            text: body.text,
+            request_id,
+            observe_ms,
+        },
+        (Some(_), None) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                "a delivery needs its request id",
+            )
+        }
+        (None, request_id) => AgentControlOp::Send {
+            session_id,
+            text: body.text,
+            request_id,
+        },
+    };
     control_finish(
         handle_as(
             &state,
-            AgentControlOp::Send {
-                session_id,
-                text: body.text,
-                request_id: body.request_id,
-            },
+            op,
             &device.id,
             Some(authorize),
         )
@@ -1214,6 +1308,7 @@ mod tests {
             Ok(Json(SendBody {
                 text: "echo hi".into(),
                 request_id: Some(request_id.into()),
+                observe_ms: None,
             }))
         };
 
