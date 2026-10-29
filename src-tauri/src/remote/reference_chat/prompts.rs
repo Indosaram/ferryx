@@ -2361,6 +2361,28 @@ mod tests {
         assert_eq!(third, second, "the unanswered asking keeps its id");
     }
 
+    #[test]
+    fn an_observer_alias_of_an_answered_omo_form_cannot_reopen_it() {
+        let session = "sess-row28-omo-alias";
+        let full = detect_reference_prompt_in_session(
+            "omo",
+            OMO_FORM,
+            &ReferencePromptSession { session_jsonl: Some(OMO_ASKS_TWO), agent_status: None },
+        )
+        .expect("the full reader sees the form");
+        let blind = detect_reference_prompt("omo", OMO_FORM).expect("the observer sees the form too");
+        assert_ne!(full.id, blind.id, "precondition: the two readers name the form differently");
+
+        let first = reference_prompt_occurrence(session, Some(full.clone()), "rev-1").expect("listed");
+        mark_reference_prompt_answered(session, &first.id, "rev-1");
+        // The answer's keys repaint the pane; the form is still drawn and the observer reads it
+        // under its own id.
+        let _ = note_reference_prompt_occurrence(session, Some(&blind.id), "rev-2", ReferencePromptReader::ScreenOnly);
+        // A full reader re-reads the same, already-answered form: it is the same asking.
+        let again = reference_prompt_occurrence(session, Some(full), "rev-2").expect("still shown");
+        assert_eq!(again.id, first.id, "an answered lingering form was reopened as {}", again.id);
+    }
+
     #[tokio::test]
     async fn a_screen_only_reader_blind_to_a_card_cannot_reopen_it_for_a_second_answer() {
         let session = "sess-row28-blind";
