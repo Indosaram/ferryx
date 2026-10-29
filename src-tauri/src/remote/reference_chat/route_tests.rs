@@ -3515,19 +3515,12 @@ async fn a_device_downgraded_from_the_desktop_can_no_longer_type() {
         .auth_manager
         .exchange_pairing_code(&pin, "reference-route-phone")
         .expect("phone token");
-    let (status, body) = fixture
-        .server
-        .request(
-            "POST",
-            &fixture.route("submit"),
-            Some(&phone),
-            Some(&fixture.mutation(
-                &uuid::Uuid::new_v4().to_string(),
-                serde_json::json!({ "text": "echo before-downgrade\n", "origin": "chat" }),
-            )),
-        )
-        .await;
-    assert_eq!(status, 200, "a Control device types: {body}");
+    // The pre-change role is read from the token rather than by typing: a typed turn waits on the
+    // pane's own writer, which is the platform's PTY and not what this test is about.
+    assert_eq!(
+        fixture.state.auth_manager.validate_token(&phone).expect("phone").permission,
+        DevicePermission::Control
+    );
 
     let manager = crate::ipc::remote::RemoteGatewayManager::new(Arc::clone(&fixture.state));
     let changed = crate::ipc::remote::set_device_permission(
