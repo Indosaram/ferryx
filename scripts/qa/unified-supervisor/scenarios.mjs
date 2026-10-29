@@ -2800,7 +2800,7 @@ export const SCENARIOS = Object.freeze({
     deadlineMs: 20 * 60_000,
     requiredAssertions: CHANNELS_REQUIRED_ASSERTIONS,
     notCovered: [
-      { clause: 'channel-bind-surface', reason: 'no product surface binds a Slack channel to the supervisor yet (bind_channel crates/ferryx-hub/src/supervisor.rs:1607 has no non-test caller); the run stops PRODUCT_GAP before posting until one exists', coveredBy: 'crates/ferryx-hub/src/chat/slack_supervisor.rs only_channels_the_owner_bound_reach_the_supervisor' },
+      { clause: 'foreign-user-in-bound-thread', reason: 'the run posts only as the owner; a stranger posting in the bound thread is not exercised against real Slack', coveredBy: 'crates/ferryx-hub/src/chat/slack_supervisor.rs owner-led thread binding tests' },
       { clause: 'real-worker', reason: 'the worker is the fixture worker (held first turn, obeys the correction); a real worker is covered by real-autonomy', coveredBy: 'real-autonomy' },
       { clause: 'native-desktop-window-and-phone-ui', reason: 'desktop is the daemon request/snapshot the app uses (ferryx-cli supervisor request, supervisorSnapshot) and phone is the paired-device HTTP API; the rendered UIs are surfaces', coveredBy: 'surfaces' },
       { clause: 'network-isolation-proof', reason: 'peers are sampled every second from /proc on Linux only', coveredBy: null },

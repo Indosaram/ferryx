@@ -18,12 +18,10 @@
 // loopback), so the runner leaves it unset; Socket Mode dials the URL apps.connections.open
 // returns (wss-*.slack.com).
 //
-// Product gap (checked before anything is posted to Slack): a channel message reaches the
-// supervisor only when the owner bound the channel (route() in
-// crates/ferryx-hub/src/chat/slack_supervisor.rs:533-565 reads supervisor_channel_bindings), and
-// the only writer, bind_channel (crates/ferryx-hub/src/supervisor.rs:1607), has no non-test
-// caller: no CLI, socket, HTTP or chat surface binds a channel. The runner only reads the hub
-// database, so until a product bind surface exists the scenario stops with PRODUCT_GAP.
+// Channel binding: the owner's request mentions the bot as a thread root, so the hub binds that
+// thread (and only that thread) to the owner's supervisor (owner_led_thread / bind_owner_thread in
+// crates/ferryx-hub/src/chat/slack_supervisor.rs). The runner only reads the hub database and
+// asserts the thread-scoped binding after the root is posted.
 //
 // Engine: the hub's retained mhc engine, on config.realEngine's provider when set (as
 // real-autonomy), else on a loopback stub that calls the work tool for the QA request and
@@ -297,12 +295,8 @@ export async function runChannels(ctx, deps) {
     ctx.assert('workspace-registered', registered.at(-1)?.type === 'registerWorkspaceOk', { replies: registered });
     hub = await deps.openHubReader(dbPath);
 
-    // 3. The QA channel must be bound to this owner's supervisor before anything is posted.
-    const binding = hub.one("SELECT binding_id, project_id, thread_id FROM supervisor_channel_bindings WHERE provider = 'slack' AND channel_id = ? AND owner_principal = ?", slackConfig.channelId, owner);
-    ctx.assert('qa-channel-bound-to-supervisor', Boolean(binding), { binding, channel: slackConfig.channelId, owner });
-    if (!binding) {
-      throw new HarnessError('PRODUCT_GAP', 'release blocker: no product surface binds a Slack channel to the supervisor (bind_channel crates/ferryx-hub/src/supervisor.rs:1607 has no non-test caller; route() crates/ferryx-hub/src/chat/slack_supervisor.rs:533-565 supervises only owner DMs and bound channels). Nothing was posted to Slack.');
-    }
+    // 3. Nothing is bound before the owner's thread exists.
+    const preBound = hub.count("SELECT COUNT(*) AS n FROM supervisor_channel_bindings WHERE provider = 'slack' AND channel_id = ?", slackConfig.channelId);
     await deps.waitForChange(ctx, 'slack socket mode connected', dirname(daemonLog), () => ({ done: connectedLines() >= 1 }), 60_000);
     ctx.assert('slack-socket-mode-connected', connectedLines() >= 1, { daemonLog });
 
@@ -321,11 +315,14 @@ export async function runChannels(ctx, deps) {
 
     // 5. The QA request as the thread root in the approved channel.
     before = assistantCount();
-    const body = `${requestMarker}: Create result.txt containing READY. Run sh verify.sh. Correct failures until it passes. QA_HOLD:${holdToken}`;
+    const body = `<@${botUser}> ${requestMarker}: Create result.txt containing READY. Run sh verify.sh. Correct failures until it passes. QA_HOLD:${holdToken}`;
     const root = await slack('owner-thread-request', 'chat.postMessage', 'owner', { channel: slackConfig.channelId, text: body });
     if (!root.ok) throw new HarnessError('SLACK_POST_FAILED', `the QA request could not be posted (${root.error})`);
     posted.owner.push({ channel: root.channel, ts: root.ts });
     const sourceId = `${slackConfig.channelId}/${root.ts}`;
+    const bindings = hub.all("SELECT binding_id, thread_id, owner_principal FROM supervisor_channel_bindings WHERE provider = 'slack' AND channel_id = ?", slackConfig.channelId);
+    ctx.assert('qa-channel-bound-to-supervisor', preBound === 0 && bindings.length === 1 && bindings[0].thread_id === root.ts && bindings[0].owner_principal === owner,
+      { preBound, bindings, rootTs: root.ts, owner, scope: 'thread only, never channel-wide' });
     const admitted = await deps.waitForChange(ctx, 'slack request admitted', hubDir, () => {
       const rows = hub.all("SELECT source_message_id, goal_id, owner_principal FROM supervisor_requests WHERE source_adapter = 'slack' AND source_message_id = ?", sourceId);
       return { done: rows.some((row) => row.goal_id), rows };
