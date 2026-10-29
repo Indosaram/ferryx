@@ -20,8 +20,8 @@ const messages = {
     lang: 'en',
     labels: { skipPreview: 'Skip past the live preview' },
     copy: {
-      previewTitle: 'The real workspace, running in your browser',
-      previewDescription: 'This live preview mounts the genuine Ferryx sidebar, tab bar, and split terminal view against a mocked backend, so you can explore the multi-agent workspace layout before you install anything.',
+      previewTitle: 'See the workspace before you install',
+      previewDescription: 'A web demo of the desktop app\u2019s sidebar, tabs and split panes, with a scripted agent session. Ferryx itself is a native app, not a browser app.',
     },
     nav: { release: 'Latest release', how: 'How it works', features: 'Features', docs: 'Docs', architecture: 'Architecture', language: '中文', theme: 'Switch theme', discord: 'Join the Ferryx Discord', github: 'Ferryx on GitHub' },
     hero: { title: 'A native terminal', titleEnd: 'for coding agents.', subtitle: 'For macOS, Windows and Linux. Claude Code, Codex and any CLI agent keep running when you close the app, remote Linux boxes connect without SSH, and every tab shows which agent is waiting on you.', github: 'View on GitHub', discord: 'Join Discord', agents: 'Any CLI agent', platforms: 'macOS · Windows · Linux', free: 'Free for individuals and small teams', license: 'macOS, Windows, and Linux · source-available under the', facts: 'product facts' },
@@ -34,8 +34,8 @@ const messages = {
     lang: 'zh-CN',
     labels: { skipPreview: '跳过实时预览' },
     copy: {
-      previewTitle: '在浏览器中体验真实工作区',
-      previewDescription: '此实时预览使用模拟后端加载 Ferryx 真实的侧边栏、标签栏和分屏终端视图，让你在安装前探索多智能体工作区布局。演示中的应用界面为英文。',
+      previewTitle: '安装前先看看工作区',
+      previewDescription: '这是桌面应用侧边栏、标签页和分屏的网页演示，智能体会话为预设脚本。Ferryx 本身是原生应用，不在浏览器中运行。演示中的应用界面为英文。',
     },
     nav: { release: '最新版本', how: '使用方式', features: '功能', docs: '文档（英文）', architecture: '架构', language: 'English', theme: '切换主题', discord: '加入 Ferryx Discord', github: '在 GitHub 上查看 Ferryx' },
     hero: { title: '为编码智能体打造的', titleEnd: '原生终端。', subtitle: '支持 macOS、Windows 和 Linux。关闭应用后 Claude Code、Codex 以及任意 CLI 智能体继续运行，远程 Linux 机器无需 SSH 即可连接，每个标签页都会显示哪个智能体在等你。', github: '在 GitHub 上查看', discord: '加入 Discord', agents: '支持任意 CLI 智能体', platforms: 'macOS · Windows · Linux', free: '个人与小团队免费', license: 'macOS、Windows 和 Linux · 源代码可用，采用', facts: '产品事实（英文）' },
