@@ -579,6 +579,9 @@ struct ReferencePromptOccurrence {
 struct ReferencePaneOccurrences {
     /// The content id of the card a reading last found on this pane.
     showing: Option<String>,
+    /// Whether a full reader put `showing` there. A screen-only reader names some cards under
+    /// another id (an OmO form without its session call), so it never replaces such a card.
+    showing_full: bool,
     cards: HashMap<String, ReferencePromptOccurrence>,
 }
 
@@ -669,6 +672,12 @@ pub fn note_reference_prompt_occurrence(
         return None;
     };
     if pane.showing.as_deref() != Some(content) {
+        // A screen-only reader may see a full reader's card under its own alias: that is no
+        // evidence the card changed, so it neither ends nor replaces the card a full reader owns.
+        if reader == ReferencePromptReader::ScreenOnly && pane.showing.is_some() && pane.showing_full {
+            let number = pane.cards.get(content).map_or(0, |card| card.number);
+            return Some(reference_prompt_public_id(content, number));
+        }
         if pane.cards.len() >= REFERENCE_PROMPT_OCCURRENCE_CARDS && !pane.cards.contains_key(content) {
             pane.cards.clear();
         }
@@ -677,6 +686,10 @@ pub fn note_reference_prompt_occurrence(
             card.number += 1;
         }
         pane.showing = Some(content.to_string());
+        pane.showing_full = false;
+    }
+    if reader == ReferencePromptReader::Full {
+        pane.showing_full = true;
     }
     let card = pane.cards.entry(content.to_string()).or_default();
     if reader == ReferencePromptReader::ScreenOnly {
