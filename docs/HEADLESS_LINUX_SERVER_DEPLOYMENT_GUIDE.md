@@ -414,7 +414,7 @@ chmod 0600 ~/.ferryx/remote/remote-config.json
 
 ### Verifying Gateway Configuration
 
-Use the CLI to inspect the persisted configuration:
+Use the CLI to inspect the gateway:
 
 ```bash
 ferryx remote status
@@ -422,7 +422,7 @@ ferryx remote status
 
 Output:
 ```text
-status=ok port=43821 mode=localNetwork
+status=ok port=43821 daemon=running mode=localNetwork relayConnected=false
 ```
 
 For JSON format:
@@ -433,12 +433,13 @@ ferryx remote status --json
 
 Output:
 ```json
-{"status":"ok","port":43821,"mode":"localNetwork"}
+{"status":"ok","port":43821,"daemon":"running","mode":"relay","relayConnected":true,"relayUrl":"https://relay.ferryx.dev","relayUrlSource":"default"}
 ```
 
-Persisted status versus live health:
-The `ferryx remote status` command reads static configuration from `~/.ferryx/remote/remote-config.json` (`src-tauri/src/cli.rs:361`).
-It prints `status=ok` along with the configured port and mode, but does not query the running daemon over IPC. It returns `status=ok` even if the daemon is stopped or if the gateway failed to bind due to network interface errors.
+Live status versus saved config:
+`ferryx remote status` asks the running daemon over its local socket and reports the live mode, whether the relay tunnel is connected (`relayConnected`), and the relay URL in effect with its source (`config` for a saved URL, `default` for the built-in relay).
+When no daemon answers it prints `status=daemonNotRunning` (`"status":"daemonNotRunning"`, `"daemon":"notRunning"`, `"relayConnected":null`) with the mode saved in `~/.ferryx/remote/remote-config.json`; nothing live is claimed. A daemon that owns the socket but does not answer (for example one still running an older protocol version after an upgrade) is reported as `status=daemonUnreachable` (`"daemon":"unreachable"`).
+`ferryx-cli up` and `ferryx account enroll` turn relay mode on after enrolling when the saved mode is `off`; a `localNetwork` or `tailscale` mode chosen earlier is left unchanged.
 To confirm that the remote gateway is actively listening, inspect open TCP sockets directly:
 ```bash
 ss -tulpn | grep 43821
