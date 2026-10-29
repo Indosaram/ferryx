@@ -23,6 +23,7 @@ import {
   RemoteWorkspaceMirror,
   useRemoteDesktopSidebar,
   type RemoteContextOption,
+  type RemoteTerminalItem,
   type RemoteTerminalTabInfo,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
@@ -1207,6 +1208,8 @@ export const RemoteHostConnection: React.FC<{
   }), [hostId]);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const modelRef = useRef(model);
+  /** The session the phone opened on its own from the Inbox, kept over desktop refreshes. */
+  const localSessionRef = useRef<{ workspaceId: string; tabId: string; terminal: RemoteTerminalItem } | null>(null);
   const modelMachineIdRef = useRef<string | null>(null);
   // Set by every user-driven selection that names a session or tab: the read-only
   // desktop-context sync must never replace an independently chosen session.
@@ -2017,8 +2020,18 @@ export const RemoteHostConnection: React.FC<{
     const refreshVersion = workspaceRefreshVersionRef.current;
     const next = await loadWorkspace();
     if (!next || workspaceRefreshVersionRef.current !== refreshVersion) return null;
-    setModel(next);
-    return next;
+    // A session the phone opened on its own (from the Inbox) stays on screen while it is listed:
+    // a desktop refresh updates the mirror around it, never takes it back.
+    const local = localSessionRef.current;
+    const localTab = local && next.context.workspaceId === local.workspaceId
+      ? next.context.terminalTabs?.find((tab) => tab.id === local.tabId && tab.sessionId === local.terminal.sessionId)
+      : undefined;
+    if (local && !localTab) localSessionRef.current = null;
+    const shown = localTab && local
+      ? { ...next, context: { ...next.context, activeTabId: local.tabId, activeTerminal: local.terminal } }
+      : next;
+    setModel(shown);
+    return shown;
   }, [loadWorkspace]);
 
   /* An inventory boundary can arrive in bursts (a busy watched tree republishes several
@@ -2381,6 +2394,7 @@ export const RemoteHostConnection: React.FC<{
     // A user selection naming a session (or an explicit tab) is an independent choice:
     // the read-only desktop-context sync must never replace it afterwards.
     independentSessionRef.current = Boolean(requestedOption.sessionId || requestedOption.tabId);
+    localSessionRef.current = null;
     if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
@@ -3053,6 +3067,30 @@ export const RemoteHostConnection: React.FC<{
     transport: inboxTransport,
   });
   inboxPushRef.current = remoteInbox.push;
+  /* Opening an Inbox row moves only this phone's own view to that session, the way the read-only
+     desktop follow applies a session: no /workspace/select, so the desktop's focus never moves.
+     The pick counts as the user's own, so the desktop follow does not take it back. */
+  const showSessionLocally = useCallback((tab: RemoteTerminalTabInfo) => {
+    const sessionId = tab.sessionId;
+    const workspaceId = modelRef.current.context.workspaceId;
+    if (!sessionId || !workspaceId) return;
+    independentSessionRef.current = true;
+    const active: RemoteTerminalItem = {
+      sessionId,
+      running: true,
+      title: tab.label,
+      workspaceId,
+      worktreeLabel: tab.worktreeLabel ?? modelRef.current.context.worktreeLabel ?? null,
+      ...(tab.daemonEpoch !== null && tab.daemonEpoch !== undefined ? { daemonEpoch: tab.daemonEpoch } : {}),
+    };
+    localSessionRef.current = { workspaceId, tabId: tab.id, terminal: active };
+    const apply = (prev: RemoteWorkspaceModel): RemoteWorkspaceModel =>
+      prev.context.workspaceId !== workspaceId
+        ? prev
+        : { ...prev, context: { ...prev.context, activeTabId: tab.id, activeTerminal: active } };
+    modelRef.current = apply(modelRef.current);
+    setModel(apply);
+  }, []);
   inboxRefreshRef.current = remoteInbox.refreshAll;
 
   // Read through refs so a poll closure never runs against a pane it was not started for.
@@ -5228,8 +5266,7 @@ export const RemoteHostConnection: React.FC<{
           prompts={remoteInbox.prompts}
           onOpen={(row) => {
             const tab = terminalTabs.find((candidate) => candidate.id === row.id);
-            const option = tab ? paneSelectionOption(model, tab) : null;
-            if (option) void selectContext(option);
+            if (tab) showSessionLocally(tab);
             setInboxOpen(false);
           }}
         />

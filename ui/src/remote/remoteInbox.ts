@@ -183,7 +183,9 @@ export function useRemoteInbox({
         }
         if (read === null) return null;
         if (read.prompt === null || read.screenRevision === null) {
-          // The card this Inbox saw is gone: it was answered somewhere.
+          // The card this Inbox saw is gone: it was answered somewhere. A waiting pane whose card
+          // this Inbox never saw keeps its row even on a null read: no reader may know its prompt
+          // (an unknown menu, a bell), and hiding it would lose the only sign it needs the user.
           if (read.prompt === null && knownRef.current.delete(row.sessionId)) hide(row.sessionId);
           return null;
         }

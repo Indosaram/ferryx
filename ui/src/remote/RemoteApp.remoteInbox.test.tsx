@@ -55,12 +55,12 @@ const state = {
   },
 };
 
-function promptOf(session: string): Record<string, unknown> {
+function promptOf(session: string, kind = "question"): Record<string, unknown> {
   return {
     prompt: {
       promptId: `p-${session}`,
       agent: "claude",
-      kind: "question",
+      kind,
       title: `Pick for ${session}`,
       question: `Pick for ${session}`,
       options: [{ label: "first" }, { label: "second" }],
@@ -183,6 +183,62 @@ describe("phone Inbox (todo 9)", () => {
     expect(within(sheet).queryByText("Pick for sess-b")).toBeNull();
     expect(within(sheet).getAllByTestId("attention-row")).toHaveLength(1);
     expect(screen.getByTestId("mobile-inbox-badge")).toHaveTextContent("1");
+    expect(calls.some((call) => call.url.includes("/workspace/select"))).toBe(false);
+  });
+  it("asks to confirm a menu pick before anything is sent, then posts the picked option", async () => {
+    const calls = installFetch({ "sess-a": promptOf("sess-a", "menu") });
+    render(<RemoteApp />);
+    const sheet = await openInbox();
+    await within(sheet).findByText("Pick for sess-a");
+    const panel = within(sheet).getByText("Pick for sess-a").closest("[data-testid='attention-prompt']") as HTMLElement;
+    await act(async () => {
+      fireEvent.click(within(panel).getAllByTestId("attention-prompt-option")[1]);
+    });
+    expect(within(panel).getByRole("button", { name: "Confirm" })).toBeInTheDocument();
+    expect(calls.some((call) => call.url.includes("/answer"))).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(within(panel).getByRole("button", { name: "Confirm" }));
+    });
+    const answer = calls.find((call) => call.method === "POST" && call.url.includes("/reference-chat/sess-a/answer"));
+    expect(answer?.body).toMatchObject({ params: { promptId: "p-sess-a", answer: { optionIndex: 1 } } });
+  });
+
+  it("re-reads every row when the events socket reopens, dropping one answered while it was down", async () => {
+    const prompts = { "sess-a": promptOf("sess-a"), "sess-b": promptOf("sess-b") };
+    installFetch(prompts);
+    render(<RemoteApp />);
+    const sheet = await openInbox();
+    await within(sheet).findByText("Pick for sess-b");
+    const events = () => StubWebSocket.instances.filter((socket) => socket.url.includes("/api/v1/events"));
+    const opened = events().length;
+    expect(opened).toBeGreaterThan(0);
+
+    // Answered on the desktop while the socket was down: no push ever reaches the phone.
+    prompts["sess-b"] = { prompt: null, screenRevision: "rev-after", cols: 80, rows: 24 };
+    await act(async () => {
+      for (const socket of events()) socket.onclose?.();
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(events().length).toBeGreaterThan(opened));
+
+    await waitFor(() => expect(within(sheet).queryByText("Pick for sess-b")).toBeNull());
+    expect(within(sheet).getAllByTestId("attention-row")).toHaveLength(1);
+  });
+
+  it("opens a row on the phone only, never moving the desktop's focus", async () => {
+    const calls = installFetch({ "sess-a": promptOf("sess-a"), "sess-b": promptOf("sess-b") });
+    render(<RemoteApp />);
+    const sheet = await openInbox();
+    await within(sheet).findByText("Pick for sess-a");
+    const row = within(sheet).getAllByTestId("attention-row").find((candidate) => candidate.textContent?.includes("alpha"));
+    await act(async () => {
+      fireEvent.click(row as HTMLElement);
+    });
+
+    await waitFor(() => expect(within(screen.getByTestId("mobile-top-bar")).getByText("alpha")).toBeInTheDocument());
     expect(calls.some((call) => call.url.includes("/workspace/select"))).toBe(false);
   });
 });
