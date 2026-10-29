@@ -399,11 +399,20 @@ pub async fn cmd_worktree_delete_preview(
 pub async fn cmd_worktree_status<R: Runtime>(
     app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
-    request: WorktreeStatusRequest,
+    request: WorktreePushRequest,
 ) -> Result<DirtyState, IpcError> {
     let registry = (*registry).clone();
     let workspace_id = request.workspace_id.clone();
-    let identity = request.worktree.clone();
+    let identity = match (request.worktree, request.worktree_path) {
+        (Some(identity), None) => identity,
+        (identity, worktree_path) => {
+            // A checkout addressed by path has no dirty snapshot or event to drive.
+            return with_worktree_path(registry, workspace_id, identity, worktree_path, |path| {
+                Ok(crate::worktree::git_status_porcelain(path)?)
+            })
+            .await;
+        }
+    };
     let event_workspace_id = workspace_id.clone();
     let event_identity = identity.clone();
 
@@ -465,7 +474,7 @@ pub struct WorktreeCommitRequest {
     pub message: String,
 }
 
-/// Push target: a managed worktree, or any checkout inside the project root by path.
+/// Status or push target: a managed worktree, or any checkout inside the project root by path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorktreePushRequest {
@@ -1111,6 +1120,19 @@ mod change_event_tests {
         let mut escape = by_path(&repo);
         escape.paths = vec!["../outside/x".into()];
         assert!(cmd_worktree_stage(app.handle().clone(), app.state(), escape).await.is_err());
+        std::fs::write(repo.join("main.txt"), b"three\n").unwrap();
+        let status = cmd_worktree_status(
+            app.handle().clone(),
+            app.state(),
+            WorktreePushRequest {
+                workspace_id: "paths".into(),
+                worktree: None,
+                worktree_path: Some(repo.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(status.files.iter().any(|file| file.path == "main.txt"), "{status:?}");
         let mut both = by_path(&repo);
         both.worktree = Some(WorktreeIdentity { ws_id: "paths".into(), slug: "x".into() });
         assert!(cmd_worktree_stage(app.handle().clone(), app.state(), both).await.is_err());
