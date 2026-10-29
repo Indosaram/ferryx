@@ -180,7 +180,9 @@ pub async fn apply(hub: &Arc<Hub>, overview: &Value) -> Result<usize> {
 pub fn overview_value(
     snapshots: &[(String, std::result::Result<MachineSnapshot, String>)],
 ) -> Result<Value> {
-    Ok(serde_json::json!({ "snapshots": serde_json::to_value(snapshots)? }))
+    let snapshots = serde_json::to_value(snapshots)
+        .map_err(|error| HubError::message(format!("omo sessions overview: {error}")))?;
+    Ok(serde_json::json!({ "snapshots": snapshots }))
 }
 
 async fn overview() -> Result<Value> {
