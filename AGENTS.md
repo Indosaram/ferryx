@@ -65,6 +65,9 @@ ferryx/
   - Remove when the task ends (pass or fail): `git -C <canonical> worktree remove --force <root>/<slug>` then `git -C <canonical> worktree prune`. Delete per-worktree cargo targets with it. Keep logs/evidence only under `<root>/.evidence/<slug>`.
   - Release builds stay in `~/ferryx-releases/` (managed by the release runbook); the relay UI stays in `~/ferryx-relay-web` on omarchy (referenced by `ferryx-relay.service`). Neither is a worktree root.
   - Never leave a worktree behind at the end of a session; before finishing, run `git -C <canonical> worktree list` on every host you touched and report what remains.
+- **Build Host Selection (remote builds/tests/gates)**: Before starting any cargo/bun build, test, or gate on a remote host, run `host=$(scripts/pick-build-host.sh)` from the canonical clone on this Mac and use the host it prints; never default to a fixed host. It probes omarchy, noye, hark, maho-mac, maho-win and instabox (instabox last) and prints the least-loaded idle one (load/core < 0.5, free RAM >= 8 GB, free disk >= 15 GB, no cargo/rustc/zig running).
+  - The picked host is claimed in `/tmp/ferryx-build-host-locks/<host>`, and other sessions skip it while the claim holds: a lease of `FERRYX_BUILD_CLAIM_TTL` seconds (default 7200), or, with `FERRYX_BUILD_OWNER_PID=<pid>`, for as long as that pid is alive. Run `scripts/pick-build-host.sh --release <host>` as soon as the build ends, pass or fail.
+  - Exit code 3 means no idle host: wait and retry, or ask the user before using paid XenoCI. Never start a second build on a host the picker reported as busy or claimed.
 - **Binary Stream Framing**: 20-byte fixed header; stream pumps coalesce bursts (`10ms` interval or `32KB` max).
 
 ## ANTI-PATTERNS (THIS PROJECT)
