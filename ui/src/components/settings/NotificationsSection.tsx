@@ -10,6 +10,17 @@ import {
 import { Alert, AlertDescription } from "../ui/alert";
 import { useNotificationSettings } from "../../lib/notificationSettings";
 import {
+  disablePhoneAlerts,
+  enablePhoneAlerts,
+  readPhoneAlertState,
+  sendPhoneTestAlert,
+  updatePhoneAlertPreferences,
+  type PhoneAlertPreferences,
+  type PhoneAlertState,
+  type PhoneFinishedMode,
+  type PushRequest,
+} from "../../lib/pushSubscription";
+import {
   getNotificationPermissionStatus,
   openNotificationSystemSettings,
   pickNotificationAudio,
@@ -61,6 +72,132 @@ function describeProbeOutcome(outcome: string | undefined): TestResult {
     default:
       return { tone: "warning", message: "Notification delivery could not be confirmed." };
   }
+}
+
+const PHONE_ALERT_NOTICE: Partial<Record<PhoneAlertState, string>> = {
+  denied: "Notifications are blocked in this browser. Allow them in the browser's site settings, then try again.",
+  dismissed: "Notification permission was not granted.",
+  insecure: "Phone alerts need a secure (HTTPS) connection to this computer.",
+  unsupported: "This browser does not support push notifications.",
+  error: "Phone alerts could not be turned on. Try again.",
+};
+
+const FINISHED_MODE_LABEL: Record<PhoneFinishedMode, string> = {
+  off: "Off",
+  longTurns: "Long turns only",
+  everyTurn: "Every turn",
+};
+
+/**
+ * Phone alerts for the paired remote web app: subscribes this browser to the gateway's Web Push
+ * and keeps the gateway's copy of the alert preferences in step. Permission is asked only when
+ * the user turns Phone alerts on, never on load.
+ */
+export function PhoneAlertsSettings({ request }: { request: PushRequest }) {
+  const { settings, updateSettings } = useNotificationSettings();
+  const [state, setState] = useState<PhoneAlertState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const preferences: PhoneAlertPreferences = {
+    phoneNeedsInput: settings.phoneNeedsInput,
+    phoneFinishedMode: settings.phoneFinishedMode,
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void readPhoneAlertState().then((next) => {
+      if (!cancelled) setState(next);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const enabled = state === "enabled";
+  const unavailable = state === "unsupported" || state === "insecure";
+
+  const handleToggle = async (checked: boolean) => {
+    setBusy(true);
+    setTestResult(null);
+    try {
+      setState(checked ? await enablePhoneAlerts(request, preferences) : await disablePhoneAlerts(request));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const changePreferences = (partial: Partial<PhoneAlertPreferences>) => {
+    updateSettings(partial);
+    if (enabled) void updatePhoneAlertPreferences(request, { ...preferences, ...partial });
+  };
+
+  const handleTest = async () => {
+    setBusy(true);
+    setTestResult(null);
+    try {
+      const result = await sendPhoneTestAlert(request);
+      setTestResult(result.ok
+        ? { tone: "success", message: "Test alert sent. It should appear on this phone in a moment." }
+        : { tone: "error", message: result.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const notice = state ? PHONE_ALERT_NOTICE[state] : undefined;
+
+  return (
+    <SettingsGroup title="Phone alerts" description="Alerts on this phone when an agent needs you, even with the app closed.">
+      <SettingRow label="Phone alerts" description="Allow this browser to receive alerts from this computer.">
+        <Switch
+          aria-label="Phone alerts"
+          data-testid="phone-alerts-toggle"
+          checked={enabled}
+          disabled={busy || state === null || unavailable}
+          onCheckedChange={(checked) => { void handleToggle(checked); }}
+        />
+      </SettingRow>
+      {notice ? (
+        <Alert role="alert" variant={state === "denied" || state === "error" ? "destructive" : "default"} className="my-2" data-testid="phone-alerts-notice">
+          <AlertDescription className="text-[11px] leading-normal">{notice}</AlertDescription>
+        </Alert>
+      ) : null}
+      <SettingRow label="Needs input" description="Alert when an agent is waiting for an answer.">
+        <Switch
+          aria-label="Phone alert when an agent needs input"
+          checked={settings.phoneNeedsInput}
+          onCheckedChange={(checked) => changePreferences({ phoneNeedsInput: checked })}
+        />
+      </SettingRow>
+      <SettingRow label="Finished" description="Alert when an agent finishes a turn. Long turns are one minute or more.">
+        <select
+          aria-label="Phone alert when an agent finishes"
+          value={settings.phoneFinishedMode}
+          onChange={(event) => changePreferences({ phoneFinishedMode: event.target.value as PhoneFinishedMode })}
+          className="h-8 rounded-md border border-input bg-background px-2 text-[12px] text-foreground"
+        >
+          {(Object.keys(FINISHED_MODE_LABEL) as PhoneFinishedMode[]).map((mode) => (
+            <option key={mode} value={mode}>{FINISHED_MODE_LABEL[mode]}</option>
+          ))}
+        </select>
+      </SettingRow>
+      <SettingRow label="Test" description="Send a test alert from this computer to this phone.">
+        <Button
+          type="button"
+          size="sm"
+          data-testid="phone-alerts-test"
+          onClick={() => { void handleTest(); }}
+          disabled={!enabled || busy}
+          className="h-7 shrink-0 px-2.5 text-[11px] font-medium"
+        >
+          Send test to this phone
+        </Button>
+      </SettingRow>
+      {testResult ? (
+        <Alert role="status" variant={testResult.tone === "error" ? "destructive" : "default"} className="mt-2">
+          <AlertDescription className="text-[11px] leading-normal">{testResult.message}</AlertDescription>
+        </Alert>
+      ) : null}
+    </SettingsGroup>
+  );
 }
 
 export function NotificationsSection() {

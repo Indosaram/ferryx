@@ -7,7 +7,7 @@ import {
   resetNotificationSettings,
   saveNotificationSettings,
 } from "../../lib/notificationSettings";
-import { NotificationsSection } from "./NotificationsSection";
+import { NotificationsSection, PhoneAlertsSettings } from "./NotificationsSection";
 
 const native = vi.hoisted(() => ({
   getNotificationPermissionStatus: vi.fn(),
@@ -294,3 +294,89 @@ describe("NotificationsSection", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("PhoneAlertsSettings", () => {
+  const restorers: Array<() => void> = [];
+  function stub(target: object, key: string, value: unknown) {
+    const original = Object.getOwnPropertyDescriptor(target, key);
+    Object.defineProperty(target, key, { value, configurable: true, writable: true });
+    restorers.push(() => (original ? Object.defineProperty(target, key, original) : Reflect.deleteProperty(target, key)));
+  }
+
+  function installBrowser(permission: NotificationPermission, answer: NotificationPermission = "granted") {
+    const notification = {
+      permission,
+      requestPermission: vi.fn(async () => { notification.permission = answer; return answer; }),
+    };
+    let current: unknown = null;
+    const subscription = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+      options: { applicationServerKey: new Uint8Array([1, 2, 3]).buffer },
+      toJSON: () => ({ endpoint: "https://fcm.googleapis.com/fcm/send/abc", keys: { p256dh: "p", auth: "a" } }),
+      unsubscribe: vi.fn(async () => { current = null; return true; }),
+    };
+    const pushManager = {
+      getSubscription: vi.fn(async () => current),
+      subscribe: vi.fn(async () => { current = subscription; return subscription; }),
+    };
+    stub(globalThis, "Notification", notification);
+    stub(window, "isSecureContext", true);
+    stub(window, "PushManager", class PushManager {});
+    stub(navigator, "serviceWorker", { ready: Promise.resolve({ pushManager }), register: vi.fn() });
+    return { notification, pushManager };
+  }
+
+  function gateway() {
+    return vi.fn(async (path: string, _init?: RequestInit) => {
+      if (path === "/api/push/vapid-public-key") return new Response(JSON.stringify({ publicKey: "AQID" }), { status: 200 });
+      if (path === "/api/v1/push/test") return new Response(JSON.stringify({ sent: 1, delivered: 1, removed: 0 }), { status: 200 });
+      return new Response(null, { status: 204 });
+    });
+  }
+
+  beforeEach(() => resetNotificationSettings());
+  afterEach(() => {
+    cleanup();
+    while (restorers.length) restorers.pop()?.();
+    resetNotificationSettings();
+  });
+
+  it("asks for permission only on the Phone alerts tap, then subscribes and sends a test", async () => {
+    const { notification, pushManager } = installBrowser("default");
+    const request = gateway();
+    await act(async () => { render(<PhoneAlertsSettings request={request} />); });
+    expect(notification.requestPermission).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /send test to this phone/i })).toBeDisabled();
+
+    await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Phone alerts" })); });
+
+    expect(notification.requestPermission).toHaveBeenCalledTimes(1);
+    expect(pushManager.subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: new Uint8Array([1, 2, 3]) });
+    expect(screen.getByRole("switch", { name: "Phone alerts" })).toHaveAttribute("data-state", "checked");
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole("combobox", { name: /finishes/i }), { target: { value: "everyTurn" } });
+    });
+    expect(loadNotificationSettings().phoneFinishedMode).toBe("everyTurn");
+    expect(request).toHaveBeenCalledWith("/api/push/preferences", expect.objectContaining({
+      body: JSON.stringify({ phoneNeedsInput: true, phoneFinishedMode: "everyTurn" }),
+    }));
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /send test to this phone/i })); });
+    expect(request).toHaveBeenCalledWith("/api/v1/push/test", { method: "POST" });
+    expect(screen.getByText(/test alert sent/i)).toBeInTheDocument();
+  });
+
+  it("explains a blocked browser and never subscribes", async () => {
+    const { notification, pushManager } = installBrowser("default", "denied");
+    const request = gateway();
+    await act(async () => { render(<PhoneAlertsSettings request={request} />); });
+    await act(async () => { fireEvent.click(screen.getByRole("switch", { name: "Phone alerts" })); });
+
+    expect(notification.requestPermission).toHaveBeenCalledTimes(1);
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(screen.getByText("Notifications are blocked in this browser", { exact: false })).toBeInTheDocument();
+  });
+});
+
