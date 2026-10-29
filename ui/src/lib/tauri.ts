@@ -90,6 +90,11 @@ export type LocalBranch = {
   isCurrent: boolean;
 };
 
+export type ProjectRefs = {
+  branches: LocalBranch[];
+  tags: string[];
+};
+
 export type GitHubIssuePreview = {
   number: number;
   title: string;
@@ -292,6 +297,11 @@ export async function listProjectBranches(workspaceId: string) {
   return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
 }
 
+/// Local branches and tags usable as a worktree base ref (no remote branches).
+export async function listProjectRefs(workspaceId: string) {
+  return invokeCommand<ProjectRefs>("cmd_project_refs", { request: { workspaceId } });
+}
+
 /// Reads one GitHub issue through the already authenticated `gh` executable.
 /// The result is inert preview data: Ferryx never runs or submits issue text.
 export async function previewGitHubIssue(request: {
@@ -434,6 +444,52 @@ export async function createWorktree(request: {
 
 export async function getWorktreeStatus(request: WorktreeStatusRequest) {
   return invokeCommand<DirtyState>("cmd_worktree_status", { request });
+}
+
+/** What a worktree diff compares: unstaged edits, the index, or one commit. */
+export type GitDiffScope =
+  | { kind: "workingTree" }
+  | { kind: "staged" }
+  | { kind: "commit"; sha: string };
+
+export type GitPushResult = { remote: string; branch: string; setUpstream: boolean };
+
+/** Unified patch text; `file` is relative to the worktree root. */
+export async function getWorktreeDiff(request: WorktreeStatusRequest & { scope: GitDiffScope; file?: string | null }) {
+  return invokeCommand<string>("cmd_worktree_diff", {
+    request: {
+      workspaceId: request.workspaceId,
+      worktree: request.worktree,
+      scope: request.scope,
+      file: request.file ?? null,
+    },
+  });
+}
+
+export async function stageWorktreePaths(request: WorktreeStatusRequest & { paths: string[] }) {
+  await invokeCommand<void>("cmd_worktree_stage", {
+    request: { workspaceId: request.workspaceId, worktree: request.worktree, paths: request.paths },
+  });
+}
+
+export async function unstageWorktreePaths(request: WorktreeStatusRequest & { paths: string[] }) {
+  await invokeCommand<void>("cmd_worktree_unstage", {
+    request: { workspaceId: request.workspaceId, worktree: request.worktree, paths: request.paths },
+  });
+}
+
+/** Commits the staged changes; resolves to the new sha. Rejects with `GIT_NOTHING_TO_COMMIT`. */
+export async function commitWorktree(request: WorktreeStatusRequest & { message: string }) {
+  return invokeCommand<string>("cmd_worktree_commit", {
+    request: { workspaceId: request.workspaceId, worktree: request.worktree, message: request.message },
+  });
+}
+
+/** Pushes without force; rejects with `GIT_PUSH_REJECTED` or `GIT_NO_REMOTE`. */
+export async function pushWorktree(request: WorktreeStatusRequest) {
+  return invokeCommand<GitPushResult>("cmd_worktree_push", {
+    request: { workspaceId: request.workspaceId, worktree: request.worktree },
+  });
 }
 
 export async function previewWorktreeDelete(request: WorktreeStatusRequest) {

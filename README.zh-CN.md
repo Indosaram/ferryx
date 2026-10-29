@@ -6,10 +6,10 @@
 
 # Ferryx
 
-### 在同一个仓库中并行运行 Claude Code、Codex 以及任意 CLI 智能体——每个都在独立的 worktree 中，关闭应用后继续运行，还能用手机操控。
+### 为编码智能体打造的原生终端，类似 cmux，但同时支持 macOS、Windows 和 Linux。
 
-内置的监督者会按你的方式回答常规提示，只把有风险的操作交给你。
-原生 Rust 与 Tauri v2，libghostty 终端核心，不使用 Electron。
+关闭应用后 Claude Code、Codex 以及任意 CLI 智能体继续运行，远程 Linux 机器无需 SSH 即可连接，每个标签页都会显示哪个智能体在等你。
+原生 Rust 与 Tauri v2，libghostty 终端核心，不使用 Electron。通道监督者已在 `main` 分支，将随下一个版本发布。
 
 [**下载**](https://github.com/Indosaram/ferryx/releases/latest) &nbsp;·&nbsp;
 [**网站**](https://ferryx.dev/) &nbsp;·&nbsp;

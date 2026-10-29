@@ -438,10 +438,21 @@ export type FileTab = {
   pinned?: boolean;
 };
 
-export type WorkspaceTab = TerminalTab | BrowserTab | FileTab;
+/** Git changes of one managed worktree: file list, diff, stage, commit and push. */
+export type ChangesTab = {
+  kind: "changes";
+  id: string;
+  label: string;
+  workspaceId: string;
+  worktreePath: string;
+  worktree: WorktreeIdentity;
+  pinned?: boolean;
+};
+
+export type WorkspaceTab = TerminalTab | BrowserTab | FileTab | ChangesTab;
 
 export function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
-  return tab.kind !== "browser" && tab.kind !== "file";
+  return tab.kind !== "browser" && tab.kind !== "file" && tab.kind !== "changes";
 }
 
 export type CreateBrowserRequest = {
@@ -577,7 +588,18 @@ export type FilePaneContent = {
   readonly previewId: string;
 };
 
-export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent | FilePaneContent;
+export type ChangesPaneContent = {
+  readonly kind: "changes";
+  readonly workspaceId: string;
+  readonly worktreePath: string;
+  readonly worktree: WorktreeIdentity;
+};
+
+export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent | FilePaneContent | ChangesPaneContent;
+
+export function createChangesPaneContent(changes: Omit<ChangesPaneContent, "kind">): ChangesPaneContent {
+  return { kind: "changes", workspaceId: changes.workspaceId, worktreePath: changes.worktreePath, worktree: changes.worktree };
+}
 
 export function createFilePaneContent(file: Omit<FilePaneContent, "kind">): FilePaneContent {
   return { kind: "file", ...file };
@@ -910,7 +932,12 @@ export interface PersistedBrowserTabState {
 export interface PersistedTab {
   id: string;
   label: string;
-  kind?: "terminal" | "browser" | "file";
+  kind?: "terminal" | "browser" | "file" | "changes";
+  changes?: {
+    workspaceId: string;
+    worktreePath: string;
+    worktree: WorktreeIdentity;
+  };
   file?: {
     path: string;
     backendSessionId: string;

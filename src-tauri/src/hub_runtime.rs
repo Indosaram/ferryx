@@ -1492,10 +1492,12 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             }
         }));
     }
-    // omo's cron triage and auto-fix: queued cron problems go to the remediator.
+    // omo's cron triage and auto-fix: queued cron problems go to the remediator. A job that
+    // needs the owner is told in the owner DM; a verified fix is reported in the home channel.
     tasks.push(tokio::spawn(ferryx_hub::cron_remediate::serve(
         launch.hub.pool.clone(),
         Some(launch.hub.owner_session().storage_key()),
+        Some(launch.hub.home_session().storage_key()),
     )));
     for task in &tasks {
         HUB_TASKS.track(task);

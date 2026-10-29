@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedAgent } from "../../lib/agentsSettings";
@@ -22,6 +22,36 @@ vi.mock("./AccountStep", () => ({
     <button type="button" data-testid="mock-account-link" onClick={() => onLinked?.()} />
   ),
 }));
+
+const remoteCalls = vi.hoisted(() => ({
+  getRemoteStatus: vi.fn(),
+  listRemoteDevices: vi.fn(),
+  createPairingCode: vi.fn(),
+  enableRemoteGateway: vi.fn(),
+}));
+
+vi.mock("../../lib/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/tauri")>()),
+  ...remoteCalls,
+}));
+
+const gatewayOff = {
+  enabled: false,
+  mode: "off" as const,
+  port: 43821,
+  boundAddress: null,
+  localIp: null,
+  relayUrl: null,
+};
+const gatewayOn = { ...gatewayOff, enabled: true, mode: "localNetwork" as const, localIp: "192.168.0.5" };
+const pairedPhone = {
+  id: "phone-1",
+  name: "Phone",
+  permission: "view" as const,
+  createdAt: 1,
+  lastSeenAt: 1,
+  revoked: false,
+};
 
 const mockAgents: readonly ResolvedAgent[] = [
   {
@@ -404,5 +434,99 @@ describe("WelcomeWizard", () => {
     });
     const { container } = render(<WelcomeWizard {...props} />);
     expect(container.firstChild).toBeNull();
+  });
+
+  describe("phone step", () => {
+    const phoneSteps = ["project", "phone", "account"] as readonly OnboardingStepId[];
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("offers to turn on remote access instead of enabling it silently", async () => {
+      remoteCalls.getRemoteStatus.mockResolvedValue(gatewayOff);
+      remoteCalls.listRemoteDevices.mockResolvedValue([]);
+      remoteCalls.enableRemoteGateway.mockResolvedValue(gatewayOn);
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps: phoneSteps, initialStepIndex: 1 })} />);
+      });
+
+      expect(remoteCalls.enableRemoteGateway).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Pair a device" })).toBeNull();
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-phone-enable"));
+      });
+      expect(remoteCalls.enableRemoteGateway).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("onboarding-phone-enable")).toBeNull();
+      expect(screen.getByRole("button", { name: "Pair a device" })).toBeDefined();
+      expect(screen.getByTestId("onboarding-phone-url").textContent).toBe("http://192.168.0.5:43821");
+    });
+
+    it("shows the issued code with a countdown", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      remoteCalls.getRemoteStatus.mockResolvedValue(gatewayOn);
+      remoteCalls.listRemoteDevices.mockResolvedValue([]);
+      remoteCalls.createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 600 });
+      await act(async () => {
+        render(<WelcomeWizard {...createDefaultProps({ steps: phoneSteps, initialStepIndex: 1 })} />);
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Pair a device" }));
+      });
+      expect(remoteCalls.createPairingCode).toHaveBeenCalledWith("view");
+      expect(screen.getByTestId("pair-device-code").textContent).toBe("482913");
+      expect(screen.getByTestId("pair-device-countdown").textContent).toContain("10:00");
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.getByTestId("pair-device-countdown").textContent).toContain("9:59");
+    });
+
+    it("completes once a new device appears in the polled device list", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      remoteCalls.getRemoteStatus.mockResolvedValue(gatewayOn);
+      remoteCalls.listRemoteDevices.mockResolvedValue([]);
+      const onStepCompleted = vi.fn();
+      await act(async () => {
+        render(
+          <WelcomeWizard
+            {...createDefaultProps({ steps: phoneSteps, initialStepIndex: 1, onStepCompleted })}
+          />,
+        );
+      });
+
+      expect(screen.getByTestId("onboarding-next").textContent).toBe("Skip");
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(screen.queryByTestId("onboarding-phone-connected")).toBeNull();
+      expect(onStepCompleted).not.toHaveBeenCalled();
+
+      remoteCalls.listRemoteDevices.mockResolvedValue([pairedPhone]);
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(screen.getByTestId("onboarding-phone-connected")).toBeDefined();
+      expect(onStepCompleted).toHaveBeenCalledWith("phone");
+      expect(screen.getByTestId("onboarding-next").textContent).toBe("Continue");
+    });
+
+    it("Skip moves on without recording the phone step", async () => {
+      remoteCalls.getRemoteStatus.mockResolvedValue(gatewayOff);
+      remoteCalls.listRemoteDevices.mockResolvedValue([]);
+      const onStepCompleted = vi.fn();
+      await act(async () => {
+        render(
+          <WelcomeWizard
+            {...createDefaultProps({ steps: phoneSteps, initialStepIndex: 1, onStepCompleted })}
+          />,
+        );
+      });
+
+      fireEvent.click(screen.getByTestId("onboarding-next"));
+      expect(onStepCompleted).not.toHaveBeenCalled();
+      expect(screen.getByTestId("onboarding-rail-account").getAttribute("aria-current")).toBe("step");
+    });
   });
 });

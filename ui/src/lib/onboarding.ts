@@ -10,7 +10,8 @@ export type OnboardingStepId =
   | "features"
   | "agents"
   | "cli"
-  | "project";
+  | "project"
+  | "phone";
 
 export const ONBOARDING_VERSION = 1;
 
@@ -20,7 +21,8 @@ export const ONBOARDING_VERSION = 1;
  * notify, Full Disk Access when a read hits a TCC-protected path); Settings >
  * Permissions remains the place to review all of them.
  *
- * The product comes first; signing in is the last step and can be skipped.
+ * The product comes first; pairing a phone and signing in close the flow and
+ * can both be skipped.
  */
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "intro",
@@ -28,6 +30,7 @@ export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "agents",
   "cli",
   "project",
+  "phone",
   "account",
 ];
 
@@ -48,6 +51,8 @@ export type OnboardingContext = {
   projectCount: number;
   /** True once this computer is enrolled to the signed-in Ferryx account. */
   accountLinked?: boolean;
+  /** Paired remote devices, when known; unknown never nags. */
+  pairedDeviceCount?: number | null;
 };
 
 function browserStorage(): Storage | null {
@@ -237,6 +242,8 @@ export function isOnboardingStepSatisfied(
       return false;
     case "project":
       return ctx.projectCount > 0;
+    case "phone":
+      return ctx.pairedDeviceCount == null || ctx.pairedDeviceCount > 0;
   }
 }
 
@@ -298,8 +305,8 @@ export function shouldAutoOpenOnboarding(
     // (users who finished the flow before it existed have no "cli" entry), so
     // neither may be the sole reason the wizard pops back open after an upgrade.
     pendingOnboardingSteps(state, ctx).some(
-      // "account" is optional for existing users too: signing in must not force the wizard open.
-      (step) => step !== "features" && step !== "cli" && step !== "account"
+      // "account" and "phone" are optional for existing users too: neither may force the wizard open.
+      (step) => step !== "features" && step !== "cli" && step !== "account" && step !== "phone"
     )
   );
 }

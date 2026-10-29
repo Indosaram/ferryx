@@ -99,6 +99,7 @@ import {
   getCliLauncherStatus,
   getAccountEnrollmentStatus,
   getInitialProject,
+  listRemoteDevices,
   getSystemPermissionsStatus,
   isTauriRuntime,
   listWorktrees,
@@ -123,7 +124,6 @@ import {
   unregisterProject,
   saveSession,
   setBadgeCount,
-  spawnTerminal,
   spawnTerminalDetailed,
   retryPairedSession,
   retryTerminalRemoteSession,
@@ -815,6 +815,7 @@ function WorkspaceApp({
     openTab,
     createBrowserTab,
     openFilePreviewTab,
+    openChangesTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab,
@@ -2140,6 +2141,12 @@ function WorkspaceApp({
   } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [pendingWorktree, setPendingWorktree] = useState<Worktree | null>(null);
+  // Agent chosen in the Add Worktree dialog for a worktree created in a non-active project;
+  // it starts once the project switch lands the pending worktree.
+  const pendingWorktreeAgentRef = useRef<{ path: string; agentId: string } | null>(null);
+  const launchAgentByIdInWorktreeRef = useRef<(worktree: Worktree, agentId: string) => Promise<void>>(
+    async () => undefined,
+  );
   const pendingWorktreePath = pendingWorktree?.path ?? null;
   const setPendingWorktreePath = useCallback((path: string | null) => {
     if (path === null) {
@@ -2377,7 +2384,13 @@ function WorkspaceApp({
       tabCount: state.layout.tabs.length,
     });
     setPendingWorktree(null);
-    runTabOperation(() => ensureTabForWorktree(target));
+    const pendingAgent = pendingWorktreeAgentRef.current;
+    pendingWorktreeAgentRef.current = null;
+    const agentId = pendingAgent?.path === target.path ? pendingAgent.agentId : null;
+    runTabOperation(async () => {
+      await ensureTabForWorktree(target);
+      if (agentId) await launchAgentByIdInWorktreeRef.current(target, agentId);
+    });
   }, [
     activeProject.workspaceId,
     activeProject.target,
@@ -2398,7 +2411,7 @@ function WorkspaceApp({
       const currentState = stateRef.current;
       const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
-      if (tab.kind === "browser" || tab.kind === "file") {
+      if (!isTerminalTab(tab)) {
         activateTab(tabId);
         return;
       }
@@ -2678,8 +2691,10 @@ function WorkspaceApp({
     });
   }, [openTab, runTabOperation]);
 
-  const handleLaunchAgent = useCallback(
-    async (agent: { name: string; command: string; args: string }) => {
+  // Starts an agent in a new tab of the given worktree of the active project, which need not be
+  // the active worktree (a freshly created one is not selected yet).
+  const launchAgentInWorktree = useCallback(
+    async (targetWorktree: Worktree, agent: { name: string; command: string; args: string }) => {
       if (activeRemoteHostRef.current) return;
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
@@ -2688,21 +2703,26 @@ function WorkspaceApp({
         return;
       }
       try {
-        const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
-        if (!targetWorktree) return;
         await ensureTerminalEvents().catch(() => undefined);
         const agentGrid = await measureInitialGeometry({
           kind: "newTab",
           groupId: stateRef.current.layout.focusedGroupId ?? null,
         }).catch(() => null);
-        const backendSessionId = await spawnTerminal({
+        const spawned = await spawnTerminalDetailed({
           workspaceId: activeProjectRef.current.workspaceId,
           worktree: worktreeIdentity(targetWorktree),
           cwd: targetWorktree.path,
           ...initialGridFields(agentGrid),
         });
+        const backendSessionId = spawned.sessionId;
         const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
-        await openTab(targetWorktree, label, backendSessionId);
+        // The pane needs the daemon epoch and incarnation to form its attach tuple; a bare id
+        // leaves the tab blank and unable to accept input.
+        await openTab(targetWorktree, label, {
+          sessionId: backendSessionId,
+          daemonEpoch: spawned.daemonEpoch ?? null,
+          incarnation: spawned.session?.incarnation ?? null,
+        });
         const fullCommand = `${agent.command} ${agent.args}`.trim();
         if (fullCommand) {
           await writeTerminal({ sessionId: backendSessionId, data: `${fullCommand}\r` });
@@ -2713,6 +2733,29 @@ function WorkspaceApp({
     },
     [openTab, reportRuntimeError],
   );
+
+  const handleLaunchAgent = useCallback(
+    async (agent: { name: string; command: string; args: string }) => {
+      const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
+      if (!targetWorktree) return;
+      await launchAgentInWorktree(targetWorktree, agent);
+    },
+    [launchAgentInWorktree],
+  );
+
+  // Resolves a dialog's agent choice against the agents launchable right now.
+  const launchAgentByIdInWorktree = useCallback(
+    async (targetWorktree: Worktree, agentId: string) => {
+      const agent = getLaunchableAgents(resolvedAgentsRef.current).find((candidate) => candidate.name === agentId);
+      if (!agent) {
+        toast.warning(`${agentId} is not available, so the new worktree opened with a shell only.`);
+        return;
+      }
+      await launchAgentInWorktree(targetWorktree, agent);
+    },
+    [launchAgentInWorktree],
+  );
+  launchAgentByIdInWorktreeRef.current = launchAgentByIdInWorktree;
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -3099,6 +3142,30 @@ function WorkspaceApp({
     setIsCreateOpen(false);
     setCreateTargetProject(null);
   }, []);
+  const handleShowChanges = useCallback(
+    (worktree: Worktree) => {
+      if (activeRemoteHostRef.current) return;
+      const ownerId = resolveWorktreeOwnerId(worktree, projectsRef.current, activeProjectRef.current.workspaceId);
+      const owner = projectsRef.current.find((project) => project.workspaceId === ownerId);
+      if (!owner || (owner.target && owner.target.kind !== "local") || !worktreeIdentity(worktree)) return;
+      if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
+        // Tabs live in the owning project's store; switch there first, then open Changes again.
+        handleSelectWorktree(worktree);
+        return;
+      }
+      openChangesTab(worktree, owner.workspaceId);
+    },
+    [handleSelectWorktree, openChangesTab],
+  );
+  const activeWorktreeCanShowChanges = Boolean(
+    activeWorktree &&
+      worktreeIdentity(activeWorktree) &&
+      (!activeProject.target || activeProject.target.kind === "local"),
+  );
+  const handleShowActiveWorktreeChanges = useCallback(() => {
+    const worktree = activeWorktreeRef.current;
+    if (worktree) handleShowChanges(worktree);
+  }, [handleShowChanges]);
   const handleOpenCommandPalette = useCallback(() => {
     if (activeRemoteHostRef.current) return;
     setIsCommandPaletteOpen(true);
@@ -3145,10 +3212,11 @@ function WorkspaceApp({
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (activeRemoteHostRef.current) return;
-      const [permissions, cli, enrollment] = await Promise.all([
+      const [permissions, cli, enrollment, devices] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3160,6 +3228,7 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
       };
       const state = loadOnboardingState();
       if (shouldAutoOpenOnboarding(state, ctx)) {
@@ -3178,10 +3247,11 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     const handleOpenOnboarding = async () => {
-      const [permissions, cli, enrollment] = await Promise.all([
+      const [permissions, cli, enrollment, devices] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3193,6 +3263,7 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
       setOnboardingInitialStepIndex(0);
@@ -3980,6 +4051,7 @@ function WorkspaceApp({
           onCreateWorktree={handleOpenCreateWorktree}
           onDeleteWorktree={handleDeleteWorktree}
           onResetAgentState={handleResetWorktreeAgentState}
+          onShowChanges={handleShowChanges}
           onManageDisk={setDiskManageProject}
           onOpenHistory={setHistoryProject}
           onOpenSettings={handleOpenSettings}
@@ -4145,6 +4217,7 @@ function WorkspaceApp({
           tabs={state.layout.tabs}
           onSelectWorktree={handleSelectWorktree}
           onSelectTab={handleSelectTerminalTab}
+          onShowChanges={activeWorktreeCanShowChanges ? handleShowActiveWorktreeChanges : undefined}
           onClose={handleCloseCommandPalette}
         />
       ) : null}
@@ -4230,16 +4303,20 @@ function WorkspaceApp({
         <AddWorktreeDialog
           project={createTargetProject ?? activeProject}
           onClose={handleCloseCreateWorktree}
-          onCreated={async (worktree) => {
+          agents={launchableAgents}
+          defaultAgentId={agentSettings.defaultAgentId}
+          onCreated={async (worktree, launch) => {
             if (activeRemoteHostRef.current) return;
             const owner = createTargetProject ?? activeProject;
             if (owner.workspaceId !== activeProject.workspaceId) {
+              pendingWorktreeAgentRef.current = launch ? { path: worktree.path, agentId: launch.agentId } : null;
               handleSelectProject(owner);
               setPendingWorktree(worktree);
               return;
             }
             await refreshWorktrees();
             await ensureTabForWorktree(worktree).catch(reportRuntimeError);
+            if (launch) await launchAgentByIdInWorktree(worktree, launch.agentId);
           }}
         />
       ) : null}
@@ -4315,7 +4392,7 @@ function WorkspaceApp({
                 kind: "newTab",
                 groupId: stateRef.current.layout.focusedGroupId ?? null,
               }).catch(() => null);
-              const backendSessionId = await spawnTerminal({
+              const spawned = await spawnTerminalDetailed({
                 workspaceId: project.workspaceId,
                 worktree: targetWorktree ? worktreeIdentity(targetWorktree) : null,
                 cwd: entry.cwd || targetWorktree?.path || project.repoRoot,
@@ -4336,7 +4413,11 @@ function WorkspaceApp({
               });
               const label = agentHistoryProviderLabel(entry.provider);
               if (targetWorktree) {
-                await openTab(targetWorktree, label, backendSessionId);
+                await openTab(targetWorktree, label, {
+                  sessionId: spawned.sessionId,
+                  daemonEpoch: spawned.daemonEpoch ?? null,
+                  incarnation: spawned.session?.incarnation ?? null,
+                });
               }
               setHistoryProject(null);
             } catch (error) {

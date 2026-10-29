@@ -13,6 +13,7 @@ import { CliStep } from "./CliStep";
 import { FeaturesStep } from "./FeaturesStep";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { IntroStep } from "./IntroStep";
+import { PhoneStep } from "./PhoneStep";
 
 export type WelcomeWizardProps = {
   steps: readonly OnboardingStepId[];
@@ -37,6 +38,7 @@ const STEP_TITLES: Record<OnboardingStepId, string> = {
   agents: "Agents",
   cli: "Command line",
   project: "First project",
+  phone: "Phone",
 };
 
 const STEP_HEADINGS: Record<OnboardingStepId, string> = {
@@ -46,6 +48,7 @@ const STEP_HEADINGS: Record<OnboardingStepId, string> = {
   agents: "Choose your default agent",
   cli: "Install the command-line tool",
   project: "Open your first project",
+  phone: "Connect your phone",
 };
 
 function clampStepIndex(index: number, total: number): number {
@@ -78,6 +81,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const [accountLinked, setAccountLinked] = useState(() =>
     doneSteps.includes("account"),
   );
+  const [phonePaired, setPhonePaired] = useState(false);
 
   const panelRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -87,6 +91,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const isFirst = currentStepIndex === 0;
   const isLast = currentStepIndex === steps.length - 1;
   const finishingWithoutAccount = currentStep === "account" && !accountLinked;
+  // Leaving the phone step without a paired device is a skip: it is not recorded as completed.
+  const skippingPhone = currentStep === "phone" && !phonePaired;
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
@@ -97,7 +103,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   }
 
   const handleNext = () => {
-    onStepCompleted(currentStep);
+    if (!skippingPhone) onStepCompleted(currentStep);
     setStepIndex((prev) => Math.min(steps.length - 1, prev + 1));
   };
 
@@ -107,7 +113,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
 
   const handleFinish = () => {
     // Skipping sign-in must not record the account step as completed.
-    if (!finishingWithoutAccount) {
+    if (!finishingWithoutAccount && !skippingPhone) {
       onStepCompleted(currentStep);
     }
     onFinish();
@@ -161,6 +167,8 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return "Optional. Use ferryx from any terminal. You can also install it later in Settings > General.";
       case "project":
         return "Start with a folder on this computer, or pair another machine.";
+      case "phone":
+        return "Optional. Pair your phone to follow and answer agents away from your desk.";
     }
   };
 
@@ -193,6 +201,16 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
             onConnectMachine={() => {
               onStepCompleted("project");
               onConnectMachine();
+            }}
+          />
+        );
+      case "phone":
+        return (
+          <PhoneStep
+            paired={phonePaired}
+            onPaired={() => {
+              setPhonePaired(true);
+              onStepCompleted("phone");
             }}
           />
         );
@@ -342,7 +360,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   onClick={handleFinish}
                   className="min-w-24"
                 >
-                  {finishingWithoutAccount ? "Finish without signing in" : "Done"}
+                  {finishingWithoutAccount ? "Finish without signing in" : skippingPhone ? "Skip" : "Done"}
                 </Button>
               ) : (
                 <Button
@@ -351,7 +369,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   onClick={handleNext}
                   className="min-w-24"
                 >
-                  Continue
+                  {skippingPhone ? "Skip" : "Continue"}
                 </Button>
               )}
             </div>
