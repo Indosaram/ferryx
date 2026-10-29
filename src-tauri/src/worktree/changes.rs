@@ -91,28 +91,35 @@ fn jailed_path(root: &Path, raw: &str) -> Result<String, GitChangeError> {
     if relative.is_empty() {
         return Err(invalid_path(raw, "path must name a file or directory"));
     }
-    // A symlinked parent may still point outside the worktree; resolve what exists.
+    // A symlinked or junctioned parent may still point outside the worktree. Resolve the
+    // nearest entry that exists (a file may legitimately not exist yet) and fail closed when
+    // it cannot be resolved.
+    let canonical_root = std::fs::canonicalize(root).map_err(WorktreeError::Io)?;
+    let outside = || -> GitChangeError {
+        WorktreeError::PathOutsideWorkspace {
+            path: PathBuf::from(raw),
+            root: canonical_root.clone(),
+        }
+        .into()
+    };
     let joined = root.join(relative.join("/"));
     let mut existing = joined.as_path();
-    while !existing.exists() {
-        match existing.parent() {
-            Some(parent) => existing = parent,
-            None => break,
-        }
-    }
-    if let (Ok(resolved), Ok(canonical_root)) = (
-        std::fs::canonicalize(existing),
-        std::fs::canonicalize(root),
-    ) {
-        if !resolved.starts_with(&canonical_root) {
-            return Err(WorktreeError::PathOutsideWorkspace {
-                path: PathBuf::from(raw),
-                root: canonical_root,
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match existing.parent() {
+                    Some(parent) if existing != root => existing = parent,
+                    _ => return Err(outside()),
+                }
             }
-            .into());
+            Err(_) => return Err(outside()),
         }
     }
-    Ok(relative.join("/"))
+    match std::fs::canonicalize(existing) {
+        Ok(resolved) if resolved.starts_with(&canonical_root) => Ok(relative.join("/")),
+        _ => Err(outside()),
+    }
 }
 
 fn jailed_paths(root: &Path, paths: &[String]) -> Result<Vec<String>, GitChangeError> {
@@ -371,6 +378,50 @@ mod tests {
         fs::write(repo.join("file.txt"), "changed\n").unwrap();
         assert!(git_stage(&repo, &[":(top)file.txt".into()]).is_err());
         assert!(git_diff(&repo, &GitDiffScope::Staged, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn new_files_in_existing_or_new_directories_are_allowed() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        fs::create_dir(repo.join("sub")).unwrap();
+        assert_eq!(jailed_path(&repo, "sub/new.txt").unwrap(), "sub/new.txt");
+        assert_eq!(jailed_path(&repo, "fresh/dir/new.txt").unwrap(), "fresh/dir/new.txt");
+        assert_eq!(jailed_path(&repo, "file.txt").unwrap(), "file.txt");
+    }
+
+    #[test]
+    fn unresolvable_paths_are_refused() {
+        let (dir, repo, _bare) = repo_with_bare_remote();
+        let missing = dir.path().join("missing-target");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&missing, repo.join("dangling")).unwrap();
+            std::os::unix::fs::symlink(repo.join("loop"), repo.join("loop")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(repo.join("dangling"))
+                .arg(&missing)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let mut bad_paths = vec!["dangling/new.txt"];
+        if cfg!(unix) {
+            bad_paths.push("loop/x");
+        }
+        for bad in bad_paths {
+            let result = git_stage(&repo, &[bad.to_string()]);
+            assert!(
+                matches!(
+                    result,
+                    Err(GitChangeError::Worktree(WorktreeError::PathOutsideWorkspace { .. }))
+                ),
+                "{bad}: {result:?}"
+            );
+        }
     }
 
     #[test]
