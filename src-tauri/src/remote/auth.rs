@@ -2014,46 +2014,58 @@ mod tests {
         assert!(gateway.exchange_pairing_code(&expired, "Expired").is_err());
     }
 
+    /// Writes one pairing code of `scope` to a fresh store, rewrites its on-disk issue time to
+    /// `ago` before now, and returns a gateway that reloads that store.
+    fn reloaded_with_code_issued(scope: DeviceAccessScope, ago: Duration) -> (tempfile::TempDir, AuthManager, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-auth.json");
+        let issuer = AuthManager::with_persistence(Some(path.clone()));
+        let code = match scope {
+            DeviceAccessScope::Mirror => issuer.create_pairing_code(DevicePermission::View),
+            DeviceAccessScope::Machine => issuer
+                .create_scoped_pairing_code(DevicePermission::Control, scope)
+                .unwrap(),
+        };
+        drop(issuer);
+        let issued = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .saturating_sub(ago);
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["pairingCodes"][code.as_str()]["created_at"] = serde_json::to_value(issued).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        (dir, AuthManager::with_persistence(Some(path)), code)
+    }
+
     /// A code persisted by another process (or before a restart) that is already past its
     /// lifetime must load expired, however long ago it was issued.
     #[test]
     fn a_reloaded_code_past_its_lifetime_is_refused_as_expired() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remote-auth.json");
-        let issuer = AuthManager::with_persistence(Some(path.clone()));
-        let code = issuer.create_pairing_code(DevicePermission::View);
-        let machine = issuer
-            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
-            .unwrap();
-        drop(issuer);
-
-        // Rewrite the store as if both codes were issued PAIRING_EXPIRY + 10 s ago (the machine
-        // code at its 600 s lifetime + 10 s), in wall-clock time on disk.
-        let unix = |ago: Duration| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .saturating_sub(ago)
-        };
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        for (key, ago) in [
-            (&code, PAIRING_EXPIRY + Duration::from_secs(10)),
-            (&machine, LONGEST_PAIRING_LIFETIME + Duration::from_secs(10)),
-        ] {
-            raw["pairingCodes"][key.as_str()]["created_at"] =
-                serde_json::to_value(unix(ago)).unwrap();
-        }
-        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
-
-        let gateway = AuthManager::with_persistence(Some(path));
-        assert_eq!(
-            gateway.exchange_pairing_code_from(&code, "late phone", None, None).unwrap_err(),
-            AuthError::ExpiredPairingCode
+        let (_dir, gateway, code) = reloaded_with_code_issued(
+            DeviceAccessScope::Mirror,
+            PAIRING_EXPIRY + Duration::from_secs(10),
         );
-        assert_eq!(
-            gateway.exchange_pairing_code_from(&machine, "late machine", None, None).unwrap_err(),
-            AuthError::ExpiredPairingCode
+        let result = gateway.exchange_pairing_code_from(&code, "late phone", None, None);
+        assert!(
+            matches!(result, Err(AuthError::ExpiredPairingCode)),
+            "expired mirror code: {:?}",
+            result.map(|(_, device)| device.id)
+        );
+        assert!(gateway.list_devices().is_empty());
+    }
+
+    #[test]
+    fn a_reloaded_machine_code_past_its_lifetime_is_refused_as_expired() {
+        let (_dir, gateway, code) = reloaded_with_code_issued(
+            DeviceAccessScope::Machine,
+            LONGEST_PAIRING_LIFETIME + Duration::from_secs(10),
+        );
+        let result = gateway.exchange_pairing_code_from(&code, "late machine", None, None);
+        assert!(
+            matches!(result, Err(AuthError::ExpiredPairingCode)),
+            "expired machine code: {:?}",
+            result.map(|(_, device)| device.id)
         );
         assert!(gateway.list_devices().is_empty());
     }
@@ -2061,27 +2073,15 @@ mod tests {
     /// A reloaded code keeps exactly its remaining lifetime rather than a fresh one.
     #[test]
     fn a_reloaded_live_code_keeps_only_its_remaining_lifetime() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("remote-auth.json");
-        let issuer = AuthManager::with_persistence(Some(path.clone()));
-        let machine = issuer
-            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
-            .unwrap();
-        drop(issuer);
-        let mut raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let issued = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            - Duration::from_secs(300);
-        raw["pairingCodes"][machine.as_str()]["created_at"] = serde_json::to_value(issued).unwrap();
-        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
-
-        let gateway = AuthManager::with_persistence(Some(path));
-        let lifetime = gateway.pairing_window.read().codes[&machine].lifetime;
-        assert!(lifetime <= Duration::from_secs(300) && lifetime > Duration::from_secs(290));
+        let (_dir, gateway, code) =
+            reloaded_with_code_issued(DeviceAccessScope::Machine, Duration::from_secs(300));
+        let lifetime = gateway.pairing_window.read().codes[&code].lifetime;
+        assert!(
+            lifetime <= Duration::from_secs(300) && lifetime > Duration::from_secs(290),
+            "remaining lifetime {lifetime:?}"
+        );
         assert!(gateway
-            .exchange_pairing_code_from(&machine, "in time", None, None)
+            .exchange_pairing_code_from(&code, "in time", None, None)
             .is_ok());
     }
 
