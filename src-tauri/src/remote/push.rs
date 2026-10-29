@@ -583,7 +583,11 @@ impl TurnTracker {
             turn_started: None,
         });
         let previous = entry.state;
-        entry.state = state;
+        // Unknown is a gap in the reading, not a state change: keep the last known state so
+        // Blocked -> Unknown -> Blocked stays one wait.
+        if state != AgentControlState::Unknown {
+            entry.state = state;
+        }
         match state {
             AgentControlState::Working => {
                 entry.turn_started.get_or_insert(now);

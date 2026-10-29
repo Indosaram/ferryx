@@ -354,6 +354,17 @@ async fn published_agent_events_drive_the_dispatcher() {
 }
 
 #[test]
+fn unknown_between_two_blocked_readings_is_one_wait() {
+    let mut turns = TurnTracker::default();
+    let t0 = Instant::now();
+    assert_eq!(turns.observe("s", AgentControlState::Blocked, t0), Some(PushKind::NeedsInput));
+    assert_eq!(turns.observe("s", AgentControlState::Unknown, t0), None);
+    assert_eq!(turns.observe("s", AgentControlState::Blocked, t0), None, "no second alert");
+    assert_eq!(turns.observe("s", AgentControlState::Working, t0), None);
+    assert_eq!(turns.observe("s", AgentControlState::Blocked, t0), Some(PushKind::NeedsInput));
+}
+
+#[test]
 fn vapid_keys_are_created_once_and_owner_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(PUSH_VAPID_FILE);
