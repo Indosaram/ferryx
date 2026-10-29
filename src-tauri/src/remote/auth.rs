@@ -1300,6 +1300,16 @@ impl AuthManager {
             .collect()
     }
 
+    /// The device when it is still paired: present, not revoked and not idle-expired.
+    pub fn live_device(&self, device_id: &str) -> Option<DeviceInfo> {
+        let now = self.now();
+        self.devices
+            .read()
+            .get(device_id)
+            .filter(|d| !d.revoked && now.saturating_sub(d.last_seen_at) <= DEVICE_IDLE_EXPIRY_SECS)
+            .cloned()
+    }
+
     /// Registration and revocation both hold the devices lock before the
     /// signal registry lock. A caller validated just before revocation either
     /// gets its latched signal or is rejected here; there is no subscribe gap.

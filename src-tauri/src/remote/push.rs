@@ -250,6 +250,14 @@ impl PushStore {
         })
     }
 
+    /// Drops every subscription whose device `is_live` rejects (unpaired, revoked or expired).
+    pub fn retain_devices(&self, is_live: impl Fn(&str) -> bool) -> Result<(), PushStoreError> {
+        self.mutate(|subs| {
+            subs.retain(|_, stored| is_live(&stored.device_id));
+            Ok(())
+        })
+    }
+
     /// Drops a subscription the push service reported gone (404/410).
     pub fn remove_gone(&self, endpoint: &str) -> Result<(), PushStoreError> {
         self.mutate(|subs| {

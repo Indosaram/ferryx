@@ -1039,6 +1039,14 @@ impl RemoteGatewayState {
         let agent_control_audit =
             Arc::new(crate::agent_control::policy::AgentControlAudit::default());
         let push = Arc::new(crate::remote::push::PushService::new(identity_dir.as_deref()));
+        // A device pruned while the daemon was down (idle expiry, revocation journal) must not
+        // keep receiving pushes after a restart.
+        if let Err(error) = push
+            .store
+            .retain_devices(|device_id| auth_manager.live_device(device_id).is_some())
+        {
+            tracing::warn!("dropping push subscriptions of unpaired devices failed: {error}");
+        }
         {
             let push = Arc::clone(&push);
             auth_manager.on_device_revoked(Arc::new(move |device_id: &str| {
@@ -1433,6 +1441,7 @@ impl RemoteGatewayState {
             .list_subscriptions()
             .into_iter()
             .filter(|sub| kind.wanted_by(sub))
+            .filter(|sub| self.auth_manager.live_device(&sub.device_id).is_some())
             .collect();
         if targets.is_empty() {
             return 0;

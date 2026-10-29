@@ -3925,7 +3925,7 @@ async fn push_test(
     use crate::remote::push::{AgentStateNotification, SendOutcome};
     let device = push_device(&state, &headers)?;
     let targets = state.push.store.for_device(&device.id);
-    if targets.is_empty() {
+    if targets.is_empty() || state.auth_manager.live_device(&device.id).is_none() {
         return Err((StatusCode::NOT_FOUND, "No push subscription for this device".into()));
     }
     let notification = AgentStateNotification {

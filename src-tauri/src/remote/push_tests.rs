@@ -260,6 +260,38 @@ async fn revoke_removes_the_device_subscriptions_on_disk_too() {
 }
 
 #[tokio::test]
+async fn an_expired_device_gets_no_push_and_is_pruned_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    let device = paired_device(&state);
+    state.push.store.subscribe(&device, mock.subscription("a", true, FinishedMode::Off)).unwrap();
+
+    // Idle past the expiry: the device is no longer paired, though nothing revoked it.
+    let later = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + crate::remote::auth::DEVICE_IDLE_EXPIRY_SECS
+        + 60;
+    state.auth_manager.set_test_clock(later);
+    assert!(state.auth_manager.live_device(&device).is_none());
+    assert_eq!(state.dispatch_push("s1", PushKind::NeedsInput).await, 0);
+    assert!(mock.received().is_empty(), "no POST for an unpaired device");
+
+    // A device missing from the auth store at startup has its subscriptions dropped.
+    let store = PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE)));
+    assert_eq!(store.list_subscriptions().len(), 1);
+    drop(state);
+    std::fs::remove_file(dir.path().join("remote-auth.json")).unwrap();
+    let restarted = gateway(dir.path());
+    assert!(restarted.push.store.list_subscriptions().is_empty());
+    assert!(PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE)))
+        .list_subscriptions()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn gone_answer_deletes_the_subscription() {
     for answer in [StatusCode::GONE, StatusCode::NOT_FOUND] {
         let dir = tempfile::tempdir().unwrap();
