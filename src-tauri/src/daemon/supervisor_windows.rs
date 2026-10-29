@@ -82,6 +82,38 @@ pub fn supported_for_install(managed_externally: bool) -> bool {
     !managed_externally
 }
 
+/// Whether this process runs from a Store (MSIX) install: it has a package identity, sits under
+/// the `WindowsApps` tree (or beside an `msix.marker`), or is a `FERRYX_STORE_BUILD`. The Store
+/// then owns install and update delivery. It lives here rather than in the desktop-only updater
+/// so the desktop-free CLI (`--no-default-features`) makes the same decision.
+#[cfg(windows)]
+pub fn store_managed_install() -> bool {
+    has_package_identity()
+        || std::env::var_os("FERRYX_STORE_BUILD").is_some()
+        || std::env::current_exe()
+            .map(|exe| {
+                let p = exe.to_string_lossy().to_lowercase();
+                p.contains(r"\windowsapps\")
+                    || p.contains("windowsapps")
+                    || exe.parent().map(|d| d.join("msix.marker").exists()).unwrap_or(false)
+            })
+            .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn has_package_identity() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentPackageFullName(
+            packageFullNameLength: *mut u32,
+            packageFullName: *mut u16,
+        ) -> i32;
+    }
+    let mut len: u32 = 0;
+    let rc = unsafe { GetCurrentPackageFullName(&mut len, std::ptr::null_mut()) };
+    rc == 122 || rc == 0
+}
+
 /// The base task name (`Ferryx\Daemon`, or the QA override). On its own it names the legacy task.
 pub fn task_name(env: Env<'_>) -> String {
     let name = non_empty(env, SUPERVISOR_NAME_ENV)

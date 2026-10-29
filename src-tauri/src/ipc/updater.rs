@@ -46,36 +46,13 @@ fn managed_externally_for(host: UpdateHost, bundle: Option<BundleType>) -> bool 
     }
 }
 
-#[cfg(windows)]
-fn has_package_identity() -> bool {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetCurrentPackageFullName(
-            packageFullNameLength: *mut u32,
-            packageFullName: *mut u16,
-        ) -> i32;
-    }
-    let mut len: u32 = 0;
-    let rc = unsafe { GetCurrentPackageFullName(&mut len, std::ptr::null_mut()) };
-    rc == 122 || rc == 0
-}
-
 /// Store (MSIX) installs live under the write-protected `WindowsApps` tree where the Store
 /// owns update delivery; self-updating those installs would fail or duplicate the app. The
 /// bundle term is always false here and keeps the whole decision in one place.
 #[cfg(windows)]
 pub fn updater_managed_externally() -> bool {
     managed_externally_for(UpdateHost::current(), bundle_type())
-        || has_package_identity()
-        || std::env::var_os("FERRYX_STORE_BUILD").is_some()
-        || std::env::current_exe()
-            .map(|exe| {
-                let p = exe.to_string_lossy().to_lowercase();
-                p.contains(r"\windowsapps\")
-                    || p.contains("windowsapps")
-                    || exe.parent().map(|d| d.join("msix.marker").exists()).unwrap_or(false)
-            })
-            .unwrap_or(false)
+        || crate::daemon::supervisor_windows::store_managed_install()
 }
 
 /// macOS self-updates from the `.app`. On Linux only the AppImage is replaced in place by the

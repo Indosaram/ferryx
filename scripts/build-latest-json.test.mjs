@@ -18,6 +18,33 @@ import { fileURLToPath } from "node:url";
 
 import { assembleRelease } from "./build-latest-json.mjs";
 import { verifyMinisign } from "./lib/minisign-verify.mjs";
+import { evaluateFloors } from "./lib/release-contract.mjs";
+
+// Floor measurements of a release that meets every advertised floor.
+const NOTARIZED = (target) => ({ target, spctlStatus: 0, spctl: `${target}: accepted\nsource=Notarized Developer ID`, staplerStatus: 0 });
+const AD_HOC = (target) => ({ target, spctlStatus: 3, spctl: `${target}: rejected\nsource=no usable signature`, staplerStatus: 65 });
+const WINDOWS_DEPENDENTS = ["KERNEL32.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "WebView2Loader.dll"];
+const CONFORMING_FLOORS = {
+  "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] },
+  dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app"), NOTARIZED("dmg")] },
+  "cli-darwin-universal": { minos: { x86_64: "10.15", arm64: "11.0" } },
+  appimage: { glibc: "2.35" },
+  deb: { glibc: "2.35" },
+  "cli-linux-amd64": { glibc: "2.17" },
+  msix: { dependents: WINDOWS_DEPENDENTS },
+  nsis: { dependents: WINDOWS_DEPENDENTS },
+  "cli-windows-amd64": { dependents: ["KERNEL32.dll", "ucrtbase.dll"] },
+};
+function floorsFor(receipt, overrides) {
+  return {
+    waiver: null,
+    checks: evaluateFloors({
+      kinds: receipt.artifacts.map((a) => a.kind),
+      measurements: { ...CONFORMING_FLOORS, ...overrides },
+      macosMinimum: "10.15",
+    }),
+  };
+}
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "scripts", "build-latest-json.mjs");
@@ -92,6 +119,7 @@ function createSyntheticReleaseFixture({
   commitSha = "5d5499806a1b207849778f488b4e3e7b821a751b",
   nsisMigration = false,
   keys = createMinisignTestKeys(),
+  floorOverrides = {},
 } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), "ferryx-release-fixture-"));
   const receiptsDir = join(rootDir, "receipts");
@@ -188,6 +216,7 @@ function createSyntheticReleaseFixture({
       },
     ],
   };
+  macReceipt.floors = floorsFor(macReceipt, floorOverrides);
   writeFileSync(join(receiptsDir, "build-receipt-macbook.json"), JSON.stringify(macReceipt, null, 2) + "\n");
 
   // Linux artifacts
@@ -248,6 +277,7 @@ function createSyntheticReleaseFixture({
       },
     ],
   };
+  linuxReceipt.floors = floorsFor(linuxReceipt, floorOverrides);
   writeFileSync(join(receiptsDir, "build-receipt-omaki.json"), JSON.stringify(linuxReceipt, null, 2) + "\n");
 
   // Windows artifacts
@@ -255,6 +285,8 @@ function createSyntheticReleaseFixture({
   mkdirSync(winDir, { recursive: true });
   const msixBuf = Buffer.from("windows-msix-installer-content-store");
   writeFileSync(join(winDir, "Ferryx_2026.908.1.0_x64.msix"), msixBuf);
+  const winCliBuf = Buffer.from("windows-cli-binary-content");
+  writeFileSync(join(winDir, "ferryx-cli-windows-amd64.exe"), winCliBuf);
 
   const winArtifacts = [
     {
@@ -263,6 +295,15 @@ function createSyntheticReleaseFixture({
       relPath: "windows/Ferryx_2026.908.1.0_x64.msix",
       bytes: msixBuf.length,
       sha256: sha256(msixBuf),
+      signatureRelPath: null,
+      targets: [],
+    },
+    {
+      kind: "cli-windows-amd64",
+      name: "ferryx-cli-windows-amd64.exe",
+      relPath: "windows/ferryx-cli-windows-amd64.exe",
+      bytes: winCliBuf.length,
+      sha256: sha256(winCliBuf),
       signatureRelPath: null,
       targets: [],
     },
@@ -302,6 +343,7 @@ function createSyntheticReleaseFixture({
     },
     artifacts: winArtifacts,
   };
+  winReceipt.floors = floorsFor(winReceipt, floorOverrides);
   writeFileSync(join(receiptsDir, "build-receipt-maho-win.json"), JSON.stringify(winReceipt, null, 2) + "\n");
 
   return {
@@ -377,6 +419,7 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
     assert.equal(existsSync(join(outDir, "Ferryx_x64.msix")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-universal")), true);
+    assert.equal(existsSync(join(outDir, "ferryx-cli-windows-amd64.exe")), true);
 
     // Original artifacts present
     assert.equal(existsSync(join(outDir, "Ferryx_2026.908.1_universal.dmg")), true);
@@ -793,6 +836,132 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
     );
     assert.equal(layoutChecked, true);
     assert.equal(existsSync(outDir), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ----------------- Release floor gate -----------------
+
+test("assembleRelease floor gate: a GLIBC_2.38 Linux artifact, an ad-hoc signed macOS build, a too-new minos and a VC++ runtime dependency each abort by name", () => {
+  const fixture = createSyntheticReleaseFixture({
+    floorOverrides: {
+      appimage: { glibc: "2.38" },
+      "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app")] },
+      dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] },
+      "cli-darwin-universal": { minos: { x86_64: "11.0", arm64: "11.0" } },
+      "cli-windows-amd64": { dependents: ["KERNEL32.dll", "VCRUNTIME140.dll"] },
+    },
+  });
+  const outDir = join(fixture.rootDir, "publish-floor-violation");
+  try {
+    assert.throws(
+      () => assembleRelease({
+        planPath: fixture.planPath,
+        receiptsDir: fixture.receiptsDir,
+        artifactsDir: fixture.artifactsDir,
+        outDir,
+        publicKey: fixture.keys.publicKeyWrapped,
+        macosMinimum: "10.15",
+      }),
+      (err) => {
+        assert.match(err.message, /^Release floor gate failed: /);
+        assert.match(err.message, /omaki appimage glibc: requires GLIBC_2\.38, above the GLIBC_2\.35 floor/);
+        assert.match(err.message, /macbook dmg notarization: app: spctl does not report Notarized Developer ID \(app: rejected source=no usable signature\)/);
+        assert.match(err.message, /macbook macos-updater notarization: app: spctl does not report Notarized Developer ID/);
+        assert.match(err.message, /macbook cli-darwin-universal macos-minos: x86_64 slice declares minos 11\.0, above the configured minimum 10\.15/);
+        // arm64 slices at 11.0 meet the Apple Silicon floor and are not reported.
+        assert.doesNotMatch(err.message, /arm64 slice/);
+        assert.match(err.message, /maho-win cli-windows-amd64 crt: depends on VCRUNTIME140\.dll/);
+        assert.doesNotMatch(err.message, /omaki deb|omaki cli-linux-amd64|maho-win msix/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(outDir), false, "no publish directory may be created");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("assembleRelease floor gate: a macOS minos check recorded against a different minimum is refused", () => {
+  // Built (and recorded) against the plan-commit minimum 10.15; minos 12.0 would pass a 13.0 minimum.
+  const fixture = createSyntheticReleaseFixture({
+    floorOverrides: { "cli-darwin-universal": { minos: { x86_64: "12.0", arm64: "12.0" } } },
+  });
+  const outDir = join(fixture.rootDir, "publish-minimum-mismatch");
+  try {
+    assert.throws(
+      () => assembleRelease({
+        planPath: fixture.planPath,
+        receiptsDir: fixture.receiptsDir,
+        artifactsDir: fixture.artifactsDir,
+        outDir,
+        publicKey: fixture.keys.publicKeyWrapped,
+        macosMinimum: "13.0",
+      }),
+      (err) => {
+        assert.match(err.message, /macbook cli-darwin-universal macos-minos: built against minimum "10\.15", but this assembly uses "13\.0"/);
+        assert.match(err.message, /macbook dmg macos-minos: built against minimum "10\.15", but this assembly uses "13\.0"/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(outDir), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("assembleRelease floor gate: re-evaluates recorded measurements instead of trusting a recorded pass flag", () => {
+  const fixture = createSyntheticReleaseFixture();
+  const outDir = join(fixture.rootDir, "publish-forged-pass");
+  try {
+    const receiptPath = join(fixture.receiptsDir, "build-receipt-omaki.json");
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+    const cli = receipt.floors.checks.find((c) => c.kind === "cli-linux-amd64");
+    cli.measured = "2.30";
+    assert.equal(cli.pass, true);
+    writeFileSync(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
+    assert.throws(
+      () => assembleRelease({
+        planPath: fixture.planPath,
+        receiptsDir: fixture.receiptsDir,
+        artifactsDir: fixture.artifactsDir,
+        outDir,
+        publicKey: fixture.keys.publicKeyWrapped,
+      }),
+      /Release floor gate failed: omaki cli-linux-amd64 glibc: requires GLIBC_2\.30, above the GLIBC_2\.17 floor$/,
+    );
+    assert.equal(existsSync(outDir), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("assembleRelease floor gate: a receipt without floor results or built under a waiver is refused unless the assembly is waived too", () => {
+  const fixture = createSyntheticReleaseFixture();
+  try {
+    const winPath = join(fixture.receiptsDir, "build-receipt-maho-win.json");
+    const win = JSON.parse(readFileSync(winPath, "utf8"));
+    delete win.floors;
+    writeFileSync(winPath, JSON.stringify(win, null, 2) + "\n");
+    const macPath = join(fixture.receiptsDir, "build-receipt-macbook.json");
+    const mac = JSON.parse(readFileSync(macPath, "utf8"));
+    mac.floors.waiver = "local QA build";
+    writeFileSync(macPath, JSON.stringify(mac, null, 2) + "\n");
+    const args = (outDir) => ({
+      planPath: fixture.planPath,
+      receiptsDir: fixture.receiptsDir,
+      artifactsDir: fixture.artifactsDir,
+      outDir,
+      publicKey: fixture.keys.publicKeyWrapped,
+    });
+    assert.throws(
+      () => assembleRelease(args(join(fixture.rootDir, "publish-unwaived"))),
+      /Release floor gate failed: macbook: built under floor waiver "local QA build"; maho-win: receipt carries no floor results$/,
+    );
+    assert.equal(existsSync(join(fixture.rootDir, "publish-unwaived")), false);
+    const res = assembleRelease({ ...args(join(fixture.rootDir, "publish-waived")), floorWaiver: "local dev release" });
+    assert.ok(res.files.includes("latest.json"));
   } finally {
     fixture.cleanup();
   }

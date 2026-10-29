@@ -24,6 +24,9 @@ export const ALLOWED_TOOLCHAIN_KEYS = Object.freeze([
   "zig",
   "rust",
   "tauri",
+  // Linux receipts only: the container image the AppImage/deb were built in and the glibc
+  // floor the CLI was linked against (release-platforms.mjs createLinuxBuildScript).
+  "linuxBuilder",
 ]);
 
 export const REQUIRED_TOOLCHAIN_KEYS = Object.freeze(["node", "bun", "zig"]);
@@ -87,6 +90,13 @@ export const KIND_DEFINITIONS = Object.freeze({
     stableAlias: "ferryx-cli-darwin-universal",
     allowedExtensions: ["-darwin-universal", "ferryx-cli"],
   },
+  "cli-windows-amd64": {
+    permittedHost: "maho-win",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-cli-windows-amd64.exe",
+    allowedExtensions: ["-windows-amd64.exe"],
+  },
 });
 
 export const ALLOWED_RECEIPT_KEYS = Object.freeze([
@@ -99,6 +109,8 @@ export const ALLOWED_RECEIPT_KEYS = Object.freeze([
   "exitCode",
   "artifacts",
   "toolchains",
+  // Release floor gate results ({ waiver, checks }); see FLOOR_CHECKS.
+  "floors",
 ]);
 
 export const REQUIRED_RECEIPT_KEYS = Object.freeze([
@@ -121,6 +133,178 @@ export const ALLOWED_ARTIFACT_KEYS = Object.freeze([
   "signatureRelPath",
   "targets",
 ]);
+
+/**
+ * Advertised floors every released artifact must meet before a release is assembled.
+ * - glibc: highest GLIBC_ symbol version any ELF file inside the artifact requires.
+ * - macos-minos: highest LC_BUILD_VERSION minos per architecture over all Mach-O files
+ *   ({ x86_64: "10.15", arm64: "11.0" }); the limit is the app's bundle.macOS.minimumSystemVersion
+ *   (src-tauri/tauri.conf.json, supplied by the caller), raised to 11.0 for arm64 slices because
+ *   macOS 11 is the first release on Apple Silicon and the linker never emits less.
+ * - notarization: `spctl -a -vvv -t install` reports Notarized Developer ID and
+ *   `xcrun stapler validate` passes, for the app and (dmg kind) the disk image.
+ * - crt: `dumpbin /dependents` lists no Visual C++ redistributable DLL; a clean Windows does
+ *   not have it and the MSIX declares no VCLibs dependency.
+ */
+export const FLOOR_CHECKS = Object.freeze({
+  "macos-updater": Object.freeze(["macos-minos", "notarization"]),
+  dmg: Object.freeze(["macos-minos", "notarization"]),
+  "cli-darwin-universal": Object.freeze(["macos-minos"]),
+  appimage: Object.freeze(["glibc"]),
+  deb: Object.freeze(["glibc"]),
+  "cli-linux-amd64": Object.freeze(["glibc"]),
+  msix: Object.freeze(["crt"]),
+  nsis: Object.freeze(["crt"]),
+  "cli-windows-amd64": Object.freeze(["crt"]),
+});
+
+export const GLIBC_FLOORS = Object.freeze({ "cli-linux-amd64": "2.17", appimage: "2.35", deb: "2.35" });
+
+/** Measurement field that carries each check's input in a host's floor measurements. */
+const FLOOR_MEASUREMENT_FIELD = Object.freeze({
+  glibc: "glibc",
+  "macos-minos": "minos",
+  notarization: "notarization",
+  crt: "dependents",
+});
+
+const VC_REDIST_DLL_REGEX = /^(vcruntime|msvcp|vccorlib|concrt|vcomp|mfc)[0-9a-z_]*\.dll$/i;
+const APPLE_SILICON_MINIMUM = "11.0";
+const DOTTED_VERSION_REGEX = /^\d+(\.\d+)*$/;
+
+/** Compares dotted numeric versions ("2.35" vs "2.17"); missing parts count as 0. */
+export function compareDottedVersions(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return Math.sign(d);
+  }
+  return 0;
+}
+
+/**
+ * Evaluates one floor check from its measured value. Never trusts a recorded pass flag:
+ * assembleRelease re-runs this on every receipt's recorded measurement.
+ *
+ * @returns {{ kind: string, check: string, limit: string | null, measured: unknown, pass: boolean, reason?: string }}
+ */
+export function evaluateFloorCheck({ kind, check, measured, macosMinimum = null }) {
+  const result = (limit, pass, reason) => ({
+    kind,
+    check,
+    limit,
+    measured: measured ?? null,
+    pass,
+    ...(pass ? {} : { reason }),
+  });
+  if (check === "glibc") {
+    const limit = GLIBC_FLOORS[kind];
+    if (typeof measured !== "string" || !DOTTED_VERSION_REGEX.test(measured)) {
+      return result(limit, false, "no GLIBC_ symbol version was measured");
+    }
+    return compareDottedVersions(measured, limit) <= 0
+      ? result(limit, true)
+      : result(limit, false, `requires GLIBC_${measured}, above the GLIBC_${limit} floor`);
+  }
+  if (check === "macos-minos") {
+    if (typeof macosMinimum !== "string" || !DOTTED_VERSION_REGEX.test(macosMinimum)) {
+      throw new Error(`macOS minimum system version must be a dotted version, got ${JSON.stringify(macosMinimum)}`);
+    }
+    const slices = measured && typeof measured === "object" && !Array.isArray(measured) ? Object.entries(measured) : [];
+    if (slices.length === 0 || slices.some(([, v]) => typeof v !== "string" || !DOTTED_VERSION_REGEX.test(v))) {
+      return result(macosMinimum, false, "no LC_BUILD_VERSION minos was measured");
+    }
+    const problems = [];
+    for (const [arch, minos] of slices) {
+      const raised = arch.startsWith("arm64") && compareDottedVersions(macosMinimum, APPLE_SILICON_MINIMUM) < 0;
+      const limit = raised ? APPLE_SILICON_MINIMUM : macosMinimum;
+      if (compareDottedVersions(minos, limit) > 0) {
+        problems.push(
+          `${arch} slice declares minos ${minos}, above ${raised ? `${limit} (the Apple Silicon floor)` : `the configured minimum ${limit}`}`,
+        );
+      }
+    }
+    return problems.length === 0 ? result(macosMinimum, true) : result(macosMinimum, false, problems.join("; "));
+  }
+  if (check === "notarization") {
+    const required = kind === "dmg" ? ["app", "dmg"] : ["app"];
+    const probes = Array.isArray(measured) ? measured : [];
+    const problems = [];
+    for (const target of required) {
+      const probe = probes.find((p) => p && p.target === target);
+      if (!probe) {
+        problems.push(`${target}: not checked`);
+        continue;
+      }
+      const spctl = typeof probe.spctl === "string" ? probe.spctl : "";
+      if (probe.spctlStatus !== 0 || !spctl.includes("Notarized Developer ID")) {
+        problems.push(`${target}: spctl does not report Notarized Developer ID (${spctl.replace(/\s+/g, " ").trim() || `exit ${probe.spctlStatus}`})`);
+      }
+      if (probe.staplerStatus !== 0) {
+        problems.push(`${target}: stapler validate failed (exit ${probe.staplerStatus})`);
+      }
+    }
+    return problems.length === 0 ? result(null, true) : result(null, false, problems.join("; "));
+  }
+  if (check === "crt") {
+    if (!Array.isArray(measured) || measured.length === 0 || measured.some((d) => typeof d !== "string")) {
+      return result(null, false, "no dumpbin /dependents output was captured");
+    }
+    const redist = measured.filter((d) => VC_REDIST_DLL_REGEX.test(d));
+    return redist.length === 0
+      ? result(null, true)
+      : result(null, false, `depends on ${redist.join(", ")} (Visual C++ runtime, absent on a clean Windows)`);
+  }
+  throw new Error(`Unknown floor check '${check}' for kind '${kind}'`);
+}
+
+/**
+ * Evaluates every floor check of the given artifact kinds from a host's measurements
+ * ({ [kind]: { glibc?, minos?, notarization?, dependents? } }).
+ */
+export function evaluateFloors({ kinds, measurements, macosMinimum = null }) {
+  const checks = [];
+  for (const kind of kinds) {
+    for (const check of FLOOR_CHECKS[kind] ?? []) {
+      const measured = measurements?.[kind]?.[FLOOR_MEASUREMENT_FIELD[check]];
+      checks.push(evaluateFloorCheck({ kind, check, measured, macosMinimum }));
+    }
+  }
+  return checks;
+}
+
+/** Formats failing floor checks as one error line. */
+export function describeFloorFailures(checks) {
+  return checks
+    .filter((c) => !c.pass)
+    .map((c) => `${c.kind} ${c.check}: ${c.reason}`)
+    .join("; ");
+}
+
+function validateFloors(floors) {
+  if (!floors || typeof floors !== "object" || Array.isArray(floors)) {
+    throw new Error("floors must be an object");
+  }
+  assertExactKeys(floors, ["waiver", "checks"], "floors");
+  if (floors.waiver !== null && (typeof floors.waiver !== "string" || floors.waiver.trim() === "")) {
+    throw new Error("floors.waiver must be null or a non-empty reason");
+  }
+  if (!Array.isArray(floors.checks)) {
+    throw new Error("floors.checks must be an array");
+  }
+  for (const [i, c] of floors.checks.entries()) {
+    if (!c || typeof c !== "object" || Array.isArray(c)) {
+      throw new Error(`floors.checks[${i}] must be an object`);
+    }
+    if (!FLOOR_CHECKS[c.kind]?.includes(c.check)) {
+      throw new Error(`floors.checks[${i}] has unknown check '${c.check}' for kind '${c.kind}'`);
+    }
+    if (typeof c.pass !== "boolean") {
+      throw new Error(`floors.checks[${i}].pass must be a boolean`);
+    }
+  }
+}
 
 const SHA256_REGEX = /^[0-9a-f]{64}$/;
 const COMMIT_SHA_REGEX = /^[0-9a-f]{40}$/;
@@ -344,7 +528,16 @@ export function parsePlan(value) {
  */
 export function requiredKinds(plan) {
   const p = typeof plan === "string" || !plan.schemaVersion ? parsePlan(plan) : plan;
-  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal"];
+  const kinds = [
+    "macos-updater",
+    "dmg",
+    "appimage",
+    "deb",
+    "msix",
+    "cli-linux-amd64",
+    "cli-darwin-universal",
+    "cli-windows-amd64",
+  ];
   if (p.channels && p.channels.nsisMigration) {
     kinds.push("nsis");
   }
@@ -411,6 +604,10 @@ export function parseReceipt(value, plan = null) {
 
   if ("toolchains" in receipt) {
     validateToolchains(receipt.toolchains, { required: [] });
+  }
+
+  if ("floors" in receipt) {
+    validateFloors(receipt.floors);
   }
 
   // Cross-check with plan if provided

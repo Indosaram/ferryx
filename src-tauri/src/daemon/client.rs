@@ -227,6 +227,23 @@ fn record_daemon_busy(channel: &crate::ipc::qa_barrier::QaBarrierChannel, error:
     channel.append_receipt(DAEMON_CLIENT_BUSY_RECEIPT, &operation_id, daemon_busy_settlement(error));
 }
 
+/// Message of the HostUnavailable error an existing-only client returns when no daemon owns the
+/// endpoint (as opposed to one that exists but did not answer).
+pub const EXISTING_ONLY_NO_DAEMON_MESSAGE: &str = "No daemon is running on this machine";
+
+/// Message of the HostUnavailable error an existing-only client returns when a daemon endpoint
+/// exists but cannot be reached (untrusted socket, or access refused).
+const EXISTING_ONLY_UNREACHABLE_MESSAGE: &str =
+    "A daemon endpoint exists on this machine but could not be reached";
+
+/// An existing-only client found a daemon speaking another protocol and leaves it alone.
+fn existing_only_mismatch() -> IpcError {
+    IpcError::new(
+        IpcErrorCode::DaemonUpdatePending,
+        "The running daemon speaks another protocol version",
+    )
+}
+
 /// QA builds: records a DAEMON_BUSY outcome for the runner; every other error and build is a no-op.
 async fn report_daemon_busy(error: &IpcError) {
     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
@@ -1336,6 +1353,10 @@ pub struct DaemonClient {
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
     upgrade_requested: Arc<AtomicBool>,
     spawn_lock: Arc<Mutex<()>>,
+    /// `Some(wait)`: only talk to a daemon that already owns the endpoint, waiting up to `wait`
+    /// for it to publish. Such a client never starts a daemon, never requests an upgrade and
+    /// reports a protocol mismatch without acting on it (CLI probes such as `remote status`).
+    existing_only: Option<Duration>,
 }
 
 impl Default for DaemonClient {
@@ -1357,6 +1378,7 @@ impl DaemonClient {
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
+            existing_only: None,
         }
     }
 
@@ -1371,6 +1393,20 @@ impl DaemonClient {
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
+            existing_only: None,
+        }
+    }
+
+    /// A client of the daemon that already owns this machine's endpoint; see `existing_only`.
+    pub fn existing_only(wait: Duration) -> Self {
+        Self::existing_only_at(Self::resolve_default_socket_path(), wait)
+    }
+
+    /// [`Self::existing_only`] against an explicit endpoint.
+    pub fn existing_only_at(socket_path: PathBuf, wait: Duration) -> Self {
+        Self {
+            existing_only: Some(wait),
+            ..Self::new_with_socket(socket_path)
         }
     }
 
@@ -2556,6 +2592,7 @@ impl DaemonClient {
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::clone(&self.upgrade_requested),
             spawn_lock: Arc::new(Mutex::new(())),
+            existing_only: self.existing_only,
         }
     }
 
@@ -2652,6 +2689,26 @@ impl DaemonClient {
         });
     }
 
+    /// Why an existing-only client reached no endpoint. Only an absent socket or one nothing
+    /// listens on (connection refused) means no daemon; a socket that fails the trust check or
+    /// refuses access belongs to an owner this client cannot reach.
+    async fn existing_only_absence(&self) -> IpcError {
+        let no_daemon = match fs::symlink_metadata(&self.socket_path) {
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            Ok(_) if Self::validate_existing_socket_path(&self.socket_path).is_err() => false,
+            Ok(_) => matches!(
+                Self::connect_socket(&self.socket_path).await,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+            ),
+        };
+        let message = if no_daemon {
+            EXISTING_ONLY_NO_DAEMON_MESSAGE
+        } else {
+            EXISTING_ONLY_UNREACHABLE_MESSAGE
+        };
+        IpcError::new(IpcErrorCode::HostUnavailable, message)
+    }
+
     async fn try_connect_existing_socket(&self) -> Result<DaemonStream, std::io::Error> {
         if fs::symlink_metadata(&self.socket_path).is_ok()
             && Self::validate_existing_socket_path(&self.socket_path).is_ok()
@@ -2679,6 +2736,12 @@ impl DaemonClient {
         // Fast path: if daemon is already running, connect immediately without sleep or spawn lock.
         if let Ok(stream) = self.try_connect_existing_socket().await {
             return Ok(stream);
+        }
+        if let Some(wait) = self.existing_only {
+            return match self.wait_for_supervised_daemon(wait).await {
+                Ok(stream) => Ok(stream),
+                Err(_) => Err(self.existing_only_absence().await),
+            };
         }
 
         // Bounded retry loop only if the socket file already exists on disk (e.g. during rolling handover when old
@@ -3031,6 +3094,9 @@ impl DaemonClient {
                 daemon_version,
                 ..
             } => {
+                if version != DAEMON_PROTOCOL_VERSION && self.existing_only.is_some() {
+                    return Err(existing_only_mismatch());
+                }
                 if version != DAEMON_PROTOCOL_VERSION {
                     // Never Shutdown, terminate, retarget or spawn over a live owner of another
                     // protocol: report the pending update and leave the old owner running.
@@ -3039,11 +3105,16 @@ impl DaemonClient {
                     return Err(self.enter_update_pending(daemon_version).await);
                 }
                 *self.epoch.write() = Some(epoch);
-                self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
+                if self.existing_only.is_none() {
+                    self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
+                }
                 Ok(ActiveConnection {
                     reader,
                     writer: write_half,
                 })
+            }
+            DaemonResponse::ProtocolMismatch { .. } if self.existing_only.is_some() => {
+                Err(existing_only_mismatch())
             }
             DaemonResponse::ProtocolMismatch { .. } => {
                 drop(reader);
@@ -5247,6 +5318,30 @@ mod tests {
     use tempfile::tempdir;
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn existing_only_reports_no_daemon_only_for_an_absent_or_refusing_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("daemon.sock");
+        let client = DaemonClient::existing_only_at(socket.clone(), Duration::ZERO);
+
+        let absent = client.remote_get_status().await.unwrap_err();
+        assert_eq!(absent.code, IpcErrorCode::HostUnavailable);
+        assert_eq!(absent.message, EXISTING_ONLY_NO_DAEMON_MESSAGE);
+
+        // A socket file nothing listens on: connection refused, still no daemon.
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        assert_eq!(client.existing_only_absence().await.message, EXISTING_ONLY_NO_DAEMON_MESSAGE);
+
+        // A live listener this client may not connect to belongs to an owner it cannot reach.
+        std::fs::remove_file(&socket).unwrap();
+        let _listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreachable = client.existing_only_absence().await;
+        assert_eq!(unreachable.code, IpcErrorCode::HostUnavailable);
+        assert_eq!(unreachable.message, EXISTING_ONLY_UNREACHABLE_MESSAGE);
+    }
 
     #[tokio::test]
     async fn remote_input_socket_sessions_do_not_block_each_other() {

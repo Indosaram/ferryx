@@ -617,7 +617,7 @@ mod backend {
 
     /// The Store owns an MSIX install's lifecycle, so it never gets a task.
     pub fn install_supported() -> bool {
-        task::supported_for_install(crate::ipc::updater::updater_managed_externally())
+        task::supported_for_install(task::store_managed_install())
     }
 
     /// The Task Scheduler is part of every supported Windows install.

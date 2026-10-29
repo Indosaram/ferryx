@@ -1757,6 +1757,7 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     Ok(BrowserCliServerStart::Serving)
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(not(unix))]
 pub fn start_browser_cli_server<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -1765,6 +1766,7 @@ pub fn start_browser_cli_server<R: tauri::Runtime>(
     start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
 }
 
+#[cfg(feature = "desktop")]
 #[cfg(not(unix))]
 fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     app: AppHandle<R>,
