@@ -1,4 +1,4 @@
-import { GitBranch, LogOut, Plus, Server } from "lucide-react";
+import { Bell, GitBranch, LogOut, Plus, Server } from "lucide-react";
 import { MobileSheet, MobileSheetItem } from "./MobileSheet";
 
 /**
@@ -13,6 +13,7 @@ export interface MobileOverflowSheetProps {
   onNewTerminal?: () => void;
   onNewWorktree?: () => void;
   onOpenMachines?: () => void;
+  onOpenPhoneAlerts?: () => void;
   onSignOut?: () => void;
   connectionLabel?: string;
   buildStamp?: string;
@@ -25,6 +26,7 @@ export function MobileOverflowSheet({
   onNewTerminal,
   onNewWorktree,
   onOpenMachines,
+  onOpenPhoneAlerts,
   onSignOut,
   connectionLabel,
   buildStamp,
@@ -61,6 +63,18 @@ export function MobileOverflowSheet({
             onOpenChange(false);
           }}
           testId="overflow-action-new-worktree"
+        />
+      ) : null}
+
+      {onOpenPhoneAlerts ? (
+        <MobileSheetItem
+          icon={Bell}
+          label="Phone alerts"
+          onSelect={() => {
+            onOpenPhoneAlerts();
+            onOpenChange(false);
+          }}
+          testId="overflow-action-phone-alerts"
         />
       ) : null}
 

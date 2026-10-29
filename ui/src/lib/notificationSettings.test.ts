@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_NOTIFICATION_SETTINGS,
   NOTIFICATION_SETTINGS_EVENT,
+  NOTIFICATION_SETTINGS_STORAGE_KEY,
   loadNotificationSettings,
   resetNotificationSettings,
   saveNotificationSettings,
@@ -19,6 +20,15 @@ describe("notificationSettings", () => {
   afterEach(() => {
     localStorage.clear();
     resetNotificationSettings();
+  });
+
+  it("defaults phone alerts to needs-input on and finished after long turns", () => {
+    expect(DEFAULT_NOTIFICATION_SETTINGS.phoneNeedsInput).toBe(true);
+    expect(DEFAULT_NOTIFICATION_SETTINGS.phoneFinishedMode).toBe("longTurns");
+    saveNotificationSettings({ phoneFinishedMode: "everyTurn", phoneNeedsInput: false });
+    expect(loadNotificationSettings()).toMatchObject({ phoneFinishedMode: "everyTurn", phoneNeedsInput: false });
+    localStorage.setItem(NOTIFICATION_SETTINGS_STORAGE_KEY, JSON.stringify({ phoneFinishedMode: "sometimes" }));
+    expect(loadNotificationSettings().phoneFinishedMode).toBe("longTurns");
   });
 
   it("loads defaults with attentionFrame as true", () => {

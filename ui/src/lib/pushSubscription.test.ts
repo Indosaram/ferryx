@@ -3,7 +3,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { registerPushSubscription, SERVICE_WORKER_PATH } from "./pushSubscription";
+import {
+  disablePhoneAlerts,
+  enablePhoneAlerts,
+  readPhoneAlertState,
+  registerPushSubscription,
+  SERVICE_WORKER_PATH,
+  updatePhoneAlertPreferences,
+} from "./pushSubscription";
 
 const SHIPPED_SERVICE_WORKER = "/sw.js";
 /** jsdom replaces the global URL class, so fs checks need a plain string path. */
@@ -62,5 +69,121 @@ describe("pushSubscription service worker registration", () => {
 
     expect(register).toHaveBeenCalledTimes(1);
     expect(register).toHaveBeenCalledWith(SHIPPED_SERVICE_WORKER);
+  });
+});
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function installNotification(permission: NotificationPermission, answer: NotificationPermission = "granted") {
+  const requestPermission = vi.fn(async () => {
+    notification.permission = answer;
+    return answer;
+  });
+  const notification = { permission, requestPermission };
+  stubProperty(globalThis, "Notification", notification);
+  return requestPermission;
+}
+
+function installPushManager(existing: unknown = null) {
+  const created = {
+    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    options: { applicationServerKey: new Uint8Array([1, 2, 3]).buffer },
+    toJSON: () => ({ endpoint: "https://fcm.googleapis.com/fcm/send/abc", keys: { p256dh: "p256dh-key", auth: "auth-key" } }),
+    unsubscribe: vi.fn(async () => true),
+  };
+  const pushManager = {
+    getSubscription: vi.fn(async () => existing),
+    subscribe: vi.fn(async () => created),
+  };
+  installPushCapableBrowser(vi.fn(), Promise.resolve({ pushManager } as never));
+  return { pushManager, created };
+}
+
+const PREFS = { phoneNeedsInput: true, phoneFinishedMode: "longTurns" as const };
+
+describe("phone alerts", () => {
+  it("asks for permission once on enable, then subscribes with the gateway VAPID key and preferences", async () => {
+    const requestPermission = installNotification("default", "granted");
+    const { pushManager } = installPushManager();
+    const request = vi.fn(async (path: string) =>
+      path === "/api/v1/push/vapid-public-key" ? jsonResponse({ publicKey: "AQID" }) : new Response(null, { status: 204 }));
+
+    await expect(enablePhoneAlerts(request, PREFS)).resolves.toBe("enabled");
+
+    expect(requestPermission).toHaveBeenCalledTimes(1);
+    expect(pushManager.subscribe).toHaveBeenCalledTimes(1);
+    expect(pushManager.subscribe).toHaveBeenCalledWith({
+      userVisibleOnly: true,
+      applicationServerKey: new Uint8Array([1, 2, 3]),
+    });
+    expect(requestPermission.mock.invocationCallOrder[0]).toBeLessThan(pushManager.subscribe.mock.invocationCallOrder[0]);
+    const subscribeCall = request.mock.calls.find(([path]) => path === "/api/v1/push/subscribe") as unknown as [string, RequestInit];
+    expect(JSON.parse(String(subscribeCall[1].body))).toEqual({
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+      keys: { p256dh: "p256dh-key", auth: "auth-key" },
+      phoneNeedsInput: true,
+      phoneFinishedMode: "longTurns",
+    });
+  });
+
+  it("never subscribes when this browser blocks notifications", async () => {
+    const requestPermission = installNotification("denied");
+    const { pushManager } = installPushManager();
+    const request = vi.fn();
+
+    await expect(enablePhoneAlerts(request, PREFS)).resolves.toBe("denied");
+
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("stops when the permission prompt is denied", async () => {
+    installNotification("default", "denied");
+    const { pushManager } = installPushManager();
+
+    await expect(enablePhoneAlerts(vi.fn(), PREFS)).resolves.toBe("denied");
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+  });
+
+  it("reads the current state without asking for permission", async () => {
+    const requestPermission = installNotification("default");
+    installPushManager();
+
+    await expect(readPhoneAlertState()).resolves.toBe("disabled");
+    expect(requestPermission).not.toHaveBeenCalled();
+  });
+
+  it("replaces a subscription bound to another gateway key", async () => {
+    installNotification("granted");
+    const stale = {
+      options: { applicationServerKey: new Uint8Array([9, 9]).buffer },
+      unsubscribe: vi.fn(async () => true),
+    };
+    const { pushManager } = installPushManager(stale);
+    const request = vi.fn(async (path: string) =>
+      path === "/api/v1/push/vapid-public-key" ? jsonResponse({ publicKey: "AQID" }) : new Response(null, { status: 204 }));
+
+    await expect(enablePhoneAlerts(request, PREFS)).resolves.toBe("enabled");
+    expect(stale.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(pushManager.subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts preference changes and keeps the browser subscription when the gateway refuses removal", async () => {
+    const request = vi.fn(async () => new Response(null, { status: 204 }));
+    await expect(updatePhoneAlertPreferences(request, { phoneNeedsInput: false, phoneFinishedMode: "everyTurn" })).resolves.toBe(true);
+    expect(request).toHaveBeenCalledWith("/api/v1/push/preferences", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ phoneNeedsInput: false, phoneFinishedMode: "everyTurn" }),
+    }));
+
+    const existing = { endpoint: "https://fcm.googleapis.com/x", unsubscribe: vi.fn(async () => true) };
+    installPushManager(existing);
+    const refuse = vi.fn(async () => new Response(null, { status: 500 }));
+    await expect(disablePhoneAlerts(refuse)).resolves.toBe("error");
+    expect(refuse).toHaveBeenCalledWith("/api/v1/push/unsubscribe", expect.objectContaining({ method: "POST" }));
+    expect(existing.unsubscribe).not.toHaveBeenCalled();
   });
 });
