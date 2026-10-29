@@ -4302,7 +4302,11 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()), request.workspace_id, crate::daemon::session_service::SpawnOptions { worktree: request.worktree.clone(), cwd: request.cwd.clone().map(|p| p.to_string_lossy().to_string()), cols, rows, shell: None }, Some(TerminalStartup::RemoteSsh { host_store_path }), None)
             .await?
     } else if is_paired_workspace {
-        if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
+        // A paired host spawns only a shell or an agent resume; never drop an agent launch silently.
+        if matches!(
+            request.startup,
+            Some(TerminalStartup::RemoteSsh { .. } | TerminalStartup::AgentLaunch { .. })
+        ) {
             return Err(crate::ssh::projects::unsupported());
         }
 

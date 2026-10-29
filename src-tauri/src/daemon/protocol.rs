@@ -309,6 +309,9 @@ pub enum TerminalStartup {
         agent_type: String,
         provider_session: AgentProviderSession,
     },
+    /// A fresh agent launch: the command and args the desktop agent settings resolved.
+    #[serde(rename_all = "camelCase")]
+    AgentLaunch { command: String, args: Vec<String> },
 }
 
 pub mod base64_serde {
@@ -2920,6 +2923,20 @@ mod tests {
 
     #[test]
     fn test_upgrade_binary_protocol_serde_roundtrip() {
+        let launch = TerminalStartup::AgentLaunch {
+            command: "claude".to_string(),
+            args: vec!["--model".to_string(), "opus".to_string()],
+        };
+        let json = serde_json::to_value(&launch).expect("serialize agent launch");
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "agentLaunch", "command": "claude", "args": ["--model", "opus"]})
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalStartup>(json).expect("deserialize agent launch"),
+            launch
+        );
+
         let req = DaemonRequest::UpgradeBinary {
             new_binary_path: None,
         };
