@@ -180,13 +180,14 @@ async function runSurfacesWith(ctx, stub) {
   const nextMail = async (label, trigger) => {
     const before = new Set(mailFiles());
     const arrived = waitForChange(ctx, `${label} mail`, mailDir, () => {
+      // A mail file appears before its link is written: wait for the link itself.
       const fresh = mailFiles().filter((name) => !before.has(name));
-      return { done: fresh.length > 0, fresh };
+      const url = fresh.length > 0 ? readFileSync(join(mailDir, fresh[0]), 'utf8').trim() : '';
+      return { done: url.length > 0, fresh, url };
     }, 60_000);
     arrived.catch(() => {});
     const triggered = await trigger();
-    const { fresh } = await arrived;
-    const url = readFileSync(join(mailDir, fresh[0]), 'utf8').trim();
+    const { fresh, url } = await arrived;
     ctx.evidence.appendJsonl('mail.jsonl', { label, file: fresh[0], kind: url.includes('/device/approve') ? 'device-approve' : 'login', at: new Date().toISOString() });
     return { url, triggered };
   };
