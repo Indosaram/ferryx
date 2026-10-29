@@ -11,6 +11,7 @@ import {
   countAttentionRows,
   formatAttentionTime,
   groupAttentionRows,
+  sortAttentionRows,
   type AttentionRow,
   type AttentionState,
 } from "./attentionModel";
@@ -56,8 +57,49 @@ const MARKER: Record<AttentionState, string> = {
   done: "bg-status-success",
 };
 
+/**
+ * A done row whose pane holds a prompt the daemon can read is waiting on the user, whatever the
+ * activity detector last said: it is shown as needs-you so its answer is reachable. Only the
+ * daemon's prompt read decides this, never the row's terminal text.
+ */
+function usePromptedRows(rows: readonly AttentionRow[], prompts: AttentionPrompts | undefined): readonly AttentionRow[] {
+  const [prompted, setPrompted] = useState<ReadonlySet<string>>(() => new Set());
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const doneKey = rows
+    .filter((row) => row.state === "done")
+    .map((row) => `${row.id}\u0000${row.revision}\u0000${row.text ?? ""}`)
+    .join("\u0001");
+
+  useEffect(() => {
+    const done = rowsRef.current.filter((row) => row.state === "done");
+    if (!prompts || done.length === 0) {
+      setPrompted((current) => (current.size === 0 ? current : new Set()));
+      return;
+    }
+    let current = true;
+    void Promise.all(
+      done.map((row) => prompts.read(row).then((prompt) => (prompt ? row.id : null), () => null)),
+    ).then((ids) => {
+      if (current) setPrompted(new Set(ids.filter((id): id is string => id !== null)));
+    });
+    return () => {
+      current = false;
+    };
+  }, [doneKey, prompts]);
+
+  if (prompted.size === 0) return rows;
+  let promoted = false;
+  const next = rows.map((row) => {
+    if (row.state !== "done" || !prompted.has(row.id)) return row;
+    promoted = true;
+    return { ...row, state: "needs-you" as const };
+  });
+  return promoted ? sortAttentionRows(next) : rows;
+}
+
 export function AttentionInbox({
-  rows,
+  rows: givenRows,
   onOpen,
   onDismiss,
   prompts,
@@ -67,6 +109,7 @@ export function AttentionInbox({
 }: AttentionInboxProps) {
   const now = useMinuteClock(fixedNow);
   const [filter, setFilter] = useState<AttentionFilter>("all");
+  const rows = usePromptedRows(givenRows, prompts);
   const counts = countAttentionRows(rows);
   const bothStates = counts["needs-you"] > 0 && counts.done > 0;
   const activeFilter: AttentionFilter = bothStates ? filter : "all";

@@ -180,11 +180,20 @@ describe("AttentionInbox prompt answers", () => {
     expect(answerCalls()[0]?.[1]).toMatchObject({ answer: { text: "use bun" } });
   });
 
-  it("reads no prompt for a finished row", async () => {
-    core.invoke.mockResolvedValue(MENU);
+  it("shows a finished row whose pane holds a daemon prompt as needing you, with its answers", async () => {
+    core.invoke.mockImplementation(async (command: string) => (command === "cmd_agent_prompt_get" ? MENU : null));
     render(<Harness initial={[{ ...waiting, state: "done" }]} />);
+
+    expect(await screen.findAllByTestId("attention-prompt-option")).toHaveLength(3);
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "needs-you");
+  });
+
+  it("keeps a finished row done when the daemon reads no prompt", async () => {
+    core.invoke.mockResolvedValue(null);
+    render(<Harness initial={[{ ...waiting, state: "done" }]} />);
+    await waitFor(() => expect(core.invoke).toHaveBeenCalledWith("cmd_agent_prompt_get", expect.anything()));
     await act(async () => {});
-    expect(core.invoke).not.toHaveBeenCalled();
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "done");
     expect(screen.queryByTestId("attention-prompt")).not.toBeInTheDocument();
   });
 });
