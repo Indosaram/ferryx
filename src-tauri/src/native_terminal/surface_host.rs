@@ -6665,6 +6665,28 @@ fn release_renderer_on_suspend(render_suspended: bool) -> bool {
     render_suspended
 }
 
+/// Makes sure a renderer exists for this frame, building it when absent.
+///
+/// A renderer released on suspension is rebuilt only once `probe_suspended` (one acquisition on
+/// the still-configured surface) reports the surface visible again. Otherwise every output frame
+/// of an occluded pane would rebuild pipelines and glyph atlas only to drop them again. Returns
+/// `true` when the surface is still suspended and no renderer was built.
+fn prepare_renderer<R>(
+    renderer: &mut Option<R>,
+    released_on_suspend: bool,
+    probe_suspended: impl FnOnce() -> Result<bool, NativeTerminalError>,
+    build: impl FnOnce() -> Result<R, NativeTerminalError>,
+) -> Result<bool, NativeTerminalError> {
+    if renderer.is_some() {
+        return Ok(false);
+    }
+    if released_on_suspend && probe_suspended()? {
+        return Ok(true);
+    }
+    *renderer = Some(build()?);
+    Ok(false)
+}
+
 /// Native WGPU surface, platform compositor child view, and renderer.
 ///
 /// # Drop Order Invariant
@@ -6819,17 +6841,44 @@ impl GpuLeg {
         _frame_generation: u64,
     ) -> Result<NativeTerminalSurfaceReceipt, NativeTerminalError> {
         let snapshot = &input.snapshot;
-        if self.renderer.is_none() {
-            self.renderer = Some(NativeTerminalRenderer::with_shared_surface_gpu(
-                self.initial_config,
-            )?);
-            if self.renderer_released {
-                self.renderer_released = false;
-                tracing::debug!(
-                    session_id = _session_id,
-                    "native terminal renderer rebuilt after suspension"
-                );
-            }
+        let was_released = self.renderer.is_none() && self.renderer_released;
+        let initial_config = self.initial_config;
+        let surface = &self.surface;
+        let still_suspended = prepare_renderer(
+            &mut self.renderer,
+            self.renderer_released,
+            || match surface.get_current_texture() {
+                // A drawable is available: the surface is visible again. The probe frame is
+                // discarded unpresented; the rebuilt renderer reconfigures and acquires anew.
+                wgpu::CurrentSurfaceTexture::Success(_)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(_)
+                | wgpu::CurrentSurfaceTexture::Lost
+                | wgpu::CurrentSurfaceTexture::Outdated => Ok(false),
+                ref other => Ok(classify_surface_error(other)? == SurfaceFrameAction::Suspend),
+            },
+            || NativeTerminalRenderer::with_shared_surface_gpu(initial_config),
+        )?;
+        if still_suspended {
+            let mut receipt = NativeTerminalSurfaceReceipt::from_snapshot(
+                layout,
+                snapshot,
+                0,
+                0,
+                CellMetrics {
+                    width_px: self.initial_config.cell_width_px,
+                    height_px: self.initial_config.cell_height_px,
+                },
+                logical_bounds,
+            );
+            receipt.render_suspended = true;
+            return Ok(receipt);
+        }
+        if was_released {
+            self.renderer_released = false;
+            tracing::debug!(
+                session_id = _session_id,
+                "native terminal renderer rebuilt after suspension"
+            );
         }
         let renderer = self.renderer.as_mut().expect("GPU renderer initialized");
         if let Some(bounds) = logical_bounds {
@@ -7006,6 +7055,58 @@ mod tests {
     #[test]
     fn visible_or_dropped_frame_keeps_the_renderer() {
         assert!(!release_renderer_on_suspend(false));
+    }
+
+    #[test]
+    fn occluded_output_frames_do_not_rebuild_a_released_renderer() {
+        // Mirrors GpuLeg::render_snapshot: prepare the renderer (probing first when it was
+        // released on suspension), then acquire; a suspended acquisition releases it.
+        // Per output frame: is the surface occluded?
+        let frames = [false, true, true, true, true, false, false];
+        let mut renderer: Option<()> = None;
+        let mut released = false;
+        let (mut builds, mut releases, mut presented) = (0, 0, 0);
+        for occluded in frames {
+            let still_suspended = prepare_renderer(
+                &mut renderer,
+                released,
+                // The probe acquires on the still-configured surface, so it sees the same
+                // visibility as this frame's acquisition.
+                || Ok(occluded),
+                || {
+                    builds += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            if still_suspended {
+                assert!(renderer.is_none(), "a suspended probe must not build the renderer");
+                continue;
+            }
+            released = false;
+            let (frame, render_suspended) = acquire_surface_frame(
+                || {
+                    if occluded {
+                        SimulatedAcquisition::Occluded
+                    } else {
+                        SimulatedAcquisition::Frame
+                    }
+                },
+                || Ok(()),
+            )
+            .unwrap();
+            if frame.is_some() {
+                presented += 1;
+            } else if release_renderer_on_suspend(render_suspended) {
+                renderer = None;
+                released = true;
+                releases += 1;
+            }
+        }
+        assert_eq!(releases, 1, "occlusion releases the renderer once");
+        assert_eq!(builds, 2, "one initial build and one rebuild on unocclusion");
+        assert_eq!(presented, 3);
+        assert!(renderer.is_some());
     }
 
     #[test]
