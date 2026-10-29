@@ -2411,6 +2411,12 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
                             break code;
                         }
                         Ok(None) => continue,
+                        // A dropped connection or a server-side failure (5xx) while waiting is
+                        // retried on the next tick; the timeout above bounds it.
+                        Err(err) if poll_error_is_transient(&err) => {
+                            tracing::debug!(error = %err, "device auth poll failed; retrying");
+                            continue;
+                        }
                         Err(err) => return Err(billing::from_enroll_error(&origin, &err)),
                     }
                 };
@@ -2690,6 +2696,13 @@ pub fn slowed_down_interval(current: std::time::Duration) -> std::time::Duration
     (current + std::time::Duration::from_secs(5)).min(std::time::Duration::from_secs(60))
 }
 
+/// Whether an approval poll failed in a way the next poll can recover from: the account service
+/// was unreachable or answered with a server error (e.g. a store write that timed out). Client
+/// errors such as an expired or unknown device code are final.
+pub fn poll_error_is_transient(error: &crate::account::enroll_client::EnrollError) -> bool {
+    error.code == "ACCOUNT_UNREACHABLE" || error.status >= 500
+}
+
 /// Whether the stored enrollment record belongs to `origin`.
 pub fn enrolled_to_origin(
     record: &crate::account::enroll_client::AccountEnrollmentRecord,
@@ -2730,7 +2743,7 @@ async fn wait_for_machine_approval(
                 ))
             }
             // A dropped connection while waiting is retried on the next tick; the deadline bounds it.
-            Err(error) if error.code == "ACCOUNT_UNREACHABLE" => {
+            Err(error) if poll_error_is_transient(&error) => {
                 tracing::debug!(%error, "machine request poll failed; retrying");
             }
             Err(error) => return Err(up_error_from_enroll(origin, &error)),
@@ -4117,6 +4130,21 @@ mod tests {
             slowed_down_interval(std::time::Duration::from_secs(58)),
             std::time::Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn approval_polling_retries_unreachable_and_server_errors_only() {
+        let error = |code: &str, status: u16| crate::account::enroll_client::EnrollError {
+            code: code.into(),
+            message: String::new(),
+            status,
+            details: None,
+        };
+        assert!(poll_error_is_transient(&error("ACCOUNT_UNREACHABLE", 0)));
+        assert!(poll_error_is_transient(&error("INTERNAL_ERROR", 500)));
+        assert!(poll_error_is_transient(&error("ACCOUNT_HTTP_502", 502)));
+        assert!(!poll_error_is_transient(&error("DEVICE_CODE_EXPIRED", 400)));
+        assert!(!poll_error_is_transient(&error("MACHINE_REQUEST_INVALID", 400)));
     }
 
     #[test]

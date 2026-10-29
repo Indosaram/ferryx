@@ -938,6 +938,58 @@ mod tests {
         assert_eq!(loaded.users.len(), 2);
     }
 
+    // Regression for the production "database is locked" sign-in failure: a writer of the same
+    // process that waits longer than SQLite's busy timeout must still commit. Time is the
+    // behavior under test here, so the holder deliberately outlasts `BUSY_TIMEOUT`; before
+    // writers were serialized in-process, the waiter failed with SQLITE_BUSY at that point.
+    #[test]
+    fn same_process_writer_outlasting_busy_timeout_still_commits() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = dir.path().to_path_buf();
+        AccountStore::load(&path).expect("initialize sqlite store");
+
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            AccountStore::mutate_transaction::<(), String, _>(&holder_path, move |store| {
+                store.users.insert(
+                    "holder_user".into(),
+                    UserRecord {
+                        user_id: "holder_user".into(),
+                        email: "holder@example.com".into(),
+                        created_at: 1,
+                    },
+                );
+                holding_tx.send(()).expect("signal that the write is in progress");
+                std::thread::sleep(
+                    store_sqlite::schema::BUSY_TIMEOUT + std::time::Duration::from_millis(500),
+                );
+                Ok(())
+            })
+        });
+        holding_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("holder must start its write within 10 s");
+
+        let waiter = AccountStore::mutate_transaction::<(), String, _>(&path, |store| {
+            store.users.insert(
+                "waiter_user".into(),
+                UserRecord {
+                    user_id: "waiter_user".into(),
+                    email: "waiter@example.com".into(),
+                    created_at: 2,
+                },
+            );
+            Ok(())
+        });
+        holder.join().expect("holder thread joins").expect("holder commits");
+        waiter.expect("a same-process writer must wait for the holder, not fail as locked");
+
+        let loaded = AccountStore::load(&path).expect("load");
+        assert!(loaded.users.contains_key("holder_user"));
+        assert!(loaded.users.contains_key("waiter_user"));
+    }
+
     #[test]
     fn crash_resume_after_db_commit_does_not_overwrite_newer_records() {
         let dir = tempfile::tempdir().expect("temp");
