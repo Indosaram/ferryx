@@ -9,7 +9,7 @@ import {
   collectReceipts, CONTROL_ENV, errorInfo, EXIT, Evidence, identityVerdict, isSha256, Journal, Ledger, Owned, PLATFORM, POSIX, probeProcess,
   reapMember, sameStartStamp, SCHEMA, sha256, withDeadline,
 } from './harness.mjs';
-import { SCENARIOS, SLEEPER } from './scenarios.mjs';
+import { SCENARIOS, SELF_TEST_SCENARIOS, SLEEPER } from './scenarios.mjs';
 import { unitChecks } from './self-test-units.mjs';
 
 export const NONCE_ENV = 'UNIFIED_SUPERVISOR_SELFTEST_NONCE';
@@ -18,8 +18,10 @@ const CHILD_DEADLINE_MS = 120_000;
 const ARM_DEADLINE_MS = 60_000;
 // The refusal, not-implemented, run-lock and stale-evidence steps need a registered scenario
 // that is still only planned: the first one, so implementing a scenario never silently runs
-// it against the self-test's fake binaries. selfTest() refuses to run without one.
-const PLANNED = Object.entries(SCENARIOS).find(([, scenario]) => !scenario.implemented)?.[0] ?? null;
+// it against the self-test's fake binaries; once every public scenario is implemented, the
+// hidden `__selftest-planned` entry. selfTest() refuses to run without one.
+const PLANNED = Object.entries(SCENARIOS).find(([, scenario]) => !scenario.implemented)?.[0]
+  ?? (SELF_TEST_SCENARIOS['__selftest-planned']?.implemented === false ? '__selftest-planned' : null);
 
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }

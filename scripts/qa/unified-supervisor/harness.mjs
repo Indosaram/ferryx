@@ -285,13 +285,31 @@ export function assertIsolatedRoot(path, label, context = {}) {
 // Config.
 
 export const CONFIG_REQUIRED = Object.freeze(['ferryxCli', 'ferryxApp', 'mhcBin', 'dataRoot', 'memoryRoot', 'projectRoot', 'ownerPrincipal']);
-export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', 'ferryxUiDist', 'realEngine', '$schema', '$comment']);
+export const CONFIG_OPTIONAL = Object.freeze(['pairedHostId', 'slackChannel', 'ferryxRelay', 'ferryxUiDist', 'realEngine', 'realSlack', '$schema', '$comment']);
 // Optional object fields, validated by their own checks instead of the string rule.
-const OBJECT_FIELDS = new Set(['realEngine']);
+const OBJECT_FIELDS = new Set(['realEngine', 'realSlack']);
 const REAL_ENGINE_FIELDS = Object.freeze({
   required: ['provider', 'api', 'baseUrl', 'model', 'apiKeyEnv', 'workerCli', 'workerBin', 'workerBaseUrl', 'workerModel'],
   optional: ['workerApiKeyEnv'],
 });
+const REAL_SLACK_FIELDS = Object.freeze(['botTokenEnv', 'appTokenEnv', 'ownerUserTokenEnv', 'teamId', 'channelId', 'ownerUserId']);
+
+// realSlack (channels, plan todo 17): the approved dedicated QA channel and the QA Slack app.
+// Token fields are env var NAMES that contain TOKEN (so the redactor masks their values).
+function checkRealSlack(value) {
+  if (typeof value !== 'object' || Array.isArray(value)) throw new HarnessError('CONFIG_INVALID', 'realSlack must be an object or null');
+  const unknown = Object.keys(value).filter((key) => !REAL_SLACK_FIELDS.includes(key));
+  if (unknown.length > 0) throw new HarnessError('CONFIG_INVALID', `realSlack has unknown field(s): ${unknown.join(', ')}`);
+  const missing = REAL_SLACK_FIELDS.filter((key) => typeof value[key] !== 'string' || value[key].trim() === '');
+  if (missing.length > 0) throw new HarnessError('CONFIG_INVALID', `realSlack is missing field(s): ${missing.join(', ')}`);
+  for (const key of ['botTokenEnv', 'appTokenEnv', 'ownerUserTokenEnv']) {
+    if (!/^[A-Z][A-Z0-9_]*TOKEN[A-Z0-9_]*$/.test(value[key])) throw new HarnessError('CONFIG_INVALID', `realSlack.${key} must be an env var NAME containing TOKEN, never a token value`);
+  }
+  if (new Set([value.botTokenEnv, value.appTokenEnv, value.ownerUserTokenEnv]).size !== 3) throw new HarnessError('CONFIG_INVALID', 'realSlack token env names must be three different variables');
+  if (!/^T[A-Z0-9]{6,}$/.test(value.teamId)) throw new HarnessError('CONFIG_INVALID', 'realSlack.teamId must be a Slack team id such as T0123456789');
+  if (!/^[CG][A-Z0-9]{6,}$/.test(value.channelId)) throw new HarnessError('CONFIG_INVALID', 'realSlack.channelId must be a Slack channel id such as C0123456789 (the approved QA channel, never a DM)');
+  if (!/^[UW][A-Z0-9]{6,}$/.test(value.ownerUserId)) throw new HarnessError('CONFIG_INVALID', 'realSlack.ownerUserId must be a Slack user id such as U0123456789');
+}
 
 // realEngine (real-autonomy, plan todo 17): a real supervisor provider and a real worker CLI.
 // Only env var NAMES are configured; key values never appear in config or evidence.
@@ -341,6 +359,7 @@ export function loadConfig(path, context = {}) {
   if (missing.length > 0) throw new HarnessError('CONFIG_INVALID', `missing required field(s): ${missing.join(', ')}`);
   for (const key of CONFIG_OPTIONAL) {
     if (config[key] === undefined || config[key] === null) continue;
+    if (key === 'realSlack') { checkRealSlack(config[key]); continue; }
     if (OBJECT_FIELDS.has(key)) { checkRealEngine(config[key], context); continue; }
     if (typeof config[key] !== 'string' || config[key].trim() === '') throw new HarnessError('CONFIG_INVALID', `${key} must be a non-empty string or null`);
   }

@@ -132,7 +132,7 @@ function decodeAddress(hexPort, v6) {
   return { ip, port: parseInt(port, 16) };
 }
 
-function tcpTable(pid) {
+export function tcpTable(pid) {
   const rows = new Map();
   for (const [file, v6] of [['tcp', false], ['tcp6', true]]) {
     let text = '';
@@ -146,7 +146,7 @@ function tcpTable(pid) {
   return rows;
 }
 
-function socketInodes(pid) {
+export function socketInodes(pid) {
   const inodes = [];
   let fds = [];
   try { fds = readdirSync(`/proc/${pid}/fd`); } catch { return inodes; }
@@ -159,15 +159,15 @@ function socketInodes(pid) {
   return inodes;
 }
 
-function commOf(pid) {
+export function commOf(pid) {
   try { return readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { return null; }
 }
 
-function cmdlineOf(pid) {
+export function cmdlineOf(pid) {
   try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' '); } catch { return null; }
 }
 
-const isLoopback = (ip) => ip.startsWith('127.') || ip === '0:0:0:0:0:0:0:1';
+export const isLoopback = (ip) => ip.startsWith('127.') || ip === '0:0:0:0:0:0:0:1';
 
 export async function runRealAutonomy(ctx, deps) {
   const { config } = ctx;

@@ -10,6 +10,14 @@
   "pairedHostId": "maho-mac",
   "ownerPrincipal": "qa-owner",
   "slackChannel": null,
+  "realSlack": {
+    "botTokenEnv": "QA_SLACK_BOT_TOKEN",
+    "appTokenEnv": "QA_SLACK_APP_TOKEN",
+    "ownerUserTokenEnv": "QA_SLACK_OWNER_USER_TOKEN",
+    "teamId": "T0QAQAQAQ",
+    "channelId": "C0QACHANNEL",
+    "ownerUserId": "U0QAOWNER"
+  },
   "realEngine": {
     "provider": "mahoquot-gateway",
     "api": "openai-completions",
