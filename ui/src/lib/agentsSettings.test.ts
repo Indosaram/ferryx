@@ -1,14 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { splitAgentCommandLine } from "./agentsSettings";
+import { splitAgentArgs } from "./agentsSettings";
 
-describe("splitAgentCommandLine", () => {
-  it("keeps quoted arguments whole and honors escapes", () => {
-    expect(splitAgentCommandLine(`claude --append-system-prompt "a b" --name 'c d'  x\\ y ""`)).toEqual([
-      "claude", "--append-system-prompt", "a b", "--name", "c d", "x y", "",
+describe("splitAgentArgs", () => {
+  it("keeps quoted arguments whole and backslashes literal", () => {
+    expect(splitAgentArgs(`--append-system-prompt "a b" --name 'c d'  ""`)).toEqual([
+      "--append-system-prompt", "a b", "--name", "c d", "",
     ]);
-    expect(splitAgentCommandLine(`codex -c "say \\"hi\\"" 'it'"'"'s'`)).toEqual(["codex", "-c", `say "hi"`, "it's"]);
-    expect(splitAgentCommandLine("  ")).toEqual([]);
+    expect(splitAgentArgs(`-c "say \\"hi\\"" 'it'"'"'s'`)).toEqual(["-c", `say "hi"`, "it's"]);
+    expect(splitAgentArgs(`--config C:\\Users\\me\\cfg.toml --dir "C:\\Program Files\\X\\"`)).toEqual([
+      "--config", "C:\\Users\\me\\cfg.toml", "--dir", "C:\\Program Files\\X\\",
+    ]);
+    expect(splitAgentArgs("  ")).toEqual([]);
   });
 });
 

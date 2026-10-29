@@ -84,7 +84,7 @@ import {
   getLaunchableAgents,
   loadAgentSettings,
   mergeDetections,
-  splitAgentCommandLine,
+  splitAgentArgs,
   type AgentSettings,
 } from "./lib/agentsSettings";
 import {
@@ -2717,7 +2717,10 @@ function WorkspaceApp({
           ...initialGridFields(agentGrid),
         };
         const fullCommand = `${agent.command} ${agent.args}`.trim();
-        const [command = "", ...args] = splitAgentCommandLine(fullCommand);
+        // argv[0] is the configured command verbatim (it may be a path with spaces or
+        // backslashes); only the argument string is split.
+        const command = agent.command.trim();
+        const args = splitAgentArgs(agent.args);
         // The agent is the pane's startup command, so it cannot race the shell's own startup the
         // way typed input does (PSReadLine drops early keystrokes). A backend that refuses the
         // startup kind (an older daemon, a paired host) still gets the agent typed into a shell.

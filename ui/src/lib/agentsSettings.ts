@@ -330,11 +330,11 @@ export function getLaunchableAgents(resolved: ResolvedAgent[]): ResolvedAgent[] 
 }
 
 /**
- * Splits an agent command line into argv the way a POSIX shell would for plain words: whitespace
- * separates, single quotes are literal, double quotes group and honor `\"` and `\\`, and a bare
- * backslash escapes the next character. Expansion (`$`, globs) is not performed.
+ * Splits an agent's argument string into argv: whitespace separates, single quotes group
+ * literally, and double quotes group with `\"` as the only escape. A backslash is otherwise
+ * literal so Windows paths survive. Expansion (`$`, globs) is not performed.
  */
-export function splitAgentCommandLine(line: string): string[] {
+export function splitAgentArgs(line: string): string[] {
   const words: string[] = [];
   let word = "";
   let inWord = false;
@@ -346,7 +346,7 @@ export function splitAgentCommandLine(line: string): string[] {
       else word += ch;
     } else if (quote === '"') {
       if (ch === '"') quote = null;
-      else if (ch === "\\" && (line[i + 1] === '"' || line[i + 1] === "\\")) word += line[++i];
+      else if (ch === "\\" && line[i + 1] === '"') word += line[++i];
       else word += ch;
     } else if (/\s/.test(ch)) {
       if (inWord) words.push(word);
@@ -355,7 +355,6 @@ export function splitAgentCommandLine(line: string): string[] {
     } else {
       inWord = true;
       if (ch === "'" || ch === '"') quote = ch;
-      else if (ch === "\\" && i + 1 < line.length) word += line[++i];
       else word += ch;
     }
   }

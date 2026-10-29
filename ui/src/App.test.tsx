@@ -3094,6 +3094,35 @@ describe("App project workspace flow", () => {
     );
   });
 
+  it.each([
+    {
+      command: "C:\\Program Files\\X\\agent.exe",
+      args: `--name "c d"`,
+      argv: ["--name", "c d"],
+    },
+    { command: "/opt/my tools/claude", args: "", argv: [] },
+    {
+      command: "C:\\Users\\me\\bin\\claude.exe",
+      args: `--config C:\\Users\\me\\cfg.toml`,
+      argv: ["--config", "C:\\Users\\me\\cfg.toml"],
+    },
+  ])("launches $command verbatim as argv[0] and splits only its args", async ({ command, args, argv }) => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: command, available: true }]);
+    saveAgentSettings({ version: 1, defaultAgentId: null, overrides: {}, custom: [{ name: "mine", command, args }] });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch mine" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch mine" }));
+
+    await waitFor(() =>
+      expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+        expect.objectContaining({ startup: { kind: "agentLaunch", command, args: argv } }),
+      ),
+    );
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+  });
+
   it("types the agent into a plain shell only when the backend refuses the launch as UNSUPPORTED", async () => {
     native.isTauriRuntime.mockReturnValue(true);
     native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
