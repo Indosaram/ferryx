@@ -158,8 +158,57 @@ pub fn git_diff(
         args.push(sha.clone());
     }
     args.push("--".into());
-    args.extend(file);
-    Ok(run_git(worktree, &args)?)
+    args.extend(file.clone());
+    let patch = run_git(worktree, &args)?;
+    match (scope, file) {
+        (GitDiffScope::WorkingTree, Some(file)) if patch.is_empty() => {
+            untracked_preview(worktree, &file)
+        }
+        _ => Ok(patch),
+    }
+}
+
+/// Largest untracked file shown as a preview patch.
+const UNTRACKED_PREVIEW_LIMIT: u64 = 1024 * 1024;
+
+/// Shows an untracked text file as an all-added patch without staging it. Returns an empty
+/// patch for tracked, ignored, binary or oversized files.
+fn untracked_preview(worktree: &Path, file: &str) -> Result<String, GitChangeError> {
+    let listed = run_git(
+        worktree,
+        &["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", file],
+    )?;
+    if !listed.split('\0').any(|entry| entry == file) {
+        return Ok(String::new());
+    }
+    let path = worktree.join(file);
+    let metadata = std::fs::symlink_metadata(&path).map_err(WorktreeError::Io)?;
+    if !metadata.is_file() || metadata.len() > UNTRACKED_PREVIEW_LIMIT {
+        return Ok(String::new());
+    }
+    let bytes = std::fs::read(&path).map_err(WorktreeError::Io)?;
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(String::new());
+    };
+    if text.contains('\0') {
+        return Ok(String::new());
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut patch = format!(
+        "diff --git a/{file} b/{file}\nnew file mode 100644\n--- /dev/null\n+++ b/{file}\n"
+    );
+    if !lines.is_empty() {
+        patch.push_str(&format!("@@ -0,0 +1,{} @@\n", lines.len()));
+        for line in &lines {
+            patch.push('+');
+            patch.push_str(line);
+            patch.push('\n');
+        }
+        if !text.ends_with('\n') {
+            patch.push_str("\\ No newline at end of file\n");
+        }
+    }
+    Ok(patch)
 }
 
 pub fn git_stage(worktree: &Path, paths: &[String]) -> Result<(), GitChangeError> {
@@ -334,6 +383,27 @@ mod tests {
         assert!(!git_push(&repo).unwrap().set_upstream);
         let log = run_git(&bare, &["log", "--format=%H", "main"]).unwrap();
         assert!(log.contains(&second_sha), "{log}");
+    }
+
+    #[test]
+    fn untracked_files_preview_as_added_lines_without_staging() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        fs::create_dir(repo.join("dir")).unwrap();
+        fs::write(repo.join("dir/new.txt"), "alpha\nbeta").unwrap();
+        let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some("dir/new.txt")).unwrap();
+        assert!(patch.contains("+++ b/dir/new.txt"), "{patch}");
+        assert!(patch.contains("@@ -0,0 +1,2 @@\n+alpha\n+beta\n"), "{patch}");
+        assert!(patch.contains("No newline at end of file"), "{patch}");
+        assert_eq!(run_git(&repo, &["diff", "--cached", "--name-only"]).unwrap(), "");
+
+        // Ignored and binary files stay empty; a clean tracked file has no preview either.
+        fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(repo.join("ignored.txt"), "secret\n").unwrap();
+        fs::write(repo.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        for quiet in ["ignored.txt", "blob.bin", "file.txt"] {
+            let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some(quiet)).unwrap();
+            assert!(patch.is_empty(), "{quiet}: {patch}");
+        }
     }
 
     #[test]

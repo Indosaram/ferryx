@@ -398,7 +398,7 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
             ) : !selection ? null : rows.length === 0 && patch !== null ? (
               <div role="status" className="px-3 py-4 font-sans text-muted-foreground">
                 {selection.group === "workingTree" && isUntracked(groups, selection.path)
-                  ? "New untracked file. Stage it to see its contents as a diff."
+                  ? "New untracked file with no text preview (empty, binary or too large)."
                   : "No textual diff for this file."}
               </div>
             ) : mode === "unified" ? (

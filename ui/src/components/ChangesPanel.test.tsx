@@ -106,6 +106,22 @@ describe("ChangesPanel", () => {
     expect(screen.getAllByTestId("diff-row").some((row) => row.getAttribute("data-kind") === "add")).toBe(true);
   });
 
+  it("previews an untracked file's lines without staging it", async () => {
+    const preview = ["diff --git a/notes.txt b/notes.txt", "new file mode 100644", "--- /dev/null", "+++ b/notes.txt", "@@ -0,0 +1,2 @@", "+first note", "+second note", ""].join("\n");
+    mockIpc({ status: () => ({ isDirty: true, files: [{ statusCode: "??", path: "notes.txt" }] }) });
+    const base = core.invoke.getMockImplementation()!;
+    core.invoke.mockImplementation(async (command: string, args?: { request?: Record<string, unknown> }) =>
+      command === "cmd_worktree_diff" && args?.request?.file === "notes.txt" ? preview : base(command, args),
+    );
+    renderPanel();
+
+    await waitFor(() => {
+      const added = screen.queryAllByTestId("diff-row").filter((row) => row.getAttribute("data-kind") === "add");
+      expect(added.map((row) => row.textContent)).toEqual([expect.stringContaining("+first note"), expect.stringContaining("+second note")]);
+    });
+    expect(core.invoke).not.toHaveBeenCalledWith("cmd_worktree_stage", expect.anything());
+  });
+
   it("stages a working-tree file when its checkbox is ticked and refreshes", async () => {
     let staged = false;
     mockIpc({
