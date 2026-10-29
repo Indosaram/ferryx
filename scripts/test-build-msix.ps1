@@ -41,7 +41,9 @@ function Assert-Throws {
         & $Block
     } catch {
         $threw = $true
-        $caughtMsg = $_.Exception.Message
+        # Windows PowerShell wraps long error records at the console width, which splits a phrase
+        # such as "not found in Cert:" across a line break; collapse whitespace before matching.
+        $caughtMsg = $_.Exception.Message -replace '\s+', ' '
     }
     if (-not $threw) {
         throw "Expected script to throw an exception, but it succeeded."
