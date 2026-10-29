@@ -404,10 +404,9 @@ async fn tauri_mock_worktree_commands_use_identity_contract() {
     let status = cmd_worktree_status(
         app.handle().clone(),
         registry_state.clone(),
-        WorktreePushRequest {
+        WorktreeStatusRequest {
             workspace_id: "workspace-test".into(),
-            worktree: Some(identity.clone()),
-            worktree_path: None,
+            worktree: identity.clone(),
         },
     )
     .await

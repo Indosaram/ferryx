@@ -399,20 +399,11 @@ pub async fn cmd_worktree_delete_preview(
 pub async fn cmd_worktree_status<R: Runtime>(
     app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
-    request: WorktreePushRequest,
+    request: WorktreeStatusRequest,
 ) -> Result<DirtyState, IpcError> {
     let registry = (*registry).clone();
     let workspace_id = request.workspace_id.clone();
-    let identity = match (request.worktree, request.worktree_path) {
-        (Some(identity), None) => identity,
-        (identity, worktree_path) => {
-            // A checkout addressed by path has no dirty snapshot or event to drive.
-            return with_worktree_path(registry, workspace_id, identity, worktree_path, |path| {
-                Ok(crate::worktree::git_status_porcelain(path)?)
-            })
-            .await;
-        }
-    };
+    let identity = request.worktree.clone();
     let event_workspace_id = workspace_id.clone();
     let event_identity = identity.clone();
 
@@ -435,6 +426,26 @@ pub async fn cmd_worktree_status<R: Runtime>(
         )?;
     }
     Ok(status)
+}
+
+/// Status for the Changes panel: a managed worktree goes through `cmd_worktree_status` (dirty
+/// tracking and events); a checkout addressed by path only reads `git status`.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_changes_status<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreePushRequest,
+) -> Result<DirtyState, IpcError> {
+    let WorktreePushRequest { workspace_id, worktree, worktree_path } = request;
+    if let (Some(worktree), None) = (&worktree, &worktree_path) {
+        let request = WorktreeStatusRequest { workspace_id, worktree: worktree.clone() };
+        return cmd_worktree_status(app, registry, request).await;
+    }
+    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, |path| {
+        Ok(crate::worktree::git_status_porcelain(path)?)
+    })
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1121,7 +1132,7 @@ mod change_event_tests {
         escape.paths = vec!["../outside/x".into()];
         assert!(cmd_worktree_stage(app.handle().clone(), app.state(), escape).await.is_err());
         std::fs::write(repo.join("main.txt"), b"three\n").unwrap();
-        let status = cmd_worktree_status(
+        let status = cmd_worktree_changes_status(
             app.handle().clone(),
             app.state(),
             WorktreePushRequest {

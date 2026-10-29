@@ -1748,6 +1748,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_worktree_delete_preview,
         cmd_worktree_status,
         cmd_worktree_diff,
+        cmd_worktree_changes_status,
         cmd_worktree_stage,
         cmd_worktree_unstage,
         cmd_worktree_commit,

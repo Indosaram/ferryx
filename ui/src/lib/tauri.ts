@@ -468,7 +468,7 @@ function changesTarget(request: ChangesTarget) {
 
 /** Status of a Changes target; managed worktrees go through the dirty-state tracking path. */
 export async function getChangesStatus(request: ChangesTarget) {
-  return invokeCommand<DirtyState>("cmd_worktree_status", { request: changesTarget(request) });
+  return invokeCommand<DirtyState>("cmd_worktree_changes_status", { request: changesTarget(request) });
 }
 
 /** Unified patch text; `file` is relative to the worktree root. */

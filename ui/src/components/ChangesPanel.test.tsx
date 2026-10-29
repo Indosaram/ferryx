@@ -30,7 +30,7 @@ type Status = { isDirty: boolean; files: Array<{ statusCode: string; path: strin
 function mockIpc(options: { status: () => Status; commit?: () => Promise<unknown>; push?: () => Promise<unknown> }) {
   core.invoke.mockImplementation(async (command: string, args?: { request?: Record<string, unknown> }) => {
     switch (command) {
-      case "cmd_worktree_status":
+      case "cmd_worktree_changes_status":
         return options.status();
       case "cmd_worktree_diff":
         return args?.request?.file === "README.md" ? README_PATCH : "";
@@ -128,7 +128,7 @@ describe("ChangesPanel", () => {
 
     await waitFor(() => expect(screen.queryAllByTestId("diff-row").length).toBeGreaterThan(0));
     const pathTarget = { workspaceId: "workspace-main", worktreePath: "/repo" };
-    expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_status", { request: pathTarget });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_changes_status", { request: pathTarget });
     expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_diff", {
       request: { ...pathTarget, scope: { kind: "workingTree" }, file: "README.md" },
     });

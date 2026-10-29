@@ -97,10 +97,9 @@ async fn all_local_git_boundaries_reject_remote_namespace_even_without_loaded_me
         cmd_worktree_status(
             app.handle().clone(),
             app.state(),
-            WorktreePushRequest {
+            WorktreeStatusRequest {
                 workspace_id: id.clone(),
-                worktree: Some(worktree.clone()),
-                worktree_path: None,
+                worktree: worktree.clone(),
             }
         )
         .await
