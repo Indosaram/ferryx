@@ -293,10 +293,6 @@ export async function bootTrace(
   }).catch(() => {});
 }
 
-export async function listProjectBranches(workspaceId: string) {
-  return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
-}
-
 /// Local branches and tags usable as a worktree base ref (no remote branches).
 export async function listProjectRefs(workspaceId: string) {
   return invokeCommand<ProjectRefs>("cmd_project_refs", { request: { workspaceId } });

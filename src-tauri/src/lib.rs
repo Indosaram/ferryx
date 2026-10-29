@@ -1732,7 +1732,6 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_list_remote_worktrees,
         ipc::ssh::cmd_ssh_create_remote_worktree,
         ipc::ssh::cmd_ssh_delete_remote_worktree,
-        cmd_project_branches,
         cmd_project_refs,
         ipc::native_menu::cmd_native_terminal_context_menu,
         ipc::native_menu::cmd_native_tab_context_menu,

@@ -28,7 +28,6 @@ import {
   unstageWorktreePaths,
   commitWorktree,
   pushWorktree,
-  listProjectBranches,
   listProjectRefs,
   previewGitHubIssue,
   listTerminalSessions,
@@ -169,28 +168,16 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_project_initial", undefined);
   });
 
-  it("registers projects and lists real local branches through typed native DTOs", async () => {
-    core.invoke
-      .mockResolvedValueOnce({ workspaceId: "ferryx", repoRoot: "/repo/ferryx" })
-      .mockResolvedValueOnce([
-        { name: "feature/a", isCurrent: false },
-        { name: "main", isCurrent: true },
-      ]);
+  it("registers projects through typed native DTOs", async () => {
+    core.invoke.mockResolvedValueOnce({ workspaceId: "ferryx", repoRoot: "/repo/ferryx" });
 
     await expect(registerProject({ workspaceId: "ferryx", repoPath: "/repo/ferryx" })).resolves.toEqual({
       workspaceId: "ferryx",
       repoRoot: "/repo/ferryx",
     });
-    await expect(listProjectBranches("ferryx")).resolves.toEqual([
-      { name: "feature/a", isCurrent: false },
-      { name: "main", isCurrent: true },
-    ]);
 
-    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_project_register", {
+    expect(core.invoke).toHaveBeenCalledExactlyOnceWith("cmd_project_register", {
       request: { workspaceId: "ferryx", repoPath: "/repo/ferryx" },
-    });
-    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_project_branches", {
-      request: { workspaceId: "ferryx" },
     });
   });
 
