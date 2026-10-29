@@ -1,0 +1,82 @@
+name: tpi-v41
+on:
+  push:
+    branches: ['ci/tpi-v41']
+permissions:
+  contents: read
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [tests, mut, clippy, qa]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true; df -h /
+      - uses: actions/checkout@v4
+        with: { submodules: recursive, fetch-depth: 0 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.16.0 }
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev openssh-server openssh-client
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: latest }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: tpi-v41-${{ matrix.part }}
+      - name: git identity + isolated tmp
+        run: |
+          git config --global user.name ferryx-ci; git config --global user.email ferryx-ci@users.noreply.github.com; git config --global init.defaultBranch main
+          d="${RUNNER_TEMP}/ferryx-ci-tmp"; mkdir -p "$d"; echo "TMPDIR=$d" >> "$GITHUB_ENV"; echo "GIT_CEILING_DIRECTORIES=$d" >> "$GITHUB_ENV"
+      - name: UI build
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+          bun run --cwd ui build
+      - name: Remote helper
+        run: cargo build --manifest-path remote-helper/Cargo.toml
+      - name: Gate
+        continue-on-error: true
+        shell: bash
+        run: bash .github/v41/${{ matrix.part }}.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tpi-v41-${{ matrix.part }}
+          path: ci-logs/
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive, fetch-depth: 0 }
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.16.0 }
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: latest }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-pc-windows-msvc }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: './src-tauri -> target', key: tpi-v41-win }
+      - name: UI build
+        shell: bash
+        run: |
+          bun install --frozen-lockfile || bun install
+          bun install --cwd ui --frozen-lockfile || bun install --cwd ui
+          bun run --cwd ui build
+      - name: Gate
+        continue-on-error: true
+        shell: bash
+        run: bash .github/v41/win.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: tpi-v41-windows, path: ci-logs/ }
