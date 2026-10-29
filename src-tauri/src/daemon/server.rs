@@ -139,6 +139,25 @@ fn release_adopted_ownership(
     }
 }
 
+/// Whether `observation` shows another prompt occurrence (or none) than the last one seen for its
+/// session. Bounded by forgetting everything past [PROMPT_MOVED_SESSIONS] sessions: a forgotten
+/// session only costs one spare push.
+fn prompt_moved(
+    shown: &mut HashMap<String, Option<String>>,
+    observation: &crate::agent_control::events::AgentObservation,
+) -> bool {
+    if shown.get(&observation.session_id) == Some(&observation.prompt_id) {
+        return false;
+    }
+    if shown.len() >= PROMPT_MOVED_SESSIONS && !shown.contains_key(&observation.session_id) {
+        shown.clear();
+    }
+    shown.insert(observation.session_id.clone(), observation.prompt_id.clone());
+    true
+}
+
+const PROMPT_MOVED_SESSIONS: usize = 256;
+
 /// The desktop event for one `agentPromptChanged` frame. A frame that is not a JSON object is
 /// logged and skipped: relaying it as a null payload would tell no row anything.
 fn prompt_changed_event(frame: &str) -> Option<DaemonRemoteEvent> {
@@ -218,6 +237,26 @@ mod prompt_changed_event_tests {
         .expect("agentPromptChanged reaches the desktop stream");
         assert_eq!(event.payload["sessionId"], "relay-pane");
         assert_eq!(event.payload["promptId"], "relay-prompt");
+    }
+
+    #[test]
+    fn a_repaint_under_the_same_prompt_is_not_a_prompt_change() {
+        let observation = |prompt: Option<&str>, revision: &str| crate::agent_control::events::AgentObservation {
+            sequence: 1,
+            session_id: "s".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: prompt.map(str::to_string),
+            kind: None,
+            screen_revision: Some(revision.into()),
+        };
+        let mut shown = HashMap::new();
+        assert!(prompt_moved(&mut shown, &observation(Some("p"), "r1")), "a first prompt is news");
+        assert!(!prompt_moved(&mut shown, &observation(Some("p"), "r2")), "a repaint is not");
+        assert!(prompt_moved(&mut shown, &observation(Some("p~1"), "r2")), "a new occurrence is");
+        assert!(prompt_moved(&mut shown, &observation(None, "r3")), "the card leaving is");
+        assert!(!prompt_moved(&mut shown, &observation(None, "r4")), "a repaint with no card is not");
     }
 }
 
@@ -3943,9 +3982,15 @@ impl DaemonServer {
             let prompt_tx = remote_event_tx.clone();
             runtime.spawn(async move {
                 let mut filter = crate::agent_control::events::PromptChangeFilter::default();
+                let mut shown = std::collections::HashMap::<String, Option<String>>::new();
                 loop {
                     match observations.recv().await {
                         Ok(observation) => {
+                            // The desktop re-reads a row's prompt on a push, so a repaint that keeps
+                            // the same prompt occurrence sends none.
+                            if !prompt_moved(&mut shown, &observation) {
+                                continue;
+                            }
                             let Some(frame) = filter.frame(&observation) else { continue };
                             if let Some(event) = prompt_changed_event(&frame) {
                                 let _ = prompt_tx.send(event);
