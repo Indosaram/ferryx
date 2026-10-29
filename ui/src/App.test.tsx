@@ -200,6 +200,7 @@ vi.mock("./lib/tauri", () => ({
   discoverDagWatchRoots: vi.fn(() => Promise.resolve([])),
   getTerminalPreferences: () => Promise.resolve({}),
   getAccountEnrollmentStatus: vi.fn(async () => ({ enrolled: false, accountOrigin: null, enrolledAt: null })),
+  listRemoteDevices: vi.fn(async () => []),
   // cc88ddc2 adds account enrollment to the lazily loaded welcome wizard.
   enrollThisMachine: vi.fn(async () => ({ enrolled: true, accountOrigin: "https://account.test", enrolledAt: 1 })),
   createWorktree: native.createWorktree,

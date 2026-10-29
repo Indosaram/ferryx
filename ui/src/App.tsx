@@ -99,6 +99,7 @@ import {
   getCliLauncherStatus,
   getAccountEnrollmentStatus,
   getInitialProject,
+  listRemoteDevices,
   getSystemPermissionsStatus,
   isTauriRuntime,
   listWorktrees,
@@ -3205,10 +3206,11 @@ function WorkspaceApp({
     let cancelled = false;
     const timer = setTimeout(async () => {
       if (activeRemoteHostRef.current) return;
-      const [permissions, cli, enrollment] = await Promise.all([
+      const [permissions, cli, enrollment, devices] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3220,6 +3222,7 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
       };
       const state = loadOnboardingState();
       if (shouldAutoOpenOnboarding(state, ctx)) {
@@ -3238,10 +3241,11 @@ function WorkspaceApp({
   useEffect(() => {
     let cancelled = false;
     const handleOpenOnboarding = async () => {
-      const [permissions, cli, enrollment] = await Promise.all([
+      const [permissions, cli, enrollment, devices] = await Promise.all([
         getSystemPermissionsStatus().catch(() => null),
         getCliLauncherStatus().catch(() => null),
         getAccountEnrollmentStatus().catch(() => null),
+        listRemoteDevices().catch(() => null),
       ]);
       if (cancelled) return;
       if (permissions) {
@@ -3253,6 +3257,7 @@ function WorkspaceApp({
         cli,
         projectCount: projectsRef.current.length,
         accountLinked: enrollment?.enrolled === true,
+        pairedDeviceCount: devices ? devices.filter((device) => !device.revoked).length : null,
       };
       setOnboardingDoneSteps(satisfiedOnboardingSteps(loadOnboardingState(), ctx));
       setOnboardingInitialStepIndex(0);

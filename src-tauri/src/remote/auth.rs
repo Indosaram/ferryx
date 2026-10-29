@@ -331,9 +331,10 @@ pub struct DeviceInfo {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "PersistedPairingCode")]
 struct PairingCode {
     _code: String,
-    #[serde(with = "persisted_instant")]
+    #[serde(serialize_with = "persisted_instant::serialize")]
     created_at: Instant,
     default_permission: DevicePermission,
     #[serde(default)]
@@ -387,6 +388,46 @@ fn mint_bearer_token() -> String {
         .collect()
 }
 
+/// On-disk form of a [`PairingCode`]: `created_at` is wall-clock time since the unix epoch.
+#[derive(Deserialize)]
+struct PersistedPairingCode {
+    _code: String,
+    created_at: Duration,
+    default_permission: DevicePermission,
+    #[serde(default)]
+    access_scope: DeviceAccessScope,
+    #[serde(default = "pairing_code_default_lifetime")]
+    lifetime: Duration,
+    #[serde(default)]
+    approved_token: Option<String>,
+    #[serde(default)]
+    attach_public_key: Option<String>,
+}
+
+impl From<PersistedPairingCode> for PairingCode {
+    /// Re-anchors a loaded code at the load instant with only its remaining lifetime, so its
+    /// wall-clock deadline is kept exactly: a code already past it (or stamped in the future
+    /// by a skewed clock) loads expired. No `Instant` is subtracted, so a fresh boot whose
+    /// monotonic clock is younger than the code cannot underflow.
+    fn from(persisted: PersistedPairingCode) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let remaining = now
+            .checked_sub(persisted.created_at)
+            .map_or(Duration::ZERO, |age| persisted.lifetime.saturating_sub(age));
+        Self {
+            _code: persisted._code,
+            created_at: Instant::now(),
+            default_permission: persisted.default_permission,
+            access_scope: persisted.access_scope,
+            lifetime: remaining,
+            approved_token: persisted.approved_token,
+            attach_public_key: persisted.attach_public_key,
+        }
+    }
+}
+
 // Preserve monotonic expiry in-process while storing portable wall-clock timestamps.
 mod persisted_instant {
     use super::*;
@@ -401,17 +442,6 @@ mod persisted_instant {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         created.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Instant, D::Error> {
-        let created = Duration::deserialize(deserializer)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let age = now.checked_sub(created).unwrap_or(PAIRING_EXPIRY);
-        Ok(Instant::now() - age.min(PAIRING_EXPIRY))
     }
 }
 
@@ -555,13 +585,23 @@ impl PairingWindow {
         source: &str,
         now: Instant,
     ) -> Result<PairingCode, AuthError> {
+        // Look the code up before pruning, so a known code past its lifetime is reported as
+        // expired rather than as an unknown code.
+        let known_expired = self
+            .codes
+            .get(code)
+            .is_some_and(|pairing| now.saturating_duration_since(pairing.created_at) >= pairing.lifetime);
         self.refresh(now);
         if !self.failures.admits(source) {
             return Err(AuthError::PairingRateLimited);
         }
         let Some(pairing) = self.codes.remove(code) else {
             self.record_failure(source, now);
-            return Err(AuthError::InvalidPairingCode);
+            return Err(if known_expired {
+                AuthError::ExpiredPairingCode
+            } else {
+                AuthError::InvalidPairingCode
+            });
         };
         if now.saturating_duration_since(pairing.created_at) >= pairing.lifetime {
             self.record_failure(source, now);
@@ -1972,6 +2012,77 @@ mod tests {
             Err(AuthError::ExpiredPairingCode)
         ));
         assert!(gateway.exchange_pairing_code(&expired, "Expired").is_err());
+    }
+
+    /// Writes one pairing code of `scope` to a fresh store, rewrites its on-disk issue time to
+    /// `ago` before now, and returns a gateway that reloads that store.
+    fn reloaded_with_code_issued(scope: DeviceAccessScope, ago: Duration) -> (tempfile::TempDir, AuthManager, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-auth.json");
+        let issuer = AuthManager::with_persistence(Some(path.clone()));
+        let code = match scope {
+            DeviceAccessScope::Mirror => issuer.create_pairing_code(DevicePermission::View),
+            DeviceAccessScope::Machine => issuer
+                .create_scoped_pairing_code(DevicePermission::Control, scope)
+                .unwrap(),
+        };
+        drop(issuer);
+        let issued = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .saturating_sub(ago);
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["pairingCodes"][code.as_str()]["created_at"] = serde_json::to_value(issued).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        (dir, AuthManager::with_persistence(Some(path)), code)
+    }
+
+    /// A code persisted by another process (or before a restart) that is already past its
+    /// lifetime must load expired, however long ago it was issued.
+    #[test]
+    fn a_reloaded_code_past_its_lifetime_is_refused_as_expired() {
+        let (_dir, gateway, code) = reloaded_with_code_issued(
+            DeviceAccessScope::Mirror,
+            PAIRING_EXPIRY + Duration::from_secs(10),
+        );
+        let result = gateway.exchange_pairing_code_from(&code, "late phone", None, None);
+        assert!(
+            matches!(result, Err(AuthError::ExpiredPairingCode)),
+            "expired mirror code: {:?}",
+            result.map(|(_, device)| device.id)
+        );
+        assert!(gateway.list_devices().is_empty());
+    }
+
+    #[test]
+    fn a_reloaded_machine_code_past_its_lifetime_is_refused_as_expired() {
+        let (_dir, gateway, code) = reloaded_with_code_issued(
+            DeviceAccessScope::Machine,
+            LONGEST_PAIRING_LIFETIME + Duration::from_secs(10),
+        );
+        let result = gateway.exchange_pairing_code_from(&code, "late machine", None, None);
+        assert!(
+            matches!(result, Err(AuthError::ExpiredPairingCode)),
+            "expired machine code: {:?}",
+            result.map(|(_, device)| device.id)
+        );
+        assert!(gateway.list_devices().is_empty());
+    }
+
+    /// A reloaded code keeps exactly its remaining lifetime rather than a fresh one.
+    #[test]
+    fn a_reloaded_live_code_keeps_only_its_remaining_lifetime() {
+        let (_dir, gateway, code) =
+            reloaded_with_code_issued(DeviceAccessScope::Machine, Duration::from_secs(300));
+        let lifetime = gateway.pairing_window.read().codes[&code].lifetime;
+        assert!(
+            lifetime <= Duration::from_secs(300) && lifetime > Duration::from_secs(290),
+            "remaining lifetime {lifetime:?}"
+        );
+        assert!(gateway
+            .exchange_pairing_code_from(&code, "in time", None, None)
+            .is_ok());
     }
 
     #[test]
