@@ -101,6 +101,10 @@ export function DaemonConnectionBanner(props: {
     title = "The background service is from a different Ferryx version";
     body =
       "Running terminals are kept. Quit and reopen Ferryx to finish the update.";
+  } else if (updatePending?.restartRequired) {
+    title = "Update installed";
+    body =
+      "Terminals are still running on the previous version. Restart them to finish updating; nothing closes until you confirm.";
   } else if (updatePending) {
     title = "Update installed";
     body =

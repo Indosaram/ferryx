@@ -12,7 +12,7 @@ import {
   clearStoredAccountSessionToken,
   getStoredAccountTokenOrigin,
   logoutAccountSession,
-  getConfiguredAccountOrigin,
+  getConfiguredAccountOriginUnchecked,
   getStoredAccountSessionToken,
   storeAccountOrigin,
   approveMachineRequest,
@@ -78,7 +78,7 @@ export function RemoteSection({
   negotiate = defaultNegotiate,
   accountSessionToken: accountSessionTokenProp,
   accountOrigin: accountOriginProp,
-  accountOriginResolver = getConfiguredAccountOrigin,
+  accountOriginResolver = getConfiguredAccountOriginUnchecked,
   onAccountSessionChange,
 }: RemoteSectionProps) {
   const [configuredOrigin, setConfiguredOrigin] = useState(() => accountOriginResolver());
@@ -642,7 +642,7 @@ export function RemoteSection({
         <AccountSignIn
           key={accountOrigin}
           origin={accountOrigin}
-          onSignIn={(tok) => { if (getConfiguredAccountOrigin() === accountOrigin) setAccountToken(tok); }}
+          onSignIn={(tok) => { if (getConfiguredAccountOriginUnchecked() === accountOrigin) setAccountToken(tok); }}
         />
       ) : (
         <AccountBar

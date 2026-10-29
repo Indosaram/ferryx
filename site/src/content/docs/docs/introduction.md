@@ -42,14 +42,19 @@ Most of Ferryx reduces to six concepts.
 Download from the [releases page](https://github.com/Indosaram/ferryx/releases/latest); the links below resolve against the latest release. Releases are calendar-versioned, so the newest tag is the one the release page shows.
 
 - **macOS**: universal DMG for Apple Silicon and Intel, [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg)
-- **Windows**: [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed by the Store with automatic updates; or the direct x64 installer [Ferryx_x64-setup.exe](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) (not code-signed, so SmartScreen warns on first run; check the SHA-256 below before running it). The `Ferryx_x64.msix` attached to releases is an unsigned Store-ingestion package rather than a direct installer.
+- **Windows**: [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed by the Store with automatic updates. Some releases also attach a direct x64 `.exe` installer on the [releases page](https://github.com/Indosaram/ferryx/releases/latest) (not code-signed, so SmartScreen warns on first run; check the SHA-256 below before running it). The `Ferryx_x64.msix` attached to releases is an unsigned Store-ingestion package rather than a direct installer.
 - **Linux**: [Ferryx_amd64.AppImage](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) or [Ferryx_amd64.deb](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb), both x64
 
-Each release also publishes a `SHA256SUMS.txt` beside the binaries, so you can check a download before running it:
+Linux builds are x86_64 only and need glibc 2.35 or newer with WebKitGTK 4.1 (Ubuntu 22.04 or later); there are no Linux or Windows ARM64 builds.
+
+Each release also publishes `SHA256SUMS` and its minisign signature `SHA256SUMS.minisig` beside the binaries, so you can check a download before running it:
 
 ```bash
-sha256sum -c SHA256SUMS.txt
+minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm
+sha256sum -c SHA256SUMS --ignore-missing
 ```
+
+The minisign key is the app's updater key, the `pubkey` in `src-tauri/tauri.conf.json`.
 
 ## Your first session
 

@@ -42,7 +42,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       fireEvent.click(screen.getByRole("button", { name: "Send Magic Link" }));
     });
 
-    expect(requestSpy).toHaveBeenCalledWith("https://relay.ferryx.dev", "user@example.com");
+    expect(requestSpy).toHaveBeenCalledWith(window.location.origin, "user@example.com");
 
     const infoMessage = screen.getByTestId("account-signin-info");
     expect(infoMessage).not.toBeNull();
@@ -52,7 +52,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(1);
-    expect(pollSpy).toHaveBeenCalledWith("https://relay.ferryx.dev", loginHandle);
+    expect(pollSpy).toHaveBeenCalledWith(window.location.origin, loginHandle);
     expect(storeSpy).not.toHaveBeenCalled();
     expect(onSignIn).not.toHaveBeenCalled();
 
@@ -60,7 +60,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(2);
-    expect(storeSpy).toHaveBeenCalledWith("tok-1", "https://relay.ferryx.dev");
+    expect(storeSpy).toHaveBeenCalledWith("tok-1", window.location.origin);
     expect(onSignIn).toHaveBeenCalledWith("tok-1", "user@example.com");
 
     await act(async () => {
@@ -106,7 +106,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(pollSpy).toHaveBeenCalledTimes(2);
-    expect(storeSpy).toHaveBeenCalledWith("tok-2", "https://relay.ferryx.dev");
+    expect(storeSpy).toHaveBeenCalledWith("tok-2", window.location.origin);
     expect(onSignIn).toHaveBeenCalledWith("tok-2", "user2@example.com");
 
     await act(async () => {
@@ -156,5 +156,28 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
     expect(pollSpy).toHaveBeenCalledTimes(1);
     expect(storeSpy).not.toHaveBeenCalled();
     expect(onSignIn).not.toHaveBeenCalled();
+  });
+
+  it("an invalid configured origin surfaces INVALID_ACCOUNT_ORIGIN instead of the hosted relay", async () => {
+    window.localStorage.setItem("ferryx.account.origin", "http://evil.example");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      render(<AccountSignIn />);
+      fireEvent.change(screen.getByLabelText("Email Address"), {
+        target: { value: "user4@example.com" },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Send Magic Link" }));
+      });
+
+      const errorBanner = screen.getByTestId("account-signin-error");
+      expect(errorBanner.getAttribute("data-code")).toBe("INVALID_ACCOUNT_ORIGIN");
+      expect(errorBanner.textContent).toContain("http://evil.example");
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      window.localStorage.removeItem("ferryx.account.origin");
+      vi.unstubAllGlobals();
+    }
   });
 });

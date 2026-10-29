@@ -73,7 +73,8 @@ import {
 import { showNotificationPermissionHint } from "./lib/notificationPermissionHint";
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
-import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
+import { DaemonConnectionBanner, type ProjectConnectionError } from "./components/DaemonConnectionBanner";
+import { DAEMON_RESTART_REQUIRED_EVENT, fetchDaemonRestartRequired } from "./lib/updaterDaemonPending";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
@@ -720,6 +721,27 @@ function WorkspaceApp({
   useEffect(() => {
     startNativeWindowFocusTracking();
   }, []);
+  // Todo 27: an update the running service could not finish because terminals are live.
+  const [daemonRestartRequired, setDaemonRestartRequired] = useState<ProjectConnectionError | null>(null);
+  useEffect(() => {
+    if (!isNativeRuntime) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<ProjectConnectionError>(DAEMON_RESTART_REQUIRED_EVENT, (event) => {
+      setDaemonRestartRequired(event.payload);
+    }).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    });
+    void fetchDaemonRestartRequired().then((signal) => {
+      if (!disposed && signal) setDaemonRestartRequired(signal);
+    }).catch((error) => {
+      console.error("Daemon restart-required check failed:", error);
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isNativeRuntime]);
   const [registeredProjectId, setRegisteredProjectId] = useState<string | null>(null);
   const [registrationAttempt, setRegistrationAttempt] = useState(0);
   const [registrationError, setRegistrationError] = useState<{
@@ -4014,6 +4036,11 @@ function WorkspaceApp({
               setRegistrationError(null);
               setRegistrationAttempt((attempt) => attempt + 1);
             }}
+          />
+        ) : daemonRestartRequired && !activeRemoteHost ? (
+          <DaemonConnectionBanner
+            error={daemonRestartRequired}
+            onRetry={() => setDaemonRestartRequired(null)}
           />
         ) : null}
         {activeRemoteHost ? (

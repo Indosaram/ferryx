@@ -147,6 +147,95 @@ async fn enter_and_decide_log(
     (pending, log)
 }
 
+/// Same-protocol restart required (todo 27): a daemon that cannot transfer sessions (Windows)
+/// refused the idle upgrade because terminals are live. The GUI keeps using it, so nothing is
+/// retired; the banner shows the pending update and offers the confirmed restart.
+fn restart_required() -> &'static Mutex<HashMap<PathBuf, UpdatePending>> {
+    static REQUIRED: OnceLock<Mutex<HashMap<PathBuf, UpdatePending>>> = OnceLock::new();
+    REQUIRED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+type RestartRequiredNotifier = Box<dyn Fn(IpcError) + Send + Sync>;
+
+fn restart_required_notifier() -> &'static OnceLock<RestartRequiredNotifier> {
+    static NOTIFIER: OnceLock<RestartRequiredNotifier> = OnceLock::new();
+    &NOTIFIER
+}
+
+/// Installs the GUI's receiver of restart-required signals (the desktop emits it as
+/// RESTART_REQUIRED_EVENT). Only the first call takes effect.
+pub fn set_restart_required_notifier(notify: impl Fn(IpcError) + Send + Sync + 'static) {
+    let _ = restart_required_notifier().set(Box::new(notify));
+}
+
+/// Desktop event carrying a restart-required signal: a DAEMON_UPDATE_PENDING error whose details
+/// add `restartRequired: true` (todo 27).
+pub const RESTART_REQUIRED_EVENT: &str = "daemon-update-restart-required";
+
+impl UpdatePending {
+    /// The restart-required signal for the banner: the pending error with `restartRequired`.
+    pub fn into_restart_required_error(self) -> IpcError {
+        let mut error = self.into_error();
+        if let Some(serde_json::Value::Object(details)) = error.details.as_mut() {
+            details.insert("restartRequired".into(), serde_json::Value::Bool(true));
+        }
+        error
+    }
+}
+
+/// Records that the owner in runtime_dir refused the idle upgrade with `live` sessions and
+/// signals the GUI. RetireWhenIdle is deliberately not sent: the owner speaks this protocol and
+/// keeps serving new terminals.
+pub fn note_restart_required(runtime_dir: &Path, running_version: Option<String>, live: u32) {
+    let pending = UpdatePending {
+        running_version,
+        live_sessions: Some(live),
+        retire_requested: false,
+    };
+    if let Ok(mut required) = restart_required().lock() {
+        required.insert(runtime_dir.to_path_buf(), pending.clone());
+    }
+    tracing::warn!(
+        code = "DAEMON_UPDATE_PENDING",
+        restart_required = true,
+        "{}",
+        pending.log_line()
+    );
+    if let Some(notify) = restart_required_notifier().get() {
+        notify(pending.into_restart_required_error());
+    }
+}
+
+fn restart_required_for(runtime_dir: &Path) -> Option<UpdatePending> {
+    restart_required()
+        .lock()
+        .ok()
+        .and_then(|required| required.get(runtime_dir).cloned())
+}
+
+/// The current restart-required signal for runtime_dir, for a GUI that mounted after it fired.
+pub fn restart_required_signal(runtime_dir: &Path) -> Option<IpcError> {
+    restart_required_for(runtime_dir).map(UpdatePending::into_restart_required_error)
+}
+
+/// The banner's re-read. For a same-protocol restart-required owner only Inventory is read, so
+/// the owner is never asked to retire; otherwise this is enter.
+pub async fn status(runtime_dir: &Path) -> UpdatePending {
+    let Some(mut pending) = restart_required_for(runtime_dir) else {
+        return enter(runtime_dir, None).await;
+    };
+    pending.live_sessions = match control::connect(runtime_dir).await {
+        Ok(ControlConnection::Connected(mut client)) => {
+            match client.call(&ControlRequest::Inventory).await {
+                Ok(ControlReply::Inventory(inventory)) => Some(inventory.total()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    pending
+}
+
 /// Result of the user's "Restart terminals now" after confirming confirm_live_sessions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "outcome", rename_all = "camelCase")]
@@ -175,7 +264,12 @@ pub async fn restart_terminals(runtime_dir: &Path, confirm_live_sessions: u32) -
         })
         .await
     {
-        Ok(ControlReply::Live { live }) => Ok(RestartOutcome::Accepted { live }),
+        Ok(ControlReply::Live { live }) => {
+            if let Ok(mut required) = restart_required().lock() {
+                required.remove(runtime_dir);
+            }
+            Ok(RestartOutcome::Accepted { live })
+        }
         Ok(ControlReply::Failed(failure)) if failure.code == CODE_COUNT_CHANGED => {
             Ok(RestartOutcome::CountChanged { live: failure.live })
         }

@@ -24,6 +24,7 @@ pub enum DagWatchFailureCode {
     HelperMissing,
     CapabilityMissing,
     Authentication,
+    HostKey,
     Unavailable,
 }
 
@@ -33,6 +34,7 @@ impl std::fmt::Display for DagWatchFailureCode {
             Self::HelperMissing => write!(f, "helper_missing"),
             Self::CapabilityMissing => write!(f, "capability_missing"),
             Self::Authentication => write!(f, "authentication"),
+            Self::HostKey => write!(f, "host_key"),
             Self::Unavailable => write!(f, "unavailable"),
         }
     }
@@ -607,6 +609,8 @@ pub enum SshWatchFailureKind {
     HelperMissing(String),
     CapabilityMissing(String),
     Authentication(String),
+    /// The SSH server's host key is unknown or changed; terminal like authentication.
+    HostKey(String),
     Transport(String),
     Other(String),
 }
@@ -617,6 +621,7 @@ impl SshWatchFailureKind {
             Self::HelperMissing(_) => DagWatchFailureCode::HelperMissing,
             Self::CapabilityMissing(_) => DagWatchFailureCode::CapabilityMissing,
             Self::Authentication(_) => DagWatchFailureCode::Authentication,
+            Self::HostKey(_) => DagWatchFailureCode::HostKey,
             Self::Transport(_) | Self::Other(_) => DagWatchFailureCode::Unavailable,
         }
     }
@@ -626,6 +631,7 @@ impl SshWatchFailureKind {
             Self::HelperMissing(msg)
             | Self::CapabilityMissing(msg)
             | Self::Authentication(msg)
+            | Self::HostKey(msg)
             | Self::Transport(msg)
             | Self::Other(msg) => msg,
         }
@@ -670,15 +676,22 @@ pub(crate) fn classify_ssh_ipc_error(err: &IpcError) -> SshWatchFailureKind {
         return SshWatchFailureKind::HelperMissing(err.message.clone());
     }
 
+    if err.code == IpcErrorCode::HostKeyUnknown
+        || err.code == IpcErrorCode::HostKeyChanged
+        || stage == "host_key"
+        || crate::ssh::runtime::host_key_failure(stderr).is_some()
+        || crate::ssh::runtime::host_key_failure(&err.message).is_some()
+    {
+        return SshWatchFailureKind::HostKey(err.message.clone());
+    }
+
     let lower_msg = err.message.to_lowercase();
     let lower_stderr = stderr.to_lowercase();
     if err.code == IpcErrorCode::Unauthorized
         || err.code == IpcErrorCode::PermissionDenied
         || lower_msg.contains("permission denied")
         || lower_msg.contains("authentication failed")
-        || lower_msg.contains("host key verification failed")
         || lower_stderr.contains("permission denied")
-        || lower_stderr.contains("host key verification failed")
         || lower_stderr.contains("authentication failed")
     {
         return SshWatchFailureKind::Authentication(err.message.clone());
@@ -713,8 +726,11 @@ pub(crate) fn classify_bridge_error(err: &crate::ssh::bridge::BridgeError) -> Ss
                     "Helper process not executable (exit 126): {stderr}"
                 ))
             } else if (*code == Some(255) || code.is_none())
+                && crate::ssh::runtime::host_key_failure(stderr).is_some()
+            {
+                SshWatchFailureKind::HostKey(format!("SSH host key verification failed: {stderr}"))
+            } else if (*code == Some(255) || code.is_none())
                 && (lower_stderr.contains("permission denied")
-                    || lower_stderr.contains("host key verification failed")
                     || lower_stderr.contains("authentication failed"))
             {
                 SshWatchFailureKind::Authentication(format!(
@@ -797,7 +813,8 @@ pub(crate) fn decide_ssh_watch_step_with_budget(
     match failure {
         SshWatchFailureKind::HelperMissing(msg)
         | SshWatchFailureKind::CapabilityMissing(msg)
-        | SshWatchFailureKind::Authentication(msg) => {
+        | SshWatchFailureKind::Authentication(msg)
+        | SshWatchFailureKind::HostKey(msg) => {
             let next_terminal = consecutive_terminal_failures + 1;
             if next_terminal >= terminal_budget {
                 SshWatchDecision::Terminal(DagWatchFailurePayload {
@@ -2097,6 +2114,22 @@ mod tests {
             classify_bridge_error(&bridge_auth),
             SshWatchFailureKind::Authentication(_)
         ));
+
+        // Host-key rejection is its own terminal kind, not authentication.
+        let bridge_host_key = crate::ssh::bridge::BridgeError::ProcessExited {
+            code: Some(255),
+            stderr: "No ED25519 host key is known for example.test and you have requested strict checking.\nHost key verification failed.".into(),
+        };
+        assert!(matches!(
+            classify_bridge_error(&bridge_host_key),
+            SshWatchFailureKind::HostKey(_)
+        ));
+        let ipc_host_key = IpcError::new(IpcErrorCode::HostKeyChanged, "ssh failed")
+            .with_details(serde_json::json!({"stage": "host_key"}));
+        assert_eq!(
+            classify_ssh_ipc_error(&ipc_host_key).to_code(),
+            DagWatchFailureCode::HostKey
+        );
     }
 
     #[test]

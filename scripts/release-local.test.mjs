@@ -668,3 +668,70 @@ test("assemble CLI: a Windows build without the MSIX exits non-zero with STORE_M
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("publish: refuses a run whose receipts were built under a floor waiver, carry no or incomplete floor results, or fail a re-evaluated floor, before any network call", async () => {
+  const { publishRelease } = await import("./release-local.mjs");
+  const plan = {
+    schemaVersion: 1,
+    runId: "rel-run-floor-publish-1",
+    repo: "Indosaram/ferryx",
+    commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
+    tag: "v2026.09.08.1",
+    appVersion: "2026.908.1",
+    msixVersion: "2026.908.1.0",
+    channels: { store: true, nsisMigration: false },
+    requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+    sourceDateEpoch: 1788868800,
+    createdAt: "2026-09-08T12:00:00.000Z",
+  };
+  const passing = { kind: "appimage", check: "glibc", limit: "2.35", measured: "2.35", pass: true };
+  const conforming = [passing, { kind: "cli-linux-amd64", check: "glibc", limit: "2.17", measured: "2.17", pass: true }];
+  const cases = [
+    [{ waiver: "local QA build", checks: [{ ...passing, measured: "2.38", pass: false, reason: "too new" }] },
+      /Release floor gate: build-receipt-omaki\.json was built under floor waiver "local QA build"; a waived run cannot be published/],
+    [undefined, /Release floor gate: build-receipt-omaki\.json carries no floor results; it cannot be published/],
+    [{ waiver: null, checks: [] },
+      /Release floor gate: build-receipt-omaki\.json fails the release floors \(appimage glibc: no recorded result; cli-linux-amd64 glibc: no recorded result\)/],
+    // A recorded pass flag is not trusted: the measured value is re-evaluated.
+    [{ waiver: null, checks: [{ ...passing, measured: "2.38", pass: true }, conforming[1]] },
+      /Release floor gate: build-receipt-omaki\.json fails the release floors \(appimage glibc: requires GLIBC_2\.38, above the GLIBC_2\.35 floor\)/],
+    // Conforming floors pass this gate; publish then reaches the remote tag check (first network call).
+    [{ waiver: null, checks: conforming }, /Remote tag 'v2026\.09\.08\.1' does not exist on origin/],
+    // A minos check recorded against the plan-commit minimum 10.15 is refused under a different
+    // publish-time minimum, even though minos 12.0 would pass 13.0.
+    [{ waiver: null, checks: [{ kind: "cli-darwin-universal", check: "macos-minos", limit: "10.15", measured: { x86_64: "12.0", arm64: "12.0" }, pass: true }] },
+      /Release floor gate: build-receipt-omaki\.json fails the release floors \(cli-darwin-universal macos-minos: built against minimum "10\.15", but publish uses "13\.0"\)/,
+      { artifacts: [{ kind: "cli-darwin-universal", name: "ferryx-cli-darwin-universal" }], macosMinimum: "13.0" }],
+  ];
+  for (const [floors, expected, extra = {}] of cases) {
+    const tmp = mkdtempSync(join(tmpdir(), "ferryx-publish-floor-"));
+    try {
+      const runDir = join(tmp, "run");
+      const publishDir = join(runDir, "publish");
+      mkdirSync(join(runDir, "receipts"), { recursive: true });
+      mkdirSync(publishDir);
+      writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan));
+      writeFileSync(join(publishDir, "latest.json"), "{}\n");
+      const artifacts = extra.artifacts ?? [{ kind: "appimage", name: "Ferryx_amd64.AppImage" }, { kind: "cli-linux-amd64", name: "ferryx-cli-linux-amd64" }];
+      writeFileSync(join(runDir, "receipts", "build-receipt-omaki.json"), JSON.stringify({ host: "omaki", artifacts, ...(floors ? { floors } : {}) }));
+      writeIntegrityState(runDir, plan, publishDir);
+      let network = 0;
+      await assert.rejects(
+        () => publishRelease({
+          runDir,
+          approvePublish: true,
+          survivalWaiver: "fixture run: no survival evidence",
+          macosMinimum: extra.macosMinimum ?? "10.15",
+          env: { FERRYX_APPROVE_PUBLISH: "1", FERRYX_RELEASE_FLOOR_WAIVER: "exported waiver must not help" },
+          ghCommand: join(tmp, "no-gh"),
+          lsRemoteFn: async () => { network += 1; return ""; },
+        }),
+        expected,
+      );
+      assert.equal(network, floors?.checks === conforming ? 1 : 0, "no network call unless the floor gate passed");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+});

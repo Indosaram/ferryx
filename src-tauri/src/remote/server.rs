@@ -1121,7 +1121,23 @@ async fn get_workspace_state(
                 }];
             }
         } else if raw_backend_empty && raw_terminal_empty {
-            if let Ok((session_id, _)) = state.terminal_service.spawn_shell(80, 24) {
+            // Held across the spawn so a zero-session retirement (control-v1 Shutdown, Windows
+            // idle upgrade) cannot decide while this shell is being created; a retiring daemon
+            // refuses the claim and no shell is spawned.
+            let spawned = match state
+                .machine_services
+                .as_ref()
+                .map(|services| services.sessions.retain_spawn_owner())
+                .transpose()
+            {
+                // The claim (if any) drops at the end of this arm, after the session exists.
+                Ok(_spawn_owner) => state.terminal_service.spawn_shell(80, 24).ok(),
+                Err(refusal) => {
+                    tracing::info!(%refusal, "Headless remote gateway default shell not spawned");
+                    None
+                }
+            };
+            if let Some((session_id, _)) = spawned {
                 tracing::info!(
                     "Auto-spawned default shell session {session_id} for headless remote gateway"
                 );
@@ -3555,37 +3571,45 @@ pub(crate) fn resolve_dist_dir_from(
     exe: Option<&Path>,
     manifest_dir: Option<&Path>,
 ) -> Option<PathBuf> {
+    resolve_dist_dir_with(cwd, exe, manifest_dir, cfg!(debug_assertions) || cfg!(test))
+}
+
+/// [`resolve_dist_dir_from`] with the dev candidates (compile-time manifest dir, cwd, relative
+/// paths) only when `dev_candidates`: a release daemon serves the UI next to its executable or
+/// the fallback page, never a checkout's `ui/dist`.
+pub(crate) fn resolve_dist_dir_with(
+    cwd: Option<&Path>,
+    exe: Option<&Path>,
+    manifest_dir: Option<&Path>,
+    dev_candidates: bool,
+) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
-    // 1. Packaged Tauri bundle resource directory (established by bundle.resources: {"../ui/dist": "ui/dist"})
+    // 1. Packaged Tauri bundle resource directory (established by bundle.resources:
+    //    {"../ui/dist": "ui/dist"}) or the copy staged with a daemon runtime generation
+    //    (macOS `Contents/Resources/ui/dist`, Windows/Linux next to the executable or under
+    //    `resources/`, Linux deb/AppImage `usr/lib/Ferryx/ui/dist`, staged `<key>/ui/dist`).
     if let Some(exe) = exe {
-        if let Some(exe_dir) = exe.parent() {
-            // macOS bundle: Ferryx.app/Contents/MacOS/ferryx -> Contents/Resources/ui/dist
-            candidates.push(exe_dir.join("../Resources/ui/dist"));
-            // Windows / Linux packaged layout: next to executable or resources subdirectory
-            candidates.push(exe_dir.join("ui/dist"));
-            candidates.push(exe_dir.join("resources/ui/dist"));
-            // Linux deb/AppImage: binary at usr/bin, resources at usr/lib/<productName>.
-            candidates.push(exe_dir.join("../lib/Ferryx/ui/dist"));
-            candidates.push(exe_dir.join("../lib/ui/dist"));
+        candidates.extend(crate::daemon::runtime_stage::ui_dist_candidates(exe));
+    }
+
+    if dev_candidates {
+        // 2. Dev / debug compile-time manifest directory
+        if let Some(manifest_dir) = manifest_dir {
+            candidates.push(manifest_dir.join("../ui/dist"));
+            candidates.push(manifest_dir.join("ui/dist"));
         }
-    }
 
-    // 2. Dev / debug compile-time manifest directory
-    if let Some(manifest_dir) = manifest_dir {
-        candidates.push(manifest_dir.join("../ui/dist"));
-        candidates.push(manifest_dir.join("ui/dist"));
-    }
+        // 3. Dev / standalone CWD
+        if let Some(cwd) = cwd {
+            candidates.push(cwd.join("ui/dist"));
+            candidates.push(cwd.join("../ui/dist"));
+        }
 
-    // 3. Dev / standalone CWD
-    if let Some(cwd) = cwd {
-        candidates.push(cwd.join("ui/dist"));
-        candidates.push(cwd.join("../ui/dist"));
+        // 4. Default fallback relative path
+        candidates.push(PathBuf::from("ui/dist"));
+        candidates.push(PathBuf::from("../ui/dist"));
     }
-
-    // 4. Default fallback relative path
-    candidates.push(PathBuf::from("ui/dist"));
-    candidates.push(PathBuf::from("../ui/dist"));
 
     for c in candidates {
         if c.is_dir() && c.join("index.html").is_file() {
@@ -3618,7 +3642,12 @@ pub(crate) fn resolve_dist_dir() -> PathBuf {
     if let Some(found) = resolve_dist_dir_from(cwd.as_deref(), exe.as_deref(), manifest_dir) {
         return found;
     }
-    PathBuf::from("ui/dist")
+    if cfg!(debug_assertions) || cfg!(test) {
+        PathBuf::from("ui/dist")
+    } else {
+        // Never canonicalizes, so the caller serves the fallback page instead of a cwd `ui/dist`.
+        PathBuf::new()
+    }
 }
 
 /// Parse once, before joining to a filesystem root. Reject Windows separators,
@@ -3693,7 +3722,7 @@ const EMBEDDED_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
 <body style="background:#09090b;color:#fafafa;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
   <div style="text-align:center;">
     <h2>Ferryx Remote Server Active</h2>
-    <p style="color:#a1a1aa;font-size:14px;">Building the UI bundle or connect through the Ferryx desktop app.</p>
+    <p style="color:#a1a1aa;font-size:14px;">The web UI files (ui/dist) were not found next to this daemon. Update or reinstall Ferryx, or connect through the Ferryx desktop app.</p>
   </div>
 </body>
 </html>"#;

@@ -84,7 +84,7 @@ export function startSshRecovery(options: {
     } catch (error) {
       if (isStructuredIpcError(error)) {
         const detailsKind = typeof error.details?.kind === "string" ? error.details.kind : "";
-        if (detailsKind === "authentication" || error.code === "AUTHENTICATION_FAILED") {
+        if (detailsKind === "authentication" || detailsKind === "hostKey" || error.code === "AUTHENTICATION_FAILED") {
           return { ok: false, blockedReason: "auth_revoked" };
         }
         if (detailsKind === "protocol" || error.code === "PROTOCOL_ERROR") {
@@ -172,7 +172,7 @@ export function startSshRecovery(options: {
           // Check if prior observation is already blocked; never dial on blocked failure
           const failureKindBefore = observationBefore?.failure?.kind;
           if (observationBefore?.state === "disconnected") {
-            if (failureKindBefore === "authentication") {
+            if (failureKindBefore === "authentication" || failureKindBefore === "hostKey") {
               return { kind: "blocked", reason: "auth_revoked", error: observationBefore.failure };
             }
             if (failureKindBefore === "protocol") {
@@ -223,7 +223,7 @@ export function startSshRecovery(options: {
 
           if (result.details?.failure) {
             const fKind = result.details.failure.kind;
-            if (fKind === "authentication") {
+            if (fKind === "authentication" || fKind === "hostKey") {
               setLatest(backendId, probedStatus);
               apply(probedStatus);
               return { kind: "blocked", reason: "auth_revoked", error: result.details.failure };
@@ -294,7 +294,7 @@ export function startSshRecovery(options: {
 
           if (result.details?.failure) {
             const fKind = result.details.failure.kind;
-            if (fKind === "authentication") {
+            if (fKind === "authentication" || fKind === "hostKey") {
               return { kind: "blocked", reason: "auth_revoked", error: result.details.failure };
             }
             if (fKind === "protocol") {

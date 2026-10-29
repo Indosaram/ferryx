@@ -14,9 +14,9 @@ use Ctrl in place of ⌘.
 
 1. Download the build for your platform from the
    [releases page](https://github.com/Indosaram/ferryx/releases/latest) and check it against the
-   published `SHA256SUMS.txt`. Platform notes: [macOS](/blog/ferryx-install-macos/),
-   [Windows](/blog/ferryx-install-windows/) (signed on the [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) or `winget install --source msstore 9NLHQL5JNLM4`; the direct `.exe` installer is not code-signed, so SmartScreen
-   warns on first run), [Linux](/blog/ferryx-install-linux/).
+   published `SHA256SUMS` (signed as `SHA256SUMS.minisig`). Platform notes: [macOS](/blog/ferryx-install-macos/),
+   [Windows](/blog/ferryx-install-windows/) (install from the [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) or `winget install --source msstore 9NLHQL5JNLM4`; some releases also attach a direct `.exe` installer, which is not code-signed, so SmartScreen
+   warns on first run), [Linux](/blog/ferryx-install-linux/) (x86_64, glibc 2.35 or newer).
 2. Launch Ferryx and add a project folder with the **+** button at the top of the sidebar. The
    project appears in the sidebar with its primary checkout listed as `main`.
 3. Press ⌘T to open a terminal tab. It starts your shell in the selected checkout.
@@ -64,10 +64,13 @@ Ferryx can reach terminals on other machines in two ways:
 - **A phone or another browser.** Sign in to your Ferryx account on it with an email magic
   link. The mobile client renders the same sessions in a layout built for a narrow screen.
   [Pair Ferryx with your phone](/blog/pair-ferryx-with-phone/) covers the steps.
-- **Another computer running Ferryx or the headless `ferryx-cli` daemon.** Install
-  `ferryx-cli`, start `ferryx-cli --daemon`, and link the machine to your account with
-  `ferryx-cli account login --email <address>`. Settings > Remote Access > Paired machines lists
-  it afterwards. See [headless Linux host setup](/blog/headless-linux-host-setup/).
+- **Another computer running Ferryx or the headless `ferryx-cli` daemon.** In Settings > Remote,
+  choose **Add Machine** > **Install command** and run the line it shows on that machine:
+  `curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>`. The installer
+  verifies `ferryx-cli` against the release `SHA256SUMS`, then runs `ferryx-cli up`, which
+  enrolls the machine with your account and keeps its daemon running. Without a key, `up`
+  prints an approval code that you enter under **Add Machine** > **Approve a machine**. See
+  [headless Linux host setup](/blog/headless-linux-host-setup/).
 
 ![The demo at phone width shows a single terminal, as the narrow layout does](/images/docs/guide/remote-narrow.png)
 

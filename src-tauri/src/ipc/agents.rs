@@ -1167,13 +1167,12 @@ fn gjc_session_id_from_path(path: &str) -> Option<String> {
 }
 
 pub fn detect_agents(names: &[String]) -> Vec<AgentDetection> {
-    let search_paths = search_paths();
     names
         .iter()
         .map(|name| name.trim())
         .filter(|name| !name.is_empty())
         .map(|name| {
-            let path = resolve_binary(name, &search_paths);
+            let path = resolve_discovered_binary(name);
             AgentDetection {
                 name: name.to_string(),
                 available: path.is_some(),
@@ -1183,69 +1182,274 @@ pub fn detect_agents(names: &[String]) -> Vec<AgentDetection> {
         .collect()
 }
 
+/// The process PATH merged with the login-shell PATH once background discovery has finished.
+///
+/// Never blocks: the first call starts discovery on its own thread and returns the process PATH
+/// until it publishes, so a session spawn on an async path never waits for the user's rc chain.
 pub(crate) fn search_paths() -> Vec<PathBuf> {
-    static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    PATHS
-        .get_or_init(|| {
-            let mut dirs: Vec<PathBuf> = Vec::new();
-            let mut push_all = |value: OsString| {
-                for dir in env::split_paths(&value) {
-                    if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
-                        dirs.push(dir);
-                    }
-                }
-            };
-            if let Some(value) = env::var_os("PATH") {
-                push_all(value);
+    merged_search_paths(login_path_cache().current())
+}
+
+/// Starts login-shell PATH discovery without waiting for it, so later lookups find it ready.
+pub fn prewarm_login_path() {
+    login_path_cache();
+}
+
+/// Resolves `name` like `resolve_binary`, but when it is missing while discovery is still
+/// running, waits (bounded) for the login-shell PATH and tries again. Only for callers already
+/// on a blocking thread whose answer would otherwise be a false "not installed".
+pub(crate) fn resolve_discovered_binary(name: &str) -> Option<PathBuf> {
+    resolve_discovered_binary_within(name, LOGIN_PATH_TIMEOUT + std::time::Duration::from_secs(1))
+}
+
+/// `resolve_discovered_binary` with a caller-chosen cap on the wait for discovery, for callers
+/// inside a request budget (session spawn) that must answer before the client gives up.
+pub(crate) fn resolve_discovered_binary_within(
+    name: &str,
+    bound: std::time::Duration,
+) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(login) = TEST_LOGIN_PATH.with(|slot| slot.borrow().clone()) {
+        return resolve_with_cache(name, &login.0, bound);
+    }
+    resolve_with_cache(name, login_path_cache(), bound)
+}
+
+/// Test seam: a login-PATH discovery that the test publishes by hand, or never.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct PendingLoginPath(std::sync::Arc<LoginPathCache>);
+
+#[cfg(test)]
+impl PendingLoginPath {
+    pub(crate) fn publish(&self, path: Option<OsString>) {
+        self.0.publish(path);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LOGIN_PATH: std::cell::RefCell<Option<PendingLoginPath>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `work` with `resolve_discovered_binary_within` on this thread reading `login` instead of
+/// the process-wide discovery.
+#[cfg(test)]
+pub(crate) fn with_login_path<T>(login: &PendingLoginPath, work: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PendingLoginPath>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_LOGIN_PATH.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(TEST_LOGIN_PATH.with(|slot| slot.replace(Some(login.clone()))));
+    work()
+}
+
+fn resolve_with_cache(
+    name: &str,
+    cache: &LoginPathCache,
+    bound: std::time::Duration,
+) -> Option<PathBuf> {
+    // One snapshot decides: a publish between the lookup and a separate "settled?" read would
+    // otherwise answer None for an agent the just-published PATH contains.
+    let snapshot = cache.lock().clone();
+    if let Some(found) = resolve_binary(name, &merged_search_paths(snapshot.clone().flatten())) {
+        return Some(found);
+    }
+    if snapshot.is_some() {
+        return None;
+    }
+    let login = cache.wait(bound);
+    resolve_binary(name, &merged_search_paths(login))
+}
+
+fn merged_search_paths(login: Option<OsString>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push_all = |value: OsString| {
+        for dir in env::split_paths(&value) {
+            if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
+                dirs.push(dir);
             }
-            if let Some(value) = login_shell_path() {
-                push_all(value);
-            }
-            dirs
-        })
-        .clone()
+        }
+    };
+    if let Some(value) = env::var_os("PATH") {
+        push_all(value);
+    }
+    if let Some(value) = login {
+        push_all(value);
+    }
+    dirs
 }
 
 // Terminals spawn through the user's login shell, so its PATH (Homebrew, nvm,
 // mise, ~/.local/bin) is the search space that matches what a launched agent
 // would actually resolve against - the GUI process PATH alone misses most of it.
 //
-// The wait below is bounded because of a measured hang: `-lic` makes the shell
-// source the user's whole rc chain, and on a host whose rc chain runs `pyenv
-// rehash` (pyenv's 60 s lock wait) the spawned child outlives any fixed caller
-// budget - a live sample showed `zsh -lic printf %s "$PATH"` hanging alongside
-// an 18 s-old `pyenv-rehash`, with `zsh -lic true` measuring 60.41 s wall, so
-// session creation (`POST /api/v1/sessions`) never returned inside its 10 s
-// budget. Resolution is now capped: on expiry the child is killed and reaped,
-// and `None` keeps meaning "could not resolve", so callers fall back to the
-// process PATH that `search_paths()` already collected.
-//
-// Reachable from async code: `search_paths()` initializes its OnceLock inline
-// on the first caller, which can be `SessionService::spawn_owned` (async
-// session creation), so this blocking wait runs on a Tokio worker thread for up
-// to the bound below. Reported here; call sites deliberately not restructured.
-fn login_shell_path() -> Option<OsString> {
-    // 2 s: a healthy login shell resolves PATH in the tens-to-hundreds of ms
-    // range (the measured pathological case was 60 s, 30x this bound), this
-    // OnceLock runs at most once per process, and the caller's session-creation
-    // budget is 10 s - leaving room for the rest of spawn on the fallback path.
-    const RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-    let shell = env::var("SHELL").ok().filter(|s| !s.trim().is_empty())?;
-    let mut command = crate::util::no_window_command(&shell);
+// The bound exists because of a measured hang: an interactive login shell sources
+// the user's whole rc chain, and on a host whose rc chain runs `pyenv rehash`
+// (pyenv's 60 s lock wait) `zsh -lic true` measured 60.41 s wall. Discovery now
+// runs once per process on its own thread, so this bound only caps how long that
+// thread waits; no session spawn or Tokio worker waits on it.
+const LOGIN_PATH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Marker printed right before the PATH, so rc-chain output (banners, `fortune`) on stdout
+/// cannot be mistaken for it.
+const LOGIN_PATH_MARKER: &str = "__FERRYX_LOGIN_PATH__";
+
+#[derive(Default)]
+struct LoginPathCache {
+    // None while discovery runs; Some(result) once it published.
+    state: std::sync::Mutex<Option<Option<OsString>>>,
+    ready: std::sync::Condvar,
+}
+
+impl LoginPathCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Option<OsString>>> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn publish(&self, value: Option<OsString>) {
+        *self.lock() = Some(value);
+        self.ready.notify_all();
+    }
+
+    fn current(&self) -> Option<OsString> {
+        self.lock().clone().flatten()
+    }
+
+    fn wait(&self, bound: std::time::Duration) -> Option<OsString> {
+        let guard = self.lock();
+        let (guard, _) = self
+            .ready
+            .wait_timeout_while(guard, bound, |state| state.is_none())
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.clone().flatten()
+    }
+}
+
+fn login_path_cache() -> &'static LoginPathCache {
+    static CACHE: OnceLock<LoginPathCache> = OnceLock::new();
+    static START: std::sync::Once = std::sync::Once::new();
+    let cache = CACHE.get_or_init(LoginPathCache::default);
+    START.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("ferryx-login-path".into())
+            .spawn(move || cache.publish(discover_login_path()));
+        if let Err(error) = spawned {
+            tracing::debug!(%error, "login PATH discovery: could not start its thread");
+            cache.publish(None);
+        }
+    });
+    cache
+}
+
+fn discover_login_path() -> Option<OsString> {
+    let Some(shell) = crate::terminal::shell::login_shell_program() else {
+        tracing::debug!("login PATH discovery: no SHELL and no passwd shell");
+        return None;
+    };
+    discover_login_path_with(&shell, LOGIN_PATH_TIMEOUT)
+}
+
+/// The shell family decides how to ask for an interactive login shell and how to print PATH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginShellKind {
+    Posix,
+    Csh,
+    Fish,
+    Nushell,
+}
+
+impl LoginShellKind {
+    fn of(shell: &str) -> Self {
+        let name = shell.rsplit('/').next().unwrap_or(shell).trim_start_matches('-');
+        match name {
+            "csh" | "tcsh" => Self::Csh,
+            "fish" => Self::Fish,
+            "nu" | "nushell" => Self::Nushell,
+            _ => Self::Posix,
+        }
+    }
+
+    /// Arguments for the probe. Flags stay separate: `-lic` is rejected by shells that only
+    /// accept one bundled flag, and csh/tcsh honor `-l` only as the sole argument, so they get
+    /// an interactive shell (which reads ~/.cshrc and ~/.tcshrc, where csh users set PATH).
+    fn probe_args(self, printenv: &str) -> Vec<String> {
+        let posix = format!("echo {LOGIN_PATH_MARKER}; {printenv} PATH");
+        match self {
+            Self::Posix => vec!["-l".into(), "-i".into(), "-c".into(), posix],
+            Self::Csh => vec!["-i".into(), "-c".into(), posix],
+            // fish keeps PATH as a list; join it so the output has the POSIX shape.
+            Self::Fish => vec![
+                "-l".into(),
+                "-i".into(),
+                "-c".into(),
+                format!("echo {LOGIN_PATH_MARKER}; string join : $PATH"),
+            ],
+            Self::Nushell => vec![
+                "-l".into(),
+                "-i".into(),
+                "-c".into(),
+                format!("print \"{LOGIN_PATH_MARKER}\"; print ($env.PATH | str join \":\")"),
+            ],
+        }
+    }
+}
+
+/// Picks the line after the last marker and accepts it only when it is a usable PATH: every
+/// non-empty entry absolute and free of control characters, at least one entry present.
+fn parse_login_path_output(stdout: &[u8]) -> Result<OsString, &'static str> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut lines = text.lines().map(|line| line.trim_end_matches('\r'));
+    let mut value = None;
+    while let Some(line) = lines.next() {
+        if line.trim() == LOGIN_PATH_MARKER {
+            value = lines.next();
+        }
+    }
+    let value = value.ok_or("marker missing from shell output")?.trim();
+    let entries: Vec<&str> = value.split(':').filter(|entry| !entry.is_empty()).collect();
+    if entries.is_empty() {
+        return Err("PATH is empty");
+    }
+    if entries
+        .iter()
+        .any(|entry| !entry.starts_with('/') || entry.chars().any(char::is_control))
+    {
+        return Err("PATH has a relative or malformed entry");
+    }
+    Ok(OsString::from(entries.join(":")))
+}
+
+fn printenv_program() -> &'static str {
+    ["/usr/bin/printenv", "/bin/printenv"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        // NixOS and similar ship printenv only through PATH, which the rc chain has set by now.
+        .unwrap_or("printenv")
+}
+
+fn discover_login_path_with(shell: &str, timeout: std::time::Duration) -> Option<OsString> {
+    let kind = LoginShellKind::of(shell);
+    let mut command = crate::util::no_window_command(shell);
     command
-        .args(["-lic", "printf %s \"$PATH\""])
+        .args(kind.probe_args(printenv_program()))
         .env("PROMPT_EOL_MARK", "")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        // Captured-and-discarded, matching the old `.output()` semantics; we
-        // never read stderr, so piping it could let a chatty rc chain fill the
-        // pipe and trip the deadline.
+        // Never read; piping it could let a chatty rc chain fill the pipe and trip the deadline.
         .stderr(std::process::Stdio::null());
     without_controlling_terminal(&mut command);
-    let mut child = command.spawn().ok()?;
-    // Drain stdout on its own thread so a shell that writes more than a pipe
-    // buffer cannot block on write until the deadline kills it (same pattern as
-    // `run_clipboard_tool` in clipboard_image.rs).
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::debug!(shell, %error, "login PATH discovery: shell failed to spawn");
+            return None;
+        }
+    };
+    // Drain stdout on its own thread so a shell that writes more than a pipe buffer cannot
+    // block on write until the deadline kills it.
     let Some(mut stdout_pipe) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1256,35 +1460,41 @@ fn login_shell_path() -> Option<OsString> {
         let _ = std::io::Read::read_to_end(&mut stdout_pipe, &mut bytes);
         bytes
     });
-    let deadline = std::time::Instant::now() + RESOLVE_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            // Deadline expired or the child is unreapable: kill so it cannot
-            // leak, then reap it, and treat the resolution as "could not
-            // resolve" (None). Note this reaps the direct child only; a
-            // grandchild the rc chain already spawned (e.g. `pyenv-rehash`)
-            // is orphaned and finishes on its own.
-            _ => {
+            // Kill and reap the direct child so it cannot leak; a grandchild the rc chain
+            // already spawned (e.g. `pyenv-rehash`) is orphaned and finishes on its own.
+            outcome => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = drain.join();
+                tracing::debug!(
+                    shell,
+                    timeout_ms = timeout.as_millis() as u64,
+                    unreapable = outcome.is_err(),
+                    "login PATH discovery: shell did not finish in time"
+                );
                 return None;
             }
         }
     };
     let bytes = drain.join().unwrap_or_default();
     if !status.success() {
+        tracing::debug!(shell, code = ?status.code(), "login PATH discovery: shell exited non-zero");
         return None;
     }
-    let value = String::from_utf8_lossy(&bytes).trim().to_string();
-    if value.is_empty() {
-        return None;
+    match parse_login_path_output(&bytes) {
+        Ok(value) => Some(value),
+        Err(reason) => {
+            tracing::debug!(shell, reason, "login PATH discovery: output rejected");
+            None
+        }
     }
-    Some(OsString::from(value))
 }
 
 /// Runs the child in a new session with no controlling terminal.
@@ -1568,6 +1778,117 @@ mod tests {
         assert_eq!(results[2].name, "definitely-not-a-real-binary-xyz");
         assert!(!results[2].available);
         assert!(results[2].path.is_none());
+    }
+
+    #[test]
+    fn login_path_probe_uses_per_shell_forms() {
+        let posix = LoginShellKind::of("/bin/zsh").probe_args("/usr/bin/printenv");
+        assert_eq!(&posix[..3], ["-l", "-i", "-c"]);
+        assert!(posix[3].ends_with("/usr/bin/printenv PATH"));
+        assert_eq!(LoginShellKind::of("-bash"), LoginShellKind::Posix);
+        let csh = LoginShellKind::of("/bin/tcsh").probe_args("/usr/bin/printenv");
+        assert_eq!(&csh[..2], ["-i", "-c"]);
+        assert_eq!(LoginShellKind::of("/usr/bin/csh"), LoginShellKind::Csh);
+        let fish = LoginShellKind::of("/opt/homebrew/bin/fish").probe_args("printenv");
+        assert!(fish[3].contains("string join : $PATH"));
+        let nu = LoginShellKind::of("/usr/local/bin/nu").probe_args("printenv");
+        assert!(nu[3].contains("str join"));
+    }
+
+    #[test]
+    fn login_path_output_shapes_parse_per_shell() {
+        let marker = LOGIN_PATH_MARKER;
+        // zsh/bash: rc-chain chatter before the marker, printenv output after it.
+        let zsh = format!("Welcome back\n{marker}\n/opt/homebrew/bin:/usr/bin:/bin\n");
+        assert_eq!(
+            parse_login_path_output(zsh.as_bytes()).unwrap(),
+            "/opt/homebrew/bin:/usr/bin:/bin"
+        );
+        let bash = format!("{marker}\r\n/home/u/.local/bin:/usr/bin\r\n");
+        assert_eq!(parse_login_path_output(bash.as_bytes()).unwrap(), "/home/u/.local/bin:/usr/bin");
+        // fish: the joined list; tcsh: printenv output identical to POSIX.
+        let fish = format!("{marker}\n/home/u/.cargo/bin:/usr/bin\n");
+        assert_eq!(parse_login_path_output(fish.as_bytes()).unwrap(), "/home/u/.cargo/bin:/usr/bin");
+        let tcsh = format!("{marker}\n/usr/local/bin:/usr/bin:\n");
+        assert_eq!(parse_login_path_output(tcsh.as_bytes()).unwrap(), "/usr/local/bin:/usr/bin");
+        // nushell prints after its banner; an echoed marker inside the banner is superseded.
+        let nu = format!("{marker} banner\n{marker}\n/home/u/.nix-profile/bin:/usr/bin\n");
+        assert_eq!(
+            parse_login_path_output(nu.as_bytes()).unwrap(),
+            "/home/u/.nix-profile/bin:/usr/bin"
+        );
+    }
+
+    #[test]
+    fn login_path_output_rejects_malformed_values() {
+        let marker = LOGIN_PATH_MARKER;
+        assert!(parse_login_path_output(b"/usr/bin:/bin\n").is_err(), "no marker");
+        assert!(parse_login_path_output(format!("{marker}\n").as_bytes()).is_err(), "empty");
+        let relative = format!("{marker}\nbin:/usr/bin\n");
+        assert!(parse_login_path_output(relative.as_bytes()).is_err());
+        let garbage = format!("{marker}\nzsh: command not found: printenv\n");
+        assert!(parse_login_path_output(garbage.as_bytes()).is_err());
+        let control = format!("{marker}\n/usr/bin:/b\u{1b}[0min\n");
+        assert!(parse_login_path_output(control.as_bytes()).is_err());
+    }
+
+    /// The probe runs a real POSIX shell end to end and returns the PATH it printed.
+    #[cfg(unix)]
+    #[test]
+    fn login_path_discovery_reads_a_real_posix_shell() {
+        let path = discover_login_path_with("/bin/sh", std::time::Duration::from_secs(10))
+            .expect("/bin/sh reports a PATH");
+        assert!(env::split_paths(&path).all(|dir| dir.is_absolute()), "{path:?}");
+    }
+
+    /// A shell that prints garbage yields no login PATH, so callers keep the process PATH.
+    #[cfg(unix)]
+    #[test]
+    fn login_path_discovery_rejects_a_shell_printing_garbage() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let shell = root.path().join("garbage-sh");
+        std::fs::write(&shell, format!("#!/bin/sh\necho {LOGIN_PATH_MARKER}\necho 'not a path'\n")).unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shell = shell.to_string_lossy().into_owned();
+        assert_eq!(discover_login_path_with(&shell, std::time::Duration::from_secs(10)), None);
+    }
+
+    /// An agent only on the login PATH resolves once discovery publishes, even when the lookup
+    /// started before it did (the daemon-start race of a machine agent resume).
+    #[cfg(unix)]
+    #[test]
+    fn discovered_binary_waits_for_a_login_path_published_later() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let name = format!("ferryx-login-only-agent-{}", std::process::id());
+        let agent = root.path().join(&name);
+        std::fs::write(&agent, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cache = std::sync::Arc::new(LoginPathCache::default());
+        let publisher = {
+            let cache = std::sync::Arc::clone(&cache);
+            let dir = root.path().as_os_str().to_owned();
+            std::thread::spawn(move || cache.publish(Some(dir)))
+        };
+        let found = resolve_with_cache(&name, &cache, std::time::Duration::from_secs(30));
+        publisher.join().unwrap();
+        assert_eq!(found, Some(agent));
+    }
+
+    /// Discovery that never publishes cannot hold the caller past its bound.
+    #[test]
+    fn discovered_binary_wait_is_bounded() {
+        let cache = LoginPathCache::default();
+        let started = std::time::Instant::now();
+        let found = resolve_with_cache(
+            "ferryx-agent-that-does-not-exist",
+            &cache,
+            std::time::Duration::from_millis(200),
+        );
+        assert_eq!(found, None);
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
     }
 
     #[test]

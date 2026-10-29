@@ -1443,6 +1443,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                     "Could not arm the daemon supervisor; the daemon will be spawned detached"
                 ),
             });
+            // A CLI launcher installed earlier keeps working after the app is moved or the
+            // AppImage is swapped; a missing or foreign launcher is left alone.
+            tauri::async_runtime::spawn_blocking(
+                crate::ipc::cli_install::refresh_launcher_on_start,
+            );
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(raw_window) = window.ns_window() {
@@ -1491,6 +1496,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             )?;
             ipc::native_menu::register_menu_event_forwarder(app.handle());
             crate::browser::download::register_download_event_forwarder(app.handle());
+            // Todo 27: a same-protocol daemon that kept its live sessions through an update.
+            let restart_handle = app.handle().clone();
+            crate::daemon::update_pending::set_restart_required_notifier(move |signal| {
+                let event = crate::daemon::update_pending::RESTART_REQUIRED_EVENT;
+                let _ = restart_handle.emit(event, signal);
+            });
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
             // P10/P11: schedule the ambiguous-close and pending-create reapers
             // for the whole app lifetime. Both run their first pass immediately
@@ -1605,6 +1616,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_shortcuts_set_native_table,
         crate::ipc::account::cmd_account_enrollment_status,
         crate::ipc::account::cmd_account_enroll_this_machine,
+        crate::ipc::account::cmd_account_http_request,
         crate::ipc::paired_host::paired_host_list,
         crate::ipc::paired_host::paired_host_reachability_list,
         crate::ipc::paired_host::paired_host_route_list,
@@ -1696,6 +1708,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_set_active_selection,
         cmd_remote_get_active_selection,
         cmd_project_initial,
+        cmd_git_probe,
         cmd_boot_trace,
         crate::ipc::system_resources::cmd_system_resources,
         cmd_project_register,
@@ -1712,6 +1725,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_update_host,
         ipc::ssh::cmd_ssh_delete_host,
         ipc::ssh::cmd_ssh_test_connection,
+        ipc::ssh::cmd_ssh_scan_host_key,
+        ipc::ssh::cmd_ssh_trust_host_key,
         ipc::ssh::cmd_ssh_set_password,
         ipc::ssh::cmd_ssh_clear_password,
         ipc::ssh::cmd_ssh_prepare_integration,
@@ -1772,6 +1787,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::agent_integration::cmd_daemon_supervisor_set,
         ipc::daemon_update::cmd_daemon_update_pending_status,
         ipc::daemon_update::cmd_daemon_restart_previous_terminals,
+        ipc::daemon_update::cmd_daemon_restart_required,
         ipc::agent_integration::cmd_agent_integration_set,
         ipc::agent_integration::cmd_agent_integration_remove_local,
         ipc::supervisor::cmd_supervisor_snapshot,

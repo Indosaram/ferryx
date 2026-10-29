@@ -66,11 +66,15 @@ private keys never reach it.
 ## Enrolling a machine
 
 On the machine that should join, run the device authorization flow with the account service
-origin configured. It sends an email link and waits for approval without inbound SSH or a GUI:
+origin configured. It prints an approval URL and code, waits for approval without inbound SSH
+or a GUI, then enrolls the machine and keeps its daemon running:
 
 ```bash
-ferryx-cli account login --email you@example.com --origin https://account.example
+ferryx-cli up --email you@example.com --origin https://account.example
 ```
+
+With a single-use install key, pass it on stdin (`--key-stdin`) or in `FERRYX_INSTALL_KEY`
+(`--key-env`); the key is never accepted as a command-line argument.
 
 `--origin` can be omitted if `FERRYX_ACCOUNT_ORIGIN` or the saved account origin is set.
 For an account session that has already issued a one-time enrollment code, the explicit

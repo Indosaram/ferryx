@@ -36,6 +36,32 @@
       ]
     },
     {
+      "target": "x86_64-unknown-linux-musl",
+      "filename": "ferryx-remote-helper",
+      "sha256": "2f5c657ec7cd31b87e7ec7cdf00a85e88deba4d8b0f6a2baa66a8bc8fecd01d6",
+      "byteLength": 1535576,
+      "capabilities": [
+        "sshHelperV1",
+        "dagStreamingV1",
+        "dagSubscribeV1",
+        "agentHookV1",
+        "agentStateV1"
+      ]
+    },
+    {
+      "target": "aarch64-unknown-linux-musl",
+      "filename": "ferryx-remote-helper",
+      "sha256": "f69b807bd8bea1fc74c042fe23379928c1b64dd86fc85b7718f9c7ab4a851e16",
+      "byteLength": 1393248,
+      "capabilities": [
+        "sshHelperV1",
+        "dagStreamingV1",
+        "dagSubscribeV1",
+        "agentHookV1",
+        "agentStateV1"
+      ]
+    },
+    {
       "target": "aarch64-apple-darwin",
       "filename": "ferryx-remote-helper",
       "sha256": "bb1a0c3c80f3b63e4510bb68d10d2d9a5dd0a1c2f00f1277ae8dffaf7c4c82a2",

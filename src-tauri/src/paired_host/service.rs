@@ -357,8 +357,11 @@ impl PairedHostService {
                 #[cfg(test)]
                 loopback_http: false,
             })),
+            // Only ever talks to the paired relay origin (pair exchange, `/host/{machine}`
+            // capabilities, E2E session allocation), so it honors the relay proxy policy. The
+            // direct path to a host goes through `MachineClient`'s unproxied client.
             http: reqwest::Client::builder()
-                .no_proxy()
+                .proxy(crate::remote::relay_client::proxy::reqwest_proxy())
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(12))

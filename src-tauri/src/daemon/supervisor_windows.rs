@@ -29,7 +29,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use super::owner_admission::{Endpoint, LockState, OwnerProbe, OwnerRecord, StartingRecord};
-use super::runtime_stage::StagedRuntime;
+use super::runtime_stage::{self, RuntimeUsage, StagedRuntime};
 use super::supervisor::{non_empty, Env, Result, SUPERVISOR_NAME_ENV};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -438,6 +438,48 @@ pub fn register_for_login_with(
         changed |= remove_logon_trigger(env, scheduler, &generation_task_name(env, &key))?;
     }
     Ok(changed)
+}
+
+/// Deletes the tasks of superseded generations, after [`register_for_login_with`] removed their
+/// logon trigger, together with their recorded definitions, so a task naming an old runtime no
+/// longer keeps it from garbage collection. The candidates are
+/// [`runtime_stage::superseded_job_keys`] over the recorded generations: `staged` and the next
+/// newest generation keep their tasks, and so does every generation a running process executes
+/// from. A registered candidate is deleted (`/Delete /F`) only when its State reads `Ready` or
+/// `Disabled`: a `Running` or `Queued` task may host its watchdog and an unreadable State is no
+/// proof of idleness, so such a task keeps its definition and its record. A candidate that is no
+/// longer registered only loses its record. Never `/End` or `/Run`. Returns the removed keys.
+pub fn remove_superseded_tasks_with(
+    env: Env<'_>,
+    staged: &StagedRuntime,
+    runtime_root: &Path,
+    scheduler: &mut dyn TaskScheduler,
+    usage: &dyn RuntimeUsage,
+) -> Result<Vec<String>> {
+    let keys = recorded_generation_keys(env)?;
+    let mut removed = Vec::new();
+    for key in runtime_stage::superseded_job_keys(runtime_root, &keys, &staged.key, usage) {
+        let name = generation_task_name(env, &key);
+        if scheduler.run(&["/Query", "/TN", &name])? {
+            let state = scheduler.task_state(&name);
+            if !matches!(state.as_deref(), Ok("Ready" | "Disabled")) {
+                tracing::info!(task = %name, ?state, "A superseded daemon task is not idle; it keeps its definition");
+                continue;
+            }
+            if !scheduler.run(&["/Delete", "/TN", &name, "/F"])? {
+                tracing::warn!(task = %name, "schtasks /Delete failed for a superseded daemon task");
+                continue;
+            }
+        }
+        let xml_path = task_xml_path(env, &name)?;
+        match std::fs::remove_file(&xml_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Failed to remove {}: {error}", xml_path.display())),
+        }
+        removed.push(key);
+    }
+    Ok(removed)
 }
 
 /// Migrates the legacy single task (`Ferryx\Daemon`, or the QA base name) for the owner admission
@@ -1008,8 +1050,9 @@ mod platform {
         remove_login_autostart_with(env, &mut SystemScheduler).map(|_| ())
     }
 
-    /// Registers this build's generation for the next logon and demotes older generations, then
-    /// collects runtime generations that neither a process nor a recorded task uses.
+    /// Registers this build's generation for the next logon and demotes older generations, deletes
+    /// the idle tasks of superseded generations, then collects runtime generations that neither a
+    /// process nor a recorded task uses.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
         let staged = stage(executable)?;
         register_staged_for_login(env, &staged)
@@ -1019,6 +1062,19 @@ mod platform {
     pub fn register_staged_for_login(env: Env<'_>, staged: &StagedRuntime) -> Result<bool> {
         let changed = register_for_login_with(env, staged, &mut SystemScheduler)?;
         if let Some(root) = crate::daemon::server::daemon_runtime_root() {
+            let processes = SystemRuntimeUsage {
+                registered_job_executables: Vec::new(),
+            };
+            match remove_superseded_tasks_with(env, staged, &root, &mut SystemScheduler, &processes)
+            {
+                Ok(removed) if !removed.is_empty() => {
+                    tracing::info!(?removed, "Removed superseded daemon generation tasks")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Could not remove superseded daemon generation tasks")
+                }
+            }
             let usage = SystemRuntimeUsage {
                 registered_job_executables: registered_executables(env),
             };
@@ -1751,7 +1807,117 @@ mod tests {
         let mut scheduler = FakeScheduler::default();
         register_for_login_with(&f.env(), &new, &mut scheduler).unwrap();
         assert!(!f.xml_path(old_name).exists());
-        assert!(!scheduler.calls.iter().any(|call| call.contains(old_name) && !call.starts_with("/Query")));
+        assert!(!scheduler
+            .calls
+            .iter()
+            .any(|call| call.contains(old_name) && !call.starts_with("/Query")));
+    }
+
+    /// Four generations, each with a recorded and registered task, the newest just registered.
+    fn four_generations(
+        f: &Fixture,
+        scheduler: &mut FakeScheduler,
+    ) -> (PathBuf, Vec<StagedRuntime>) {
+        let root = f.local.join("Ferryx").join("daemon-runtime");
+        let generations: Vec<StagedRuntime> = (1..=4)
+            .map(|index| {
+                let staged = f.staged(&format!("v{index}-0000000{index}"));
+                let marker = root.join(&staged.key).join(runtime_stage::STAGED_AT_FILE);
+                std::fs::write(marker, index.to_string()).unwrap();
+                let name = generation_task_name(&f.env(), &staged.key);
+                let definition = f.definition(&staged);
+                write_task_xml(&f.xml_path(&name), &definition).unwrap();
+                scheduler.registered.insert(name, definition);
+                staged
+            })
+            .collect();
+        register_for_login_with(&f.env(), &generations[3], scheduler).unwrap();
+        (root, generations)
+    }
+
+    fn no_process() -> runtime_stage::SystemRuntimeUsage {
+        runtime_stage::SystemRuntimeUsage {
+            registered_job_executables: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn superseded_idle_tasks_are_deleted_and_their_runtimes_then_collected() {
+        let f = Fixture::new();
+        let mut scheduler = FakeScheduler::default().with_state("Ready");
+        let (root, generations) = four_generations(&f, &mut scheduler);
+        let collect = || {
+            let usage = runtime_stage::SystemRuntimeUsage {
+                registered_job_executables: registered_executables(&f.env()),
+            };
+            let mut removed = runtime_stage::collect_garbage(&root, &usage).unwrap();
+            removed.sort();
+            removed
+        };
+        assert!(
+            collect().is_empty(),
+            "every recorded task protects its runtime"
+        );
+        scheduler.calls.clear();
+
+        let mut removed = remove_superseded_tasks_with(
+            &f.env(),
+            &generations[3],
+            &root,
+            &mut scheduler,
+            &no_process(),
+        )
+        .unwrap();
+
+        removed.sort();
+        assert_eq!(removed, ["v1-00000001", "v2-00000002"]);
+        let mut mutations: Vec<String> = scheduler.mutations().into_iter().cloned().collect();
+        mutations.sort();
+        assert_eq!(
+            mutations,
+            [
+                "/Delete /TN Ferryx\\Daemon-v1-00000001 /F",
+                "/Delete /TN Ferryx\\Daemon-v2-00000002 /F"
+            ]
+        );
+        assert!(!f.xml_path("Ferryx\\Daemon-v1-00000001").exists());
+        assert!(!f.xml_path("Ferryx\\Daemon-v2-00000002").exists());
+        assert!(f.xml_path("Ferryx\\Daemon-v3-00000003").exists());
+        assert!(f.xml_path("Ferryx\\Daemon-v4-00000004").exists());
+        assert_eq!(collect(), ["v1-00000001", "v2-00000002"]);
+        assert!(!generations[0].executable.exists() && generations[2].executable.exists());
+    }
+
+    #[test]
+    fn a_superseded_task_that_runs_or_cannot_be_read_is_kept() {
+        for state in [Some("Running"), Some("Queued"), None] {
+            let f = Fixture::new();
+            let mut scheduler = FakeScheduler {
+                state: state.map(str::to_string),
+                ..FakeScheduler::default()
+            };
+            let (root, generations) = four_generations(&f, &mut scheduler);
+            scheduler.calls.clear();
+
+            let removed = remove_superseded_tasks_with(
+                &f.env(),
+                &generations[3],
+                &root,
+                &mut scheduler,
+                &no_process(),
+            );
+
+            assert_eq!(removed, Ok(Vec::new()), "{state:?}");
+            assert!(
+                scheduler.mutations().is_empty(),
+                "{state:?}: {:?}",
+                scheduler.calls
+            );
+            assert!(
+                f.xml_path("Ferryx\\Daemon-v1-00000001").exists(),
+                "{state:?}"
+            );
+        }
     }
 
     /// No `/Run`, `/End` or `/Delete`: opting out of autostart must never start, end or remove a

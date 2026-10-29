@@ -16,9 +16,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
 
-import { assembleRelease } from "./build-latest-json.mjs";
+import { assembleRelease, loadDefaultMacosMinimum } from "./build-latest-json.mjs";
 import { appendSurvivalReport, generateChangelog } from "./lib/release-changelog.mjs";
-import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
+import { evaluateFloorCheck, FLOOR_CHECKS, parsePlan, parseReceipt } from "./lib/release-contract.mjs";
 import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
 import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
 import { assertSurvivalGate } from "./lib/release-survival.mjs";
@@ -681,6 +681,46 @@ export function survivalGateRelease({ runDir, survivalWaiver = null }) {
 }
 
 /**
+ * Refuses to publish unless every build receipt carries floor results that pass without a waiver:
+ * one recorded check per FLOOR_CHECKS entry of each artifact kind, each re-evaluated from its
+ * measured value (the recorded pass flag is not trusted). There is no publish-time override.
+ */
+function assertPublishableFloors(runDir, macosMinimum) {
+  const receiptsDir = join(runDir, "receipts");
+  for (const name of readdirSync(receiptsDir).filter((n) => n.endsWith(".json")).sort()) {
+    const receipt = JSON.parse(readFileSync(join(receiptsDir, name), "utf8"));
+    const floors = receipt.floors;
+    if (!floors) {
+      throw new Error(`Release floor gate: ${name} carries no floor results; it cannot be published`);
+    }
+    if (floors.waiver !== null) {
+      throw new Error(
+        `Release floor gate: ${name} was built under floor waiver ${JSON.stringify(floors.waiver)}; a waived run cannot be published`,
+      );
+    }
+    const failing = [];
+    for (const art of receipt.artifacts ?? []) {
+      for (const check of FLOOR_CHECKS[art.kind] ?? []) {
+        const recorded = (floors.checks ?? []).find((c) => c.kind === art.kind && c.check === check);
+        if (!recorded) {
+          failing.push(`${art.kind} ${check}: no recorded result`);
+          continue;
+        }
+        if (check === "macos-minos" && recorded.limit !== macosMinimum) {
+          failing.push(`${art.kind} ${check}: built against minimum ${JSON.stringify(recorded.limit)}, but publish uses ${JSON.stringify(macosMinimum)}`);
+          continue;
+        }
+        const fresh = evaluateFloorCheck({ kind: art.kind, check, measured: recorded.measured, macosMinimum });
+        if (!fresh.pass) failing.push(`${art.kind} ${check}: ${fresh.reason}`);
+      }
+    }
+    if (failing.length > 0) {
+      throw new Error(`Release floor gate: ${name} fails the release floors (${failing.join("; ")}); it cannot be published`);
+    }
+  }
+}
+
+/**
  * Publishes release assets to GitHub Release as draft, verifies bytes, and undrafts. Refuses to
  * draft unless the session survival gate passes (or the owner waived unreachable evidence).
  */
@@ -691,6 +731,7 @@ export async function publishRelease({
   ghCommand = "gh",
   lsRemoteFn = null,
   env = process.env,
+  macosMinimum = null,
 }) {
   assertNotInCI("publish");
 
@@ -708,7 +749,9 @@ export async function publishRelease({
     throw new Error(`publish directory not found in run directory: ${runDir}`);
   }
 
-  // 0. Session survival gate, before any network call.
+  // 0. Release floor gate and session survival gate, before any network call. A run built
+  // under FERRYX_RELEASE_FLOOR_WAIVER may be assembled and verified locally, never published.
+  assertPublishableFloors(resolvedRunDir, macosMinimum ?? loadDefaultMacosMinimum());
   const survival = assertSurvivalGate({ releaseDir: resolvedRunDir, commitSha: plan.commitSha, waiver: survivalWaiver });
 
   // 1. Verify remote tag matches plan commitSha

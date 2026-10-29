@@ -110,8 +110,13 @@ pub fn shell_plan(
     environment.platform.validate_path(root)?;
     match environment.platform {
         RemotePlatform::Posix => {
-            let mut plan =
-                direct::shell_plan_with_session(host, root, Some(session_id), agent_socket)?;
+            let mut plan = direct::shell_plan_with_session(
+                host,
+                root,
+                Some(session_id),
+                agent_socket,
+                Some(&environment.home),
+            )?;
             if let Some(script) = plan.args.pop() {
                 plan.args.push(environment.executor.command(&script));
             }
@@ -826,6 +831,12 @@ mod forwarding_tests {
             home: home.into(),
             temp: "/tmp".into(),
             git: true,
+            runtime_dir: None,
+            os: match platform {
+                RemotePlatform::Posix => "Linux".into(),
+                RemotePlatform::Windows => "Windows".into(),
+            },
+            arch: "x86_64".into(),
         }
     }
 

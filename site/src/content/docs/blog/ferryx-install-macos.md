@@ -11,8 +11,8 @@ description: "Download the universal DMG, clear Gatekeeper warnings, and underst
 
 Ferryx ships one universal DMG for Apple Silicon and Intel Macs, macOS 10.15 or later. It is signed with a Developer ID and notarized by Apple, so it installs without disabling Gatekeeper.
 
-1. Download [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest).
-2. Check the download before you open it. In the folder holding both files, run `shasum -a 256 -c SHA256SUMS.txt --ignore-missing`. The DMG line must read `OK`.
+1. Download [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) with `SHA256SUMS` and `SHA256SUMS.minisig` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest).
+2. Check the download before you open it. In the folder holding the files, run `shasum -a 256 -c SHA256SUMS --ignore-missing`. The DMG line must read `OK`. To confirm the checksum list itself came from the release, run `minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm` (`brew install minisign`); the key is the app's updater key.
 3. Optional: confirm Apple's verdict yourself with `spctl -a -vvv -t install Ferryx_universal.dmg`. A good download reports `accepted` and `source=Notarized Developer ID`. The release process runs this same check on every published DMG and refuses to publish one that fails it.
 
 ## Gatekeeper prompts
@@ -44,7 +44,7 @@ Updates installed from inside Ferryx are signed and notarized the same way, so t
 
 ## How this fits Ferryx today
 
-Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
+Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64, through the Microsoft Store; some releases also attach a direct `.exe`), and Linux (x86_64 AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
 ![Installing Ferryx on macOS: DMG, Gatekeeper, Notarization illustration](/images/blog/ferryx-install-macos/body-1.png)
 
@@ -68,7 +68,7 @@ Ferryx ships calendar-versioned releases quickly; check that your version matche
 
 ## Limits and non-goals
 
-Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), Windows builds are not code-signed yet so SmartScreen warns on first run, and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
+Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), the direct Windows `.exe` that some releases attach is not code-signed, so SmartScreen warns on it (the Microsoft Store build is signed), and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
 
 ## How to verify these claims
 

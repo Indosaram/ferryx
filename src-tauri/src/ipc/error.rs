@@ -83,6 +83,9 @@ pub enum IpcErrorCode {
     CliParentSymlinkDenied,
     CliPlatformUnsupported,
     CliExecutableNotFound,
+    /// The app runs from a location that vanishes on exit (macOS App Translocation, an AppImage
+    /// mount), so a launcher pointing there would dangle.
+    CliTemporaryExecutable,
     InvalidArgument,
     InternalError,
     Unsupported,
@@ -138,6 +141,12 @@ pub enum IpcErrorCode {
     AuthExpired,
     NotFound,
     MethodNotAllowed,
+    /// OpenSSH refused the connection because the server's host key is not in known_hosts.
+    /// The UI offers a fingerprint confirmation step before the key is trusted.
+    HostKeyUnknown,
+    /// OpenSSH refused the connection because the server's host key differs from the pinned one.
+    /// Never trusted from the UI: the stale entry must be removed by the user.
+    HostKeyChanged,
     #[serde(untagged)]
     Custom(String),
 }
@@ -250,6 +259,8 @@ impl IpcErrorCode {
             "DAEMON_BUSY" => Self::DaemonBusy,
             "DAEMON_DETACH_UNAVAILABLE" => Self::DaemonDetachUnavailable,
             "NATIVE_RENDERER_UNAVAILABLE" => Self::NativeRendererUnavailable,
+            "HOST_KEY_UNKNOWN" => Self::HostKeyUnknown,
+            "HOST_KEY_CHANGED" => Self::HostKeyChanged,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -549,6 +560,10 @@ impl From<crate::ipc::cli_install::CliInstallError> for IpcError {
                 Self::new(IpcErrorCode::CliExecutableNotFound, message)
                     .with_details(json!({ "reason": reason }))
             }
+            crate::ipc::cli_install::CliInstallError::TemporaryExecutable { path, location } => {
+                Self::new(IpcErrorCode::CliTemporaryExecutable, message)
+                    .with_details(json!({ "path": path.to_string_lossy(), "location": location }))
+            }
             crate::ipc::cli_install::CliInstallError::HomeDirNotFound => {
                 Self::new(IpcErrorCode::InvalidPath, message)
             }
@@ -584,6 +599,8 @@ mod tests {
             (IpcErrorCode::DaemonUpdatePending, "DAEMON_UPDATE_PENDING"),
             (IpcErrorCode::DaemonBusy, "DAEMON_BUSY"),
             (IpcErrorCode::DaemonDetachUnavailable, "DAEMON_DETACH_UNAVAILABLE"),
+            (IpcErrorCode::HostKeyUnknown, "HOST_KEY_UNKNOWN"),
+            (IpcErrorCode::HostKeyChanged, "HOST_KEY_CHANGED"),
         ];
         for (code, wire) in cases {
             let encoded = serde_json::to_value(&code).expect("encode typed error");

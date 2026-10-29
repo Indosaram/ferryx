@@ -77,6 +77,8 @@ export type RegisteredProject = {
   gitRoot?: string | null;
   gitRemote?: string | null;
   gitCommonDir?: string | null;
+  gitUnavailable?: GitUnavailableReason | null;
+  gitVersion?: string | null;
   gitBranch?: string | null;
   gitHead?: string | null;
   hostLabel?: string;
@@ -250,6 +252,26 @@ export async function unregisterProject(request: { workspaceId: string }) {
 
 export async function revealPath(path: string) {
   return invokeCommand<void>("cmd_path_reveal", { path });
+}
+
+/** Why a folder is served without Git; mirrors `GitUnavailableReason` in worktree/git.rs. */
+export type GitUnavailableReason =
+  | { kind: "gitMissing" }
+  | { kind: "xcodeCommandLineToolsMissing" }
+  | { kind: "dubiousOwnership"; path: string }
+  | { kind: "notARepository" }
+  | { kind: "gitFailed"; message: string }
+  | { kind: "nonUtf8Output" };
+
+export type GitProbe = {
+  version: string | null;
+  unavailable: GitUnavailableReason | null;
+};
+
+/** Whether Git runs on this host; null outside the desktop shell. */
+export async function getGitProbe(): Promise<GitProbe | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<GitProbe>("cmd_git_probe");
 }
 
 export async function getInitialProject() {
@@ -1563,6 +1585,31 @@ export async function enrollThisMachine(
   });
 }
 
+export type AccountHttpRequest = {
+  origin: string;
+  method: "GET" | "POST";
+  path: string;
+  bearer: string | null;
+  body: string | null;
+  timeoutMs: number;
+};
+
+export type AccountHttpResponse = {
+  status: number;
+  body: string;
+};
+
+/**
+ * One account-service call made by the desktop backend, so a self-hosted account origin works
+ * without widening the webview CSP. Failures are structured `{ code, message, details }`.
+ */
+export async function accountHttpRequest(request: AccountHttpRequest): Promise<AccountHttpResponse> {
+  if (!isTauri()) {
+    throw new Error("Account requests through the desktop backend are available only in the desktop app");
+  }
+  return invokeCommand<AccountHttpResponse>("cmd_account_http_request", request);
+}
+
 export type DagRunUpdatedEvent = {
   projectPath: string;
   generation?: number;
@@ -1573,6 +1620,7 @@ export type DagWatchFailureCode =
   | "helper_missing"
   | "capability_missing"
   | "authentication"
+  | "host_key"
   | "unavailable";
 
 /** Terminal DAG-watch outcome pushed by the backend when retrying stopped for good. */

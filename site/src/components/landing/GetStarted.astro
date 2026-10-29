@@ -1,5 +1,6 @@
 ---
 import CopyCommand from './CopyCommand';
+import { PLATFORMS } from '@/lib/downloads';
 
 const baseUrl = import.meta.env.BASE_URL.endsWith('/')
   ? import.meta.env.BASE_URL
@@ -7,7 +8,8 @@ const baseUrl = import.meta.env.BASE_URL.endsWith('/')
 
 const macUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg';
 const windowsStoreUrl = 'https://apps.microsoft.com/detail/9NLHQL5JNLM4';
-const windowsUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe';
+// The direct installer is optional per release; PLATFORMS lists it only when it is published.
+const windowsInstallerUrl = PLATFORMS.windows.assets.find((asset) => asset.id === 'windows-installer')?.url;
 const appImageUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage';
 const debUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb';
 const releasesUrl = 'https://github.com/Indosaram/ferryx/releases/latest';
@@ -72,7 +74,7 @@ const textLink =
           </svg>
           <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">Windows</h3>
         </div>
-        <p class="mt-2 text-[13px] text-ink-faint">Microsoft Store + x64 installer (.exe)</p>
+        <p class="mt-2 text-[13px] text-ink-faint">{windowsInstallerUrl ? 'Microsoft Store + x64 installer (.exe)' : 'Microsoft Store (x64)'}</p>
         <ul class="mt-4 flex flex-col gap-2">
           <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
             <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
@@ -89,13 +91,15 @@ const textLink =
         </ul>
         <div class="mt-auto flex flex-col gap-3 pt-6">
           <a href={windowsStoreUrl} data-ferryx-location="install_section" class={primaryLink}>Get from Microsoft Store</a>
-          <a
-            href={windowsUrl}
-            data-ferryx-location="install_section"
-            class="text-[14px] font-medium text-ink underline underline-offset-4 transition-colors duration-150 hover:text-ink-soft"
-          >
-            Direct .exe installer (unsigned)
-          </a>
+          {windowsInstallerUrl && (
+            <a
+              href={windowsInstallerUrl}
+              data-ferryx-location="install_section"
+              class="text-[14px] font-medium text-ink underline underline-offset-4 transition-colors duration-150 hover:text-ink-soft"
+            >
+              Direct .exe installer (unsigned)
+            </a>
+          )}
         </div>
       </div>
 
@@ -126,11 +130,11 @@ const textLink =
           </li>
           <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
             <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
-            glibc 2.31 or newer
+            glibc 2.35 or newer (Ubuntu 22.04+)
           </li>
           <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
             <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
-            WebKitGTK 4.0 / 4.1 + GTK 3
+            WebKitGTK 4.1 + GTK 3
           </li>
         </ul>
         <div class="mt-auto flex flex-col gap-3 pt-6">
@@ -172,9 +176,10 @@ const textLink =
           </svg>
           <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">Headless Linux server</h3>
         </div>
-        <p class="mt-2 text-[13px] text-ink-faint">daemon + CLI</p>
+        <p class="mt-2 text-[13px] text-ink-faint">daemon + CLI, x86_64, glibc 2.17+</p>
         <p class="mt-4 text-[14px] leading-relaxed text-ink-soft">
-          No GUI needed. Pair it from your desktop.
+          No GUI needed. The installer runs ferryx-cli up, which links the machine to your account
+          and keeps its daemon running. Add Machine in the app gives you the same line with an install key.
         </p>
         <CopyCommand client:visible command="curl -fsSL https://relay.ferryx.dev/install.sh | bash" />
       </div>
@@ -182,7 +187,7 @@ const textLink =
 
     <div class="mt-10 flex flex-col gap-4 border-t border-line pt-6 sm:flex-row sm:items-center sm:justify-between">
       <p class="font-mono text-[13px] text-ink-faint">
-        Verify downloads: <span class="text-ink-soft">sha256sum -c SHA256SUMS.txt</span>
+        Verify downloads: <span class="text-ink-soft">sha256sum -c SHA256SUMS --ignore-missing</span> (signed as SHA256SUMS.minisig)
       </p>
       <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
         <a href={releasesUrl} class={`group ${textLink}`}>All releases <span aria-hidden="true" class="inline-block transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none">→</span></a>

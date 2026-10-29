@@ -46,6 +46,9 @@ pub struct RemoteSessionDescriptor {
 pub enum RemoteFailureKind {
     Transport,
     Authentication,
+    /// OpenSSH rejected the server's host key (unknown or changed); reconnecting cannot help
+    /// until the user trusts or repairs the key.
+    HostKey,
     Missing,
     Expired,
     Protocol,
@@ -83,6 +86,12 @@ impl RemoteFailure {
                     || error.code == crate::ipc::IpcErrorCode::CliExecutableNotFound
                 {
                     RemoteFailureKind::Missing
+                } else if matches!(
+                    error.code,
+                    crate::ipc::IpcErrorCode::HostKeyUnknown
+                        | crate::ipc::IpcErrorCode::HostKeyChanged
+                ) {
+                    RemoteFailureKind::HostKey
                 } else if error.code != crate::ipc::IpcErrorCode::IoError {
                     RemoteFailureKind::Protocol
                 } else if stage == Some("transport") {
@@ -118,11 +127,11 @@ impl RemoteFailure {
     }
 }
 fn ssh_stderr_failure_kind(stderr: &str) -> RemoteFailureKind {
+    if crate::ssh::runtime::host_key_failure(stderr).is_some() {
+        return RemoteFailureKind::HostKey;
+    }
     let lower = stderr.to_lowercase();
-    if lower.contains("permission denied")
-        || lower.contains("authentication")
-        || lower.contains("host key verification failed")
-    {
+    if lower.contains("permission denied") || lower.contains("authentication") {
         RemoteFailureKind::Authentication
     } else {
         RemoteFailureKind::Transport
@@ -2016,6 +2025,9 @@ mod tests {
                     home: "/home".to_string(),
                     temp: "/tmp".to_string(),
                     git: true,
+                    runtime_dir: None,
+                    os: "Linux".into(),
+                    arch: "x86_64".into(),
                 },
                 helper: HelperLocation {
                     executable: "/bin/helper".to_string(),

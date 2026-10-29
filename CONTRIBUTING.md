@@ -14,14 +14,16 @@ Ferryx is source-available under the license in [`LICENSE`](LICENSE). It is not 
 
 ## Build prerequisites
 
-- [Bun](https://bun.sh/) 1.1+
-- [Rust](https://www.rust-lang.org/) stable (at least 1.82)
-- [Node.js](https://nodejs.org/) 20+
+- [Bun](https://bun.sh/) 1.1+ (the only JavaScript runtime the repository uses; Node.js is not needed)
+- [Rust](https://www.rust-lang.org/) stable (at least 1.89, the `rust-version` in `src-tauri/Cargo.toml`)
 - [Zig](https://ziglang.org/download/) 0.16.0 (required for the pinned Ghostty build)
-- [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
+- [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/) as a Cargo subcommand, since `cargo tauri dev` runs it:
+  `cargo install tauri-cli --version "^2" --locked`
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
-[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop or CLI binary.
+[Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop app. The
+headless CLI does not need them:
+`cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli`.
 
 Clone and install:
 

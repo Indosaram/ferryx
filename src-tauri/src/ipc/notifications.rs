@@ -23,7 +23,8 @@ use tauri::{AppHandle, Runtime, State};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
-#[cfg(not(target_os = "macos"))]
+// macOS and Windows submit natively; only the remaining platforms show through the plugin.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use tauri_plugin_notification::NotificationExt;
 
 /// Native backend built on `tauri-plugin-notification`.
@@ -56,38 +57,42 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
         {
             crate::notification::permission::macos::submit_notification(content)
         }
-        // Windows/Linux: route clicks through notify-rust when the notification
-        // carries a destination. notify-rust's `wait_for_response` gives us the
-        // real activation the tauri plugin drops. Test / id-less notifications
-        // (no target) still show through the plugin.
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        // Windows sends every toast through notify-rust, which picks the
+        // AppUserModelID for this install (MSIX package AUMID vs the NSIS/MSI
+        // shortcut identifier); the plugin always applies the config identifier,
+        // which a Store install does not register, so its toasts were dropped.
+        #[cfg(target_os = "windows")]
+        {
+            let identifier = self.app.config().identifier.clone();
+            crate::notification::notify_rust_adapter::submit_with_click_routing(
+                content,
+                &identifier,
+                Arc::clone(self.app.state::<Arc<NotificationActivations>>().inner()),
+            )
+        }
+        // Linux: route clicks through notify-rust when the notification carries
+        // a destination. notify-rust's `wait_for_response` gives us the real
+        // activation the tauri plugin drops. Test / id-less notifications (no
+        // target) still show through the plugin. `"Default"` is not a
+        // freedesktop sound name, and the plugin builder exposes no
+        // suppress-sound hint, so the sound setting is left to the server.
+        #[cfg(target_os = "linux")]
         {
             if content.target.is_some() {
-                let app_id = self.app.config().identifier.clone();
+                let identifier = self.app.config().identifier.clone();
                 return crate::notification::notify_rust_adapter::submit_with_click_routing(
                     content,
-                    &app_id,
+                    &identifier,
                     Arc::clone(self.app.state::<Arc<NotificationActivations>>().inner()),
                 );
             }
-            let builder = self
-                .app
+            self.app
                 .notification()
                 .builder()
                 .title(&content.title)
-                .body(&content.body);
-            // Windows renders an unset sound name as a silent toast, so the
-            // default `System` choice has to name the platform default
-            // explicitly; `Silent` stays unset, which is already silent there.
-            // Linux is untouched: `"Default"` is not a freedesktop sound name,
-            // and the plugin builder exposes no suppress-sound hint.
-            #[cfg(target_os = "windows")]
-            let builder = if content.sound == NotificationSound::System {
-                builder.sound(crate::notification::notify_rust_adapter::DEFAULT_SOUND_NAME)
-            } else {
-                builder
-            };
-            builder.show().map_err(|error| error.to_string())
+                .body(&content.body)
+                .show()
+                .map_err(|error| error.to_string())
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {

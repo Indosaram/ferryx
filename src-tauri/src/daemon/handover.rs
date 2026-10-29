@@ -26,11 +26,16 @@ impl UpgradeAction {
     }
 }
 
-/// Opt-in gate for the non-unix idle restart. Default OFF: without it the platform keeps the
-/// refusal-only behavior, so a defect in the Windows-only restart wiring cannot cost a daemon.
+/// Gate for the non-unix idle upgrade (todo 27). Default ON: a daemon with zero live sessions
+/// loses nothing by handing its endpoint to the staged successor, and the session count is
+/// re-checked under the spawn gate before it leaves. `FERRYX_DAEMON_IDLE_UPGRADE=0` (or `false`,
+/// `off`) restores the refusal-only behavior.
 #[cfg(any(not(unix), test))]
 pub(crate) fn idle_upgrade_enabled(value: Option<&str>) -> bool {
-    matches!(value, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"))
+    !matches!(
+        value.map(str::trim),
+        Some(v) if v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")
+    )
 }
 
 #[cfg(not(unix))]
@@ -49,9 +54,300 @@ pub(crate) fn successor_lock_wait(value: Option<&str>) -> Option<std::time::Dura
     }
 }
 
+/// Printed on stdout by a declared successor (Windows idle upgrade, todo 27) right before its
+/// first instance-lock attempt: it is alive and waiting for the predecessor's lock. The
+/// predecessor accepts the upgrade only after reading this line.
+#[cfg(any(not(unix), test))]
+pub(crate) const SUCCESSOR_WAITING_TOKEN: &str = "FERRYX_DAEMON_SUCCESSOR_WAITING";
+
+/// Declares a successor daemon (see successor_lock_wait).
+pub(crate) const SUCCESSOR_ENV: &str = "FERRYX_DAEMON_SUCCESSOR";
+
+/// Pid of the daemon a Windows idle-upgrade successor replaces (todo 27). The successor follows
+/// that process before its lock window starts: the predecessor leaves only once every in-flight
+/// request drained, which can take longer than the window.
+pub(crate) const PREDECESSOR_PID_ENV: &str = "FERRYX_DAEMON_PREDECESSOR_PID";
+
+/// The successor role this daemon process was started with: the lock wait and, on Windows, the
+/// predecessor pid. Both describe this one start only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SuccessorEnv {
+    pub(crate) wait: Option<std::time::Duration>,
+    // Followed only by the Windows idle-upgrade successor (predecessor_from_env).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) predecessor_pid: Option<u32>,
+}
+
+fn read_successor_env(get: &dyn Fn(&str) -> Option<String>) -> SuccessorEnv {
+    SuccessorEnv {
+        wait: successor_lock_wait(get(SUCCESSOR_ENV).as_deref()),
+        predecessor_pid: get(PREDECESSOR_PID_ENV).and_then(|pid| pid.trim().parse().ok()),
+    }
+}
+
+static SUCCESSOR_ENV_STATE: std::sync::OnceLock<SuccessorEnv> = std::sync::OnceLock::new();
+
+/// Reads the successor variables once and removes them from this process's environment (todo
+/// 27, round 4). Left in place they reach every PTY shell (portable-pty seeds a command from the
+/// process environment) and every process those shells start, so a daemon later started from
+/// such a terminal would wait for an unrelated pid. Must run before the daemon starts any thread,
+/// like supervisor_linux::capture_notify_socket: run_daemon_headless calls it first.
+pub(crate) fn consume_successor_env() -> SuccessorEnv {
+    let state = successor_env();
+    std::env::remove_var(SUCCESSOR_ENV);
+    std::env::remove_var(PREDECESSOR_PID_ENV);
+    state
+}
+
+/// The successor role captured by consume_successor_env (read without removal in a process that
+/// never consumed it, such as a unit test).
+pub(crate) fn successor_env() -> SuccessorEnv {
+    *SUCCESSOR_ENV_STATE.get_or_init(|| read_successor_env(&|key| std::env::var(key).ok()))
+}
+
 pub(crate) fn successor_wait_from_env() -> Option<std::time::Duration> {
-    let value = std::env::var("FERRYX_DAEMON_SUCCESSOR").ok();
-    successor_lock_wait(value.as_deref())
+    successor_env().wait
+}
+
+/// Upper bound on following a predecessor that is still running: its in-flight drain (a
+/// CreateWorktree alone may take 40 s) plus a wide margin. A predecessor still running after it
+/// is not leaving; the successor then gives up without a lock, and the predecessor, which checks
+/// that its successor is alive before it leaves, keeps serving.
+#[cfg(any(not(unix), test))]
+pub(crate) const PREDECESSOR_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The predecessor process a declared successor follows before its lock window starts.
+#[cfg(any(windows, test))]
+pub(crate) trait PredecessorExit {
+    /// Blocks until the predecessor has exited (true) or `bound` passed (false).
+    fn wait_exit(&mut self, bound: std::time::Duration) -> bool;
+}
+
+#[cfg(windows)]
+mod predecessor_ffi {
+    pub(super) type Handle = *mut std::ffi::c_void;
+    pub(super) const SYNCHRONIZE: u32 = 0x0010_0000;
+    pub(super) const WAIT_OBJECT_0: u32 = 0;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub(super) fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        pub(super) fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+        pub(super) fn CloseHandle(handle: Handle) -> i32;
+    }
+}
+
+/// A SYNCHRONIZE handle on the predecessor daemon. It is opened before the successor announces
+/// itself, while the predecessor is certainly alive (it is waiting for that announcement), so a
+/// reused pid is never followed.
+#[cfg(windows)]
+pub(crate) struct PredecessorProcess(predecessor_ffi::Handle);
+
+#[cfg(windows)]
+impl PredecessorProcess {
+    /// None when the process is already gone or cannot be opened.
+    pub(crate) fn open(pid: u32) -> Option<Self> {
+        // SAFETY: OpenProcess takes plain integers and returns a handle or null; no pointer is read.
+        let handle = unsafe { predecessor_ffi::OpenProcess(predecessor_ffi::SYNCHRONIZE, 0, pid) };
+        (!handle.is_null()).then_some(Self(handle))
+    }
+}
+
+#[cfg(windows)]
+impl PredecessorExit for PredecessorProcess {
+    fn wait_exit(&mut self, bound: std::time::Duration) -> bool {
+        // Kept below INFINITE (u32::MAX), so the wait is always bounded.
+        let milliseconds = u32::try_from(bound.as_millis()).unwrap_or(u32::MAX - 1);
+        // SAFETY: self.0 is a live process handle opened with SYNCHRONIZE, closed only in Drop.
+        let waited = unsafe { predecessor_ffi::WaitForSingleObject(self.0, milliseconds) };
+        waited == predecessor_ffi::WAIT_OBJECT_0
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PredecessorProcess {
+    fn drop(&mut self) {
+        // SAFETY: self.0 was returned non-null by OpenProcess and is closed exactly once, here.
+        unsafe {
+            predecessor_ffi::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Whether `pid` is the daemon that owns this runtime dir: owner.json names it and its process
+/// start time matches the record. Anything else (no or unreadable record, another pid, a reused
+/// pid with a different start time) is not a predecessor to follow.
+#[cfg(any(windows, test))]
+pub(crate) fn predecessor_is_runtime_owner(
+    pid: u32,
+    record: Result<Option<crate::daemon::owner_admission::OwnerRecord>, String>,
+    start_time_of: &dyn Fn(u32) -> Option<u64>,
+) -> Result<(), String> {
+    let record = match record {
+        Ok(Some(record)) => record,
+        Ok(None) => return Err("no owner record in this runtime dir".into()),
+        Err(error) => return Err(format!("owner record unreadable: {error}")),
+    };
+    if record.pid != pid {
+        return Err(format!("this runtime dir is owned by pid {}", record.pid));
+    }
+    match start_time_of(pid) {
+        Some(start) if start == record.start_time => Ok(()),
+        Some(_) => Err("pid reused: its start time differs from the owner record".into()),
+        None => Err("process gone".into()),
+    }
+}
+
+/// The predecessor named by `pid`, when it is the Ferryx daemon owning the runtime dir whose
+/// owner record is `owner`. The handle is opened first, so the start time is read while the
+/// process cannot go away and its pid cannot be reused. Anything else is ignored at once: the
+/// lock window then starts now.
+#[cfg(windows)]
+pub(crate) fn predecessor_for(pid: u32, owner: &std::path::Path) -> Option<PredecessorProcess> {
+    let Some(predecessor) = PredecessorProcess::open(pid) else {
+        tracing::info!(
+            pid,
+            "Predecessor daemon already gone; the instance lock window starts now"
+        );
+        return None;
+    };
+    let record = crate::daemon::owner_admission::read_record(owner);
+    match predecessor_is_runtime_owner(
+        pid,
+        record,
+        &crate::daemon::owner_admission::process_start_time,
+    ) {
+        Ok(()) => Some(predecessor),
+        Err(reason) => {
+            tracing::warn!(
+                pid,
+                %reason,
+                "Ignoring a predecessor pid that is not this runtime dir's daemon; the instance \
+                 lock window starts now"
+            );
+            None
+        }
+    }
+}
+
+/// The predecessor this process was started to follow, if it is the runtime dir's daemon.
+#[cfg(windows)]
+pub(crate) fn predecessor_from_env() -> Option<PredecessorProcess> {
+    let pid = successor_env().predecessor_pid?;
+    predecessor_for(
+        pid,
+        &crate::daemon::owner_admission::AdmissionPaths::for_runtime().owner,
+    )
+}
+
+#[cfg(test)]
+mod successor_env_tests {
+    use super::{predecessor_is_runtime_owner, read_successor_env, SuccessorEnv};
+    use crate::daemon::owner_admission::OwnerRecord;
+
+    fn record(pid: u32, start_time: u64) -> Result<Option<OwnerRecord>, String> {
+        Ok(Some(OwnerRecord {
+            pid,
+            start_time,
+            generation_key: "gen".into(),
+            epoch: 1,
+            supervisor_pid: None,
+            supervisor_start_time: None,
+        }))
+    }
+
+    #[test]
+    fn successor_env_reads_both_variables() {
+        let env = |key: &str| match key {
+            "FERRYX_DAEMON_SUCCESSOR" => Some("1".to_string()),
+            "FERRYX_DAEMON_PREDECESSOR_PID" => Some(" 4242 ".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            read_successor_env(&env),
+            SuccessorEnv {
+                wait: Some(std::time::Duration::from_secs(15)),
+                predecessor_pid: Some(4242),
+            }
+        );
+        assert_eq!(
+            read_successor_env(&|_: &str| None),
+            SuccessorEnv { wait: None, predecessor_pid: None }
+        );
+    }
+
+    /// Round 4 (D-ENV): only the runtime dir's own daemon is followed; an unrelated or reused
+    /// pid is rejected without waiting for it.
+    #[test]
+    fn only_the_runtime_owner_is_a_predecessor() {
+        let start = |pid: u32| (pid == 4242).then_some(77);
+        assert!(predecessor_is_runtime_owner(4242, record(4242, 77), &start).is_ok());
+        let unrelated = predecessor_is_runtime_owner(4242, record(5151, 77), &start).unwrap_err();
+        assert!(unrelated.contains("owned by pid 5151"), "{unrelated}");
+        let reused = predecessor_is_runtime_owner(4242, record(4242, 76), &start).unwrap_err();
+        assert!(reused.contains("pid reused"), "{reused}");
+        assert!(predecessor_is_runtime_owner(4242, Ok(None), &start).is_err());
+        assert!(predecessor_is_runtime_owner(4242, Err("bad".into()), &start).is_err());
+        assert!(predecessor_is_runtime_owner(9, record(9, 1), &start).is_err(), "gone");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod predecessor_process_tests {
+    use super::{PredecessorExit, PredecessorProcess};
+    use std::time::Duration;
+
+    /// Round 4 (D-ENV): a live process that is not the runtime dir's daemon (no owner record,
+    /// then a record naming another pid) is rejected at once instead of being waited on.
+    #[test]
+    fn unrelated_live_pid_is_not_followed() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "set /p FERRYX_T27_WAIT="])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("unrelated live process");
+        let dir = tempfile::tempdir().unwrap();
+        let owner = dir.path().join("owner.json");
+        assert!(super::predecessor_for(child.id(), &owner).is_none());
+        crate::daemon::owner_admission::write_record_atomic(
+            &owner,
+            &crate::daemon::owner_admission::OwnerRecord {
+                pid: std::process::id(),
+                start_time: 1,
+                generation_key: "gen".into(),
+                epoch: 1,
+                supervisor_pid: None,
+                supervisor_start_time: None,
+            },
+        )
+        .unwrap();
+        assert!(super::predecessor_for(child.id(), &owner).is_none());
+        drop(child.stdin.take());
+        child.wait().expect("reap the stand-in");
+    }
+
+    /// The handle wait follows the real process: bounded while it runs, true once it exits.
+    #[test]
+    fn predecessor_wait_follows_the_real_process() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "set /p FERRYX_T27_WAIT="])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("stand-in predecessor");
+        let mut predecessor = PredecessorProcess::open(child.id()).expect("open the predecessor");
+        assert!(
+            !predecessor.wait_exit(Duration::from_millis(200)),
+            "the stand-in blocks on its stdin, so it is still running"
+        );
+        drop(child.stdin.take());
+        assert!(
+            predecessor.wait_exit(Duration::from_secs(30)),
+            "exit observed"
+        );
+        child.wait().expect("reap the stand-in");
+    }
 }
 
 /// Platform-neutral upgrade admission. Unix keeps its handover/re-exec behavior; a platform
@@ -186,13 +482,25 @@ mod upgrade_action_tests {
     }
 
     #[test]
-    fn idle_restart_is_opt_in_only() {
+    fn idle_upgrade_is_on_unless_explicitly_disabled() {
+        assert!(idle_upgrade_enabled(None));
         assert!(idle_upgrade_enabled(Some("1")));
         assert!(idle_upgrade_enabled(Some("true")));
-        assert!(idle_upgrade_enabled(Some("TRUE")));
-        assert!(!idle_upgrade_enabled(None));
         assert!(!idle_upgrade_enabled(Some("0")));
-        assert!(!idle_upgrade_enabled(Some("yes")));
+        assert!(!idle_upgrade_enabled(Some("FALSE")));
+        assert!(!idle_upgrade_enabled(Some(" off ")));
+    }
+
+    /// Todo 27: the idle upgrade on a platform without session transfer proceeds with zero live
+    /// sessions under the default gate and refuses with one.
+    #[test]
+    fn idle_upgrade_without_session_transfer_proceeds_at_zero_and_refuses_one_live_session() {
+        assert!(idle_upgrade_enabled(None));
+        assert_eq!(upgrade_action(0, false), UpgradeAction::Proceed);
+        assert_eq!(
+            upgrade_action(1, false),
+            UpgradeAction::Refuse { live_sessions: 1 }
+        );
     }
 
     #[test]
@@ -1073,6 +1381,8 @@ pub struct HandoverManager {
     /// Set once a control-v1 Shutdown was accepted: the retirement predicate then ignores the
     /// live sessions the caller confirmed and waits only for in-flight responses.
     shutdown_requested: AtomicBool,
+    #[cfg(test)]
+    retirement_cancelled: Arc<tokio::sync::Notify>,
     client_abort_tx: broadcast::Sender<()>,
     commit_notify_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     commit_callbacks: CommitCallbacks,
@@ -1188,6 +1498,8 @@ impl HandoverManager {
             retiring_ready: Arc::new(tokio::sync::Notify::new()),
             retiring_signalled: AtomicBool::new(false),
             shutdown_requested: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cancelled: Arc::new(tokio::sync::Notify::new()),
             client_abort_tx,
             commit_notify_tx: Arc::new(Mutex::new(None)),
             commit_callbacks: Arc::new(Mutex::new(Vec::new())),
@@ -1545,6 +1857,42 @@ impl HandoverManager {
 
     pub(crate) fn control_shutdown_requested(&self) -> bool {
         self.shutdown_requested.load(Ordering::SeqCst)
+    }
+
+    /// Undoes the zero-count Shutdown gate of an idle upgrade whose successor could not be
+    /// started (todo 27): Retiring goes back to Active, so the daemon keeps serving. Only valid
+    /// while the caller still holds its request guard and before mark_control_shutdown, so no
+    /// retirement can have been signalled.
+    #[cfg(any(not(unix), test))]
+    pub(crate) fn reopen_after_idle_upgrade_failure(&self) {
+        let mut status = self.status.write();
+        if *status == HandoverStatus::Retiring && !self.control_shutdown_requested() {
+            *status = HandoverStatus::Active;
+        }
+    }
+
+    /// Undoes an accepted idle upgrade whose successor ended before this daemon left (todo 27):
+    /// the retirement task found the successor gone, so leaving would leave no daemon. Retiring
+    /// goes back to Active and the one-shot retirement signal is re-armed, so a later
+    /// RetireWhenIdle or Shutdown retires as usual. Decided under the status write lock that
+    /// check_retirement_locked also takes, so no signal interleaves.
+    #[cfg(any(not(unix), test))]
+    pub(crate) fn reopen_after_successor_exit(&self) {
+        let mut status = self.status.write();
+        if *status == HandoverStatus::Retiring {
+            *status = HandoverStatus::Active;
+        }
+        self.shutdown_requested.store(false, Ordering::SeqCst);
+        self.retiring_signalled.store(false, Ordering::SeqCst);
+        drop(status);
+        #[cfg(test)]
+        self.retirement_cancelled.notify_one();
+    }
+
+    /// Raised each time reopen_after_successor_exit cancelled a retirement.
+    #[cfg(test)]
+    pub(crate) fn retirement_cancelled(&self) -> Arc<tokio::sync::Notify> {
+        self.retirement_cancelled.clone()
     }
 
     /// Runs the installed retirement action (process exit 0 outside fixtures).

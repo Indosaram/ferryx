@@ -259,6 +259,22 @@ export async function testSshConnection(host: SshHost): Promise<SshTargetSummary
   return invoke<SshTargetSummary>("cmd_ssh_test_connection", { host: cleaned });
 }
 
+export interface SshScannedHostKey {
+  keyType: string;
+  fingerprintSha256: string;
+  line: string;
+}
+
+/** Reads the host keys the server presents, without trusting any of them. */
+export async function scanSshHostKey(host: SshHost): Promise<{ keys: SshScannedHostKey[] }> {
+  return invoke<{ keys: SshScannedHostKey[] }>("cmd_ssh_scan_host_key", { host: cleanHostForIpc(host) });
+}
+
+/** Pins the host key; the backend refuses when the server no longer presents this fingerprint. */
+export async function trustSshHostKey(host: SshHost, fingerprintSha256: string): Promise<void> {
+  return invoke<void>("cmd_ssh_trust_host_key", { host: cleanHostForIpc(host), fingerprintSha256 });
+}
+
 export async function prepareSshIntegration(host: SshHost): Promise<void> {
   return invoke<void>("cmd_ssh_prepare_integration", { host: cleanHostForIpc(host) });
 }

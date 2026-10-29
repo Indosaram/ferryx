@@ -1368,6 +1368,18 @@ impl DaemonSessionService {
             .transpose()
     }
 
+    /// Spawn-gate claim for a session created outside spawn_session (the headless gateway's
+    /// default shell): a retiring daemon refuses it with DAEMON_RETIRING, so no session can
+    /// appear after a zero-session retirement or idle upgrade was decided.
+    pub(crate) fn retain_spawn_owner(
+        &self,
+    ) -> Result<Option<super::handover::SpawnOwnerGuard>, String> {
+        self.handover_manager
+            .upgrade()
+            .map(|manager| manager.retain_spawn_owner())
+            .transpose()
+    }
+
     pub(crate) fn router(&self) -> &super::proxy::SessionRouter {
         &self.session_router
     }
@@ -2572,9 +2584,12 @@ impl DaemonSessionService {
                             provider_session,
                         )
                         .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
-                        if crate::ipc::agents::resolve_binary(
+                        // Right after daemon start the login PATH may still be resolving; wait
+                        // for it as long as the pre-discovery code did (2 s) so a login-PATH-only
+                        // agent is not reported unsupported, while staying inside the spawn budget.
+                        if crate::ipc::agents::resolve_discovered_binary_within(
                             &plan.program,
-                            &crate::ipc::agents::search_paths(),
+                            std::time::Duration::from_secs(2),
                         )
                         .is_none()
                         {

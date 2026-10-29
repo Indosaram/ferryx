@@ -12,7 +12,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the Orca [README](https://git
 
 | | Ferryx | Orca |
 | :--- | :--- | :--- |
-| Platforms | macOS universal DMG, Windows x64 installer, Linux AppImage and .deb | macOS (Apple Silicon and Intel), Windows .exe, Linux AppImage, AUR |
+| Platforms | macOS universal DMG, Windows x64 via the Microsoft Store (some releases also attach a direct `.exe`), Linux x86_64 AppImage and .deb | macOS (Apple Silicon and Intel), Windows .exe, Linux AppImage, AUR |
 | Shell | Tauri v2 with the OS webview, terminal rendered by WGPU | Electron (`electron` 43.8.1 in `package.json`) |
 | Agents | Any CLI agent; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Any CLI agent |
 | Editor | Read-only file previews, no editor or LSP | Built-in editor (Monaco) with autosave |

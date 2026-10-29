@@ -728,6 +728,7 @@ async fn control_shutdown_wrong_count_leaves_no_marker_and_no_exit() {
         ControlReply::Failed(ControlFailure {
             code: control::CODE_COUNT_CHANGED.to_string(),
             live: Some(0),
+            reason: None,
         })
     );
     assert!(!fixture.server.handover_manager.retiring_signalled());
@@ -763,4 +764,487 @@ async fn windows_wrong_token_connection_is_closed_without_reply() {
         .await
         .expect("handler returned")
         .unwrap();
+}
+
+const IDLE_UPGRADE_CHILD_ROOT: &str = "FERRYX_T27_IDLE_UPGRADE_CHILD_ROOT";
+
+/// Todo 27: the Windows RequestUpgrade path (idle_request_upgrade), driven here with stand-in
+/// successor processes. One live session refuses with its count and starts nothing; a successor
+/// that cannot start, ends at once, or never announces its lock wait is refused with a typed
+/// reason while the gate reopens; zero sessions with an announcing successor start exactly the
+/// staged generation executable, refuse new spawns, and exit (marker written) only after the
+/// reply. daemon_runtime_root comes from the environment, so the scenario runs in a child test
+/// process with a private data dir.
+#[test]
+fn idle_upgrade_without_handover_proceeds_at_zero_sessions_and_refuses_one_live_session() {
+    if let Some(root) = std::env::var_os(IDLE_UPGRADE_CHILD_ROOT) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(idle_upgrade_scenarios(PathBuf::from(root)));
+        return;
+    }
+    let root = tempfile::Builder::new()
+        .prefix("fx-t27-")
+        .tempdir()
+        .unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "daemon::server::control_server::control_wire_tests::idle_upgrade_without_handover_proceeds_at_zero_sessions_and_refuses_one_live_session",
+            "--exact",
+            "--nocapture",
+        ])
+        .env(IDLE_UPGRADE_CHILD_ROOT, root.path())
+        .env("FERRYX_RUNTIME_DIR", root.path().join("runtime"))
+        .env("FERRYX_DATA_DIR", root.path().join("data"))
+        .output()
+        .expect("run the private idle upgrade scenario");
+    assert!(
+        output.status.success(),
+        "private idle upgrade scenario failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+type StartedSuccessors = Arc<std::sync::Mutex<Vec<PathBuf>>>;
+
+/// How the stand-in successor behaves.
+#[derive(Clone, Copy)]
+enum StandIn {
+    /// Prints the lock-wait announcement and stays alive, as a real successor waiting for the
+    /// predecessor's lock does.
+    Announces,
+    /// Prints the announcement and then ends: a successor that gives up or crashes after it was
+    /// accepted.
+    AnnouncesThenExits,
+    /// Starts and exits at once without announcing (whoami.exe on Windows, as in the QA run).
+    ExitsAtOnce,
+    /// Stays alive and silent past the readiness bound.
+    Silent,
+    /// The program does not exist.
+    Missing,
+}
+
+fn stand_in_command(behavior: StandIn) -> tokio::process::Command {
+    use crate::daemon::handover::SUCCESSOR_WAITING_TOKEN;
+    let (program, args): (&str, Vec<String>) = match (behavior, cfg!(windows)) {
+        (StandIn::Announces, false) => (
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                format!("echo {SUCCESSOR_WAITING_TOKEN}; exec sleep 30"),
+            ],
+        ),
+        (StandIn::Announces, true) => (
+            "powershell.exe",
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                format!(
+                    "[Console]::Out.WriteLine('{SUCCESSOR_WAITING_TOKEN}'); [Console]::Out.Flush(); \
+                     Start-Sleep -Seconds 30"
+                ),
+            ],
+        ),
+        (StandIn::AnnouncesThenExits, false) => (
+            "/bin/sh",
+            vec!["-c".into(), format!("echo {SUCCESSOR_WAITING_TOKEN}")],
+        ),
+        (StandIn::AnnouncesThenExits, true) => (
+            "cmd",
+            vec!["/C".into(), format!("echo {SUCCESSOR_WAITING_TOKEN}")],
+        ),
+        (StandIn::ExitsAtOnce, false) => ("/bin/sh", vec!["-c".into(), "exit 0".into()]),
+        (StandIn::ExitsAtOnce, true) => ("whoami.exe", vec![]),
+        (StandIn::Silent, false) => ("sleep", vec!["5".into()]),
+        (StandIn::Silent, true) => (
+            "powershell.exe",
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 30".into(),
+            ],
+        ),
+        (StandIn::Missing, _) => ("ferryx-t27-no-such-successor", vec![]),
+    };
+    let mut command = tokio::process::Command::new(program);
+    command.args(args);
+    command
+}
+
+fn recording_successor(
+    started: &StartedSuccessors,
+    behavior: StandIn,
+) -> impl FnOnce(&Path) -> tokio::process::Command {
+    let started = Arc::clone(started);
+    move |executable: &Path| {
+        started.lock().unwrap().push(executable.to_path_buf());
+        stand_in_command(behavior)
+    }
+}
+
+const READY_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn idle_upgrade_scenarios(root: PathBuf) {
+    use crate::daemon::handover::HandoverStatus;
+    const KEY: &str = "2026.1028.1-t27idle";
+    let staged = daemon_runtime_root()
+        .expect("runtime root")
+        .join(KEY)
+        .join(if cfg!(windows) {
+            "ferryx.exe"
+        } else {
+            "ferryx"
+        });
+    assert!(
+        staged.starts_with(&root),
+        "staged under the private data dir: {}",
+        staged.display()
+    );
+    std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+    std::fs::write(&staged, b"staged").unwrap();
+    let staged_arg = staged.to_string_lossy().into_owned();
+    let staged_arg_for_exit = staged_arg.clone();
+    let refused = |live, reason: Option<&str>| {
+        ControlReply::Failed(ControlFailure {
+            code: control::CODE_UPGRADE_REFUSED.to_string(),
+            live,
+            reason: reason.map(str::to_string),
+        })
+    };
+
+    // One live session: refused with its count, no successor, the daemon keeps serving.
+    #[cfg(unix)]
+    {
+        let fixture = ControlFixture::new();
+        let (session_id, _output) = spawn_cat(&fixture.server);
+        let started = StartedSuccessors::default();
+        let (reply, after) = fixture
+            .server
+            .idle_request_upgrade(
+                staged_arg.clone(),
+                Some(KEY.into()),
+                recording_successor(&started, StandIn::Announces),
+                READY_BOUND,
+            )
+            .await;
+        assert_eq!(reply, refused(Some(1), None));
+        assert!(matches!(after, AfterFlush::Nothing));
+        assert!(
+            started.lock().unwrap().is_empty(),
+            "no successor while a session is live"
+        );
+        assert_eq!(
+            fixture.server.handover_manager.status(),
+            HandoverStatus::Active
+        );
+        assert!(matches!(
+            data_exchange(&fixture.server, DaemonRequest::Ping).await,
+            DaemonResponse::Pong
+        ));
+        assert!(!fixture.server.handover_manager.retiring_signalled());
+        assert!(!fixture.marker().exists());
+        let closed = data_exchange(&fixture.server, DaemonRequest::Close { session_id }).await;
+        assert!(matches!(closed, DaemonResponse::CloseOk), "{closed:?}");
+    }
+
+    // A rejected staged executable starts nothing.
+    {
+        let fixture = ControlFixture::new();
+        let started = StartedSuccessors::default();
+        let (reply, after) = fixture
+            .server
+            .idle_request_upgrade(
+                staged_arg.clone(),
+                Some("another-generation".into()),
+                recording_successor(&started, StandIn::Announces),
+                READY_BOUND,
+            )
+            .await;
+        assert_eq!(
+            reply,
+            ControlReply::Failed(ControlFailure::code(control::CODE_BAD_REQUEST))
+        );
+        assert!(matches!(after, AfterFlush::Nothing));
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    // A successor that cannot start, ends at once, or stays silent past the bound: refused with
+    // the typed reason, the gate reopens (a spawn is admitted again), the daemon keeps serving,
+    // and no retirement is armed.
+    for (behavior, bound, reason) in [
+        (
+            StandIn::Missing,
+            READY_BOUND,
+            control::REASON_SUCCESSOR_NOT_STARTED,
+        ),
+        (
+            StandIn::ExitsAtOnce,
+            READY_BOUND,
+            control::REASON_SUCCESSOR_EXITED,
+        ),
+        (
+            StandIn::Silent,
+            std::time::Duration::from_millis(300),
+            control::REASON_SUCCESSOR_NOT_READY,
+        ),
+    ] {
+        let mut fixture = ControlFixture::new();
+        let started = StartedSuccessors::default();
+        let (reply, after) = fixture
+            .server
+            .idle_request_upgrade(
+                staged_arg.clone(),
+                Some(KEY.into()),
+                recording_successor(&started, behavior),
+                bound,
+            )
+            .await;
+        assert_eq!(reply, refused(None, Some(reason)));
+        assert!(matches!(after, AfterFlush::Nothing));
+        assert_eq!(started.lock().unwrap().len(), 1);
+        assert_eq!(
+            fixture.server.handover_manager.status(),
+            HandoverStatus::Active
+        );
+        assert!(!fixture.server.handover_manager.retiring_signalled());
+        assert!(!fixture.server.handover_manager.control_shutdown_requested());
+        assert!(
+            fixture.server.handover_manager.retain_spawn_owner().is_ok(),
+            "{reason}: the spawn gate reopened"
+        );
+        assert!(matches!(
+            data_exchange(&fixture.server, DaemonRequest::Ping).await,
+            DaemonResponse::Pong
+        ));
+        assert!(
+            fixture.exited.try_recv().is_err(),
+            "{reason}: the daemon did not exit"
+        );
+        assert!(!fixture.marker().exists());
+    }
+
+    // Zero sessions and an announcing successor: one successor from the staged executable,
+    // spawns refused, exit after flush.
+    let mut fixture = ControlFixture::new();
+    let started = StartedSuccessors::default();
+    let (reply, after) = fixture
+        .server
+        .idle_request_upgrade(
+            staged_arg,
+            Some(KEY.into()),
+            recording_successor(&started, StandIn::Announces),
+            READY_BOUND,
+        )
+        .await;
+    assert_eq!(reply, ControlReply::UpgradeAccepted);
+    assert!(
+        matches!(after, AfterFlush::Shutdown),
+        "the handler retires after flushing the reply"
+    );
+    assert_eq!(*started.lock().unwrap(), vec![staged]);
+    assert_eq!(
+        fixture.server.handover_manager.status(),
+        HandoverStatus::Retiring
+    );
+    assert!(
+        fixture.exited.try_recv().is_err(),
+        "no exit before the reply is flushed"
+    );
+    assert_daemon_retiring(
+        data_exchange(&fixture.server, spawn_request("after-idle-upgrade")).await,
+    );
+    // What handle_control_connection does once the reply is flushed.
+    fixture.server.handover_manager.mark_control_shutdown();
+    fixture
+        .server
+        .handover_manager
+        .check_retirement_if_empty(&fixture.server.terminal_service);
+    assert_eq!(fixture.await_exit().await, 0, "no session ended");
+    assert!(
+        fixture.marker().exists(),
+        "the predecessor's watchdog stops on the marker"
+    );
+    stop_stand_in_successor(&fixture.server).await;
+
+    successor_ended_after_announcing_cancels_the_retirement(&staged_arg_for_exit, KEY).await;
+    successor_about_to_give_up_cancels_the_retirement(&staged_arg_for_exit, KEY).await;
+}
+
+/// Kills and reaps the stand-in successor this test started (it would otherwise sleep on).
+async fn stop_stand_in_successor(server: &DaemonServer) {
+    let successor = server.idle_successor.lock().take();
+    if let Some(mut successor) = successor {
+        let _ = successor.child.kill().await;
+    }
+}
+
+/// Round 4 (D-RACE): the successor stops following this daemon PREDECESSOR_EXIT_BOUND after it
+/// started. A retirement reached SUCCESSOR_GIVE_UP_MARGIN or less before that instant is
+/// cancelled even though the successor still runs; one reached earlier proceeds. The clock is
+/// injected: the accepted successor's spawn time is moved back instead of waiting.
+async fn successor_about_to_give_up_cancels_the_retirement(staged_arg: &str, key: &str) {
+    use crate::daemon::handover::{HandoverStatus, PREDECESSOR_EXIT_BOUND};
+    let mut fixture = ControlFixture::new();
+    let in_flight = fixture
+        .server
+        .handover_manager
+        .retain_request(Arc::clone(&fixture.server.terminal_service))
+        .expect("a request in flight");
+    let started = StartedSuccessors::default();
+    let (reply, _) = fixture
+        .server
+        .idle_request_upgrade(
+            staged_arg.to_string(),
+            Some(key.into()),
+            recording_successor(&started, StandIn::Announces),
+            READY_BOUND,
+        )
+        .await;
+    assert_eq!(reply, ControlReply::UpgradeAccepted);
+    let spawned_at = fixture
+        .server
+        .idle_successor
+        .lock()
+        .as_ref()
+        .expect("the accepted successor is kept")
+        .spawned_at;
+    let last_safe = spawned_at + PREDECESSOR_EXIT_BOUND - SUCCESSOR_GIVE_UP_MARGIN
+        - std::time::Duration::from_millis(1);
+    assert!(
+        fixture.server.idle_successor_gone(last_safe).is_none(),
+        "a successor with more than the margin left can take over"
+    );
+    // The drain ends just inside the margin: move the spawn time back so that now is there.
+    {
+        let mut slot = fixture.server.idle_successor.lock();
+        let successor = slot.as_mut().unwrap();
+        successor.spawned_at = std::time::Instant::now()
+            .checked_sub(PREDECESSOR_EXIT_BOUND - SUCCESSOR_GIVE_UP_MARGIN)
+            .expect("clock far enough from its origin");
+    }
+    let cancelled = fixture.server.handover_manager.retirement_cancelled();
+    fixture.server.handover_manager.mark_control_shutdown();
+    fixture
+        .server
+        .handover_manager
+        .check_retirement_if_empty(&fixture.server.terminal_service);
+    drop(in_flight);
+    tokio::time::timeout(std::time::Duration::from_secs(10), cancelled.notified())
+        .await
+        .expect("retirement cancelled");
+    assert_eq!(
+        fixture.server.handover_manager.status(),
+        HandoverStatus::Active
+    );
+    assert!(fixture.exited.try_recv().is_err(), "the daemon did not exit");
+    assert!(!fixture.marker().exists(), "no retirement marker");
+    assert!(fixture.server.idle_successor.lock().is_none());
+    assert!(matches!(
+        data_exchange(&fixture.server, DaemonRequest::Ping).await,
+        DaemonResponse::Pong
+    ));
+}
+
+#[test]
+fn successor_give_up_window_on_an_injected_clock() {
+    use crate::daemon::handover::PREDECESSOR_EXIT_BOUND;
+    let spawned = std::time::Instant::now();
+    let at = |secs: u64| spawned + std::time::Duration::from_secs(secs);
+    let too_soon = |now| {
+        successor_gives_up_too_soon(spawned, now, PREDECESSOR_EXIT_BOUND, SUCCESSOR_GIVE_UP_MARGIN)
+    };
+    assert_eq!(PREDECESSOR_EXIT_BOUND, std::time::Duration::from_secs(120));
+    assert_eq!(SUCCESSOR_GIVE_UP_MARGIN, std::time::Duration::from_secs(10));
+    assert!(!too_soon(at(0)));
+    assert!(!too_soon(at(109)));
+    assert!(!too_soon(at(110) - std::time::Duration::from_millis(1)));
+    assert!(too_soon(at(110)), "inside the margin");
+    assert!(too_soon(at(119)));
+    assert!(too_soon(at(125)), "past the successor's bound");
+}
+
+/// Round 3 (D1-residual): the upgrade is accepted, then the successor ends while a request is
+/// still in flight. When that request finishes the retirement task finds the successor gone:
+/// no marker, no exit, the daemon is Active again, admits spawns and answers Ping. Ordering is
+/// event-driven: the successor's exit is awaited on its handle, and the cancellation on the
+/// handover manager's notify.
+async fn successor_ended_after_announcing_cancels_the_retirement(staged_arg: &str, key: &str) {
+    use crate::daemon::handover::HandoverStatus;
+    let mut fixture = ControlFixture::new();
+    let in_flight = fixture
+        .server
+        .handover_manager
+        .retain_request(Arc::clone(&fixture.server.terminal_service))
+        .expect("a request in flight");
+    let started = StartedSuccessors::default();
+    let (reply, after) = fixture
+        .server
+        .idle_request_upgrade(
+            staged_arg.to_string(),
+            Some(key.into()),
+            recording_successor(&started, StandIn::AnnouncesThenExits),
+            READY_BOUND,
+        )
+        .await;
+    assert_eq!(reply, ControlReply::UpgradeAccepted);
+    assert!(matches!(after, AfterFlush::Shutdown));
+    // The successor ends after its announcement; wait for that on its own handle.
+    let mut successor = fixture
+        .server
+        .idle_successor
+        .lock()
+        .take()
+        .expect("the accepted successor is kept");
+    tokio::time::timeout(std::time::Duration::from_secs(30), successor.child.wait())
+        .await
+        .expect("stand-in successor ended")
+        .expect("reaped");
+    *fixture.server.idle_successor.lock() = Some(successor);
+    // What handle_control_connection does once the reply is flushed; the in-flight request still
+    // holds the daemon, so nothing retires yet.
+    let cancelled = fixture.server.handover_manager.retirement_cancelled();
+    fixture.server.handover_manager.mark_control_shutdown();
+    fixture
+        .server
+        .handover_manager
+        .check_retirement_if_empty(&fixture.server.terminal_service);
+    assert!(!fixture.server.handover_manager.retiring_signalled());
+    assert_eq!(
+        fixture.server.handover_manager.status(),
+        HandoverStatus::Retiring
+    );
+    // The in-flight request finishes: the retirement task runs and finds the successor gone.
+    drop(in_flight);
+    tokio::time::timeout(std::time::Duration::from_secs(10), cancelled.notified())
+        .await
+        .expect("retirement cancelled");
+    assert_eq!(
+        fixture.server.handover_manager.status(),
+        HandoverStatus::Active
+    );
+    assert!(!fixture.server.handover_manager.control_shutdown_requested());
+    assert!(
+        fixture.server.handover_manager.retain_spawn_owner().is_ok(),
+        "the spawn gate reopened"
+    );
+    assert!(matches!(
+        data_exchange(&fixture.server, DaemonRequest::Ping).await,
+        DaemonResponse::Pong
+    ));
+    assert!(
+        fixture.exited.try_recv().is_err(),
+        "the daemon did not exit"
+    );
+    assert!(!fixture.marker().exists(), "no retirement marker");
+    assert!(fixture.server.idle_successor.lock().is_none());
+    // The retirement path is re-armed: a later RetireWhenIdle on the idle daemon still exits.
+    let reply = fixture.control(ControlRequest::RetireWhenIdle, None).await;
+    assert_eq!(reply, ControlReply::Live { live: 0 });
+    assert_eq!(fixture.await_exit().await, 0);
+    assert!(fixture.marker().exists());
 }

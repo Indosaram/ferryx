@@ -13,7 +13,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the cmux [README](https://git
 | | Ferryx | cmux |
 | :--- | :--- | :--- |
 | macOS | Universal DMG | Yes, native Swift/AppKit app (DMG or Homebrew cask) |
-| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (signed) and x64 `.exe` installer | No desktop app; [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) is open |
+| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (x64, signed); some releases also attach a direct `.exe` | No desktop app; [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) is open |
 | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | No desktop app; [Linux request #330](https://github.com/manaflow-ai/cmux/issues/330) is open, its most-reacted issue |
 | Terminal core | libghostty-vt parser, WGPU renderer | libghostty, reads your existing Ghostty config |
 | License | Source-available under the Ferryx License, free for individuals and small companies | The README calls it "Free and GPL-licensed" |
@@ -21,7 +21,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the cmux [README](https://git
 
 ## Where the two actually differ
 
-**Platforms.** This is the deciding fact for most people. cmux is a Mac app by design: the README sells it as "Native macOS app — Built with Swift and AppKit, not Electron." The [Linux support issue](https://github.com/manaflow-ai/cmux/issues/330) had 221 reactions and was still open on 2026-10-24, and the [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) had 52. Ferryx ships a macOS universal DMG, a Windows x64 installer, and Linux AppImage and .deb packages from one codebase.
+**Platforms.** This is the deciding fact for most people. cmux is a Mac app by design: the README sells it as "Native macOS app — Built with Swift and AppKit, not Electron." The [Linux support issue](https://github.com/manaflow-ai/cmux/issues/330) had 221 reactions and was still open on 2026-10-24, and the [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) had 52. Ferryx ships a macOS universal DMG, a Windows x64 build through the Microsoft Store (some releases also attach a direct `.exe`), and x86_64 Linux AppImage and .deb packages from one codebase.
 
 **Who owns the session.** In Ferryx a headless Rust PTY daemon owns the pseudoterminals and the window is only a client, so closing or reloading the GUI leaves agents running. Output goes into a 512 KiB ring buffer per session with monotonic sequence numbers, and a reconnect replays what you missed or reports a gap if the buffer wrapped. On cmux, users ask for exactly this: [Sessions are lost after app restart](https://github.com/manaflow-ai/cmux/issues/2823) and a request for [live process preservation across cmd+q](https://github.com/manaflow-ai/cmux/issues/1663) were both open on 2026-10-24. Ferryx's limit is honest too: if the daemon itself dies, its PTYs go with it, and only macOS restarts a crashed daemon automatically (launchd).
 

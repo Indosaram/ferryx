@@ -34,6 +34,24 @@ pub fn account_origin() -> Result<String, AccountOriginError> {
     })
 }
 
+/// Origin for CLI account commands given no `--origin`: [`account_origin`], or the hosted
+/// relay when nothing is configured, so `account login` works out of the box. Only an unset
+/// origin falls back; an invalid or insecure configured origin still fails.
+pub fn cli_account_origin() -> Result<String, AccountOriginError> {
+    or_hosted_default(account_origin())
+}
+
+fn or_hosted_default(
+    resolved: Result<String, AccountOriginError>,
+) -> Result<String, AccountOriginError> {
+    match resolved {
+        Err(error) if error.code == "ACCOUNT_ORIGIN_UNSET" => {
+            Ok(crate::remote::state::DEFAULT_RELAY_URL.to_string())
+        }
+        other => other,
+    }
+}
+
 pub fn account_data_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("FERRYX_ACCOUNT_DATA_DIR") {
         return Some(PathBuf::from(dir));
@@ -346,6 +364,33 @@ mod tests {
             "HOME must keep winning so existing platforms resolve the same directory"
         );
         assert_eq!(resolve_account_data_dir(None, None), None);
+    }
+
+    #[test]
+    fn cli_origin_defaults_to_the_hosted_relay_only_when_unset() {
+        let unset = Err(AccountOriginError {
+            code: "ACCOUNT_ORIGIN_UNSET",
+            message: "set FERRYX_ACCOUNT_ORIGIN".into(),
+        });
+        assert_eq!(
+            or_hosted_default(unset).unwrap(),
+            crate::remote::state::DEFAULT_RELAY_URL
+        );
+        assert_eq!(
+            normalize_account_origin(crate::remote::state::DEFAULT_RELAY_URL).unwrap(),
+            crate::remote::state::DEFAULT_RELAY_URL,
+            "the default must already be a normalized origin"
+        );
+        assert_eq!(
+            or_hosted_default(Ok("https://account.example".into())).unwrap(),
+            "https://account.example"
+        );
+        let invalid = normalize_account_origin("http://relay.example.com");
+        assert_eq!(
+            or_hosted_default(invalid).unwrap_err().code,
+            "ACCOUNT_ORIGIN_INSECURE",
+            "a configured but invalid origin must not fall back to the hosted relay"
+        );
     }
 
     #[test]

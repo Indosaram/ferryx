@@ -29,9 +29,11 @@ import {
   type RegisteredProject,
 } from "../lib/tauri";
 import type { Worktree } from "../lib/types";
+import { gitUnavailableMessage } from "./onboarding/FirstProjectStep";
 import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
 import { PairedDaemonProjectForm } from "./PairedDaemonProjectForm";
 import { useModalDialog } from "./useModalDialog";
+import { toast } from "./ui/sonner";
 
 const fieldClass =
   "h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring";
@@ -42,6 +44,13 @@ function checkIsTauri(): boolean {
   } catch {
     return false;
   }
+}
+
+/// A folder Git cannot serve still registers (as a plain folder); say why instead of
+/// silently dropping worktrees.
+function reportGitUnavailable(project: RegisteredProject): void {
+  const message = gitUnavailableMessage(project.gitUnavailable);
+  if (message) toast.warning(message);
 }
 
 /// IPC failures arrive as structured `{ code, message }` objects (not `Error`
@@ -242,6 +251,7 @@ export function AddProjectDialog({
     try {
       const project = await registerProject({ workspaceId: derivedId, repoPath: selectedPath });
       if (dismissedRef.current || !isMountedRef.current) return;
+      reportGitUnavailable(project);
       onRegisteredRef.current(project);
       handleDismiss();
     } catch (cause) {
@@ -264,6 +274,7 @@ export function AddProjectDialog({
     try {
       const project = await registerProject({ workspaceId: trimmedWorkspaceId, repoPath: trimmedPath });
       if (dismissedRef.current || !isMountedRef.current) return;
+      reportGitUnavailable(project);
       onRegisteredRef.current(project);
       handleDismiss();
     } catch (cause) {

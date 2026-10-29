@@ -372,6 +372,19 @@ fn ssh_helper_unit_launch_args_forward_env_and_drop_connection_vars() {
             OsString::from("BASH_FUNC_probe%%"),
             OsString::from("() { :; }"),
         ),
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+        (
+            OsString::from("AWS_SECRET_ACCESS_KEY"),
+            OsString::from("secret"),
+        ),
+        (
+            OsString::from("FERRYX_AGENT_STATE_TOKEN"),
+            OsString::from("pane-token"),
+        ),
+        (OsString::from("XDG_SESSION_ID"), OsString::from("42")),
+        (OsString::from("SSH_AUTH_SOCK"), OsString::from("/tmp/ssh-x/agent.1")),
+        (OsString::from("TZ"), OsString::from("line\nbreak")),
     ];
     let args = unit_launch_args(
         std::path::Path::new("/home/u/.ferryx/bin/ferryx-remote-helper"),
@@ -395,6 +408,19 @@ fn ssh_helper_unit_launch_args_forward_env_and_drop_connection_vars() {
         .iter()
         .any(|arg| arg.starts_with("--setenv=XDG_RUNTIME_DIR=")));
     assert!(!text.iter().any(|arg| arg.contains("BASH_FUNC_probe")));
+    // Allowlist, not a denylist: only the named session variables reach the unit.
+    assert!(text.contains(&"--setenv=LANG=C.UTF-8".to_string()));
+    assert!(text.contains(&"--setenv=LC_ALL=C.UTF-8".to_string()));
+    let forwarded: Vec<&str> = text
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("--setenv="))
+        .filter_map(|kv| kv.split_once('=').map(|(key, _)| key))
+        .collect();
+    assert_eq!(
+        forwarded,
+        ["FERRYX_HELPER_HYGIENE_SECS", "PATH", "LANG", "LC_ALL"],
+        "{text:?}"
+    );
     assert_eq!(
         &text[text.len() - 7..],
         &[
@@ -448,4 +474,20 @@ fn ssh_helper_unit_name_is_deterministic_and_scoped_to_the_root() {
         assert_eq!(digest.len(), 16);
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
+}
+
+#[test]
+fn ssh_helper_linger_off_host_chooses_setsid_with_reason() {
+    assert_eq!(linger_blocker(Ok((true, "Linger=yes\n", ""))), None);
+    let off = linger_blocker(Ok((true, "Linger=no\n", ""))).expect("linger off blocks the unit");
+    assert!(off.starts_with("LINGER_DISABLED:"), "{off}");
+    assert!(off.contains("Linger=no"), "{off}");
+    let empty = linger_blocker(Ok((true, "", ""))).expect("missing value blocks the unit");
+    assert!(empty.starts_with("LINGER_DISABLED:"), "{empty}");
+    let failed = linger_blocker(Ok((false, "", "Failed to get user: No such user\n")))
+        .expect("loginctl failure blocks the unit");
+    assert!(failed.starts_with("LINGER_UNKNOWN:") && failed.contains("No such user"), "{failed}");
+    let missing = linger_blocker(Err("No such file or directory (os error 2)"))
+        .expect("missing loginctl blocks the unit");
+    assert!(missing.starts_with("LINGER_UNKNOWN:"), "{missing}");
 }

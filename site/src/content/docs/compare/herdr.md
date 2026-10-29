@@ -13,7 +13,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the Herdr [README](https://gi
 | | Ferryx | Herdr |
 | :--- | :--- | :--- |
 | Form | Desktop app (Tauri v2), WGPU-rendered terminals | TUI multiplexer, one Rust binary, runs in your terminal |
-| Platforms | macOS universal DMG, Windows x64 installer, Linux AppImage and .deb, headless `ferryx-cli` | Linux and macOS via install script, Homebrew or mise; Windows via PowerShell installer |
+| Platforms | macOS universal DMG, Windows x64 via the Microsoft Store (some releases also attach a direct `.exe`), Linux x86_64 AppImage and .deb, headless `ferryx-cli` | Linux and macOS via install script, Homebrew or mise; Windows via PowerShell installer |
 | Agents | Any CLI agent; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Any CLI agent, with working/blocked/idle status per pane |
 | Remote | SSH workspaces, mobile web client, outbound relay | Saved SSH machines in one window with independent reconnects |
 | License | Source-available under the Ferryx License, free for individuals and small companies | Apache-2.0 (relicensed from AGPL-3.0 in July 2026, [#1340](https://github.com/herdrdev/herdr/issues/1340)) |

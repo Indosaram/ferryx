@@ -46,6 +46,27 @@ fn managed_externally_for(host: UpdateHost, bundle: Option<BundleType>) -> bool 
     }
 }
 
+/// Updater targets every release publishes in `latest.json`: the `expectedTargets` of the updater
+/// kinds in `scripts/lib/release-contract.mjs` (`UPDATER_TARGETS`, cross-checked by
+/// `scripts/release-contract.test.mjs`).
+const PUBLISHED_UPDATER_TARGETS: [&str; 4] = [
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "linux-x86_64",
+    "windows-x86_64",
+];
+
+/// A build for any other target (a self-built Linux/Windows ARM binary, say) has no entry in the
+/// manifest, so every check would fail with a missing-platform error. No published channel can
+/// update it, so it is treated as externally managed.
+fn has_published_target(target: Option<&str>) -> bool {
+    target.is_some_and(|target| PUBLISHED_UPDATER_TARGETS.contains(&target))
+}
+
+fn unpublished_target() -> bool {
+    !has_published_target(tauri_plugin_updater::target().as_deref())
+}
+
 #[cfg(windows)]
 fn has_package_identity() -> bool {
     #[link(name = "kernel32")]
@@ -65,6 +86,15 @@ fn has_package_identity() -> bool {
 /// bundle term is always false here and keeps the whole decision in one place.
 #[cfg(windows)]
 pub fn updater_managed_externally() -> bool {
+    store_install() || unpublished_target()
+}
+
+/// Whether the Microsoft Store owns this install. Unlike [`updater_managed_externally`] this
+/// ignores the unpublished-target term, so callers that mean "Store install" (the distribution
+/// channel, the daemon's Task Scheduler supervisor) keep treating a self-built binary as an
+/// installer build.
+#[cfg(windows)]
+pub fn store_install() -> bool {
     managed_externally_for(UpdateHost::current(), bundle_type())
         || has_package_identity()
         || std::env::var_os("FERRYX_STORE_BUILD").is_some()
@@ -82,7 +112,7 @@ pub fn updater_managed_externally() -> bool {
 /// in-app updater; a distribution package is updated by `dpkg`/`rpm` instead.
 #[cfg(not(windows))]
 pub fn updater_managed_externally() -> bool {
-    managed_externally_for(UpdateHost::current(), bundle_type())
+    managed_externally_for(UpdateHost::current(), bundle_type()) || unpublished_target()
 }
 
 #[tauri::command]
@@ -94,16 +124,21 @@ pub async fn cmd_updater_managed_externally() -> Result<bool, IpcError> {
 /// updated by the Microsoft Store, NSIS installs by the in-app updater. macOS and the Linux
 /// AppImage self-update; a Linux distribution package keeps the same `native` channel while
 /// `updater_managed_externally` hides the in-app update card.
+///
+/// Store-ness is decided by package identity alone, so an install the updater cannot serve for
+/// another reason (an unpublished target) is still reported as the installer channel.
+#[cfg(windows)]
 pub fn distribution_channel() -> &'static str {
-    if cfg!(windows) {
-        if updater_managed_externally() {
-            "store"
-        } else {
-            "installer"
-        }
+    if store_install() {
+        "store"
     } else {
-        "native"
+        "installer"
     }
+}
+
+#[cfg(not(windows))]
+pub fn distribution_channel() -> &'static str {
+    "native"
 }
 
 #[tauri::command]
@@ -347,9 +382,12 @@ fn stall_window() -> Duration {
 /// Stable update manifest; the same URL as `plugins.updater.endpoints` in tauri.conf.json.
 pub const STABLE_UPDATE_ENDPOINT: &str =
     "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json";
-/// Beta update manifest, uploaded next to `latest.json` on the latest release.
+/// Beta update manifest, served from the fixed `beta` release tag (`BETA_CHANNEL_TAG` and
+/// `BETA_MANIFEST_NAME` in `scripts/lib/release-contract.mjs`). `releases/latest` never resolves
+/// to a prerelease, so a beta build can only be reached through a tag that does not move with
+/// the stable release.
 pub const BETA_UPDATE_ENDPOINT: &str =
-    "https://github.com/Indosaram/ferryx/releases/latest/download/latest-beta.json";
+    "https://github.com/Indosaram/ferryx/releases/download/beta/latest-beta.json";
 
 /// Endpoints for the update channel the user picked in Settings. Stable (the default, also for
 /// any unknown value) keeps the configured endpoints. Beta asks `latest-beta.json` first and falls
@@ -544,15 +582,61 @@ mod tests {
             config["plugins"]["updater"]["endpoints"][0].as_str(),
             Some(STABLE_UPDATE_ENDPOINT)
         );
+        // Installers go forward only, like the daemon upgrade (`should_request_upgrade`).
+        assert_eq!(
+            config["bundle"]["windows"]["allowDowngrades"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn beta_manifest_is_served_from_a_fixed_tag() {
+        // `releases/latest` never resolves to a prerelease, so the beta manifest must not be
+        // looked up there; stable stays on `releases/latest`.
+        assert_eq!(
+            BETA_UPDATE_ENDPOINT,
+            "https://github.com/Indosaram/ferryx/releases/download/beta/latest-beta.json"
+        );
+        assert!(!BETA_UPDATE_ENDPOINT.contains("/releases/latest/"));
+        assert_eq!(
+            STABLE_UPDATE_ENDPOINT,
+            "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json"
+        );
+    }
+
+    #[test]
+    fn unpublished_updater_targets_are_managed_externally() {
+        for target in [
+            "darwin-aarch64",
+            "darwin-x86_64",
+            "linux-x86_64",
+            "windows-x86_64",
+        ] {
+            assert!(has_published_target(Some(target)), "{target}");
+        }
+        for target in [
+            "linux-aarch64",
+            "windows-aarch64",
+            "linux-armv7",
+            "windows-i686",
+        ] {
+            assert!(!has_published_target(Some(target)), "{target}");
+        }
+        // A platform the plugin cannot name has no manifest entry either.
+        assert!(!has_published_target(None));
+        // This test binary runs on a published host target, so it keeps the in-app updater.
+        if cfg!(target_arch = "x86_64") || cfg!(target_os = "macos") {
+            assert!(!unpublished_target());
+        }
     }
 
     #[test]
     fn test_distribution_channel_non_windows() {
         if !cfg!(windows) {
             assert_eq!(distribution_channel(), "native");
-            // A test binary is never packaged as a distribution package, so it keeps the
-            // in-app updater.
-            assert!(!updater_managed_externally());
+            // A test binary is never packaged as a distribution package, so only an
+            // unpublished host target takes it away from the in-app updater.
+            assert_eq!(updater_managed_externally(), unpublished_target());
         }
     }
 

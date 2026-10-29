@@ -516,7 +516,7 @@ pass that produced the site edits.
   the GitHub API and each README for the tmux/worktree comparison page.
 - https://api.github.com/repos/Indosaram/ferryx/releases/latest **(new)** — v2026.09.18.1 assets:
   `Ferryx_universal.dmg`, `Ferryx_x64-setup.exe`, `Ferryx_amd64.AppImage`, `Ferryx_amd64.deb`,
-  `SHA256SUMS.txt`.
+  and a checksum list (current releases publish it as `SHA256SUMS` with `SHA256SUMS.minisig`).
 - https://runpane.com/alternatives/conductor — competitor comparison-table format.
 - https://paseo.sh/alternatives/conductor — Apache-2.0, daemon + mobile clients.
 - https://superset.sh/compare/conductor-alternative — alternative table incl. "Orca".

@@ -1,13 +1,46 @@
-import { ChevronRight, FolderPlus, Monitor } from "lucide-react";
+import { AlertCircle, ChevronRight, FolderPlus, Monitor } from "lucide-react";
+
+import type { GitUnavailableReason } from "../../lib/tauri";
+
+/** What the user should install or run so Git-backed worktrees work; null when nothing. */
+export function gitUnavailableMessage(reason: GitUnavailableReason | null | undefined): string | null {
+  switch (reason?.kind) {
+    case undefined:
+    case "notARepository":
+      return null;
+    case "gitMissing":
+      return "Git was not found. Install Git to use worktrees; folders still open as plain folders.";
+    case "xcodeCommandLineToolsMissing":
+      return "Git needs the Xcode Command Line Tools. Run `xcode-select --install`, then reopen the folder.";
+    case "dubiousOwnership":
+      return `Git refuses this folder because another user owns it. If you trust it, run \`git config --global --add safe.directory ${reason.path || "<folder>"}\`.`;
+    case "gitFailed":
+      return `Git failed: ${reason.message}`;
+    case "nonUtf8Output":
+      return "Git reported a file or folder name that is not UTF-8, so this folder opens without worktrees. Rename it to UTF-8 to use worktrees.";
+  }
+}
 
 export function FirstProjectStep(props: {
   onAddProject: () => void;
   onConnectMachine: () => void;
+  gitUnavailable?: GitUnavailableReason | null;
 }): JSX.Element {
-  const { onAddProject, onConnectMachine } = props;
+  const { onAddProject, onConnectMachine, gitUnavailable } = props;
+  const gitMessage = gitUnavailableMessage(gitUnavailable);
 
   return (
     <div className="grid gap-2">
+      {gitMessage ? (
+        <div
+          role="status"
+          data-testid="onboarding-git-unavailable"
+          className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-[12px] leading-relaxed text-status-warning"
+        >
+          <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+          <span>{gitMessage}</span>
+        </div>
+      ) : null}
       <button
         type="button"
         data-testid="onboarding-add-project"

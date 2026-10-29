@@ -4,7 +4,7 @@
 use url::Url;
 
 use super::client::ClientError;
-use super::direct_connect::{ensure_direct, is_running, DirectAttempt};
+use super::direct_connect::{configured_stun_servers, ensure_direct, is_running, DirectAttempt};
 use super::direct_route::GLOBAL_DIRECT_ROUTES;
 use super::direct_trust::{trusted_key, DirectTrustStore};
 use super::inventory::{CredentialLease, HostView};
@@ -46,6 +46,10 @@ pub(crate) fn is_transport_failure(error: &ClientError) -> bool {
 pub(crate) fn kick(http: &reqwest::Client, host: &HostView, lease: &CredentialLease) {
     let generation = lease.generation().0;
     if is_running(&host.host_id, generation) {
+        return;
+    }
+    // STUN disabled: no trust lookup, no account fetch, no UDP; every request stays on the relay.
+    if configured_stun_servers().unwrap_or_default().is_empty() {
         return;
     }
     // Subscribe before any await so a revocation during trust loading is seen.
@@ -157,6 +161,7 @@ pub(crate) async fn load_attempt_in(
         host_machine_id: host.machine_id.clone(),
         signing_key: ed25519_dalek::SigningKey::from_bytes(&seed),
         host_key,
+        stun_servers: configured_stun_servers().unwrap_or_default(),
     })
 }
 
