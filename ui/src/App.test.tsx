@@ -1835,7 +1835,11 @@ describe("App project workspace flow", () => {
     native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
     native.listProjectRefs.mockResolvedValue({ branches: [{ name: "beta-main", isCurrent: true }], tags: [] });
     native.createWorktree.mockResolvedValue(betaWorktree);
-    native.spawnTerminal.mockResolvedValue("spawn-beta-agent");
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-beta-agent",
+      daemonEpoch: "epoch-beta",
+      session: { cwd: req.cwd, incarnation: "inc-beta" },
+    }));
 
     render(<App />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
@@ -1846,10 +1850,21 @@ describe("App project workspace flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
 
     expect(await screen.findByText("Active project beta")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(native.writeTerminal).toHaveBeenCalledWith({ sessionId: "spawn-beta-agent", data: "claude\r" }),
+    await waitFor(() => expect(workspace.openTab).toHaveBeenCalledWith(betaWorktree, "Claude", expect.anything()));
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "beta",
+        worktree: { wsId: "beta", slug: "agent-beta" },
+        cwd: betaWorktree.path,
+        startup: { kind: "agentLaunch", command: "claude", args: [] },
+      }),
     );
-    expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ cwd: betaWorktree.path }));
+    expect(workspace.openTab).toHaveBeenCalledWith(betaWorktree, "Claude", {
+      sessionId: "spawn-beta-agent",
+      daemonEpoch: "epoch-beta",
+      incarnation: "inc-beta",
+    });
+    expect(native.writeTerminal).not.toHaveBeenCalled();
   });
 
   it("starts the agent chosen in Add Worktree in the new worktree, not the active one", async () => {
