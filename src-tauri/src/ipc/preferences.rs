@@ -36,6 +36,8 @@ pub struct TerminalOverridesRequest {
     pub shell: Option<String>,
     #[serde(default)]
     pub scrollback: Option<usize>,
+    #[serde(default)]
+    pub scrollback_compression: Option<bool>,
 }
 
 impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
@@ -46,6 +48,7 @@ impl From<TerminalOverridesRequest> for TerminalPreferenceOverrides {
             macos_option_as_alt: request.macos_option_as_alt,
             shell: request.shell,
             scrollback: request.scrollback,
+            scrollback_compression: request.scrollback_compression,
         }
     }
 }

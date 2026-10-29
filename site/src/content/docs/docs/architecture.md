@@ -69,7 +69,7 @@ Ferryx bypasses the webview rendering engine for desktop terminal panes. The pro
 
 ### Pinned libghostty Parser Core
 
-We statically link `libghostty-vt` at pinned commit `6a508fd5e34c7e222c052a6d00bb3891ff3feace` built with Zig 0.16.0 (`src-tauri/native_terminal/build_ghostty.rs`). This library handles VT sequence interpretation, alternate screens, scrollback history, SGR styling, and Unicode combining marks in native code.
+We statically link `libghostty-vt` at pinned commit `83fb95624b0439ee660c2679b43b38c8b63769cd` built with Zig 0.17.0 (`src-tauri/native_terminal/build_ghostty.rs`). This library handles VT sequence interpretation, alternate screens, scrollback history, SGR styling, and Unicode combining marks in native code.
 
 Rust wraps the Ghostty FFI structures with typed guard destructors (`src-tauri/src/native_terminal/guards.rs`). To verify memory safety, we ran dynamic lifetime tests on macOS using `leaks` and GuardMalloc (`MallocScribble=1`):
 

@@ -154,7 +154,8 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
     settings.macosOptionAsAltSource === "local" ||
     settings.fontSizeSource === "local" ||
     localSettings.shell !== null ||
-    localSettings.scrollback !== DEFAULT_TERMINAL_SETTINGS.scrollback;
+    localSettings.scrollback !== DEFAULT_TERMINAL_SETTINGS.scrollback ||
+    localSettings.scrollbackCompression !== null;
   let terminalSource = "Built-in defaults";
   if (hasLocalTerminalOverride) {
     terminalSource = "Local override";
@@ -217,6 +218,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               macosOptionAsAlt={settings.macosOptionAsAlt}
               shell={localSettings.shell}
               scrollback={localSettings.scrollback}
+              scrollbackCompression={settings.scrollbackCompression}
               source={terminalSource}
               sourcePath={nativePreferences.sourcePath}
               onFontFamily={(fontFamily) => updateSettings({ fontFamily })}
@@ -224,6 +226,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               onOptionAsAlt={(macosOptionAsAlt) => updateSettings({ macosOptionAsAlt })}
               onShell={(shell) => updateSettings({ shell })}
               onScrollback={(scrollback) => updateSettings({ scrollback })}
+              onScrollbackCompression={(scrollbackCompression) => updateSettings({ scrollbackCompression })}
               onUseImported={() => {
                 updateSettings({
                   fontFamily: null,
@@ -231,6 +234,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
                   fontSize: null,
                   shell: null,
                   scrollback: DEFAULT_TERMINAL_SETTINGS.scrollback,
+                  scrollbackCompression: null,
                 });
                 void refreshNativePreferences();
               }}

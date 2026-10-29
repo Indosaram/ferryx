@@ -252,7 +252,7 @@ test("validateHostConfig: validates expectedTools schema", () => {
   withValidTools.hosts.macbook.expectedTools = {
     bun: "1.4.0",
     node: "22.22.3",
-    zig: "0.16.0",
+    zig: "0.17.0",
     rust: "1.92.0",
     tauri: "2.10.1",
   };

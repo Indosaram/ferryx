@@ -5,8 +5,8 @@ This directory defines the Phase 1 build contract and verification harness for e
 ## Source & Toolchain Contract
 
 - **Vendored Submodule**: `src-tauri/vendor/ghostty`
-- **Pinned Commit SHA**: `6a508fd5e34c7e222c052a6d00bb3891ff3feace`
-- **Required Zig Compiler**: `0.16.0` (`zig version`)
+- **Pinned Commit SHA**: `83fb95624b0439ee660c2679b43b38c8b63769cd`
+- **Required Zig Compiler**: `0.17.0` (`zig version`)
 - **Built Static Artifact**: `libghostty-vt.a` (emitted into Cargo `$OUT_DIR/ghostty_vt/lib`)
 - **Include Directory**: `$OUT_DIR/ghostty_vt/include` (and vendored headers at `vendor/ghostty/include`)
 
@@ -15,8 +15,8 @@ This directory defines the Phase 1 build contract and verification harness for e
 1. **Structured, Fail-Fast Verification**:
    - `build.rs` delegates compilation to `build_ghostty::build_ghostty_vt()`.
    - All helper paths strictly propagate structured `Result<GhosttyBuildConfig, String>` with zero production `unwrap()` or `expect()`.
-   - `verify_zig` validates that `zig` is present in `PATH` (or specified via the `ZIG` environment variable) and that its version starts with `0.16.0`.
-   - `verify_submodule_sha` validates that the vendored submodule exists at `src-tauri/vendor/ghostty`, contains `build.zig`, and resolves to commit `6a508fd5e34c7e222c052a6d00bb3891ff3feace`.
+   - `verify_zig` validates that `zig` is present in `PATH` (or specified via the `ZIG` environment variable) and that its version starts with `0.17.0`.
+   - `verify_submodule_sha` validates that the vendored submodule exists at `src-tauri/vendor/ghostty`, contains `build.zig`, and resolves to commit `83fb95624b0439ee660c2679b43b38c8b63769cd`.
    - If missing, mismatching, or uninitialized, actionable remediation commands are printed and the build fails immediately.
 
 2. **No Silent Upstream Downloads**:
@@ -24,7 +24,7 @@ This directory defines the Phase 1 build contract and verification harness for e
 
 3. **Narrowly Scoped Compilation & Hermetic Caching**:
    - Only `libghostty-vt` is built (macOS app, XCFramework, documentation, executables, and tests are disabled with `-Demit-*` flags).
-   - Compilation artifacts and Zig caches (`--cache-dir`, `--global-cache-dir`) are isolated strictly inside Cargo's `$OUT_DIR`, retaining no untracked cache files in the workspace.
+   - Compilation artifacts and Zig caches (`--cache-dir`, and the `ZIG_GLOBAL_CACHE_DIR` environment variable since Zig 0.17 dropped `--global-cache-dir`) are isolated strictly inside Cargo's `$OUT_DIR`, retaining no untracked cache files in the workspace.
 
 4. **FFI Safety & ABI Matching**:
    - `GhosttyResult`, `GhosttyOptimizeMode`, and `GhosttyBuildInfo` use `#[repr(i32)]` to align with C `enum : int` / Zig `enum(c_int)` ABI.

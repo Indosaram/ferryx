@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -796,11 +796,13 @@ impl SessionHub {
     /// Two cases keep retained replay: an alternate screen (the formatter serializes only the
     /// active screen, so the primary screen's history would be lost) and retained inline images
     /// (the formatter carries no image data).
+    ///
+    /// Taking the seed re-arms the mirror's idle compression and wakes its driver.
     fn screen_seed(&self) -> Option<super::screen_mirror::ScreenSeed> {
         if self.buffer.retained_image_bytes() > 0 {
             return None;
         }
-        let screen = self.screen.as_ref()?.lock();
+        let mut screen = self.screen.as_ref()?.lock();
         if screen.is_alternate_screen() {
             return None;
         }
@@ -817,6 +819,52 @@ impl SessionHub {
 
     pub fn replay_gap(&self) -> Option<&ReplayGap> {
         self.replay_gap.as_ref()
+    }
+}
+
+/// Starts idle scrollback compression for `hub`'s screen mirror on the current tokio runtime.
+///
+/// One task per hub, holding only a weak reference: it sleeps until the mirror's scheduler is
+/// due, or waits for the mirror's activity signal when nothing is scheduled, and exits once the
+/// hub is gone or compression is unsupported here. Without a runtime (synchronous callers) the
+/// mirror is simply not compressed.
+///
+/// The current runtime must have its time driver enabled: tokio offers no non-panicking probe
+/// for it, and the driver's sleep would panic in the spawned task on an IO-only runtime. Every
+/// caller registers sessions from the daemon's `enable_all` runtime or the Tauri runtime.
+fn spawn_screen_compression(hub: &Arc<RwLock<SessionHub>>) -> Option<tokio::task::JoinHandle<()>> {
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    let activity = hub.read().screen.as_ref()?.lock().activity_signal();
+    Some(runtime.spawn(drive_screen_compression(Arc::downgrade(hub), activity)))
+}
+
+async fn drive_screen_compression(hub: Weak<RwLock<SessionHub>>, activity: Arc<tokio::sync::Notify>) {
+    loop {
+        let enabled = super::cached_terminal_preferences().scrollback_compression;
+        // The wall clock the mirror's activity marks also use. A sleep may end slightly before
+        // the step is due; the scheduler then reports the remainder. Every guard is released
+        // before the next await.
+        let now = std::time::Instant::now();
+        let wakeup = {
+            let Some(hub) = hub.upgrade() else { return };
+            let hub = hub.read();
+            let Some(screen) = hub.screen.as_ref() else { return };
+            let mut screen = screen.lock();
+            if let Err(error) = screen.run_due_compression(now, enabled) {
+                tracing::warn!(%error, "screen mirror scrollback compression step failed");
+            }
+            if !screen.compression_supported() {
+                // Nothing will ever be scheduled again; waking on every feed would only
+                // contend with publishers for the hub and screen locks.
+                return;
+            }
+            screen.compression_wakeup(now)
+        };
+        match wakeup {
+            Some(wait) => tokio::time::sleep(wait).await,
+            // Output, a resize, or the mirror's drop wakes this.
+            None => activity.notified().await,
+        }
     }
 }
 
@@ -929,9 +977,9 @@ impl TerminalOutputHub {
             published_bytes: 0,
             screen: super::screen_mirror::ScreenMirror::new(80, 24).map(parking_lot::Mutex::new),
         };
-        self.sessions
-            .write()
-            .insert(session_id.to_string(), Arc::new(RwLock::new(hub)));
+        let hub = Arc::new(RwLock::new(hub));
+        spawn_screen_compression(&hub);
+        self.sessions.write().insert(session_id.to_string(), hub);
         (raw_rx, rx)
     }
 
@@ -1337,9 +1385,9 @@ impl TerminalOutputHub {
             screen: screen.map(parking_lot::Mutex::new),
         };
 
-        self.sessions
-            .write()
-            .insert(session_id.to_string(), Arc::new(RwLock::new(hub)));
+        let hub = Arc::new(RwLock::new(hub));
+        spawn_screen_compression(&hub);
+        self.sessions.write().insert(session_id.to_string(), hub);
 
         if is_transport_owner {
             self.transport_owners.write().insert(session_id.to_string());
@@ -2688,5 +2736,37 @@ mod tests {
         assert_eq!(hub2.session_published_bytes("imported_session"), Some(0));
         hub2.publish("imported_session", vec![b'c'; 15]).expect("publish after import");
         assert_eq!(hub2.session_published_bytes("imported_session"), Some(15));
+    }
+
+    #[tokio::test]
+    async fn screen_compression_driver_stops_when_the_hub_is_dropped() {
+        let hub = TerminalOutputHub::new(4096);
+        // Registered off the runtime, so registration spawns no driver: the one below is the
+        // only one.
+        let registering = hub.clone();
+        let _output = std::thread::spawn(move || registering.register_session("compressed"))
+            .join()
+            .expect("register off the runtime");
+        let session = hub.sessions.read().get("compressed").cloned().expect("session hub");
+        // No output yet, so nothing is scheduled and the driver waits on the activity signal,
+        // which only the mirror's drop can wake.
+        let scheduled = session
+            .read()
+            .screen
+            .as_ref()
+            .expect("screen mirror")
+            .lock()
+            .compression_wakeup(std::time::Instant::now());
+        assert_eq!(scheduled, None);
+        let driver = spawn_screen_compression(&session).expect("driver on a tokio runtime");
+        tokio::task::yield_now().await;
+        assert!(!driver.is_finished(), "the driver lives while the hub does");
+
+        hub.remove_session("compressed");
+        drop(session);
+        tokio::time::timeout(std::time::Duration::from_secs(10), driver)
+            .await
+            .expect("the driver must exit once the hub is gone")
+            .expect("driver task");
     }
 }

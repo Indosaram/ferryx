@@ -40,6 +40,15 @@ pub struct SnapshotSlot {
     generation: AtomicU64,
     attached: AtomicBool,
     attachment_epoch: AtomicU64,
+    /// Whether the last completed frame found the surface occluded. Kitty animations are not
+    /// ticked and arm no pump deadline while this holds.
+    render_suspended: AtomicBool,
+    /// Wakes the session pump to re-read its Kitty animation deadline after a frame prepared
+    /// outside the pump armed one, or after the surface became visible again.
+    animation_wake: tokio::sync::Notify,
+    /// Wakes the session pump after a request read scrollback (search, select-all, copy), which
+    /// restores compressed pages, so the pump re-arms idle compression.
+    history_read: tokio::sync::Notify,
 }
 
 impl Default for SnapshotSlot {
@@ -56,6 +65,9 @@ impl SnapshotSlot {
             generation: AtomicU64::new(0),
             attached: AtomicBool::new(false),
             attachment_epoch: AtomicU64::new(1),
+            render_suspended: AtomicBool::new(false),
+            animation_wake: tokio::sync::Notify::new(),
+            history_read: tokio::sync::Notify::new(),
         }
     }
 
@@ -65,6 +77,8 @@ impl SnapshotSlot {
         let mut ready = self.ready.lock();
         let epoch = self.attachment_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.attached.store(attached, Ordering::SeqCst);
+        // A new attachment owns a new surface; its visibility is unknown until it renders.
+        self.render_suspended.store(false, Ordering::Release);
         if !attached {
             *ready = None;
         }
@@ -164,6 +178,36 @@ impl SnapshotSlot {
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
+
+    /// Records whether the last completed frame was suspended because the surface is occluded.
+    /// Becoming visible again wakes the pump so a paused animation resumes.
+    pub(crate) fn set_render_suspended(&self, suspended: bool) {
+        if self.render_suspended.swap(suspended, Ordering::AcqRel) && !suspended {
+            self.animation_wake.notify_one();
+        }
+    }
+
+    pub(crate) fn render_suspended(&self) -> bool {
+        self.render_suspended.load(Ordering::Acquire)
+    }
+
+    /// Asks the pump to re-read the session's Kitty animation deadline.
+    pub(crate) fn wake_animation(&self) {
+        self.animation_wake.notify_one();
+    }
+
+    pub(crate) fn animation_woken(&self) -> tokio::sync::futures::Notified<'_> {
+        self.animation_wake.notified()
+    }
+
+    /// Records that a request read the session's scrollback; the pump treats it as activity.
+    pub(crate) fn mark_history_read(&self) {
+        self.history_read.notify_one();
+    }
+
+    pub(crate) fn history_read(&self) -> tokio::sync::futures::Notified<'_> {
+        self.history_read.notified()
+    }
 }
 
 #[cfg(test)]
@@ -215,7 +259,7 @@ mod tests {
         slot.consume().expect("submitted frame");
         assert!(presentations.borrow().is_none());
         let mut receipt = NativeTerminalSurfaceReceipt {
-            presented: false, render_deferred: true, render_suspended: false,
+            presented: false, render_deferred: true, render_suspended: false, renderer_released: false,
             cols: 80, rows: 24, rebuilt_rows: 0, reused_rows: 0,
             cursor_col: 0, cursor_row: 0, cell_width_px: 10, cell_height_px: 20,
             effective_scale_factor: Some(1.0),
@@ -289,7 +333,7 @@ mod tests {
         let bounds = LogicalBounds { x: 0.0, y: 0.0, width: 800.0, height: 480.0, scale_factor: 1.0 };
         let generation = slot.publish(layout, bounds, mock_input(), Some(active.clone()), None);
         let receipt = NativeTerminalSurfaceReceipt {
-            presented: true, render_deferred: false, render_suspended: false,
+            presented: true, render_deferred: false, render_suspended: false, renderer_released: false,
             cols: 80, rows: 24, rebuilt_rows: 0, reused_rows: 0,
             cursor_col: 0, cursor_row: 0, cell_width_px: 10, cell_height_px: 20,
             effective_scale_factor: Some(1.0),

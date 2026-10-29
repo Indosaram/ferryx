@@ -59,7 +59,7 @@ ssh omaki "/home/indo/build-release-incremental.sh <TAG>"
 ```
 - **What it does**:
   1. Fetches the latest tag in `/home/indo/ferryx-release`.
-  2. Ensures Ghostty submodule is pinned at `6a508fd5`.
+  2. Ensures Ghostty submodule is pinned at `83fb9562`.
   3. Stamps version via `sync-version.mjs`.
   4. Incrementally builds UI (`bun run --cwd ui build`).
   5. Incrementally builds DEB bundle (`bun tauri build --bundles deb`) with sccache and preserved target.

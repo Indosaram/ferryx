@@ -136,7 +136,7 @@ function assembledRun(tmp) {
     schemaVersion: 1, runId: "rel-run-survival-1", repo: "Indosaram/ferryx", commitSha: COMMIT,
     tag: "v2026.1024.1", appVersion: "2026.1024.1", msixVersion: "2026.1024.1.0",
     channels: { store: true, nsisMigration: false }, requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" }, sourceDateEpoch: 1788868800, createdAt: "2026-09-08T12:00:00.000Z",
+    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" }, sourceDateEpoch: 1788868800, createdAt: "2026-09-08T12:00:00.000Z",
   };
   writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan));
   writeFileSync(join(publishDir, "latest.json"), JSON.stringify({ version: plan.appVersion }));

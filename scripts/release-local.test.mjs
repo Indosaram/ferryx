@@ -36,7 +36,7 @@ const STORE_PLAN = {
   msixVersion: "2026.908.1.0",
   channels: { store: true, nsisMigration: false },
   requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-  toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+  toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
   sourceDateEpoch: 1788868800,
   createdAt: "2026-09-08T12:00:00.000Z",
 };
@@ -329,7 +329,7 @@ test("verify: detects tampered artifacts and altered receipts", async () => {
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
     };
@@ -393,7 +393,7 @@ test("publish: full pipeline with fake gh executable and byte verification", asy
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
     };
@@ -569,7 +569,7 @@ test("verify-remote: verifies release availability against local HTTP server", a
       msixVersion: "2026.908.1.0",
       channels: { store: true, nsisMigration: false },
       requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+      toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
       sourceDateEpoch: 1788868800,
       createdAt: "2026-09-08T12:00:00.000Z",
     };

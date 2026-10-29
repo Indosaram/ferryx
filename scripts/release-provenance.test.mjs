@@ -66,7 +66,7 @@ function plan() {
     msixVersion: "2026.908.1.0",
     channels: { store: true, nsisMigration: false },
     requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
-    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
     sourceDateEpoch: 1788868800,
     createdAt: "2026-09-08T12:00:00.000Z",
   };
@@ -85,7 +85,7 @@ function receiptsFor(p) {
     {
       host: "omaki",
       completedAt: "2026-09-08T12:35:00.000Z",
-      toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.16.0", rust: "1.88.0" },
+      toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.17.0", rust: "1.88.0" },
       artifacts: [{ kind: "appimage", name: "Ferryx_amd64.AppImage", bytes: 14, sha256: "a".repeat(64) }],
     },
     {
@@ -299,7 +299,7 @@ function writeRun(tmp, key) {
   const receipt = (host, artifactsList) => ({
     schemaVersion: 1, runId: p.runId, host, commitSha: p.commitSha, appVersion: p.appVersion,
     completedAt: "2026-09-08T12:30:00.000Z", exitCode: 0,
-    toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.16.0", rust: "1.88.0" }, artifacts: artifactsList,
+    toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.17.0", rust: "1.88.0" }, artifacts: artifactsList,
   });
   const write = (host, list) => writeFileSync(join(receipts, `build-receipt-${host}.json`), JSON.stringify(receipt(host, list)));
   write("macbook", [
