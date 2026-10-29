@@ -83,8 +83,10 @@ pub async fn pending_alerts(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec
            JOIN inbox_items i ON i.id = d.item_id
           WHERE d.class = 'owner'
             AND d.status = 'open'
-            AND i.source IN ('mail','imessage','slack','discord','github','cron')
+            AND i.source IN ('mail','kakao','imessage','slack','discord','github','cron')
             AND julianday(d.decided_at) >= julianday(?)
+            -- Earlier builds surfaced these through the action loop; do not repeat them.
+            AND NOT EXISTS (SELECT 1 FROM action_loop_outcomes a WHERE a.item_key = 'inbox:' || i.id)
             AND NOT EXISTS (
                 SELECT 1 FROM delivery_obligations o
                  WHERE o.id = ? || i.id
@@ -392,7 +394,7 @@ mod tests {
         .unwrap();
     }
 
-    /// e2e with a mock Slack API: the alert is posted to the owner's home channel at once
+    /// e2e with a mock Slack API: the alert is posted to the owner DM at once
     /// and only then counts as delivered.
     #[cfg(feature = "hub-slack")]
     #[tokio::test]
@@ -404,7 +406,7 @@ mod tests {
         let owner = crate::chat::session::SessionKey::new(
             "slack",
             None::<String>,
-            "CHOME",
+            "UOWNER",
             None::<String>,
             "UOWNER",
         );
@@ -415,7 +417,7 @@ mod tests {
         let posted = calls.lock().unwrap().clone();
         assert_eq!(posted.len(), 1, "{posted:?}");
         assert_eq!(posted[0].0, "chat.postMessage");
-        assert_eq!(posted[0].1["channel"], "CHOME");
+        assert_eq!(posted[0].1["channel"], "UOWNER");
         assert!(posted[0].1["text"]
             .as_str()
             .unwrap()

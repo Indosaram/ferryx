@@ -758,8 +758,16 @@ impl PtyManager {
                     Ok(None)
                         if session.output_receiver_closed() || session.is_reader_finished() =>
                     {
+                        // Info, not debug: this branch closes (SIGHUP/SIGTERM) a shell that has not
+                        // exited, so the log must say which side ended first.
+                        tracing::info!(
+                            session_id = %session_id,
+                            receiver_closed = session.output_receiver_closed(),
+                            reader_finished = session.is_reader_finished(),
+                            "closing a live PTY because its output side ended"
+                        );
                         if let Err(error) = manager.close_session(&session_id).await {
-                            tracing::debug!(
+                            tracing::warn!(
                                 "PTY receiver-drop cleanup failed for {}: {}",
                                 session_id,
                                 error
@@ -798,6 +806,7 @@ impl PtyManager {
         if !session.begin_closing() {
             return;
         }
+        tracing::info!(session_id, ?code, "PTY child exited on its own");
 
         // The child has exited, so its stream is settling. Giving up the master lets the console
         // host flush whatever it still holds and exit, and the reader delivers that tail and ends on

@@ -380,6 +380,16 @@ impl ActionLoop {
                     }
                 }
                 _ = sweep.tick() => {
+                    // Owner items do not ride the action loop, so they are alerted here too.
+                    let owner = self
+                        .owner_session_key
+                        .as_deref()
+                        .unwrap_or(&self.lead_session_key);
+                    if let Err(error) =
+                        crate::owner_alert::sweep(&self.pool, owner, Utc::now()).await
+                    {
+                        tracing::warn!(%error, "owner alert sweep failed");
+                    }
                     let pending = unseen_inbox(&self.pool, Utc::now()).await.unwrap_or_default();
                     if !pending.is_empty() && deadline.is_none() {
                         deadline = Some(tokio::time::Instant::now() + self.coalesce_window);
@@ -501,9 +511,10 @@ pub async fn retire_unfiltered_kakao_backlog(pool: &SqlitePool) -> Result<u64> {
     Ok(retired)
 }
 
-/// omo-gateway's `scan_unseen_candidates`: triaged `bot`/`owner` items (never FYI, ignored or
-/// untriaged noise) and GitHub items that triage did not take, each once, received within
-/// `MAX_ITEM_AGE` of `now`.
+/// omo-gateway's `scan_unseen_candidates`: triaged `bot` items (never FYI, ignored or
+/// untriaged noise; an `owner` item reaches the owner DM once through the owner alert sweep, so
+/// it is not also handed to the lead in the home channel) and GitHub items that triage did not
+/// take, each once, received within `MAX_ITEM_AGE` of `now`.
 async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopItem>> {
     let oldest = age_cutoff(now);
     #[allow(clippy::type_complexity)]
@@ -511,7 +522,7 @@ async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopI
         "SELECT d.item_id, d.class, COALESCE(d.reason, ''), i.source, COALESCE(i.author, ''), COALESCE(i.title, ''), COALESCE(i.snippet, ''), i.link
          FROM inbox_decisions d
          JOIN inbox_items i ON i.id = d.item_id
-         WHERE d.class IN ('bot', 'owner')
+         WHERE d.class = 'bot'
            AND i.received_at >= ?
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || d.item_id)
            AND NOT EXISTS (SELECT 1 FROM action_loop_outcomes o WHERE o.item_key = 'inbox:' || d.item_id)
@@ -605,7 +616,7 @@ async fn requeue_stale(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<Loop
     let cutoff = (now - chrono::Duration::from_std(REQUEUE_AFTER).unwrap_or_default()).to_rfc3339();
     let rows: Vec<(String, String, String, String, Option<String>, i64)> = sqlx::query_as(
         "SELECT item_key, kind, source, line, link, attempts FROM action_loop_outcomes
-         WHERE status = 'enqueued' AND attempts < ? AND updated_at < ?",
+         WHERE status = 'enqueued' AND kind <> 'inbox_owner' AND attempts < ? AND updated_at < ?",
     )
     .bind(MAX_ATTEMPTS)
     .bind(cutoff)
@@ -969,7 +980,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('i1','owner','needs you','open',?)",
+            "INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('i1','bot','bot can reply','open',?)",
         )
         .bind(quiet.to_rfc3339())
         .execute(&pool)
@@ -982,7 +993,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(kind, "inbox_owner");
+        assert_eq!(kind, "inbox_bot");
         let release: String =
             sqlx::query_scalar("SELECT release_at FROM lane_events WHERE kind = 'action_loop'")
                 .fetch_one(&pool)
@@ -1001,6 +1012,13 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(events, 1);
+        // A row an earlier build enqueued for an owner item still needs a delivered alert.
+        sqlx::query(
+            "UPDATE action_loop_outcomes SET kind = 'inbox_owner' WHERE item_key = 'inbox:i1'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("DELETE FROM delivery_obligations")
             .execute(&pool)
             .await
@@ -1053,7 +1071,7 @@ mod tests {
             sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?,'mail',?,'x',?,'h',?)")
                 .bind(id).bind(id).bind(at).bind(at)
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'owner', 'r', 'open', ?)")
+            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'bot', 'r', 'open', ?)")
                 .bind(id).bind(at)
                 .execute(&pool).await.unwrap();
         }
@@ -1077,6 +1095,44 @@ mod tests {
         assert_eq!(status, "failed");
     }
 
+    /// 2026-10-28: owner items rode the action loop into a lead turn in the home channel while
+    /// the alert sweep also posted them to the owner DM. They now reach the owner DM only.
+    #[tokio::test]
+    async fn an_owner_item_goes_to_the_owner_dm_once_and_not_to_the_lead() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        for (id, class) in [("own", "owner"), ("bot", "bot")] {
+            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?,'mail',?,'Ada',?,'x',?,'h',?)")
+                .bind(id).bind(id).bind(id).bind(now.to_rfc3339()).bind(now.to_rfc3339())
+                .execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, ?, 'r', 'open', ?)")
+                .bind(id).bind(class).bind(now.to_rfc3339())
+                .execute(&pool).await.unwrap();
+        }
+        let mut loop_ = ActionLoop::new(pool.clone(), "lead").with_cap(24);
+        loop_.owner_session_key = Some("owner-dm".into());
+        assert!(loop_.flush(now).await.unwrap().is_some());
+        assert!(loop_.flush(now).await.unwrap().is_none());
+        let body: String =
+            sqlx::query_scalar("SELECT body FROM lane_events WHERE kind = 'action_loop'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(body.contains("bot"), "{body}");
+        assert!(
+            !body.contains("own"),
+            "an owner item is not handed to the lead: {body}"
+        );
+        let posted: Vec<(String, String)> =
+            sqlx::query_as("SELECT session_key, text FROM chat_outbox")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(posted.len(), 1, "{posted:?}");
+        assert_eq!(posted[0].0, "owner-dm");
+        assert!(posted[0].1.contains("own"), "{posted:?}");
+    }
+
     #[tokio::test]
     async fn the_unfiltered_kakao_backlog_is_retired_once() {
         let pool = crate::storage::memory().await.unwrap();
@@ -1085,7 +1141,7 @@ mod tests {
             sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?,?,?,'x',?,'h',?)")
                 .bind(id).bind(source).bind(id).bind(&now).bind(&now)
                 .execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'owner', 'r', 'open', ?)")
+            sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'bot', 'r', 'open', ?)")
                 .bind(id).bind(&now)
                 .execute(&pool).await.unwrap();
         }

@@ -2,7 +2,12 @@ use crate::daemon::{
     protocol::{DaemonRequest, DaemonResponse},
     DaemonClient,
 };
-use crate::ipc::{run_blocking, IpcError};
+use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+use crate::worktree::changes::{GitChangeError, GitDiffScope};
+#[cfg(feature = "desktop")]
+use crate::worktree::changes::{
+    git_commit, git_diff, git_push, git_stage, git_unstage, GitPushResult,
+};
 use crate::worktree::{
     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
     WorktreeIdentity,
@@ -421,6 +426,179 @@ pub async fn cmd_worktree_status<R: Runtime>(
         )?;
     }
     Ok(status)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeDiffRequest {
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
+    pub scope: GitDiffScope,
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreePathsRequest {
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeCommitRequest {
+    pub workspace_id: String,
+    pub worktree: WorktreeIdentity,
+    pub message: String,
+}
+
+impl From<GitChangeError> for IpcError {
+    fn from(error: GitChangeError) -> Self {
+        let message = error.to_string();
+        match error {
+            GitChangeError::NothingToCommit => Self::new(IpcErrorCode::GitNothingToCommit, message),
+            GitChangeError::PushRejected { stderr } => {
+                Self::new(IpcErrorCode::GitPushRejected, message)
+                    .with_details(serde_json::json!({ "stderr": stderr }))
+            }
+            GitChangeError::NoRemote => Self::new(IpcErrorCode::GitNoRemote, message),
+            GitChangeError::EmptyMessage => Self::new(IpcErrorCode::InvalidArgument, message)
+                .with_details(serde_json::json!({ "reason": "empty_message" })),
+            GitChangeError::DetachedHead => Self::new(IpcErrorCode::InvalidArgument, message)
+                .with_details(serde_json::json!({ "reason": "detached_head" })),
+            GitChangeError::InvalidCommit { sha } => {
+                Self::new(IpcErrorCode::InvalidArgument, message)
+                    .with_details(serde_json::json!({ "reason": "invalid_commit", "sha": sha }))
+            }
+            GitChangeError::Worktree(error) => error.into(),
+        }
+    }
+}
+
+/// Resolves a managed worktree to its jailed canonical path and runs `work` there on a
+/// blocking thread.
+#[cfg(feature = "desktop")]
+async fn with_worktree_path<T: Send + 'static>(
+    registry: WorkspaceRegistry,
+    workspace_id: String,
+    identity: WorktreeIdentity,
+    work: impl FnOnce(&std::path::Path) -> Result<T, GitChangeError> + Send + 'static,
+) -> Result<T, IpcError> {
+    run_blocking(move || {
+        let (manager, worktree) = registry
+            .resolve_worktree(&workspace_id, &identity)
+            .map_err(IpcError::from)?;
+        let path = manager
+            .canonical_allowed_path(&worktree.path)
+            .map_err(IpcError::from)?;
+        work(&path).map_err(IpcError::from)
+    })
+    .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_diff(
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeDiffRequest,
+) -> Result<String, IpcError> {
+    let WorktreeDiffRequest { workspace_id, worktree, scope, file } = request;
+    with_worktree_path((*registry).clone(), workspace_id, worktree, move |path| {
+        git_diff(path, &scope, file.as_deref())
+    })
+    .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_stage(
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreePathsRequest,
+) -> Result<(), IpcError> {
+    let WorktreePathsRequest { workspace_id, worktree, paths } = request;
+    with_worktree_path((*registry).clone(), workspace_id, worktree, move |path| {
+        git_stage(path, &paths)
+    })
+    .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_unstage(
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreePathsRequest,
+) -> Result<(), IpcError> {
+    let WorktreePathsRequest { workspace_id, worktree, paths } = request;
+    with_worktree_path((*registry).clone(), workspace_id, worktree, move |path| {
+        git_unstage(path, &paths)
+    })
+    .await
+}
+
+/// Commits the staged changes and returns the new commit sha.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_commit<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeCommitRequest,
+) -> Result<String, IpcError> {
+    let WorktreeCommitRequest { workspace_id, worktree, message } = request;
+    let event = (workspace_id.clone(), worktree.clone());
+    let sha = with_worktree_path((*registry).clone(), workspace_id, worktree, move |path| {
+        git_commit(path, &message)
+    })
+    .await?;
+    emit_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::Updated)?;
+    Ok(sha)
+}
+
+/// Pushes the worktree branch to its upstream (or `origin` with `-u`). Never forces.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_push(
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeStatusRequest,
+) -> Result<GitPushResult, IpcError> {
+    let WorktreeStatusRequest { workspace_id, worktree } = request;
+    with_worktree_path((*registry).clone(), workspace_id, worktree, git_push).await
+}
+
+#[cfg(test)]
+mod git_change_error_tests {
+    use super::*;
+
+    #[test]
+    fn git_change_errors_map_to_structured_codes() {
+        let code = |error: GitChangeError| serde_json::to_value(IpcError::from(error).code).unwrap();
+        assert_eq!(code(GitChangeError::NothingToCommit), "GIT_NOTHING_TO_COMMIT");
+        assert_eq!(code(GitChangeError::NoRemote), "GIT_NO_REMOTE");
+        let rejected = IpcError::from(GitChangeError::PushRejected { stderr: "! [rejected]".into() });
+        assert_eq!(serde_json::to_value(&rejected.code).unwrap(), "GIT_PUSH_REJECTED");
+        assert_eq!(rejected.details.unwrap()["stderr"], "! [rejected]");
+        assert_eq!(code(GitChangeError::EmptyMessage), "INVALID_ARGUMENT");
+        let outside = GitChangeError::Worktree(crate::worktree::WorktreeError::InvalidPath {
+            path: "../x".into(),
+            reason: "parent traversal".into(),
+        });
+        assert_eq!(code(outside), "INVALID_PATH");
+        for wire in ["GIT_NOTHING_TO_COMMIT", "GIT_PUSH_REJECTED", "GIT_NO_REMOTE"] {
+            assert_eq!(serde_json::to_value(IpcErrorCode::from_code_str(wire)).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn diff_scope_wire_shape() {
+        let scope: GitDiffScope =
+            serde_json::from_value(serde_json::json!({ "kind": "commit", "sha": "abc1234" })).unwrap();
+        assert_eq!(scope, GitDiffScope::Commit { sha: "abc1234".into() });
+        let staged: GitDiffScope = serde_json::from_value(serde_json::json!({ "kind": "staged" })).unwrap();
+        assert_eq!(staged, GitDiffScope::Staged);
+        let working: GitDiffScope =
+            serde_json::from_value(serde_json::json!({ "kind": "workingTree" })).unwrap();
+        assert_eq!(working, GitDiffScope::WorkingTree);
+    }
 }
 
 #[cfg(all(test, unix))]

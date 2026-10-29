@@ -329,9 +329,13 @@ describe("useWorkspaceRuntime", () => {
       return { store, runtime };
     });
 
+    // The mount-time refresh opens the first tab; let it land before opening the rest so
+    // its ensure step cannot race the openTab calls below and add a fifth tab.
+    await waitFor(() => expect(result.current.store.state.layout.tabs).toHaveLength(1));
+    expect(services.listWorktrees).toHaveBeenCalledTimes(1);
+
     let tab4Id = "";
     await act(async () => {
-      await result.current.store.openTab(worktree, "tab 1");
       await result.current.store.openTab(worktree, "tab 2");
       await result.current.store.openTab(worktree, "tab 3");
       const tab4 = await result.current.store.openTab(worktree, "tab 4");
@@ -345,6 +349,7 @@ describe("useWorkspaceRuntime", () => {
       await result.current.runtime.refreshWorktrees();
     });
 
+    expect(services.listWorktrees).toHaveBeenCalledTimes(2);
     expect(result.current.store.state.layout.tabs).toHaveLength(4);
     expect(result.current.store.state.layout.activeTabId).toBe(tab4Id);
   });

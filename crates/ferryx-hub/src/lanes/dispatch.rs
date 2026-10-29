@@ -357,7 +357,9 @@ enum CronDisposition {
     Keep,
 }
 
-/// omo: only urgent events wake a turn in the owner DM ("DM으로는 급한 용무만").
+/// omo: only urgent events wake a turn in the owner DM ("DM으로는 급한 용무만"). `action_loop`
+/// carries bot-handled and GitHub items only (owner items are alerted in the DM by the owner
+/// alert sweep), so it is routine and reports in the home channel.
 fn owner_dm_worthy(kind: &str, body: &str) -> bool {
     match kind {
         "inbox_urgent" | "owner_reply_failed" | "dead" | "launch_failed" | "startup_error" => true,

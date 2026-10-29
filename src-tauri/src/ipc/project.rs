@@ -235,6 +235,13 @@ pub struct LocalBranch {
     pub is_current: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRefs {
+    pub branches: Vec<LocalBranch>,
+    pub tags: Vec<String>,
+}
+
 #[cfg(feature = "desktop")]
 /// Registers a project, enforcing one workspace ID per canonical repository
 /// root. Requesting a new ID for an already-registered root is not an error:
@@ -321,33 +328,91 @@ pub async fn cmd_project_branches(
         if !manager.is_git_backed() {
             return Ok(Vec::new());
         }
-        let branch_output = run_git(
-            manager.repo_root(),
-            &[
-                "for-each-ref",
-                "--sort=refname",
-                "--format=%(refname:short)",
-                "refs/heads/",
-            ],
-        )
-        .map_err(IpcError::from)?;
-        let current_output =
-            run_git(manager.repo_root(), &["branch", "--show-current"]).map_err(IpcError::from)?;
-        let current = current_output.trim();
-
-        let mut branches = branch_output
-            .lines()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(|name| LocalBranch {
-                name: name.to_string(),
-                is_current: !current.is_empty() && name == current,
-            })
-            .collect::<Vec<_>>();
-        branches.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(branches)
+        local_branches(manager.repo_root())
     })
     .await
+}
+
+/// Lists the local branches and tags a worktree can be based on. Remote-tracking
+/// branches are deliberately excluded.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_project_refs(
+    registry: State<'_, WorkspaceRegistry>,
+    request: ProjectBranchesRequest,
+) -> Result<ProjectRefs, IpcError> {
+    let registry = (*registry).clone();
+    run_blocking(move || {
+        let manager = registry
+            .manager(&request.workspace_id)
+            .map_err(IpcError::from)?;
+        if !manager.is_git_backed() {
+            return Ok(ProjectRefs::default());
+        }
+        project_refs(manager.repo_root())
+    })
+    .await
+}
+
+#[cfg(feature = "desktop")]
+fn project_refs(repo_root: &Path) -> Result<ProjectRefs, IpcError> {
+    Ok(ProjectRefs {
+        branches: local_branches(repo_root)?,
+        tags: local_tags(repo_root)?,
+    })
+}
+
+#[cfg(feature = "desktop")]
+fn local_branches(repo_root: &Path) -> Result<Vec<LocalBranch>, IpcError> {
+    // Full refnames avoid the "heads/<name>" disambiguation %(refname:short) emits
+    // when a tag shares the branch's name.
+    let branch_output = run_git(
+        repo_root,
+        &[
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname)",
+            "refs/heads/",
+        ],
+    )
+    .map_err(IpcError::from)?;
+    let current_output =
+        run_git(repo_root, &["branch", "--show-current"]).map_err(IpcError::from)?;
+    let current = current_output.trim();
+
+    let mut branches = branch_output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("refs/heads/"))
+        .filter(|name| !name.is_empty())
+        .map(|name| LocalBranch {
+            name: name.to_string(),
+            is_current: !current.is_empty() && name == current,
+        })
+        .collect::<Vec<_>>();
+    branches.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(branches)
+}
+
+#[cfg(feature = "desktop")]
+fn local_tags(repo_root: &Path) -> Result<Vec<String>, IpcError> {
+    // Full refnames avoid the "tags/<name>" disambiguation %(refname:short) emits
+    // when a branch shares the tag's name.
+    let output = run_git(
+        repo_root,
+        &[
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname)",
+            "refs/tags/",
+        ],
+    )
+    .map_err(IpcError::from)?;
+    Ok(output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("refs/tags/"))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +506,106 @@ pub async fn cmd_path_reveal<R: tauri::Runtime>(
         Ok(())
     })
     .await
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod project_refs_tests {
+    use super::*;
+
+    fn repository() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        run_git(directory.path(), &["init", "-b", "main"]).unwrap();
+        run_git(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        run_git(directory.path(), &["branch", "b1"]).unwrap();
+        directory
+    }
+
+    fn branch_names(refs: &ProjectRefs) -> Vec<&str> {
+        refs.branches
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn project_refs_lists_local_branches_and_tags_without_remote_branches() {
+        let repo = repository();
+        run_git(repo.path(), &["tag", "t1"]).unwrap();
+        run_git(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/r1", "HEAD"],
+        )
+        .unwrap();
+
+        let refs = project_refs(repo.path()).unwrap();
+
+        assert_eq!(branch_names(&refs), vec!["b1", "main"]);
+        assert!(refs
+            .branches
+            .iter()
+            .any(|branch| branch.name == "main" && branch.is_current));
+        assert_eq!(refs.tags, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn project_refs_keeps_plain_names_when_a_branch_and_tag_share_a_name() {
+        let repo = repository();
+        run_git(repo.path(), &["tag", "b1"]).unwrap();
+        run_git(repo.path(), &["tag", "main"]).unwrap();
+
+        let refs = project_refs(repo.path()).unwrap();
+
+        assert_eq!(branch_names(&refs), vec!["b1", "main"]);
+        assert!(refs
+            .branches
+            .iter()
+            .any(|branch| branch.name == "main" && branch.is_current));
+        assert_eq!(refs.tags, vec!["b1".to_string(), "main".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn cmd_project_refs_rejects_ssh_workspace_ids() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .manage(WorkspaceRegistry::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+
+        let error = cmd_project_refs(
+            app.state::<WorkspaceRegistry>(),
+            ProjectBranchesRequest {
+                workspace_id: "ssh:opaque-hash".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, crate::ipc::IpcErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn project_refs_returns_empty_tags_for_repo_without_tags() {
+        let repo = repository();
+
+        let refs = project_refs(repo.path()).unwrap();
+
+        assert_eq!(branch_names(&refs), vec!["b1", "main"]);
+        assert!(refs.tags.is_empty());
+    }
 }
 
 #[cfg(test)]

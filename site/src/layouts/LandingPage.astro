@@ -15,14 +15,14 @@ const baseUrl = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_UR
 
 const { language = 'en' } = Astro.props as { language?: LocaleCode };
 const locale = getLocale(language, baseUrl);
-const title = language === 'en' ? 'Ferryx — Parallel AI Coding Agents with a Supervisor' : 'Ferryx — 带监督者的并行 AI 编码智能体';
+const title = language === 'en' ? 'Ferryx — A Native Terminal for Coding Agents on macOS, Windows and Linux' : 'Ferryx — 支持 macOS、Windows 和 Linux 的编码智能体原生终端';
 // Concrete over evocative: the words a crawler and an answer engine need are the ones a
 // person would search for — the agents, the isolation mechanism, and the platforms.
 const description = language === 'en'
-  ? 'Run Claude Code, Codex and any CLI agent side by side in one repo — each in its own worktree, alive when the app closes, steerable from your phone.'
-  : '在同一个仓库中并行运行 Claude Code、Codex 以及任意 CLI 智能体——每个都在独立的 worktree 中，关闭应用后继续运行，还能用手机操控。';
-const socialDescription = language === 'en' ? 'Your agents, supervised. Ferryx remembers what you approve, answers routine agent prompts the way you would, and sends risky ones to you.' : description;
-const socialImageAlt = language === 'en' ? 'Ferryx — your agents, supervised' : 'Ferryx — 你的智能体，有人监督';
+  ? 'A native terminal for Claude Code, Codex and any CLI agent on macOS, Windows and Linux. Agents keep running when the app closes; remote boxes need no SSH.'
+  : '面向 Claude Code、Codex 以及任意 CLI 智能体的原生终端，支持 macOS、Windows 和 Linux。关闭应用后智能体继续运行，远程 Linux 机器无需 SSH 即可连接，每个标签页都会显示哪个智能体在等你。';
+const socialDescription = description;
+const socialImageAlt = language === 'en' ? 'Ferryx — a native terminal for coding agents' : 'Ferryx — 为编码智能体打造的原生终端';
 // Crawlers reject relative social URLs, so resolve everything against the deployed origin.
 const canonical = new URL(locale.basePath, Astro.site ?? Astro.url).href;
 const socialImage = new URL(`${baseUrl}og-image.png`, Astro.site ?? Astro.url).href;
@@ -47,7 +47,8 @@ const structuredData = {
       downloadUrl: `${repoUrl}/releases/latest`,
       softwareHelp: new URL(`${baseUrl}docs/introduction/`, Astro.site ?? Astro.url).href,
       featureList: [
-        'A supervisor answers routine agent prompts the way the owner would and escalates risky or destructive prompts to the owner',
+        'Runs on macOS, Windows and Linux from one codebase',
+        'Outbound relay connects remote Linux machines without SSH, open ports or a public IP',
         'Runs CLI coding agents such as Claude Code, Codex, and Antigravity (agy) in parallel terminal panes',
         'Managed Git worktree per agent, created and removed by the app and jailed to the repository root',
         'Headless Rust PTY daemon keeps sessions alive when the window closes, and replays missed output on reconnect',
