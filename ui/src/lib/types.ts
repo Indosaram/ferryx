@@ -785,7 +785,8 @@ export type NativeTerminalScrollbarPayload = {
 
 export type WorktreeChangedPayload = {
   workspaceId: string;
-  worktree: WorktreeIdentity;
+  /** `null` for a checkout addressed by path (the main checkout or an unmanaged worktree). */
+  worktree: WorktreeIdentity | null;
   kind:
     | "created"
     | "deleted"

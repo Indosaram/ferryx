@@ -66,7 +66,8 @@ pub enum WorktreeChangeKind {
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeChangedPayload {
     pub workspace_id: String,
-    pub worktree: WorktreeIdentity,
+    /// `None` for a checkout addressed by path (the main checkout or an unmanaged worktree).
+    pub worktree: Option<WorktreeIdentity>,
     pub kind: WorktreeChangeKind,
 }
 
@@ -75,6 +76,16 @@ pub(crate) fn emit_worktree_changed<R: Runtime>(
     app: &AppHandle<R>,
     workspace_id: String,
     worktree: WorktreeIdentity,
+    kind: WorktreeChangeKind,
+) -> Result<(), IpcError> {
+    emit_change_payload(app, workspace_id, Some(worktree), kind)
+}
+
+#[cfg(feature = "desktop")]
+fn emit_change_payload<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: String,
+    worktree: Option<WorktreeIdentity>,
     kind: WorktreeChangeKind,
 ) -> Result<(), IpcError> {
     app.emit(
@@ -528,10 +539,9 @@ fn notify_worktree_changed<R: Runtime>(
     worktree: Option<WorktreeIdentity>,
     kind: WorktreeChangeKind,
 ) {
-    // A checkout addressed by path has no managed identity for the event; its panel refreshes
-    // itself after each action.
-    let Some(worktree) = worktree else { return };
-    if let Err(error) = emit_worktree_changed(app, workspace_id, worktree, kind) {
+    // Callers run this only after the jailed resolve and the Git operation succeeded, so a
+    // path outside the project root never reaches it. Path targets carry no identity.
+    if let Err(error) = emit_change_payload(app, workspace_id, worktree, kind) {
         tracing::warn!(?error, ?kind, "worktree_changed emit failed after a successful git operation");
     }
 }
@@ -1022,7 +1032,7 @@ mod change_event_tests {
         let staged = next();
         assert_eq!(staged.kind, WorktreeChangeKind::DirtyChanged);
         assert_eq!(staged.workspace_id, "events");
-        assert_eq!(staged.worktree, identity);
+        assert_eq!(staged.worktree, Some(identity.clone()));
 
         cmd_worktree_unstage(app.handle().clone(), app.state(), paths.clone()).await.unwrap();
         assert_eq!(next().kind, WorktreeChangeKind::DirtyChanged);
@@ -1081,6 +1091,11 @@ mod change_event_tests {
             .manage(registry)
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+            let payload: WorktreeChangedPayload = serde_json::from_str(event.payload()).unwrap();
+            tx.send(payload).unwrap();
+        });
 
         std::fs::write(repo.join("main.txt"), b"one\ntwo\n").unwrap();
         let by_path = |path: &std::path::Path| WorktreePathsRequest {
@@ -1090,6 +1105,9 @@ mod change_event_tests {
             paths: vec!["main.txt".into()],
         };
         cmd_worktree_stage(app.handle().clone(), app.state(), by_path(&repo)).await.unwrap();
+        let staged_event = rx.try_recv().expect("a path-addressed stage emits worktree_changed");
+        assert_eq!(staged_event.kind, WorktreeChangeKind::DirtyChanged);
+        assert_eq!(staged_event.worktree, None);
         let staged = cmd_worktree_diff(
             app.state(),
             WorktreeDiffRequest {
@@ -1116,10 +1134,15 @@ mod change_event_tests {
         .await
         .unwrap();
         assert_eq!(run_git(&repo, &["rev-parse", "HEAD"]).unwrap().trim(), sha);
+        let committed = rx.try_recv().expect("a path-addressed commit emits worktree_changed");
+        assert_eq!(committed.workspace_id, "paths");
+        assert_eq!(committed.worktree, None);
+        assert_eq!(committed.kind, WorktreeChangeKind::Updated);
 
         std::fs::write(unmanaged.join("main.txt"), b"changed\n").unwrap();
         cmd_worktree_stage(app.handle().clone(), app.state(), by_path(&unmanaged)).await.unwrap();
         assert!(!run_git(&unmanaged, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+        rx.try_recv().expect("an unmanaged worktree stage emits worktree_changed");
 
         // Outside the jail, a directory that is not a checkout, and an escaping file path.
         let refused = cmd_worktree_stage(app.handle().clone(), app.state(), by_path(&outside)).await;
@@ -1147,5 +1170,7 @@ mod change_event_tests {
         let mut both = by_path(&repo);
         both.worktree = Some(WorktreeIdentity { ws_id: "paths".into(), slug: "x".into() });
         assert!(cmd_worktree_stage(app.handle().clone(), app.state(), both).await.is_err());
+        // Nothing outside the jail, nor any refused request, emitted an event.
+        assert!(rx.try_recv().is_err(), "refused targets must not emit worktree_changed");
     }
 }
