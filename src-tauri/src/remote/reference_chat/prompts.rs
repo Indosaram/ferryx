@@ -570,6 +570,9 @@ struct ReferencePromptOccurrence {
     number: u64,
     /// The screen revision this occurrence was answered on through Ferryx, if it was.
     answered_on: Option<String>,
+    /// Whether a reader without the pane's session record has seen this card. Only such a card
+    /// can be judged gone by that reader: it is blind to the cards that need the session (OmO).
+    seen_blind: bool,
 }
 
 #[derive(Debug, Default)]
@@ -627,6 +630,15 @@ fn reference_prompt_public_id(content: &str, number: u64) -> String {
     }
 }
 
+/// What a screen reader can see, for the occurrence ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferencePromptReader {
+    /// Reads with the pane's session record: sees every card a detector can find.
+    Full,
+    /// Reads the screen alone (the background observer): blind to cards that need the session.
+    ScreenOnly,
+}
+
 /// Note what one reading of `session`'s screen found, and return the public id of that card.
 ///
 /// A card's content id is a hash of what it shows, so an agent asking the identical question
@@ -634,24 +646,23 @@ fn reference_prompt_public_id(content: &str, number: u64) -> String {
 /// the first keeps the plain content id, and once Ferryx has answered one, the next time that card
 /// appears after a reading saw the pane without it (on another screen) it is `<content>~<n>`.
 /// A card still on screen after its answer keeps its id, so the answer ledger refuses it again.
+/// A [ReferencePromptReader::ScreenOnly] reading ends an occurrence only for a card it could see.
 pub fn note_reference_prompt_occurrence(
     session: &str,
     content: Option<&str>,
     screen_revision: &str,
+    reader: ReferencePromptReader,
 ) -> Option<String> {
     let Ok(mut ledger) = reference_occurrence_ledger().lock() else {
         return content.map(str::to_string);
     };
     let pane = ledger.pane(session);
     let Some(content) = content else {
-        // A screen identical to the one an answer went out on is not evidence the card left: a
-        // reader that cannot see this card (no session record) must not open a new occurrence.
-        let still_there = pane
-            .showing
-            .as_ref()
-            .and_then(|showing| pane.cards.get(showing))
-            .and_then(|card| card.answered_on.as_deref())
-            == Some(screen_revision);
+        let showing = pane.showing.as_ref().and_then(|showing| pane.cards.get(showing));
+        // A screen identical to the one an answer went out on is not evidence the card left, and
+        // a reader blind to this card cannot say it left.
+        let still_there = showing.and_then(|card| card.answered_on.as_deref()) == Some(screen_revision)
+            || (reader == ReferencePromptReader::ScreenOnly && showing.is_some_and(|card| !card.seen_blind));
         if !still_there {
             pane.showing = None;
         }
@@ -667,11 +678,15 @@ pub fn note_reference_prompt_occurrence(
         }
         pane.showing = Some(content.to_string());
     }
-    let number = pane.cards.get(content).map_or(0, |card| card.number);
-    Some(reference_prompt_public_id(content, number))
+    let card = pane.cards.entry(content.to_string()).or_default();
+    if reader == ReferencePromptReader::ScreenOnly {
+        card.seen_blind = true;
+    }
+    Some(reference_prompt_public_id(content, card.number))
 }
 
-/// [note_reference_prompt_occurrence] for a detected prompt: its id becomes the public one.
+/// [note_reference_prompt_occurrence] for a prompt a full reader detected: its id becomes the
+/// public one.
 pub fn reference_prompt_occurrence(
     session: &str,
     prompt: Option<ReferencePrompt>,
@@ -681,6 +696,7 @@ pub fn reference_prompt_occurrence(
         session,
         prompt.as_ref().map(|prompt| prompt.id.as_str()),
         screen_revision,
+        ReferencePromptReader::Full,
     );
     prompt.zip(public).map(|(mut prompt, id)| {
         prompt.id = id;
@@ -2307,6 +2323,73 @@ mod tests {
         let (stale, keys) = answer_claude_occurrence(&answers, session, &first.id, "req-x-4").await;
         assert_not_typed(&stale, ScopeErrorCode::RequestConflict);
         assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stale_occurrence_the_answer_ledger_never_saw_is_refused_by_the_occurrence_check() {
+        let session = "sess-row28-stale";
+        let card = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let first = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("X is listed");
+        let (outcome, _) = answer_claude_occurrence(&ReferencePromptAnswers::new(), session, &first.id, "req-s-1").await;
+        assert!(outcome.is_typed(), "{outcome:?}");
+        assert!(reference_prompt_occurrence(session, None, "rev-working").is_none());
+        let second = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("X again");
+        assert_ne!(second.id, first.id);
+
+        // A caller still holding the first asking's id, on an answer path whose single-use ledger
+        // never recorded it: only the occurrence check stands between it and the new asking.
+        let fresh = ReferencePromptAnswers::new();
+        let (stale, keys) = answer_claude_occurrence(&fresh, session, &first.id, "req-s-2").await;
+        assert_not_typed(&stale, ScopeErrorCode::RequestConflict);
+        assert!(keys.is_empty(), "the old asking's id typed into the new asking: {keys:?}");
+    }
+
+    #[test]
+    fn marking_a_stale_occurrence_answered_does_not_end_the_current_one() {
+        let session = "sess-row28-mark";
+        let card = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let first = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("X").id;
+        mark_reference_prompt_answered(session, &first, REVISION);
+        assert!(reference_prompt_occurrence(session, None, "rev-working").is_none());
+        let second = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("X again").id;
+        assert_eq!(reference_prompt_occurrence_number(&second), 1);
+
+        // A late mark for the first asking must not count as an answer to the second one.
+        mark_reference_prompt_answered(session, &first, REVISION);
+        assert!(reference_prompt_occurrence(session, None, "rev-working-2").is_none());
+        let third = reference_prompt_occurrence(session, Some(card), REVISION).expect("X still unanswered").id;
+        assert_eq!(third, second, "the unanswered asking keeps its id");
+    }
+
+    #[tokio::test]
+    async fn a_screen_only_reader_blind_to_a_card_cannot_reopen_it_for_a_second_answer() {
+        let session = "sess-row28-blind";
+        let card = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let answers = ReferencePromptAnswers::new();
+        // A full reader (with the session record) lists the card; the observer never saw it.
+        let first = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("X");
+        let (outcome, _) = answer_claude_occurrence(&answers, session, &first.id, "req-b-1").await;
+        assert!(outcome.is_typed(), "{outcome:?}");
+
+        // The pane repaints; the observer, blind to this card, reads no prompt on the new screen.
+        assert!(note_reference_prompt_occurrence(session, None, "rev-repaint", ReferencePromptReader::ScreenOnly)
+            .is_none());
+
+        // The full reader still sees the same, already-answered card: it is the same asking.
+        let lingering = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("still shown");
+        assert_eq!(lingering.id, first.id, "a blind reading must not open a new asking");
+        let (again, keys) = answer_claude_occurrence(&answers, session, &lingering.id, "req-b-2").await;
+        assert_not_typed(&again, ScopeErrorCode::RequestConflict);
+        assert!(keys.is_empty(), "the answered card was answered a second time: {keys:?}");
+
+        // A card the observer itself saw is one it can judge gone.
+        let session = "sess-row28-seen";
+        let seen = note_reference_prompt_occurrence(session, Some(&card.id), REVISION, ReferencePromptReader::ScreenOnly)
+            .expect("seen");
+        mark_reference_prompt_answered(session, &seen, REVISION);
+        assert!(note_reference_prompt_occurrence(session, None, "rev-gone", ReferencePromptReader::ScreenOnly).is_none());
+        let next = reference_prompt_occurrence(session, Some(card), REVISION).expect("asked again");
+        assert_ne!(next.id, seen, "an observer that could see the card may end its asking");
     }
     #[tokio::test]
     async fn an_answer_is_planned_from_the_card_and_written_to_the_original_pane() {

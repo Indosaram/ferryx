@@ -224,6 +224,7 @@ fn publish_if_changed(
         session_id,
         draft.prompt_id.as_deref(),
         draft.screen_revision.as_deref().unwrap_or_default(),
+        crate::remote::reference_chat::prompts::ReferencePromptReader::ScreenOnly,
     );
     draft.workspace_id = workspace_of.and_then(|lookup| lookup(session_id));
     let changed = match bus.latest(session_id) {
