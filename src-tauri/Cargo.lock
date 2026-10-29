@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "ferryx"
-version = "2026.1029.1"
+version = "2026.1030.1"
 dependencies = [
  "aes",
  "anyhow",

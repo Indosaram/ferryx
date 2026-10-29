@@ -514,7 +514,10 @@ pub async fn retire_unfiltered_kakao_backlog(pool: &SqlitePool) -> Result<u64> {
 /// omo-gateway's `scan_unseen_candidates`: triaged `bot` items (never FYI, ignored or
 /// untriaged noise; an `owner` item reaches the owner DM once through the owner alert sweep, so
 /// it is not also handed to the lead in the home channel) and GitHub items that triage did not
-/// take, each once, received within `MAX_ITEM_AGE` of `now`.
+/// take, each once, received within `MAX_ITEM_AGE` of `now`. Mail is never a candidate: mail the
+/// owner must act on reaches him through the owner alert sweep, and the rest (CI failure mail,
+/// newsletters, receipts) only produced noise in the home channel (2026-10-29: "쓸데없는 메일
+/// 알림 하는거 하지마").
 async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopItem>> {
     let oldest = age_cutoff(now);
     #[allow(clippy::type_complexity)]
@@ -523,6 +526,7 @@ async fn unseen_inbox(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<LoopI
          FROM inbox_decisions d
          JOIN inbox_items i ON i.id = d.item_id
          WHERE d.class = 'bot'
+           AND i.source <> 'mail'
            AND i.received_at >= ?
            AND NOT EXISTS (SELECT 1 FROM action_loop_seen s WHERE s.item_key = 'inbox:' || d.item_id)
            AND NOT EXISTS (SELECT 1 FROM action_loop_outcomes o WHERE o.item_key = 'inbox:' || d.item_id)
@@ -616,7 +620,7 @@ async fn requeue_stale(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<Loop
     let cutoff = (now - chrono::Duration::from_std(REQUEUE_AFTER).unwrap_or_default()).to_rfc3339();
     let rows: Vec<(String, String, String, String, Option<String>, i64)> = sqlx::query_as(
         "SELECT item_key, kind, source, line, link, attempts FROM action_loop_outcomes
-         WHERE status = 'enqueued' AND kind <> 'inbox_owner' AND attempts < ? AND updated_at < ?",
+         WHERE status = 'enqueued' AND kind <> 'inbox_owner' AND source <> 'mail' AND attempts < ? AND updated_at < ?",
     )
     .bind(MAX_ATTEMPTS)
     .bind(cutoff)
@@ -809,7 +813,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         sqlx::query(
-            "INSERT INTO inbox_items(id, source, source_ref, snippet, title, received_at, raw_hash, collected_at) VALUES('i1','mail','m1','ping','Ping',?,'h',?)",
+            "INSERT INTO inbox_items(id, source, source_ref, snippet, title, received_at, raw_hash, collected_at) VALUES('i1','imessage','m1','ping','Ping',?,'h',?)",
         )
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
@@ -849,7 +853,7 @@ mod tests {
                 .await
                 .unwrap();
         assert!(
-            body.starts_with("[메일 · 봇 처리] 보낸 사람 없음: Ping"),
+            body.starts_with("[문자 · 봇 처리] 보낸 사람 없음: Ping"),
             "{body}"
         );
         assert!(loop_.flush(now).await.unwrap().is_none());
@@ -972,7 +976,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         sqlx::query(
-            "INSERT INTO inbox_items(id, source, source_ref, snippet, title, received_at, raw_hash, collected_at) VALUES('i1','mail','m1','ping','Ping',?,'h',?)",
+            "INSERT INTO inbox_items(id, source, source_ref, snippet, title, received_at, raw_hash, collected_at) VALUES('i1','imessage','m1','ping','Ping',?,'h',?)",
         )
         .bind(quiet.to_rfc3339())
         .bind(quiet.to_rfc3339())
@@ -1068,7 +1072,7 @@ mod tests {
         let old = (now - chrono::Duration::hours(80)).to_rfc3339();
         let fresh = (now - chrono::Duration::hours(1)).to_rfc3339();
         for (id, at) in [("old", &old), ("new", &fresh)] {
-            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?,'mail',?,'x',?,'h',?)")
+            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?,'imessage',?,'x',?,'h',?)")
                 .bind(id).bind(id).bind(at).bind(at)
                 .execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, 'bot', 'r', 'open', ?)")
@@ -1101,9 +1105,9 @@ mod tests {
     async fn an_owner_item_goes_to_the_owner_dm_once_and_not_to_the_lead() {
         let pool = crate::storage::memory().await.unwrap();
         let now = Utc::now();
-        for (id, class) in [("own", "owner"), ("bot", "bot")] {
-            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?,'mail',?,'Ada',?,'x',?,'h',?)")
-                .bind(id).bind(id).bind(id).bind(now.to_rfc3339()).bind(now.to_rfc3339())
+        for (id, class, source) in [("own", "owner", "mail"), ("bot", "bot", "imessage")] {
+            sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES(?,?,?,'Ada',?,'x',?,'h',?)")
+                .bind(id).bind(source).bind(id).bind(id).bind(now.to_rfc3339()).bind(now.to_rfc3339())
                 .execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES(?, ?, 'r', 'open', ?)")
                 .bind(id).bind(class).bind(now.to_rfc3339())
@@ -1137,7 +1141,7 @@ mod tests {
     async fn the_unfiltered_kakao_backlog_is_retired_once() {
         let pool = crate::storage::memory().await.unwrap();
         let now = Utc::now().to_rfc3339();
-        for (id, source) in [("k1", "kakao"), ("m1", "mail")] {
+        for (id, source) in [("k1", "kakao"), ("m1", "imessage")] {
             sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?,?,?,'x',?,'h',?)")
                 .bind(id).bind(source).bind(id).bind(&now).bind(&now)
                 .execute(&pool).await.unwrap();
@@ -1154,5 +1158,33 @@ mod tests {
             .map(|item| item.item_key)
             .collect();
         assert_eq!(keys, vec!["inbox:m1".to_owned()]);
+    }
+
+    /// 2026-10-29 "쓸데없는 메일 알림 하는거 하지마": CI failure mail and other bot-class mail no
+    /// longer reach the lead, and mail an earlier build enqueued is not handed back every 30 min.
+    #[tokio::test]
+    async fn bot_class_mail_never_reaches_the_lead() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        let at = now.to_rfc3339();
+        sqlx::query("INSERT INTO inbox_items(id, source, source_ref, author, title, snippet, received_at, raw_hash, collected_at) VALUES('ci','mail','ci','Indo <notifications@github.com>','[Indosaram/ferryx] Run failed: clippy-lane','x',?,'h',?)")
+            .bind(&at).bind(&at)
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, status, decided_at) VALUES('ci', 'bot', 'r', 'open', ?)")
+            .bind(&at)
+            .execute(&pool).await.unwrap();
+        let loop_ = ActionLoop::new(pool.clone(), "lead").with_cap(24);
+        assert!(loop_.flush(now).await.unwrap().is_none());
+        let older = (now - chrono::Duration::hours(2)).to_rfc3339();
+        sqlx::query("INSERT INTO action_loop_outcomes(item_key, kind, source, line, status, attempts, enqueued_at, updated_at) VALUES('inbox:old','inbox_bot','mail','l','enqueued',1,?,?)")
+            .bind(&older).bind(&older)
+            .execute(&pool).await.unwrap();
+        assert!(requeue_stale(&pool, now).await.unwrap().is_empty());
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind = 'action_loop'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(events, 0);
     }
 }
