@@ -2140,6 +2140,12 @@ function WorkspaceApp({
   } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   const [pendingWorktree, setPendingWorktree] = useState<Worktree | null>(null);
+  // Agent chosen in the Add Worktree dialog for a worktree created in a non-active project;
+  // it starts once the project switch lands the pending worktree.
+  const pendingWorktreeAgentRef = useRef<{ path: string; agentId: string } | null>(null);
+  const launchAgentByIdInWorktreeRef = useRef<(worktree: Worktree, agentId: string) => Promise<void>>(
+    async () => undefined,
+  );
   const pendingWorktreePath = pendingWorktree?.path ?? null;
   const setPendingWorktreePath = useCallback((path: string | null) => {
     if (path === null) {
@@ -2377,7 +2383,13 @@ function WorkspaceApp({
       tabCount: state.layout.tabs.length,
     });
     setPendingWorktree(null);
-    runTabOperation(() => ensureTabForWorktree(target));
+    const pendingAgent = pendingWorktreeAgentRef.current;
+    pendingWorktreeAgentRef.current = null;
+    const agentId = pendingAgent?.path === target.path ? pendingAgent.agentId : null;
+    runTabOperation(async () => {
+      await ensureTabForWorktree(target);
+      if (agentId) await launchAgentByIdInWorktreeRef.current(target, agentId);
+    });
   }, [
     activeProject.workspaceId,
     activeProject.target,
@@ -2678,8 +2690,10 @@ function WorkspaceApp({
     });
   }, [openTab, runTabOperation]);
 
-  const handleLaunchAgent = useCallback(
-    async (agent: { name: string; command: string; args: string }) => {
+  // Starts an agent in a new tab of the given worktree of the active project, which need not be
+  // the active worktree (a freshly created one is not selected yet).
+  const launchAgentInWorktree = useCallback(
+    async (targetWorktree: Worktree, agent: { name: string; command: string; args: string }) => {
       if (activeRemoteHostRef.current) return;
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
@@ -2688,8 +2702,6 @@ function WorkspaceApp({
         return;
       }
       try {
-        const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
-        if (!targetWorktree) return;
         await ensureTerminalEvents().catch(() => undefined);
         const agentGrid = await measureInitialGeometry({
           kind: "newTab",
@@ -2713,6 +2725,29 @@ function WorkspaceApp({
     },
     [openTab, reportRuntimeError],
   );
+
+  const handleLaunchAgent = useCallback(
+    async (agent: { name: string; command: string; args: string }) => {
+      const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
+      if (!targetWorktree) return;
+      await launchAgentInWorktree(targetWorktree, agent);
+    },
+    [launchAgentInWorktree],
+  );
+
+  // Resolves a dialog's agent choice against the agents launchable right now.
+  const launchAgentByIdInWorktree = useCallback(
+    async (targetWorktree: Worktree, agentId: string) => {
+      const agent = getLaunchableAgents(resolvedAgentsRef.current).find((candidate) => candidate.name === agentId);
+      if (!agent) {
+        toast.warning(`${agentId} is not available, so the new worktree opened with a shell only.`);
+        return;
+      }
+      await launchAgentInWorktree(targetWorktree, agent);
+    },
+    [launchAgentInWorktree],
+  );
+  launchAgentByIdInWorktreeRef.current = launchAgentByIdInWorktree;
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -4230,16 +4265,20 @@ function WorkspaceApp({
         <AddWorktreeDialog
           project={createTargetProject ?? activeProject}
           onClose={handleCloseCreateWorktree}
-          onCreated={async (worktree) => {
+          agents={launchableAgents}
+          defaultAgentId={agentSettings.defaultAgentId}
+          onCreated={async (worktree, launch) => {
             if (activeRemoteHostRef.current) return;
             const owner = createTargetProject ?? activeProject;
             if (owner.workspaceId !== activeProject.workspaceId) {
+              pendingWorktreeAgentRef.current = launch ? { path: worktree.path, agentId: launch.agentId } : null;
               handleSelectProject(owner);
               setPendingWorktree(worktree);
               return;
             }
             await refreshWorktrees();
             await ensureTabForWorktree(worktree).catch(reportRuntimeError);
+            if (launch) await launchAgentByIdInWorktree(worktree, launch.agentId);
           }}
         />
       ) : null}
