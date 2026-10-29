@@ -102,21 +102,18 @@ fn jailed_path(root: &Path, raw: &str) -> Result<String, GitChangeError> {
         }
         .into()
     };
-    let joined = root.join(relative.join("/"));
-    let mut existing = joined.as_path();
-    loop {
-        match std::fs::symlink_metadata(existing) {
-            Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match existing.parent() {
-                    Some(parent) if existing != root => existing = parent,
-                    _ => return Err(outside()),
-                }
-            }
+    // Walk down from the root instead of up from the target, so the walk can never climb
+    // above the root whatever its spelling (trailing separator, case on Windows).
+    let mut existing = root.to_path_buf();
+    for part in &relative {
+        let next = existing.join(part);
+        match std::fs::symlink_metadata(&next) {
+            Ok(_) => existing = next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
             Err(_) => return Err(outside()),
         }
     }
-    match std::fs::canonicalize(existing) {
+    match std::fs::canonicalize(&existing) {
         Ok(resolved) if resolved.starts_with(&canonical_root) => Ok(relative.join("/")),
         _ => Err(outside()),
     }
@@ -387,6 +384,16 @@ mod tests {
         assert_eq!(jailed_path(&repo, "sub/new.txt").unwrap(), "sub/new.txt");
         assert_eq!(jailed_path(&repo, "fresh/dir/new.txt").unwrap(), "fresh/dir/new.txt");
         assert_eq!(jailed_path(&repo, "file.txt").unwrap(), "file.txt");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn root_with_trailing_backslash_allows_new_nested_dirs() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        let spelled = PathBuf::from(format!("{}\\", repo.display()));
+        assert_eq!(jailed_path(&spelled, "new\\nested\\file.txt").unwrap(), "new/nested/file.txt");
+        let upper = PathBuf::from(repo.display().to_string().to_uppercase());
+        assert_eq!(jailed_path(&upper, "new/nested/file.txt").unwrap(), "new/nested/file.txt");
     }
 
     #[test]
