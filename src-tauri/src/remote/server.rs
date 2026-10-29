@@ -8791,13 +8791,15 @@ mod tests {
             _subscription_id: &'a str,
         ) -> crate::remote::browser_backend::BoxFuture<'a, Result<(), RemoteBrowserError>> {
             Box::pin(async move {
-                self.viewer_subs
-                    .fetch_update(
-                        std::sync::atomic::Ordering::SeqCst,
-                        std::sync::atomic::Ordering::SeqCst,
-                        |v| Some(v.saturating_sub(1)),
-                    )
-                    .ok();
+                let mut current = self.viewer_subs.load(std::sync::atomic::Ordering::SeqCst);
+                while let Err(actual) = self.viewer_subs.compare_exchange_weak(
+                    current,
+                    current.saturating_sub(1),
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                ) {
+                    current = actual;
+                }
                 Ok(())
             })
         }

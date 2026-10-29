@@ -1763,9 +1763,19 @@ mod tests {
                     || {
                         attempt += 1;
                         let _ = attempt_tx.send(attempt);
-                        let failing = failures
-                            .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |left| left.checked_sub(1))
-                            .is_ok();
+                        let mut left = failures.load(std::sync::atomic::Ordering::SeqCst);
+                        let failing = loop {
+                            let Some(next) = left.checked_sub(1) else { break false };
+                            match failures.compare_exchange_weak(
+                                left,
+                                next,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            ) {
+                                Ok(_) => break true,
+                                Err(current) => left = current,
+                            }
+                        };
                         let paths = paths.clone();
                         async move {
                             if failing {

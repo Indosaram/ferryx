@@ -578,7 +578,7 @@ mod tests {
         let ink_sum: u64 = if bpp == 1 {
             mask.iter().map(|&px| px as u64).sum()
         } else {
-            mask.chunks_exact(4).map(|px| px[3] as u64).sum()
+            mask.as_chunks::<4>().0.iter().map(|px| px[3] as u64).sum()
         };
         let density = (ink_sum as f64) / 255.0 / 256.0;
 

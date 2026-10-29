@@ -2422,7 +2422,7 @@ impl DaemonClient {
         let result = match self
             .paired_host_request(DaemonRequest::PairedHostOperation { request })
             .await
-            .map_err(&transport_error)?
+            .map_err(transport_error)?
         {
             DaemonResponse::PairedHostOperationOk { response } => Ok(response),
             DaemonResponse::PairedHostOperationError { error } => Err(error),

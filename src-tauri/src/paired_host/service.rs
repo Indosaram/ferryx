@@ -773,10 +773,9 @@ impl PairedHostService {
     }
     async fn pair_inner(&self, request: PairRequest) -> Result<HostView> {
         let origin = self.origin(&request.relay_origin)?;
-        for value in [&request.display_label] {
-            if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
-                return Err(ServiceError::invalid());
-            }
+        let label = &request.display_label;
+        if label.is_empty() || label.len() > 256 || label.chars().any(char::is_control) {
+            return Err(ServiceError::invalid());
         }
         if request.pin.0.is_empty()
             || request.pin.0.len() > 256

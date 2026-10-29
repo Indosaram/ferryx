@@ -3661,6 +3661,13 @@ pub(crate) fn handover_effective_owned(
     }
 }
 
+/// The session output a stream pump forwards: its id, live broadcast and backing hub.
+pub(crate) struct SequencedStream {
+    pub(crate) session_id: String,
+    pub(crate) rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
+    pub(crate) hub: Arc<TerminalOutputHub>,
+}
+
 impl DaemonServer {
     pub fn new() -> Self {
         // Headless CLI constructs synchronously inside its multi-thread runtime.
@@ -6831,9 +6838,7 @@ impl DaemonServer {
                                 let _ = write_half.flush().await;
 
                                 self.pump_session_stream(
-                                    session_id,
-                                    attachment.receiver,
-                                    hub,
+                                    SequencedStream { session_id, rx: attachment.receiver, hub },
                                     write_half,
                                     Some(agent_subscription),
                                     Some(&mut reader),
@@ -8366,13 +8371,19 @@ impl DaemonServer {
                         .unwrap_or(0),
                 )
             });
-            remaining
-                .fetch_update(
+            let mut left = remaining.load(std::sync::atomic::Ordering::SeqCst);
+            loop {
+                let Some(next) = left.checked_sub(1) else { break false };
+                match remaining.compare_exchange_weak(
+                    left,
+                    next,
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
-                    |left| left.checked_sub(1),
-                )
-                .is_ok()
+                ) {
+                    Ok(_) => break true,
+                    Err(current) => left = current,
+                }
+            }
         }
         #[cfg(not(feature = "local-split-qa"))]
         {
@@ -8700,9 +8711,7 @@ impl DaemonServer {
     {
         let exit_status = hub.exit_status(&session_id);
         Self::pump_sequenced_stream_with_agent_state(
-            session_id,
-            rx,
-            hub,
+            SequencedStream { session_id, rx, hub },
             writer,
             None,
             None::<tokio::io::Empty>,
@@ -8714,9 +8723,7 @@ impl DaemonServer {
 
     async fn pump_session_stream<W, R>(
         &self,
-        session_id: String,
-        rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
-        hub: Arc<TerminalOutputHub>,
+        stream: SequencedStream,
         writer: W,
         agent_rx: Option<AgentStateSubscription>,
         client_reader: Option<R>,
@@ -8725,6 +8732,7 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        let SequencedStream { session_id, rx, hub } = stream;
         // Captured before streaming: the PTY leaves the registry as soon as it exits, which is
         // exactly when the exit frame that must carry this incarnation is written.
         let incarnation = self
@@ -8738,7 +8746,8 @@ impl DaemonServer {
             if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch { return; }
             let (input, output) = tokio::io::duplex(64 * 1024);
             let pump = Self::pump_sequenced_stream_with_agent_state(
-                session_id.clone(), rx, hub, output, agent_rx, client_reader, incarnation, exit_status,
+                SequencedStream { session_id: session_id.clone(), rx, hub },
+                output, agent_rx, client_reader, incarnation, exit_status,
             );
             tokio::pin!(pump);
             let mut lines = BufReader::new(input).lines();
@@ -8804,9 +8813,7 @@ impl DaemonServer {
         }
         let Ok(mut updates) = self.terminal_service.remote().subscribe(&session_id) else {
             Self::pump_sequenced_stream_with_agent_state(
-                session_id,
-                rx,
-                hub,
+                SequencedStream { session_id, rx, hub },
                 writer,
                 agent_rx,
                 client_reader,
@@ -8818,9 +8825,7 @@ impl DaemonServer {
         };
         let (input, output) = tokio::io::duplex(64 * 1024);
         let pump = Self::pump_sequenced_stream_with_agent_state(
-            session_id.clone(),
-            rx,
-            hub,
+            SequencedStream { session_id: session_id.clone(), rx, hub },
             output,
             agent_rx,
             client_reader,
@@ -8864,9 +8869,7 @@ impl DaemonServer {
     }
 
     pub(crate) async fn pump_sequenced_stream_with_agent_state<W, R>(
-        session_id: String,
-        mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
-        hub: Arc<TerminalOutputHub>,
+        stream: SequencedStream,
         writer: W,
         mut agent_state_rx: Option<AgentStateSubscription>,
         mut client_reader: Option<R>,
@@ -8876,6 +8879,7 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        let SequencedStream { session_id, mut rx, hub } = stream;
         let mut writer = BufWriter::new(writer);
         if let Some(snapshot) = agent_state_rx
             .as_ref()
@@ -9879,9 +9883,7 @@ mod tests {
         let hub = Arc::new(TerminalOutputHub::default());
 
         let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            "exiting-session".to_string(),
-            rx,
-            hub,
+            SequencedStream { session_id: "exiting-session".to_string(), rx, hub },
             server_side,
             None,
             None::<tokio::io::Empty>,
@@ -9918,7 +9920,7 @@ mod tests {
         hub.record_exit("delayed-exit", Some(9));
         let (client, server_side) = tokio::io::duplex(4096);
         let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            "delayed-exit".to_string(), rx, hub, server_side, None,
+            SequencedStream { session_id: "delayed-exit".to_string(), rx, hub }, server_side, None,
             None::<tokio::io::Empty>, Some("original-incarnation".to_string()), Some(status),
         ));
         let mut reader = BufReader::new(client);
@@ -11466,9 +11468,7 @@ mod tests {
         let agent_rx = server.agent_states.subscribe(&session_id);
 
         let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            session_id.clone(),
-            rx,
-            hub,
+            SequencedStream { session_id: session_id.clone(), rx, hub },
             client,
             Some(agent_rx),
             None::<tokio::io::Empty>,
@@ -12395,9 +12395,7 @@ mod tests {
         let session_id = "test-idle-session".to_string();
 
         let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            session_id,
-            rx,
-            hub,
+            SequencedStream { session_id, rx, hub },
             server_write_side,
             None,
             Some(server_read_side),
@@ -13414,9 +13412,7 @@ mod instance_lock_deadline_tests {
         let pump_task = tokio::spawn(async move {
             pump_server
                 .pump_session_stream::<_, tokio::io::Empty>(
-                    pump_session_id,
-                    rx,
-                    hub,
+                    SequencedStream { session_id: pump_session_id, rx, hub },
                     server_writer,
                     None,
                     None,

@@ -213,7 +213,7 @@ fn parse_listing(
         Some(parent.to_string())
     };
     let mut entries = Vec::new();
-    for pair in fields[2..fields.len() - 3].chunks_exact(2) {
+    for pair in fields[2..fields.len() - 3].as_chunks::<2>().0 {
         let hidden = flag(pair[1])?;
         let name = match std::str::from_utf8(pair[0]) {
             Ok(name) => name,

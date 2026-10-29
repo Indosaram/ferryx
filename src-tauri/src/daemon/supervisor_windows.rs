@@ -254,7 +254,7 @@ fn decode_utf16_with_bom(bytes: &[u8]) -> Option<String> {
         return None;
     }
     let units: Vec<u16> = body
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     String::from_utf16(&units).ok()
@@ -319,7 +319,7 @@ fn decode_task_xml(bytes: &[u8]) -> String {
     let looks_utf16 = bytes.len() >= 2 && bytes.len().is_multiple_of(2) && bytes[1] == 0;
     if looks_utf16 {
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>().0.iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
         if let Ok(text) = String::from_utf16(&units) {

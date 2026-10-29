@@ -523,7 +523,7 @@ pub fn dib_to_png(dib: &[u8]) -> Option<Vec<u8>> {
     // 32-bit BI_RGB carries an undefined fourth byte that older producers leave zeroed; treating
     // it as alpha would encode a fully transparent image.
     if channels == 4 && !any_alpha {
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[3] = 255;
         }
     }
