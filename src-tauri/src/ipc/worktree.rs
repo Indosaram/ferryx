@@ -512,28 +512,34 @@ pub async fn cmd_worktree_diff(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn cmd_worktree_stage(
+pub async fn cmd_worktree_stage<R: Runtime>(
+    app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
     request: WorktreePathsRequest,
 ) -> Result<(), IpcError> {
     let WorktreePathsRequest { workspace_id, worktree, paths } = request;
+    let event = (workspace_id.clone(), worktree.clone());
     with_worktree_path((*registry).clone(), workspace_id, worktree, move |path| {
         git_stage(path, &paths)
     })
-    .await
+    .await?;
+    emit_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged)
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn cmd_worktree_unstage(
+pub async fn cmd_worktree_unstage<R: Runtime>(
+    app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
     request: WorktreePathsRequest,
 ) -> Result<(), IpcError> {
     let WorktreePathsRequest { workspace_id, worktree, paths } = request;
+    let event = (workspace_id.clone(), worktree.clone());
     with_worktree_path((*registry).clone(), workspace_id, worktree, move |path| {
         git_unstage(path, &paths)
     })
-    .await
+    .await?;
+    emit_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged)
 }
 
 /// Commits the staged changes and returns the new commit sha.
@@ -557,12 +563,16 @@ pub async fn cmd_worktree_commit<R: Runtime>(
 /// Pushes the worktree branch to its upstream (or `origin` with `-u`). Never forces.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub async fn cmd_worktree_push(
+pub async fn cmd_worktree_push<R: Runtime>(
+    app: AppHandle<R>,
     registry: State<'_, WorkspaceRegistry>,
     request: WorktreeStatusRequest,
 ) -> Result<GitPushResult, IpcError> {
     let WorktreeStatusRequest { workspace_id, worktree } = request;
-    with_worktree_path((*registry).clone(), workspace_id, worktree, git_push).await
+    let event = (workspace_id.clone(), worktree.clone());
+    let result = with_worktree_path((*registry).clone(), workspace_id, worktree, git_push).await?;
+    emit_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::Updated)?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -880,5 +890,87 @@ mod deletion_repair_tests {
         let (cached, _) = scans.begin("repair", false);
         assert!(cached.rows.is_empty(), "reopen must not return deleted row");
         stop_deletion_daemon(stop, daemon).await;
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod change_event_tests {
+    use super::*;
+    use crate::worktree::{run_git, CreateWorktreeOptions};
+    use tauri::Listener;
+
+    #[tokio::test]
+    async fn stage_unstage_and_push_emit_worktree_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        run_git(&repo, &["config", "user.name", "Event fixture"]).unwrap();
+        run_git(&repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        run_git(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+        run_git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        run_git(dir.path(), &["init", "-q", "--bare", "remote.git"]).unwrap();
+        let bare = dir.path().join("remote.git");
+        run_git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]).unwrap();
+        let registry = WorkspaceRegistry::new();
+        registry.register("events", &repo).unwrap();
+        let manager = registry.manager("events").unwrap();
+        let identity = WorktreeIdentity { ws_id: "events".into(), slug: "wt".into() };
+        let path = manager.worktree_path_for("events", "wt").unwrap();
+        let wt = manager
+            .create_worktree(CreateWorktreeOptions::new("events", "wt", path))
+            .unwrap();
+        std::fs::write(wt.path.join("a.txt"), b"a").unwrap();
+
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+            let payload: WorktreeChangedPayload = serde_json::from_str(event.payload()).unwrap();
+            tx.send(payload).unwrap();
+        });
+        let mut next = || {
+            rx.try_recv().expect("command must emit worktree_changed before returning")
+        };
+        let paths = WorktreePathsRequest {
+            workspace_id: "events".into(),
+            worktree: identity.clone(),
+            paths: vec!["a.txt".into()],
+        };
+
+        cmd_worktree_stage(app.handle().clone(), app.state(), paths.clone()).await.unwrap();
+        let staged = next();
+        assert_eq!(staged.kind, WorktreeChangeKind::DirtyChanged);
+        assert_eq!(staged.workspace_id, "events");
+        assert_eq!(staged.worktree, identity);
+
+        cmd_worktree_unstage(app.handle().clone(), app.state(), paths.clone()).await.unwrap();
+        assert_eq!(next().kind, WorktreeChangeKind::DirtyChanged);
+
+        cmd_worktree_stage(app.handle().clone(), app.state(), paths).await.unwrap();
+        next();
+        cmd_worktree_commit(
+            app.handle().clone(),
+            app.state(),
+            WorktreeCommitRequest {
+                workspace_id: "events".into(),
+                worktree: identity.clone(),
+                message: "a".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(next().kind, WorktreeChangeKind::Updated);
+
+        cmd_worktree_push(
+            app.handle().clone(),
+            app.state(),
+            WorktreeStatusRequest { workspace_id: "events".into(), worktree: identity },
+        )
+        .await
+        .unwrap();
+        assert_eq!(next().kind, WorktreeChangeKind::Updated);
     }
 }
