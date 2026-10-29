@@ -60,7 +60,7 @@ const native = {
   createWorktree: vi.fn(),
   getWorktreeStatus: vi.fn(),
   getInitialProject: vi.fn().mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }),
-  listProjectBranches: vi.fn(),
+  listProjectRefs: vi.fn(),
   listWorktrees: vi.fn().mockResolvedValue([]),
   registerProject: vi.fn(),
   syncDesktopLocalProjects: vi.fn().mockResolvedValue(undefined),
@@ -213,7 +213,7 @@ vi.mock("./lib/tauri", () => ({
   getCliLauncherStatus: native.getCliLauncherStatus,
   getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" as const })),
   installCliLauncher: native.installCliLauncher,
-  listProjectBranches: native.listProjectBranches,
+  listProjectRefs: native.listProjectRefs,
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
   syncDesktopLocalProjects: native.syncDesktopLocalProjects,
@@ -516,7 +516,7 @@ describe("App project workspace flow", () => {
     native.getWorktreeStatus.mockReset();
     native.getInitialProject.mockReset();
     native.getInitialProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
-    native.listProjectBranches.mockReset();
+    native.listProjectRefs.mockReset();
     native.listWorktrees.mockReset();
     native.listWorktrees.mockResolvedValue([]);
     native.registerProject.mockReset();
@@ -1695,9 +1695,9 @@ describe("App project workspace flow", () => {
 
   it("opens a registered project's real branch-dropdown worktree flow", async () => {
     const registration = Promise.resolve({ workspaceId: "rorca", repoRoot: "/repos/rorca" });
-    const branches = Promise.resolve([{ name: "main", isCurrent: true }]);
+    const branches = Promise.resolve({ branches: [{ name: "main", isCurrent: true }], tags: [] });
     native.registerProject.mockReturnValue(registration);
-    native.listProjectBranches.mockReturnValue(branches);
+    native.listProjectRefs.mockReturnValue(branches);
 
     await act(async () => { render(<App />); });
 
@@ -1718,8 +1718,8 @@ describe("App project workspace flow", () => {
     });
 
     expect(screen.getByRole("form", { name: "Add Worktree" })).toBeInTheDocument();
-    expect(native.listProjectBranches).toHaveBeenCalledWith("rorca");
-    expect(screen.getByRole("combobox", { name: "Base branch" })).toBeInTheDocument();
+    expect(native.listProjectRefs).toHaveBeenCalledWith("rorca");
+    expect(screen.getByRole("combobox", { name: "Base ref" })).toBeInTheDocument();
   });
 
   it("opens worktree creation for the clicked non-active project", async () => {
@@ -1733,14 +1733,14 @@ describe("App project workspace flow", () => {
       workspaceId,
       repoRoot: `/repos/${workspaceId}`,
     }));
-    native.listProjectBranches.mockResolvedValue([{ name: "beta-main", isCurrent: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "beta-main", isCurrent: true }], tags: [] });
 
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Add worktree to beta" }));
 
     expect(await screen.findByRole("heading", { name: "Add Worktree · beta" })).toBeInTheDocument();
-    await waitFor(() => expect(native.listProjectBranches).toHaveBeenCalledWith("beta"));
+    await waitFor(() => expect(native.listProjectRefs).toHaveBeenCalledWith("beta"));
   });
 
   it("switches to the non-active project before opening its created worktree", async () => {
@@ -1755,7 +1755,7 @@ describe("App project workspace flow", () => {
       workspaceId,
       repoRoot: `/repos/${workspaceId}`,
     }));
-    native.listProjectBranches.mockResolvedValue([{ name: "beta-main", isCurrent: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "beta-main", isCurrent: true }], tags: [] });
     native.createWorktree.mockResolvedValue(betaWorktree);
     workspace.refreshWorktrees.mockImplementation(() => {
       if (!workspace.storeState.worktrees.some((worktree: { path: string }) => worktree.path === betaWorktree.path)) {
@@ -1785,6 +1785,61 @@ describe("App project workspace flow", () => {
         (worktree: { path: string }) => worktree.path !== betaWorktree.path,
       );
     }
+  });
+
+  it("starts the agent chosen in Add Worktree in the new worktree, not the active one", async () => {
+    const projects = [{ workspaceId: "alpha", repoRoot: "/repos/alpha" }];
+    const created = {
+      workspaceId: "alpha",
+      path: "/repos/alpha/.orca-worktrees/alpha/agent-wt",
+      head: "abc1234",
+      branch: "refs/heads/orca/alpha/agent-wt",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+    }));
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "main", isCurrent: true }], tags: ["v1.0"] });
+    native.createWorktree.mockResolvedValue(created);
+    native.spawnTerminal.mockResolvedValue("spawn-new-worktree-agent");
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to alpha" }));
+    await screen.findByRole("heading", { name: "Add Worktree · alpha" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Base ref" })).toHaveValue("main"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Worktree slug" }), { target: { value: "agent-wt" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Base ref" }), { target: { value: "v1.0" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: "claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+
+    await waitFor(() =>
+      expect(native.writeTerminal).toHaveBeenCalledWith({ sessionId: "spawn-new-worktree-agent", data: "claude\r" }),
+    );
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "alpha",
+      worktree: { wsId: "alpha", slug: "agent-wt" },
+      baseRef: "v1.0",
+    });
+    expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(created);
+    expect(native.spawnTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "alpha",
+        worktree: { wsId: "alpha", slug: "agent-wt" },
+        cwd: created.path,
+      }),
+    );
+    expect(native.spawnTerminal).not.toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo/main" }));
+    expect(workspace.openTab).toHaveBeenCalledWith(created, "Claude", "spawn-new-worktree-agent");
   });
 
   it("switches the active project when selecting a project row in the nested tree", async () => {

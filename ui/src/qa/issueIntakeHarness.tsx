@@ -23,11 +23,14 @@ const scenario = new URLSearchParams(window.location.search).get("scenario") ?? 
 
 (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
   invoke: async (cmd: string) => {
-    if (cmd === "cmd_project_branches") {
-      return [
-        { name: "develop", isCurrent: false },
-        { name: "main", isCurrent: true },
-      ];
+    if (cmd === "cmd_project_refs") {
+      return {
+        branches: [
+          { name: "develop", isCurrent: false },
+          { name: "main", isCurrent: true },
+        ],
+        tags: [],
+      };
     }
     if (cmd === "cmd_github_issue_preview") {
       if (scenario === "intake-error") {

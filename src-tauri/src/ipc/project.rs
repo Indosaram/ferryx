@@ -364,12 +364,14 @@ fn project_refs(repo_root: &Path) -> Result<ProjectRefs, IpcError> {
 
 #[cfg(feature = "desktop")]
 fn local_branches(repo_root: &Path) -> Result<Vec<LocalBranch>, IpcError> {
+    // Full refnames avoid the "heads/<name>" disambiguation %(refname:short) emits
+    // when a tag shares the branch's name.
     let branch_output = run_git(
         repo_root,
         &[
             "for-each-ref",
             "--sort=refname",
-            "--format=%(refname:short)",
+            "--format=%(refname)",
             "refs/heads/",
         ],
     )
@@ -380,7 +382,7 @@ fn local_branches(repo_root: &Path) -> Result<Vec<LocalBranch>, IpcError> {
 
     let mut branches = branch_output
         .lines()
-        .map(str::trim)
+        .filter_map(|line| line.trim().strip_prefix("refs/heads/"))
         .filter(|name| !name.is_empty())
         .map(|name| LocalBranch {
             name: name.to_string(),
@@ -556,6 +558,43 @@ mod project_refs_tests {
             .iter()
             .any(|branch| branch.name == "main" && branch.is_current));
         assert_eq!(refs.tags, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn project_refs_keeps_plain_names_when_a_branch_and_tag_share_a_name() {
+        let repo = repository();
+        run_git(repo.path(), &["tag", "b1"]).unwrap();
+        run_git(repo.path(), &["tag", "main"]).unwrap();
+
+        let refs = project_refs(repo.path()).unwrap();
+
+        assert_eq!(branch_names(&refs), vec!["b1", "main"]);
+        assert!(refs
+            .branches
+            .iter()
+            .any(|branch| branch.name == "main" && branch.is_current));
+        assert_eq!(refs.tags, vec!["b1".to_string(), "main".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn cmd_project_refs_rejects_ssh_workspace_ids() {
+        use tauri::Manager;
+
+        let app = tauri::test::mock_builder()
+            .manage(WorkspaceRegistry::new())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+
+        let error = cmd_project_refs(
+            app.state::<WorkspaceRegistry>(),
+            ProjectBranchesRequest {
+                workspace_id: "ssh:opaque-hash".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, crate::ipc::IpcErrorCode::Unsupported);
     }
 
     #[test]
