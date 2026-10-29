@@ -8,8 +8,8 @@ describe("splitAgentArgs", () => {
       "--append-system-prompt", "a b", "--name", "c d", "",
     ]);
     expect(splitAgentArgs(`-c "say \\"hi\\"" 'it'"'"'s'`)).toEqual(["-c", `say "hi"`, "it's"]);
-    expect(splitAgentArgs(`--config C:\\Users\\me\\cfg.toml --dir "C:\\Program Files\\X\\"`)).toEqual([
-      "--config", "C:\\Users\\me\\cfg.toml", "--dir", "C:\\Program Files\\X\\",
+    expect(splitAgentArgs(`--config C:\\Users\\me\\cfg.toml --dir "C:\\Program Files\\X\\bin"`)).toEqual([
+      "--config", "C:\\Users\\me\\cfg.toml", "--dir", "C:\\Program Files\\X\\bin",
     ]);
     expect(splitAgentArgs("  ")).toEqual([]);
   });
