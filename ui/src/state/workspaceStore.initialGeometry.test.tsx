@@ -51,7 +51,9 @@ describe("initial PTY geometry callers", () => {
   it("new tab spawns with the measured group-body grid", async () => {
     const { services, spawnTerminal } = servicesWith(async () => ({ cols: 132, rows: 41 }));
     const { result } = renderHook(() => useWorkspaceStore({ workspaceId: "ws-geo", initialWorktrees: [worktree], services }));
-    await act(async () => { await result.current.openTab(worktree, "existing", "existing-backend"); });
+    await act(async () => {
+      await result.current.openTab(worktree, "existing", { sessionId: "existing-backend", daemonEpoch: null, incarnation: null });
+    });
     await act(async () => { await result.current.openTab(worktree); });
     expect(services.measureInitialGeometry).toHaveBeenCalledWith({ kind: "newTab", groupId: expect.anything() });
     expect(spawnTerminal).toHaveBeenCalledTimes(1);

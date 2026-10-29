@@ -25,13 +25,17 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-/** The address a phone opens to reach this machine's gateway, or null when none is known yet. */
+/** The pairing page a phone opens on this machine's gateway, or null when no address is known yet. */
 export function remoteAccessUrl(status: RemoteGatewayStatus | null): string | null {
   if (!status?.enabled) return null;
-  if (status.mode === "relay" && status.relayUrl) return status.relayUrl;
-  if (status.localIp) return `http://${status.localIp}:${status.port}`;
+  if (status.mode === "relay" && status.relayUrl) {
+    // A phone browser opens the relay page over http(s); the configured relay may be its ws(s) tunnel address.
+    const page = status.relayUrl.replace(/^ws(s?):\/\//i, "http$1://").replace(/\/+$/, "");
+    return `${page}/pair?relay=1`;
+  }
+  if (status.localIp) return `http://${status.localIp}:${status.port}/pair`;
   const host = status.boundAddress?.replace(/:\d+$/, "");
-  if (host && host !== "0.0.0.0" && host !== "[::]") return `http://${host}:${status.port}`;
+  if (host && host !== "0.0.0.0" && host !== "[::]") return `http://${host}:${status.port}/pair`;
   return null;
 }
 

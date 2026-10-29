@@ -1,7 +1,7 @@
 // The phone's default home: what the hub supervisor on each computer drives, its pause, and
 // what it typed. Mirrors the desktop SupervisorPanelView, laid out as touch cards per machine.
 import { Eye, Pause, Play } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { cn } from "../../lib/cn";
@@ -137,6 +137,22 @@ export function SupervisorHome({ machines, now, needsYou, onSetPaused, onOpenLan
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   // The lane's paused value the person asked for, shown until the next snapshot settles it.
   const [optimistic, setOptimistic] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  // Once a snapshot shows the asked-for value the override has done its job: drop it, so a later
+  // change from another surface (desktop, Slack) shows instead of the stale request.
+  useEffect(() => {
+    if (optimistic.size === 0) return;
+    const settled = [...optimistic].filter(([id, paused]) => {
+      const [machineId, laneKey] = id.split("\u0000");
+      const lane = machines.find((m) => m.machineId === machineId)?.snapshot?.lanes.find((item) => item.key === laneKey);
+      return lane?.paused === paused;
+    });
+    if (settled.length === 0) return;
+    setOptimistic((prev) => {
+      const copy = new Map(prev);
+      for (const [id, paused] of settled) if (copy.get(id) === paused) copy.delete(id);
+      return copy;
+    });
+  }, [machines, optimistic]);
   const headline = supervisorHeadline(machines, now);
   const recent = recentActions(machines);
   const readable = machines.filter((machine) => machine.snapshot);

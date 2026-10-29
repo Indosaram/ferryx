@@ -201,7 +201,12 @@ pub trait Runtime: Send + Sync {
     async fn rerun(&self, job: &str, approved: bool) -> Result<RunReceipt>;
     async fn quota_check(&self) -> Result<Value>;
     async fn log_excerpt(&self, job: &str) -> Result<String>;
+    /// An informational outcome (a verified fix): the home channel.
     async fn outcome(&self, problem: &Problem, message: &str) -> Result<()>;
+    /// A notice that needs the owner to act (approve a rerun, restore a login): the owner DM.
+    async fn owner_notice(&self, problem: &Problem, message: &str) -> Result<()> {
+        self.outcome(problem, message).await
+    }
 }
 
 pub struct Remediator {
@@ -569,17 +574,28 @@ impl Remediator {
             },
         )
         .await?;
+        let notice = redact_token(&scrub(&format!(
+            "{}\n{}",
+            owner_message(&problem.job_id, &action),
+            approval_instruction(problem.id)
+        )));
+        // The owner item's alert is this notice: the alert sweep sees the obligation and does
+        // not post the item a second time, and reconcile marks it delivered once it is posted.
+        sqlx::query(
+            "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'pending', ?, ?)
+             ON CONFLICT(id) DO UPDATE SET state = 'pending', body = excluded.body, updated_at = excluded.updated_at",
+        )
+        .bind(format!(
+            "{}{}",
+            crate::owner_alert::OBLIGATION_PREFIX,
+            crate::schedule::cron_owner_item_id(&problem.job_id)
+        ))
+        .bind(&notice)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
-        self.runtime
-            .outcome(
-                problem,
-                &format!(
-                    "{}\n{}",
-                    owner_message(&problem.job_id, &action),
-                    approval_instruction(problem.id)
-                ),
-            )
-            .await
+        self.runtime.owner_notice(problem, &notice).await
     }
 
     /// Escalates `remediating` rows no live lane or rerun can still settle.
@@ -847,12 +863,15 @@ pub fn make_lane(
     })
 }
 
-/// The hub's runtime: lanes in the hub database, reruns through the native runner, outcomes in
-/// the owner's Slack.
+/// The hub's runtime: lanes in the hub database, reruns through the native runner, notices that
+/// need the owner in the owner DM and verified fixes in the home channel.
 pub struct HubRuntime {
     pub pool: SqlitePool,
     pub briefs: PathBuf,
+    /// The owner DM: needs-you notices.
     pub owner_session: Option<String>,
+    /// The home channel: verified fixes. Falls back to the owner session.
+    pub home_session: Option<String>,
     pub quota_url: String,
     pub log_paths: Vec<PathBuf>,
 }
@@ -866,6 +885,7 @@ impl HubRuntime {
             pool,
             briefs: home.join(".ferryx/hub/cron-briefs"),
             owner_session,
+            home_session: None,
             quota_url: "http://127.0.0.1:18801".into(),
             log_paths: vec![home.join(".ferryx/hub/hub.log")],
         }
@@ -986,8 +1006,23 @@ impl Runtime for HubRuntime {
     }
 
     async fn outcome(&self, problem: &Problem, message: &str) -> Result<()> {
+        let target = self
+            .home_session
+            .as_deref()
+            .or(self.owner_session.as_deref());
+        self.post(problem, message, target).await
+    }
+
+    async fn owner_notice(&self, problem: &Problem, message: &str) -> Result<()> {
+        self.post(problem, message, self.owner_session.as_deref())
+            .await
+    }
+}
+
+impl HubRuntime {
+    async fn post(&self, problem: &Problem, message: &str, target: Option<&str>) -> Result<()> {
         queue_outcome(&self.pool, problem.id, &problem.job_id, message).await?;
-        let Some(owner) = &self.owner_session else {
+        let Some(owner) = target else {
             return Ok(());
         };
         let message = redact_token(&scrub(message));
@@ -1141,8 +1176,9 @@ pub async fn dispatch_once(pool: &SqlitePool, remediator: &Remediator) -> Result
     Ok(handled)
 }
 
-/// Installs the hub remediator and runs the dispatcher every 5 seconds.
-pub async fn serve(pool: SqlitePool, owner_session: Option<String>) {
+/// Installs the hub remediator and runs the dispatcher every 5 seconds. Needs-you notices go to
+/// `owner_session` (the owner DM), verified fixes to `home_session` (the home channel).
+pub async fn serve(pool: SqlitePool, owner_session: Option<String>, home_session: Option<String>) {
     match redact_stored_owner_tokens(&pool).await {
         Ok(0) => {}
         Ok(rows) => tracing::info!(rows, "redacted leaked cron owner tokens from stored chat"),
@@ -1170,7 +1206,10 @@ pub async fn serve(pool: SqlitePool, owner_session: Option<String>) {
     let remediator = Arc::new(Remediator {
         pool: pool.clone(),
         judge: Judge::from_config(crate::judge::typesafe_from_env()),
-        runtime: Arc::new(HubRuntime::new(pool.clone(), owner_session)),
+        runtime: Arc::new(HubRuntime {
+            home_session,
+            ..HubRuntime::new(pool.clone(), owner_session)
+        }),
     });
     if install(Arc::clone(&remediator)).is_err() {
         tracing::debug!("cron remediator was already installed");

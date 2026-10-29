@@ -1084,7 +1084,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let session = hub.owner_session();
+        let session = hub.home_session();
         assert_eq!(session.channel_id, "C0C9XG5FP8W");
         assert_eq!(session.user_id, "UOWNER");
         let _ = std::fs::remove_dir_all(&dir);

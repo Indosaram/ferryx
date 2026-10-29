@@ -1321,7 +1321,12 @@ pub async fn finish_run(
                 .bind(now.to_rfc3339())
                 .execute(pool)
                 .await?;
-            escalate_incident(pool, job_id, kind, &detail, now).await?;
+            // With a remediator running, the failure is triaged first: an auto-fix is only
+            // reported in the home channel, and the remediator itself escalates to the owner
+            // when it cannot fix the job. Without one, the owner is told at once.
+            if crate::cron_remediate::installed().is_none() {
+                escalate_incident(pool, job_id, kind, &detail, now).await?;
+            }
         }
     }
     Ok(true)

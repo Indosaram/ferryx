@@ -124,7 +124,6 @@ import {
   unregisterProject,
   saveSession,
   setBadgeCount,
-  spawnTerminal,
   spawnTerminalDetailed,
   retryPairedSession,
   retryTerminalRemoteSession,
@@ -2713,14 +2712,21 @@ function WorkspaceApp({
           kind: "newTab",
           groupId: stateRef.current.layout.focusedGroupId ?? null,
         }).catch(() => null);
-        const backendSessionId = await spawnTerminal({
+        const spawned = await spawnTerminalDetailed({
           workspaceId: activeProjectRef.current.workspaceId,
           worktree: worktreeIdentity(targetWorktree),
           cwd: targetWorktree.path,
           ...initialGridFields(agentGrid),
         });
+        const backendSessionId = spawned.sessionId;
         const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
-        await openTab(targetWorktree, label, backendSessionId);
+        // The pane needs the daemon epoch and incarnation to form its attach tuple; a bare id
+        // leaves the tab blank and unable to accept input.
+        await openTab(targetWorktree, label, {
+          sessionId: backendSessionId,
+          daemonEpoch: spawned.daemonEpoch ?? null,
+          incarnation: spawned.session?.incarnation ?? null,
+        });
         const fullCommand = `${agent.command} ${agent.args}`.trim();
         if (fullCommand) {
           await writeTerminal({ sessionId: backendSessionId, data: `${fullCommand}\r` });
@@ -4423,7 +4429,7 @@ function WorkspaceApp({
                 kind: "newTab",
                 groupId: stateRef.current.layout.focusedGroupId ?? null,
               }).catch(() => null);
-              const backendSessionId = await spawnTerminal({
+              const spawned = await spawnTerminalDetailed({
                 workspaceId: project.workspaceId,
                 worktree: targetWorktree ? worktreeIdentity(targetWorktree) : null,
                 cwd: entry.cwd || targetWorktree?.path || project.repoRoot,
@@ -4444,7 +4450,11 @@ function WorkspaceApp({
               });
               const label = agentHistoryProviderLabel(entry.provider);
               if (targetWorktree) {
-                await openTab(targetWorktree, label, backendSessionId);
+                await openTab(targetWorktree, label, {
+                  sessionId: spawned.sessionId,
+                  daemonEpoch: spawned.daemonEpoch ?? null,
+                  incarnation: spawned.session?.incarnation ?? null,
+                });
               }
               setHistoryProject(null);
             } catch (error) {
