@@ -178,6 +178,7 @@ import {
 import { registerWindowCloseGuard, startUpdatePolling } from "./lib/updater";
 import { maybeShowWindowsStoreMigrationNotice } from "./lib/windowsStoreMigration";
 import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { usePendingWorktree } from "./state/pendingWorktree";
 import { findDirectionalLeafId, type PaneFocusDirection } from "./state/paneGeometry";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
@@ -2144,21 +2145,14 @@ function WorkspaceApp({
     activeAgentCount: number;
   } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
-  const [pendingWorktree, setPendingWorktree] = useState<Worktree | null>(null);
-  // Agent chosen in the Add Worktree dialog for a worktree created in a non-active project;
-  // it starts once the project switch lands the pending worktree.
-  const pendingWorktreeAgentRef = useRef<{ path: string; agentId: string } | null>(null);
+  // The agent chosen in the Add Worktree dialog for a worktree created in a non-active project
+  // starts once the project switch lands the pending worktree.
+  const { pendingWorktree, setPendingWorktree, pendingWorktreeAgentRef, setPendingWorktreePath } =
+    usePendingWorktree();
   const launchAgentByIdInWorktreeRef = useRef<(worktree: Worktree, agentId: string) => Promise<void>>(
     async () => undefined,
   );
   const pendingWorktreePath = pendingWorktree?.path ?? null;
-  const setPendingWorktreePath = useCallback((path: string | null) => {
-    if (path === null) {
-      setPendingWorktree(null);
-    } else {
-      setPendingWorktree((current) => (current?.path === path ? current : { path, head: "", branch: null, bare: false, detached: false, locked: null, prunable: null }));
-    }
-  }, []);
   const [pendingRemoteSlug, setPendingRemoteSlug] = useState<{
     workspaceId: string;
     createTerminal?: boolean;
@@ -2772,8 +2766,9 @@ function WorkspaceApp({
     async (owner: RegisteredProject, worktree: Worktree, launch?: WorktreeAgentLaunch) => {
       if (activeRemoteHostRef.current) return;
       if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
-        pendingWorktreeAgentRef.current = launch ? { path: worktree.path, agentId: launch.agentId } : null;
+        // The project switch clears any pending worktree and its agent, so record the agent after it.
         handleSelectProject(owner);
+        pendingWorktreeAgentRef.current = launch ? { path: worktree.path, agentId: launch.agentId } : null;
         setPendingWorktree(worktree);
         return;
       }
@@ -3175,7 +3170,7 @@ function WorkspaceApp({
       if (activeRemoteHostRef.current) return;
       const ownerId = resolveWorktreeOwnerId(worktree, projectsRef.current, activeProjectRef.current.workspaceId);
       const owner = projectsRef.current.find((project) => project.workspaceId === ownerId);
-      if (!owner || (owner.target && owner.target.kind !== "local") || !worktreeIdentity(worktree)) return;
+      if (!owner || (owner.target && owner.target.kind !== "local") || owner.gitRoot === null) return;
       if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
         // Tabs live in the owning project's store; switch there first, then open Changes again.
         handleSelectWorktree(worktree);
@@ -3186,9 +3181,7 @@ function WorkspaceApp({
     [handleSelectWorktree, openChangesTab],
   );
   const activeWorktreeCanShowChanges = Boolean(
-    activeWorktree &&
-      worktreeIdentity(activeWorktree) &&
-      (!activeProject.target || activeProject.target.kind === "local"),
+    activeWorktree && activeProject.gitRoot !== null && (!activeProject.target || activeProject.target.kind === "local"),
   );
   const handleShowActiveWorktreeChanges = useCallback(() => {
     const worktree = activeWorktreeRef.current;

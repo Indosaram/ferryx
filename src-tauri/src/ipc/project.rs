@@ -314,25 +314,6 @@ pub async fn cmd_sync_desktop_sidebar(
     daemon_client.sync_desktop_sidebar(model).await
 }
 
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub async fn cmd_project_branches(
-    registry: State<'_, WorkspaceRegistry>,
-    request: ProjectBranchesRequest,
-) -> Result<Vec<LocalBranch>, IpcError> {
-    let registry = (*registry).clone();
-    run_blocking(move || {
-        let manager = registry
-            .manager(&request.workspace_id)
-            .map_err(IpcError::from)?;
-        if !manager.is_git_backed() {
-            return Ok(Vec::new());
-        }
-        local_branches(manager.repo_root())
-    })
-    .await
-}
-
 /// Lists the local branches and tags a worktree can be based on. Remote-tracking
 /// branches are deliberately excluded.
 #[cfg(feature = "desktop")]

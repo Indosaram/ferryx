@@ -37,7 +37,7 @@ async fn all_local_git_boundaries_reject_remote_namespace_even_without_loaded_me
         IpcErrorCode::WorkspaceNotFound
     );
     assert_eq!(
-        cmd_project_branches(
+        cmd_project_refs(
             app.state(),
             ProjectBranchesRequest {
                 workspace_id: id.clone()

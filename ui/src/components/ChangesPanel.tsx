@@ -6,11 +6,12 @@ import { highlightLines } from "../lib/previewHighlight";
 import {
   commitWorktree,
   getWorktreeDiff,
-  getWorktreeStatus,
+  getChangesStatus,
   pushWorktree,
   stageWorktreePaths,
   toIpcError,
   unstageWorktreePaths,
+  type ChangesTarget,
   type GitDiffScope,
 } from "../lib/tauri";
 import type { DirtyFile, StructuredIpcError, WorktreeIdentity } from "../lib/types";
@@ -18,7 +19,8 @@ import { SegmentedControl } from "./ui/SegmentedControl";
 
 export type ChangesPanelProps = {
   workspaceId: string;
-  worktree: WorktreeIdentity;
+  /** `null` for the main checkout or an unmanaged worktree, addressed by `worktreePath`. */
+  worktree: WorktreeIdentity | null;
   worktreePath: string;
   /** The tab is on screen; becoming visible refreshes the file list. */
   active?: boolean;
@@ -180,8 +182,12 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
   const [busy, setBusy] = useState<null | "stage" | "commit" | "push">(null);
   const [actionError, setActionError] = useState<StructuredIpcError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const { wsId, slug } = worktree;
-  const request = useMemo(() => ({ workspaceId, worktree: { wsId, slug } }), [workspaceId, wsId, slug]);
+  const wsId = worktree?.wsId;
+  const slug = worktree?.slug;
+  const request = useMemo<ChangesTarget>(
+    () => (wsId !== undefined && slug !== undefined ? { workspaceId, worktree: { wsId, slug } } : { workspaceId, worktreePath }),
+    [workspaceId, wsId, slug, worktreePath],
+  );
   const refreshSeq = useRef(0);
   const diffSeq = useRef(0);
   // `busy` state lags a render behind; this ref stops a second action (e.g. a repeated
@@ -191,7 +197,7 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current;
     try {
-      const status = await getWorktreeStatus(request);
+      const status = await getChangesStatus(request);
       if (seq !== refreshSeq.current) return;
       const next = groupChanges(status.files);
       setGroups(next);
@@ -398,7 +404,7 @@ export function ChangesPanel({ workspaceId, worktree, worktreePath, active = tru
             ) : !selection ? null : rows.length === 0 && patch !== null ? (
               <div role="status" className="px-3 py-4 font-sans text-muted-foreground">
                 {selection.group === "workingTree" && isUntracked(groups, selection.path)
-                  ? "New untracked file. Stage it to see its contents as a diff."
+                  ? "New untracked file with no text preview (empty, binary or too large)."
                   : "No textual diff for this file."}
               </div>
             ) : mode === "unified" ? (

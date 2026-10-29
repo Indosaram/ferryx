@@ -30,7 +30,7 @@ type Status = { isDirty: boolean; files: Array<{ statusCode: string; path: strin
 function mockIpc(options: { status: () => Status; commit?: () => Promise<unknown>; push?: () => Promise<unknown> }) {
   core.invoke.mockImplementation(async (command: string, args?: { request?: Record<string, unknown> }) => {
     switch (command) {
-      case "cmd_worktree_status":
+      case "cmd_worktree_changes_status":
         return options.status();
       case "cmd_worktree_diff":
         return args?.request?.file === "README.md" ? README_PATCH : "";
@@ -104,6 +104,34 @@ describe("ChangesPanel", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Split" }));
     expect(screen.getByTestId("changes-diff").getAttribute("data-mode")).toBe("split");
     expect(screen.getAllByTestId("diff-row").some((row) => row.getAttribute("data-kind") === "add")).toBe(true);
+  });
+
+  it("previews an untracked file's lines without staging it", async () => {
+    const preview = ["diff --git a/notes.txt b/notes.txt", "new file mode 100644", "--- /dev/null", "+++ b/notes.txt", "@@ -0,0 +1,2 @@", "+first note", "+second note", ""].join("\n");
+    mockIpc({ status: () => ({ isDirty: true, files: [{ statusCode: "??", path: "notes.txt" }] }) });
+    const base = core.invoke.getMockImplementation()!;
+    core.invoke.mockImplementation(async (command: string, args?: { request?: Record<string, unknown> }) =>
+      command === "cmd_worktree_diff" && args?.request?.file === "notes.txt" ? preview : base(command, args),
+    );
+    renderPanel();
+
+    await waitFor(() => {
+      const added = screen.queryAllByTestId("diff-row").filter((row) => row.getAttribute("data-kind") === "add");
+      expect(added.map((row) => row.textContent)).toEqual([expect.stringContaining("+first note"), expect.stringContaining("+second note")]);
+    });
+    expect(core.invoke).not.toHaveBeenCalledWith("cmd_worktree_stage", expect.anything());
+  });
+
+  it("addresses the main checkout by path when it has no managed identity", async () => {
+    mockIpc({ status: () => ({ isDirty: true, files: [{ statusCode: " M", path: "README.md" }] }) });
+    render(<ChangesPanel workspaceId="workspace-main" worktree={null} worktreePath="/repo" />);
+
+    await waitFor(() => expect(screen.queryAllByTestId("diff-row").length).toBeGreaterThan(0));
+    const pathTarget = { workspaceId: "workspace-main", worktreePath: "/repo" };
+    expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_changes_status", { request: pathTarget });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_worktree_diff", {
+      request: { ...pathTarget, scope: { kind: "workingTree" }, file: "README.md" },
+    });
   });
 
   it("stages a working-tree file when its checkbox is ticked and refreshes", async () => {

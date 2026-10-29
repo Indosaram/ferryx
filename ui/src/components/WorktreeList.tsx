@@ -1,5 +1,5 @@
 import { useSortable } from "@dnd-kit/sortable";
-import { LockKeyhole, Plus, Trash2 } from "lucide-react";
+import { GitCompare, LockKeyhole, Plus, Trash2 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -52,7 +52,7 @@ export type WorktreeRowProps = {
   readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
   readonly onResetAgentState?: (worktree: Worktree) => void;
-  /** Opens the Changes tab; offered only for managed local worktrees. */
+  /** Opens the Changes tab; offered for local checkouts, including the main one. */
   readonly onShowChanges?: (worktree: Worktree) => void;
   /** Precomputed row state (sidebarLiveState); without it the row derives its own. */
   readonly live?: SidebarRowLive;
@@ -164,7 +164,7 @@ export const WorktreeRow = memo(function WorktreeRow({
       items.push({ kind: "item", id: "copy-branch", label: "Copy Branch Name" });
     }
     if (onShowChanges && !isRemote) {
-      items.push({ kind: "item", id: "show-changes", label: "Show Changes", enabled: !isDisabled && worktreeIdentity(worktree) !== null });
+      items.push({ kind: "item", id: "show-changes", label: "Show Changes", enabled: !isDisabled });
     }
     if (onResetAgentState) {
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", enabled: !isDisabled, icon: "refresh" });
@@ -246,6 +246,18 @@ export const WorktreeRow = memo(function WorktreeRow({
       trailing={
         <>
           {worktree.locked ? <LockKeyhole className="mr-0.5 size-3 text-status-warning" /> : null}
+          {onShowChanges && !isRemote ? (
+            <IconButton
+              label="Show changes"
+              size="sm"
+              disabled={isDisabled}
+              className="size-5"
+              onClick={isDisabled ? undefined : () => onShowChanges(worktree)}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <GitCompare className="size-3" />
+            </IconButton>
+          ) : null}
           {onCreateWorktree ? (
             <IconButton
               label="Add worktree"

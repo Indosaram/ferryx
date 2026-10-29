@@ -75,19 +75,29 @@ const setField = (selector: string, value: string, prototype: typeof HTMLInputEl
 function Harness() {
   useEffect(() => {
     if (scenario === "agent" || scenario === "badref") {
-      window.setTimeout(() => {
+      // The Base ref input stays disabled until the refs load; fill the form once it is enabled.
+      const fill = () => {
+        const baseRef = document.querySelector<HTMLInputElement>('[aria-label="Base ref"]');
+        if (!baseRef || baseRef.disabled) return false;
         setField('[aria-label="Worktree slug"]', "release-fix", HTMLInputElement);
         setField('[aria-label="Base ref"]', scenario === "agent" ? "v1" : "does-not-exist", HTMLInputElement);
         setField('[aria-label="Agent"]', "claude", HTMLSelectElement);
         if (scenario === "badref") {
-          window.setTimeout(() => {
+          // React commits the typed values before the click is handled on the next frame.
+          window.requestAnimationFrame(() =>
             Array.from(document.querySelectorAll("button"))
               .find((button) => button.textContent === "Create Worktree")
-              ?.click();
-          }, 60);
+              ?.click(),
+          );
         }
-      }, 60);
-      return;
+        return true;
+      };
+      if (fill()) return;
+      const observer = new MutationObserver(() => {
+        if (fill()) observer.disconnect();
+      });
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["disabled"] });
+      return () => observer.disconnect();
     }
     const input = document.querySelector<HTMLInputElement>('[aria-label="GitHub issue"]');
     if (!input) return;
