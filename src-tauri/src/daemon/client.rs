@@ -7433,6 +7433,7 @@ mod tests {
                 tab_id: None,
                 terminal_tabs: Vec::new(),
                 attention_inventory: Vec::new(),
+                session_attention: Vec::new(),
             }),
         };
         assert!(request_is_retry_safe(&req));

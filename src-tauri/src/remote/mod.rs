@@ -74,6 +74,11 @@ mod filesystem_tests;
 #[cfg(test)]
 mod workspace_api_tests;
 
+// Calls the real /api/v1/workspace/state, so it runs on every target.
+#[cfg(test)]
+#[path = "session_attention_privacy_tests.rs"]
+mod session_attention_privacy_tests;
+
 #[cfg(all(test, unix))]
 #[path = "dag_paired_tests.rs"]
 mod dag_paired_tests;

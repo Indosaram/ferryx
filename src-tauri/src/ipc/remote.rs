@@ -3,7 +3,8 @@ use crate::daemon::client::DaemonClient;
 use crate::ipc::IpcError;
 use crate::remote::auth::{DeviceInfo, DevicePermission, PairingWindowStatus};
 use crate::remote::protocol::{
-    RemoteActiveDesktopSelection, RemoteTerminalTabInfo, RemoteWorktreeAttention,
+    RemoteActiveDesktopSelection, RemoteSessionAttention, RemoteTerminalTabInfo,
+    RemoteWorktreeAttention,
 };
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
@@ -562,6 +563,8 @@ pub(crate) async fn set_device_permission(
 pub struct SetActiveDesktopSelectionRequest {
     #[serde(default)]
     pub attention_inventory: Vec<RemoteWorktreeAttention>,
+    #[serde(default)]
+    pub session_attention: Vec<RemoteSessionAttention>,
     pub workspace_id: Option<String>,
     pub worktree_slug: Option<String>,
     pub worktree_label: Option<String>,
@@ -665,6 +668,7 @@ pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
         && request.tab_id.is_none()
         && request.terminal_tabs.is_empty()
         && request.attention_inventory.is_empty()
+        && request.session_attention.is_empty()
     {
         None
     } else {
@@ -677,6 +681,20 @@ pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
                     worktree_slug: sanitize_worktree_text(entry.worktree_slug),
                     worktree_label: sanitize_worktree_text(entry.worktree_label),
                     state: sanitize_activity_state(entry.state),
+                })
+                .collect(),
+            session_attention: request
+                .session_attention
+                .into_iter()
+                .filter_map(|entry| {
+                    Some(RemoteSessionAttention {
+                        backend_session_id: sanitize_session_id(Some(entry.backend_session_id))?,
+                        workspace_id: entry.workspace_id,
+                        worktree_slug: sanitize_worktree_text(entry.worktree_slug),
+                        state: sanitize_activity_state(Some(entry.state))
+                            .filter(|state| state != "working")?,
+                        agent_type: sanitize_agent_type(entry.agent_type),
+                    })
                 })
                 .collect(),
             workspace_id: request.workspace_id,

@@ -35,7 +35,8 @@ import { MobileSheet } from "./chat/MobileSheet";
 import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
 import type { PushRequest } from "../lib/pushSubscription";
 import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
-import { useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
+import { remoteInboxEntries, useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
+import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { capRetainedMessages } from "./agentConversation";
 import {
   ReferenceHistoryFetchError,
@@ -3100,12 +3101,22 @@ export const RemoteHostConnection: React.FC<{
     }),
     [inboxTargetFor, token, transportBaseUrl],
   );
-  const remoteInbox = useRemoteInbox({
-    workspaceId: effectiveModel.context.workspaceId,
-    workspaceLabel: effectiveModel.context.workspaceId,
-    tabs: effectiveModel.context.terminalTabs ?? [],
-    transport: inboxTransport,
+  /* One Inbox for the whole host: every waiting or finished session of every worktree, project
+     and (account mode) machine, not only the desktop's active selection. The phone home and the
+     session sheet both render these rows. */
+  const accountInboxRows: InboxRow[] = isAccountMode
+    ? buildInboxRows({
+        options: accountDiscovery.accountOptions,
+        inventories: accountDiscovery.sessionInventories,
+        lanes: phoneSupervisor.lanes,
+      })
+    : [];
+  const inboxEntries = remoteInboxEntries({
+    model: effectiveModel,
+    machineId: activeMachineId,
+    accountRows: accountInboxRows,
   });
+  const remoteInbox = useRemoteInbox({ entries: inboxEntries, transport: inboxTransport });
   inboxPushRef.current = remoteInbox.push;
   /* Opening an Inbox row moves only this phone's own view to that session, the way the read-only
      desktop follow applies a session: no /workspace/select, so the desktop's focus never moves.
@@ -4811,13 +4822,31 @@ export const RemoteHostConnection: React.FC<{
       .filter((option) => option.sessionId && option.inventoryActivityState === "waiting")
       .map((option) => `${option.machineId}\u0000${option.sessionId}`),
   );
-  const phoneInboxRows: InboxRow[] = phoneHome
-    ? buildInboxRows({
-        options: accountDiscovery.accountOptions,
-        inventories: accountDiscovery.sessionInventories,
-        lanes: phoneSupervisor.lanes,
-      })
-    : [];
+  /* Opening an Inbox row never moves the desktop's focus: a pane already mirrored is shown on this
+     phone only, and any other account session opens through the read-only account selection. */
+  const openInboxRow = (row: AttentionRow): boolean => {
+    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
+    if (!entry) return false;
+    const tab = entry.tabId ? terminalTabs.find((candidate) => candidate.id === entry.tabId) : undefined;
+    if (tab) {
+      showSessionLocally(tab);
+      if (phoneHome) phoneNav.openSession();
+      return true;
+    }
+    const option = entry.machineId
+      ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId)
+      : null;
+    if (!option) {
+      toast.error("This session can't be opened from here right now", {
+        description: entry.machineId
+          ? "Its computer is offline or has not listed it yet."
+          : "Answer it here, or pick its worktree to open it.",
+      });
+      return false;
+    }
+    openPhoneSession(option);
+    return true;
+  };
   const activeSupervisorSnapshot = phoneHome && activeMachineId
     ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
     : null;
@@ -4893,9 +4922,12 @@ export const RemoteHostConnection: React.FC<{
             },
           }}
           inbox={{
-            rows: phoneInboxRows,
+            rows: remoteInbox.rows,
+            prompts: remoteInbox.prompts,
             loading: accountInventoryLoading,
-            onOpen: (row) => openPhoneSession(row.option),
+            onOpen: (row) => {
+              openInboxRow(row);
+            },
           }}
           worktrees={phoneWorktrees}
           resume={
@@ -5363,9 +5395,7 @@ export const RemoteHostConnection: React.FC<{
           rows={remoteInbox.rows}
           prompts={remoteInbox.prompts}
           onOpen={(row) => {
-            const tab = terminalTabs.find((candidate) => candidate.id === row.id);
-            if (tab) showSessionLocally(tab);
-            setInboxOpen(false);
+            if (openInboxRow(row)) setInboxOpen(false);
           }}
         />
       </MobileSheet>

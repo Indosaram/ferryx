@@ -1607,6 +1607,14 @@ export type FocusedTerminalPayload = {
     worktreeLabel: string | null;
     state: "waiting" | "done" | "working" | null;
   }>;
+  /** Every waiting or unseen-done session of every project, keyed by its backend session. */
+  sessionAttention?: Array<{
+    backendSessionId: string;
+    workspaceId: string;
+    worktreeSlug: string | null;
+    state: "waiting" | "done";
+    agentType?: string;
+  }>;
   workspaceId: string;
   worktreeSlug?: string | null;
   worktreeLabel?: string | null;
@@ -1635,6 +1643,7 @@ export async function publishFocusedTerminal(payload: FocusedTerminalPayload | n
       tabId,
       terminalTabs,
       attentionInventory: payload?.attentionInventory ?? [],
+      ...(payload?.sessionAttention?.length ? { sessionAttention: payload.sessionAttention } : {}),
     },
   });
 }

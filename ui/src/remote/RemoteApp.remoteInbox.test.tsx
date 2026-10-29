@@ -74,7 +74,7 @@ function promptOf(session: string, kind = "question"): Record<string, unknown> {
 
 type Call = { url: string; method: string; body: unknown };
 
-function installFetch(prompts: Record<string, Record<string, unknown>>): Call[] {
+function installFetch(prompts: Record<string, Record<string, unknown>>, workspaceState: unknown = state): Call[] {
   const calls: Call[] = [];
   vi.stubGlobal(
     "fetch",
@@ -92,7 +92,7 @@ function installFetch(prompts: Record<string, Record<string, unknown>>): Call[] 
           sessions: ["sess-main", "sess-a", "sess-b"].map((sessionId) => ({ sessionId, daemonEpoch: DAEMON_EPOCH, running: true })),
         });
       }
-      if (url.includes("/api/v1/workspace/state")) return jsonResponse(state);
+      if (url.includes("/api/v1/workspace/state")) return jsonResponse(workspaceState);
       if (url.includes("/reference-chat/") && url.includes("/prompt")) {
         const session = Object.keys(prompts).find((id) => url.includes(`/reference-chat/${id}/`));
         return jsonResponse(session ? prompts[session] : { prompt: null, screenRevision: "rev-0", cols: 80, rows: 24 });
@@ -138,6 +138,55 @@ describe("phone Inbox (todo 9)", () => {
     const rows = within(sheet).getAllByTestId("attention-row");
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.getAttribute("data-attention-state") === "needs-you")).toBe(true);
+  });
+
+  /** The gateway's RemoteWorkspaceState: projects, the active context, and every project's waiting sessions. */
+  const hostState = {
+    projects: [
+      { workspaceId: "ferryx", worktrees: [
+        { worktreeSlug: "main", worktreeLabel: "main", attention: "waiting" },
+        { worktreeSlug: "feat-c", worktreeLabel: "feat-c", attention: "waiting" },
+      ] },
+      { workspaceId: "docs", worktrees: [{ worktreeSlug: "feat-d", worktreeLabel: "feat-d", attention: "waiting" }] },
+    ],
+    activeContext: state.activeContext,
+    activeWorkspaceId: "ferryx",
+    worktrees: [],
+    sessions: [],
+    sessionAttention: [
+      { backendSessionId: "sess-a", workspaceId: "ferryx", worktreeSlug: "main", state: "waiting", agentType: "claude" },
+      { backendSessionId: "sess-c", workspaceId: "ferryx", worktreeSlug: "feat-c", state: "waiting", agentType: "claude" },
+      { backendSessionId: "sess-d", workspaceId: "docs", worktreeSlug: "feat-d", state: "waiting", agentType: "claude" },
+    ],
+  };
+
+  it("lists waiting sessions of other worktrees and projects too, not only the desktop's active selection", async () => {
+    const calls = installFetch({ "sess-a": promptOf("sess-a"), "sess-b": promptOf("sess-b") }, hostState);
+    render(<RemoteApp />);
+    await waitFor(() => expect(screen.getByTestId("mobile-inbox-badge")).toHaveTextContent("4"));
+    const sheet = await openInbox();
+    const rows = within(sheet).getAllByTestId("attention-row");
+    expect(rows).toHaveLength(4);
+    expect(within(sheet).getByText("ferryx / feat-c")).toBeInTheDocument();
+    expect(within(sheet).getByText("docs / feat-d")).toBeInTheDocument();
+    expect(calls.some((call) => call.url.includes("/workspace/select"))).toBe(false);
+  });
+
+  it("says a row with no mirrored pane can't be opened here, without any request", async () => {
+    const calls = installFetch({ "sess-a": promptOf("sess-a"), "sess-b": promptOf("sess-b") }, hostState);
+    render(<RemoteApp />);
+    await waitFor(() => expect(screen.getByTestId("mobile-inbox-badge")).toHaveTextContent("4"));
+    const sheet = await openInbox();
+    const row = within(sheet).getByText("docs / feat-d").closest("[data-testid='attention-row']") as HTMLElement;
+    // Every row's prompt read has gone out; only the tap is measured.
+    await waitFor(() => expect(calls.some((call) => call.url.includes("/reference-chat/sess-d/"))).toBe(true));
+    const before = calls.length;
+    await act(async () => {
+      fireEvent.click(row);
+    });
+    expect(await screen.findByText("This session can't be opened from here right now")).toBeInTheDocument();
+    expect(calls.slice(before)).toEqual([]);
+    expect(screen.getByRole("dialog", { name: "Inbox" })).toBeInTheDocument();
   });
 
   it("answers inline through the prompt route and removes the row", async () => {
