@@ -6,7 +6,7 @@ use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::worktree::changes::{GitChangeError, GitDiffScope};
 #[cfg(feature = "desktop")]
 use crate::worktree::changes::{
-    git_commit, git_diff, git_push, git_stage, git_unstage, GitPushResult,
+    git_changes_status, git_commit, git_diff, git_push, git_stage, git_unstage, GitPushResult,
 };
 use crate::worktree::{
     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
@@ -449,14 +449,12 @@ pub async fn cmd_worktree_changes_status<R: Runtime>(
     request: WorktreePushRequest,
 ) -> Result<DirtyState, IpcError> {
     let WorktreePushRequest { workspace_id, worktree, worktree_path } = request;
-    if let (Some(worktree), None) = (&worktree, &worktree_path) {
-        let request = WorktreeStatusRequest { workspace_id, worktree: worktree.clone() };
-        return cmd_worktree_status(app, registry, request).await;
+    if let (Some(identity), None) = (&worktree, &worktree_path) {
+        // Keep the sidebar's dirty tracking and its events for managed worktrees.
+        let request = WorktreeStatusRequest { workspace_id: workspace_id.clone(), worktree: identity.clone() };
+        cmd_worktree_status(app, registry.clone(), request).await?;
     }
-    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, |path| {
-        Ok(crate::worktree::git_status_porcelain(path)?)
-    })
-    .await
+    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, git_changes_status).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
