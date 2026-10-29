@@ -7506,7 +7506,11 @@ impl DaemonServer {
                                 details: None,
                             }
                         }
-                        Err(err) => daemon_error(err.to_string()),
+                        Err(err) => DaemonResponse::Error {
+                            message: err.to_string(),
+                            code: Some("INTERNAL_ERROR".into()),
+                            details: None,
+                        },
                     }
                 }
                 Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {

@@ -71,9 +71,26 @@ function exposureLabel(status: RemoteGatewayStatus): string {
 }
 
 /** Plain-language facts about who can reach this machine right now. Always visible. */
-function AccessFactsCard({ status, statusError }: { status: PairingGatewayStatus | null; statusError: boolean }) {
+function AccessFactsCard({ status, statusError, onPairingExpired }: {
+  status: PairingGatewayStatus | null;
+  statusError: boolean;
+  onPairingExpired: () => void;
+}) {
   const scope = status?.enabled ? status.bindScope ?? "loopback" : null;
   const pairing = status?.pairingWindow;
+  const [pairingLeft, setPairingLeft] = useState(0);
+  useEffect(() => {
+    if (!pairing?.open || pairing.secondsLeft <= 0) { setPairingLeft(0); return; }
+    const expiresAt = Date.now() + pairing.secondsLeft * 1000;
+    setPairingLeft(pairing.secondsLeft);
+    const timer = window.setInterval(() => {
+      const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      setPairingLeft(left);
+      if (left === 0) { window.clearInterval(timer); onPairingExpired(); }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairing, onPairingExpired]);
+  const pairingOpen = Boolean(pairing?.open) && pairingLeft > 0;
   return (
     <section aria-label="Access" className="mb-6 space-y-3">
       <h3 className="text-[12px] font-semibold">Access</h3>
@@ -94,8 +111,8 @@ function AccessFactsCard({ status, statusError }: { status: PairingGatewayStatus
             <li data-testid="access-fact-token" data-configured={String(Boolean(status.tokenConfigured))}>
               Machine token: {status.tokenConfigured ? "set on this computer" : "not set"}
             </li>
-            <li data-testid="access-fact-pairing" data-open={String(Boolean(pairing?.open))}>
-              Pairing: {pairing?.open ? `a code is live for ${formatCountdown(pairing.secondsLeft)}` : "closed, no live code"}
+            <li data-testid="access-fact-pairing" data-open={String(pairingOpen)}>
+              Pairing: {pairingOpen ? `a code is live for ${formatCountdown(pairingLeft)}` : "closed, no live code"}
             </li>
           </ul>
         )}
@@ -105,7 +122,7 @@ function AccessFactsCard({ status, statusError }: { status: PairingGatewayStatus
 }
 
 /** Mints a one-time pairing code for the chosen role and counts down to its expiry. */
-function PairDeviceCard({ disabled }: { disabled: boolean }) {
+function PairDeviceCard({ disabled, onMinted }: { disabled: boolean; onMinted: () => void }) {
   const [role, setRole] = useState<PairingRole>("view");
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number; role: PairingRole } | null>(null);
   const [remaining, setRemaining] = useState(0);
@@ -128,6 +145,7 @@ function PairDeviceCard({ disabled }: { disabled: boolean }) {
       const created = await createPairingCode(minted);
       setPairing({ code: created.code, expiresAt: Date.now() + created.expiresInSeconds * 1000, role: minted });
       setRemaining(created.expiresInSeconds);
+      onMinted();
     } catch (err: unknown) {
       setError(errorMessage(err, "Failed to create a pairing code"));
     } finally {
@@ -411,9 +429,11 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
     }
   };
 
+  const refreshAfterPairingChange = useCallback(() => { void refreshStatus(); }, [refreshStatus]);
+
   if (detailsOnly) return <section aria-label="Gateway diagnostics" className="space-y-2 text-sm">
     {statusError ? <p role="alert">Gateway status unavailable.</p> : null}
-    <AccessFactsCard status={status} statusError={statusError} />
+    <AccessFactsCard status={status} statusError={statusError} onPairingExpired={refreshAfterPairingChange} />
     {status?.gateStatus && typeof status.gateStatus === "object" && "insecureLanGated" in status.gateStatus ? (
       <p data-testid="gateway-gate-warning" role="note">
         Direct LAN access is gated: {status.gateStatus.insecureLanGated.reason}. Only loopback and trusted-overlay connections are accepted.
@@ -449,7 +469,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
             : status.localIp || status.boundAddress ? "Local Ready" : "Connecting"}
         </Badge>
       ) : null}
-      <AccessFactsCard status={status} statusError={statusError} />
+      <AccessFactsCard status={status} statusError={statusError} onPairingExpired={refreshAfterPairingChange} />
       <div className="border-y border-border">
         <SettingRow
           label="Allow remote access"
@@ -521,7 +541,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
         ) : null}
       </div>
 
-      <PairDeviceCard disabled={!status?.enabled || statusError} />
+      <PairDeviceCard disabled={!status?.enabled || statusError} onMinted={refreshAfterPairingChange} />
 
       <div className="mt-8 space-y-3">
         <h3 className="text-[12px] font-semibold">Authorized Devices</h3>

@@ -1781,8 +1781,9 @@ struct SetDevicePermissionRequest {
     permission: DevicePermission,
 }
 
-/// POST /api/v1/devices/{id}/permission. Only a Control device may change a role, so a View
-/// device can never raise itself or anyone else; the caller is authorized before the body is read.
+/// POST /api/v1/devices/{id}/permission. Only a Control device may change a role, and over HTTP
+/// only to View: promotion to Control is owner-only via IPC. The caller is authorized before the
+/// body is read.
 async fn set_device_permission(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -1803,6 +1804,12 @@ async fn set_device_permission(
     }
     let request: SetDevicePermissionRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid permission request: {e}")))?;
+    if request.permission == DevicePermission::Control {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Granting control is only allowed on this computer".into(),
+        ));
+    }
     let auth = Arc::clone(&state.auth_manager);
     crate::ipc::run_blocking(move || Ok(auth.set_device_permission(&device_id, request.permission)))
         .await

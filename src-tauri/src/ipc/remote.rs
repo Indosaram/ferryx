@@ -511,7 +511,7 @@ pub async fn cmd_remote_device_revoke(
 }
 
 /// Owner-only role change for a paired device. Remote devices use
-/// `POST /api/v1/devices/{id}/permission`, which requires a Control caller.
+/// `POST /api/v1/devices/{id}/permission`, which requires a Control caller and only downgrades.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_device_set_permission(

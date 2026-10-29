@@ -328,6 +328,38 @@ describe("RemoteAccessSection", () => {
     expect(screen.getByRole("button", { name: "New code" })).toBeInTheDocument();
   });
 
+  it("refreshes the Access card after minting and ticks its pairing countdown", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 60 });
+    await act(async () => { render(<RemoteAccessSection />); });
+    expect(screen.getByTestId("access-fact-pairing")).toHaveTextContent("Pairing: closed, no live code");
+
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, pairingWindow: { open: true, secondsLeft: 60 } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+    const fact = screen.getByTestId("access-fact-pairing");
+    expect(fact).toHaveTextContent("Pairing: a code is live for 1:00");
+
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(fact).toHaveTextContent("Pairing: a code is live for 0:59");
+  });
+
+  it("refetches status when the Access card's pairing countdown runs out", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, pairingWindow: { open: true, secondsLeft: 2 } });
+    await act(async () => { render(<RemoteAccessSection />); });
+    const fact = screen.getByTestId("access-fact-pairing");
+    expect(fact).toHaveTextContent("Pairing: a code is live for 0:02");
+    const callsBefore = getRemoteStatus.mock.calls.length;
+
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, pairingWindow: { open: false, secondsLeft: 0 } });
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(fact).toHaveTextContent("Pairing: a code is live for 0:01");
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(getRemoteStatus.mock.calls.length).toBe(callsBefore + 1);
+    expect(screen.getByTestId("access-fact-pairing")).toHaveTextContent("Pairing: closed, no live code");
+    expect(screen.getByTestId("access-fact-pairing")).toHaveAttribute("data-open", "false");
+  });
+
   it("binds the role to a live code and locks the role picker until the code expires", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
     createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 60 });

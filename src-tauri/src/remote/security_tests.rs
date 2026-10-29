@@ -337,3 +337,25 @@ async fn control_device_changes_another_device_role() {
         DevicePermission::View
     );
 }
+
+#[tokio::test]
+async fn control_device_cannot_promote_another_device_over_http() {
+    let state = state();
+    let (control_token, _) = pair(&state, DevicePermission::Control);
+    let (target_token, target) = pair(&state, DevicePermission::View);
+    let server = SecurityServer::start(Arc::clone(&state)).await;
+    let (status, body) = server
+        .request(
+            "POST",
+            &format!("/api/v1/devices/{}/permission", target.id),
+            Some(&control_token),
+            Some(r#"{"permission":"control"}"#),
+        )
+        .await;
+    server.stop().await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        state.auth_manager.validate_token(&target_token).unwrap().permission,
+        DevicePermission::View
+    );
+}
