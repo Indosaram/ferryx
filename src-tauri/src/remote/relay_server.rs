@@ -2619,7 +2619,8 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["workspace", "file-read" | "paste-upload"])
             | ("POST", ["pair", "exchange"])
             | ("POST", ["direct", "offer"])
-            | ("POST", ["push", "subscribe" | "unsubscribe"])
+            | ("GET", ["push", "vapid-public-key"])
+            | ("POST", ["push", "subscribe" | "unsubscribe" | "preferences"])
             | ("GET", ["session", _])
             | ("GET", ["agent-history", _])
             // Reference chat (plan task 13). The relay only admits the frozen route table;
@@ -4654,6 +4655,16 @@ mod tests {
         assert!(!allowed_http_route(&Method::GET, "attach/../secret"));
         assert!(!allowed_http_route(&Method::GET, "api/v1/attach"));
         assert!(allowed_http_route(&Method::GET, "capabilities"));
+    }
+
+    #[test]
+    fn test_allowed_http_route_admits_push_registration() {
+        assert!(allowed_http_route(&Method::GET, "push/vapid-public-key"));
+        for route in ["push/subscribe", "push/unsubscribe", "push/preferences"] {
+            assert!(allowed_http_route(&Method::POST, route), "{route}");
+            assert!(!allowed_http_route(&Method::GET, route), "{route} is POST only");
+        }
+        assert!(!allowed_http_route(&Method::POST, "push/vapid-public-key"));
     }
 
     #[test]

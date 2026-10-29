@@ -7592,16 +7592,27 @@ fn web_origin(url: &str) -> Option<String> {
 
 /// Whether a cross-origin browser call may read this gateway's response.
 ///
-/// Only `/api/v1/*` (minus the health probe) answers cross-origin; health and static assets stay
-/// same-origin. Admitted origins: the gateway's own origin, the default relay and the configured
-/// relay override, and the origins of this machine's saved paired hosts. Never with credentials.
+/// Only `/api/v1/*` (minus the health probe and the push registration routes) answers
+/// cross-origin; health, push registration and static assets stay same-origin, as the
+/// `/api/push/*` aliases always were. Admitted origins: the gateway's own origin, the default
+/// relay and the configured relay override, and the origins of this machine's saved paired
+/// hosts. Never with credentials.
 pub(crate) fn cors_origin_allowed(
     state: &RemoteGatewayState,
     origin: &axum::http::HeaderValue,
     parts: &axum::http::request::Parts,
 ) -> bool {
     let path = parts.uri.path();
-    if !path.starts_with("/api/v1/") || path == "/api/v1/health" {
+    if !path.starts_with("/api/v1/")
+        || path == "/api/v1/health"
+        || matches!(
+            path,
+            "/api/v1/push/vapid-public-key"
+                | "/api/v1/push/subscribe"
+                | "/api/v1/push/unsubscribe"
+                | "/api/v1/push/preferences"
+        )
+    {
         return false;
     }
     let Ok(origin) = origin.to_str() else {
@@ -7824,6 +7835,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(super::dag_api::ws_dag_handler),
         )
         .route("/api/v1/push/test", post(push_test))
+        .route("/api/v1/push/vapid-public-key", get(push_vapid_public_key))
+        .route("/api/v1/push/subscribe", post(push_subscribe))
+        .route("/api/v1/push/unsubscribe", post(push_unsubscribe))
+        .route("/api/v1/push/preferences", post(push_preferences))
         .route("/api/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
@@ -9858,6 +9873,74 @@ mod tests {
             state.push.store.list_subscriptions().is_empty(),
             "unauthenticated request must not have registered a subscription"
         );
+    }
+
+    /// The relay forwards only `/api/v1/*`, so each push route must answer there with the same
+    /// handler and auth as its `/api/push/*` alias, never the router's 404.
+    #[tokio::test]
+    async fn push_routes_answer_under_api_v1_like_their_aliases() {
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        ));
+        let code = state
+            .auth_manager
+            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&code, "PushRouteClient")
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let router = create_remote_router(Arc::clone(&state));
+            async move { axum::serve(listener, router).await.unwrap() }
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let endpoint = "https://fcm.googleapis.com/fcm/send/route-test";
+        let routes = [
+            ("vapid-public-key", None, StatusCode::OK),
+            (
+                "subscribe",
+                Some(serde_json::json!({
+                    "endpoint": endpoint,
+                    "keys": { "p256dh": "p256dh-key", "auth": "auth-key" },
+                })),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "preferences",
+                Some(serde_json::json!({ "phoneNeedsInput": false })),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                "unsubscribe",
+                Some(serde_json::json!({ "endpoint": endpoint })),
+                StatusCode::NO_CONTENT,
+            ),
+        ];
+        for prefix in ["/api/v1/push", "/api/push"] {
+            for (route, body, authorized) in &routes {
+                let path = format!("{prefix}/{route}");
+                let request = |bearer: Option<&str>| {
+                    let url = format!("http://{addr}{path}");
+                    let mut request = match body {
+                        Some(body) => http.post(url).json(body),
+                        None => http.get(url),
+                    };
+                    if let Some(bearer) = bearer {
+                        request = request.bearer_auth(bearer);
+                    }
+                    request.send()
+                };
+                let anonymous = request(None).await.unwrap().status();
+                assert_eq!(anonymous, StatusCode::UNAUTHORIZED, "{path} without a token");
+                let paired = request(Some(&token)).await.unwrap().status();
+                assert_eq!(paired, *authorized, "{path} with a paired token");
+            }
+        }
+
+        server.abort();
     }
 
     #[tokio::test]
