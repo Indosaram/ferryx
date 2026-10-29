@@ -1852,6 +1852,59 @@ describe("App project workspace flow", () => {
     expect(native.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ cwd: betaWorktree.path }));
   });
 
+  it("creates try-ferryx from the setup wizard and starts the default agent through the Add Worktree path", async () => {
+    const projects = [{ workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" }];
+    const created = {
+      workspaceId: "alpha",
+      path: "/repos/alpha/.orca-worktrees/alpha/try-ferryx",
+      head: "abc1234",
+      branch: "refs/heads/orca/alpha/try-ferryx",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: `/repos/${workspaceId}`,
+    }));
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.createWorktree.mockResolvedValue(created);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-try-agent",
+      daemonEpoch: "epoch-try",
+      session: { cwd: req.cwd, incarnation: "inc-try" },
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    act(() => {
+      window.dispatchEvent(new Event("ferryx:open-onboarding"));
+    });
+    await screen.findByRole("dialog", { name: "Welcome to Ferryx" }, { timeout: 8000 });
+    while (!screen.queryByTestId("onboarding-try-create")) {
+      fireEvent.click(screen.getByTestId("onboarding-next"));
+    }
+    expect(native.createWorktree).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("onboarding-try-create"));
+
+    await waitFor(() =>
+      expect(native.writeTerminal).toHaveBeenCalledWith({ sessionId: "spawn-try-agent", data: "claude\r" }),
+    );
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "alpha",
+      worktree: { wsId: "alpha", slug: "try-ferryx" },
+      baseRef: "HEAD",
+    });
+    expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(created);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(expect.objectContaining({ cwd: created.path }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Welcome to Ferryx" })).toBeNull());
+  }, 15000);
+
   it("starts the agent chosen in Add Worktree in the new worktree, not the active one", async () => {
     const projects = [{ workspaceId: "alpha", repoRoot: "/repos/alpha" }];
     const created = {
