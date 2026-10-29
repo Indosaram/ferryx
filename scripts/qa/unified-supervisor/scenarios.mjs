@@ -50,7 +50,7 @@ const ADMISSION_WORK = Object.freeze({
 // Daemon protocol version of this source revision (src-tauri/src/daemon/protocol.rs); a
 // daemon that speaks another one answers protocolMismatch with its own, which is used instead.
 export const DAEMON_PROTOCOL_VERSION = 5;
-const HELD_STATES = new Set(['degraded', 'awaiting_owner', 'delivery_uncertain', 'cancelled', 'paused', 'completed']);
+export const HELD_STATES = new Set(['degraded', 'awaiting_owner', 'delivery_uncertain', 'cancelled', 'paused', 'completed']);
 
 export const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
@@ -474,12 +474,12 @@ const AUTONOMY_WORK = Object.freeze({
   requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
   operations: ['edit', 'test'],
 });
-const AUTONOMY_VERIFY = 'test "$(cat result.txt)" = READY\n';
+export const AUTONOMY_VERIFY = 'test "$(cat result.txt)" = READY\n';
 // The blind convergence prompt's opening (crates/ferryx-hub/src/goals/converge.rs build_prompt).
-const CONVERGENCE_MARKER = 'You independently check whether a coding lane';
-const AUTONOMY_CONVERGED = Object.freeze({ requirements: [{ req_id: 'r1', met: true, evidence_refs: ['sig:req:r1'] }] });
+export const CONVERGENCE_MARKER = 'You independently check whether a coding lane';
+export const AUTONOMY_CONVERGED = Object.freeze({ requirements: [{ req_id: 'r1', met: true, evidence_refs: ['sig:req:r1'] }] });
 
-function promptTextOf(json) {
+export function promptTextOf(json) {
   return (json?.messages ?? []).map((message) => (typeof message?.content === 'string' ? message.content
     : (Array.isArray(message?.content) ? message.content.map((part) => part?.text ?? '').join('') : ''))).join('\n');
 }
