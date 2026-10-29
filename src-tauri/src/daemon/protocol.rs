@@ -21,6 +21,8 @@ pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `AgentPromptGet`/`AgentPromptAnswer`.
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
+/// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
+pub const AGENT_LAUNCH_CAPABILITY: &str = "agentLaunchV1";
 /// Error code of a `PasteWrite` chunk that was refused or unwound by `CancelPaste`. Its
 /// details carry the exact `bytesWritten` of that chunk.
 pub const PASTE_CANCELLED_CODE: &str = "PASTE_CANCELLED";
@@ -309,6 +311,9 @@ pub enum TerminalStartup {
         agent_type: String,
         provider_session: AgentProviderSession,
     },
+    /// A fresh agent launch: the command and args the desktop agent settings resolved.
+    #[serde(rename_all = "camelCase")]
+    AgentLaunch { command: String, args: Vec<String> },
 }
 
 pub mod base64_serde {
@@ -2920,6 +2925,20 @@ mod tests {
 
     #[test]
     fn test_upgrade_binary_protocol_serde_roundtrip() {
+        let launch = TerminalStartup::AgentLaunch {
+            command: "claude".to_string(),
+            args: vec!["--model".to_string(), "opus".to_string()],
+        };
+        let json = serde_json::to_value(&launch).expect("serialize agent launch");
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "agentLaunch", "command": "claude", "args": ["--model", "opus"]})
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalStartup>(json).expect("deserialize agent launch"),
+            launch
+        );
+
         let req = DaemonRequest::UpgradeBinary {
             new_binary_path: None,
         };

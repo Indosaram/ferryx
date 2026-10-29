@@ -84,6 +84,7 @@ import {
   getLaunchableAgents,
   loadAgentSettings,
   mergeDetections,
+  splitAgentArgs,
   type AgentSettings,
 } from "./lib/agentsSettings";
 import {
@@ -125,6 +126,7 @@ import {
   saveSession,
   setBadgeCount,
   spawnTerminalDetailed,
+  closeTerminal,
   retryPairedSession,
   retryTerminalRemoteSession,
   getTerminalRemoteStatus,
@@ -2706,23 +2708,46 @@ function WorkspaceApp({
           kind: "newTab",
           groupId: stateRef.current.layout.focusedGroupId ?? null,
         }).catch(() => null);
-        const spawned = await spawnTerminalDetailed({
+        const spawnRequest = {
           workspaceId: activeProjectRef.current.workspaceId,
           worktree: worktreeIdentity(targetWorktree),
           cwd: targetWorktree.path,
           ...initialGridFields(agentGrid),
-        });
+        };
+        const fullCommand = `${agent.command} ${agent.args}`.trim();
+        // argv[0] is the configured command verbatim (it may be a path with spaces or
+        // backslashes); only the argument string is split.
+        const command = agent.command.trim();
+        const args = splitAgentArgs(agent.args);
+        // The agent is the pane's startup command, so it cannot race the shell's own startup the
+        // way typed input does (PSReadLine drops early keystrokes). A backend that refuses the
+        // startup kind (an older daemon, a paired host) still gets the agent typed into a shell.
+        let typeCommand = false;
+        let spawned;
+        try {
+          spawned = await spawnTerminalDetailed(
+            command ? { ...spawnRequest, startup: { kind: "agentLaunch", command, args } } : spawnRequest,
+          );
+        } catch (error) {
+          if (!command || toIpcError(error).code !== "UNSUPPORTED") throw error;
+          spawned = await spawnTerminalDetailed(spawnRequest);
+          typeCommand = true;
+        }
         const backendSessionId = spawned.sessionId;
         const label = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);
         // The pane needs the daemon epoch and incarnation to form its attach tuple; a bare id
         // leaves the tab blank and unable to accept input.
-        await openTab(targetWorktree, label, {
+        const tabId = await openTab(targetWorktree, label, {
           sessionId: backendSessionId,
           daemonEpoch: spawned.daemonEpoch ?? null,
           incarnation: spawned.session?.incarnation ?? null,
         });
-        const fullCommand = `${agent.command} ${agent.args}`.trim();
-        if (fullCommand) {
+        // openTab does not own a pre-spawned backend, so a discarded tab would orphan the PTY.
+        if (tabId === null) {
+          await closeTerminal(backendSessionId);
+          return;
+        }
+        if (typeCommand) {
           await writeTerminal({ sessionId: backendSessionId, data: `${fullCommand}\r` });
         }
       } catch (error) {
