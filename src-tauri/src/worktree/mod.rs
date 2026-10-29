@@ -371,6 +371,26 @@ prunable reason gitdir gone
     }
 
     #[test]
+    fn leftover_branch_is_reported_as_branch_already_exists() {
+        let (_temp, manager) = setup_test_repo();
+        let branch = manager.branch_name_for("ws", "kept").unwrap();
+        git::run_git(manager.repo_root(), &["branch", &branch]).unwrap();
+        let target = path_for(&manager, "kept");
+        let err = manager
+            .create_worktree(CreateWorktreeOptions::new("ws", "kept", &target))
+            .unwrap_err();
+        assert!(
+            matches!(&err, WorktreeError::BranchAlreadyExists { branch: b } if *b == branch),
+            "{err:?}"
+        );
+        assert!(!target.exists());
+        assert_eq!(
+            crate::ipc::error::IpcError::from(err).code,
+            crate::ipc::error::IpcErrorCode::WorktreeAlreadyExists
+        );
+    }
+
+    #[test]
     fn existing_target_and_missing_status_are_rejected() {
         let (_temp, manager) = setup_test_repo();
         let existing = path_for(&manager, "existing");

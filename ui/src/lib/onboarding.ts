@@ -11,6 +11,7 @@ export type OnboardingStepId =
   | "agents"
   | "cli"
   | "project"
+  | "try"
   | "phone";
 
 export const ONBOARDING_VERSION = 1;
@@ -30,6 +31,7 @@ export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
   "agents",
   "cli",
   "project",
+  "try",
   "phone",
   "account",
 ];
@@ -242,6 +244,10 @@ export function isOnboardingStepSatisfied(
       return false;
     case "project":
       return ctx.projectCount > 0;
+    case "try":
+      // An offer, not a requirement: it is never pending, so it neither reopens the
+      // wizard nor becomes the landing step. Only a created worktree records it.
+      return true;
     case "phone":
       return ctx.pairedDeviceCount == null || ctx.pairedDeviceCount > 0;
   }
@@ -263,7 +269,7 @@ export function satisfiedOnboardingSteps(
 ): OnboardingStepId[] {
   const completed = new Set<OnboardingStepId>(state.completedSteps);
   return wizardSteps(ctx).filter(
-    (step) => completed.has(step) || isOnboardingStepSatisfied(step, ctx)
+    (step) => completed.has(step) || (step !== "try" && isOnboardingStepSatisfied(step, ctx))
   );
 }
 
@@ -305,8 +311,8 @@ export function shouldAutoOpenOnboarding(
     // (users who finished the flow before it existed have no "cli" entry), so
     // neither may be the sole reason the wizard pops back open after an upgrade.
     pendingOnboardingSteps(state, ctx).some(
-      // "account" and "phone" are optional for existing users too: neither may force the wizard open.
-      (step) => step !== "features" && step !== "cli" && step !== "account" && step !== "phone"
+      // "try", "account" and "phone" are optional for existing users too: none may force the wizard open.
+      (step) => step !== "features" && step !== "cli" && step !== "try" && step !== "account" && step !== "phone"
     )
   );
 }
