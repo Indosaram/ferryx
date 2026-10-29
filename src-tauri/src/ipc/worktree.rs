@@ -476,6 +476,20 @@ impl From<GitChangeError> for IpcError {
     }
 }
 
+/// Emits worktree_changed after a Git operation that already succeeded. A failed emit only
+/// delays the UI refresh, so it is logged and never turned into an error for the caller.
+#[cfg(feature = "desktop")]
+fn notify_worktree_changed<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: String,
+    worktree: WorktreeIdentity,
+    kind: WorktreeChangeKind,
+) {
+    if let Err(error) = emit_worktree_changed(app, workspace_id, worktree, kind) {
+        tracing::warn!(?error, ?kind, "worktree_changed emit failed after a successful git operation");
+    }
+}
+
 /// Resolves a managed worktree to its jailed canonical path and runs `work` there on a
 /// blocking thread.
 #[cfg(feature = "desktop")]
@@ -523,7 +537,8 @@ pub async fn cmd_worktree_stage<R: Runtime>(
         git_stage(path, &paths)
     })
     .await?;
-    emit_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged)
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged);
+    Ok(())
 }
 
 #[cfg(feature = "desktop")]
@@ -539,7 +554,8 @@ pub async fn cmd_worktree_unstage<R: Runtime>(
         git_unstage(path, &paths)
     })
     .await?;
-    emit_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged)
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged);
+    Ok(())
 }
 
 /// Commits the staged changes and returns the new commit sha.
@@ -571,7 +587,7 @@ pub async fn cmd_worktree_push<R: Runtime>(
     let WorktreeStatusRequest { workspace_id, worktree } = request;
     let event = (workspace_id.clone(), worktree.clone());
     let result = with_worktree_path((*registry).clone(), workspace_id, worktree, git_push).await?;
-    emit_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::Updated)?;
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::Updated);
     Ok(result)
 }
 
