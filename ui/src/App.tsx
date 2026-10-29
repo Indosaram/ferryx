@@ -7,7 +7,7 @@ import { withTimeout } from "./lib/withTimeout";
 import { CommandPalette } from "./components/CommandPalette";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
-import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog } from "./components/ProjectDialogs";
+import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, type WorktreeAgentLaunch } from "./components/ProjectDialogs";
 import { ExternalWorktreeImportDialog } from "./components/ExternalWorktreeImportDialog";
 import { useExternalWorktreePrompt } from "./state/useExternalWorktreePrompt";
 import { Sidebar, type SidebarAttention } from "./components/Sidebar";
@@ -2099,6 +2099,10 @@ function WorkspaceApp({
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
   const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
   const [onboardingDoneSteps, setOnboardingDoneSteps] = useState<readonly OnboardingStepId[]>([]);
+  // A local project added from the wizard's first-project step reopens the wizard on the
+  // "try" step, which offers to create a first worktree there with the default agent.
+  const [onboardingAddedProject, setOnboardingAddedProject] = useState<RegisteredProject | null>(null);
+  const onboardingResumeRef = useRef<{ steps: OnboardingStepId[] } | null>(null);
   const [onboardingPermissions, setOnboardingPermissions] = useState<SystemPermissionsStatus | null>(null);
   const [whatsNew, setWhatsNew] = useState<WhatsNewEntry | null>(null);
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
@@ -2776,6 +2780,30 @@ function WorkspaceApp({
   );
   launchAgentByIdInWorktreeRef.current = launchAgentByIdInWorktree;
 
+  // Opens a just-created worktree in its tab and starts the chosen agent there; shared by
+  // the Add Worktree dialog and the onboarding first-worktree step.
+  // Reopening setup with projects already present tries the active project, when it is local.
+  const onboardingTryProject =
+    onboardingAddedProject ??
+    (activeProject !== DEFAULT_PROJECT && (activeProject.target?.kind ?? "local") === "local" ? activeProject : null);
+
+  const handleWorktreeCreated = useCallback(
+    async (owner: RegisteredProject, worktree: Worktree, launch?: WorktreeAgentLaunch) => {
+      if (activeRemoteHostRef.current) return;
+      if (owner.workspaceId !== activeProjectRef.current.workspaceId) {
+        // The project switch clears any pending worktree and its agent, so record the agent after it.
+        handleSelectProject(owner);
+        pendingWorktreeAgentRef.current = launch ? { path: worktree.path, agentId: launch.agentId } : null;
+        setPendingWorktree(worktree);
+        return;
+      }
+      await refreshWorktrees();
+      await ensureTabForWorktree(worktree).catch(reportRuntimeError);
+      if (launch) await launchAgentByIdInWorktree(worktree, launch.agentId);
+    },
+    [ensureTabForWorktree, handleSelectProject, launchAgentByIdInWorktree, refreshWorktrees, reportRuntimeError],
+  );
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -3148,6 +3176,7 @@ function WorkspaceApp({
     setIsAddProjectOpen(true);
   }, []);
   const handleCloseAddProject = useCallback(() => {
+    onboardingResumeRef.current = null;
     setIsAddProjectOpen(false);
     setAddProjectTarget(undefined);
   }, []);
@@ -4266,13 +4295,25 @@ function WorkspaceApp({
             agents={resolvedAgents}
             isMac={isMacShortcutPlatform()}
             onStepCompleted={(step) => markOnboardingStepsCompleted([step])}
-            onFinish={() => setOnboardingSteps(null)}
-            onSkip={() => {
-              dismissOnboarding();
+            onFinish={() => {
+              setOnboardingAddedProject(null);
               setOnboardingSteps(null);
             }}
-            onRemindLater={() => setOnboardingSteps(null)}
+            onSkip={() => {
+              dismissOnboarding();
+              setOnboardingAddedProject(null);
+              setOnboardingSteps(null);
+            }}
+            onRemindLater={() => {
+              setOnboardingAddedProject(null);
+              setOnboardingSteps(null);
+            }}
+            tryProject={onboardingTryProject}
+            defaultAgentId={agentSettings.defaultAgentId}
+            onTryWorktreeCreated={(worktree, launch) =>
+              onboardingTryProject ? handleWorktreeCreated(onboardingTryProject, worktree, launch) : undefined}
             onAddProject={() => {
+              onboardingResumeRef.current = { steps: onboardingSteps };
               setOnboardingSteps(null);
               handleOpenAddProject();
             }}
@@ -4312,7 +4353,16 @@ function WorkspaceApp({
           initialHostId={addProjectHostId}
           initialTarget={addProjectTarget}
           onClose={handleCloseAddProject}
-          onRegistered={handleRegisteredProject}
+          onRegistered={(project) => {
+            handleRegisteredProject(project);
+            const resume = onboardingResumeRef.current;
+            onboardingResumeRef.current = null;
+            if (!resume || project.target?.kind === "ssh" || project.target?.kind === "pairedDaemon") return;
+            setOnboardingAddedProject(project);
+            setOnboardingInitialStepIndex(Math.max(0, resume.steps.indexOf("try")));
+            setOnboardingDoneSteps((done) => (done.includes("project") ? done : [...done, "project"]));
+            setOnboardingSteps(resume.steps);
+          }}
           onOpenSettings={handleOpenSshSettings}
         />
       ) : null}
@@ -4322,20 +4372,7 @@ function WorkspaceApp({
           onClose={handleCloseCreateWorktree}
           agents={launchableAgents}
           defaultAgentId={agentSettings.defaultAgentId}
-          onCreated={async (worktree, launch) => {
-            if (activeRemoteHostRef.current) return;
-            const owner = createTargetProject ?? activeProject;
-            if (owner.workspaceId !== activeProject.workspaceId) {
-              // The project switch clears any pending worktree and its agent, so record the agent after it.
-              handleSelectProject(owner);
-              pendingWorktreeAgentRef.current = launch ? { path: worktree.path, agentId: launch.agentId } : null;
-              setPendingWorktree(worktree);
-              return;
-            }
-            await refreshWorktrees();
-            await ensureTabForWorktree(worktree).catch(reportRuntimeError);
-            if (launch) await launchAgentByIdInWorktree(worktree, launch.agentId);
-          }}
+          onCreated={(worktree, launch) => handleWorktreeCreated(createTargetProject ?? activeProject, worktree, launch)}
         />
       ) : null}
       {deleteTarget ? (

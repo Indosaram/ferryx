@@ -28,12 +28,16 @@ const remoteCalls = vi.hoisted(() => ({
   listRemoteDevices: vi.fn(),
   createPairingCode: vi.fn(),
   enableRemoteGateway: vi.fn(),
+  createWorktree: vi.fn(),
 }));
 
 vi.mock("../../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/tauri")>()),
   ...remoteCalls,
 }));
+
+const toastMock = vi.hoisted(() => ({ error: vi.fn() }));
+vi.mock("sonner", () => ({ toast: toastMock }));
 
 const gatewayOff = {
   enabled: false,
@@ -527,6 +531,257 @@ describe("WelcomeWizard", () => {
       fireEvent.click(screen.getByTestId("onboarding-next"));
       expect(onStepCompleted).not.toHaveBeenCalled();
       expect(screen.getByTestId("onboarding-rail-account").getAttribute("aria-current")).toBe("step");
+    });
+  });
+
+  describe("try step: first worktree", () => {
+    const project = {
+      workspaceId: "scratch",
+      repoRoot: "/repos/scratch",
+      gitRoot: "/repos/scratch",
+    };
+    const created = {
+      path: "/repos/.ferryx-worktrees/scratch/try-ferryx",
+      head: "abc",
+      branch: "refs/heads/ferryx/try-ferryx",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    const agents: ResolvedAgent[] = [
+      { name: "claude", available: true, enabled: true, command: "claude", args: "", custom: false },
+      { name: "codex", available: true, enabled: true, command: "codex", args: "", custom: false },
+    ];
+
+    function renderTry(overrides?: Partial<WelcomeWizardProps>) {
+      const props = createDefaultProps({
+        steps: ["project", "try", "phone"],
+        initialStepIndex: 1,
+        agents,
+        tryProject: project,
+        defaultAgentId: "codex",
+        onTryWorktreeCreated: vi.fn(),
+        ...overrides,
+      });
+      render(<WelcomeWizard {...props} />);
+      return props;
+    }
+
+    afterEach(() => {
+      remoteCalls.createWorktree.mockReset();
+    });
+
+    it("creates try-ferryx from HEAD, starts the default agent, then finishes", async () => {
+      remoteCalls.createWorktree.mockResolvedValue(created);
+      const props = renderTry();
+
+      expect(remoteCalls.createWorktree).not.toHaveBeenCalled();
+      const tryButton = screen.getByTestId("onboarding-try-create");
+      expect(tryButton.textContent).toBe("Create a worktree and start Codex");
+      await act(async () => {
+        fireEvent.click(tryButton);
+      });
+
+      expect(remoteCalls.createWorktree).toHaveBeenCalledTimes(1);
+      expect(remoteCalls.createWorktree).toHaveBeenCalledWith({
+        workspaceId: "scratch",
+        worktree: { wsId: "scratch", slug: "try-ferryx" },
+        baseRef: "HEAD",
+      });
+      expect(props.onTryWorktreeCreated).toHaveBeenCalledWith(created, { agentId: "codex" });
+      expect(props.onStepCompleted).toHaveBeenCalledWith("try");
+      expect(props.onFinish).toHaveBeenCalledTimes(1);
+    });
+
+    it("Skip creates nothing, does not record the step, and moves to the next step", () => {
+      const props = renderTry();
+
+      const skip = screen.getByTestId("onboarding-next");
+      expect(skip.textContent).toBe("Skip");
+      fireEvent.click(skip);
+
+      expect(props.onStepCompleted).not.toHaveBeenCalled();
+      expect(remoteCalls.createWorktree).not.toHaveBeenCalled();
+      expect(props.onTryWorktreeCreated).not.toHaveBeenCalled();
+      expect(props.onFinish).not.toHaveBeenCalled();
+      expect(screen.getByTestId("onboarding-rail-phone").getAttribute("aria-current")).toBe("step");
+    });
+
+    it("offers only Skip for a folder that is not a Git repository", () => {
+      const props = renderTry({ tryProject: { ...project, gitRoot: null } });
+
+      expect(screen.getByTestId("onboarding-try-not-git").textContent).toContain(
+        "This folder is not a Git repository",
+      );
+      expect(screen.queryByTestId("onboarding-try-create")).toBeNull();
+      fireEvent.click(screen.getByTestId("onboarding-next"));
+      expect(remoteCalls.createWorktree).not.toHaveBeenCalled();
+      expect(props.onFinish).not.toHaveBeenCalled();
+    });
+
+    it("switches to the not-a-Git-repository view when the backend says so", async () => {
+      remoteCalls.createWorktree.mockRejectedValue({ code: "INVALID_REPO_ROOT", message: "Not a git repository: /repos/scratch" });
+      const props = renderTry();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(remoteCalls.createWorktree).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("onboarding-try-not-git")).toBeDefined();
+      expect(screen.queryByTestId("onboarding-try-create")).toBeNull();
+      expect(props.onFinish).not.toHaveBeenCalled();
+    });
+
+    it("keeps the step open with the backend error when creation fails", async () => {
+      remoteCalls.createWorktree.mockRejectedValue({ code: "GIT_ERROR", message: "Git command failed" });
+      const props = renderTry();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(screen.getByTestId("onboarding-try-error").textContent).toBe("Git command failed");
+      expect(props.onTryWorktreeCreated).not.toHaveBeenCalled();
+      expect(props.onFinish).not.toHaveBeenCalled();
+    });
+
+    it("takes the next free slug when try-ferryx already exists", async () => {
+      remoteCalls.createWorktree
+        .mockRejectedValueOnce({ code: "WORKTREE_ALREADY_EXISTS", message: "Worktree already exists" })
+        .mockRejectedValueOnce({ code: "WORKTREE_ALREADY_EXISTS", message: "Branch already exists" })
+        .mockResolvedValueOnce(created);
+      const props = renderTry();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(remoteCalls.createWorktree.mock.calls.map((call) => call[0].worktree.slug)).toEqual([
+        "try-ferryx",
+        "try-ferryx-2",
+        "try-ferryx-3",
+      ]);
+      expect(props.onTryWorktreeCreated).toHaveBeenCalledWith(created, { agentId: "codex" });
+      expect(props.onFinish).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries to try-ferryx-2 when only the try-ferryx branch is left behind", async () => {
+      // BranchAlreadyExists serializes as WORKTREE_ALREADY_EXISTS with the branch in details.
+      remoteCalls.createWorktree
+        .mockRejectedValueOnce({
+          code: "WORKTREE_ALREADY_EXISTS",
+          message: "Branch already exists: 'ferryx/scratch/try-ferryx'",
+          details: { branch: "ferryx/scratch/try-ferryx" },
+        })
+        .mockResolvedValueOnce(created);
+      const props = renderTry();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(remoteCalls.createWorktree.mock.calls.map((call) => call[0].worktree.slug)).toEqual([
+        "try-ferryx",
+        "try-ferryx-2",
+      ]);
+      expect(props.onFinish).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry a non-collision error", async () => {
+      remoteCalls.createWorktree.mockRejectedValue({ code: "GIT_ERROR", message: "a branch named x already exists" });
+      const props = renderTry();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(remoteCalls.createWorktree).toHaveBeenCalledTimes(1);
+      expect(props.onFinish).not.toHaveBeenCalled();
+    });
+
+    it("does not retry an error without a typed code", async () => {
+      remoteCalls.createWorktree.mockRejectedValue(new Error("WORKTREE_ALREADY_EXISTS in message only"));
+      renderTry();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(remoteCalls.createWorktree).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops at try-ferryx-9 and reports the collision", async () => {
+      remoteCalls.createWorktree.mockRejectedValue({ code: "WORKTREE_ALREADY_EXISTS", message: "exists" });
+      const props = renderTry();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(remoteCalls.createWorktree.mock.calls.map((call) => call[0].worktree.slug)).toEqual([
+        "try-ferryx",
+        ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `try-ferryx-${n}`),
+      ]);
+      expect(screen.getByTestId("onboarding-try-error").textContent).toBe("exists");
+      expect(props.onFinish).not.toHaveBeenCalled();
+    });
+
+    it("still finishes and reports the failure when the agent does not start", async () => {
+      remoteCalls.createWorktree.mockResolvedValue(created);
+      toastMock.error.mockReset();
+      const props = renderTry({
+        onTryWorktreeCreated: vi.fn().mockRejectedValue({ code: "PTY_SPAWN_FAILED", message: "spawn failed" }),
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      });
+
+      expect(remoteCalls.createWorktree).toHaveBeenCalledTimes(1);
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining("spawn failed"));
+      expect(props.onFinish).toHaveBeenCalledTimes(1);
+    });
+
+    it("starts the first launchable agent when no default is set, like the new-tab menu", () => {
+      renderTry({
+        defaultAgentId: null,
+        agents: [{ ...agents[0], available: false }, agents[1]],
+      });
+
+      expect(screen.getByTestId("onboarding-try-create").textContent).toBe("Create a worktree and start Codex");
+    });
+
+    it("offers no create button without a local project", () => {
+      renderTry({ tryProject: null });
+
+      expect(screen.getByTestId("onboarding-try-no-project")).toBeDefined();
+      expect(screen.queryByTestId("onboarding-try-create")).toBeNull();
+      expect(screen.getByTestId("onboarding-next").textContent).toBe("Skip");
+    });
+
+    it("Skip on the last step finishes without recording it", () => {
+      const props = renderTry({ steps: ["project", "try"] });
+
+      fireEvent.click(screen.getByTestId("onboarding-finish"));
+
+      expect(props.onFinish).toHaveBeenCalledTimes(1);
+      expect(props.onStepCompleted).not.toHaveBeenCalled();
+      expect(remoteCalls.createWorktree).not.toHaveBeenCalled();
+    });
+
+    it("keeps the footer disabled while the worktree is being created", async () => {
+      let resolve: (value: typeof created) => void = () => undefined;
+      remoteCalls.createWorktree.mockReturnValue(new Promise((r) => { resolve = r; }));
+      renderTry();
+
+      fireEvent.click(screen.getByTestId("onboarding-try-create"));
+      expect(screen.getByTestId("onboarding-next").hasAttribute("disabled")).toBe(true);
+      expect(screen.getByTestId("onboarding-back").hasAttribute("disabled")).toBe(true);
+      await act(async () => {
+        resolve(created);
+      });
     });
   });
 });

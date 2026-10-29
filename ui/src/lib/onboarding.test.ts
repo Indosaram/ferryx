@@ -207,6 +207,7 @@ describe("onboarding exports and constants", () => {
       "agents",
       "cli",
       "project",
+      "try",
       "phone",
       "account",
     ]);
@@ -665,6 +666,7 @@ describe("wizardSteps", () => {
       "agents",
       "cli",
       "project",
+      "try",
       "phone",
       "account",
     ]);
@@ -698,6 +700,7 @@ describe("wizardSteps", () => {
       "agents",
       "cli",
       "project",
+      "try",
       "phone",
       "account",
     ]);
@@ -970,5 +973,36 @@ describe("phone step", () => {
     const unpaired = { ...ctx, pairedDeviceCount: 0 };
     expect(pendingOnboardingSteps(state, unpaired)).toEqual(["phone"]);
     expect(shouldAutoOpenOnboarding(state, unpaired)).toBe(false);
+  });
+});
+
+describe("try step", () => {
+  const ctx: OnboardingContext = {
+    permissions: macosPermissionsStatus,
+    agents: [{ name: "claude", available: true }],
+    cli: cliInstalled,
+    projectCount: 1,
+    accountLinked: true,
+    pairedDeviceCount: 1,
+  };
+
+  it("sits between project and phone", () => {
+    const steps = wizardSteps(ctx);
+    const at = steps.indexOf("project");
+    expect(steps.slice(at, at + 3)).toEqual(["project", "try", "phone"]);
+  });
+
+  it("is never pending, never forces auto-open, and is done only once recorded", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro", "features", "agents", "cli", "project"],
+      dismissed: false,
+    };
+    expect(pendingOnboardingSteps(state, ctx)).toEqual([]);
+    expect(shouldAutoOpenOnboarding(state, ctx)).toBe(false);
+    expect(satisfiedOnboardingSteps(state, ctx)).not.toContain("try");
+    expect(
+      satisfiedOnboardingSteps({ ...state, completedSteps: [...state.completedSteps, "try"] }, ctx),
+    ).toContain("try");
   });
 });

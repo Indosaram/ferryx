@@ -540,6 +540,19 @@ impl WorktreeManager {
         self.ensure_canonical_inside_root(&options.path, canonical_parent)?;
         self.exclude_from_status(&options.path);
 
+        // A branch left behind by a removed worktree makes `worktree add -b` fail with a bare
+        // git error; report it as the typed collision so callers can pick another slug.
+        let branch_ref = format!("refs/heads/{branch_name}");
+        if run_git(
+            &self.repo_root,
+            &["show-ref", "--verify", "--quiet", "--end-of-options", &branch_ref],
+        )
+        .is_ok()
+        {
+            return Err(WorktreeError::BranchAlreadyExists {
+                branch: branch_name,
+            });
+        }
         git_worktree_add(
             &self.repo_root,
             &options.path,
