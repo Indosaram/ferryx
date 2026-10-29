@@ -549,7 +549,167 @@ pub fn remember_reference_prompt_card(card: &ReferencePromptCard) {
 
 /// The card this module detected for a prompt id, if it still holds it.
 pub fn reference_prompt_card(prompt_id: &str) -> Option<ReferencePromptCard> {
-    reference_prompt_registry().lock().ok()?.cards.get(prompt_id).cloned()
+    let content = reference_prompt_content_id(prompt_id);
+    reference_prompt_registry().lock().ok()?.cards.get(content).cloned()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Occurrences: one asking of a card on one pane
+// ---------------------------------------------------------------------------------------------
+
+/// Separates a card's content id from the occurrence number its public id carries.
+pub const REFERENCE_PROMPT_OCCURRENCE_SEPARATOR: char = '~';
+
+/// How many panes the occurrence ledger remembers; the oldest is forgotten first.
+const REFERENCE_PROMPT_OCCURRENCE_SESSIONS: usize = 256;
+/// How many distinct cards one pane remembers before the ones it is not showing are dropped.
+const REFERENCE_PROMPT_OCCURRENCE_CARDS: usize = 64;
+
+#[derive(Debug, Default)]
+struct ReferencePromptOccurrence {
+    number: u64,
+    /// The screen revision this occurrence was answered on through Ferryx, if it was.
+    answered_on: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ReferencePaneOccurrences {
+    /// The content id of the card a reading last found on this pane.
+    showing: Option<String>,
+    cards: HashMap<String, ReferencePromptOccurrence>,
+}
+
+#[derive(Debug, Default)]
+struct ReferenceOccurrenceLedger {
+    order: VecDeque<String>,
+    panes: HashMap<String, ReferencePaneOccurrences>,
+}
+
+impl ReferenceOccurrenceLedger {
+    fn pane(&mut self, session: &str) -> &mut ReferencePaneOccurrences {
+        if !self.panes.contains_key(session) {
+            self.order.push_back(session.to_string());
+            while self.order.len() > REFERENCE_PROMPT_OCCURRENCE_SESSIONS {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.panes.remove(&oldest);
+                }
+            }
+        }
+        self.panes.entry(session.to_string()).or_default()
+    }
+}
+
+fn reference_occurrence_ledger() -> &'static Mutex<ReferenceOccurrenceLedger> {
+    static LEDGER: OnceLock<Mutex<ReferenceOccurrenceLedger>> = OnceLock::new();
+    LEDGER.get_or_init(|| Mutex::new(ReferenceOccurrenceLedger::default()))
+}
+
+/// The content part of a public prompt id: the id the detectors and card registries use.
+pub fn reference_prompt_content_id(prompt_id: &str) -> &str {
+    match prompt_id.rsplit_once(REFERENCE_PROMPT_OCCURRENCE_SEPARATOR) {
+        Some((content, number)) if !content.is_empty() && number.parse::<u64>().is_ok() => content,
+        _ => prompt_id,
+    }
+}
+
+fn reference_prompt_occurrence_number(prompt_id: &str) -> u64 {
+    prompt_id
+        .rsplit_once(REFERENCE_PROMPT_OCCURRENCE_SEPARATOR)
+        .and_then(|(_, number)| number.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn reference_prompt_public_id(content: &str, number: u64) -> String {
+    if number == 0 {
+        content.to_string()
+    } else {
+        format!("{content}{REFERENCE_PROMPT_OCCURRENCE_SEPARATOR}{number}")
+    }
+}
+
+/// Note what one reading of `session`'s screen found, and return the public id of that card.
+///
+/// A card's content id is a hash of what it shows, so an agent asking the identical question
+/// again would get the id of the asking that was already answered. Each asking is an occurrence:
+/// the first keeps the plain content id, and once Ferryx has answered one, the next time that card
+/// appears after a reading saw the pane without it (on another screen) it is `<content>~<n>`.
+/// A card still on screen after its answer keeps its id, so the answer ledger refuses it again.
+pub fn note_reference_prompt_occurrence(
+    session: &str,
+    content: Option<&str>,
+    screen_revision: &str,
+) -> Option<String> {
+    let Ok(mut ledger) = reference_occurrence_ledger().lock() else {
+        return content.map(str::to_string);
+    };
+    let pane = ledger.pane(session);
+    let Some(content) = content else {
+        // A screen identical to the one an answer went out on is not evidence the card left: a
+        // reader that cannot see this card (no session record) must not open a new occurrence.
+        let still_there = pane
+            .showing
+            .as_ref()
+            .and_then(|showing| pane.cards.get(showing))
+            .and_then(|card| card.answered_on.as_deref())
+            == Some(screen_revision);
+        if !still_there {
+            pane.showing = None;
+        }
+        return None;
+    };
+    if pane.showing.as_deref() != Some(content) {
+        if pane.cards.len() >= REFERENCE_PROMPT_OCCURRENCE_CARDS && !pane.cards.contains_key(content) {
+            pane.cards.clear();
+        }
+        let card = pane.cards.entry(content.to_string()).or_default();
+        if card.answered_on.take().is_some() {
+            card.number += 1;
+        }
+        pane.showing = Some(content.to_string());
+    }
+    let number = pane.cards.get(content).map_or(0, |card| card.number);
+    Some(reference_prompt_public_id(content, number))
+}
+
+/// [note_reference_prompt_occurrence] for a detected prompt: its id becomes the public one.
+pub fn reference_prompt_occurrence(
+    session: &str,
+    prompt: Option<ReferencePrompt>,
+    screen_revision: &str,
+) -> Option<ReferencePrompt> {
+    let public = note_reference_prompt_occurrence(
+        session,
+        prompt.as_ref().map(|prompt| prompt.id.as_str()),
+        screen_revision,
+    );
+    prompt.zip(public).map(|(mut prompt, id)| {
+        prompt.id = id;
+        prompt
+    })
+}
+
+/// The public id `content` has on `session` now, without counting a reading.
+pub fn reference_prompt_current_id(session: &str, content: &str) -> String {
+    let number = reference_occurrence_ledger()
+        .lock()
+        .ok()
+        .and_then(|ledger| ledger.panes.get(session)?.cards.get(content).map(|card| card.number))
+        .unwrap_or(0);
+    reference_prompt_public_id(content, number)
+}
+
+/// Record that this occurrence was answered through Ferryx on `screen_revision`.
+fn mark_reference_prompt_answered(session: &str, prompt_id: &str, screen_revision: &str) {
+    let Ok(mut ledger) = reference_occurrence_ledger().lock() else {
+        return;
+    };
+    let number = reference_prompt_occurrence_number(prompt_id);
+    let pane = ledger.pane(session);
+    if let Some(card) = pane.cards.get_mut(reference_prompt_content_id(prompt_id)) {
+        if card.number == number {
+            card.answered_on = Some(screen_revision.to_string());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -665,7 +825,9 @@ pub fn reference_answer_keys(
     answer: &ReferencePromptAnswer,
 ) -> Result<Vec<ReferenceKeyStep>, ScopeErrorCode> {
     let card = reference_prompt_card(&prompt.id).ok_or(ScopeErrorCode::InvalidRequest)?;
-    plan_answer_keys(&card, prompt, answer, None)
+    // The card's own prompt carries the content id a family's planner reads (pi's cursor).
+    let planned = card.prompt().clone();
+    plan_answer_keys(&card, &planned, answer, None)
 }
 
 /// The keys for one card, planned from the card itself.
@@ -1077,17 +1239,24 @@ impl ReferencePromptAnswers {
         // pane's trust rule again.
         let agent = request.agent;
         let mut screen_text = fresh.text;
-        let mut card =
-            match detect_reference_prompt_card_in_session(agent, &screen_text, &request.session) {
-                Some(card) if card.prompt().id == request.payload.prompt_id => card,
-                _ => {
-                    return refused(
-                        ScopeErrorCode::RequestConflict,
-                        true,
-                        REFERENCE_PROMPT_STALE_SCREEN_MESSAGE,
-                    );
-                }
-            };
+        let detected = detect_reference_prompt_card_in_session(agent, &screen_text, &request.session);
+        // The card must be the asking the user answered, not only the same content: an identical
+        // re-ask after an answer is a new occurrence with its own id.
+        let mut card = match detected {
+            Some(card)
+                if reference_prompt_current_id(session_id(request), &card.prompt().id)
+                    == request.payload.prompt_id =>
+            {
+                card
+            }
+            _ => {
+                return refused(
+                    ScopeErrorCode::RequestConflict,
+                    true,
+                    REFERENCE_PROMPT_STALE_SCREEN_MESSAGE,
+                );
+            }
+        };
 
         // A folded OmO widget is not answerable where it stands. Its own key opens the form, and
         // the form the screen then shows — verified to be the same asking — is what is answered.
@@ -1214,6 +1383,11 @@ impl ReferencePromptAnswers {
         if let Ok(mut ledger) = self.ledger.lock() {
             ledger.record(ledger_key);
         }
+        mark_reference_prompt_answered(
+            session_id(request),
+            &request.payload.prompt_id,
+            &request.payload.screen_revision,
+        );
         ReferenceInputOutcome::Accepted {
             receipt: DeliveryReceipt {
                 request_id: request.request_id.to_string(),
@@ -1256,7 +1430,9 @@ async fn wait_for_open_form(
                 if let Some(card) =
                     detect_reference_prompt_card_in_session(agent, &snapshot.text, &request.session)
                 {
-                    if card.prompt().id == request.payload.prompt_id && !card.is_folded_omo() {
+                    if card.prompt().id == reference_prompt_content_id(&request.payload.prompt_id)
+                        && !card.is_folded_omo()
+                    {
                         return Ok((card, snapshot.text));
                     }
                 }
@@ -2070,6 +2246,70 @@ mod tests {
     // Answering: fresh screen, single use, one step per pane
     // -----------------------------------------------------------------------------------------
 
+    /// Answer the claude question on `session` as `prompt_id`, on a screen showing that card at
+    /// [REVISION], and return the outcome and the keys written.
+    async fn answer_claude_occurrence(
+        answers: &ReferencePromptAnswers,
+        session: &str,
+        prompt_id: &str,
+        request_id: &str,
+    ) -> (ReferenceInputOutcome, Vec<String>) {
+        let target = target(session);
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::default();
+        let step = SharedStep::default();
+        let reader = ScriptedScreen::one(CLAUDE_QUESTION);
+        let payload = payload(prompt_id, REVISION, option(1));
+        let authorize = allow();
+        let alive = alive();
+        let request = ReferenceAnswerRequest {
+            target: &target,
+            request_id,
+            agent: "claude",
+            payload: &payload,
+            session: ReferencePromptSession::default(),
+            authorize: &authorize,
+            alive: &alive,
+        };
+        let outcome = answer_once(answers, &request, &step, &reader, &writer, &clock).await;
+        (outcome, writer.text())
+    }
+
+    #[tokio::test]
+    async fn an_identical_re_ask_after_an_answer_is_a_new_answerable_occurrence() {
+        let session = "sess-row28-reask";
+        let card = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");
+        let answers = ReferencePromptAnswers::new();
+
+        // The agent asks X; the Inbox lists it and answers it.
+        let first = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("X is listed");
+        assert_eq!(first.id, card.id, "the first asking keeps the plain content id");
+        let (outcome, keys) = answer_claude_occurrence(&answers, session, &first.id, "req-x-1").await;
+        assert!(outcome.is_typed(), "{outcome:?}");
+        assert_eq!(keys, vec!["\u{1b}[B".to_string(), "\r".to_string()]);
+
+        // Still on screen after its answer: the same occurrence, and a second answer types nothing.
+        let lingering = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("still shown");
+        assert_eq!(lingering.id, first.id, "one asking keeps one id");
+        let (again, keys) = answer_claude_occurrence(&answers, session, &first.id, "req-x-2").await;
+        assert_not_typed(&again, ScopeErrorCode::RequestConflict);
+        assert!(keys.is_empty());
+
+        // The agent moves on, then asks the identical X again: the screen is byte-identical.
+        assert!(reference_prompt_occurrence(session, None, "rev-working").is_none());
+        let second = reference_prompt_occurrence(session, Some(card.clone()), REVISION).expect("X is listed again");
+        assert_ne!(second.id, first.id, "a new asking has its own id");
+        assert_eq!(reference_prompt_content_id(&second.id), card.id);
+
+        let (outcome, keys) = answer_claude_occurrence(&answers, session, &second.id, "req-x-3").await;
+        assert!(outcome.is_typed(), "the re-ask is answerable: {outcome:?}");
+        assert_eq!(keys, vec!["\u{1b}[B".to_string(), "\r".to_string()]);
+
+        // The first asking's id no longer names the card on screen.
+        let (stale, keys) = answer_claude_occurrence(&answers, session, &first.id, "req-x-4").await;
+        assert_not_typed(&stale, ScopeErrorCode::RequestConflict);
+        assert!(keys.is_empty());
+    }
     #[tokio::test]
     async fn an_answer_is_planned_from_the_card_and_written_to_the_original_pane() {
         let prompt = detect_reference_prompt("claude", CLAUDE_QUESTION).expect("a claude card");

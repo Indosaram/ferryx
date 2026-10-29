@@ -119,7 +119,11 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         {
             let identity = reference_chat_identity(state, &target, Some(agent)).await;
             let session = reference_chat_prompt_session(state, &identity).await;
-            reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow())
+            reference_prompts::reference_prompt_occurrence(
+                session_id,
+                reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow()),
+                &snapshot.revision,
+            )
         }
         _ => None,
     };
@@ -564,6 +568,7 @@ pub(crate) async fn prompt_get(
     let identity = reference_chat_identity(state, &target, Some(&agent)).await;
     let session = reference_chat_prompt_session_for_screen(state, &identity, &agent, &snapshot.text).await;
     let prompt = reference_prompts::detect_reference_prompt_in_session(&agent, &snapshot.text, &session.borrow());
+    let prompt = reference_prompts::reference_prompt_occurrence(session_id, prompt, &snapshot.revision);
     Ok(prompt.and_then(|prompt| prompt_view(&prompt, snapshot.revision)))
 }
 

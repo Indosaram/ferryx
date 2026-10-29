@@ -6785,6 +6785,11 @@ async fn reference_chat_prompt(
         &snapshot.text,
         &session.borrow(),
     );
+    let prompt = reference_prompts::reference_prompt_occurrence(
+        &read.target.target.backend_session_id,
+        prompt,
+        &snapshot.revision,
+    );
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({
