@@ -50,7 +50,7 @@ const ADMISSION_WORK = Object.freeze({
 // Daemon protocol version of this source revision (src-tauri/src/daemon/protocol.rs); a
 // daemon that speaks another one answers protocolMismatch with its own, which is used instead.
 export const DAEMON_PROTOCOL_VERSION = 5;
-const HELD_STATES = new Set(['degraded', 'awaiting_owner', 'delivery_uncertain', 'cancelled', 'paused', 'completed']);
+export const HELD_STATES = new Set(['degraded', 'awaiting_owner', 'delivery_uncertain', 'cancelled', 'paused', 'completed']);
 
 export const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
@@ -474,12 +474,12 @@ const AUTONOMY_WORK = Object.freeze({
   requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
   operations: ['edit', 'test'],
 });
-const AUTONOMY_VERIFY = 'test "$(cat result.txt)" = READY\n';
+export const AUTONOMY_VERIFY = 'test "$(cat result.txt)" = READY\n';
 // The blind convergence prompt's opening (crates/ferryx-hub/src/goals/converge.rs build_prompt).
-const CONVERGENCE_MARKER = 'You independently check whether a coding lane';
-const AUTONOMY_CONVERGED = Object.freeze({ requirements: [{ req_id: 'r1', met: true, evidence_refs: ['sig:req:r1'] }] });
+export const CONVERGENCE_MARKER = 'You independently check whether a coding lane';
+export const AUTONOMY_CONVERGED = Object.freeze({ requirements: [{ req_id: 'r1', met: true, evidence_refs: ['sig:req:r1'] }] });
 
-function promptTextOf(json) {
+export function promptTextOf(json) {
   return (json?.messages ?? []).map((message) => (typeof message?.content === 'string' ? message.content
     : (Array.isArray(message?.content) ? message.content.map((part) => part?.text ?? '').join('') : ''))).join('\n');
 }
@@ -2364,6 +2364,51 @@ async function runBurst(ctx) {
     ctx.assert('report-from-an-unbound-session-refused', stranger.reply?.ok === false && stranger.reply.code === 'NOT_FOUND' && laneEventsAfter === laneEventsBefore,
       { stranger, laneEventsBefore, laneEventsAfter });
 
+    // 2b. Urgent owner pause inside an open report window, on the other goal: its report is
+    //     pending and its window (oldest report + 30s, hub clock) has not elapsed. The owner
+    //     pauses through `ferryx-cli supervisor request`; the scheduler delivers the owner wake
+    //     at once, alone and unjudged (wakes.rs tick step 3), before that window ends, while the
+    //     report wake stays pending behind the pause (a paused goal is Deferral::Held).
+    const otherReported = wakeState('other');
+    const otherReportEvent = otherReported.laneEvents.find((event) => event.kind === 'worker_report') ?? null;
+    const otherWindowEndMs = Date.parse(otherReportEvent?.created_at ?? '') + BURST_WINDOW_MS;
+    const pauseEnvelope = { requestId: `qa-burst-pause-other-${ctx.runId}`, projectId, goalId: goals.other, expectedRevision: otherReported.goal?.revision,
+      action: 'pause', payload: { reason: 'qa urgent pause inside the report window' } };
+    const pauseFile = join(requestsDir, 'pause-other.json');
+    writeFileSync(pauseFile, JSON.stringify(pauseEnvelope));
+    ctx.evidence.appendJsonl('envelopes.jsonl', { label: 'pause-other', envelope: pauseEnvelope, at: new Date().toISOString() });
+    const pauseSentMs = Date.now();
+    const pauseRequest = await ctx.cli(['supervisor', 'request', '--json', pauseFile], { label: 'pause-other', env });
+    transcript(`pause-other: exit ${pauseRequest.code} ${JSON.stringify(pauseRequest.json)}`);
+    const ownerTurnsOf = (state) => state.turns.filter((turn) => JSON.parse(turn.causes).includes('owner_control'));
+    // Bounded by the window end itself: a pause turn later than that is the defect asserted below.
+    const pauseSettled = pauseRequest.code !== 0 ? null : await waitForChange(ctx, 'urgent pause turn on the other goal', hubDir, () => {
+      const state = wakeState('other');
+      const turn = ownerTurnsOf(state)[0] ?? null;
+      return { done: turn !== null && turn.state !== 'pending', state, observedMs: Date.now() };
+    }, Math.max(1_000, otherWindowEndMs - Date.now())).then((value) => value, (error) => { if (ctx.signal.aborted) throw error; return null; });
+    const atPause = pauseSettled?.state ?? wakeState('other');
+    const pauseEvent = hub.one(`SELECT seq, from_state, to_state, from_revision, to_revision, recorded_at FROM supervisor_state_events
+      WHERE goal_id = ? AND source = 'goal' AND to_state = 'paused' ORDER BY seq LIMIT 1`, goals.other);
+    const pauseTurn = ownerTurnsOf(atPause)[0] ?? null;
+    const ownerWakes = atPause.wakes.filter((wake) => wake.cause === 'owner_control');
+    const heldReport = atPause.wakes.find((wake) => wake.cause === 'report') ?? null;
+    const pauseDelayMs = pauseTurn && pauseEvent ? Date.parse(pauseTurn.created_at) - Date.parse(pauseEvent.recorded_at) : null;
+    ctx.assert('owner-pause-applied-inside-the-open-report-window', pauseRequest.code === 0 && Number.isFinite(otherWindowEndMs)
+      && pauseSentMs < otherWindowEndMs && pauseEvent?.from_state === 'running' && Date.parse(pauseEvent.recorded_at) < otherWindowEndMs
+      && pauseEvent.to_revision === (otherReported.goal?.revision ?? -1) + 1,
+    { pause: { code: pauseRequest.code, json: pauseRequest.json }, pauseEvent, otherReportEvent, windowEnd: new Date(otherWindowEndMs || 0).toISOString() });
+    ctx.assert('urgent-pause-delivered-before-the-window-ends', pauseTurn?.state === 'delivered' && Number(pauseTurn.urgent) === 1
+      && JSON.stringify(JSON.parse(pauseTurn.causes)) === JSON.stringify(['owner_control']) && pauseTurn.judge_score === null
+      && Date.parse(pauseTurn.created_at) >= Date.parse(pauseEvent?.recorded_at ?? '') && Date.parse(pauseTurn.settled_at ?? '') < otherWindowEndMs
+      && ownerWakes.length === 1 && ownerWakes[0].consumed_at !== null
+      && JSON.stringify(atPause.receipts.filter((receipt) => receipt.turn_id === pauseTurn.id).map((receipt) => [receipt.wake_id, receipt.disposition])) === JSON.stringify([[ownerWakes[0].id, 'delivered']]),
+    { pauseTurn, pauseDelayMs, ownerWakes, receipts: atPause.receipts, windowEnd: new Date(otherWindowEndMs || 0).toISOString(), observedAt: pauseSettled && new Date(pauseSettled.observedMs).toISOString() });
+    ctx.assert('pending-report-held-behind-the-pause', heldReport !== null && heldReport.event_id === `lane_event:${otherReport?.reply?.laneEventId}`
+      && heldReport.consumed_at === null && !atPause.receipts.some((receipt) => receipt.wake_id === heldReport.id)
+      && atPause.goal?.run_state === 'paused' && ownerTurnsOf(atPause).length === atPause.turns.length,
+    { heldReport, goal: atPause.goal, turns: atPause.turns, receipts: atPause.receipts });
+
     // 3. The window, on the hub's own clock: the oldest report's lane event time.
     const afterReports = wakeState('burst');
     const reportEvents = afterReports.laneEvents.filter((event) => event.kind === 'worker_report');
@@ -2412,11 +2457,34 @@ async function runBurst(ctx) {
       && reportWakes.length === 4 && final.turns.length === 1, { laneEvents: final.laneEvents, wakes: final.wakes, turns: final.turns });
     const otherState = wakeState('other');
     const otherWakeIds = otherState.wakes.filter((wake) => wake.cause === 'report').map((wake) => wake.event_id);
+    // The other goal's only turn so far is the owner pause: its report is still held.
     ctx.assert('unrelated-report-does-not-wake-this-goal', otherWakeIds.length === 1 && otherWakeIds[0] === `lane_event:${otherReport?.reply?.laneEventId}`
-      && !final.wakes.some((wake) => otherWakeIds.includes(wake.event_id)) && otherState.turns.length === 0,
+      && !final.wakes.some((wake) => otherWakeIds.includes(wake.event_id)) && otherState.turns.every((row) => !JSON.parse(row.causes).includes('report')),
     { otherWakes: otherState.wakes, otherTurns: otherState.turns, burstWakes: final.wakes });
     ctx.assert('burst-graded-only-after-the-window', modelCalls.filter((call) => call.goals.includes('burst')).every((call) => call.seq > callsBeforeRelease
       && Date.parse(call.at) >= windowEndMs), { callsBeforeRelease, burstCalls: modelCalls.filter((call) => call.goals.includes('burst')) });
+
+    // 5. The owner resumes the other goal and its run settles: the report held behind the pause
+    //    is delivered in a later turn, never lost.
+    const otherPaused = wakeState('other');
+    const resumeEnvelope = { requestId: `qa-burst-resume-other-${ctx.runId}`, projectId, goalId: goals.other, expectedRevision: otherPaused.goal?.revision, action: 'resume', payload: {} };
+    const resumeFile = join(requestsDir, 'resume-other.json');
+    writeFileSync(resumeFile, JSON.stringify(resumeEnvelope));
+    ctx.evidence.appendJsonl('envelopes.jsonl', { label: 'resume-other', envelope: resumeEnvelope, at: new Date().toISOString() });
+    const resumeRequest = await ctx.cli(['supervisor', 'request', '--json', resumeFile], { label: 'resume-other', env });
+    transcript(`resume-other: exit ${resumeRequest.code} ${JSON.stringify(resumeRequest.json)}`);
+    release('hold-other');
+    const otherEnded = resumeRequest.code !== 0 ? null : await waitForChange(ctx, 'other to complete or hold after its resume', hubDir, () => {
+      const state = wakeState('other');
+      return { done: HELD_STATES.has(state.goal?.run_state) && state.goal?.run_state !== 'paused' && state.turns.every((row) => row.state !== 'pending'), state };
+    }, 6 * 60_000);
+    const otherFinal = otherEnded?.state ?? wakeState('other');
+    const reportReceipt = heldReport ? otherFinal.receipts.find((receipt) => receipt.wake_id === heldReport.id) ?? null : null;
+    const reportTurn = reportReceipt ? otherFinal.turns.find((row) => row.id === reportReceipt.turn_id) ?? null : null;
+    ctx.assert('held-report-delivered-after-the-resume', resumeRequest.code === 0 && reportReceipt?.disposition === 'delivered'
+      && reportTurn?.state === 'delivered' && pauseTurn !== null && reportTurn.id > pauseTurn.id && JSON.parse(reportTurn.causes).includes('report')
+      && otherFinal.wakes.find((wake) => wake.id === heldReport.id)?.consumed_at !== null,
+    { resume: { code: resumeRequest.code, json: resumeRequest.json }, goal: otherFinal.goal, turns: otherFinal.turns, receipts: otherFinal.receipts, wakes: otherFinal.wakes });
 
     // Cleanup: every hold released, the daemon stopped; every fixture worker must be gone.
     release('hold-other');
@@ -2438,6 +2506,7 @@ async function runBurst(ctx) {
       ingress: 'agent-state socket supervisorReport -> hub_runtime::supervisor_worker_report -> lanes::dispatch::report_from_worker -> hand_to_supervisor -> wakes::report',
       window: { oldest: new Date(oldestMs).toISOString(), windowEnd: new Date(windowEndMs).toISOString(), spanMs, heldPastMs: BURST_HOLD_PAST_MS },
       goals, sessions: sessionOf, replies: { originals, duplicates, other: otherReport, stranger },
+      urgentPause: { otherWindowEnd: new Date(otherWindowEndMs || 0).toISOString(), pauseEvent, pauseTurn, pauseDelayMs, heldReport, atPause, otherFinal },
       checkpoints: { afterReports, atWindowEnd, final, other: otherState },
       modelCalls, callsBeforeRelease,
     });
@@ -2568,19 +2637,19 @@ export const SCENARIOS = Object.freeze({
   burst: Object.freeze({
     implemented: true,
     task: '9',
-    summary: 'Four ordinary reports from a live run\'s own worker at real 0,1,2,3s, a retry and an out-of-order replay, another goal\'s report: no turn and no model call before oldest+30s, then exactly one delivered turn with each report receipted once',
-    deadlineMs: 12 * 60_000,
+    summary: 'Four ordinary reports from a live run\'s own worker at real 0,1,2,3s, a retry and an out-of-order replay, another goal\'s report: no turn and no model call before oldest+30s, then exactly one delivered turn with each report receipted once; an owner pause of the other goal inside its open report window is delivered at once, its report held and delivered after the resume',
+    deadlineMs: 16 * 60_000,
     requiredAssertions: [
       'engine-ready', 'workspace-registered', 'two-goals-admitted', 'both-runs-started-and-held-live', 'four-reports-accepted-for-their-own-goal',
       'duplicate-and-out-of-order-reports-are-the-same-events', 'unrelated-report-lands-on-its-own-goal', 'report-from-an-unbound-session-refused',
       'reports-spread-over-three-seconds-inside-the-window', 'each-report-handed-to-the-goal-once', 'no-wake-turn-before-the-window-ends',
       'no-model-call-between-the-reports-and-the-window-end', 'burst-goal-completed', 'exactly-one-wake-turn-delivered-once',
       'turn-at-or-after-oldest-report-plus-window', 'each-report-receipted-once', 'duplicates-added-no-event-wake-or-turn',
-      'unrelated-report-does-not-wake-this-goal', 'burst-graded-only-after-the-window', 'fixture-workers-gone',
+      'unrelated-report-does-not-wake-this-goal', 'burst-graded-only-after-the-window', 'owner-pause-applied-inside-the-open-report-window',
+      'urgent-pause-delivered-before-the-window-ends', 'pending-report-held-behind-the-pause', 'held-report-delivered-after-the-resume', 'fixture-workers-gone',
     ],
     notCovered: [
       { clause: 'report-only-window-on-an-idle-goal', reason: 'a worker reports only while its run is live, so the goal is busy and its reports wait for the settle; the runner holds the run past oldest+30s on the real clock. A report-only batch admitted by the window itself (and its judge call) is never reached through a live worker', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs reports_batch_on_the_oldest_and_an_owner_pause_skips_the_window' },
-      { clause: 'urgent-pause-zero-delay', reason: 'an owner pause skipping the window is a separate owner path', coveredBy: 'crates/ferryx-hub/src/supervisor/tests/wakes.rs the_loop_recovers_at_start_and_delivers_an_owner_pause_without_delay' },
       { clause: 'ended-goal-report', reason: 'a worker of an ended goal is gone with its pane, so a report for it cannot be sent through the product', coveredBy: 'crates/ferryx-hub/src/lanes/dispatch.rs a_worker_report_becomes_one_wake_on_its_own_goal' },
     ],
     run: runBurst,

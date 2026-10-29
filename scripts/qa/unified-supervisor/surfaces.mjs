@@ -3,7 +3,12 @@
 // Supervisor tab) and 390x844 (phone home), in light and dark. Submit goes through the
 // composer, pause through the phone, resume through the wide layout; each surface must show the
 // goal and revision the hub database and the daemon snapshot (the desktop app's IPC request)
-// report. Stopping the daemon must leave the last goal shown as disconnected, never blank.
+// report. The run states running, paused and completed are each captured on both surfaces in
+// light and dark (12 screenshots). `completed` is reached live by a second goal on a second
+// project whose requirement names a verifier Ferryx runs (verify.sh, as in autonomy): the hub's
+// retained mhc engine on a loopback provider stub grades each settled run, the fixture worker's
+// first turn fails the check and its corrective turn passes it. Stopping the daemon must leave
+// the last goal shown as disconnected, never blank.
 //
 // Every product effect goes through product surfaces: `ferryx-cli supervisor setup|request`,
 // `ferryx-cli account login` (device authorization), the daemon socket the GUI uses (workspace,
@@ -11,16 +16,21 @@
 // file mailer's magic links are opened like a person would), and the browser UI itself. The hub
 // database is only read, read-only.
 //
-// Not covered here (listed in assertions.json): the native desktop window (MahoRD capture), a
-// goal reaching `completed` (needs a runnable verifier and T10's mhc judge, see notCovered), and
+// Theme: the client's appearance setting "system" (storage key ferryx.settings.appearance)
+// follows prefers-color-scheme, which the browser context emulates; no CSS is injected.
+//
+// Not covered here (listed in assertions.json): the native desktop window (MahoRD capture) and
 // typing/native-pane masks (ui unit tests).
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HarnessError, isInside, POSIX } from './harness.mjs';
+import { awaitEngine, prepareEngineEnv, startProviderStub } from './mhc.mjs';
+// Live bindings of a module that imports this one: read inside functions only, never at load.
 import {
-  DAEMON_PROTOCOL_VERSION, GATEWAY_PORT, WORKER, daemonExchange, freeLoopbackPort, onPath, openHubReader, portIsFree, readWorkerLogs, shellQuote, waitForChange,
+  AUTONOMY_CONVERGED, AUTONOMY_VERIFY, CONVERGENCE_MARKER, DAEMON_PROTOCOL_VERSION, GATEWAY_PORT, HELD_STATES, WORKER, daemonExchange, freeLoopbackPort, onPath,
+  openHubReader, portIsFree, promptTextOf, readWorkerLogs, shellQuote, waitForChange,
 } from './scenarios.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -35,6 +45,17 @@ const LAYOUTS = Object.freeze({
   phone: { width: 390, height: 844, mobile: true },
 });
 const APPEARANCE_KEY = 'ferryx.settings.appearance';
+// The completion leg: its own project and checkout, so the pane shell can start the
+// multi-turn fixture worker for its lanes only (selected by the pane's working directory).
+const COMPLETE_PROJECT = 'qa-complete';
+const COMPLETE_WORK = Object.freeze({
+  title: 'Write result.txt',
+  instruction: 'Create result.txt containing READY. Run verify.sh. Correct failures until it passes.',
+  requirements: [{ id: 'r1', text: 'result.txt contains exactly READY', verifier: 'verify.sh exits 0' }],
+  operations: ['edit', 'test'],
+});
+// The label each captured run state shows (UnifiedSupervisorSection RUN_STATE_LABELS).
+const STATE_LABELS = Object.freeze({ running: 'Running', paused: 'Paused', completed: 'Completed' });
 
 function loadPlaywright() {
   const require = createRequire(join(REPO_ROOT, 'ui', 'package.json'));
@@ -77,7 +98,18 @@ function probeLayout(selector) {
 const layoutOk = (probe) => probe?.found === true && probe.width > 0 && probe.height > 0 && probe.textLength > 0
   && probe.documentOverflowX === false && probe.overlaps.length === 0 && probe.outside.length === 0;
 
+// The loopback provider stub the hub's mhc engine grades with: it claims completion and cites
+// the check Ferryx ran, so only that check decides (see autonomy in scenarios.mjs).
 async function runSurfaces(ctx) {
+  const stub = await startProviderStub(ctx, { answer: (json) => (promptTextOf(json).includes(CONVERGENCE_MARKER) ? AUTONOMY_CONVERGED : null) });
+  try {
+    return await runSurfacesWith(ctx, stub);
+  } finally {
+    await stub.close();
+  }
+}
+
+async function runSurfacesWith(ctx, stub) {
   if (!POSIX) throw new HarnessError('SCENARIO_PLATFORM_UNSUPPORTED', 'surfaces runs the POSIX fixture worker pane; run it on Linux or macOS');
   const { config } = ctx;
   if (!config.ferryxRelay) throw new HarnessError('CONFIG_INVALID', 'surfaces needs ferryxRelay: the relay hosts the account service and serves the web client');
@@ -105,8 +137,16 @@ async function runSurfaces(ctx) {
   const workspaceRoot = join(data, 'ws');
   const repo = join(workspaceRoot, PROJECT);
   mkdirSync(repo, { recursive: true });
+  // The completion project's checkout commits verify.sh, so every lane worktree has it.
+  const completeRepo = join(workspaceRoot, COMPLETE_PROJECT);
+  mkdirSync(completeRepo, { recursive: true });
+  writeFileSync(join(completeRepo, 'verify.sh'), AUTONOMY_VERIFY, { mode: 0o755 });
   const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
-  for (const [label, args] of [['git-init', [...gitArgs, 'init', '-q', repo]], ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']]]) {
+  for (const [label, args] of [
+    ['git-init', [...gitArgs, 'init', '-q', repo]], ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'qa fixture']],
+    ['git-init-complete', [...gitArgs, 'init', '-q', completeRepo]], ['git-add-complete', [...gitArgs, '-C', completeRepo, 'add', 'verify.sh']],
+    ['git-commit-complete', [...gitArgs, '-C', completeRepo, 'commit', '-q', '-m', 'qa fixture verifier']],
+  ]) {
     const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
     if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
   }
@@ -114,7 +154,10 @@ async function runSurfaces(ctx) {
   mkdirSync(workerLogs, { recursive: true });
   const shell = join(data, 'bin', 'qa-surfaces-shell');
   mkdirSync(dirname(shell), { recursive: true });
-  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${shellQuote(process.execPath)} ${shellQuote(WORKER)} ${shellQuote(workerLogs)}\n`, { mode: 0o755 });
+  // A pane in the completion project's checkout (or its lane worktree <repo>-lanes/<key>) runs
+  // the multi-turn worker (autonomy's); every other pane the single-turn one.
+  const node = shellQuote(process.execPath);
+  writeFileSync(shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\ncase "$(pwd -P)" in\n  */${COMPLETE_PROJECT}|*/${COMPLETE_PROJECT}/*|*/${COMPLETE_PROJECT}-lanes/*) exec ${node} ${shellQuote(WORKER)} ${shellQuote(workerLogs)} --multi-turn ;;\nesac\nexec ${node} ${shellQuote(WORKER)} ${shellQuote(workerLogs)}\n`, { mode: 0o755 });
 
   // 2. Relay with its embedded account service; it also serves the web client from ferryxUiDist.
   const relayPort = await freeLoopbackPort();
@@ -150,15 +193,20 @@ async function runSurfaces(ctx) {
 
   // 3. Owner set-up, then the machine joins the account through device authorization.
   const email = `${config.ownerPrincipal.replace(/[^A-Za-z0-9._-]/g, '-')}@example.invalid`;
-  const daemonPort = await freeLoopbackPort();
-  const env = ctx.productEnv({
-    SHELL: shell, FERRYX_HUB_TRACKER_ADDR: `127.0.0.1:${daemonPort}`, FERRYX_HUB_WORKSPACE: WORKSPACE_ID, OMON_LANE_AUTO_WORKTREE: '1',
+  // The hub's retained mhc engine on the loopback stub (it grades the completion leg's runs);
+  // prepareEngineEnv also gives the hub HTTP listener a run-local port.
+  const env = await prepareEngineEnv(ctx, { baseUrl: stub.baseUrl, mhcBin: config.mhcBin, label: 'surfaces', extra: {
+    SHELL: shell, FERRYX_HUB_WORKSPACE: WORKSPACE_ID, OMON_LANE_AUTO_WORKTREE: '1',
     FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_MACHINE_TOKEN: machineToken, FERRYX_RELAY_URL: origin, FERRYX_ACCOUNT_ORIGIN: origin,
-  });
+  } });
   const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', PROJECT, '--repo-identity', REPO_IDENTITY,
     '--host', 'local', '--git-common-dir', realpathSync(join(repo, '.git')), '--json'], { label: 'supervisor-setup', env });
   if (setup.code !== 0 || !setup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup failed: ${setup.stdout} ${setup.stderr}`);
   const projectId = setup.json.projectId;
+  const completeSetup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', COMPLETE_PROJECT, '--repo-identity', `qa:${COMPLETE_PROJECT}`,
+    '--host', 'local', '--git-common-dir', realpathSync(join(completeRepo, '.git')), '--json'], { label: 'supervisor-setup-complete', env });
+  if (completeSetup.code !== 0 || !completeSetup.json?.projectId) throw new HarnessError('SETUP_FAILED', `supervisor setup (completion project) failed: ${completeSetup.stdout} ${completeSetup.stderr}`);
+  const completeProjectId = completeSetup.json.projectId;
   const loginCursor = ctx.journal.cursor();
   const { url: approveUrl } = await nextMail('device-login', async () => ctx.spawn('account-login', config.ferryxCli, ['account', 'login', '--email', email, '--origin', origin], { env, cwd: data, graceMs: 3_000 }));
   const approved = await fetch(approveUrl, { signal: ctx.signal });
@@ -167,6 +215,8 @@ async function runSurfaces(ctx) {
 
   // 4. The isolated daemon in relay mode with agent control on; the hub runs the dispatcher.
   const daemon = await ctx.startDaemon({ env, deadlineMs: 60_000 });
+  const engine = await awaitEngine(ctx, env, 'surfaces-ready', (json) => json?.engine?.state === 'ready' && json?.hubOpen === true, 120_000);
+  ctx.assert('engine-ready', engine?.engine?.state === 'ready', { engine });
   const registered = await exchange('register-workspace', { type: 'registerWorkspace', workspaceId: WORKSPACE_ID, repoRoot: realpathSync(workspaceRoot) });
   const control = await exchange('agent-control-on', { type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
   const daemonLog = join(env.FERRYX_DATA_DIR, 'logs', 'daemon.log');
@@ -233,6 +283,8 @@ async function runSurfaces(ctx) {
       const element = document.querySelector(`[data-testid="supervisor-goal"][data-goal-id="${id}"]`);
       return element && wanted.includes(element.getAttribute('data-run-state'));
     }, { id: goalId, wanted: states }, { timeout: UI_DEADLINE_MS });
+    // Two projects: each surface shows one at a time (UnifiedSupervisorSection filters by it).
+    const selectProject = (surface, id) => surface.page.selectOption('[data-testid="supervisor-project"]', id);
     const setTheme = async (surface, theme) => {
       await surface.page.emulateMedia({ colorScheme: theme });
       await surface.page.waitForFunction((wanted) => document.documentElement.dataset.theme === wanted, theme, { timeout: UI_DEADLINE_MS });
@@ -251,6 +303,7 @@ async function runSurfaces(ctx) {
     const phone = await signIn('phone');
     await openSupervisor(desktop);
     await openSupervisor(phone);
+    await Promise.all([selectProject(desktop, projectId), selectProject(phone, projectId)]);
     const connections = await Promise.all([desktop, phone].map((surface) => surface.page.getAttribute('[data-testid="supervisor-connection"]', 'data-state')));
     ctx.assert('both-surfaces-reach-the-live-supervisor', connections.every((state) => state === 'live'), { connections });
 
@@ -271,10 +324,29 @@ async function runSurfaces(ctx) {
     // 7. The dispatcher starts the fixture worker; both surfaces show running at the hub revision.
     await Promise.all([waitState(desktop, goalId, ['running']), waitState(phone, goalId, ['running'])]);
     const running = { hub: goalRow(goalId), daemon: await daemonGoal('snapshot-running', goalId), desktop: await shownGoal(desktop, goalId), phone: await shownGoal(phone, goalId) };
-    const same = (state) => (view) => view.hub?.run_state === state && view.daemon?.runState === state && view.desktop.runState === state && view.phone.runState === state
+    const same = (state, id = goalId) => (view) => view.hub?.run_state === state && view.daemon?.runState === state && view.desktop.runState === state && view.phone.runState === state
       && view.desktop.revision === view.hub.revision && view.phone.revision === view.hub.revision && view.daemon.revision === view.hub.revision
-      && view.desktop.id === goalId && view.phone.id === goalId;
+      && view.desktop.id === id && view.phone.id === id;
     ctx.assert('running-same-goal-and-revision-everywhere', same('running')(running), running);
+    // One state on both surfaces in light and dark: the goal card scrolled into view, its id,
+    // revision and state label as the hub and daemon report them, the section readable.
+    const captureState = async (state, id, view) => {
+      const entries = [];
+      for (const theme of ['light', 'dark']) {
+        for (const surface of [desktop, phone]) {
+          await setTheme(surface, theme);
+          const card = goalOn(surface, id);
+          await card.scrollIntoViewIfNeeded();
+          const label = (await card.locator('[data-testid="supervisor-run-state"]').innerText()).trim();
+          const shown = await shownGoal(surface, id);
+          entries.push({ surface: surface.name, theme, label, shown, probe: await capture(surface, `${state}-${theme}`) });
+        }
+      }
+      ctx.assert(`${state}-same-goal-label-readable-light-and-dark`, same(state, id)(view) && entries.length === 4 && entries.every((entry) => entry.label === STATE_LABELS[state]
+        && entry.shown.id === id && entry.shown.runState === state && entry.shown.revision === view.hub.revision && layoutOk(entry.probe) && entry.probe.theme === entry.theme),
+      { view, entries });
+    };
+    await captureState('running', goalId, running);
 
     // 8. Waiting: the owner adds an external-event dependency, the worker's turn ends (its pane
     //    reports idle), and the scheduler moves the goal to waiting_event by itself. Only the
@@ -305,8 +377,7 @@ async function runSurfaces(ctx) {
     await Promise.all([waitState(phone, goalId, ['paused']), waitState(desktop, goalId, ['paused'])]);
     const paused = { hub: goalRow(goalId), daemon: await daemonGoal('snapshot-paused', goalId), desktop: await shownGoal(desktop, goalId), phone: await shownGoal(phone, goalId) };
     ctx.assert('phone-pause-seen-on-desktop-at-the-same-revision', same('paused')(paused) && paused.hub.revision === waiting.hub.revision + 1, paused);
-    await capture(phone, 'paused-dark');
-    await capture(desktop, 'paused-dark');
+    await captureState('paused', goalId, paused);
 
     // 11. Resume on the wide layout: the goal returns to the state the pause interrupted. Only an
     //     owner hold bumps the revision (transition_goal_in), so the resumed revision is the
@@ -315,6 +386,42 @@ async function runSurfaces(ctx) {
     await Promise.all([waitState(desktop, goalId, ['waiting_event']), waitState(phone, goalId, ['waiting_event'])]);
     const resumed = { hub: goalRow(goalId), daemon: await daemonGoal('snapshot-resumed', goalId), desktop: await shownGoal(desktop, goalId), phone: await shownGoal(phone, goalId) };
     ctx.assert('desktop-resume-returns-live-on-both', same('waiting_event')(resumed) && resumed.hub.revision === paused.hub.revision, resumed);
+
+    // 11b. Completed, live: the owner submits a goal whose requirement names verify.sh to the
+    //      completion project (`ferryx-cli supervisor request`). Nobody acts again: the hub
+    //      grades each settled run on mhc and runs verify.sh itself; the worker's first turn
+    //      fails it, its corrective turn passes it and the goal completes. Both surfaces switch
+    //      to that project and open its ended goals.
+    const completeFile = join(data, 'submit-complete.json');
+    const completeEnvelope = { requestId: `qa-surfaces-complete-${ctx.runId}`, projectId: completeProjectId, action: 'submit', payload: { request: COMPLETE_WORK.instruction, work: COMPLETE_WORK } };
+    writeFileSync(completeFile, JSON.stringify(completeEnvelope));
+    const completeSubmit = await ctx.cli(['supervisor', 'request', '--json', completeFile], { label: 'submit-complete', env });
+    const completeGoalId = completeSubmit.json?.receipt?.receipt?.goal_id ?? null;
+    ctx.assert('completion-goal-admitted', completeSubmit.code === 0 && completeSubmit.json?.receipt?.outcome === 'admitted' && typeof completeGoalId === 'string',
+      { code: completeSubmit.code, json: completeSubmit.json });
+    if (!completeGoalId) throw new HarnessError('ADMISSION_FAILED', 'the completion submit returned no goal');
+    transcript(`completion goal=${completeGoalId}`);
+    const completeEnded = await waitForChange(ctx, 'completion goal to complete or hold', dirname(dbPath), () => {
+      const row = hub.one('SELECT run_state, state_detail, revision FROM supervisor_goals WHERE goal_id = ?', completeGoalId);
+      return { done: HELD_STATES.has(row?.run_state), row };
+    }, 6 * 60_000);
+    const completeTurns = readWorkerLogs(workerLogs).flatMap((entry) => entry.entries.filter((line) => line.kind === 'turn'));
+    ctx.assert('completion-goal-completed-by-the-verifier-ferryx-ran', completeEnded.row?.run_state === 'completed' && completeEnded.row.state_detail?.startsWith('VERIFIED: ')
+      && completeTurns.map((line) => line.verifyExit).join(',') === '1,0', { goal: completeEnded.row, turns: completeTurns });
+    const openEnded = async (surface) => {
+      await selectProject(surface, completeProjectId);
+      await waitState(surface, completeGoalId, ['completed']);
+      const ended = surface.page.locator('[data-testid="supervisor-unified"] details').filter({ has: goalOn(surface, completeGoalId) });
+      if (!(await ended.evaluate((element) => element.open))) await ended.locator('summary').click();
+      await goalOn(surface, completeGoalId).waitFor({ state: 'visible' });
+    };
+    await openEnded(desktop);
+    await openEnded(phone);
+    const completed = { hub: goalRow(completeGoalId), daemon: await daemonGoal('snapshot-completed', completeGoalId), desktop: await shownGoal(desktop, completeGoalId), phone: await shownGoal(phone, completeGoalId) };
+    await captureState('completed', completeGoalId, completed);
+    // Back to the first project for the disconnect leg.
+    await Promise.all([selectProject(desktop, projectId), selectProject(phone, projectId)]);
+    await Promise.all([waitState(desktop, goalId, ['waiting_event']), waitState(phone, goalId, ['waiting_event'])]);
 
     // 12. Disconnect: the daemon (recorded PID) stops. Both views keep the goal, say disconnected
     //     or unavailable, and stay readable in light and dark.
@@ -339,8 +446,10 @@ async function runSurfaces(ctx) {
     ctx.assert('no-page-errors', pageErrors.length === 0, pageErrors);
 
     ctx.evidence.writeJson('surfaces.json', {
-      goalId, projectId, origin, email, receipt: shownReceipt, request, states: { running, waiting, paused, resumed }, screenshots: shots, pageErrors,
-      worker: { kind: 'fixture', note: 'The pane runs fixture-worker.mjs: it reports working on its first line and idle on QA-SETTLE. It is not a real provider worker.' },
+      goalId, projectId, origin, email, receipt: shownReceipt, request, states: { running, waiting, paused, resumed, completed }, screenshots: shots, pageErrors,
+      completion: { goalId: completeGoalId, projectId: completeProjectId, envelope: completeEnvelope, goal: completeEnded.row, turns: completeTurns, providerRequests: stub.requests.length },
+      worker: { kind: 'fixture', note: 'The first project\'s pane runs fixture-worker.mjs single-turn: it reports working on its first line and idle on QA-SETTLE. The completion project\'s pane runs it --multi-turn: wrong bytes on turn 1, READY after, runs verify.sh, reports working then idle. Not a real provider worker.' },
+      model: { kind: 'loopback stub', note: 'The stub always answers complete and cites sig:req:r1; the check Ferryx ran decides.' },
       desktopSurface: 'The 1440x900 surface is the remote web client wide layout; the native desktop window was not driven (MahoRD capture is not part of this runner). The desktop app reads the same daemon supervisorSnapshot recorded under states.*.daemon.',
     });
     for (const entry of readWorkerLogs(workerLogs)) ctx.evidence.writeText(`workers/${entry.name}`, entry.text);
@@ -411,16 +520,17 @@ async function captureFailure(ctx, surfaces, error, pageErrors) {
 export const SURFACES_SCENARIO = Object.freeze({
   implemented: true,
   task: '14',
-  summary: 'Real web client signed in to a self-hosted account at 1440x900 and 390x844, light and dark: composer submit names the backend goal, running and waiting_event reach both views at the hub revision, phone pause is seen on desktop, desktop resume returns live, a stopped daemon leaves the goal shown as disconnected',
-  deadlineMs: 12 * 60_000,
+  summary: 'Real web client signed in to a self-hosted account at 1440x900 and 390x844, light and dark: composer submit names the backend goal, running and waiting_event reach both views at the hub revision, phone pause is seen on desktop, desktop resume returns live, a second goal completes through the verifier Ferryx runs, running/paused/completed captured on both surfaces in light and dark, a stopped daemon leaves the goal shown as disconnected',
+  deadlineMs: 20 * 60_000,
   requiredAssertions: [
-    'machine-enrolled-in-account', 'daemon-reachable-through-relay', 'both-surfaces-reach-the-live-supervisor', 'submit-receipt-names-the-backend-goal',
-    'running-same-goal-and-revision-everywhere', 'waiting-reached-the-views-without-an-owner-action', 'waiting-view-readable-no-blank-no-overlap',
-    'phone-pause-seen-on-desktop-at-the-same-revision', 'desktop-resume-returns-live-on-both', 'disconnect-keeps-the-goal-and-says-so', 'no-page-errors',
+    'machine-enrolled-in-account', 'engine-ready', 'daemon-reachable-through-relay', 'both-surfaces-reach-the-live-supervisor', 'submit-receipt-names-the-backend-goal',
+    'running-same-goal-and-revision-everywhere', 'running-same-goal-label-readable-light-and-dark', 'waiting-reached-the-views-without-an-owner-action',
+    'waiting-view-readable-no-blank-no-overlap', 'phone-pause-seen-on-desktop-at-the-same-revision', 'paused-same-goal-label-readable-light-and-dark',
+    'desktop-resume-returns-live-on-both', 'completion-goal-admitted', 'completion-goal-completed-by-the-verifier-ferryx-ran',
+    'completed-same-goal-label-readable-light-and-dark', 'disconnect-keeps-the-goal-and-says-so', 'no-page-errors',
   ],
   notCovered: [
     { clause: 'native desktop window', reason: 'the native Ferryx window is captured with MahoRD, outside this runner', coveredBy: 'unrun: MahoRD native capture' },
-    { clause: 'run state completed', reason: 'T10 completes a goal only through a Ferryx-runnable verifier graded by the retained mhc judge; the composer submits with the "owner review" verifier, which T10 holds as VERIFIER_NOT_RUNNABLE, and driving the judge needs the T6 provider stub this scenario does not start. The views render completed from the same snapshot field (data-run-state), and the completion paths announce the goal (supervisor/completion.rs)', coveredBy: 'autonomy scenario (task 10): goal-completed-without-owner; ui/src/lib/unifiedSupervisor.test.ts (completed goal offers no controls)' },
     { clause: 'typing and native-pane masks', reason: 'rendered from fixture snapshots, not from a live hub', coveredBy: 'ui/src/components/supervisor/Supervisor.test.tsx, ui/src/remote/home/SupervisorHome.test.tsx' },
   ],
   run: runSurfaces,
