@@ -114,12 +114,15 @@ fn search_measurements() {
 /// so a larger corpus would not compare like for like.
 const GHOSTTY_SEARCH_ROWS: usize = 65_536;
 
+/// One search benchmark corpus: name, row generator (row index -> line), query.
+type SearchCorpus = (&'static str, fn(usize) -> String, &'static str);
+
 /// Todo 14 of .omo/plans/ghostty-1-4-upgrade.md: time search_grid against ghostty_search on
 /// 65,536-row ASCII, CJK and emoji corpora and diff their results. Only queries that
 /// `ghostty_search_eligible` accepts are compared; every other query stays on search_grid.
 /// Adoption rule: ghostty_search median lower on all three corpora AND diff=0.
 fn ghostty_search_measurements() {
-    let corpora: [(&str, fn(usize) -> String, &str); 3] = [
+    let corpora: [SearchCorpus; 3] = [
         ("ascii", |i| format!("{i:05} INFO build step ok; Error: retry {} done", i % 97), "error: retry 1"),
         ("cjk", |i| format!("{i:05} 日志 界面 ERROR 处理 {} 完成 done", i % 89), "error"),
         ("emoji", |i| format!("{i:05} 👩‍💻 build 🚀 Error ✅ e\u{301}tape {} done", i % 83), "error"),
