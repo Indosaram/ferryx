@@ -825,9 +825,7 @@ pub fn reference_answer_keys(
     answer: &ReferencePromptAnswer,
 ) -> Result<Vec<ReferenceKeyStep>, ScopeErrorCode> {
     let card = reference_prompt_card(&prompt.id).ok_or(ScopeErrorCode::InvalidRequest)?;
-    // The card's own prompt carries the content id a family's planner reads (pi's cursor).
-    let planned = card.prompt().clone();
-    plan_answer_keys(&card, &planned, answer, None)
+    plan_answer_keys(&card, prompt, answer, None)
 }
 
 /// The keys for one card, planned from the card itself.
