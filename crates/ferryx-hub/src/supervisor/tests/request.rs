@@ -1440,7 +1440,10 @@ async fn resolve_not_delivered_queues_a_new_dispatch_and_never_resends_the_uncer
     assert_eq!(answer["action"], "resolve_delivery");
     assert_eq!(answer["outcome"], "not_delivered");
     assert_eq!(answer["runState"], "ready", "{answer}");
-    assert_eq!(answer["revision"], 2, "the answer fences decisions made before it");
+    assert_eq!(
+        answer["revision"], 2,
+        "the answer fences decisions made before it"
+    );
     assert_eq!(answer["resolvedRequestId"], uncertain.as_str());
     let resend = answer["dispatchRequestId"].as_str().unwrap().to_owned();
     assert_ne!(resend, uncertain, "a resend is a new dispatch id");
@@ -1483,7 +1486,10 @@ async fn resolve_not_delivered_queues_a_new_dispatch_and_never_resends_the_uncer
     )
     .await
     .unwrap_err();
-    assert_eq!((stale.code.as_str(), stale.status), ("REVISION_CONFLICT", 409));
+    assert_eq!(
+        (stale.code.as_str(), stale.status),
+        ("REVISION_CONFLICT", 409)
+    );
     assert_eq!(fingerprint(pool).await, before);
 }
 
@@ -1503,7 +1509,12 @@ async fn resolve_delivered_grades_the_run_without_any_new_dispatch() {
     let answer = handle(
         pool,
         &context(OWNER),
-        goal_call("resolve_delivery", &goal_id, 1, json!({"outcome": "delivered"})),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "delivered"}),
+        ),
     )
     .await
     .unwrap();
@@ -1532,21 +1543,26 @@ async fn resolve_delivered_grades_the_run_without_any_new_dispatch() {
             .unwrap();
     assert_eq!(dispatches_after, dispatches_before, "nothing is resent");
     assert!(ready_dispatches(pool, 10).await.unwrap().is_empty());
-    let binding = execution_binding_of(pool, &goal_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let binding = execution_binding_of(pool, &goal_id).await.unwrap().unwrap();
     assert_eq!(binding.run_id, None, "no run stays live");
 
     // Answering again finds the goal no longer uncertain.
     let again = handle(
         pool,
         &context(OWNER),
-        goal_call("resolve_delivery", &goal_id, 1, json!({"outcome": "delivered"})),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "delivered"}),
+        ),
     )
     .await
     .unwrap_err();
-    assert_eq!((again.code.as_str(), again.status), ("REVISION_CONFLICT", 409));
+    assert_eq!(
+        (again.code.as_str(), again.status),
+        ("REVISION_CONFLICT", 409)
+    );
 }
 
 #[tokio::test]
@@ -1558,7 +1574,12 @@ async fn a_stale_or_misplaced_resolution_is_refused_and_writes_nothing() {
     let not_uncertain = handle(
         pool,
         &context(OWNER),
-        goal_call("resolve_delivery", &goal_id, 1, json!({"outcome": "delivered"})),
+        goal_call(
+            "resolve_delivery",
+            &goal_id,
+            1,
+            json!({"outcome": "delivered"}),
+        ),
     )
     .await
     .unwrap_err();
@@ -1570,7 +1591,12 @@ async fn a_stale_or_misplaced_resolution_is_refused_and_writes_nothing() {
     let uncertain = make_uncertain(pool, &goal_id).await;
     let before = fingerprint(pool).await;
     for (revision, payload, code, status) in [
-        (0, json!({"outcome": "not_delivered"}), "REVISION_CONFLICT", 409),
+        (
+            0,
+            json!({"outcome": "not_delivered"}),
+            "REVISION_CONFLICT",
+            409,
+        ),
         (2, json!({"outcome": "delivered"}), "REVISION_CONFLICT", 409),
         (1, json!({}), "INVALID_REQUEST", 400),
         (1, json!({"outcome": "resend"}), "INVALID_REQUEST", 400),
@@ -1606,7 +1632,10 @@ async fn a_stale_or_misplaced_resolution_is_refused_and_writes_nothing() {
     assert_eq!(fingerprint(pool).await, before);
     let (old_state, resolved, _, _) = dispatch_row(pool, &uncertain).await;
     assert_eq!((old_state.as_str(), resolved), ("uncertain", None));
-    assert_eq!(state(pool, &goal_id).await, (RunState::DeliveryUncertain, 1));
+    assert_eq!(
+        state(pool, &goal_id).await,
+        (RunState::DeliveryUncertain, 1)
+    );
 }
 
 #[tokio::test]
@@ -1648,5 +1677,8 @@ async fn only_the_goal_owner_resolves_an_uncertain_delivery() {
     assert_eq!(fingerprint(pool).await, before);
     let (old_state, resolved, _, _) = dispatch_row(pool, &uncertain).await;
     assert_eq!((old_state.as_str(), resolved), ("uncertain", None));
-    assert_eq!(state(pool, &goal_id).await, (RunState::DeliveryUncertain, 1));
+    assert_eq!(
+        state(pool, &goal_id).await,
+        (RunState::DeliveryUncertain, 1)
+    );
 }
