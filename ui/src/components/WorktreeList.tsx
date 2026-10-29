@@ -32,6 +32,7 @@ type WorktreeListProps = {
   readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
   readonly onResetAgentState?: (worktree: Worktree) => void;
+  readonly onShowChanges?: (worktree: Worktree) => void;
   readonly sortableWorkspaceId?: string;
   readonly label?: string;
   /** Rendered when the list is empty. The sidebar passes a hint; other callers keep an empty list silent. */
@@ -51,6 +52,8 @@ export type WorktreeRowProps = {
   readonly onCreateWorktree?: (worktree: Worktree) => void;
   readonly onDelete: (worktree: Worktree) => void;
   readonly onResetAgentState?: (worktree: Worktree) => void;
+  /** Opens the Changes tab; offered only for managed local worktrees. */
+  readonly onShowChanges?: (worktree: Worktree) => void;
   /** Precomputed row state (sidebarLiveState); without it the row derives its own. */
   readonly live?: SidebarRowLive;
 };
@@ -59,7 +62,7 @@ export type WorktreeRowProps = {
 export type WorktreeListRowContext = Pick<
   WorktreeListProps,
   "repoRoot" | "activePath" | "activeWorkspaceId" | "statuses" | "unreadWorktreePaths" | "activityByWorktreePath" |
-  "onSelect" | "onCreateWorktree" | "onDelete" | "onResetAgentState" | "sortableWorkspaceId"
+  "onSelect" | "onCreateWorktree" | "onDelete" | "onResetAgentState" | "onShowChanges" | "sortableWorkspaceId"
 > & { readonly agentsByPath: ReadonlyMap<string, ActiveAgent> };
 
 /** Row props for one worktree of a list; the sidebar container and WorktreeList share it. */
@@ -83,6 +86,7 @@ export function worktreeListRowProps(worktree: Worktree, context: WorktreeListRo
     onCreateWorktree: context.onCreateWorktree,
     onDelete: context.onDelete,
     onResetAgentState: context.onResetAgentState,
+    onShowChanges: context.onShowChanges,
   };
 }
 
@@ -119,6 +123,7 @@ export const WorktreeRow = memo(function WorktreeRow({
   onCreateWorktree,
   onDelete,
   onResetAgentState,
+  onShowChanges,
   live,
 }: WorktreeRowProps) {
   const menuUnlistenRef = useRef<(() => void) | null>(null);
@@ -158,6 +163,9 @@ export const WorktreeRow = memo(function WorktreeRow({
     if (worktree.branch) {
       items.push({ kind: "item", id: "copy-branch", label: "Copy Branch Name" });
     }
+    if (onShowChanges && !isRemote) {
+      items.push({ kind: "item", id: "show-changes", label: "Show Changes", enabled: !isDisabled && worktreeIdentity(worktree) !== null });
+    }
     if (onResetAgentState) {
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", enabled: !isDisabled, icon: "refresh" });
     }
@@ -182,6 +190,8 @@ export const WorktreeRow = memo(function WorktreeRow({
               toast.success("Copied branch name to clipboard");
             });
           }
+        } else if (id === "show-changes") {
+          onShowChanges?.(worktree);
         } else if (id === "reset-agent-state") {
           onResetAgentState?.(worktree);
         } else if (id === "delete") onDelete(worktree);
@@ -310,6 +320,7 @@ export function WorktreeList({
   onCreateWorktree,
   onDelete,
   onResetAgentState,
+  onShowChanges,
   sortableWorkspaceId,
   label = "Worktrees",
   emptyState,
@@ -325,7 +336,7 @@ export function WorktreeList({
       {worktrees.map((worktree) => {
         const rowProps = worktreeListRowProps(worktree, {
           repoRoot, activePath, activeWorkspaceId, statuses, unreadWorktreePaths, activityByWorktreePath,
-          onSelect, onCreateWorktree, onDelete, onResetAgentState, sortableWorkspaceId, agentsByPath,
+          onSelect, onCreateWorktree, onDelete, onResetAgentState, onShowChanges, sortableWorkspaceId, agentsByPath,
         });
         const rowKey = worktree.workspaceId ? `${worktree.workspaceId}:${worktree.path}` : worktree.path;
 

@@ -54,6 +54,7 @@ import type {
   StructuredIpcError,
   TerminalLifecycle,
   TerminalLifecyclePayload,
+  ChangesTab,
   FileTab,
   SessionRecoveryState,
   TerminalSession,
@@ -1998,7 +1999,7 @@ export function useWorkspaceStore({
       const snapshot = stateRef.current;
       const sourceTab = snapshot.layout.tabs.find((tab) => tab.id === sourceTabId);
       const sourceLayout = snapshot.layout.layoutsByTabId[sourceTabId];
-      if (!sourceTab || sourceTab.kind === "browser" || !sourceLayout || collectLeafIds(sourceLayout.root).length <= 1) return null;
+      if (!sourceTab || !isTerminalTab(sourceTab) || !sourceLayout || collectLeafIds(sourceLayout.root).length <= 1) return null;
       const sessionId = sourceLayout.sessionIdsByLeafId[leafId];
       if (!sessionId || !snapshot.sessions[sessionId]) return null;
       const newTabId = createId("tab");
@@ -2028,6 +2029,11 @@ export function useWorkspaceStore({
       if (closingTab.kind === "file") {
         dispatch({ type: "CLOSE_TAB", tabId });
         releaseOrphanPreviews(stateRef.current);
+        return;
+      }
+
+      if (closingTab.kind === "changes") {
+        dispatch({ type: "CLOSE_TAB", tabId });
         return;
       }
 
@@ -2389,6 +2395,39 @@ export function useWorkspaceStore({
     [dispatch],
   );
 
+  /** Opens (or focuses) the Changes tab of a managed worktree in that worktree's layout. */
+  const openChangesTab = useCallback(
+    (worktree: Worktree, ownerWorkspaceId: string): string | null => {
+      const identity = worktreeIdentity(worktree);
+      if (!identity) return null;
+      const snapshot = stateRef.current;
+      const isChangesFor = (tab: WorkspaceTab) =>
+        tab.kind === "changes" && tab.worktreePath === worktree.path && tab.workspaceId === ownerWorkspaceId;
+      if (snapshot.activeWorktreePath !== worktree.path && snapshot.worktrees.some((candidate) => candidate.path === worktree.path)) {
+        dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+      }
+      const current = stateRef.current;
+      const existing = (current.activeWorktreePath === worktree.path ? current.layout.tabs : current.worktreeLayouts?.[worktree.path]?.tabs ?? [])
+        .find(isChangesFor);
+      if (existing) {
+        dispatch({ type: "ACTIVATE_TAB", tabId: existing.id });
+        return existing.id;
+      }
+      const tabId = createId("tab");
+      const tab: ChangesTab = {
+        kind: "changes",
+        id: tabId,
+        label: "Changes",
+        workspaceId: ownerWorkspaceId,
+        worktreePath: worktree.path,
+        worktree: identity,
+      };
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab, targetWorktreePath: worktree.path });
+      return tabId;
+    },
+    [dispatch],
+  );
+
   const adoptBrowserSession = useCallback(
     (
       browserState: BrowserState | BrowserSessionCreatedPayload["browser"],
@@ -2541,6 +2580,7 @@ export function useWorkspaceStore({
     openTab,
     createBrowserTab,
     openFilePreviewTab,
+    openChangesTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
@@ -2828,7 +2868,7 @@ export function selectTabActivitySummaries(state: WorkspaceState): Record<string
   const allTabs = getAllTabs(state);
 
   for (const tab of allTabs) {
-    if (tab.kind === "browser") continue;
+    if (!isTerminalTab(tab)) continue;
     const sessionIds = getTabSessionIds(state, tab.id);
     const activities = [...sessionIds]
       .map((sessionId) => activityBySessionId[sessionId])
@@ -2847,7 +2887,7 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
   const allTabs = getAllTabs(state);
 
   for (const tab of allTabs) {
-    if (tab.kind === "browser") continue;
+    if (!isTerminalTab(tab)) continue;
     const sessionIds = getTabSessionIds(state, tab.id);
     const worktreePaths = new Set<string>();
     for (const sessionId of sessionIds) {
@@ -4671,7 +4711,7 @@ function getTabWorktreePath(state: WorkspaceState, tabId: string): string | null
 
 function findTabIdForSession(state: WorkspaceState, sessionId: string): string | null {
   for (const tab of getAllTabs(state)) {
-    if (tab.kind === "browser") continue;
+    if (!isTerminalTab(tab)) continue;
     if (getTabSessionIds(state, tab.id).has(sessionId)) return tab.id;
   }
   return null;
