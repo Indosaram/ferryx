@@ -385,7 +385,7 @@ export function prepareRelease({
     msixVersion,
     channels,
     requiredTargets,
-    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
+    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
     sourceDateEpoch,
     createdAt,
   };

@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Ferryx",
-  "version": "2026.1028.2",
+  "version": "2026.1029.1",
   "identifier": "com.ferryx.app",
   "build": {
     "beforeDevCommand": "bun scripts/dev-frontend.mjs",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "bun run --cwd ui build",
+    "beforeBuildCommand": "bun scripts/fetch-mhc.mjs --from-env --prune && bun run --cwd ui build",
     "frontendDist": "../ui/dist"
   },
   "app": {
@@ -47,7 +47,8 @@
     "createUpdaterArtifacts": true,
     "resources": {
       "../ui/dist": "ui/dist",
-      "resources/helpers": "helpers"
+      "resources/helpers": "helpers",
+      "resources/mhc/payload": "mhc"
     },
     "targets": [
       "dmg",

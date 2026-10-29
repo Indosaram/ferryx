@@ -3,12 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const EXPECTED_GHOSTTY_SHA: &str = "6a508fd5e34c7e222c052a6d00bb3891ff3feace";
-pub const REQUIRED_ZIG_VERSION: &str = "0.16.0";
+pub const EXPECTED_GHOSTTY_SHA: &str = "83fb95624b0439ee660c2679b43b38c8b63769cd";
+pub const REQUIRED_ZIG_VERSION: &str = "0.17.0";
 
 /// Version of the shared libghostty-vt artifact cache layout and of the `zig build`
 /// arguments below. Bump it whenever either changes so stale artifacts are never reused.
-const ARTIFACT_CACHE_SCHEMA: &str = "v1";
+const ARTIFACT_CACHE_SCHEMA: &str = "v2";
 const ARTIFACT_CACHE_COMPLETE_MARKER: &str = ".complete";
 
 /// Result of build environment verification and libghostty-vt compilation.
@@ -308,6 +308,9 @@ pub fn build_ghostty_vt_with_target_and_env(
 
     let mut cmd = Command::new(&zig_binary);
     cmd.current_dir(&submodule_dir);
+    // Zig 0.17 removed `zig build --global-cache-dir`; the frontend now resolves the global
+    // cache from ZIG_GLOBAL_CACHE_DIR and hands it to the build runner itself.
+    cmd.env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir_str);
     cmd.args([
         "build",
         "-Demit-lib-vt=true",
@@ -321,8 +324,6 @@ pub fn build_ghostty_vt_with_target_and_env(
         ghostty_prefix_str,
         "--cache-dir",
         zig_cache_dir_str,
-        "--global-cache-dir",
-        zig_global_cache_dir_str,
     ]);
 
     let output = cmd.output().map_err(|e| {

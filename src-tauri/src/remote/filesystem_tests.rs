@@ -628,6 +628,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 "pairedPasteUploadV2",
                 "pairedFileReadV1",
                 "repoDiscoveryV1",
+                "resourceUsageV1",
                 "terminalCreateV1",
                 "terminalStreamV1",
                 "dagStreamingV1",

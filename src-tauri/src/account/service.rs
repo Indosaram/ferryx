@@ -691,6 +691,20 @@ pub async fn device_poll(
     let request: DevicePollRequestBody = parse_json(body).await?;
     let now = now_secs();
     let code_hash = token_hash(&request.device_code);
+    // A pending device is polled every few seconds for minutes, so the common answer is served
+    // from a read and takes no write lock; only expiry and approval change the store.
+    let pending = state.read(|store| {
+        Ok(store
+            .device_auths
+            .get(&code_hash)
+            .is_some_and(|record| record.expires_at > now && record.enrollment_code.is_none()))
+    })?;
+    if pending {
+        return Ok(Json(DevicePollResponse {
+            status: "authorization_pending".into(),
+            enrollment_code: None,
+        }));
+    }
     state.mutate(|store| {
         let record = store.device_auths.get(&code_hash).ok_or_else(|| {
             ApiError::new(

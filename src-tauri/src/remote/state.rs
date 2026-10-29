@@ -1006,15 +1006,7 @@ impl RemoteGatewayState {
         let (active_session_tx, _) = watch::channel(None);
         let config = config_path
             .as_deref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<PersistedRemoteGatewayConfig>(&bytes).ok())
-            .map(|persisted| RemoteGatewayConfig {
-                mode: persisted.mode,
-                // Port is fixed; ignore persisted value so stale custom ports heal on load.
-                port: REMOTE_GATEWAY_PORT,
-                allow_control: persisted.allow_control,
-                relay_url: persisted.relay_url,
-            })
+            .and_then(load_persisted_config)
             .unwrap_or_default();
         let agent_events = Arc::new(crate::agent_control::events::AgentEventBus::new(
             crate::agent_control::events::AGENT_EVENT_RETAIN,
@@ -1666,8 +1658,70 @@ fn remote_data_dir() -> Option<PathBuf> {
     resolve_remote_data_dir(|variable| std::env::var_os(variable))
 }
 
+/// The gateway config a persistent daemon restores at boot (`remote-config.json`).
+pub fn remote_config_path() -> Option<PathBuf> {
+    remote_data_dir().map(|dir| dir.join("remote-config.json"))
+}
+
+/// The saved gateway config at `path`, read the way a daemon reads it at boot. `None` when the
+/// file is missing or unreadable, in which case the daemon starts from the default (Off).
+pub fn load_persisted_config(path: &std::path::Path) -> Option<RemoteGatewayConfig> {
+    let bytes = std::fs::read(path).ok()?;
+    let persisted = serde_json::from_slice::<PersistedRemoteGatewayConfig>(&bytes).ok()?;
+    Some(RemoteGatewayConfig {
+        mode: persisted.mode,
+        // Port is fixed; ignore persisted value so stale custom ports heal on load.
+        port: REMOTE_GATEWAY_PORT,
+        allow_control: persisted.allow_control,
+        relay_url: persisted.relay_url,
+    })
+}
+
+/// Saves Relay through `relay_url` at `path` when the saved mode is Off (or nothing is saved),
+/// so the next daemon boot connects to the relay. A mode the user chose is left untouched, and so
+/// is a file that exists but does not parse (corrupt, or a mode from a newer build).
+/// Returns whether the config was written.
+pub fn persist_relay_if_off(path: &std::path::Path, relay_url: &str) -> std::io::Result<bool> {
+    let saved = match load_persisted_config(path) {
+        Some(saved) => saved,
+        None if path.exists() => return Ok(false),
+        None => RemoteGatewayConfig::default(),
+    };
+    if saved.mode != RemoteNetworkMode::Off {
+        return Ok(false);
+    }
+    let config = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::Relay,
+        relay_url: Some(relay_url.to_string()),
+        ..saved
+    };
+    write_private_json(path, &config.persisted_snapshot())?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persist_relay_if_off_leaves_a_corrupt_config_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-config.json");
+        std::fs::write(&path, b"{not json").unwrap();
+
+        assert!(!persist_relay_if_off(&path, "https://relay.example").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn persist_relay_if_off_leaves_an_unknown_mode_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-config.json");
+        let saved = br#"{"mode":"meshVpn","port":43821,"allowControl":true}"#;
+        std::fs::write(&path, saved).unwrap();
+
+        assert!(!persist_relay_if_off(&path, "https://relay.example").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+
     /// P19 (round 2): the trusted-overlay proof must FAIL CLOSED. An interface
     /// name alone (utun/tun/tailscale) is not authoritative — without positive
     /// Tailscale CLI confirmation the CGNAT address stays gated, and a CLI that

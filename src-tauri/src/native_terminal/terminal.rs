@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 
 use super::bell::TerminalContext;
 use super::color::ColorRgb;
+use super::compression::{CompressionStep, MemoryUsage};
 use super::cursor::CursorState;
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
@@ -25,7 +26,7 @@ use super::queries::{
     query_total_rows,
 };
 use super::render_pass::capture_render_snapshot;
-use super::search::search_grid;
+use super::search::{search_grid, search_with_ghostty};
 use super::selection;
 use super::selection::{
     apply_mouse_gesture, clear_selection, create_selection_gesture, line_text_at,
@@ -34,19 +35,42 @@ use super::selection::{
 };
 use super::snapshot::RenderSnapshot;
 use super::sys::ffi::{
-    ghostty_terminal_get, ghostty_terminal_reset, ghostty_terminal_resize, ghostty_terminal_set,
+    ghostty_terminal_compress, ghostty_terminal_compression_activity, ghostty_terminal_get,
+    ghostty_terminal_reset, ghostty_terminal_resize, ghostty_terminal_set,
     ghostty_terminal_vt_write,
 };
+use super::sys::kitty::{ghostty_kitty_graphics_animation_tick, Graphics, GRAPHICS};
 use super::sys::types::{
-    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalModeConfig,
-    GHOSTTY_MODE_SYNCHRONIZED_OUTPUT, GHOSTTY_TERMINAL_DATA_MODE,
+    GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalMemoryUsage,
+    GhosttyTerminalModeConfig, GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
+    GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL, GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE,
+    GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING, GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED,
+    GHOSTTY_TERMINAL_DATA_MEMORY_USAGE, GHOSTTY_TERMINAL_DATA_MODE,
     GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
     GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
     GHOSTTY_TERMINAL_OPT_MODE, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_TITLE,
+    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, GHOSTTY_TERMINAL_OPT_TITLE, GHOSTTY_NO_VALUE,
 };
 use super::viewport::{query_scrollbar, scroll_viewport, ScrollViewport, ScrollbarState};
 use crate::terminal::TerminalThemeColors;
+
+/// Shortest spacing between two animation redraws: one frame at 120 Hz, as kitty_graphics.h
+/// ("Animation", step 2) recommends. Playback advances at most one frame per tick anyway.
+const MIN_ANIMATION_FRAME_MS: u64 = 8;
+
+/// Converts the next due frame `next_ms` (on the terminal's animation clock that started at
+/// `epoch`) into a pump deadline no sooner than one minimum frame interval after `now_ms`.
+/// `None` only if the due time is beyond what `Instant` can represent.
+fn clamp_animation_deadline(
+    epoch: std::time::Instant,
+    now_ms: u64,
+    next_ms: u64,
+) -> Option<tokio::time::Instant> {
+    let due_ms = next_ms.max(now_ms.saturating_add(MIN_ANIMATION_FRAME_MS));
+    epoch
+        .checked_add(std::time::Duration::from_millis(due_ms))
+        .map(tokio::time::Instant::from_std)
+}
 
 const ONE_DARK_DEFAULTS: [&str; 16] = [
     "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
@@ -118,6 +142,11 @@ pub struct NativeTerminal {
     gesture: SelectionGestureGuard,
     image_cache: std::cell::RefCell<super::images::ImageCache>,
     synchronized_output_deadline: Option<tokio::time::Instant>,
+    /// Start of this terminal's monotonic Kitty animation clock. libghostty requires one clock
+    /// with one starting point for the terminal's whole lifetime.
+    animation_epoch: std::time::Instant,
+    /// When the next Kitty animation frame is due, from the last tick; `None` when nothing plays.
+    animation_deadline: std::cell::Cell<Option<tokio::time::Instant>>,
     /// Monotonic count of primary-screen rows dropped from the top of the screen
     /// (scrollback pruning or erasure) since this terminal was created.
     scrollback_pruned_rows: u64,
@@ -152,6 +181,8 @@ impl NativeTerminal {
             gesture,
             image_cache: Default::default(),
             synchronized_output_deadline: None,
+            animation_epoch: std::time::Instant::now(),
+            animation_deadline: std::cell::Cell::new(None),
             scrollback_pruned_rows: 0,
         })
     }
@@ -235,6 +266,75 @@ impl NativeTerminal {
 
     pub(crate) fn synchronized_output_deadline(&self) -> Option<tokio::time::Instant> {
         self.synchronized_output_deadline
+    }
+
+    /// Advances every playing Kitty animation to the frame due at `now_ms` (milliseconds on
+    /// this terminal's animation clock) and returns when the next frame is due on the same
+    /// clock, or `None` when nothing is playing.
+    ///
+    /// The call mutates the image storage and invalidates every image handle; `render_snapshot`
+    /// looks images up again on each capture, so no handle outlives this call.
+    pub fn animation_tick(&self, now_ms: u64) -> Result<Option<u64>, NativeTerminalError> {
+        let mut graphics: Graphics = std::ptr::null_mut();
+        // SAFETY: The owned terminal is live and accessed exclusively; the out pointer has the
+        // header-documented GhosttyKittyGraphics * type.
+        let result = unsafe {
+            ghostty_terminal_get(
+                self.handle.as_ptr(),
+                GRAPHICS,
+                (&mut graphics as *mut Graphics).cast(),
+            )
+        };
+        if result == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_get(KittyGraphics)")?;
+        let mut next_ms = 0u64;
+        // SAFETY: `graphics` was just read from the live terminal and `next_ms` is a valid u64
+        // out pointer that the call writes only on success.
+        let result =
+            unsafe { ghostty_kitty_graphics_animation_tick(graphics, now_ms, &mut next_ms) };
+        if result == GHOSTTY_NO_VALUE {
+            return Ok(None);
+        }
+        NativeTerminalError::from_c_result(result, "ghostty_kitty_graphics_animation_tick")?;
+        Ok(Some(next_ms))
+    }
+
+    /// Ticks Kitty animations for a frame about to be drawn and records when the next frame is
+    /// due. Skipped while the image storage holds no image. Returns `true` when this tick armed
+    /// a deadline that was not armed before, so a pump that is not waiting on one must re-read.
+    pub(crate) fn advance_animations(&self) -> Result<bool, NativeTerminalError> {
+        let was_armed = self.animation_deadline.get().is_some();
+        if !super::images::kitty_storage_in_use(self.handle.as_ptr())? {
+            self.animation_deadline.set(None);
+            return Ok(false);
+        }
+        let now_ms = u64::try_from(self.animation_epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let deadline = self
+            .animation_tick(now_ms)?
+            .and_then(|next_ms| clamp_animation_deadline(self.animation_epoch, now_ms, next_ms));
+        self.animation_deadline.set(deadline);
+        Ok(!was_armed && deadline.is_some())
+    }
+
+    /// When the next Kitty animation frame is due, as recorded by the last tick.
+    pub(crate) fn animation_deadline(&self) -> Option<tokio::time::Instant> {
+        self.animation_deadline.get()
+    }
+
+    /// Forgets a deadline that is due at `now`, so a wakeup that cannot redraw (no layout yet)
+    /// does not fire again immediately. The next tick arms a fresh one.
+    pub(crate) fn clear_due_animation_deadline(&self, now: tokio::time::Instant) {
+        if self.animation_deadline.get().is_some_and(|deadline| deadline <= now) {
+            self.animation_deadline.set(None);
+        }
+    }
+
+    /// Forgets the animation deadline of a pane that cannot show it (detached or occluded), so
+    /// the first tick after it becomes visible again counts as newly armed and wakes the pump.
+    pub(crate) fn forget_animation_deadline(&self) {
+        self.animation_deadline.set(None);
     }
 
     pub(crate) fn expire_synchronized_output(
@@ -409,6 +509,17 @@ impl NativeTerminal {
         let row = u32::try_from(row).map_err(|_| NativeTerminalError::LimitExceeded)?;
         selection::screen_row_text(self.handle, row)
     }
+
+    /// Search through libghostty-vt's `ghostty_search`. Accepts only queries for which
+    /// `ghostty_search_eligible` holds and then returns what `search_grid` returns.
+    /// Evaluation path: the production search still goes through `search_grid`.
+    pub fn search_with_ghostty(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Result<Vec<(u16, u16, u16)>, NativeTerminalError> {
+        search_with_ghostty(self.handle, query, case_sensitive)
+    }
 }
 
 impl TerminalEngine for NativeTerminal {
@@ -419,6 +530,7 @@ impl TerminalEngine for NativeTerminal {
             ghostty_terminal_reset(self.handle.as_ptr());
         }
         self.synchronized_output_deadline = None;
+        self.animation_deadline.set(None);
         reset_selection_gesture(&self.gesture, self.handle);
     }
 
@@ -722,18 +834,135 @@ impl TerminalEngine for NativeTerminal {
     fn take_bell_count(&mut self) -> u64 {
         self.context.bell_counter.swap(0, Ordering::Relaxed)
     }
+
+    fn compression_activity(&self) -> Result<u64, NativeTerminalError> {
+        let mut activity: u64 = 0;
+        // SAFETY: The owned terminal is live and `activity` is a valid writable u64.
+        let result = unsafe {
+            ghostty_terminal_compression_activity(self.handle.as_ptr(), &mut activity)
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_compression_activity")?;
+        Ok(activity)
+    }
+
+    fn compress_step(&mut self) -> Result<CompressionStep, NativeTerminalError> {
+        let mut raw = GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
+        // SAFETY: `&mut self` serializes this call with every other access to the live terminal,
+        // as the header requires; `raw` is a valid writable result slot.
+        let result = unsafe {
+            ghostty_terminal_compress(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL,
+                &mut raw,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_compress")?;
+        match raw {
+            GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED => Ok(CompressionStep::Unsupported),
+            GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING => Ok(CompressionStep::Pending),
+            GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE => Ok(CompressionStep::Complete),
+            other => Err(NativeTerminalError::InvalidValue(format!(
+                "ghostty_terminal_compress returned unknown result {other}"
+            ))),
+        }
+    }
+
+    fn memory_usage(&self) -> Result<MemoryUsage, NativeTerminalError> {
+        let mut raw = GhosttyTerminalMemoryUsage::default();
+        // SAFETY: The live terminal fills the sized struct whose `size` names this layout.
+        let result = unsafe {
+            ghostty_terminal_get(
+                self.handle.as_ptr(),
+                GHOSTTY_TERMINAL_DATA_MEMORY_USAGE,
+                &mut raw as *mut GhosttyTerminalMemoryUsage as *mut c_void,
+            )
+        };
+        NativeTerminalError::from_c_result(result, "ghostty_terminal_get(MemoryUsage)")?;
+        Ok(MemoryUsage {
+            compression_supported: raw.compression_supported,
+            primary_pages: raw.primary_pages,
+            primary_virtual_bytes: raw.primary_virtual_bytes,
+            primary_resident_bytes: raw.primary_resident_bytes,
+            primary_compressed_pages: raw.primary_compressed_pages,
+            primary_compressed_bytes: raw.primary_compressed_bytes,
+            primary_image_bytes: raw.primary_image_bytes,
+            alternate_pages: raw.alternate_pages,
+            alternate_virtual_bytes: raw.alternate_virtual_bytes,
+            alternate_resident_bytes: raw.alternate_resident_bytes,
+            alternate_compressed_pages: raw.alternate_compressed_pages,
+            alternate_compressed_bytes: raw.alternate_compressed_bytes,
+            alternate_image_bytes: raw.alternate_image_bytes,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::NativeTerminal;
+    use super::{clamp_animation_deadline, NativeTerminal};
     use crate::native_terminal::color::ColorRgb;
+    use crate::native_terminal::compression::CompressionStep;
     use crate::native_terminal::engine::TerminalEngine;
     use crate::native_terminal::terminal::full_palette;
     use crate::native_terminal::{
         MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize,
     };
     use crate::terminal::TerminalThemeColors;
+
+    /// A looping two-frame 1x1 Kitty animation (red, then green), 100 ms per frame, image id 7.
+    const KITTY_TWO_FRAME_ANIMATION: &[u8] = b"\x1b_Ga=T,f=32,s=1,v=1,i=7,q=2,C=1;/wAA/w==\x1b\\\
+\x1b_Ga=f,f=32,s=1,v=1,i=7,z=100,q=2;AP8A/w==\x1b\\\
+\x1b_Ga=a,i=7,r=1,z=100,q=2\x1b\\\
+\x1b_Ga=a,i=7,s=3,q=2\x1b\\";
+
+    #[test]
+    fn kitty_animation_tick_advances_frames_and_stops() {
+        let mut terminal = NativeTerminal::new(8, 6).unwrap();
+        terminal.resize(8, 6, 8, 8).unwrap();
+        terminal.feed(KITTY_TWO_FRAME_ANIMATION).unwrap();
+        let image = |terminal: &NativeTerminal| {
+            let snapshot = terminal.render_snapshot().unwrap();
+            assert_eq!(snapshot.images.len(), 1, "the animated image is placed once");
+            std::sync::Arc::clone(&snapshot.images[0].image)
+        };
+
+        assert!(
+            terminal.animation_tick(0).unwrap().is_some(),
+            "a looping animation reports when its next frame is due"
+        );
+        let first = image(&terminal);
+        assert!(terminal.animation_tick(150).unwrap().is_some());
+        let second = image(&terminal);
+        assert_ne!(
+            first.generation, second.generation,
+            "a new animation frame must change the image generation the texture cache keys on"
+        );
+        assert_ne!(first.rgba, second.rgba, "the captured pixels follow the current frame");
+
+        terminal.feed(b"\x1b_Ga=a,i=7,s=1,q=2\x1b\\").unwrap();
+        assert_eq!(
+            terminal.animation_tick(300).unwrap(),
+            None,
+            "a stopped animation asks for no redraw"
+        );
+    }
+
+    #[test]
+    fn kitty_animation_deadline_is_never_sooner_than_one_frame_interval() {
+        let epoch = std::time::Instant::now();
+        let at = |ms: u64| {
+            Some(tokio::time::Instant::from_std(epoch + std::time::Duration::from_millis(ms)))
+        };
+        assert_eq!(clamp_animation_deadline(epoch, 100, 250), at(250));
+        assert_eq!(clamp_animation_deadline(epoch, 100, 103), at(108));
+        assert_eq!(clamp_animation_deadline(epoch, 100, 40), at(108));
+    }
+
+    #[test]
+    fn kitty_animation_is_not_ticked_without_images() {
+        let terminal = NativeTerminal::new(8, 6).unwrap();
+        assert!(!terminal.advance_animations().unwrap());
+        assert_eq!(terminal.animation_deadline(), None);
+    }
 
     #[test]
     fn synchronized_output_survives_resize_until_redraw_completes() {
@@ -1217,6 +1446,54 @@ mod tests {
     }
 
     #[test]
+    fn native_terminal_double_click_stops_at_latin_hangul_boundary() {
+        let mut terminal = NativeTerminal::new(80, 24).expect("create native terminal");
+        terminal
+            .feed("'us/f1-ui-matrix부' x\r\n".as_bytes())
+            .expect("write mixed-script line");
+        let size = MouseRendererSize {
+            screen_width: 800,
+            screen_height: 480,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let double_click = |terminal: &mut NativeTerminal, x: f32, base_ns: u64| {
+            let event = |action, time_ns| MouseEvent {
+                action,
+                button: (action == MouseAction::Press).then_some(MouseButton::Left),
+                position: MousePosition { x, y: 10.0 },
+                modifiers: Default::default(),
+                size: Some(size),
+                timestamp_ns: Some(time_ns),
+            };
+            for (action, time_ns) in [
+                (MouseAction::Press, base_ns),
+                (MouseAction::Release, base_ns + 50_000_000),
+                (MouseAction::Press, base_ns + 200_000_000),
+                (MouseAction::Release, base_ns + 250_000_000),
+            ] {
+                terminal
+                    .handle_mouse_gesture(&event(action, time_ns))
+                    .expect("double click gesture");
+            }
+            terminal.selection_text().expect("query word selection")
+        };
+
+        // Column 12 is inside "matrix"; column 16 is the wide Hangul cell.
+        let latin = double_click(&mut terminal, 125.0, 1_000_000_000).expect("latin selection");
+        assert!(latin.ends_with("matrix"), "got {latin:?}");
+        assert!(!latin.contains('부'), "got {latin:?}");
+        assert_eq!(
+            double_click(&mut terminal, 165.0, 5_000_000_000),
+            Some("부".to_string())
+        );
+    }
+
+    #[test]
     fn native_terminal_double_click_selects_url_across_a_soft_wrap() {
         // 20 columns forces the URL to soft-wrap onto a second row.
         let mut terminal = NativeTerminal::new(20, 24).expect("create native terminal");
@@ -1617,6 +1894,68 @@ mod tests {
         let shifted = row - u32::try_from(delta).unwrap();
         terminal.select_range((0, shifted), (9, shifted), false).unwrap();
         assert_eq!(terminal.selection_text().unwrap(), expected);
+    }
+
+    /// Writes `lines` numbered rows and drains incremental compression, returning the final step.
+    fn fill_and_compress(terminal: &mut NativeTerminal, lines: usize) -> CompressionStep {
+        terminal.set_scrollback_limit_lines(Some(50_000)).unwrap();
+        let mut input = String::with_capacity(lines * 48);
+        for i in 0..lines {
+            input.push_str(&format!("line {i:06} repeated and compressible terminal history\r\n"));
+        }
+        terminal.feed_str(&input).unwrap();
+        // Each step inspects a bounded number of pages, so a pass over 20,000 rows ends well
+        // inside this bound; reaching it means the pass never completes.
+        for _ in 0..100_000 {
+            match terminal.compress_step().unwrap() {
+                CompressionStep::Pending => continue,
+                done => return done,
+            }
+        }
+        panic!("incremental compression never completed");
+    }
+
+    #[test]
+    fn compress_step_compresses_idle_scrollback_where_supported() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        let fresh = terminal.memory_usage().unwrap();
+        assert_eq!(fresh.primary_compressed_pages, 0);
+        let activity_before = terminal.compression_activity().unwrap();
+
+        let step = fill_and_compress(&mut terminal, 20_000);
+        assert_ne!(
+            terminal.compression_activity().unwrap(),
+            activity_before,
+            "writing scrollback must change the compression activity token"
+        );
+
+        let usage = terminal.memory_usage().unwrap();
+        assert!(usage.primary_pages > fresh.primary_pages);
+        assert!(usage.primary_resident_bytes > 0);
+        if usage.compression_supported {
+            assert_eq!(step, CompressionStep::Complete);
+            assert!(usage.primary_compressed_pages > 0, "{usage:?}");
+            assert!(usage.primary_compressed_bytes > 0, "{usage:?}");
+            assert!(usage.primary_resident_bytes <= usage.primary_virtual_bytes, "{usage:?}");
+        } else {
+            assert_eq!(step, CompressionStep::Unsupported);
+            assert_eq!(usage.primary_compressed_pages, 0);
+            assert_eq!(usage.primary_compressed_bytes, 0);
+        }
+    }
+
+    #[test]
+    fn search_grid_reads_through_compressed_scrollback() {
+        let mut terminal = NativeTerminal::new(80, 24).unwrap();
+        fill_and_compress(&mut terminal, 20_000);
+
+        // Line 0 lives on the oldest page, the first one compressed.
+        assert_eq!(terminal.search_grid("line 000000 ", true).unwrap(), vec![(0, 0, 11)]);
+        assert_eq!(
+            terminal.screen_row_text(1).unwrap().trim_end(),
+            "line 000001 repeated and compressible terminal history"
+        );
+        assert_eq!(terminal.search_grid("line 019999 ", true).unwrap().len(), 1);
     }
 
     #[test]

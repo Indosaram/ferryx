@@ -125,6 +125,12 @@ try {
     }
     $helperManifest = @{ schemaVersion = 1; protocolVersion = 1; helperVersion = "2026.908.1"; artifacts = $artifacts }
     [System.IO.File]::WriteAllText((Join-Path $fixtureHelpers "manifest.json"), ($helperManifest | ConvertTo-Json -Depth 5))
+    $fixtureMhc = Join-Path $fixtureRoot "src-tauri/resources/mhc/payload/x86_64-pc-windows-msvc"
+    New-Item -ItemType Directory -Force -Path (Join-Path $fixtureMhc "mhc/skills"), (Join-Path $fixtureMhc "bun") | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $fixtureMhc "fetch.json"), '{"mhc":{},"bun":{}}')
+    [System.IO.File]::WriteAllText((Join-Path $fixtureMhc "mhc/mhc.exe"), 'fixture-mhc')
+    [System.IO.File]::WriteAllText((Join-Path $fixtureMhc "mhc/skills/SKILL.md"), 'fixture-skill')
+    [System.IO.File]::WriteAllText((Join-Path $fixtureMhc "bun/bun.exe"), 'fixture-bun')
 
     # -------------------------------------------------------------
     # Test 1: Missing -ExePath parameter throws
@@ -386,6 +392,9 @@ try {
                 "ui/dist/index.html" = (Join-Path $fixtureDist "index.html")
                 "ui/dist/assets/app.js" = (Join-Path $fixtureDist "assets/app.js")
                 "helpers/manifest.json" = (Join-Path $fixtureHelpers "manifest.json")
+                "mhc/x86_64-pc-windows-msvc/mhc/mhc.exe" = (Join-Path $fixtureMhc "mhc/mhc.exe")
+                "mhc/x86_64-pc-windows-msvc/mhc/skills/SKILL.md" = (Join-Path $fixtureMhc "mhc/skills/SKILL.md")
+                "mhc/x86_64-pc-windows-msvc/bun/bun.exe" = (Join-Path $fixtureMhc "bun/bun.exe")
             }
             foreach ($artifact in $artifacts) {
                 $relative = "$($artifact.target)/$($artifact.filename)"
@@ -544,7 +553,7 @@ try {
         } "Packaged manifest Identity ProcessorArchitecture.*does not match expected 'x64'"
     }
 
-    foreach ($relative in @("ui/dist/index.html", "src-tauri/resources/helpers/manifest.json", "src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe")) {
+    foreach ($relative in @("ui/dist/index.html", "src-tauri/resources/helpers/manifest.json", "src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe", "src-tauri/resources/mhc/payload/x86_64-pc-windows-msvc/fetch.json", "src-tauri/resources/mhc/payload/x86_64-pc-windows-msvc/mhc/mhc.exe", "src-tauri/resources/mhc/payload/x86_64-pc-windows-msvc/bun/bun.exe")) {
         Run-Test "Missing required resource fails before packaging: $relative" {
             $resource = Join-Path $fixtureRoot $relative
             $saved = [System.IO.File]::ReadAllBytes($resource)

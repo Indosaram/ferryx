@@ -71,8 +71,12 @@ pub struct InitLockGuard {
     _in_process: MutexGuard<'static, ()>,
 }
 
+/// How long a connection waits for another process's write lock before SQLite reports
+/// "database is locked". Writers of one process are serialized before they reach SQLite.
+pub const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+
 pub fn configure_connection(conn: &Connection) -> Result<(), String> {
-    conn.busy_timeout(Duration::from_millis(5000))
+    conn.busy_timeout(BUSY_TIMEOUT)
         .map_err(|error| format!("Failed to set busy timeout: {error}"))?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|error| format!("Failed to set journal_mode WAL: {error}"))?;

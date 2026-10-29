@@ -68,9 +68,13 @@ impl Gateway {
     }
 
     async fn post(&self, token: &str, body: &str) -> (u16, Option<String>, serde_json::Value) {
+        self.post_to("/api/v1/supervisor/pause", token, body).await
+    }
+
+    async fn post_to(&self, path: &str, token: &str, body: &str) -> (u16, Option<String>, serde_json::Value) {
         self.send(
             client()
-                .post(format!("http://{}/api/v1/supervisor/pause", self.addr))
+                .post(format!("http://{}{path}", self.addr))
                 .bearer_auth(token)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body.to_owned()),
@@ -176,6 +180,34 @@ async fn a_malformed_pause_body_is_an_invalid_request() {
 
         assert_eq!(status, 400, "{body} -> {answer}");
         assert_eq!(answer["error"]["code"], "INVALID_REQUEST", "{body}");
+    }
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_start_without_an_open_hub_is_supervisor_unavailable() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/start", &token, "").await;
+
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn only_an_admitted_machine_control_device_may_start_the_hub() {
+    let gateway = Gateway::start().await;
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let outsider = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().set_agent_control(true, Vec::new()).expect("enable policy to exercise denials");
+    gateway.state().agent_control_policy.restrict_to(["another-device"]);
+
+    for token in [&mirror, &outsider] {
+        let (status, _, body) = gateway.post_to("/api/v1/supervisor/start", token, "").await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
     }
     gateway.stop().await;
 }

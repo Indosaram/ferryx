@@ -76,7 +76,7 @@ The repository provides two dedicated server binaries defined in `src-tauri/Carg
 
 ### Prerequisites
 
-- Rust stable (at least 1.82), Zig 0.16.0, and initialized repository submodules for the pinned Ghostty build
+- Rust stable (at least 1.82), Zig 0.17.0, and initialized repository submodules for the pinned Ghostty build
 - The Linux system packages required by Tauri v2, including GTK 3 and WebKitGTK 4.1, plus `pkg-config` and a C compiler; the relay shares the Tauri crate's dependencies
 
 ### Compilation

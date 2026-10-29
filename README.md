@@ -6,7 +6,7 @@
 
 # Ferryx
 
-### A native terminal for coding agents, like cmux but on macOS, Windows and Linux.
+### A native terminal for coding agents on macOS, Windows and Linux.
 
 Claude Code, Codex and any CLI agent keep running when you close the app, remote Linux boxes
 connect without SSH, and every tab shows which agent is waiting on you. Native Rust on Tauri v2
@@ -230,7 +230,7 @@ unmeasured performance claims:
 - [Bun](https://bun.sh/) 1.1+
 - [Rust](https://www.rust-lang.org/) stable (at least 1.82)
 - [Node.js](https://nodejs.org/) 20+
-- [Zig](https://ziglang.org/download/) 0.16.0 (required for the pinned Ghostty build)
+- [Zig](https://ziglang.org/download/) 0.17.0 (required for the pinned Ghostty build)
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
 On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required by
@@ -248,6 +248,25 @@ bun install
 bun install --cwd ui
 bun install --cwd site
 ```
+
+### Fetch the bundled agent runtime (mhc + bun)
+
+The hub runs its Slack, cron and judge turns through [mhc](https://github.com/Indosaram/mhc),
+and mhc's eval and bash tools need [bun](https://github.com/oven-sh/bun). Every desktop package
+ships both. The versions and their sha256 values are pinned in `src-tauri/resources/mhc/pin.json`.
+One command downloads both from their public GitHub releases for your machine. It verifies the
+mhc minisign signature and the sha256 of both files, then places them in the gitignored
+`src-tauri/resources/mhc/payload/<target triple>/`:
+
+```bash
+bun scripts/fetch-mhc.mjs
+```
+
+The command is idempotent: it skips a download that is already present and verified.
+`--target <triple>` fetches for another platform, and `--target universal-apple-darwin` fetches
+both macOS slices. Release builds run it automatically: `cargo tauri build` calls it from
+`beforeBuildCommand`. A dev build works without it. The hub then uses `FERRYX_HUB_MHC_BIN`
+when set, else `mhc` from your PATH.
 
 ### Run the desktop app
 

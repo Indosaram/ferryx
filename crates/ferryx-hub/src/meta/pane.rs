@@ -14,7 +14,7 @@ impl SupervisorPanePreset {
             title: "supervisor".into(),
             cwd,
             command: if command.is_empty() {
-                vec![super::supervisor::mhc_bin()]
+                super::supervisor::supervisor_pane_command()
             } else {
                 command
             },

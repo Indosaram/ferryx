@@ -15,6 +15,8 @@ export type TerminalSettings = {
   macosOptionAsAlt: boolean | null;
   fontSize: number | null;
   scrollback: number;
+  /** Local override for idle scrollback compression; `null` follows Ghostty (default on). */
+  scrollbackCompression: boolean | null;
   shell: string | null;
 };
 
@@ -25,6 +27,7 @@ export type EffectiveTerminalSettings = {
   macosOptionAsAlt: boolean;
   fontSize: number;
   scrollback: number;
+  scrollbackCompression: boolean;
   cursorStyle: "bar" | "block" | "underline";
   theme: TerminalThemeColors;
   fontFamilySource: TerminalSettingSource;
@@ -40,7 +43,8 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fontFamily: null,
   macosOptionAsAlt: null,
   fontSize: null,
-  scrollback: 10_000,
+  scrollback: 50_000,
+  scrollbackCompression: null,
   shell: null,
 };
 
@@ -85,7 +89,8 @@ export const FALLBACK_PREFERENCES: TerminalPreferences = {
   status: "absent",
   sourcePath: null,
   defaultShell: null,
-  scrollback: 10_000,
+  scrollback: 50_000,
+  scrollbackCompression: true,
 };
 
 export function loadTerminalSettings(storage: Pick<Storage, "getItem" | "setItem"> | null = browserStorage()): TerminalSettings {
@@ -169,6 +174,9 @@ export function resolveTerminalSettings(
     macosOptionAsAlt: hasLocalOptionOverride ? local.macosOptionAsAlt! : nativePreferences.macosOptionAsAlt,
     fontSize: effectiveFontSize,
     scrollback: local.scrollback,
+    scrollbackCompression: typeof local.scrollbackCompression === "boolean"
+      ? local.scrollbackCompression
+      : nativePreferences.scrollbackCompression ?? true,
     cursorStyle,
     theme: nativePreferences.theme ?? DEFAULT_TERMINAL_THEME,
     fontFamilySource: localFontFamily ? "local" : ghosttyImported ? "ghostty" : "fallback",
@@ -194,6 +202,7 @@ async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
     macosOptionAsAlt: settings.macosOptionAsAlt,
     shell: settings.shell,
     scrollback: settings.scrollback,
+    scrollbackCompression: settings.scrollbackCompression,
   };
   const serialized = JSON.stringify(payload);
   if (pushedOverrides === serialized) return;
@@ -297,6 +306,7 @@ function normalizeTerminalSettings(settings: Partial<TerminalSettings>): Termina
       ? clampInteger(settings.fontSize, 13, FONT_SIZE_MIN, FONT_SIZE_MAX)
       : null,
     scrollback: clampInteger(settings.scrollback, DEFAULT_TERMINAL_SETTINGS.scrollback, SCROLLBACK_MIN, SCROLLBACK_MAX),
+    scrollbackCompression: typeof settings.scrollbackCompression === "boolean" ? settings.scrollbackCompression : null,
     shell: normalizeOptionalString(settings.shell),
   };
 }

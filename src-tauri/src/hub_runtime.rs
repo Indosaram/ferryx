@@ -810,6 +810,56 @@ pub fn supervisor_available() -> bool {
     SUPERVISOR_VIEW.get().is_some()
 }
 
+/// What a start needs besides the running slot: the hub, its config and its bridge.
+static SUPERVISOR_LAUNCH: std::sync::OnceLock<HubLaunch> = std::sync::OnceLock::new();
+
+/// Why the hub was not started.
+#[derive(Debug, thiserror::Error)]
+pub enum HubStartError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    #[error("this daemon handed the hub over to its successor")]
+    HandedOver,
+    #[error("hub start was not persisted: {0}")]
+    Storage(String),
+}
+
+/// Clears the persisted stop and runs a generation unless one already runs. Returns whether
+/// this call started it. `hub start` on the control socket and a paired phone both land here.
+async fn start_generation(
+    running: &tokio::sync::Mutex<Option<Generation>>,
+    launch: &HubLaunch,
+) -> Result<bool, HubStartError> {
+    if HUB_TASKS.is_retired() {
+        return Err(HubStartError::HandedOver);
+    }
+    if let Err(error) = ferryx_hub::control::clear_stopped(&launch.hub.pool).await {
+        tracing::warn!(%error, "hub start did not clear the stopped flag");
+        return Err(HubStartError::Storage(error.to_string()));
+    }
+    let mut slot = running.lock().await;
+    if slot.is_some() {
+        return Ok(false);
+    }
+    *slot = Some(spawn_generation(launch).await);
+    Ok(true)
+}
+
+/// A person starts the stopped hub from another surface. `by` names who, as for a lane pause.
+/// Like `ferryx hub start`, it never restarts the daemon, so live PTY sessions stay up.
+pub async fn start_supervisor(state: &RemoteGatewayState, by: &str) -> Result<bool, HubStartError> {
+    let (Some((_, running)), Some(launch)) = (SUPERVISOR_VIEW.get(), SUPERVISOR_LAUNCH.get()) else {
+        return Err(HubStartError::Unavailable);
+    };
+    let started = start_generation(running, launch).await?;
+    tracing::info!(by, started, "supervisor hub start requested");
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "hub": "started" }),
+    );
+    Ok(started)
+}
+
 /// Why a lane was not paused or resumed.
 #[derive(Debug, thiserror::Error)]
 pub enum LanePauseError {
@@ -1118,6 +1168,7 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     };
     let running = Arc::new(tokio::sync::Mutex::new(generation));
     let _ = SUPERVISOR_VIEW.set((Arc::clone(&launch.hub), Arc::clone(&running)));
+    let _ = SUPERVISOR_LAUNCH.set(launch.clone());
     serve_control(running, launch);
     if stopped {
         tracing::info!("ferryx hub stayed stopped until hub start (or FERRYX_HUB=on)");
@@ -1204,7 +1255,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let watch_server = Arc::clone(&launch.server);
     // The omo session poller reports omo panes (by omo session id, on every host), so the pane
     // observer leaves them to it instead of sending a second notice under the pane id.
-    let omo_polled = ferryx_hub::sessions::omo_poll::enabled() && ferryx_hub::sessions::omo_poll::binary().is_some();
+    let omo_polled = ferryx_hub::sessions::omo_poll::enabled();
     tasks.push(tokio::spawn(ferryx_hub::sessions::omo_poll::run(Arc::clone(&launch.hub))));
     tasks.push(tokio::spawn(async move {
         let mut agents = std::collections::HashMap::new();
@@ -1616,21 +1667,13 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                         Ok(ferryx_hub::control::ControlOp::Start) if HUB_TASKS.is_retired() => {
                             "{\"status\":\"failed\",\"error\":\"this daemon handed the hub over to its successor\"}\n"
                         }
-                        Ok(ferryx_hub::control::ControlOp::Start) => {
-                            match ferryx_hub::control::clear_stopped(&launch.hub.pool).await {
-                                Ok(()) => {
-                                    let mut slot = running.lock().await;
-                                    if slot.is_none() {
-                                        *slot = Some(spawn_generation(&launch).await);
-                                    }
-                                    "{\"status\":\"ok\",\"op\":\"start\"}\n"
-                                }
-                                Err(error) => {
-                                    tracing::warn!(%error, "hub start did not clear the stopped flag");
-                                    "{\"status\":\"failed\",\"error\":\"hub start was not persisted\"}\n"
-                                }
+                        Ok(ferryx_hub::control::ControlOp::Start) => match start_generation(&running, &launch).await {
+                            Ok(_) => "{\"status\":\"ok\",\"op\":\"start\"}\n",
+                            Err(HubStartError::HandedOver) => {
+                                "{\"status\":\"failed\",\"error\":\"this daemon handed the hub over to its successor\"}\n"
                             }
-                        }
+                            Err(_) => "{\"status\":\"failed\",\"error\":\"hub start was not persisted\"}\n",
+                        },
                         Ok(ferryx_hub::control::ControlOp::Status) => {
                             let running_now = running.lock().await.is_some();
                             let report = ferryx_hub::control::status_report(

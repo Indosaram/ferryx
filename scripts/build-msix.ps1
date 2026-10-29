@@ -307,6 +307,18 @@ try {
     Copy-Item -LiteralPath $distSource -Destination (Join-Path $stagingDir "ui/dist") -Recurse
     Copy-Item -LiteralPath $helpersSource -Destination (Join-Path $stagingDir "helpers") -Recurse
 
+    # Bundled mhc + bun (tauri.conf.json "resources/mhc/payload" -> "mhc"), fetched and verified by
+    # scripts/fetch-mhc.mjs; the hub resolves <install dir>/mhc/<triple>/mhc/mhc.exe.
+    $mhcTriple = "x86_64-pc-windows-msvc"
+    $mhcSource = Join-Path $repoRoot "src-tauri/resources/mhc/payload/$mhcTriple"
+    foreach ($required in @((Join-Path $mhcSource "fetch.json"), (Join-Path $mhcSource "mhc/mhc.exe"), (Join-Path $mhcSource "bun/bun.exe"))) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "ERROR: Required MSIX mhc resource missing: $required (run: bun scripts/fetch-mhc.mjs --target $mhcTriple)"
+        }
+    }
+    New-Item -ItemType Directory -Path (Join-Path $stagingDir "mhc") | Out-Null
+    Copy-Item -LiteralPath $mhcSource -Destination (Join-Path $stagingDir "mhc/$mhcTriple") -Recurse
+
     # Locate and copy icon assets
     $iconSource = $null
     if ($IconsDir -and (Test-Path $IconsDir)) {

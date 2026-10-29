@@ -20,6 +20,7 @@ export interface TerminalSectionProps {
   macosOptionAsAlt: boolean;
   shell?: string | null;
   scrollback?: number;
+  scrollbackCompression?: boolean;
   source: string;
   sourcePath: string | null;
   onFontFamily: (fontFamily: string) => void;
@@ -27,6 +28,7 @@ export interface TerminalSectionProps {
   onOptionAsAlt: (enabled: boolean) => void;
   onShell?: (shell: string | null) => void;
   onScrollback?: (scrollback: number) => void;
+  onScrollbackCompression?: (enabled: boolean) => void;
   onUseImported: () => void;
 }
 

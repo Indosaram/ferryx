@@ -142,6 +142,7 @@ export type TerminalPreferences = {
   sourcePath: string | null;
   defaultShell?: string | null;
   scrollback?: number;
+  scrollbackCompression?: boolean;
 };
 
 type WorktreeStatusRequest = {
@@ -356,7 +357,8 @@ export async function getTerminalPreferences(remote?: RemotePreferenceTarget): P
       status: "absent",
       sourcePath: null,
       defaultShell: null,
-      scrollback: 10_000,
+      scrollback: 50_000,
+      scrollbackCompression: true,
     };
   }
   return invokeCommand<TerminalPreferences>("cmd_terminal_preferences");
@@ -368,6 +370,7 @@ export type TerminalOverrides = {
   macosOptionAsAlt: boolean | null;
   shell?: string | null;
   scrollback?: number | null;
+  scrollbackCompression?: boolean | null;
 };
 
 export type TerminalOverridesRequest = TerminalOverrides;
@@ -381,6 +384,7 @@ export async function applyTerminalOverrides(
       ...overrides,
       shell: overrides.shell ?? null,
       scrollback: overrides.scrollback ?? null,
+      scrollbackCompression: overrides.scrollbackCompression ?? null,
     },
   });
 }

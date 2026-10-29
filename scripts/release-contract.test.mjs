@@ -28,7 +28,7 @@ function makeValidPlan(overrides = {}) {
     toolchains: {
       node: ">=22.0.0",
       bun: ">=1.4.0",
-      zig: "0.16.0",
+      zig: "0.17.0",
     },
     sourceDateEpoch: 1788868800,
     createdAt: "2026-09-08T12:00:00.000Z",
@@ -135,7 +135,7 @@ test("parsePlan accepts valid plan with NSIS migration and windows-x86_64 target
     toolchains: {
       node: ">=22.0.0",
       bun: ">=1.4.0",
-      zig: "0.16.0",
+      zig: "0.17.0",
       rust: "1.85.0",
       tauri: "2.3.0",
     },
@@ -256,7 +256,7 @@ test("parsePlan validates toolchains strict keys", () => {
           toolchains: {
             node: ">=22.0.0",
             bun: ">=1.4.0",
-            zig: "0.16.0",
+            zig: "0.17.0",
             python: "3.12",
           },
         }),

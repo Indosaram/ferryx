@@ -9,10 +9,16 @@ use thiserror::Error;
 pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "monospace";
 pub const DEFAULT_MACOS_OPTION_AS_ALT: bool = false;
 pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 13.0;
-pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+pub const DEFAULT_SCROLLBACK_LINES: usize = 50_000;
+/// Same key and default as Ghostty 1.4 `scrollback-compression`.
+pub const DEFAULT_SCROLLBACK_COMPRESSION: bool = true;
 
 fn default_scrollback() -> usize {
     DEFAULT_SCROLLBACK_LINES
+}
+
+fn default_scrollback_compression() -> bool {
+    DEFAULT_SCROLLBACK_COMPRESSION
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +138,7 @@ pub struct GhosttyTerminalConfig {
     pub palette: HashMap<u8, String>,
     pub theme_name: Option<String>,
     pub scrollback_limit: Option<usize>,
+    pub scrollback_compression: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -172,6 +179,9 @@ pub struct TerminalPreferences {
     pub default_shell: Option<String>,
     #[serde(default = "default_scrollback")]
     pub scrollback: usize,
+    /// Compress idle scrollback in memory (Ghostty `scrollback-compression`).
+    #[serde(default = "default_scrollback_compression")]
+    pub scrollback_compression: bool,
 }
 
 impl TerminalPreferences {
@@ -187,6 +197,7 @@ impl TerminalPreferences {
             source_path,
             default_shell: None,
             scrollback: DEFAULT_SCROLLBACK_LINES,
+            scrollback_compression: DEFAULT_SCROLLBACK_COMPRESSION,
         }
     }
 
@@ -271,6 +282,9 @@ impl TerminalPreferences {
             source_path: Some(source_path),
             default_shell: None,
             scrollback: config.scrollback_limit.unwrap_or(DEFAULT_SCROLLBACK_LINES),
+            scrollback_compression: config
+                .scrollback_compression
+                .unwrap_or(DEFAULT_SCROLLBACK_COMPRESSION),
         }
     }
 }
@@ -310,6 +324,7 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
     let mut palette: HashMap<u8, String> = HashMap::new();
     let mut theme_name: Option<String> = None;
     let mut scrollback_limit: Option<usize> = None;
+    let mut scrollback_compression: Option<bool> = None;
 
     for (index, raw_line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -420,6 +435,14 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
                     scrollback_limit = Some(parsed.clamp(1_000, 500_000));
                 }
             }
+            "scrollback-compression" => {
+                let cleaned = unquote(value).trim();
+                scrollback_compression = if cleaned.is_empty() {
+                    None
+                } else {
+                    Some(cleaned == "true")
+                };
+            }
             "palette" => {
                 let cleaned = unquote(value).trim();
                 if let Some((idx_str, color_str)) = cleaned.split_once('=') {
@@ -465,6 +488,7 @@ pub fn parse_ghostty_config(input: &str) -> Result<GhosttyTerminalConfig, Ghostt
         palette,
         theme_name,
         scrollback_limit,
+        scrollback_compression,
     })
 }
 
@@ -847,6 +871,7 @@ pub struct TerminalPreferenceOverrides {
     pub macos_option_as_alt: Option<bool>,
     pub shell: Option<String>,
     pub scrollback: Option<usize>,
+    pub scrollback_compression: Option<bool>,
 }
 
 struct PreferenceCache {
@@ -893,6 +918,9 @@ pub fn apply_terminal_preference_overrides(
         .filter(|lines| *lines >= 1_000 && *lines <= 500_000)
     {
         effective.scrollback = scrollback;
+    }
+    if let Some(compression) = overrides.scrollback_compression {
+        effective.scrollback_compression = compression;
     }
     effective
 }
@@ -1327,5 +1355,81 @@ scrollback-limit-lines = 25000
         };
         let effective = apply_terminal_preference_overrides(&imported, &overrides);
         assert_eq!(effective.scrollback, 50_000);
+    }
+
+    #[test]
+    fn scrollback_compression_follows_ghostty_config_and_local_override() {
+        let defaults = TerminalPreferences::defaults(TerminalPreferencesStatus::Absent, None);
+        assert!(defaults.scrollback_compression);
+
+        let absent = parse_ghostty_config("font-size = 14\n").expect("parse config");
+        assert_eq!(absent.scrollback_compression, None);
+        let imported = TerminalPreferences::imported(absent, PathBuf::from("/tmp/config"));
+        assert!(imported.scrollback_compression, "Ghostty defaults compression to true");
+
+        let off = parse_ghostty_config("scrollback-compression = false\n").expect("parse config");
+        assert_eq!(off.scrollback_compression, Some(false));
+        let imported_off = TerminalPreferences::imported(off, PathBuf::from("/tmp/config"));
+        assert!(!imported_off.scrollback_compression);
+
+        let on = parse_ghostty_config("scrollback-compression = true\n").expect("parse config");
+        assert_eq!(on.scrollback_compression, Some(true));
+
+        let overridden = apply_terminal_preference_overrides(
+            &imported_off,
+            &TerminalPreferenceOverrides {
+                scrollback_compression: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(overridden.scrollback_compression);
+        let followed = apply_terminal_preference_overrides(
+            &imported_off,
+            &TerminalPreferenceOverrides::default(),
+        );
+        assert!(!followed.scrollback_compression);
+    }
+
+    #[test]
+    fn scrollback_compression_defaults_on_for_preferences_saved_before_the_field() {
+        let mut value = serde_json::to_value(TerminalPreferences::defaults(
+            TerminalPreferencesStatus::Absent,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(value["scrollbackCompression"], serde_json::json!(true));
+        value.as_object_mut().unwrap().remove("scrollbackCompression");
+        let restored: TerminalPreferences = serde_json::from_value(value).unwrap();
+        assert!(restored.scrollback_compression);
+    }
+
+    #[test]
+    fn default_scrollback_is_fifty_thousand_lines_and_explicit_values_are_kept() {
+        assert_eq!(DEFAULT_SCROLLBACK_LINES, 50_000);
+        let defaults = TerminalPreferences::defaults(TerminalPreferencesStatus::Absent, None);
+        assert_eq!(defaults.scrollback, 50_000);
+        let absent = parse_ghostty_config("font-size = 14\n").expect("parse config");
+        let imported = TerminalPreferences::imported(absent, PathBuf::from("/tmp/config"));
+        assert_eq!(imported.scrollback, 50_000);
+        let saved = parse_ghostty_config("scrollback-limit = 10000\n").expect("parse config");
+        let imported_saved = TerminalPreferences::imported(saved, PathBuf::from("/tmp/config"));
+        assert_eq!(imported_saved.scrollback, 10000, "an explicit 10000 survives the default change");
+    }
+}
+
+#[cfg(test)]
+mod saved_preferences_tests {
+    use super::*;
+
+    #[test]
+    fn saved_preferences_without_scrollback_load_the_new_default() {
+        let mut value = serde_json::to_value(TerminalPreferences::defaults(
+            TerminalPreferencesStatus::Absent,
+            None,
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().remove("scrollback");
+        let restored: TerminalPreferences = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.scrollback, DEFAULT_SCROLLBACK_LINES);
     }
 }

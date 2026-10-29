@@ -120,7 +120,7 @@ function createSyntheticReleaseFixture({
     toolchains: {
       node: ">=22.0.0",
       bun: ">=1.4.0",
-      zig: "0.16.0",
+      zig: "0.17.0",
       rust: "1.85.0",
       tauri: "2.3.0",
     },

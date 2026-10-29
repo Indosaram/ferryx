@@ -7,7 +7,7 @@
 
 use super::*;
 
-use crate::hub_runtime::LanePauseError;
+use crate::hub_runtime::{HubStartError, LanePauseError};
 
 /// Capability a machine Control device sees while this daemon has the hub open.
 pub(crate) const SUPERVISOR_CAPABILITY: &str = "supervisorV1";
@@ -83,6 +83,38 @@ fn pause_refusal(error: &LanePauseError) -> Response {
         LanePauseError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
     };
     machine_error_with_details(status, code, &message, serde_json::Map::new())
+}
+
+/// `POST /api/v1/supervisor/start`: start the stopped hub, as `ferryx hub start` does. No body.
+/// Only a machine Control device the agent-control policy admits may start it; the daemon is
+/// never restarted, so live PTY sessions stay up.
+pub(crate) async fn http_start(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let by = format!("remote:{}", device.id);
+    match crate::hub_runtime::start_supervisor(&state, &by).await {
+        Ok(started) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({ "started": started })),
+        )
+            .into_response(),
+        Err(error) => {
+            let (status, code) = match error {
+                HubStartError::Unavailable => {
+                    (StatusCode::SERVICE_UNAVAILABLE, SUPERVISOR_UNAVAILABLE_CODE)
+                }
+                HubStartError::HandedOver => (StatusCode::CONFLICT, SUPERVISOR_INVALID_STATE_CODE),
+                HubStartError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
+            };
+            machine_error_with_details(status, code, &error.to_string(), serde_json::Map::new())
+        }
+    }
 }
 
 

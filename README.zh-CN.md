@@ -6,7 +6,7 @@
 
 # Ferryx
 
-### 为编码智能体打造的原生终端，类似 cmux，但同时支持 macOS、Windows 和 Linux。
+### 为编码智能体打造的原生终端，支持 macOS、Windows 和 Linux。
 
 关闭应用后 Claude Code、Codex 以及任意 CLI 智能体继续运行，远程 Linux 机器无需 SSH 即可连接，每个标签页都会显示哪个智能体在等你。
 原生 Rust 与 Tauri v2，libghostty 终端核心，不使用 Electron。通道监督者已在 `main` 分支，将随下一个版本发布。
@@ -164,7 +164,7 @@ Ferryx 原生 Ghostty 和 Rust 组件的架构清单。这不是与基于 Electr
 - [Bun](https://bun.sh/) 1.1+
 - [Rust](https://www.rust-lang.org/) stable（至少 1.82）
 - [Node.js](https://nodejs.org/) 20+
-- [Zig](https://ziglang.org/download/) 0.16.0（构建固定版本的 Ghostty 时需要）
+- [Zig](https://ziglang.org/download/) 0.17.0（构建固定版本的 Ghostty 时需要）
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
 在 Linux 上，编译桌面或 CLI 二进制文件之前，请安装

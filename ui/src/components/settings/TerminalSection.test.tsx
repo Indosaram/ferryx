@@ -74,6 +74,33 @@ describe("TerminalSection", () => {
     expect(onScrollback).toHaveBeenCalledWith(100_000);
   });
 
+  it("defaults the Scrollback control to 50,000 lines", () => {
+    render(<TerminalSection {...defaultProps} onScrollback={vi.fn()} />);
+    expect(screen.getByLabelText(/scrollback lines/i)).toHaveValue(50_000);
+  });
+
+  it("renders the scrollback compression toggle on by default and reports changes", () => {
+    const onScrollbackCompression = vi.fn();
+    const { rerender } = render(
+      <TerminalSection {...defaultProps} onScrollbackCompression={onScrollbackCompression} />,
+    );
+
+    const toggle = screen.getByRole("switch", { name: /compress idle scrollback/i });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(toggle);
+    expect(onScrollbackCompression).toHaveBeenCalledExactlyOnceWith(false);
+
+    rerender(
+      <TerminalSection
+        {...defaultProps}
+        scrollbackCompression={false}
+        onScrollbackCompression={onScrollbackCompression}
+      />,
+    );
+    expect(screen.getByRole("switch", { name: /compress idle scrollback/i })).toHaveAttribute("aria-checked", "false");
+  });
+
   it("buffers font family changes and commits only on blur or Enter", () => {
     const onFontFamily = vi.fn();
     render(<TerminalSection {...defaultProps} onFontFamily={onFontFamily} />);

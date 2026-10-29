@@ -118,6 +118,22 @@ function frameObject(frame: unknown): Record<string, unknown> | null {
   return objectOf(typeof frame === "string" ? decodeJson(frame) : frame);
 }
 
+export type HubStartResult =
+  | { kind: "ok"; started: boolean }
+  | { kind: "error"; code: string; message: string; status: number | null };
+
+/** `POST /api/v1/supervisor/start`: start a stopped hub, as `ferryx hub start` does. */
+export async function startRemoteSupervisor(fetchLike: SupervisorFetch): Promise<HubStartResult> {
+  let res: SupervisorHttpResponse;
+  try {
+    res = await fetchLike("/api/v1/supervisor/start", { method: "POST" });
+  } catch (err) {
+    return { kind: "error", ...offline(err), status: null };
+  }
+  if (res.status < 200 || res.status >= 300) return { kind: "error", ...errorOf(res), status: res.status };
+  return { kind: "ok", started: objectOf(decodeJson(res.body))?.started === true };
+}
+
 /** True for an `/api/v1/events` frame (raw text or parsed) announcing a supervisor change. */
 export function isSupervisorChangedFrame(frame: unknown): boolean {
   return frameObject(frame)?.type === SUPERVISOR_CHANGED_FRAME;

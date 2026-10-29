@@ -182,6 +182,7 @@ fn test_renderer_theme_conversion_from_terminal_preferences() {
         source_path: None,
         default_shell: None,
         scrollback: 10_000,
+        scrollback_compression: true,
     };
 
     let theme_from_prefs = RendererTheme::from(&prefs);
@@ -233,6 +234,7 @@ fn test_rendered_row_instances_honor_preference_theme_colors() {
         source_path: None,
         default_shell: None,
         scrollback: 10_000,
+        scrollback_compression: true,
     };
 
     let theme = RendererTheme::from(&prefs);
@@ -342,6 +344,7 @@ fn test_renderer_cursor_visual_style_preference_and_unfocused_hollow() {
         source_path: None,
         default_shell: None,
         scrollback: 10_000,
+        scrollback_compression: true,
     };
 
     let theme = RendererTheme::from(&prefs);

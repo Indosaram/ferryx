@@ -32,6 +32,34 @@ impl ClipboardImage {
     }
 }
 
+/// Names the format agents accept from the bytes themselves, so a payload is never labelled by
+/// the type it was requested as.
+pub fn sniff_image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// Extension agents accept for an image file copied from a file manager.
+pub fn passthrough_image_extension(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "gif" => Some("gif"),
+        "webp" => Some("webp"),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard};
@@ -41,6 +69,18 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
     let data_for = |uti: &str| -> Option<Vec<u8>> {
         let ty = NSString::from_str(uti);
         pasteboard.dataForType(&ty).map(|data| data.to_vec())
+    };
+    // ImageIO decodes every still format AppKit apps publish (TIFF, HEIC, BMP, JPEG 2000...);
+    // agents only accept a few, so the rest are re-encoded as PNG.
+    let to_png = |bytes: &[u8]| -> Option<ClipboardImage> {
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes))?;
+        // SAFETY: UB category: FFI boundary UB.
+        // Runtime invariant: `rep` is a live NSBitmapImageRep decoded from pasteboard image data and
+        // the property dictionary is a valid empty NSDictionary, which is what PNG encoding accepts.
+        let png = unsafe {
+            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+        }?;
+        ClipboardImage::new(png.to_vec(), "png")
     };
 
     // Screenshots and browser copies already carry a format agents accept; pass those through
@@ -56,23 +96,33 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         }
     }
 
-    // AppKit apps (Preview, Keynote) leave only TIFF behind, which agents reject.
-    if let Some(tiff) = data_for("public.tiff") {
-        if let Some(rep) = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&tiff)) {
-            // SAFETY: UB category: FFI boundary UB.
-            // Runtime invariant: `rep` is a live NSBitmapImageRep decoded from pasteboard TIFF and the
-            // property dictionary is a valid empty NSDictionary, which is what PNG encoding accepts.
-            let png = unsafe {
-                rep.representationUsingType_properties(
-                    NSBitmapImageFileType::PNG,
-                    &NSDictionary::new(),
-                )
-            };
-            if let Some(png) = png {
-                if let Some(image) = ClipboardImage::new(png.to_vec(), "png") {
-                    return Some(image);
-                }
+    // AppKit apps (Preview, Keynote) leave only TIFF behind, Photos leaves HEIC and Windows-origin
+    // copies leave BMP; agents reject all of them. Any other image flavour the pasteboard
+    // advertises is tried last, so the classifier's "image" never meets an unreadable payload.
+    let mut image_types: Vec<String> = [
+        "public.tiff",
+        "public.heic",
+        "public.heif",
+        "com.microsoft.bmp",
+    ]
+    .iter()
+    .map(|uti| uti.to_string())
+    .collect();
+    if let Some(types) = pasteboard.types() {
+        for ty in types.iter() {
+            let ty = ty.to_string();
+            let is_image = (ty.starts_with("public.") && ty.contains("image"))
+                || ty.starts_with("com.adobe.")
+                || ty.starts_with("public.jpeg-2000")
+                || ty.starts_with("com.apple.icns");
+            if is_image && !image_types.contains(&ty) {
+                image_types.push(ty);
             }
+        }
+    }
+    for uti in &image_types {
+        if let Some(image) = data_for(uti).and_then(|bytes| to_png(&bytes)) {
+            return Some(image);
         }
     }
 
@@ -82,21 +132,24 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         if let Some(url) = objc2_foundation::NSURL::URLWithString(&text) {
             if let Some(path_str) = url.path() {
                 let path_buf = std::path::PathBuf::from(path_str.to_string());
-                if let Some(ext) = path_buf.extension().and_then(|e| e.to_str()) {
-                    let ext_lower = ext.to_ascii_lowercase();
-                    let extension = match ext_lower.as_str() {
-                        "png" => Some("png"),
-                        "jpg" | "jpeg" => Some("jpg"),
-                        "gif" => Some("gif"),
-                        "webp" => Some("webp"),
-                        _ => None,
-                    };
-                    if let Some(ext_static) = extension {
-                        if let Ok(bytes) = std::fs::read(&path_buf) {
-                            if let Some(image) = ClipboardImage::new(bytes, ext_static) {
-                                return Some(image);
-                            }
+                let is_image_file = path_buf
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| {
+                        matches!(
+                            ext.to_ascii_lowercase().as_str(),
+                            "tif" | "tiff" | "heic" | "heif" | "bmp"
+                        )
+                    });
+                if let Some(ext_static) = passthrough_image_extension(&path_buf) {
+                    if let Ok(bytes) = std::fs::read(&path_buf) {
+                        if let Some(image) = ClipboardImage::new(bytes, ext_static) {
+                            return Some(image);
                         }
+                    }
+                } else if is_image_file {
+                    if let Some(image) = std::fs::read(&path_buf).ok().and_then(|bytes| to_png(&bytes)) {
+                        return Some(image);
                     }
                 }
             }
@@ -117,6 +170,7 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
 
     // Standard Win32 clipboard formats, also needed without the native renderer.
     const CF_DIB_ID: u32 = 8;
+    const CF_HDROP_ID: u32 = 15;
     const CF_DIBV5_ID: u32 = 17;
 
     struct ClipboardGuard;
@@ -129,10 +183,20 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         }
     }
 
-    // SAFETY: UB category: FFI boundary UB.
-    // Runtime invariant: a null HWND associates the clipboard with the current task, which is
-    // the documented way to read it without owning a window.
-    if unsafe { OpenClipboard(std::ptr::null_mut::<std::ffi::c_void>() as HWND) } == 0 {
+    // Clipboard managers and the app that just copied hold the clipboard open for a moment, so a
+    // single attempt turned a busy clipboard into "no image". Same budget as the type probe.
+    let mut opened = false;
+    for _ in 0..5 {
+        // SAFETY: UB category: FFI boundary UB.
+        // Runtime invariant: a null HWND associates the clipboard with the current task, which is
+        // the documented way to read it without owning a window.
+        if unsafe { OpenClipboard(std::ptr::null_mut::<std::ffi::c_void>() as HWND) } != 0 {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !opened {
         return None;
     }
     let _guard = ClipboardGuard;
@@ -160,8 +224,9 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         }
     };
 
-    let mut png_format: Option<u32> = None;
+    let mut encoded_formats: Vec<u32> = Vec::new();
     let mut dib_format: Option<u32> = None;
+    let mut hdrop_format: Option<u32> = None;
     let mut format = 0u32;
     loop {
         // SAFETY: UB category: FFI boundary UB.
@@ -174,6 +239,10 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
             dib_format.get_or_insert(format);
             continue;
         }
+        if format == CF_HDROP_ID {
+            hdrop_format.get_or_insert(format);
+            continue;
+        }
         let mut name = [0u16; 64];
         // SAFETY: UB category: FFI boundary UB.
         // Runtime invariant: `name` is a live buffer of the length passed to the call.
@@ -181,23 +250,64 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
             unsafe { GetClipboardFormatNameW(format, name.as_mut_ptr(), name.len() as i32) };
         if length > 0 {
             let label = String::from_utf16_lossy(&name[..length as usize]);
-            if label.eq_ignore_ascii_case("PNG") {
-                png_format.get_or_insert(format);
+            // Browsers register these encoded flavours beside the bitmap; the bytes are sniffed,
+            // so the label only has to say "encoded image".
+            let label = label.to_ascii_lowercase();
+            if matches!(
+                label.as_str(),
+                "png" | "image/png" | "jfif" | "image/jpeg" | "gif" | "image/gif" | "image/webp"
+            ) {
+                encoded_formats.push(format);
             }
         }
     }
 
-    if let Some(image) = png_format
+    for format in encoded_formats {
+        if let Some(bytes) = read_format(format) {
+            if let Some(extension) = sniff_image_extension(&bytes) {
+                if let Some(image) = ClipboardImage::new(bytes, extension) {
+                    return Some(image);
+                }
+            }
+        }
+    }
+    // Paint, Excel and older apps publish only a device-independent bitmap.
+    if let Some(image) = dib_format
         .and_then(read_format)
+        .and_then(|dib| dib_to_png(&dib))
         .and_then(|bytes| ClipboardImage::new(bytes, "png"))
     {
         return Some(image);
     }
-    // Paint, Excel and older apps publish only a device-independent bitmap.
-    dib_format
-        .and_then(read_format)
-        .and_then(|dib| dib_to_png(&dib))
-        .and_then(|bytes| ClipboardImage::new(bytes, "png"))
+    // An image file copied in Explorer arrives as a file list, which the classifier already
+    // calls an image.
+    let path = hdrop_format.and_then(read_format).and_then(|drop| first_dropped_path(&drop))?;
+    let extension = passthrough_image_extension(&path)?;
+    std::fs::read(&path).ok().and_then(|bytes| ClipboardImage::new(bytes, extension))
+}
+
+/// First path in a packed `DROPFILES` (`CF_HDROP`) payload.
+///
+/// The header is `pFiles: u32, pt: (i32, i32), fNC: i32, fWide: i32`; the list that follows at
+/// `pFiles` is NUL-separated and ends with an empty entry.
+pub fn first_dropped_path(drop: &[u8]) -> Option<std::path::PathBuf> {
+    let offset = read_u32(drop, 0)? as usize;
+    let wide = read_u32(drop, 16)? != 0;
+    let list = drop.get(offset..)?;
+    let path = if wide {
+        let units: Vec<u16> = list
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .take_while(|unit| *unit != 0)
+            .collect();
+        String::from_utf16(&units).ok()?
+    } else {
+        let bytes: Vec<u8> = list.iter().copied().take_while(|byte| *byte != 0).collect();
+        String::from_utf8(bytes).ok()?
+    };
+    (!path.is_empty()).then(|| std::path::PathBuf::from(path))
 }
 
 /// Longest a clipboard helper may run before it is killed, so a wedged tool cannot hold a paste.
@@ -206,10 +316,18 @@ const CLIPBOARD_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 
 /// Clipboard helpers to try, in order. Wayland comes first: `wl-paste` reads the compositor's own
 /// clipboard, which is the only one that exists under a Wayland session even when XWayland runs.
+/// Each format is requested by name because a helper refuses a type the clipboard does not
+/// offer; browsers often publish only JPEG or WebP.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const CLIPBOARD_TOOLS: [(&str, &[&str]); 2] = [
+const CLIPBOARD_TOOLS: [(&str, &[&str]); 8] = [
     ("wl-paste", &["--type", "image/png"]),
+    ("wl-paste", &["--type", "image/jpeg"]),
+    ("wl-paste", &["--type", "image/webp"]),
+    ("wl-paste", &["--type", "image/gif"]),
     ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]),
+    ("xclip", &["-selection", "clipboard", "-t", "image/jpeg", "-o"]),
+    ("xclip", &["-selection", "clipboard", "-t", "image/webp", "-o"]),
+    ("xclip", &["-selection", "clipboard", "-t", "image/gif", "-o"]),
 ];
 
 /// Runs one clipboard helper and hands back its stdout bytes.
@@ -264,19 +382,17 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
     read_clipboard_image_from(&CLIPBOARD_TOOLS)
 }
 
-/// Reads the first helper in `tools` that hands back real PNG bytes.
+/// Reads the first helper in `tools` that hands back bytes of a format agents accept.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn read_clipboard_image_from(tools: &[(&str, &[&str])]) -> Option<ClipboardImage> {
-    const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
-
     for &(program, args) in tools {
         let Some(bytes) = run_clipboard_tool(program, args) else {
             continue;
         };
         // A helper can exit successfully with a payload in a format this build cannot decode;
-        // that is a miss, not an image, so only real PNG bytes travel on.
-        if bytes.starts_with(&PNG_MAGIC) {
-            if let Some(image) = ClipboardImage::new(bytes, "png") {
+        // that is a miss, not an image, so only bytes that really are an accepted format travel on.
+        if let Some(extension) = sniff_image_extension(&bytes) {
+            if let Some(image) = ClipboardImage::new(bytes, extension) {
                 return Some(image);
             }
         }
@@ -1183,6 +1299,43 @@ mod tests {
     fn an_empty_pasteboard_payload_never_becomes_a_clipboard_image() {
         assert_eq!(ClipboardImage::new(Vec::new(), "png"), None);
         assert!(ClipboardImage::new(vec![1, 2, 3], "png").is_some());
+    }
+
+    #[test]
+    fn image_bytes_are_labelled_by_their_own_format() {
+        assert_eq!(sniff_image_extension(&[0x89, 0x50, 0x4E, 0x47, 0x0D]), Some("png"));
+        assert_eq!(sniff_image_extension(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(sniff_image_extension(b"GIF89a"), Some("gif"));
+        assert_eq!(sniff_image_extension(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(sniff_image_extension(b"RIFF\0\0\0\0WAVEfmt "), None);
+        assert_eq!(sniff_image_extension(b"II*\0"), None);
+        assert_eq!(sniff_image_extension(&[]), None);
+    }
+
+    #[test]
+    fn first_dropped_path_reads_wide_and_ansi_file_lists() {
+        let header = |wide: u32| {
+            let mut h = Vec::new();
+            h.extend_from_slice(&20u32.to_le_bytes());
+            h.extend_from_slice(&[0u8; 8]);
+            h.extend_from_slice(&0u32.to_le_bytes());
+            h.extend_from_slice(&wide.to_le_bytes());
+            h
+        };
+        let mut wide = header(1);
+        for unit in "C:\\shots\\a.png".encode_utf16().chain([0, 0]) {
+            wide.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(first_dropped_path(&wide), Some(std::path::PathBuf::from("C:\\shots\\a.png")));
+
+        let mut ansi = header(0);
+        ansi.extend_from_slice(b"C:\\b.jpg\0\0");
+        assert_eq!(first_dropped_path(&ansi), Some(std::path::PathBuf::from("C:\\b.jpg")));
+
+        assert_eq!(first_dropped_path(&header(1)), None);
+        assert_eq!(first_dropped_path(&[1, 2]), None);
+        assert_eq!(passthrough_image_extension(std::path::Path::new("x.JPEG")), Some("jpg"));
+        assert_eq!(passthrough_image_extension(std::path::Path::new("x.tiff")), None);
     }
 
     #[test]

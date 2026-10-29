@@ -2,7 +2,7 @@
   "constants": {
     "ghosttySnapshotMagic": "GHOSTSNP",
     "ghosttySnapshotFormatVersion": 1,
-    "ghosttyCleanRevision": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+    "ghosttyCleanRevision": "83fb95624b0439ee660c2679b43b38c8b63769cd",
     "engineIdentifier": "ghostty-vt",
     "maxSnapshotChunkBytes": 65536,
     "maxCompressedPayloadBytes": 4194304,
@@ -37,7 +37,7 @@
       "chunkSequence": 542,
       "engineCompat": {
         "engine": "ghostty-vt",
-        "sourceRevision": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",
+        "sourceRevision": "83fb95624b0439ee660c2679b43b38c8b63769cd",
         "snapshotVersion": 1
       },
       "totalCompressedBytes": 24,

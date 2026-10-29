@@ -48,7 +48,7 @@ export const HOSTS = Object.freeze({
     cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target-w5qa-20261019',
     // CARGO_INCREMENTAL=0: six QA builds share one target dir, and incremental caches filled
     // maho-win's C: (r4 v1bump failed with os error 112 after A, B, C and bump had passed).
-    buildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.16.0\\zig.exe', CARGO_INCREMENTAL: '0' },
+    buildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.17.0\\zig.exe', CARGO_INCREMENTAL: '0' },
     evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
     // No '-' or '_' in the 8.3 form: the GUI launch types a short path through MahoRD, which drops
     // both on maho-win. Measured: C:\Users\sook\ferryx-wt\qaruns\<runId>\l1.cmd ->

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fxsh::frame::{Frame, FLAG_ERROR, FLAG_EVENT, FLAG_RESPONSE};
 use fxsh::messages::*;
@@ -19,13 +19,19 @@ use tokio::task::JoinHandle;
 
 use crate::host::HostShared;
 use crate::outbox::{ConnHandle, SnapItem};
-use ferryx_vt::{state_changed, Advance, HostTerminal, DEFAULT_SCROLLBACK_LINES};
+use ferryx_vt::{state_changed, Advance, CompressStep, HostTerminal, DEFAULT_SCROLLBACK_LINES};
 
 pub const MAILBOX_LIMIT: usize = 8 * 1024 * 1024;
 pub const SNAPSHOT_CHUNK: usize = 1024 * 1024;
 pub const MAX_SUBSCRIBERS: usize = 64;
 pub const FLUSH_BACKLOG: usize = 1024 * 1024;
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(4);
+/// Quiet time after output before idle scrollback compression starts (same
+/// value as COMPRESSION_IDLE_DELAY in src-tauri native_terminal/compression.rs).
+pub const COMPRESS_IDLE_DELAY: Duration = Duration::from_secs(2);
+/// Pause between incremental compression steps of one pass, so requests and
+/// output interleave with the pass.
+pub const COMPRESS_STEP_INTERVAL: Duration = Duration::from_millis(1);
 pub const EXIT_DRAIN: Duration = Duration::from_millis(250);
 
 pub enum Event {
@@ -42,6 +48,91 @@ pub enum Event {
     Released { subscription_id: u64, reservation_id: u64, snapshot_id: u64 },
     Deadline { subscription_id: u64, reservation_id: u64, snapshot_id: u64 },
     Flush,
+    /// The session's single idle compression timer fired.
+    Compress,
+}
+
+/// Decides when the next idle compression step runs, with at most one timer
+/// in flight. Output records its time and starts a [`COMPRESS_IDLE_DELAY`]
+/// timer only when none is running; a timer that fires before the idle delay
+/// since the last output has passed is restarted for the remainder. A pending
+/// step starts a [`COMPRESS_STEP_INTERVAL`] timer; complete stops until the
+/// next output; unsupported stops for good.
+#[derive(Debug, Default)]
+pub struct CompressTimer {
+    /// A timer task is running; it is the only one.
+    in_flight: bool,
+    /// Latest output; the idle delay counts from here.
+    last_output: Option<Instant>,
+    /// A pass is in progress: the next fire steps without waiting for idle.
+    stepping: bool,
+    unsupported: bool,
+}
+
+/// What a fired compression timer asks the session to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressFire {
+    /// Run one compression step now.
+    Step,
+    /// Output arrived since arming: start the timer again for this remainder.
+    Wait(Duration),
+    /// Nothing to do until the next output.
+    Idle,
+}
+
+impl CompressTimer {
+    /// Records output at `now`; returns the delay of a timer to start, or
+    /// `None` when one is already running (it re-arms itself when it fires).
+    pub fn on_output(&mut self, now: Instant) -> Option<Duration> {
+        if self.unsupported {
+            return None;
+        }
+        self.last_output = Some(now);
+        self.stepping = false;
+        self.start(COMPRESS_IDLE_DELAY)
+    }
+
+    /// The running timer fired at `now`.
+    pub fn fire(&mut self, now: Instant) -> CompressFire {
+        self.in_flight = false;
+        let Some(last_output) = self.last_output.filter(|_| !self.unsupported) else {
+            return CompressFire::Idle;
+        };
+        if !self.stepping {
+            let due = last_output + COMPRESS_IDLE_DELAY;
+            if now < due {
+                return self.start(due - now).map_or(CompressFire::Idle, CompressFire::Wait);
+            }
+        }
+        CompressFire::Step
+    }
+
+    /// Records a step result; returns the delay of the next timer to start, if any.
+    pub fn after_step(&mut self, step: CompressStep) -> Option<Duration> {
+        match step {
+            CompressStep::Pending => {
+                self.stepping = true;
+                self.start(COMPRESS_STEP_INTERVAL)
+            }
+            CompressStep::Complete => {
+                self.stepping = false;
+                self.last_output = None;
+                None
+            }
+            CompressStep::Unsupported => {
+                self.unsupported = true;
+                None
+            }
+        }
+    }
+
+    fn start(&mut self, delay: Duration) -> Option<Duration> {
+        if self.unsupported || self.in_flight {
+            return None;
+        }
+        self.in_flight = true;
+        Some(delay)
+    }
 }
 
 #[derive(Default)]
@@ -115,6 +206,7 @@ pub struct Session {
     exit: Option<ExitInfo>,
     pending_exit: Option<ExitInfo>,
     flush_scheduled: bool,
+    compress: CompressTimer,
 }
 
 pub fn start(parts: SessionParts) {
@@ -180,6 +272,7 @@ pub fn start(parts: SessionParts) {
         exit: None,
         pending_exit: None,
         flush_scheduled: false,
+        compress: CompressTimer::default(),
     };
     tokio::spawn(session.run(rx));
 }
@@ -233,6 +326,8 @@ impl Session {
                 self.gate.release(bytes.len());
                 let adv = self.term.feed(&bytes);
                 self.publish(adv);
+                let next = self.compress.on_output(Instant::now());
+                self.start_compress_timer(next);
             }
             Event::PtyEof => self.finish_child(None),
             Event::Written(n) => {
@@ -294,7 +389,25 @@ impl Session {
                 self.flush_scheduled = false;
                 self.flush_deltas();
             }
+            Event::Compress => match self.compress.fire(Instant::now()) {
+                CompressFire::Step => {
+                    let step = self.term.compress_step();
+                    let next = self.compress.after_step(step);
+                    self.start_compress_timer(next);
+                }
+                CompressFire::Wait(remaining) => self.start_compress_timer(Some(remaining)),
+                CompressFire::Idle => {}
+            },
         }
+    }
+
+    fn start_compress_timer(&self, delay: Option<Duration>) {
+        let Some(delay) = delay else { return };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tx.send(Event::Compress);
+        });
     }
 
     fn frame(&self, request_id: u64, flags: u16, message: Message) -> Vec<u8> {
@@ -728,6 +841,9 @@ impl Session {
                 let _ = self.master.resize(PtySize { rows: applied.rows, cols: applied.cols, pixel_width: 0, pixel_height: 0 });
                 let adv = self.term.resize(applied.cols, applied.rows);
                 self.publish(adv);
+                // A reflow may re-read all scrollback, restoring compressed pages.
+                let next = self.compress.on_output(Instant::now());
+                self.start_compress_timer(next);
                 self.reply(&conn, rid, Message::ResizeAck(ResizeAck { epoch: applied.epoch, seq: applied.seq, cols: applied.cols, rows: applied.rows }));
             }
             Err(ResizeError::StaleLease { current_epoch }) => self.reply_err(&conn, rid, ErrorDetail::StaleLease { scope: Scope::Resize, current_epoch, epoch_final_accepted: 0 }, "stale resize lease"),
@@ -764,5 +880,55 @@ impl Session {
             sub.s.start_with_ack(incarnation, revision, known, &mut fx);
         }
         self.apply(id, fx, Some(rid));
+    }
+}
+
+#[cfg(test)]
+mod compress_timer_tests {
+    use super::*;
+
+    #[test]
+    fn compress_timer_rearms_for_the_remainder_after_later_output() {
+        let mut timer = CompressTimer::default();
+        let start = Instant::now();
+        assert_eq!(timer.fire(start), CompressFire::Idle, "nothing steps before any output");
+        assert_eq!(timer.on_output(start), Some(COMPRESS_IDLE_DELAY));
+        let later = start + Duration::from_millis(500);
+        assert_eq!(timer.on_output(later), None, "the running timer covers later output");
+        assert_eq!(
+            timer.fire(start + COMPRESS_IDLE_DELAY),
+            CompressFire::Wait(Duration::from_millis(500)),
+            "a timer firing early re-arms for the rest of the idle delay"
+        );
+        assert_eq!(timer.fire(later + COMPRESS_IDLE_DELAY), CompressFire::Step);
+    }
+
+    #[test]
+    fn compress_timer_burst_of_output_arms_at_most_one_timer() {
+        let mut timer = CompressTimer::default();
+        let start = Instant::now();
+        let armed = (0..1_000u64)
+            .filter_map(|i| timer.on_output(start + Duration::from_micros(i)))
+            .count();
+        assert_eq!(armed, 1);
+    }
+
+    #[test]
+    fn compress_timer_continues_pending_and_stops_on_complete_or_unsupported() {
+        let mut timer = CompressTimer::default();
+        let start = Instant::now();
+        let due = start + COMPRESS_IDLE_DELAY;
+        timer.on_output(start).unwrap();
+        assert_eq!(timer.fire(due), CompressFire::Step);
+        assert_eq!(timer.after_step(CompressStep::Pending), Some(COMPRESS_STEP_INTERVAL));
+        assert_eq!(timer.fire(due + COMPRESS_STEP_INTERVAL), CompressFire::Step);
+        assert_eq!(timer.after_step(CompressStep::Complete), None);
+        assert_eq!(timer.fire(due + COMPRESS_IDLE_DELAY), CompressFire::Idle);
+
+        let again = due + COMPRESS_IDLE_DELAY;
+        timer.on_output(again).unwrap();
+        assert_eq!(timer.fire(again + COMPRESS_IDLE_DELAY), CompressFire::Step);
+        assert_eq!(timer.after_step(CompressStep::Unsupported), None);
+        assert_eq!(timer.on_output(again), None, "unsupported platforms never re-arm");
     }
 }

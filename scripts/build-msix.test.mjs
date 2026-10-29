@@ -151,3 +151,11 @@ test("build-msix.ps1: validates packaged MSIX manifest identity (Name, Version, 
     "Script must validate Identity ProcessorArchitecture is x64 in the packaged manifest",
   );
 });
+
+test("build-msix.ps1: stages the verified bundled mhc + bun under mhc/<triple>", () => {
+  assert.match(scriptContent, /"fetch\.json"/);
+  assert.match(scriptContent, /\$mhcTriple = "x86_64-pc-windows-msvc"/);
+  assert.match(scriptContent, /"mhc\/mhc\.exe"/);
+  assert.match(scriptContent, /"bun\/bun\.exe"/);
+  assert.match(scriptContent, /Copy-Item -LiteralPath \$mhcSource -Destination \(Join-Path \$stagingDir "mhc\/\$mhcTriple"\) -Recurse/);
+});

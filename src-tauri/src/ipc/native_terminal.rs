@@ -34,8 +34,8 @@ use crate::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState, NativeTerminalSurfaceReceipt,
 };
 use crate::native_terminal::{
-    KeyModifiers, MouseAction, MouseEvent, MousePosition, MouseRendererSize, NativeTerminalError,
-    NativeTerminalInput, ScrollViewport, TerminalEngine, TerminalWheelOutcome,
+    KeyModifiers, MemoryUsage, MouseAction, MouseEvent, MousePosition, MouseRendererSize,
+    NativeTerminalError, NativeTerminalInput, ScrollViewport, TerminalEngine, TerminalWheelOutcome,
 };
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +155,31 @@ pub struct NativeTerminalCursorReceipt {
     pub scrollback_pruned_rows: u64,
 }
 
+/// Memory one native terminal holds, primary and alternate screens summed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalMemoryReceipt {
+    /// Whether idle scrollback compression can free memory on this platform.
+    pub compression_supported: bool,
+    /// Physical bytes the screen pages use now; a compressed page counts its compressed size.
+    pub resident_bytes: u64,
+    /// Bytes held by compressed pages.
+    pub compressed_bytes: u64,
+    /// Bytes held by Kitty images (not part of `resident_bytes`).
+    pub image_bytes: u64,
+}
+
+impl From<MemoryUsage> for NativeTerminalMemoryReceipt {
+    fn from(usage: MemoryUsage) -> Self {
+        Self {
+            compression_supported: usage.compression_supported,
+            resident_bytes: usage.primary_resident_bytes.saturating_add(usage.alternate_resident_bytes),
+            compressed_bytes: usage.primary_compressed_bytes.saturating_add(usage.alternate_compressed_bytes),
+            image_bytes: usage.primary_image_bytes.saturating_add(usage.alternate_image_bytes),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalMouseReceipt {
@@ -251,8 +276,15 @@ pub fn classify_windows_clipboard(
     format_ids: &[u32],
     format_names: &[String],
 ) -> NativeTerminalClipboardContent {
+    let has_image_data = format_ids
+        .iter()
+        .any(|&id| matches!(id, CF_BITMAP_ID | CF_DIB_ID | CF_DIBV5_ID))
+        || format_names.iter().any(|name| {
+            let name = name.to_ascii_lowercase();
+            name == "png" || name.starts_with("image/") || name == "jfif"
+        });
     if let Some(text) = text {
-        if !text.is_empty() {
+        if !text.is_empty() && !(has_image_data && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
@@ -276,6 +308,20 @@ pub fn classify_windows_clipboard(
     NativeTerminalClipboardContent::Empty
 }
 
+/// Browsers and chat apps publish the copied image's address as text beside the image. A lone
+/// URL next to real image data is that locator, not text the user meant to paste.
+pub fn is_image_locator_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("file://")
+        || lower.starts_with("data:image/")
+}
+
 fn is_image_pasteboard_type(t: &str) -> bool {
     t.starts_with("public.png")
         || t.starts_with("public.tiff")
@@ -292,12 +338,12 @@ pub fn classify_clipboard_content(
     text: Option<String>,
     types: &[String],
 ) -> NativeTerminalClipboardContent {
+    let has_image = types.iter().any(|t| is_image_pasteboard_type(t));
     if let Some(text) = text {
-        if !text.is_empty() {
+        if !text.is_empty() && !(has_image && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
-    let has_image = types.iter().any(|t| is_image_pasteboard_type(t));
     if has_image {
         return NativeTerminalClipboardContent::Image;
     }
@@ -414,7 +460,7 @@ pub fn classify_linux_clipboard(
         return NativeTerminalClipboardContent::Image;
     }
     if let Some(text) = text {
-        if !text.is_empty() {
+        if !text.is_empty() && !(has_image && is_image_locator_text(&text)) {
             return NativeTerminalClipboardContent::Text { text };
         }
     }
@@ -1639,7 +1685,7 @@ pub fn select_attached_native_terminal(
     mode: &NativeTerminalSelectMode,
 ) -> Result<NativeTerminalSelectionReceipt, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| {
+    state.with_session_history(session_id, |term| {
         let selection_res = match mode {
             NativeTerminalSelectMode::All => term.select_all(),
             NativeTerminalSelectMode::Word { col, row } => term.select_word_at(*col, *row),
@@ -1683,7 +1729,7 @@ pub fn copy_attached_native_selection(
     session_id: &str,
 ) -> Result<String, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| {
+    state.with_session_history(session_id, |term| {
         let text = term.selection_text()?.unwrap_or_default();
         Ok(text)
     })
@@ -1708,6 +1754,15 @@ pub fn cursor_for_attached_native_terminal(
     })
 }
 
+/// Memory usage of an attached native session's terminal.
+pub fn memory_for_attached_native_terminal(
+    state: &NativeTerminalSurfaceHostState,
+    session_id: &str,
+) -> Result<NativeTerminalMemoryReceipt, NativeTerminalError> {
+    require_attached_surface(state, session_id)?;
+    state.with_session_terminal(session_id, |term| Ok(term.memory_usage()?.into()))
+}
+
 /// Search full-screen text grid for an attached native session.
 pub fn search_attached_native_terminal(
     state: &NativeTerminalSurfaceHostState,
@@ -1716,7 +1771,7 @@ pub fn search_attached_native_terminal(
     case_sensitive: bool,
 ) -> Result<NativeTerminalSearchResult, NativeTerminalError> {
     require_attached_surface(state, session_id)?;
-    state.with_session_terminal(session_id, |term| {
+    state.with_session_history(session_id, |term| {
         let raw_matches = term.search_grid(query, case_sensitive)?;
         let matches = raw_matches
             .into_iter()
@@ -4069,6 +4124,82 @@ mod tests {
     }
 
     #[test]
+    fn history_reads_wake_the_pump_to_rearm_idle_compression() {
+        use futures_util::FutureExt as _;
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("history", 1, None).unwrap();
+        let slot = state.session_snapshot_slot("history").unwrap();
+        state
+            .with_session_terminal("history", |term| term.feed(b"history line\r\n"))
+            .unwrap();
+        assert!(slot.history_read().now_or_never().is_none(), "plain access is not a history read");
+
+        search_attached_native_terminal(&state, "history", "history", false).unwrap();
+        assert!(slot.history_read().now_or_never().is_some(), "search must wake the pump");
+        select_attached_native_terminal(&state, "history", &NativeTerminalSelectMode::All).unwrap();
+        assert!(slot.history_read().now_or_never().is_some(), "select-all must wake the pump");
+        copy_attached_native_selection(&state, "history").unwrap();
+        assert!(slot.history_read().now_or_never().is_some(), "copy must wake the pump");
+        state.teardown();
+    }
+
+    #[test]
+    fn memory_for_attached_native_terminal_reports_resident_bytes() {
+        // Given an attached session holding 1,000 lines.
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("memory", 1, None).unwrap();
+        state
+            .with_session_terminal("memory", |term| {
+                for i in 0..1_000 {
+                    term.feed(format!("memory line {i:04}\r\n").as_bytes())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // When diagnostics read its memory usage.
+        let receipt = memory_for_attached_native_terminal(&state, "memory").unwrap();
+
+        // Then the pages are resident, and a platform without compression reports none compressed.
+        assert!(receipt.resident_bytes > 0, "{receipt:?}");
+        if !receipt.compression_supported {
+            assert_eq!(receipt.compressed_bytes, 0, "{receipt:?}");
+        }
+        assert!(memory_for_attached_native_terminal(&state, "not-attached").is_err());
+        state.teardown();
+    }
+
+    #[test]
+    fn memory_receipt_sums_both_screens_in_camel_case() {
+        let usage = MemoryUsage {
+            compression_supported: true,
+            primary_resident_bytes: 100,
+            primary_compressed_bytes: 10,
+            primary_image_bytes: 1,
+            alternate_resident_bytes: 200,
+            alternate_compressed_bytes: 20,
+            alternate_image_bytes: 2,
+            ..MemoryUsage::default()
+        };
+        let receipt = NativeTerminalMemoryReceipt::from(usage);
+        assert_eq!(
+            receipt,
+            NativeTerminalMemoryReceipt {
+                compression_supported: true,
+                resident_bytes: 300,
+                compressed_bytes: 30,
+                image_bytes: 3,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap(),
+            serde_json::json!({
+                "compressionSupported": true, "residentBytes": 300, "compressedBytes": 30, "imageBytes": 3,
+            })
+        );
+    }
+
+    #[test]
     fn stale_tuple_set_bounds_reports_reason_so_the_pane_resends() {
         // Given a surface that rotated to attempt generation 4 while a set-bounds for 3 was in flight.
         let tuple = |generation| crate::daemon::protocol::PaneAttachTuple {
@@ -4580,6 +4711,7 @@ mod tests {
                 presented: false,
                 render_deferred: true,
                 render_suspended: false,
+                renderer_released: false,
                 cols: 80,
                 rows: 24,
                 rebuilt_rows: 0,
@@ -4810,6 +4942,7 @@ mod tests {
                     presented,
                     render_deferred: false,
                     render_suspended: false,
+                    renderer_released: false,
                     cols: 80,
                     rows: 24,
                     rebuilt_rows: 0,
@@ -5008,6 +5141,33 @@ mod tests {
         assert_eq!(
             classify_clipboard_content(Some("".to_string()), &[]),
             NativeTerminalClipboardContent::Empty
+        );
+    }
+
+    #[test]
+    fn test_classify_clipboard_content_treats_a_lone_url_beside_image_data_as_the_image() {
+        let url = Some("https://cdn.example.com/a.png".to_string());
+        assert_eq!(
+            classify_clipboard_content(url.clone(), &["public.png".to_string(), "public.utf8-plain-text".to_string()]),
+            NativeTerminalClipboardContent::Image
+        );
+        // Without image data the URL is just text.
+        assert_eq!(
+            classify_clipboard_content(url, &["public.utf8-plain-text".to_string()]),
+            NativeTerminalClipboardContent::Text { text: "https://cdn.example.com/a.png".to_string() }
+        );
+        // Real prose beside an image is still the user's text.
+        assert_eq!(
+            classify_clipboard_content(Some("see https://x.dev".to_string()), &["public.png".to_string()]),
+            NativeTerminalClipboardContent::Text { text: "see https://x.dev".to_string() }
+        );
+        assert_eq!(
+            classify_windows_clipboard(Some("https://x.dev/i.jpg".to_string()), &[CF_UNICODETEXT_ID, CF_DIB_ID], &[]),
+            NativeTerminalClipboardContent::Image
+        );
+        assert_eq!(
+            classify_linux_clipboard(Some("https://x.dev/i.jpg".to_string()), &["text/plain".to_string(), "image/jpeg".to_string()]),
+            NativeTerminalClipboardContent::Image
         );
     }
 

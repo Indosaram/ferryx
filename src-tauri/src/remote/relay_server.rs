@@ -2638,7 +2638,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
             // Supervisor view. The lane key rides in the pause body, never in the path.
             | ("GET", ["supervisor"])
-            | ("POST", ["supervisor", "pause"])
+            | ("POST", ["supervisor", "pause" | "start"])
             | ("GET", ["attach"])
     )
 }
@@ -4966,6 +4966,7 @@ mod tests {
         ));
         assert!(allowed_http_route(&Method::GET, "supervisor"));
         assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
+        assert!(allowed_http_route(&Method::POST, "supervisor/start"));
         for (method, path) in [
             (Method::GET, "reference-chat/session-1"),
             (Method::GET, "reference-chat/x/secret"),
@@ -4976,6 +4977,7 @@ mod tests {
             (Method::DELETE, "supervisor"),
             (Method::POST, "supervisor"),
             (Method::GET, "supervisor/pause"),
+            (Method::GET, "supervisor/start"),
             (Method::POST, "supervisor/x/y"),
             (Method::GET, "supervisor/x/y"),
             (Method::POST, "supervisor/lane-1/pause"),

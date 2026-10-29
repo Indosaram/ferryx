@@ -12,6 +12,10 @@
 //!   must pass `codesign --verify --strict`; nothing here builds or edits a bundle.
 //! - Linux: `<root>/<key>/ferryx` (source: the AppImage path when running from one).
 //! - Windows: `<root>\\<key>\\ferryx.exe`.
+//!
+//! Next to the executable, every generation also carries copies of the app's remote helper
+//! assets (`<key>/helpers`) and its bundled mhc payload (`<key>/mhc/<triple>`), so the staged
+//! daemon never reaches back into the app install for them.
 
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -167,7 +171,69 @@ pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, Ru
             tracing::warn!(source = %source_exe.display(), "No remote helper assets next to the daemon source; SSH helper installs from this daemon will fail");
         }
     }
+    let bundled_mhc = std::env::current_exe()
+        .ok()
+        .and_then(|exe| ferryx_hub::meta::supervisor::bundled_mhc_dir_near(&exe))
+        .or_else(|| ferryx_hub::meta::supervisor::bundled_mhc_dir_near(source_exe));
+    match bundled_mhc {
+        Some(mhc) => {
+            if let Err(error) = ensure_bundled_mhc(&generation, &mhc) {
+                tracing::warn!(%error, generation = %staged.key, "Could not stage the bundled mhc; hub turns from this daemon fall back to mhc on PATH");
+            }
+        }
+        None => {
+            tracing::info!(source = %source_exe.display(), "No bundled mhc next to the daemon source; hub turns use mhc on PATH");
+        }
+    }
     Ok(staged)
+}
+
+/// Copies this platform's bundled mhc payload (`<mhc>/<host triple>`: the mhc release folder and
+/// the bun it needs) into `<generation>/mhc/<host triple>` unless it is already there, so the
+/// staged daemon's hub keeps its mhc when the app is replaced. Files are hard-linked when the
+/// generation shares a volume with the install (the payload is ~300 MB) and copied otherwise.
+/// The copy lands complete (temp dir, then rename) and an existing one is never overwritten.
+pub fn ensure_bundled_mhc(generation: &Path, mhc: &Path) -> Result<(), RuntimeStageError> {
+    let triple = ferryx_hub::meta::supervisor::host_triple();
+    let parent = generation.join(ferryx_hub::meta::supervisor::BUNDLED_MHC_DIR);
+    let destination = parent.join(triple);
+    if ferryx_hub::meta::supervisor::bundled_mhc_in(&parent).is_some() {
+        return Ok(());
+    }
+    fs::create_dir_all(&parent).map_err(io_error(format!("create {}", parent.display())))?;
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let tmp = parent.join(format!(
+        "{triple}{TMP_MARKER}{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = link_or_copy_tree(&mhc.join(triple), &tmp)
+        .and_then(|()| sync_dir(&tmp).map_err(io_error(format!("sync {}", tmp.display()))))
+        .and_then(|()| match fs::rename(&tmp, &destination) {
+            Ok(()) => sync_dir(&parent).map_err(io_error(format!("sync {}", parent.display()))),
+            // Another stager won the rename.
+            Err(_) if ferryx_hub::meta::supervisor::bundled_mhc_in(&parent).is_some() => Ok(()),
+            Err(error) => Err(io_error(format!("rename {} to {}", tmp.display(), destination.display()))(error)),
+        });
+    if tmp.exists() {
+        remove_tmp_dir(&tmp);
+    }
+    result
+}
+
+/// [`copy_tree`] that hard-links each file first and copies only when linking fails.
+fn link_or_copy_tree(source: &Path, destination: &Path) -> Result<(), RuntimeStageError> {
+    fs::create_dir_all(destination).map_err(io_error(format!("create {}", destination.display())))?;
+    for entry in fs::read_dir(source).map_err(io_error(format!("read {}", source.display())))? {
+        let entry = entry.map_err(io_error(format!("read {}", source.display())))?;
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            link_or_copy_tree(&entry.path(), &target)?;
+        } else if fs::hard_link(entry.path(), &target).is_err() {
+            fs::copy(entry.path(), &target).map_err(io_error(format!("copy {}", entry.path().display())))?;
+        }
+    }
+    Ok(())
 }
 
 /// The remote helper assets dir (one holding `manifest.json`) next to `executable`: an app

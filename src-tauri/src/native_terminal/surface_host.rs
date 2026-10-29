@@ -9,6 +9,7 @@ use super::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
     SurfaceCompositionLayout, SurfacePresentationGeometry,
 };
+use super::compression::{CompressionScheduler, CompressionStep};
 use super::engine::TerminalEngine;
 use super::error::NativeTerminalError;
 use super::input::{cursor_style_for_focus, NativeTerminalInput};
@@ -65,13 +66,20 @@ const RESIZE_REDRAW_ARM_WINDOW: std::time::Duration = std::time::Duration::from_
 const RESIZE_REDRAW_ABSORB_MAX: std::time::Duration = std::time::Duration::from_secs(1);
 const OUTPUT_BATCH_MAX: usize = 64;
 
-/// The pump wakes on an idle stream only for timed work: a skipped trailing agent detection or
-/// an armed replay/redraw absorb window. Otherwise it blocks on the stream.
+/// The pump wakes on an idle stream only for timed work: a skipped trailing agent detection, an
+/// armed replay/redraw absorb window, or a due scrollback-compression step. It waits for the
+/// soonest of them; with none armed it blocks on the stream.
 fn pump_idle_wakeup(
     agent_detect_maybe_pending: bool,
     replay_absorb_armed: bool,
+    compression_due: Option<std::time::Duration>,
 ) -> Option<std::time::Duration> {
-    (agent_detect_maybe_pending || replay_absorb_armed).then_some(AGENT_DETECT_TRAILING_IDLE)
+    let trailing = (agent_detect_maybe_pending || replay_absorb_armed)
+        .then_some(AGENT_DETECT_TRAILING_IDLE);
+    match (trailing, compression_due) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Whether an output burst is still being absorbed. The window closes on the first gap longer
@@ -83,6 +91,22 @@ fn replay_absorb_continues(
 ) -> bool {
     since_start < max && since_last_output < REPLAY_ABSORB_IDLE
 }
+
+/// Whether a session's Kitty animations may run: only for a pane that owns a surface the last
+/// frame did not find occluded. Detached and occluded panes neither tick nor wake the pump.
+fn kitty_animation_active(surface_attached: bool, render_suspended: bool) -> bool {
+    surface_attached && !render_suspended
+}
+
+/// The Kitty animation deadline the pump waits on, or `None` when the pane cannot show it.
+fn animation_pump_deadline(
+    surface_attached: bool,
+    render_suspended: bool,
+    deadline: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    deadline.filter(|_| kitty_animation_active(surface_attached, render_suspended))
+}
+
 pub const NATIVE_TERMINAL_SCROLLBAR_EVENT: &str = "native_terminal_scrollbar";
 pub const NATIVE_TERMINAL_FOCUS_EVENT: &str = "native_terminal_focus";
 
@@ -181,6 +205,9 @@ pub struct NativeTerminalSurfaceReceipt {
     pub render_deferred: bool,
     /// The surface is not visible; no retry may be armed until visibility returns.
     pub render_suspended: bool,
+    /// The GPU renderer (pipelines, glyph atlas, image textures) was dropped because the surface
+    /// is suspended; it is rebuilt lazily on the next frame.
+    pub renderer_released: bool,
     pub cols: u16,
     pub rows: u16,
     pub rebuilt_rows: u16,
@@ -205,6 +232,7 @@ impl NativeTerminalSurfaceReceipt {
             presented: false,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols: layout.cols,
             rows: layout.rows,
             rebuilt_rows,
@@ -2053,6 +2081,7 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 )
                             }
                         };
+                        completion_snapshot_slot.set_render_suspended(receipt.render_suspended);
                         let current_frame = completion_snapshot_slot.consume();
                         let tuple_is_current = current_frame.as_ref().is_some_and(|current| {
                             current.generation == frame_generation
@@ -2420,6 +2449,53 @@ fn defer_scheduled_render<R: Runtime>(
 pub(crate) static RENDER_SNAPSHOT_CALL_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+mod kitty_animation_pump_tests {
+    use super::{animation_pump_deadline, kitty_animation_active};
+    use crate::native_terminal::snapshot_slot::SnapshotSlot;
+
+    #[test]
+    fn kitty_animation_deadline_is_armed_only_for_a_visible_attached_pane() {
+        let due = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(100));
+        assert_eq!(animation_pump_deadline(true, false, due), due);
+        assert_eq!(
+            animation_pump_deadline(true, true, due),
+            None,
+            "an occluded (render_suspended) pane must not arm an animation deadline"
+        );
+        assert_eq!(
+            animation_pump_deadline(false, false, due),
+            None,
+            "a detached pane must not arm an animation deadline"
+        );
+        assert_eq!(animation_pump_deadline(true, false, None), None);
+        assert!(!kitty_animation_active(true, true));
+        assert!(!kitty_animation_active(false, false));
+    }
+
+    #[tokio::test]
+    async fn uncovering_a_suspended_surface_wakes_the_animation_pump() {
+        let slot = SnapshotSlot::new();
+        slot.set_attached(true);
+        slot.set_render_suspended(true);
+        assert!(slot.render_suspended());
+        // Subscribe before the transition so the wake cannot be missed.
+        let woken = slot.animation_woken();
+        slot.set_render_suspended(false);
+        tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("becoming visible must wake the pump to resume a paused animation");
+        assert!(!slot.render_suspended());
+
+        slot.set_render_suspended(true);
+        slot.set_attached(false);
+        assert!(
+            !slot.render_suspended(),
+            "a new attachment starts with unknown, not suspended, visibility"
+        );
+    }
+}
+
 pub fn dispatch_main_thread_receipt<R: Runtime>(
     window: &Window<R>,
     task: impl FnOnce() + Send + 'static,
@@ -2672,6 +2748,18 @@ fn session_render_snapshot(
                     end_row,
                 },
             );
+    // Kitty animations advance once per prepared frame, before the image capture below, and
+    // only for a visible pane. The tick invalidates image handles; the capture looks every
+    // image up again.
+    if kitty_animation_active(session.surface_attached, session.snapshot_slot.render_suspended()) {
+        match session.terminal.advance_animations() {
+            // A frame prepared outside the pump (focus, visibility, reattach) may have armed a
+            // deadline the pump is not waiting on; let it re-read.
+            Ok(true) => session.snapshot_slot.wake_animation(),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "Failed to advance Kitty animations"),
+        }
+    }
     let mut snapshot = session.terminal.render_snapshot()?;
     #[cfg(test)]
     RENDER_SNAPSHOT_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -2752,6 +2840,23 @@ fn with_session_owned_by<T>(
         return None;
     }
     Some(f(&mut session))
+}
+
+/// Logs a terminal's memory once a compression pass completes.
+fn trace_compressed_memory(session_id: &str, terminal: &NativeTerminal) {
+    match terminal.memory_usage() {
+        Ok(usage) => {
+            let memory = crate::ipc::native_terminal::NativeTerminalMemoryReceipt::from(usage);
+            tracing::debug!(
+                session_id,
+                resident_bytes = memory.resident_bytes,
+                compressed_bytes = memory.compressed_bytes,
+                image_bytes = memory.image_bytes,
+                "Scrollback compression complete"
+            );
+        }
+        Err(error) => tracing::debug!(session_id, %error, "Scrollback memory usage unavailable"),
+    }
 }
 
 fn lock_replay_to_bottom(sessions: &SessionMap, session_id: &str, owner: (u64, &Arc<SnapshotSlot>)) {
@@ -3540,6 +3645,22 @@ impl NativeTerminalSurfaceHostState {
         f: impl FnOnce(&mut NativeTerminal) -> Result<T, NativeTerminalError>,
     ) -> Result<T, NativeTerminalError> {
         self.with_session_terminal_and_context(session_id, |term, _| f(term))
+    }
+
+    /// Like [`Self::with_session_terminal`] for requests that read scrollback (search,
+    /// select-all, copy). Reading restores compressed pages, so the session pump is told to
+    /// re-arm idle compression.
+    pub fn with_session_history<T>(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut NativeTerminal) -> Result<T, NativeTerminalError>,
+    ) -> Result<T, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        let handle = self.session(session_id).ok_or(NativeTerminalError::NoValue)?;
+        let mut session = handle.lock();
+        let result = f(&mut session.terminal);
+        session.snapshot_slot.mark_history_read();
+        result
     }
 
     pub fn reapply_theme_to_sessions(&self) {
@@ -4491,16 +4612,29 @@ impl NativeTerminalSurfaceHostState {
             // Only this task feeds the terminal or defers agent detection once it runs, so idle
             // ticks skip the session lock unless a handled message may have changed either.
             let mut deadline = None;
+            let mut animation_deadline = None;
             let mut refresh_deadline = true;
             let mut agent_detect_maybe_pending = false;
+            // Idle scrollback compression. Output restarts its idle delay; steps run only from
+            // the idle-timeout branch below, under the session lock, never while a replay or
+            // redraw burst is being absorbed.
+            let mut compression = CompressionScheduler::default();
             // A non-output message drained while batching output is handled on the next turn.
             let mut carried: Option<DaemonStreamMessage<'static>> = None;
             loop {
                 if refresh_deadline {
-                    deadline = read_session(&sessions, &session_id_owned, |session| {
-                        session.terminal.synchronized_output_deadline()
+                    (deadline, animation_deadline) = read_session(&sessions, &session_id_owned, |session| {
+                        let animation = animation_pump_deadline(
+                            session.surface_attached,
+                            session.snapshot_slot.render_suspended(),
+                            session.terminal.animation_deadline(),
+                        );
+                        if animation.is_none() {
+                            session.terminal.forget_animation_deadline();
+                        }
+                        (session.terminal.synchronized_output_deadline(), animation)
                     })
-                    .flatten();
+                    .unwrap_or((None, None));
                 }
                 refresh_deadline = true;
                 let received = if let Some(msg) = carried.take() {
@@ -4524,8 +4658,69 @@ impl NativeTerminalSurfaceHostState {
                         schedule_render();
                         continue;
                     }
+                    _ = async {
+                        match animation_deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        // The next Kitty animation frame is due: prepare a frame, which ticks the
+                        // animation and arms the following deadline.
+                        let redraw = with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |session| {
+                            let now = tokio::time::Instant::now();
+                            let visible = kitty_animation_active(
+                                session.surface_attached,
+                                session.snapshot_slot.render_suspended(),
+                            );
+                            if visible {
+                                session.publish_frame();
+                            }
+                            // A frame that ticked re-armed a later deadline. One that could not
+                            // (no layout yet, or the pane went away) must not fire again at once.
+                            session.terminal.clear_due_animation_deadline(now);
+                            visible
+                        })
+                        .unwrap_or(false);
+                        if redraw {
+                            update_sender.send_replace(());
+                            schedule_render();
+                        }
+                        continue;
+                    }
+                    _ = slot.history_read() => {
+                        // A search, select-all or copy read scrollback and restored compressed
+                        // pages; restart the idle delay the way output does.
+                        refresh_deadline = false;
+                        compression.mark_activity(std::time::Instant::now());
+                        continue;
+                    }
+                    _ = slot.animation_woken() => {
+                        // A visible pane with no armed deadline (it was just uncovered) may hold
+                        // a paused animation: prepare one frame so its tick re-arms the deadline.
+                        let redraw = with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |session| {
+                            let resume = kitty_animation_active(
+                                session.surface_attached,
+                                session.snapshot_slot.render_suspended(),
+                            ) && session.terminal.animation_deadline().is_none();
+                            if resume {
+                                session.publish_frame();
+                            }
+                            resume && session.terminal.animation_deadline().is_some()
+                        })
+                        .unwrap_or(false);
+                        if redraw {
+                            update_sender.send_replace(());
+                            schedule_render();
+                        }
+                        continue;
+                    }
                     result = async {
-                        match pump_idle_wakeup(agent_detect_maybe_pending, replay_absorb.is_some()) {
+                        let compression_due = if replay_absorb.is_some() {
+                            None
+                        } else {
+                            compression.next_wakeup(std::time::Instant::now())
+                        };
+                        match pump_idle_wakeup(agent_detect_maybe_pending, replay_absorb.is_some(), compression_due) {
                             Some(idle) => tokio::time::timeout(idle, messages.recv()).await,
                             None => Ok(messages.recv().await),
                         }
@@ -4596,6 +4791,23 @@ impl NativeTerminalSurfaceHostState {
                                 schedule_render();
                             }
                         }
+                        let now = std::time::Instant::now();
+                        if replay_absorb.is_none() && compression.is_due(now) {
+                            let enabled = cached_terminal_preferences().scrollback_compression;
+                            match with_session_owned_by(&sessions, &session_id_owned, (pump_generation, &slot), |sess| {
+                                let step = compression.run_due_step(now, enabled, &mut sess.terminal);
+                                if matches!(step, Ok(Some(CompressionStep::Complete))) {
+                                    trace_compressed_memory(&session_id_owned, &sess.terminal);
+                                }
+                                step
+                            }) {
+                                Some(Ok(_)) => {}
+                                Some(Err(error)) => {
+                                    tracing::warn!(session_id = %session_id_owned, %error, "Scrollback compression step failed");
+                                }
+                                None => compression.disarm(),
+                            }
+                        }
                         continue;
                     }
                 };
@@ -4618,6 +4830,7 @@ impl NativeTerminalSurfaceHostState {
 
                         if session_exists {
                             agent_detect_maybe_pending = true;
+                            compression.mark_activity(std::time::Instant::now());
                             crate::ipc::debug::log_native_switch_debug(serde_json::json!({
                                 "event": "terminal.render.vt_consumed",
                                 "details": {
@@ -4791,6 +5004,7 @@ impl NativeTerminalSurfaceHostState {
                         if session_exists {
                             schedule_render();
                             update_sender.send_replace(());
+                            compression.mark_activity(std::time::Instant::now());
                         }
                     }
                     DaemonStreamMessage::Gap {
@@ -5904,6 +6118,7 @@ impl NativeTerminalSurfaceHostState {
             presented: false,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols: layout.cols,
             rows: layout.rows,
             rebuilt_rows: 0,
@@ -5946,6 +6161,7 @@ impl NativeTerminalSurfaceHostState {
             presented: false,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols,
             rows,
             rebuilt_rows: 0,
@@ -6439,6 +6655,14 @@ struct GpuLeg {
     initial_config: RendererConfig,
     format: wgpu::TextureFormat,
     size: PhysicalSize<u32>,
+    /// Set when the renderer was dropped on suspension, so the next build is logged as a rebuild.
+    renderer_released: bool,
+}
+
+/// An occluded (suspended) surface presents nothing until visibility returns, so its renderer's
+/// GPU resources are released; a plain dropped frame keeps them because it retries immediately.
+fn release_renderer_on_suspend(render_suspended: bool) -> bool {
+    render_suspended
 }
 
 /// Native WGPU surface, platform compositor child view, and renderer.
@@ -6535,6 +6759,7 @@ impl NativeSurfaceFrameTarget {
                 initial_config,
                 format: wgpu::TextureFormat::Bgra8Unorm,
                 size: PhysicalSize::new(0, 0),
+                renderer_released: false,
             }),
             cell_metrics: CellMetrics {
                 width_px: cell_metrics.width_px,
@@ -6598,6 +6823,13 @@ impl GpuLeg {
             self.renderer = Some(NativeTerminalRenderer::with_shared_surface_gpu(
                 self.initial_config,
             )?);
+            if self.renderer_released {
+                self.renderer_released = false;
+                tracing::debug!(
+                    session_id = _session_id,
+                    "native terminal renderer rebuilt after suspension"
+                );
+            }
         }
         let renderer = self.renderer.as_mut().expect("GPU renderer initialized");
         if let Some(bounds) = logical_bounds {
@@ -6695,6 +6927,19 @@ impl GpuLeg {
                 logical_bounds,
             );
             receipt.render_suspended = render_suspended;
+            if release_renderer_on_suspend(render_suspended) {
+                // Keep the latest config so the rebuilt renderer starts where this one stopped.
+                self.initial_config = *renderer.config();
+                self.renderer = None;
+                // Forces the size check to reconfigure the surface with the rebuilt renderer.
+                self.size = PhysicalSize::new(0, 0);
+                self.renderer_released = true;
+                receipt.renderer_released = true;
+                tracing::debug!(
+                    session_id = _session_id,
+                    "native terminal renderer_released on suspension"
+                );
+            }
             return Ok(receipt);
         };
         let view = frame
@@ -6752,6 +6997,16 @@ impl NativeTerminalSurfaceHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_surface_releases_the_renderer() {
+        assert!(release_renderer_on_suspend(true));
+    }
+
+    #[test]
+    fn visible_or_dropped_frame_keeps_the_renderer() {
+        assert!(!release_renderer_on_suspend(false));
+    }
 
     #[test]
     fn dom_overlay_input_ownership_is_shared_across_host_state_clones() {
@@ -6921,10 +7176,22 @@ mod tests {
 
     #[test]
     fn idle_pump_blocks_without_pending_timed_work() {
-        assert_eq!(pump_idle_wakeup(false, false), None);
-        assert_eq!(pump_idle_wakeup(true, false), Some(AGENT_DETECT_TRAILING_IDLE));
-        assert_eq!(pump_idle_wakeup(false, true), Some(AGENT_DETECT_TRAILING_IDLE));
-        assert_eq!(pump_idle_wakeup(true, true), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(false, false, None), None);
+        assert_eq!(pump_idle_wakeup(true, false, None), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(false, true, None), Some(AGENT_DETECT_TRAILING_IDLE));
+        assert_eq!(pump_idle_wakeup(true, true, None), Some(AGENT_DETECT_TRAILING_IDLE));
+    }
+
+    #[test]
+    fn idle_pump_waits_for_the_soonest_armed_compression_or_trailing_work() {
+        let compression = crate::native_terminal::compression::COMPRESSION_IDLE_DELAY;
+        assert_eq!(pump_idle_wakeup(false, false, Some(compression)), Some(compression));
+        assert_eq!(
+            pump_idle_wakeup(true, false, Some(compression)),
+            Some(AGENT_DETECT_TRAILING_IDLE)
+        );
+        let overdue = std::time::Duration::ZERO;
+        assert_eq!(pump_idle_wakeup(false, true, Some(overdue)), Some(overdue));
     }
 
     fn output_message(sequence: u64, data: &'static [u8]) -> DaemonStreamMessage<'static> {
@@ -12139,6 +12406,7 @@ mod qa_native_producer_tests {
             presented: true,
             render_deferred: false,
             render_suspended: false,
+            renderer_released: false,
             cols: 80,
             rows: 24,
             rebuilt_rows: 24,
