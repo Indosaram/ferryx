@@ -3067,6 +3067,72 @@ describe("App project workspace flow", () => {
     expect(native.writeTerminal).not.toHaveBeenCalled();
   });
 
+  it("keeps a quoted agent argument as one argv entry", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    saveAgentSettings({
+      version: 1,
+      defaultAgentId: null,
+      overrides: { claude: { args: `--append-system-prompt "a b" --name 'c d'` } },
+      custom: [],
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() =>
+      expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startup: {
+            kind: "agentLaunch",
+            command: "claude",
+            args: ["--append-system-prompt", "a b", "--name", "c d"],
+          },
+        }),
+      ),
+    );
+  });
+
+  it("types the agent into a plain shell only when the backend refuses the launch as UNSUPPORTED", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => {
+      if (req.startup) throw { code: "UNSUPPORTED", message: "older daemon", details: {} };
+      return { sessionId: "spawn-fallback", daemonEpoch: "epoch-fb", session: { cwd: req.cwd, incarnation: "inc-fb" } };
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() =>
+      expect(native.writeTerminal).toHaveBeenCalledWith({ sessionId: "spawn-fallback", data: "claude\r" }),
+    );
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
+    expect(native.spawnTerminalDetailed.mock.calls[1][0]).not.toHaveProperty("startup");
+  });
+
+  it("does not fall back to typed input when the launch is refused with another code", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.spawnTerminalDetailed.mockImplementation(async () => {
+      // The message even names the startup kind; only the structured code may decide.
+      throw { code: "AGENT_RESUME_INVALID", message: "Malformed request: unknown variant `agentLaunch`", details: {} };
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() =>
+      expect(workspace.reportRuntimeError).toHaveBeenCalledWith(expect.objectContaining({ code: "AGENT_RESUME_INVALID" })),
+    );
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+    expect(workspace.openTab).not.toHaveBeenCalled();
+  });
+
   it("resumes an agent history entry into a tab that carries the daemon epoch and incarnation", async () => {
     native.isTauriRuntime.mockReturnValue(true);
     native.spawnTerminalDetailed.mockImplementation(async (req) => ({

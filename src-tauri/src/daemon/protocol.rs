@@ -21,6 +21,8 @@ pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `AgentPromptGet`/`AgentPromptAnswer`.
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
+/// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
+pub const AGENT_LAUNCH_CAPABILITY: &str = "agentLaunchV1";
 /// Error code of a `PasteWrite` chunk that was refused or unwound by `CancelPaste`. Its
 /// details carry the exact `bytesWritten` of that chunk.
 pub const PASTE_CANCELLED_CODE: &str = "PASTE_CANCELLED";

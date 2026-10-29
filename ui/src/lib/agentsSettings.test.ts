@@ -1,5 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { splitAgentCommandLine } from "./agentsSettings";
+
+describe("splitAgentCommandLine", () => {
+  it("keeps quoted arguments whole and honors escapes", () => {
+    expect(splitAgentCommandLine(`claude --append-system-prompt "a b" --name 'c d'  x\\ y ""`)).toEqual([
+      "claude", "--append-system-prompt", "a b", "--name", "c d", "x y", "",
+    ]);
+    expect(splitAgentCommandLine(`codex -c "say \\"hi\\"" 'it'"'"'s'`)).toEqual(["codex", "-c", `say "hi"`, "it's"]);
+    expect(splitAgentCommandLine("  ")).toEqual([]);
+  });
+});
+
 import {
   AGENT_CANDIDATES,
   AGENTS_SETTINGS_CHANGED_EVENT,

@@ -84,6 +84,7 @@ import {
   getLaunchableAgents,
   loadAgentSettings,
   mergeDetections,
+  splitAgentCommandLine,
   type AgentSettings,
 } from "./lib/agentsSettings";
 import {
@@ -2716,7 +2717,7 @@ function WorkspaceApp({
           ...initialGridFields(agentGrid),
         };
         const fullCommand = `${agent.command} ${agent.args}`.trim();
-        const [command = "", ...args] = fullCommand.split(/\s+/).filter(Boolean);
+        const [command = "", ...args] = splitAgentCommandLine(fullCommand);
         // The agent is the pane's startup command, so it cannot race the shell's own startup the
         // way typed input does (PSReadLine drops early keystrokes). A backend that refuses the
         // startup kind (an older daemon, a paired host) still gets the agent typed into a shell.
@@ -2727,8 +2728,7 @@ function WorkspaceApp({
             command ? { ...spawnRequest, startup: { kind: "agentLaunch", command, args } } : spawnRequest,
           );
         } catch (error) {
-          const refusal = toIpcError(error);
-          if (!command || (refusal.code !== "UNSUPPORTED" && !refusal.message.includes("agentLaunch"))) throw error;
+          if (!command || toIpcError(error).code !== "UNSUPPORTED") throw error;
           spawned = await spawnTerminalDetailed(spawnRequest);
           typeCommand = true;
         }
