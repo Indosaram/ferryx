@@ -328,3 +328,36 @@ export function getLaunchableAgents(resolved: ResolvedAgent[]): ResolvedAgent[] 
   if (!Array.isArray(resolved)) return [];
   return resolved.filter((agent) => agent.enabled && agent.available);
 }
+
+/**
+ * Splits an agent's argument string into argv: whitespace separates, single quotes group
+ * literally, and double quotes group with `\"` as the only escape. A backslash is otherwise
+ * literal so Windows paths survive. Expansion (`$`, globs) is not performed.
+ */
+export function splitAgentArgs(line: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else word += ch;
+    } else if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === "\\" && line[i + 1] === '"') word += line[++i];
+      else word += ch;
+    } else if (/\s/.test(ch)) {
+      if (inWord) words.push(word);
+      word = "";
+      inWord = false;
+    } else {
+      inWord = true;
+      if (ch === "'" || ch === '"') quote = ch;
+      else word += ch;
+    }
+  }
+  if (inWord) words.push(word);
+  return words;
+}

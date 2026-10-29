@@ -171,6 +171,10 @@ export type SpawnTerminalRequest = {
     kind: "pairedDaemon";
     hostId: string;
     remoteWorkspaceId: string;
+  } | {
+    kind: "agentLaunch";
+    command: string;
+    args: string[];
   } | null;
   createOnly?: boolean | null;
   preparedLocalSplit?: import("./types").PreparedLocalSplit | null;
@@ -589,6 +593,13 @@ function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTe
       kind: "pairedDaemon",
       hostId: String(startup.hostId ?? ""),
       remoteWorkspaceId: String(startup.remoteWorkspaceId ?? ""),
+    };
+  }
+  if (startup.kind === "agentLaunch") {
+    return {
+      kind: "agentLaunch",
+      command: String(startup.command ?? ""),
+      args: Array.isArray(startup.args) ? startup.args.map(String) : [],
     };
   }
   if (startup.kind !== "agentResume") return null;
