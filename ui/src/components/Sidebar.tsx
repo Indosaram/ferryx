@@ -114,6 +114,8 @@ export type SidebarAttention = {
   onDismissAll: () => void;
   /** Lets a needs-you row answer its pane's prompt inline. */
   prompts?: AttentionPrompts;
+  /** Working panes the Inbox lists only once the daemon reads a prompt on them. */
+  candidates?: readonly AttentionRow[];
   inboxOpen: boolean;
   onInboxOpenChange: (open: boolean) => void;
 };

@@ -4,6 +4,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const core = vi.hoisted(() => ({ invoke: vi.fn(), isTauri: vi.fn(() => true) }));
 vi.mock("@tauri-apps/api/core", () => core);
+const events = vi.hoisted(() => {
+  const handlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
+  return {
+    handlers,
+    listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+      const set = handlers.get(name) ?? new Set();
+      set.add(handler);
+      handlers.set(name, set);
+      return () => set.delete(handler);
+    }),
+    emit(name: string, payload: unknown) {
+      for (const handler of handlers.get(name) ?? []) handler({ payload });
+    },
+  };
+});
+vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import { AttentionInbox } from "./AttentionInbox";
 import type { AttentionRow } from "./attentionModel";
@@ -36,7 +52,7 @@ const MENU = {
   needsConfirmation: false,
 };
 
-function Harness({ initial = [waiting] }: { initial?: AttentionRow[] }) {
+function Harness({ initial = [waiting], candidates }: { initial?: AttentionRow[]; candidates?: AttentionRow[] }) {
   const [rows, setRows] = useState(initial);
   const prompts = useMemo(
     () => desktopAttentionPrompts(
@@ -45,7 +61,11 @@ function Harness({ initial = [waiting] }: { initial?: AttentionRow[] }) {
     ),
     [],
   );
-  return <AttentionInbox rows={rows} onOpen={vi.fn()} prompts={prompts} now={NOW} />;
+  return <AttentionInbox rows={rows} {...(candidates ? { candidates } : {})} onOpen={vi.fn()} prompts={prompts} now={NOW} />;
+}
+
+function promptReads() {
+  return core.invoke.mock.calls.filter(([command]) => command === "cmd_agent_prompt_get").map(([, args]) => args);
 }
 
 function answerCalls() {
@@ -55,6 +75,7 @@ function answerCalls() {
 beforeEach(() => {
   core.invoke.mockReset();
   core.isTauri.mockReturnValue(true);
+  events.handlers.clear();
 });
 afterEach(cleanup);
 
@@ -180,11 +201,81 @@ describe("AttentionInbox prompt answers", () => {
     expect(answerCalls()[0]?.[1]).toMatchObject({ answer: { text: "use bun" } });
   });
 
-  it("reads no prompt for a finished row", async () => {
-    core.invoke.mockResolvedValue(MENU);
-    render(<Harness initial={[{ ...waiting, state: "done" }]} />);
+  it("lists a working pane as needing you once the daemon reads a prompt on it", async () => {
+    core.invoke.mockImplementation(async (command: string) => (command === "cmd_agent_prompt_get" ? MENU : null));
+    render(<Harness initial={[]} candidates={[{ ...waiting, id: "ws-1:pane-w", sessionId: "pane-w" }]} />);
+
+    expect(await screen.findAllByTestId("attention-prompt-option")).toHaveLength(3);
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "needs-you");
+  });
+
+  it("lists no row for a working pane the daemon reads no prompt on", async () => {
+    core.invoke.mockResolvedValue(null);
+    render(<Harness initial={[]} candidates={[{ ...waiting, id: "ws-1:pane-w", sessionId: "pane-w" }]} />);
+    await waitFor(() => expect(core.invoke).toHaveBeenCalledWith("cmd_agent_prompt_get", { sessionId: "daemon-pane-w" }));
     await act(async () => {});
-    expect(core.invoke).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("attention-row")).not.toBeInTheDocument();
+    expect(screen.getByTestId("attention-inbox-empty")).toBeInTheDocument();
+  });
+
+  it("re-reads only the done row whose session a push names, through one listener", async () => {
+    core.invoke.mockResolvedValue(null);
+    const done = (id: string): AttentionRow => ({ ...waiting, id: `ws-1:${id}`, sessionId: id, state: "done" });
+    render(<Harness initial={[done("pane-a"), done("pane-b")]} />);
+    await waitFor(() => expect(promptReads()).toHaveLength(2));
+    await waitFor(() => expect(events.handlers.get("agentPromptChanged")?.size).toBe(1));
+
+    await act(async () => {
+      events.emit("agentPromptChanged", { sessionId: "daemon-pane-b" });
+    });
+    await waitFor(() => expect(promptReads()).toHaveLength(3));
+    expect(promptReads()[2]).toEqual({ sessionId: "daemon-pane-b" });
+  });
+
+  it("drops the row when an agentPromptChanged push finds the card answered elsewhere", async () => {
+    let card: typeof MENU | null = MENU;
+    core.invoke.mockImplementation(async (command: string) => (command === "cmd_agent_prompt_get" ? card : null));
+    render(<Harness />);
+    expect(await screen.findAllByTestId("attention-prompt-option")).toHaveLength(3);
+    await waitFor(() => expect(events.handlers.get("agentPromptChanged")?.size ?? 0).toBeGreaterThan(0));
+
+    card = null;
+    await act(async () => {
+      events.emit("agentPromptChanged", { sessionId: "daemon-other" });
+    });
+    expect(screen.getByTestId("attention-row")).toBeInTheDocument();
+
+    await act(async () => {
+      events.emit("agentPromptChanged", { sessionId: "daemon-pane-1" });
+    });
+    await waitFor(() => expect(screen.queryByTestId("attention-row")).not.toBeInTheDocument());
+    expect(answerCalls()).toHaveLength(0);
+  });
+
+  it("shows no answer buttons for a multi-select card the daemon reports as unanswerable", async () => {
+    // The daemon's prompt view is null for a multi-select card (agent_control_service prompt_view).
+    core.invoke.mockResolvedValue(null);
+    render(<Harness />);
+    await waitFor(() => expect(core.invoke).toHaveBeenCalledWith("cmd_agent_prompt_get", { sessionId: "daemon-pane-1" }));
+    await act(async () => {});
+    expect(screen.queryByTestId("attention-prompt-option")).not.toBeInTheDocument();
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "needs-you");
+  });
+
+  it("shows a finished row whose pane holds a daemon prompt as needing you, with its answers", async () => {
+    core.invoke.mockImplementation(async (command: string) => (command === "cmd_agent_prompt_get" ? MENU : null));
+    render(<Harness initial={[{ ...waiting, state: "done" }]} />);
+
+    expect(await screen.findAllByTestId("attention-prompt-option")).toHaveLength(3);
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "needs-you");
+  });
+
+  it("keeps a finished row done when the daemon reads no prompt", async () => {
+    core.invoke.mockResolvedValue(null);
+    render(<Harness initial={[{ ...waiting, state: "done" }]} />);
+    await waitFor(() => expect(core.invoke).toHaveBeenCalledWith("cmd_agent_prompt_get", expect.anything()));
+    await act(async () => {});
+    expect(screen.getByTestId("attention-row")).toHaveAttribute("data-attention-state", "done");
     expect(screen.queryByTestId("attention-prompt")).not.toBeInTheDocument();
   });
 });

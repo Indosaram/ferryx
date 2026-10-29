@@ -1250,6 +1250,16 @@ export interface AgentPrompt {
 /** Exactly one of an option's key or free text. */
 export type AgentPromptAnswer = { key: string } | { text: string };
 
+/** The daemon's push that a session's prompt card appeared, moved or went away. */
+export const AGENT_PROMPT_CHANGED_EVENT = "agentPromptChanged";
+
+export async function onAgentPromptChanged(handler: (sessionId: string) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<{ sessionId?: unknown }>(AGENT_PROMPT_CHANGED_EVENT, (event) => {
+    if (typeof event.payload?.sessionId === "string") handler(event.payload.sessionId);
+  });
+}
+
 /** Null when the pane holds no prompt a reader knows. `sessionId` is the daemon's session id. */
 export async function getAgentPrompt(sessionId: string): Promise<AgentPrompt | null> {
   if (!isTauri()) return null;

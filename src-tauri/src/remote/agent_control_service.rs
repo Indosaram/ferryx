@@ -119,7 +119,11 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         {
             let identity = reference_chat_identity(state, &target, Some(agent)).await;
             let session = reference_chat_prompt_session(state, &identity).await;
-            reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow())
+            reference_prompts::reference_prompt_occurrence(
+                session_id,
+                reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow()),
+                &snapshot.revision,
+            )
         }
         _ => None,
     };
@@ -496,12 +500,16 @@ async fn prompt_agent(
 }
 
 /// The desktop's view of one detected card. The "type your own answer" row is not an option:
-/// it is answered with free text.
+/// it is answered with free text. A multi-select card has no view: the shared answer path
+/// refuses it, and the phone drops it too, so both Inboxes leave it to the pane.
 fn prompt_view(
     prompt: &reference_types::ReferencePrompt,
     screen_revision: String,
-) -> crate::daemon::protocol::AgentPromptView {
+) -> Option<crate::daemon::protocol::AgentPromptView> {
     use crate::daemon::protocol::{AgentPromptView, AgentPromptViewKind, AgentPromptViewOption};
+    if prompt.multi_select {
+        return None;
+    }
     let options: Vec<AgentPromptViewOption> = prompt
         .options
         .iter()
@@ -525,14 +533,14 @@ fn prompt_view(
         option_index: Some(0),
         ..Default::default()
     });
-    AgentPromptView {
+    Some(AgentPromptView {
         prompt_id: prompt.id.clone(),
         screen_revision,
         question,
         options,
         kind,
         needs_confirmation,
-    }
+    })
 }
 
 /// `AgentPromptGet`: the card the pane's screen holds now, through the same detectors the
@@ -560,7 +568,8 @@ pub(crate) async fn prompt_get(
     let identity = reference_chat_identity(state, &target, Some(&agent)).await;
     let session = reference_chat_prompt_session_for_screen(state, &identity, &agent, &snapshot.text).await;
     let prompt = reference_prompts::detect_reference_prompt_in_session(&agent, &snapshot.text, &session.borrow());
-    Ok(prompt.map(|prompt| prompt_view(&prompt, snapshot.revision)))
+    let prompt = reference_prompts::reference_prompt_occurrence(session_id, prompt, &snapshot.revision);
+    Ok(prompt.and_then(|prompt| prompt_view(&prompt, snapshot.revision)))
 }
 
 /// The reference answer an `AgentPromptAnswerInput` names, after the daemon boundary's length
@@ -1036,6 +1045,24 @@ mod tests {
     use crate::remote::backend::RemoteSessionBackend as _;
     use crate::remote::reference_chat::types::ReferencePromptAnswer;
 
+    #[test]
+    fn a_multi_select_card_has_no_desktop_view_and_a_single_choice_card_does() {
+        let multi = reference_prompts::detect_reference_prompt(
+            "claude",
+            include_str!("reference_chat/fixtures/claude/prompt/question-tabs-multiselect.screen"),
+        )
+        .expect("the multi-select fixture is a card");
+        assert!(multi.multi_select);
+        assert!(prompt_view(&multi, "rev".into()).is_none());
+
+        let single = reference_prompts::detect_reference_prompt(
+            "claude",
+            include_str!("reference_chat/fixtures/claude/prompt/question.screen"),
+        )
+        .expect("the question fixture is a card");
+        assert!(!single.multi_select);
+        assert!(prompt_view(&single, "rev".into()).is_some());
+    }
     #[test]
     fn a_remote_receipt_carries_the_paired_host_id_and_other_results_do_not() {
         let mut receipt = serde_json::json!({

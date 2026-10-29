@@ -148,6 +148,36 @@ export function buildAttentionRows(
   return sortAttentionRows(rows);
 }
 
+/**
+ * Unread agent entries whose pane reads working. The detector can miss a prompt (an agent menu
+ * the screen rules do not know), so the Inbox asks the daemon about each and lists only those
+ * whose pane really holds a prompt, as needs-you. They are not rows on their own.
+ */
+export function buildPromptCandidateRows(
+  entries: readonly NotificationEntry[],
+  activityOf: AttentionActivityLookup = () => undefined,
+): AttentionRow[] {
+  const rows: AttentionRow[] = [];
+  for (const entry of entries) {
+    if (!("unread" in entry.read) || entry.reason === "supervisor") continue;
+    if (activityOf(entry.workspaceId, entry.sessionId)?.state !== "working") continue;
+    const title = displayTitle(entry.labels.terminalTitle);
+    const who = entry.labels.agentLabel?.trim() || title || "Terminal";
+    rows.push({
+      id: entry.id,
+      revision: entry.revision,
+      workspaceId: entry.workspaceId,
+      sessionId: entry.sessionId,
+      state: "needs-you",
+      who,
+      location: formatAttentionLocation(entry.labels.workspaceLabel, entry.labels.worktreeLabel),
+      text: title !== who ? title : undefined,
+      at: entry.lastOccurredAt,
+    });
+  }
+  return rows;
+}
+
 export function sortAttentionRows(rows: readonly AttentionRow[]): AttentionRow[] {
   return [...rows].sort((a, b) => {
     if (a.state !== b.state) return a.state === "needs-you" ? -1 : 1;
