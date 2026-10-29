@@ -585,13 +585,23 @@ impl PairingWindow {
         source: &str,
         now: Instant,
     ) -> Result<PairingCode, AuthError> {
+        // Look the code up before pruning, so a known code past its lifetime is reported as
+        // expired rather than as an unknown code.
+        let known_expired = self
+            .codes
+            .get(code)
+            .is_some_and(|pairing| now.saturating_duration_since(pairing.created_at) >= pairing.lifetime);
         self.refresh(now);
         if !self.failures.admits(source) {
             return Err(AuthError::PairingRateLimited);
         }
         let Some(pairing) = self.codes.remove(code) else {
             self.record_failure(source, now);
-            return Err(AuthError::InvalidPairingCode);
+            return Err(if known_expired {
+                AuthError::ExpiredPairingCode
+            } else {
+                AuthError::InvalidPairingCode
+            });
         };
         if now.saturating_duration_since(pairing.created_at) >= pairing.lifetime {
             self.record_failure(source, now);
