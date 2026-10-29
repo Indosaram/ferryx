@@ -24,6 +24,7 @@ import {
   setTerminalAppearance,
   getWorktreeStatus,
   listProjectBranches,
+  listProjectRefs,
   previewGitHubIssue,
   listTerminalSessions,
   onNativeTerminalScrollbar,
@@ -184,6 +185,21 @@ describe("Tauri IPC wrapper contract", () => {
       request: { workspaceId: "ferryx", repoPath: "/repo/ferryx" },
     });
     expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_project_branches", {
+      request: { workspaceId: "ferryx" },
+    });
+  });
+
+  it("lists local branches and tags as worktree base refs", async () => {
+    core.invoke.mockResolvedValueOnce({
+      branches: [{ name: "main", isCurrent: true }],
+      tags: ["v1.0.0"],
+    });
+
+    await expect(listProjectRefs("ferryx")).resolves.toEqual({
+      branches: [{ name: "main", isCurrent: true }],
+      tags: ["v1.0.0"],
+    });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_project_refs", {
       request: { workspaceId: "ferryx" },
     });
   });

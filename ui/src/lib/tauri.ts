@@ -90,6 +90,11 @@ export type LocalBranch = {
   isCurrent: boolean;
 };
 
+export type ProjectRefs = {
+  branches: LocalBranch[];
+  tags: string[];
+};
+
 export type GitHubIssuePreview = {
   number: number;
   title: string;
@@ -290,6 +295,11 @@ export async function bootTrace(
 
 export async function listProjectBranches(workspaceId: string) {
   return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
+}
+
+/// Local branches and tags usable as a worktree base ref (no remote branches).
+export async function listProjectRefs(workspaceId: string) {
+  return invokeCommand<ProjectRefs>("cmd_project_refs", { request: { workspaceId } });
 }
 
 /// Reads one GitHub issue through the already authenticated `gh` executable.
