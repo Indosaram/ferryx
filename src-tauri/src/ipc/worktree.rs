@@ -612,9 +612,7 @@ pub async fn cmd_worktree_commit<R: Runtime>(
         git_commit(path, &message)
     })
     .await?;
-    if let Some(identity) = event.1 {
-        emit_worktree_changed(&app, event.0, identity, WorktreeChangeKind::Updated)?;
-    }
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::Updated);
     Ok(sha)
 }
 
