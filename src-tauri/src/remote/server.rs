@@ -4727,12 +4727,15 @@ mod file_read_session_base_tests {
 
     #[tokio::test]
     async fn relative_path_anchors_on_live_shell_cwd_before_worktree() {
+        // The live cwd must be absolute on the host OS; "/wt" has no drive on Windows.
+        let worktree = std::env::temp_dir().join("wt");
+        let live = worktree.join("sub").join("dir");
         let backend = LiveCwdBackend {
-            worktree: PathBuf::from("/wt"),
-            live: Some(PathBuf::from("/wt/sub/dir")),
+            worktree,
+            live: Some(live.clone()),
         };
         let base = file_read_session_base(&backend, &req("shot.png", None)).await.ok().flatten();
-        assert_eq!(base, Some(PathBuf::from("/wt/sub/dir")), "live cwd must win over worktree_path");
+        assert_eq!(base, Some(live), "live cwd must win over worktree_path");
     }
 
     #[tokio::test]
