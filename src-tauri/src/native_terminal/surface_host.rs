@@ -6021,7 +6021,11 @@ impl NativeTerminalSurfaceHostState {
         if !session.surface_attached {
             return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
         }
-        session.terminal.scroll_viewport(behavior)
+        let result = session.terminal.scroll_viewport(behavior);
+        // Scrolling into compressed scrollback restores those pages; re-arm idle compression the
+        // way other history reads do (`with_session_history`).
+        session.snapshot_slot.mark_history_read();
+        result
     }
 
     pub fn encode_input(
