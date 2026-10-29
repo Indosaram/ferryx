@@ -56,9 +56,9 @@ Passing checks:
 - `cargo check --manifest-path src-tauri/Cargo.toml`.
 - `git diff --check`.
 - Actual Windows SSH probe and registration:
-  `maho-win`, `C:\Users\sook\code\omo-gateway`.
+  `maho-win`, `C:\Users\<user>\code\omo-gateway`.
 - Actual Linux SSH probe and registration:
-  `omarchy`, `/home/indo/projects/PirateTalk`.
+  `omarchy`, `/home/<user>/projects/PirateTalk`.
 
 The live integration test is `src-tauri/tests/ssh_project_identity_live.rs`.
 It reads an existing remote checkout and writes registration records only to a
@@ -70,7 +70,7 @@ Example invocation:
 
 ```sh
 FERRYX_IDENTITY_HOST=omarchy \
-FERRYX_IDENTITY_PATH=/home/indo/projects/PirateTalk \
+FERRYX_IDENTITY_PATH=/home/<user>/projects/PirateTalk \
 cargo test --manifest-path src-tauri/Cargo.toml \
   --test ssh_project_identity_live -- --ignored --nocapture
 ```

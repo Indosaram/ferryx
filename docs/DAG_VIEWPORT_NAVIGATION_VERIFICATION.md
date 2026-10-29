@@ -37,7 +37,7 @@ SVG 좌표 독립 검증은 완료됐으며 계측 불일치를 확인했다.
 사용하지 않는다. 다른 연결선이나 물리 제스처까지 통과한 것으로 확대하지 않는다.
 또한 원본 기록은 `siblingTerminalsSelected=false`이므로 빈 형제 터미널 배열을
 터미널 위치 불변의 증거로 사용할 수 없다.
-독립 분석: `/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/native-live-geometry-audit-gjfNxhtV.md`.
+독립 분석: `<worktree-root>/dag-viewport-wave3/.omo/ulw-execute/native-live-geometry-audit-gjfNxhtV.md`.
 
 이 기동은 앞선 사전 점검의 미기동 상태만 갱신한다.
 C5/S7 및 과거·현재 S8을 해소하지 않는다.
@@ -51,7 +51,7 @@ C5/S7 및 과거·현재 S8을 해소하지 않는다.
 죽은 실행의 파일 감시를 해제했으며, 앞선 창의 조작 안내는 더 이상 유효하지 않다.
 원본 증거는 보존하고, 다음 실행 전에 좌표 계측 수정과 감독 시간 제한을 해결한다.
 현재 실행의 소유권 및 원본 기록 위치:
-`/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/native-live-gjfNxhtV.md`.
+`<worktree-root>/dag-viewport-wave3/.omo/ulw-execute/native-live-gjfNxhtV.md`.
 
 판정의 세부 내역은 다음과 같다.
 
@@ -115,8 +115,8 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 - 상태: ACCEPTED (브라우저 및 단위 테스트 기준).
 - 충족 내역: 좌클릭 드래그를 통한 월드 이동, 픽셀 1:1 일치, 헤더 고정, 스크롤바 미표시, 경계 밖 포인터 해제 및 클릭 합성 방지 검증 완료.
 - 증적 경로:
-  - 베이스라인 실패 기록(RED): /Users/indo/code/project/orca-lite-wt/dag-viewport-wave1/.omo/evidence/dag-viewport-navigation/baseline/adversarial-verify.md
-  - 브라우저 통과 기록(GREEN): /Users/indo/code/project/orca-lite-wt/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair3/adversarial-verify.md
+  - 베이스라인 실패 기록(RED): <worktree-root>/dag-viewport-wave1/.omo/evidence/dag-viewport-navigation/baseline/adversarial-verify.md
+  - 브라우저 통과 기록(GREEN): <worktree-root>/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair3/adversarial-verify.md
   - 단위 테스트: ui/src/components/dag/DagGraphView.viewport.test.tsx
 - 한계: 네이티브 데스크톱 앱 내 실제 입력 동작은 미검증.
 
@@ -124,24 +124,24 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 - 상태: PARTIAL (브라우저 휠 및 터치 핀치 ACCEPTED, 네이티브 물리 트랙패드 UNVERIFIED).
 - 충족 내역: 휠 델타 정규화, 지수 스케일링, 포인터 앵커 유지, 한계 클램핑, DevTools 터치 핀치 및 1-2-1 접점 전환 검증 완료.
 - 증적 경로:
-  - 브라우저 통과 기록: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair3/adversarial-verify.md
-  - 영구 후보 브라우저 보완 판정: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/permanent-browser/StrippedBrowserAcceptedVerdict.md
+  - 브라우저 통과 기록: <worktree-root>/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair3/adversarial-verify.md
+  - 영구 후보 브라우저 보완 판정: <worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/permanent-browser/StrippedBrowserAcceptedVerdict.md
 - 명시적 공백: macOS 상의 실제 물리 트랙패드 제스처 전달은 검증되지 않았다. 에뮬레이션 입력이나 Chrome 프로필 기반 터치 제스처는 네이티브 검증 대체물로 인정되지 않는다.
 
 요구사항 C3 (복구 제어 및 수명주기):
 - 상태: ACCEPTED (브라우저 및 단위 테스트 기준).
 - 충족 내역: Fit 버튼, 100% 리셋 버튼, Plus/Minus 버튼의 한계 안전성, 390x844 모바일 뷰포트 내 컨트롤 가시성, 0 크기 지연 처리, 창 리사이즈 중심 보존, 대규모 노드 그래프 Fit 계산 검증 완료.
 - 증적 경로:
-  - 뷰포트 컨트롤 시각 검증: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair2/visual-verdict.md
-  - 협소 레이아웃 수락 기록: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/narrow-layout-accepted.md
-  - 영구 후보 보완 판정: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/permanent-browser/StrippedBrowserAcceptedVerdict.md
+  - 뷰포트 컨트롤 시각 검증: <worktree-root>/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair2/visual-verdict.md
+  - 협소 레이아웃 수락 기록: <worktree-root>/dag-viewport-wave3/.omo/ulw-execute/narrow-layout-accepted.md
+  - 영구 후보 보완 판정: <worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/permanent-browser/StrippedBrowserAcceptedVerdict.md
 - 한계: 후속 네이티브 런타임은 기동했지만 실제 창 리사이즈 동작과 중심 보존은 미검증.
 
 요구사항 C4 (인접 영역 회귀 방지):
 - 상태: PARTIAL (브라우저 호스트 간섭 배제 ACCEPTED, 네이티브 터미널 격리 UNVERIFIED).
 - 충족 내역: DagPaneBadge 모달 열림 상태에서의 Tab 키 가둠, Escape 닫기 및 포커스 복원, TerminalSplitView 내 DAG 리프 분할 경계 드래그 유지 및 형제 노드 격리 확인.
 - 증적 경로:
-  - 모달 상호작용 검증: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair3/modal-complete/independent-verdict.md
+  - 모달 상호작용 검증: <worktree-root>/dag-viewport-wave2/.omo/evidence/dag-viewport-navigation/green/repair3/modal-complete/independent-verdict.md
   - 모달 포커스 격리 테스트: ui/src/components/TerminalSplitView.modalFocus.test.tsx
   - 네이티브 터미널 포커스 소유권 테스트: ui/src/components/NativeTerminalPane.focusOwnership.test.tsx
 - 명시적 공백: 실제 실행 중인 백엔드 PTY 세션으로의 휠 스크롤 또는 키 누출 여부는 네이티브 환경에서 실측되지 않았다.
@@ -150,9 +150,9 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 - 상태: UNVERIFIED 및 BLOCKED.
 - 사유: macOS Accessibility 권한이 거부되어 OS 차원의 자동화 입력 주입이 차단되었다(2026-09-13T02:37:03Z 확인). 화면 기록(Screen Recording) 권한만으로는 입력 주입이 불가능하다. 물리 트랙패드 핀치 장치 역시 에이전트 환경에서 지원되지 않는다.
 - 증적 경로:
-  - 네이티브 입력 게이트 상태: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/native/preparation/input-gate-current.md
-  - 네이티브 차단 및 다음 조치 보고서: /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/native-next-action.md
-  - 격리 기동 사전 점검(HOLD): /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/native/preparation/isolated-launch-preflight.md
+  - 네이티브 입력 게이트 상태: <worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/native/preparation/input-gate-current.md
+  - 네이티브 차단 및 다음 조치 보고서: <worktree-root>/dag-viewport-wave3/.omo/ulw-execute/native-next-action.md
+  - 격리 기동 사전 점검(HOLD): <worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/native/preparation/isolated-launch-preflight.md
 
 시나리오 S1 (양쪽 호스트 팬):
 - 브라우저: PASS. 모달 및 독립 분할 뷰에서 (100, 100)에서 (220, 180)으로 드래그 시 월드 엘리먼트와 연결선 좌표가 정확히 (120, 80) 이동함을 확인.
@@ -184,7 +184,7 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 
 시나리오 S8 (자원 회수 및 정리):
 - 상태: PARTIAL.
-- 세부 내용: 영구 후보 브라우저 러너 프로세스(Chrome 컨텍스트, Vite 서버 PID 47578/47579, 포트 5193)는 완전히 종료 및 회수되었다. Wave 3 작업트리 내 15개 임시 계측 파일 삭제 및 아카이브 무결성 검증은 통과했다(/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/post-cleanup-accepted.md). 그러나 과거 이력 차수의 네이티브 자원 완전 종료 영수증은 최종 완료 상태가 아니다.
+- 세부 내용: 영구 후보 브라우저 러너 프로세스(Chrome 컨텍스트, Vite 서버 PID 47578/47579, 포트 5193)는 완전히 종료 및 회수되었다. Wave 3 작업트리 내 15개 임시 계측 파일 삭제 및 아카이브 무결성 검증은 통과했다(<worktree-root>/dag-viewport-wave3/.omo/ulw-execute/post-cleanup-accepted.md). 그러나 과거 이력 차수의 네이티브 자원 완전 종료 영수증은 최종 완료 상태가 아니다.
 
 ## 4. 독립 자동화 검증 상세 (커밋 3a826a15)
 
@@ -214,10 +214,10 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 - TypeScript 힌트 1건: ui/src/components/NativeTerminalPane.tsx 190:20-190:27 위치에서 TS6385 'keyCode' is deprecated 제안 힌트가 보고되었으며, 기존 코드로 보존되었다.
 - Vite 청크 크기 권고: App 번들이 514.63 kB로 500 kB 권장 크기를 초과하여 청크 분할 권고 메시지가 stderr에 출력되었다.
 - 테스트 mock 에러 출력: NativeTerminalPane.test.tsx 5116행의 마운트 재시도/백오프 테스트에서 두 차례의 의도된 모의 실패 스택(cmd_native_terminal_attach 실패 로그)이 stderr에 기록되었다. 이는 테스트 케이스의 의도된 통과 경로이다.
-- 공유 캐시 변경: 빌드 과정 중 /Users/indo/code/project/orca-lite/ui/node_modules/.vite/vitest/da39a3ee5e6b4b0d3255bfef95601890afd80709/results.json 파일의 SHA-256 해시가 변경되었다. 변경을 발생시킨 프로세스의 작성자(writer)는 식별되지 않았다(UNKNOWN).
+- 공유 캐시 변경: 빌드 과정 중 <repo>/ui/node_modules/.vite/vitest/da39a3ee5e6b4b0d3255bfef95601890afd80709/results.json 파일의 SHA-256 해시가 변경되었다. 변경을 발생시킨 프로세스의 작성자(writer)는 식별되지 않았다(UNKNOWN).
 
 독립 검증 증적 문서:
-/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/permanent-automated-independent.md
+<worktree-root>/dag-viewport-wave3/.omo/ulw-execute/permanent-automated-independent.md
 
 ## 5. 브라우저 및 시각 검증 내역
 
@@ -240,7 +240,7 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 동일한 소스 후보에 대한 정적 픽셀 검토 증적으로서 유효하지만, 235 차수의 산출물에 대해 개별적인 픽셀 감사가 다시 수행된 것은 아니다.
 
 브라우저 수락 증적 문서:
-/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/permanent-browser/StrippedBrowserAcceptedVerdict.md
+<worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/permanent-browser/StrippedBrowserAcceptedVerdict.md
 
 ### 실제 App 검증용 컨트롤: 브라우저 한정 인수
 
@@ -254,7 +254,7 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 분기점 검증의 컨텍스트·브라우저·서버 199 정리는 별도 `threshold/AcceptedVerdict.md`에 기록되어 있다.
 
 증거 디렉터리:
-`/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/native/minimal-fixture/browser/`.
+`<worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/native/minimal-fixture/browser/`.
 주요 판정은 `FinalPaneWidthHostVerdict.md`, `narrow-controls/ExactClippingVerdict.md`, `narrow-controls/PaneWidthVision.md`, `threshold/AcceptedVerdict.md`다.
 초기 `VisualVerdict.md`의 도구 부족 판정은 당시 실행되지 않은 시도의 기록으로 보존한다.
 이후 실행 증거가 해소한 범위는 브라우저 하위 항목뿐이다. Tauri 전송·저장·PTY는 모두 모의 처리되었으므로 실제 네이티브 바인딩, 세션 생성, 입력, 프로세스 회수나 C5/S7을 증명하지 않는다.
@@ -269,12 +269,12 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 `bun run --cwd ui test`에 검증된 동등 설정, runner 로더, 결과 캐시 비활성화 및 JSON 출력 인자를 사용했다. `--maxWorkers=1`과 기존 시간 제한은 유지했다.
 전체 실행 시간은 323.62초이며 재시도나 감독 프로세스 시간 초과는 없었다. 담당자는 추적 파일 1,797개의 전후 해시 일치와 실행 프로세스·소유 의존성 링크 정리를 기록했다.
 27개 실패의 정확한 테스트 이름, 원본 출력, JSON, 명령과 정리 기록:
-`/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/final/full-suite/report.md`.
+`<worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/final/full-suite/report.md`.
 독립 비교 작업 `st_01a099d5`가 DAG 구현 전 기준 `f4ab00e2`에서 전체 검사를 한 번 실행했다. 기준 결과는 213개 파일, 2,265개 테스트 중 27개 실패이며 종료 코드는 1이다.
 실패한 27개 테스트의 파일·이름과 전체 실패 메시지는 두 실행에서 모두 일치했다. 메시지 비교에서 작업트리 경로와 ANSI 색상만 정규화했으며, 후보에만 발생한 실패와 기준에만 발생한 실패는 모두 0개다. 리드도 양쪽 원본 JSON을 별도로 대조해 같은 결과를 확인했다.
 따라서 관찰된 27개 실패는 기존 실패로 분류한다. 전체 스위트가 통과했다는 뜻은 아니며, 특히 9개 시간 초과의 내부 원인이 같거나 타이밍 변동이 없다고 증명한 것은 아니다. 이 실패 집합을 근거로 DAG 제품 코드를 수정하지 않는다.
 비교 보고서와 원본 증거:
-`/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/final/full-suite/baseline-attribution.md`.
+`<worktree-root>/dag-viewport-wave3/.omo/evidence/dag-viewport-navigation/final/full-suite/baseline-attribution.md`.
 
 네이티브 입력 및 트랙패드 핀치 게이트 (C5 / S7):
 마지막 권한 관찰은 2026-09-13T02:37:03Z의 Accessibility 거부 기록이며, 이후 권한 상태를 새로 확인한 것은 아니다.
@@ -288,7 +288,7 @@ ResizeObserver가 뷰포트 크기를 감시하며, 크기 변화 시 너비와 
 확보된 기록에서 현재 종료할 작업 소유 네이티브 프로세스나 PTY도 식별되지 않았지만, 이는 누수가 없다는 증명이 아니다.
 현재 PID 부재나 새로운 정상 실행으로 과거 종료 증거를 대신하지 않는다. S8은 미완료다.
 대조 보고서:
-`/Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/.omo/ulw-execute/historical-s8-reconciliation.md`.
+`<worktree-root>/dag-viewport-wave3/.omo/ulw-execute/historical-s8-reconciliation.md`.
 
 main 브랜치 병합 차단:
 main 작업 트리에 존재하는 타 세션 소유의 미커밋 파일로 인해 충돌 방지 차원에서 병합 명령이 차단되어 있다.

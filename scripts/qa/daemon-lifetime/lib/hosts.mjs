@@ -6,15 +6,45 @@
 // (maho-client --host <ip> --pairing-id <id> --mcp). The user's own MacBook desktop is never
 // driven: on mac the harness only launches, quits and terminates the QA bundle it built.
 
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Mac paths come from the environment, defaulting to the canonical clone that owns this checkout
+// (the parent of git's common dir, so a linked worktree still resolves to the main clone) and its
+// sibling `<clone>-wt` worktree root. FERRYX_QA_CANONICAL, FERRYX_QA_WORKTREE_ROOT and
+// FERRYX_QA_EVIDENCE_ROOT override them.
+function canonicalClone() {
+  const here = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+  try {
+    const common = execFileSync('git', ['-C', here, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return path.dirname(common);
+  } catch {
+    return here;
+  }
+}
+const MAC_CANONICAL = process.env.FERRYX_QA_CANONICAL ?? canonicalClone();
+const MAC_WORKTREE_ROOT = process.env.FERRYX_QA_WORKTREE_ROOT ?? `${MAC_CANONICAL}-wt`;
+const MAC_EVIDENCE_ROOT = process.env.FERRYX_QA_EVIDENCE_ROOT
+  ?? path.join(MAC_WORKTREE_ROOT, '.evidence', 'daemon-independent-lifetime-20261017');
+
+// Remote home directories come from the environment so no operator's account is baked into the
+// harness. FERRYX_QA_LINUX_HOME / FERRYX_QA_WINDOWS_HOME name the home on each target; the SSH user
+// defaults to its last path segment.
+const LINUX_HOME = process.env.FERRYX_QA_LINUX_HOME ?? '/home/qa';
+const WINDOWS_HOME = process.env.FERRYX_QA_WINDOWS_HOME ?? 'C:\\Users\\qa';
+const LINUX_USER = process.env.FERRYX_QA_LINUX_USER ?? path.posix.basename(LINUX_HOME);
+const WINDOWS_USER = process.env.FERRYX_QA_WINDOWS_USER ?? path.win32.basename(WINDOWS_HOME);
+
 export const HOSTS = Object.freeze({
   mac: Object.freeze({
     platform: 'mac',
     name: 'this-mac',
     transport: { kind: 'local' },
-    canonical: '/Volumes/T9-Mac/project/ferryx',
-    worktreeRoot: '/Volumes/T9-Mac/project/ferryx-wt',
+    canonical: MAC_CANONICAL,
+    worktreeRoot: MAC_WORKTREE_ROOT,
     cargoTarget: '/tmp/ferryx-daemon-lifetime-qa-target',
-    evidenceRoot: '/Volumes/T9-Mac/project/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
+    evidenceRoot: MAC_EVIDENCE_ROOT,
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     node: 'node',
     gui: { kind: 'mac-local' },
@@ -23,18 +53,18 @@ export const HOSTS = Object.freeze({
   linux: Object.freeze({
     platform: 'linux',
     name: 'omarchy',
-    transport: { kind: 'ssh', target: 'omarchy', address: '100.91.254.71', user: 'indo' },
-    canonical: '/home/indo/code/ferryx',
-    worktreeRoot: '/home/indo/code/ferryx-wt',
-    cargoTarget: '/home/indo/code/ferryx-wt/.target-w5qa-20261019',
+    transport: { kind: 'ssh', target: 'omarchy', address: '100.91.254.71', user: LINUX_USER },
+    canonical: `${LINUX_HOME}/code/ferryx`,
+    worktreeRoot: `${LINUX_HOME}/code/ferryx-wt`,
+    cargoTarget: `${LINUX_HOME}/code/ferryx-wt/.target-w5qa-20261019`,
     guiEnv: { WAYLAND_DISPLAY: 'wayland-1', DISPLAY: ':0', XDG_RUNTIME_DIR: '/run/user/1000' },
-    evidenceRoot: '/home/indo/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
+    evidenceRoot: `${LINUX_HOME}/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017`,
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     // Bulk run storage (artifacts, data with the staged daemon-runtime copies, logs) goes on the home
     // filesystem: omarchy's /tmp is a 16 GiB tmpfs with usrquota, and r3b's staging copy failed there
     // with EDQUOT (os error 122). Only the runtime dir (sockets, owner.json) stays under runRoot, so
     // handover-<uuid>.sock keeps a path well inside the 108-byte sun_path limit.
-    storageRoot: '/home/indo/code/ferryx-wt/.qaruns',
+    storageRoot: `${LINUX_HOME}/code/ferryx-wt/.qaruns`,
     node: 'node',
     gui: { kind: 'mahord', host: '100.91.254.71', pairingId: 'AF12D209-AB76-401E-BDB2-0D80E01FC2C8' },
     exeSuffix: '',
@@ -42,18 +72,18 @@ export const HOSTS = Object.freeze({
   windows: Object.freeze({
     platform: 'windows',
     name: 'maho-win',
-    transport: { kind: 'ssh', target: 'maho-win', address: '100.68.224.49', user: 'sook', shell: 'cmd' }, // sshd DefaultShell is cmd.exe (measured 2026-10-19)
-    canonical: 'C:\\Users\\sook\\ferryx',
-    worktreeRoot: 'C:\\Users\\sook\\ferryx-wt',
-    cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target-w5qa-20261019',
+    transport: { kind: 'ssh', target: 'maho-win', address: '100.68.224.49', user: WINDOWS_USER, shell: 'cmd' }, // sshd DefaultShell is cmd.exe (measured 2026-10-19)
+    canonical: `${WINDOWS_HOME}\\ferryx`,
+    worktreeRoot: `${WINDOWS_HOME}\\ferryx-wt`,
+    cargoTarget: `${WINDOWS_HOME}\\ferryx-wt\\.target-w5qa-20261019`,
     // CARGO_INCREMENTAL=0: six QA builds share one target dir, and incremental caches filled
     // maho-win's C: (r4 v1bump failed with os error 112 after A, B, C and bump had passed).
-    buildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.16.0\\zig.exe', CARGO_INCREMENTAL: '0' },
-    evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
+    buildEnv: { ZIG: `${WINDOWS_HOME}\\ferryx-wt\\.zig-0.16.0\\zig.exe`, CARGO_INCREMENTAL: '0' },
+    evidenceRoot: `${WINDOWS_HOME}\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017`,
     // No '-' or '_' in the 8.3 form: the GUI launch types a short path through MahoRD, which drops
-    // both on maho-win. Measured: C:\Users\sook\ferryx-wt\qaruns\<runId>\l1.cmd ->
-    // C:\Users\sook\FERRYX~1\qaruns\202610~1\l1.cmd. The old .qa-daemon-lifetime was QA-DAE~1.
-    runRoot: 'C:\\Users\\sook\\ferryx-wt\\qaruns',
+    // both on maho-win. Measured: C:\Users\<user>\ferryx-wt\qaruns\<runId>\l1.cmd ->
+    // C:\Users\<user>\FERRYX~1\qaruns\202610~1\l1.cmd. The old .qa-daemon-lifetime was QA-DAE~1.
+    runRoot: `${WINDOWS_HOME}\\ferryx-wt\\qaruns`,
     node: 'node',
     // The 4F8ADF2E pairing is stale; 9929DC13 is the one that completes a handshake (2026-10-15).
     gui: { kind: 'mahord', host: '100.68.224.49', pairingId: '9929DC13-3841-4182-A399-9E1323F961A2', physical: { width: 3840, height: 1600 } },

@@ -327,7 +327,7 @@ pub mod tests {
     #[test]
     fn test_r4_17_absolute_filesystem_paths_are_redacted_beyond_known_prefixes() {
         let leaks = [
-            "Snapshot failed for /Volumes/T9-Mac/project/ferryx/secret.json",
+            "Snapshot failed for /Volumes/Data/project/ferryx/secret.json",
             "Socket at /var/folders/x9/T/ferryx.sock is gone",
             "Temp file /tmp/ferryx-capture-1.jpeg missing",
             "Config /opt/homebrew/etc/ferryx.toml unreadable",
@@ -359,13 +359,13 @@ pub mod tests {
 
         // Non-http schemes must not shelter an embedded filesystem path.
         assert_eq!(
-            sanitize_public_string("file:///Volumes/T9-Mac/private/key.pem"),
+            sanitize_public_string("file:///Volumes/Data/private/key.pem"),
             "file://[redacted-path]"
         );
 
         // HTTP(S) URLs remain byte-identical, including path segments that look local.
         for url in [
-            "https://example.com/Volumes/T9-Mac/report",
+            "https://example.com/Volumes/Data/report",
             "http://localhost:3000/tmp/preview",
             "https://example.com/var/folders/x/y",
         ] {

@@ -18,7 +18,7 @@ The hub control socket is `~/.ferryx/hub/control.sock`. `ferryx hub stop`, `ferr
 
 ## Live database
 
-The gateway's launchd job uses WorkingDirectory `/Users/indo/code/project/omon-gateway`. The database is `omon_gateway.db` in that directory, which is `~/code/project/omon-gateway/omon_gateway.db`. It is not `~/.omon/gateway.db`.
+The gateway's launchd job uses WorkingDirectory `~/code/project/omon-gateway`. The database is `omon_gateway.db` in that directory, which is `~/code/project/omon-gateway/omon_gateway.db`. It is not `~/.omon/gateway.db`.
 
 Discovery order, for `ferryx hub migrate` with no `--from-omo` and for `scripts/hub-cutover.sh`:
 

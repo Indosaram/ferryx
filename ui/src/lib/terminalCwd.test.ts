@@ -13,7 +13,7 @@ describe("isAbsoluteTerminalCwd", () => {
   });
 
   it("accepts platform absolute paths", () => {
-    expect(isAbsoluteTerminalCwd("/Volumes/T9-Mac/project/ferryx")).toBe(true);
+    expect(isAbsoluteTerminalCwd("/Volumes/Data/project/ferryx")).toBe(true);
     expect(isAbsoluteTerminalCwd("C:\\Users\\sook\\work")).toBe(true);
     expect(isAbsoluteTerminalCwd("\\\\host\\share")).toBe(true);
   });

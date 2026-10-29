@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import fixtures from "../../../docs/evidence/paired-daemon/fixtures/contracts.json";
-import identities from "../../../docs/evidence/paired-daemon/fixtures/identities.json";
+import fixtures from "../../../src-tauri/tests/fixtures/paired-daemon/contracts.json";
+import identities from "../../../src-tauri/tests/fixtures/paired-daemon/identities.json";
 import { remoteHostStore, remoteHostKey, type HostEndpoint } from "../state/remoteHostStore";
 import type { PairedHostOperationRequest } from "../lib/pairedDaemonProject";
 import { PairedDaemonProjectForm } from "./PairedDaemonProjectForm";

@@ -1,2 +1,0 @@
-ADVERSARIAL_TEST: Receipt appVersion skew
-ERROR_THROWN: appVersion mismatch: expected '2026.908.1', got '2026.908.9'

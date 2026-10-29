@@ -13,49 +13,49 @@
     },
     {
       "id": "primary-secrets-present",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "primary has the object-store credentials",
       "command": "sudo test -s /etc/ferryx/litestream.env"
     },
     {
       "id": "primary-install-litestream",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "install litestream 0.3.13",
       "command": "command -v litestream >/dev/null && litestream version | grep -q 'v0.3.13' || { curl -fsSL https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.tar.gz | tar -xz -C /tmp litestream && sudo install -m 0755 /tmp/litestream /usr/local/bin/litestream; }"
     },
     {
       "id": "primary-litestream-config",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "file",
       "description": "write /etc/litestream.yml",
       "path": "/etc/litestream.yml",
       "mode": "0644",
-      "content": "# Rendered by scripts/relay-failover.mjs. Credentials come from /etc/ferryx/litestream.env\n# (LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY), never from this file.\ndbs:\n  - path: /home/indo/.ferryx/account-data/account-store.sqlite3\n    replicas:\n      - type: s3\n        bucket: ferryx-relay-litestream\n        path: account-store\n        endpoint: https://account-id.r2.cloudflarestorage.com\n        region: auto\n        force-path-style: true\n        sync-interval: 1s\n"
+      "content": "# Rendered by scripts/relay-failover.mjs. Credentials come from /etc/ferryx/litestream.env\n# (LITESTREAM_ACCESS_KEY_ID, LITESTREAM_SECRET_ACCESS_KEY), never from this file.\ndbs:\n  - path: /home/relay/.ferryx/account-data/account-store.sqlite3\n    replicas:\n      - type: s3\n        bucket: ferryx-relay-litestream\n        path: account-store\n        endpoint: https://account-id.r2.cloudflarestorage.com\n        region: auto\n        force-path-style: true\n        sync-interval: 1s\n"
     },
     {
       "id": "primary-litestream-unit",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "file",
       "description": "write /etc/systemd/system/litestream.service",
       "path": "/etc/systemd/system/litestream.service",
       "mode": "0644",
-      "content": "# Continuous replication of the account database. Enabled on the primary only; on the\n# standby it stays disabled until `relay-failover.mjs promote-standby` enables it.\n[Unit]\nDescription=Litestream replication of the Ferryx account database\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=indo\nEnvironmentFile=/etc/ferryx/litestream.env\nExecStart=/usr/local/bin/litestream replicate -config /etc/litestream.yml\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n"
+      "content": "# Continuous replication of the account database. Enabled on the primary only; on the\n# standby it stays disabled until `relay-failover.mjs promote-standby` enables it.\n[Unit]\nDescription=Litestream replication of the Ferryx account database\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=relay\nEnvironmentFile=/etc/ferryx/litestream.env\nExecStart=/usr/local/bin/litestream replicate -config /etc/litestream.yml\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n"
     },
     {
       "id": "primary-replicate",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "start replicating the primary account database",
       "command": "sudo systemctl daemon-reload && sudo systemctl enable --now litestream.service"
     },
     {
       "id": "primary-replica-exists",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "the replica has a generation",
-      "command": "litestream generations -config /etc/litestream.yml '/home/indo/.ferryx/account-data/account-store.sqlite3' | grep -q ."
+      "command": "litestream generations -config /etc/litestream.yml '/home/relay/.ferryx/account-data/account-store.sqlite3' | grep -q ."
     },
     {
       "id": "standby-secrets-present",
@@ -80,24 +80,24 @@
     },
     {
       "id": "copy-ui",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "copy the served remote web client from the primary",
-      "command": "rsync -a --delete '/home/indo/ferryx-relay-web/dist/' 'root@standby.example.net:/var/lib/ferryx/ui-dist/'"
+      "command": "rsync -a --delete '/home/relay/ferryx-relay-web/dist/' 'root@standby.example.net:/var/lib/ferryx/ui-dist/'"
     },
     {
       "id": "copy-signing-key",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "same account signing key, so grants verify on both hosts",
-      "command": "rsync -a '/home/indo/.ferryx/account-data/account-signing-key.json' 'root@standby.example.net:/var/lib/ferryx/account-data/account-signing-key.json'"
+      "command": "rsync -a '/home/relay/.ferryx/account-data/account-signing-key.json' 'root@standby.example.net:/var/lib/ferryx/account-data/account-signing-key.json'"
     },
     {
       "id": "copy-relay-keys",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "same durable machine key registry",
-      "command": "rsync -a '/home/indo/.ferryx/relay/machine_keys.json' 'root@standby.example.net:/var/lib/ferryx/relay/machine_keys.json'"
+      "command": "rsync -a '/home/relay/.ferryx/relay/machine_keys.json' 'root@standby.example.net:/var/lib/ferryx/relay/machine_keys.json'"
     },
     {
       "id": "copy-binary",

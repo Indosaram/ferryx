@@ -20,6 +20,7 @@ Thumbs.db
 # Agent session runtime state
 .omo/
 .evidence/
+.qa-evidence/
 task-2/
 /recovery-*.md
 /PARITY.md

@@ -2,7 +2,7 @@
 
 ## Scope and artifact ledger
 
-Worktree: `/Users/indo/code/project/orca-lite-wt/sa-docs`. Node v22.22.3.
+Worktree: `<worktree-root>/sa-docs`. Node v22.22.3.
 Only the verifier, its focused new tests, and this evidence file are owned by this repair.
 Existing documentation changes belong to the lead and are not modified.
 No Ferryx process, socket, watcher, or daemon is started or touched.

@@ -1,5 +1,0 @@
-$ node --input-type=module < missing-runner-result harness
-UNEXPECTED_RECEIPT_CREATED=true
-exitCode=0
-receiptExists=true
-EXIT_STATUS=2

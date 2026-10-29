@@ -355,7 +355,7 @@
 
 | 항목 | 현재 상태 | 근거(file:line) |
 |---|---|---|
-| Cargo 바이너리 | `ferryx`, `ferryx-cli`, `ferryx-account`, `ferryx-relay`가 정의되어 있습니다. `ferryx-remote-helper`용 `[[bin]]`은 없습니다. | /Volumes/T9-Mac/project/ferryx/src-tauri/Cargo.toml:17-31 |
+| Cargo 바이너리 | `ferryx`, `ferryx-cli`, `ferryx-account`, `ferryx-relay`가 정의되어 있습니다. `ferryx-remote-helper`용 `[[bin]]`은 없습니다. | <repo>/src-tauri/Cargo.toml:17-31 |
 | Helper 진입점 / 빌드 | standalone `main()`이 있고, 빌드는 `scripts/build-remote-helpers.mjs` 게이트를 거칩니다. | src-tauri/src/ferryx_scope/ssh/standalone.rs:1-8; build.rs:22-34 |
 | Helper 버전 / 서브커맨드 | `HELPER_VERSION = "2026.1017.1"`입니다. 서브커맨드는 `start`/`daemon`/`bridge --stdio`뿐입니다. | process.rs:12, 909-931, 42 |
 | Helper `start` | Linux에서는 `systemd-run --user --collect` transient unit으로, 안 되면 `setsid`로 띄웁니다. 재부팅하면 살아남지 못합니다. | process.rs:387-470, 580-604, 628-654, 458-466 |
@@ -389,7 +389,7 @@
 
 | 항목 | 현재 상태 | 근거(file:line) |
 |---|---|---|
-| 머신 카탈로그 경로 | `<identity_dir>/machine-workspaces.v1.json`이고, 만드는 곳은 `DaemonWorkspaceService::new` 하나뿐입니다. | /Volumes/T9-Mac/project/ferryx/src-tauri/src/daemon/server.rs:3206-3211, 3220 |
+| 머신 카탈로그 경로 | `<identity_dir>/machine-workspaces.v1.json`이고, 만드는 곳은 `DaemonWorkspaceService::new` 하나뿐입니다. | <repo>/src-tauri/src/daemon/server.rs:3206-3211, 3220 |
 | 카탈로그 스키마 | 명시적으로 등록한 root만 담습니다(`CatalogRow`, `Ownership`, `worktree_observations`). | src-tauri/src/remote/workspace_catalog.rs:11-49 |
 | 로드 / 저장 | 손상 시 실패로 닫고(fail-closed) 격리합니다. 저장은 `write_private_json`에 디렉터리 fsync까지 합니다. | workspace_catalog.rs:99-153 |
 | 부팅 시 재확인 | 기존 행만 다시 stat하고, 새로 스캔하지는 않습니다. | src-tauri/src/daemon/workspace_service.rs:53-99 |
@@ -423,7 +423,7 @@
 
 | 항목 | 현재 상태 | 근거(file:line) |
 |---|---|---|
-| Supervisor facade | macOS는 launchd LaunchAgent, Windows는 scheduled task와 watchdog, Linux는 systemd user unit을 씁니다. | /Volumes/T9-Mac/project/ferryx/src-tauri/src/daemon/supervisor.rs:1-24 |
+| Supervisor facade | macOS는 launchd LaunchAgent, Windows는 scheduled task와 watchdog, Linux는 systemd user unit을 씁니다. | <repo>/src-tauri/src/daemon/supervisor.rs:1-24 |
 | `supported()` 정책 | dev 빌드이거나 `FERRYX_DATA_DIR`/`RUNTIME_DIR`/`SESSION_DIR`가 설정되어 있으면 비활성화됩니다. | supervisor.rs:56-83 |
 | `ensure_if_absent` / admission | 잠금, owner 분류, legacy 마이그레이션, owner가 Absent일 때만 시작, login 등록 순서로 진행합니다. | supervisor.rs:198-209; daemon/owner_admission.rs:914-955 |
 | 공개 lifecycle / opt-out | `ensure`, `uninstall`, `remove_autostart`, `installed`와 `daemon-supervisor.optout` 마커가 있습니다. | supervisor.rs:124-185, 306-311, 86-104 |

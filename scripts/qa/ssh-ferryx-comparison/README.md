@@ -31,7 +31,7 @@ harness directory:
 ```powershell
 $env:CARGO_TARGET_DIR = "$env:TEMP\ferryx-ssh-causal-target-$([guid]::NewGuid().ToString('N'))"
 $env:FERRYX_SSH_TEST_HELPER_ROOT = "C:\ProgramData\Ferryx\ssh-causal-helper-$([guid]::NewGuid().ToString('N'))"
-$env:FERRYX_SSH_TEST_HELPER = 'C:\Users\sook\.ferryx\bin\ferryx-remote-helper.exe'
+$env:FERRYX_SSH_TEST_HELPER = "$env:USERPROFILE\.ferryx\bin\ferryx-remote-helper.exe"
 cargo run --manifest-path .\scripts\qa\ssh-ferryx-comparison\Cargo.toml --release -- .\evidence\manifest.json .\evidence\bridge-trials.json
 ```
 

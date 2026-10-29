@@ -38,7 +38,7 @@ Review-clean landing complete. Web worker re-review VERDICT: blockers=0 majors=0
 ## Manual maho-win desktop QA steps (user-performed; recorded, not gate-blocking)
 1. Pull/build the app on maho-win from main (or update the installed copy), start ferryx daemon.
 2. In the desktop app, open the SSH section and connect to the maho-win remote host; confirm the helper readiness row shows an honest value (Installed / Not installed / Not verified).
-3. Open a terminal on a remote workspace whose path is a normal drive path (C:\Users\sook\...): confirm cwd is the project path (pwd shows the project directory, not C:\Windows).
+3. Open a terminal on a remote workspace whose path is a normal drive path (C:\Users\<user>\...): confirm cwd is the project path (pwd shows the project directory, not C:\Windows).
 4. If the remote project path is a UNC path (\\server\share\...): confirm the terminal spawn now fails with the explicit UNSUPPORTED UNC cwd error instead of silently opening in the Windows directory.
 5. Verify a worktree under the remote project (e.g. .orca-worktrees/wt-<slug>) opens with the worktree path as cwd and helper readiness matches reality.
 

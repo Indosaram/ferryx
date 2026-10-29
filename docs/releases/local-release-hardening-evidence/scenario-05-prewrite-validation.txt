@@ -1,3 +1,0 @@
-exitCode: 1
-stderr: no [package] version line found in Cargo.toml
-conf untouched: true

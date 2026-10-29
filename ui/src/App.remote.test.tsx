@@ -651,7 +651,7 @@ describe("App SSH project lifecycle", () => {
       workspaceId: "ssh:roblox", repoRoot: "C:\\Users\\sook\\code\\roblox-game-forge",
       gitRoot: "C:/Users/sook", gitBranch: "master", target: { kind: "ssh", hostId: "build" },
     };
-    seed([{ workspaceId: "project", repoRoot: "/Users/indo/code/project", gitRoot: null }, folder], "project");
+    seed([{ workspaceId: "project", repoRoot: "/Users/example/code/project", gitRoot: null }, folder], "project");
     localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, "[]");
     native.registerRemoteProject.mockResolvedValue({
       workspaceId: folder.workspaceId, repoRoot: folder.repoRoot, gitRoot: folder.gitRoot,

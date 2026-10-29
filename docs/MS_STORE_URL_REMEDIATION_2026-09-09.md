@@ -84,7 +84,7 @@ No private email address or fixed retention period was invented.
   errors. The new Footer error found in the first pass was fixed by passing
   the base path from Astro; it is absent from the final diagnostics.
 - LSP diagnostics unavailable: the shared LSP daemon could not become reachable
-  at `/Users/indo/.omo/lsp-daemon/v0.1.0/daemon.sock`.
+  at `~/.omo/lsp-daemon/v0.1.0/daemon.sock`.
 - `git diff --check`: clean.
 - No tests were added for prose. No desktop app or background PTY daemon was
   started, stopped, or rebuilt.

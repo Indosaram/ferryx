@@ -421,8 +421,8 @@ pub fn split_remote_size_line(bytes: &[u8]) -> Option<(usize, &[u8])> {
 /// Directory a paired POSIX host keeps this project's omo transcripts in.
 ///
 /// The slug comes from the same [`slug_for_cwd`] the local path uses, which is correct because the
-/// remote directory name was observed to match it exactly (`--home-indo-piratetalk--` for
-/// `/home/indo/piratetalk`). Windows hosts return `None`: the slug separator there is unverified,
+/// remote directory name was observed to match it exactly (`--home-user-piratetalk--` for
+/// `/home/user/piratetalk`). Windows hosts return `None`: the slug separator there is unverified,
 /// and guessing it would silently resolve the wrong directory.
 pub fn remote_transcript_dir(home: &str, project_path: &str) -> Option<String> {
     if project_path.contains('\\') || project_path.contains(':') {
@@ -602,8 +602,8 @@ mod tests {
     #[test]
     fn test_slug_for_cwd() {
         assert_eq!(
-            slug_for_cwd("/Volumes/T9-Mac/project/ferryx"),
-            "--Volumes-T9-Mac-project-ferryx--"
+            slug_for_cwd("/Volumes/Data/project/ferryx"),
+            "--Volumes-Data-project-ferryx--"
         );
         assert_eq!(slug_for_cwd("/private/tmp"), "--private-tmp--");
         assert_eq!(

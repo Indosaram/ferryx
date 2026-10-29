@@ -28,9 +28,9 @@ RemoteApp-zG0Wmg5p.js, which uses the current reference-chat mutation path.
 These are inspected deployment artifacts, not evidence of a particular socket
 closure in the user's browser.
 
-The relay service runs /home/indo/bin/ferryx-relay, whose file timestamp was
+The relay service runs /home/<user>/bin/ferryx-relay, whose file timestamp was
 2026-10-05 00:34:01 +0900. Its configured static UI directory is
-/home/indo/ferryx-relay-web/dist. A timestamp does not identify a source revision.
+/home/<user>/ferryx-relay-web/dist. A timestamp does not identify a source revision.
 
 ## Current source and executed verification
 
@@ -104,11 +104,11 @@ Native Linux preparation confirmed that omarchy has GLib, GIO, GObject,
 GTK 3, WebKitGTK 4.1, ALSA, and Rust installed. The frozen candidate revision
 is da05a01ed3e242268524f96dcfdc6ea6ecb5b57b. GitHub could not supply that
 revision (`upload-pack: not our ref`), so it was transferred directly to
-the host's canonical clone at /home/indo/code/ferryx. Native compilation
+the host's canonical clone at /home/<user>/code/ferryx. Native compilation
 is pending under monitor mon_8PCZZ2F9F6176DGA, using the detached worktree
-/home/indo/code/ferryx-wt/chat-relay-20261012 and shared cargo target
-/home/indo/code/ferryx-wt/.target. This is candidate preparation only;
-the production system service still runs /home/indo/bin/ferryx-relay.
+/home/<user>/code/ferryx-wt/chat-relay-20261012 and shared cargo target
+/home/<user>/code/ferryx-wt/.target. This is candidate preparation only;
+the production system service still runs /home/<user>/bin/ferryx-relay.
 The owned worktree must be removed after candidate verification or failure.
 
 ## Linux candidate result
@@ -133,20 +133,20 @@ The dynamic path segment is a session ID, not a provider ID:
 used the arbitrary session ID `omo`; no real OMO session was addressed.
 
 Candidate binary and UI assets are preserved under
-`/home/indo/code/ferryx-wt/.evidence/chat-relay-20261012/`.
+`/home/<user>/code/ferryx-wt/.evidence/chat-relay-20261012/`.
 The clean owned worktree was removed; remote worktree listing now contains
-only `/home/indo/code/ferryx` at 0f578e6e on main.
+only `/home/<user>/code/ferryx` at 0f578e6e on main.
 Stopping the SSH monitor did not terminate the remote fixture process:
-PID 700881 remained at `/home/indo/code/ferryx-wt/.target/debug/ferryx-relay`
+PID 700881 remained at `/home/<user>/code/ferryx-wt/.target/debug/ferryx-relay`
 with port 47879. Its PID was not recorded at spawn, so no pattern-based
 termination was performed. This leftover is reported for user-directed
-cleanup. Production relay PID 3409888 at `/home/indo/bin/ferryx-relay`
+cleanup. Production relay PID 3409888 at `/home/<user>/bin/ferryx-relay`
 was not modified. Production deployment remains unapproved and unapplied.
 
 A later read-only cleanup census on 2026-10-12 ran
 `ps -p 700881 -o pid=,ppid=,comm=,args=` and
-`git -C /home/indo/code/ferryx worktree list` through SSH. The command exited
-0 and returned only `/home/indo/code/ferryx 0f578e6e [main]`; the previously
+`git -C /home/<user>/code/ferryx worktree list` through SSH. The command exited
+0 and returned only `/home/<user>/code/ferryx 0f578e6e [main]`; the previously
 reported PID had no process row. No termination was performed. This settles
 the recorded leftover PID observation, not production deployment or sending.
 
@@ -154,7 +154,7 @@ the recorded leftover PID observation, not production deployment or sending.
 
 The following receipts were recovered from the original session record without
 rerunning builds, tests, or live requests. The local JSONL record is
-`/Users/indo/.omo/agent/sessions/--Volumes-T9-Mac-project-ferryx--/2026-10-12T01-23-35-674Z_01a12db5-407a-7644-84e2-467b2d469998.jsonl`.
+`~/.omo/agent/sessions/--Volumes-T9-Mac-project-ferryx--/2026-10-12T01-23-35-674Z_01a12db5-407a-7644-84e2-467b2d469998.jsonl`.
 Line numbers identify historical evidence, not validation of a later revision.
 
 | Record line | Observed receipt | Scope |
@@ -259,10 +259,10 @@ previous executable and UI pending deployment approval.
 ## Deployment and post-deployment verification (2026-10-12)
 
 The user authorized replacement. Before replacement the service was active as
-PID 3409888 with `ExecStart=/home/indo/bin/ferryx-relay --port 8787`, and the
+PID 3409888 with `ExecStart=/home/<user>/bin/ferryx-relay --port 8787`, and the
 candidate hashes matched. Rollback copies of the previous executable and UI are
-at `/home/indo/code/ferryx-wt/.evidence/chat-relay-20261012/rollback-20261012T151102`.
-`/home/indo/bin/ferryx-relay` and `/home/indo/ferryx-relay-web/dist` were
+at `/home/<user>/code/ferryx-wt/.evidence/chat-relay-20261012/rollback-20261012T151102`.
+`/home/<user>/bin/ferryx-relay` and `/home/<user>/ferryx-relay-web/dist` were
 replaced and `ferryx-relay.service` restarted; it is active as MainPID 1135903
 and the installed executable hash is `6fe1f08d...0ee` (the candidate).
 
@@ -280,7 +280,7 @@ no active terminal, so no live session was read or written.
 ### Process-level isolated send (real relay, real daemon, real shell)
 
 Script: `.omo/scratch/chat-relay-e2e.mjs` (copied to
-`/home/indo/code/ferryx-wt/.evidence/chat-relay-20261012/e2e-run-1/`, with
+`/home/<user>/code/ferryx-wt/.evidence/chat-relay-20261012/e2e-run-1/`, with
 `result.log` and `steps.log`). Monitor `mon_2EB4R1K66WFYFRV2`, exit 0.
 On omarchy, under a throwaway root on loopback:
 
@@ -304,7 +304,7 @@ Teardown: the daemon exited 0 on in-band shutdown; the relay received SIGTERM
 after its `/proc/<pid>/exe` matched the launched path. The shell PID no longer
 exists. Production MainPID 1135903 and its executable hash were unchanged
 afterwards. The omarchy worktree `chat-e2e-20261012` was removed; the worktree
-list contains only `/home/indo/code/ferryx 0f578e6e [main]`.
+list contains only `/home/<user>/code/ferryx 0f578e6e [main]`.
 
 ### Still unverified
 

@@ -81,7 +81,7 @@ return s_pRtlNtStatusToDosError(status);
 - `scripts/qa/ssh-causal-comparison/`: 초기 Windows 비교 하네스. 실제 통과한 비교는 수정된 별도 PowerShell 명령으로 실행했다.
 - `scripts/qa/ssh-ferryx-comparison/`: 캐시 라이브러리 기반 진단 실행기와 SSH 래퍼. 성공한 전체 SSH 핸드셰이크 비교는 없음.
 - 로컬 임시 증거: `/tmp/sshd-bridge.log`, `/tmp/sshd-ready.log`, `/tmp/sequential-01-4480.stderr.log`, `/tmp/file-output-control.log`. 임시 경로이므로 영구 보관을 보장하지 않는다.
-- 원격 전용 증거/산출물 디렉터리는 삭제 완료를 주장하지 않는다. `C:\ProgramData\Ferryx\ssh-causal-evidence\run-20261003-062907-31128632` 및 `C:\Users\sook\AppData\Local\Temp\ferryx-bridge-driver-20261003`에는 테스트 키와 진단 산출물이 남을 수 있다. 키 내용은 보고서에 포함하지 않는다.
+- 원격 전용 증거/산출물 디렉터리는 삭제 완료를 주장하지 않는다. `C:\ProgramData\Ferryx\ssh-causal-evidence\run-20261003-062907-31128632` 및 `C:\Users\<user>\AppData\Local\Temp\ferryx-bridge-driver-20261003`에는 테스트 키와 진단 산출물이 남을 수 있다. 키 내용은 보고서에 포함하지 않는다.
 
 ## 재개한다면
 

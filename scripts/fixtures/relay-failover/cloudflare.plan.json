@@ -38,8 +38,8 @@
         "minimum_origins": 1,
         "origins": [
           {
-            "name": "omarchy",
-            "address": "tunnel-id.cfargotunnel.com",
+            "name": "relay-primary",
+            "address": "primary-origin.example.net",
             "enabled": true,
             "header": {
               "Host": [

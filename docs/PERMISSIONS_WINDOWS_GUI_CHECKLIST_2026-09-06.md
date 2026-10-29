@@ -10,12 +10,12 @@ builds run in Session 0 where `ferryx.exe` windows are not user-visible
 
 ## Setup
 
-The QA worktree is already prepared at `C:\Users\sook\ferryx-permqa`
+The QA worktree is already prepared at `C:\Users\<user>\ferryx-permqa`
 (commit `e404e76`, own `node_modules`, `ui\dist` built, cargo permissions tests
 6/6 green). In an interactive PowerShell (not SSH):
 
 ```powershell
-cd C:\Users\sook\ferryx-permqa
+cd C:\Users\<user>\ferryx-permqa
 bun tauri dev
 ```
 

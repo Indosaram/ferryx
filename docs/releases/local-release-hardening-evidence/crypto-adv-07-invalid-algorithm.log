@@ -1,2 +1,0 @@
-ADV-07 Invalid Algorithm:
-error=Invalid signature algorithm: expected 'Ed' or 'ED', got 'XX'

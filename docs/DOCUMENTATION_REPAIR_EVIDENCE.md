@@ -6,7 +6,7 @@ This record documents the factual corrections and source anchoring performed on 
 1. `docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md`
 2. `site/src/content/docs/privacy.md`
 
-Audited claims were verified against the codebase in worktree `/Users/indo/code/project/orca-lite-wt/sa-docs`. The eleven known discrepancies and their surrounding sections were mapped to concrete source lines, resolving factual errors and qualifying broad guarantees pending exhaustive repository-wide ledger coverage.
+Audited claims were verified against the codebase in worktree `<worktree-root>/sa-docs`. The eleven known discrepancies and their surrounding sections were mapped to concrete source lines, resolving factual errors and qualifying broad guarantees pending exhaustive repository-wide ledger coverage.
 
 ---
 
@@ -167,7 +167,7 @@ $ astro build
 [types] Generated 195ms
 [build] output: "static"
 [build] mode: "static"
-[build] directory: /Users/indo/code/project/orca-lite-wt/sa-docs/site/dist/
+[build] directory: <worktree-root>/sa-docs/site/dist/
 [build] Collecting build info...
 [build] ✓ Completed in 325ms.
 [build] Building static entrypoints...

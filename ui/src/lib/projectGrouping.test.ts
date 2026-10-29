@@ -183,8 +183,8 @@ describe("projectGrouping", () => {
     it("groups matching local and remote projects into one project group with local as primary", () => {
       const local: RegisteredProject = {
         workspaceId: "orca-lite",
-        repoRoot: "/Users/indo/code/project/orca-lite",
-        gitRoot: "/Users/indo/code/project/orca-lite",
+        repoRoot: "/Users/example/code/project/orca-lite",
+        gitRoot: "/Users/example/code/project/orca-lite",
         gitRemote: "git@github.com:Indosaram/ferryx.git",
       };
       const remote: RegisteredProject = {
@@ -196,7 +196,7 @@ describe("projectGrouping", () => {
       };
       const other: RegisteredProject = {
         workspaceId: "other-tool",
-        repoRoot: "/Users/indo/code/other-tool",
+        repoRoot: "/Users/example/code/other-tool",
         gitRoot: null,
       };
 

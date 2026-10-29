@@ -1,6 +1,6 @@
 # Privacy Page Final Correction Ledger
 
-Audited 2026-09-13 in `/Users/indo/code/project/orca-lite-wt/sa-docs` for task `st_01a09a8b`.
+Audited 2026-09-13 in `<worktree-root>/sa-docs` for task `st_01a09a8b`.
 This ledger records the factual resolutions applied to `site/src/content/docs/privacy.md` based on `docs/DOCUMENTATION_CLAIM_COVERAGE.md` and direct inspection of repository sources. Each resolution replaces unsupported absolute claims with verified implementation facts. No production code was modified.
 
 ## Mandatory Coverage Verification

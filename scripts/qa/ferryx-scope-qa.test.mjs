@@ -2,11 +2,12 @@ import { test, expect } from 'bun:test';
 import { validateRoot, validateEvidence, prepare, cleanup } from './ferryx-scope-fixtures.mjs';
 import { symlinkSync, unlinkSync, rmdirSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { collectChild, spawnChild } from './ferryx-scope-lifecycle.mjs';
 
 test('rejects an unsafe root before accessing resources', async () => {
   // Given a personal directory, when validation runs, then no adoption is allowed.
-  await expect(Promise.resolve().then(() => validateRoot('/Users/indo'))).rejects.toThrow();
+  await expect(Promise.resolve().then(() => validateRoot(homedir()))).rejects.toThrow();
 });
 
 test('rejects claimed success without actual observations', () => {
@@ -24,7 +25,7 @@ test('rejects a fixture child symlink without deleting its target', () => {
   const fixture = prepare();
   const home = join(fixture.root, 'home');
   rmdirSync(home);
-  symlinkSync('/Users/indo', home);
+  symlinkSync(homedir(), home);
   try {
     // When validating, then reject before resource access.
     expect(() => validateRoot(fixture.root)).toThrow('UNSAFE_CHILD');

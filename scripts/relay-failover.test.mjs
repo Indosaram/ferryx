@@ -96,7 +96,7 @@ test("the load balancer prefers the primary pool and health-checks /healthz", ()
 
 test("drill summary passes only with all-200 samples inside the stop window", () => {
   const plan = drillPlan(loadConfig(CONFIG));
-  expect(plan.probeHost).toBe("maho-win");
+  expect(plan.probeHost).toBe("windows-probe-host");
   expect(plan.url).toBe("https://relay.ferryx.dev/healthz");
   const ok = summarizeDrill("1000 200\r\n6000 200\n11000 200\n", 2000, 9000);
   expect(ok).toMatchObject({ samples: 3, samplesWhilePrimaryStopped: 1, failures: 0, passed: true });

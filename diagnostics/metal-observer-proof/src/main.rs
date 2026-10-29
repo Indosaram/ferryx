@@ -16,7 +16,6 @@ extern "C" {
 static DRAWABLES_REQUESTED: AtomicUsize = AtomicUsize::new(0);
 static DRAWABLES_ACQUIRED: AtomicUsize = AtomicUsize::new(0);
 
-#[path = "/Users/indo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-hal-24.0.4/src/metal/layer_observer.rs"]
 mod original_observer;
 
 mod corrected_observer;

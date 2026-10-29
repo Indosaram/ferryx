@@ -12,7 +12,7 @@ All 28 pre-existing session IDs remain present on the surviving legacy daemons.
 
 ## Build source and command
 
-- Repository: `/Users/indo/code/project/orca-lite`, branch `main`.
+- Repository: `<repo>`, branch `main`.
 - Terminal error recovery commit: `a8db9b3`.
 - Working-tree app and Cargo version: `2026.908.1`.
 - Build uses the current main working tree, including concurrent uncommitted

@@ -43,8 +43,8 @@
 | Builder | OS / Arch | sccache Version | Cache Storage | Cargo Config Location | Persistent Release Path |
 |---|---|---|---|---|---|
 | **MacBook** | macOS arm64 | `0.16.0` | MinIO S3 (`100.126.171.58:9000/sccache`) via launchd daemon (`port 4226`) | `~/.cargo/config.toml` (`/opt/homebrew/bin/sccache`) | Persistent worktree or `CARGO_TARGET_DIR` |
-| **omaki** | Arch Linux x86_64 | `0.16.0-3` | Local NVMe (`/home/indo/.cache/sccache`, 50 GiB max) | `/home/indo/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/indo/ferryx-release` |
-| **maho-win** | Windows 11 x86_64 | `0.17.0` | Local disk (`C:\Users\sook\.cache\maho\sccache`, 50 GiB max) | `C:\Users\sook\.cargo\config.toml` (`sccache.exe`) | `C:\Users\sook\ferryx-winbuild\ferryx-release` |
+| **omaki** | Arch Linux x86_64 | `0.16.0-3` | Local NVMe (`/home/<user>/.cache/sccache`, 50 GiB max) | `/home/<user>/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/<user>/ferryx-release` |
+| **maho-win** | Windows 11 x86_64 | `0.17.0` | Local disk (`C:\Users\<user>\.cache\maho\sccache`, 50 GiB max) | `C:\Users\<user>\.cargo\config.toml` (`sccache.exe`) | `C:\Users\<user>\ferryx-winbuild\ferryx-release` |
 
 ---
 
@@ -53,33 +53,33 @@
 ### A. Linux (omaki)
 Execute via SSH or terminal:
 ```bash
-ssh omaki "/home/indo/build-release-incremental.sh <TAG>"
+ssh omaki "/home/<user>/build-release-incremental.sh <TAG>"
 # Example:
-# ssh omaki "/home/indo/build-release-incremental.sh v2026.09.08.1"
+# ssh omaki "/home/<user>/build-release-incremental.sh v2026.09.08.1"
 ```
 - **What it does**:
-  1. Fetches the latest tag in `/home/indo/ferryx-release`.
+  1. Fetches the latest tag in `/home/<user>/ferryx-release`.
   2. Ensures Ghostty submodule is pinned at `6a508fd5`.
   3. Stamps version via `sync-version.mjs`.
   4. Incrementally builds UI (`bun run --cwd ui build`).
   5. Incrementally builds DEB bundle (`bun tauri build --bundles deb`) with sccache and preserved target.
   6. Bundles AppImage via `linuxdeploy` and signs both DEB and AppImage.
-  7. Stages artifacts into `/home/indo/ferryx-release-artifacts/`.
+  7. Stages artifacts into `/home/<user>/ferryx-release-artifacts/`.
 
 ### B. Windows (maho-win)
 Execute via SSH:
 ```powershell
-ssh maho-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\sook\ferryx-winbuild\build-release-incremental.ps1 -Tag <TAG>"
+ssh maho-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\<user>\ferryx-winbuild\build-release-incremental.ps1 -Tag <TAG>"
 # Example:
-# ssh maho-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\sook\ferryx-winbuild\build-release-incremental.ps1 -Tag v2026.09.08.1"
+# ssh maho-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\<user>\ferryx-winbuild\build-release-incremental.ps1 -Tag v2026.09.08.1"
 ```
 - **What it does**:
-  1. Fetches the latest tag in `C:\Users\sook\ferryx-winbuild\ferryx-release`.
+  1. Fetches the latest tag in `C:\Users\<user>\ferryx-winbuild\ferryx-release`.
   2. Stamps version via `sync-version.mjs`.
   3. Incrementally builds UI (`bun run --cwd ui build`).
   4. Incrementally builds NSIS setup (`cargo tauri build --bundles nsis`) with sccache.
   5. Builds MSIX package via `scripts\build-msix.ps1 -ExePath <release-ferryx.exe> -Version <version> -SkipSigning`.
-  6. Stages artifacts into `C:\Users\sook\ferryx-winbuild\ferryx-release-artifacts\`.
+  6. Stages artifacts into `C:\Users\<user>\ferryx-winbuild\ferryx-release-artifacts\`.
 
 ### C. macOS (MacBook)
 When building the macOS Universal release:

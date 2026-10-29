@@ -1,2 +1,0 @@
-exitCode: 1
-stderr: Invalid release tag "v2026.13.01": month must be 1..12, got 13

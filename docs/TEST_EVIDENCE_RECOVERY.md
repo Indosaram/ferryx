@@ -9,7 +9,7 @@ No historical receipt was recreated, and no tests, builds, or daemons were run i
 Source S (original local JSONL, not a report quotation):
 
 ```text
-/Users/indo/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-09-12T12-29-35-992Z_01a09598-3778-7aff-83ff-6f8031c71b9d.jsonl
+~/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-09-12T12-29-35-992Z_01a09598-3778-7aff-83ff-6f8031c71b9d.jsonl
 ```
 
 Session: `01a09598-3778-7aff-83ff-6f8031c71b9d`. Source identities below use
@@ -22,8 +22,8 @@ S:2126, event `bf24cce9`, `2026-09-13T02:53:30.350Z`, calls eval
 
 ```sh
 # Historical command only; not executed during recovery.
-# cwd: /Users/indo/code/project/orca-lite-wt/sa-tests
-CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite-wt/sa-tests/target cargo test --manifest-path src-tauri/Cargo.toml --test daemon_duplicate_prevention
+# cwd: <worktree-root>/sa-tests
+CARGO_TARGET_DIR=<worktree-root>/sa-tests/target cargo test --manifest-path src-tauri/Cargo.toml --test daemon_duplicate_prevention
 ```
 
 The wrapper inherits `process.env` and overrides `CARGO_TARGET_DIR`. It reads
@@ -68,7 +68,7 @@ override during a larger sweep. Its completion notification S:2154 (`bef6e181`,
 `2026-09-13T02:59:28.707Z`) points to source G:
 
 ```text
-/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-12T12-29-35-992Z_01a09598-3778-7aff-83ff-6f8031c71b9d-artifacts/local/detached-eval-toolu_01AKx3SpUbBKiMTj2Ve74Q4s.log
+~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-12T12-29-35-992Z_01a09598-3778-7aff-83ff-6f8031c71b9d-artifacts/local/detached-eval-toolu_01AKx3SpUbBKiMTj2Ve74Q4s.log
 ```
 
 G:15, exact retained output:
@@ -84,7 +84,7 @@ restoration -> later sweep GREEN exit 0, not an immediate paired restoration run
 
 ## Searches and precise remaining gap
 
-1. Searched `/Users/indo/ferryx-4track-evidence-20260913/` and the requested
+1. Searched `~/ferryx-4track-evidence-20260913/` and the requested
    parent notepad for `LOCK_SH`, `LOCK_EX`, the test name, readiness diagnostic,
    and restoration. `EVIDENCE_LEDGER.md:819-820` and notepad `:821-822`
    repeat only the mutation and FAILED summary; they are not independent raw

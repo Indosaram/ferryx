@@ -9,7 +9,7 @@ older main-repository `.omo/FERRYX_MANUAL_GUI_QA.md`.
 Use this track's current worktree, not an older integration build:
 
 ```sh
-cd /Users/indo/code/project/orca-lite-wt/sa-worktree-disk
+cd <worktree-root>/sa-worktree-disk
 bun tauri dev
 ```
 

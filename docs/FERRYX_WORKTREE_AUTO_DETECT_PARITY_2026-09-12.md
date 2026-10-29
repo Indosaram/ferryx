@@ -2,7 +2,7 @@
 
 질문: "에이전트가 워크트리를 생성하는 경우 페릭스 프로젝트 리스트에서 자동 감지돼야 하는데 지금은 안 된다. Orca는 이걸 어떻게 감지하는가?"
 
-Upstream 기준: github.com/stablyai/orca, 로컬 클론 `/Users/indo/code/project/orca` @ `20ab9950` (2026-09-11).
+Upstream 기준: github.com/stablyai/orca, 로컬 클론 `~/code/project/orca` @ `20ab9950` (2026-09-11).
 핵심 설계 문서: upstream `docs/reference/worktree-scan-fingerprint.md` ("Steady-state worktree rescan: Git-admin fingerprint gate").
 
 ## 결론 3줄

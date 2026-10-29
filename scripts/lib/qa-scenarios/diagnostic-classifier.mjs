@@ -56,8 +56,8 @@ export function buildIsolatedEnv(context) {
   // (`%APPDATA%\com.ferryx.app\dev\session_state.json`), boots into the host's
   // restored layout instead of the empty state, and the pane step's `New
   // Terminal` affordance does not exist. The repository's own Windows QA recipe
-  // requires both variables and says so:
-  // `docs/evidence/windows-terminal-20260912/windows-environment.md:13`
+  // requires both variables and says so (windows-terminal-20260912/windows-environment.md:13,
+  // formerly under docs/evidence/, which is no longer in the repository; see docs/EVIDENCE.md):
   // ("Set BOTH FERRYX_SESSION_DIR and FERRYX_RUNTIME_DIR to unique QA paths").
   const sessionDir = join(context.isolationRoot, 'session');
   // Windows app data is NOT covered by HOME. WebView2 keeps its profile (and therefore the

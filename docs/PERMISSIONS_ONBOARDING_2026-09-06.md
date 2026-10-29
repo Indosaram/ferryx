@@ -86,7 +86,7 @@ Real-device evidence (all commands run natively on each host at HEAD e404e76):
   6/6 pass (RC=0); vitest 3 suites 17/17 (RC=0, node v22.23.2); `bun run build` RC=0;
   ghostty pin 6a508fd5 verified; code synced via incremental git bundles
   (e2a6785..049c673 then 049c673..e404e76).
-- maho-win (Windows x86_64 msvc, ssh maho-win, C:\Users\sook\ferryx-permqa):
+- maho-win (Windows x86_64 msvc, ssh maho-win, C:\Users\<user>\ferryx-permqa):
   `cargo test --lib permissions` 6/6 pass (RC=0, ghostty-vt-static.lib built from
   junctioned source, sha 6a508fd5); `bun run build` (tsc + vite) RC=0 after giving the
   QA checkout its own node_modules (the junction to the winbuild clone was stale --

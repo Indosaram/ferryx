@@ -4,7 +4,7 @@
 **Auditor:** Senior Mobile & Frontend Systems Engineer  
 **Status:** Complete  
 **Reference Codebase (T3 Code, MIT authoritative):** `~/.cache/t3code-ref/t3code/apps/mobile/src/`  
-**Target Codebase (Ferryx Remote Mobile Chat):** `/Volumes/T9-Mac/project/ferryx/ui/src/remote/`  
+**Target Codebase (Ferryx Remote Mobile Chat):** `<repo>/ui/src/remote/`  
 **Live Wire Evidence:** `.omo/evidence/ulw/01a0d650-db7a-7817-a21b-7be552a81e89/G009/` (`wire-927.5-samples.json`, `baseline-dump.json`, `baseline-collapsed.png`, `baseline-expanded.png`, `after-dump.json`, `after-collapsed.png`, `after-expanded.png`, `after-row-drawer.png`)
 
 ---
@@ -296,7 +296,7 @@ FUNCTION finalizeTurn(turn):
   * `8379` (`assistant`): `"While that compiles, I'm checking the other half of the 404s...\n→ eval"` (ts: `07:16:02.832Z`)
   * `8380` (`toolResult`): `"16832 => FERRYX_SESSION_ID=..."`
   * `8381` (`assistant`): `"→ eval"` (ts: `07:16:07.831Z`)
-  * `8382` (`toolResult`): `"   1 /Volumes/T9-Mac/project/EclipticRD-Rewrite/..."`
+  * `8382` (`toolResult`): `"   1 <volume>/project/EclipticRD-Rewrite/..."`
   * `8383` (`assistant`): `"→ eval"` (ts: `07:16:26.499Z`)
   * `8384` (`toolResult`): `"5854 |         let _ = state.auth_manager..."`
   * `8385` (`assistant`): `"Still compiling; I'll wait on the monitor."` (ts: `07:16:29.376Z`)
@@ -322,7 +322,7 @@ FUNCTION finalizeTurn(turn):
       5. `[pencil] Edited server.rs` (detail: `"Successfully replaced 1 block(s)..."`)
       6. `[terminal] Ran eval` (detail: `"Command running in background..."`)
       7. `[terminal] Ran eval` (detail: `"16832 => FERRYX_SESSION_ID=..."`)
-      8. `[terminal] Ran eval` (detail: `"   1 /Volumes/T9-Mac/project/..."`)
+      8. `[terminal] Ran eval` (detail: `"   1 <volume>/project/..."`)
       9. `[terminal] Ran eval` (detail: `"5854 | let _ = state..."`)
       10. `[terminal] Ran eval` (detail: `"test result: ok. 37 passed..."`)
     * **Assistant Prose Canvas:** Clean Markdown text without tool arrows:

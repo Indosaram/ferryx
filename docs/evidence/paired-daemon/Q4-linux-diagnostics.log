@@ -1,2 +1,0 @@
-error: Unknown binary 'rust-analyzer' in official toolchain 'stable-x86_64-unknown-linux-gnu'.
-LSP_TOOL_EXIT 1

@@ -47,13 +47,13 @@ test("buildHost: remote artifact transport uses keepalive options", async () => 
 
 test("createWindowsBuildScript: reads signing secret from a remote file", () => {
   const script = createWindowsBuildScript({
-    workspaceDir: "C:/Users/sook/ferryx-releases/test",
+    workspaceDir: "C:/ferryx-releases/test",
     plan: {
       tag: "v2026.09.20.7",
       msixVersion: "2026.920.7.0",
       channels: { nsisMigration: true },
     },
-    hostConfig: { root: "C:/Users/sook/ferryx-releases" },
+    hostConfig: { root: "C:/ferryx-releases" },
     signingSecretFile: "tauri-signing-secret.json",
   });
   assert.match(script, /ConvertFrom-Json/);
@@ -65,9 +65,9 @@ test("probeMacbook: correctly inspects disk budget and detects insufficiency", a
   const hostConfig = {
     platform: "darwin",
     ssh: null,
-    root: "/Users/indo/ferryx-release-builds",
+    root: "/path/to/ferryx-release-builds",
     minFreeBytes: 100 * 1024 * 1024 * 1024 * 1024, // 100 TB - impossible to satisfy
-    signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+    signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
     notaryProfile: "FerryxNotary",
   };
 
@@ -84,9 +84,9 @@ test("probeMacbook: passes disk check when budget is conservative", async () => 
   const hostConfig = {
     platform: "darwin",
     ssh: null,
-    root: "/Users/indo/ferryx-release-builds",
+    root: "/path/to/ferryx-release-builds",
     minFreeBytes: 1024 * 1024, // 1 MB
-    signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+    signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
     notaryProfile: "FerryxNotary",
   };
 
@@ -287,8 +287,8 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
 
     const config = {
       schemaVersion: 1,
-      repository: "/Users/indo/code/project/orca-lite",
-      ghosttyRepository: "/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty",
+      repository: "/path/to/ferryx",
+      ghosttyRepository: "/path/to/ferryx/src-tauri/vendor/ghostty",
       repo: "Indosaram/ferryx",
       hosts: {
         macbook: {
@@ -571,14 +571,14 @@ test("buildHost: fails closed when a custom runner returns no result", async () 
 test("buildHost: rejects unknown host or missing run directory", async () => {
   const config = {
     schemaVersion: 1,
-    repository: "/Users/indo/code/project/orca-lite",
-    ghosttyRepository: "/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty",
+    repository: "/path/to/ferryx",
+    ghosttyRepository: "/path/to/ferryx/src-tauri/vendor/ghostty",
     repo: "Indosaram/ferryx",
     hosts: {
       macbook: {
         platform: "darwin",
         ssh: null,
-        root: "/Users/indo/ferryx-release-builds",
+        root: "/path/to/ferryx-release-builds",
         minFreeBytes: 1024,
       },
     },
@@ -619,8 +619,8 @@ test("buildHost: fails closed if workspace already exists on host", async () => 
 
     const config = {
       schemaVersion: 1,
-      repository: "/Users/indo/code/project/orca-lite",
-      ghosttyRepository: "/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty",
+      repository: "/path/to/ferryx",
+      ghosttyRepository: "/path/to/ferryx/src-tauri/vendor/ghostty",
       repo: "Indosaram/ferryx",
       hosts: {
         macbook: {
@@ -675,8 +675,8 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
 
     const config = {
       schemaVersion: 1,
-      repository: "/Users/indo/code/project/orca-lite",
-      ghosttyRepository: "/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty",
+      repository: "/path/to/ferryx",
+      ghosttyRepository: "/path/to/ferryx/src-tauri/vendor/ghostty",
       repo: "Indosaram/ferryx",
       hosts: {
         macbook: {
@@ -911,7 +911,7 @@ function createMacFinalizeFixture(tmp, { notaryStatus = "Accepted" } = {}) {
       ) {
         writeFileSync(target, `${readFileSync(target, "utf8")}+signed`);
       }
-      return { status: 0, stdout: "", stderr: "Authority=Developer ID Application: Indo Yoon (5DUM8WPB4C)\n" };
+      return { status: 0, stdout: "", stderr: "Authority=Developer ID Application: Example Developer (TEAMID0000)\n" };
     }
     if (command === "rm") {
       rmSync(args[args.length - 1], { recursive: true, force: true });
@@ -992,7 +992,7 @@ test("finalizeMacosBundle: DMG is rebuilt from the signed+stapled app, so helper
       appPath: fixture.appPath,
       dmgPath: fixture.dmgPath,
       workspaceDir: fixture.workspaceDir,
-      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
       notaryProfile: "FerryxNotary",
       approveNotarization: true,
       exec: fixture.exec,
@@ -1023,7 +1023,7 @@ test("finalizeMacosBundle: orders DMG creation after app staple and before DMG n
       appPath: fixture.appPath,
       dmgPath: fixture.dmgPath,
       workspaceDir: fixture.workspaceDir,
-      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
       notaryProfile: "FerryxNotary",
       approveNotarization: true,
       exec: fixture.exec,
@@ -1087,7 +1087,7 @@ test("finalizeMacosBundle: signs the nested daemon helper bundle before the oute
       appPath: fixture.appPath,
       dmgPath: fixture.dmgPath,
       workspaceDir: fixture.workspaceDir,
-      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
       notaryProfile: "FerryxNotary",
       approveNotarization: true,
       entitlements,
@@ -1133,7 +1133,7 @@ test("finalizeMacosBundle: fails when signing changed the outer app's recorded e
           appPath: fixture.appPath,
           dmgPath: null,
           workspaceDir: fixture.workspaceDir,
-          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
           notaryProfile: "FerryxNotary",
           approveNotarization: true,
           entitlements,
@@ -1161,7 +1161,7 @@ test("submitForNotarization: fails closed on an Invalid submission instead of pr
           appPath: fixture.appPath,
           dmgPath: fixture.dmgPath,
           workspaceDir: fixture.workspaceDir,
-          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
           notaryProfile: "FerryxNotary",
           approveNotarization: true,
           exec: fixture.exec,

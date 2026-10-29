@@ -16,7 +16,7 @@ vi.mock("../lib/pairedHostReachability", async (importOriginal) => ({
 vi.mock("../lib/sshHosts", () => ({ useSshHosts: () => ({ hosts: [{ id: "ssh", label: "SSH machine" }] }), subscribeSshHosts: () => () => undefined }));
 afterEach(() => { cleanup(); localStorage.clear(); remoteHostStore.reset(); reach.view = { supported: false, entry: null }; });
 it("opens the registered SSH folder rather than its parent Git worktree", () => {
-  const local: RegisteredProject = { workspaceId: "project", repoRoot: "/Users/indo/code/project", gitRoot: null };
+  const local: RegisteredProject = { workspaceId: "project", repoRoot: "/Users/example/code/project", gitRoot: null };
   const remote: RegisteredProject = {
     workspaceId: "ssh:roblox", repoRoot: "C:\\Users\\sook\\code\\roblox-game-forge",
     gitRoot: "C:/Users/sook", gitBranch: "master", target: { kind: "ssh", hostId: "ssh" },

@@ -1,2 +1,0 @@
-pty EXIT=101; WAITED=True
-worktrees EXIT=101; WAITED=True

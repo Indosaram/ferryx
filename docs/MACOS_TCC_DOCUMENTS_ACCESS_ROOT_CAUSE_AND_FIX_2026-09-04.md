@@ -11,7 +11,7 @@
 When Ferryx was running, macOS presented a TCC security dialog requesting access to the user's `Documents` folder (`kTCCServiceSystemPolicyDocumentsFolder`), followed by prompts for other protected user folders (Downloads, Photos, Desktop).
 
 Through dissection of the macOS Unified Log (`tccd`, `kernel`), Ferryx state databases, and agent session transcripts, two interrelated root causes were identified:
-1. An agent sub-process ran `find /` inside a terminal session spawned by Ferryx, which systematically traversed the root filesystem starting from `/` and entering `/Users/indo/Documents`.
+1. An agent sub-process ran `find /` inside a terminal session spawned by Ferryx, which systematically traversed the root filesystem starting from `/` and entering `~/Documents`.
 2. Ferryx itself had an invalid workspace registered with `repoRoot: "/"` and `workspaceId: "project"`, causing its background DAG watcher to attach an FSEvents recursive file watcher (`watcher.watch("/", RecursiveMode::Recursive)`) to the entire macOS root filesystem and scan the root directory.
 
 Both the active state and all code paths allowing filesystem root registration and recursive root watching have been hardened and tested.
@@ -23,8 +23,8 @@ Both the active state and all code paths allowing filesystem root registration a
 ### 2.1 Unified Log Trace
 Querying macOS Unified Log at the time of the alert (14:13:36 to 15:44:21 KST) revealed:
 - Process `/usr/bin/find` (PID 19605) ran for 1 hour 30 minutes, responsible process attributed by `tccd` to `com.ferryx.app` (PID 36197).
-- Traversal order walked directories alphabetically: `/Library` -> `/System` -> `/Users/indo/Library` -> `/Users/indo/Documents` -> `/Users/indo/Downloads`.
-- As soon as `find` crossed into `/Users/indo/Documents`, `tccd` intercepted the `getattrlistbulk` system call and triggered `kTCCServiceSystemPolicyDocumentsFolder`.
+- Traversal order walked directories alphabetically: `/Library` -> `/System` -> `~/Library` -> `~/Documents` -> `~/Downloads`.
+- As soon as `find` crossed into `~/Documents`, `tccd` intercepted the `getattrlistbulk` system call and triggered `kTCCServiceSystemPolicyDocumentsFolder`.
 
 ### 2.2 Agent Session Transcript Trace
 Inspection of `~/.omo/sessions/` transcripts revealed that an AI coding agent operating inside a terminal under Ferryx was caught in a tool-denial retry loop and issued `find /` in a blind attempt to locate files across the system.
@@ -86,7 +86,7 @@ In Ferryx:
 - Added test in `App.test.tsx` verifying `"/"` is filtered out during app bootstrap.
 
 ### 3.6 Active State Remediation
-- Removed `"project": "/"` from `/Users/indo/Library/Application Support/com.ferryx.app/session_state.json`.
+- Removed `"project": "/"` from `~/Library/Application Support/com.ferryx.app/session_state.json`.
 - Removed `"project": "/"` from WebKit LocalStorage (`ItemTable.ferryx.projects` in `localstorage.sqlite3`).
 
 ---

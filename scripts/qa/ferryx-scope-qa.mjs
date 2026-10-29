@@ -27,7 +27,10 @@ export async function main(argv) {
     const fixture = preparing || values['self-test'] ? (owned = prepare()) : validateRoot(values.root);
     report.fixture = { root: fixture.root, id: fixture.id, repositories: fixture.repositories };
     if (values['evidence-dir']) {
-      const base = realpathSync('docs/evidence/ferryx-scope');
+      // Evidence is local-only (untracked); override the root with FERRYX_QA_EVIDENCE_DIR.
+      const baseDir = join(resolve(import.meta.dirname, '../..', process.env.FERRYX_QA_EVIDENCE_DIR || '.qa-evidence'), 'ferryx-scope');
+      mkdirSync(baseDir, { recursive: true, mode: 0o700 });
+      const base = realpathSync(baseDir);
       const requested = resolve(values['evidence-dir']);
       if (!requested.startsWith(`${base}/`) || requested === base) throw new Error('UNSAFE_EVIDENCE_DIR');
       // Walk each component before creation: never follow an existing symlink.

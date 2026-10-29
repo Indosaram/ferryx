@@ -1694,18 +1694,18 @@ mod tests {
         assert_eq!(
             extract_session_id_from_path(
                 "codex",
-                "/Users/indo/.codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl",
+                "/Users/example/.codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl",
             ),
             Some("01a1626f-f0db-75d0-b73c-2372a21d4cae".to_string())
         );
         assert_eq!(
-            extract_session_id_from_path("codex", "/Users/indo/.codex/sessions/2026/10/22/notes.jsonl"),
+            extract_session_id_from_path("codex", "/Users/example/.codex/sessions/2026/10/22/notes.jsonl"),
             None
         );
         assert_eq!(
             extract_session_id_from_path(
                 "codex",
-                "/Users/indo/.claude/projects/x/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl",
+                "/Users/example/.claude/projects/x/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl",
             ),
             None
         );
@@ -1765,21 +1765,21 @@ mod tests {
         assert_eq!(
             extract_session_id_from_path(
                 "cline",
-                "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.json",
+                "/Users/example/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.json",
             ),
             Some("1792653340197_ys4yu".to_string())
         );
         assert_eq!(
             extract_session_id_from_path(
                 "cline",
-                "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.messages.json",
+                "/Users/example/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.messages.json",
             ),
             Some("1792653340197_ys4yu".to_string())
         );
         assert_eq!(
             extract_session_id_from_path(
                 "cline",
-                "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/other_ys4yu.json",
+                "/Users/example/.cline/data/sessions/1792653340197_ys4yu/other_ys4yu.json",
             ),
             None
         );
@@ -1825,7 +1825,7 @@ mod tests {
         assert!(args_match_agent("droid", "droid"));
         assert!(args_match_agent(
             "cline",
-            "/Users/indo/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn"
+            "/Users/example/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn"
         ));
         assert!(!args_match_agent(
             "cline",
@@ -1853,7 +1853,7 @@ mod tests {
         assert_eq!(
             resume_id_from_args(
                 "cline",
-                "/Users/indo/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn --id 1792653340197_ys4yu"
+                "/Users/example/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn --id 1792653340197_ys4yu"
             )
             .as_deref(),
             Some("1792653340197_ys4yu")
@@ -2081,7 +2081,7 @@ mod tests {
         // processes measured live, or their panes never get an id.
         assert!(args_match_agent(
             "kimi",
-            "/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi"
+            "/Users/example/.local/share/uv/tools/kimi-cli/bin/python /Users/example/.local/bin/kimi"
         ));
         assert!(args_match_agent(
             "kimi",
@@ -2152,7 +2152,7 @@ mod tests {
     fn uuid_from_session_path_extracts_timestamped_omo_session_id() {
         assert_eq!(
             uuid_from_session_path(
-                "/Users/indo/.omo/sessions/project/2026-08-31T04-00-20-190Z_01a055f9-a8de-7619-a1f5-81ca62e3d3b1.jsonl",
+                "/Users/example/.omo/sessions/project/2026-08-31T04-00-20-190Z_01a055f9-a8de-7619-a1f5-81ca62e3d3b1.jsonl",
             ),
             Some("01a055f9-a8de-7619-a1f5-81ca62e3d3b1".to_string())
         );
@@ -2162,8 +2162,8 @@ mod tests {
     fn session_id_from_env_output_reads_pi_session_file() {
         let stdout = concat!(
             "12345 ?? S 0:00.01 bun /Users/x/omo-ai/bin/omo.js serve ",
-            "HOME=/Users/indo PATH=/usr/bin:/bin ",
-            "PI_SESSION_FILE=/Users/indo/.omo/sessions/orca-lite/2026-08-31T04-00-20-190Z_01a055f9-a8de-7619-a1f5-81ca62e3d3b1.jsonl ",
+            "HOME=/Users/example PATH=/usr/bin:/bin ",
+            "PI_SESSION_FILE=/Users/example/.omo/sessions/orca-lite/2026-08-31T04-00-20-190Z_01a055f9-a8de-7619-a1f5-81ca62e3d3b1.jsonl ",
             "SHELL=/bin/zsh\n",
         );
 
@@ -2172,7 +2172,7 @@ mod tests {
             Some("01a055f9-a8de-7619-a1f5-81ca62e3d3b1".to_string())
         );
         assert_eq!(
-            session_id_from_env_output("omo", "HOME=/Users/indo PATH=/usr/bin:/bin"),
+            session_id_from_env_output("omo", "HOME=/Users/example PATH=/usr/bin:/bin"),
             None
         );
     }
@@ -2235,7 +2235,7 @@ mod tests {
     }
 
     /// The measured senpi transcript (facts/local-1.md:341-344, facts/local.md:34).
-    const SENPI_MEASURED_PATH: &str = "/Users/indo/.senpi/agent/sessions/--private-tmp-parity-pi.tqp0--/2026-10-22T07-24-18-316Z_01a1627f-160c-731c-9a7c-2069a9dd8b54.jsonl";
+    const SENPI_MEASURED_PATH: &str = "/Users/example/.senpi/agent/sessions/--private-tmp-parity-pi.tqp0--/2026-10-22T07-24-18-316Z_01a1627f-160c-731c-9a7c-2069a9dd8b54.jsonl";
 
     #[test]
     fn pi_discovery_reads_the_measured_senpi_store() {
@@ -2243,11 +2243,11 @@ mod tests {
         let no_env = |_: &str| None;
         assert_eq!(pi_session_id_from_path(SENPI_MEASURED_PATH, no_env), Some(id.to_string()));
         // Windows separators normalise to the same marker.
-        let windows = SENPI_MEASURED_PATH.replace("/Users/indo", r"C:\Users\indo").replace('/', r"\");
+        let windows = SENPI_MEASURED_PATH.replace("/Users/example", r"C:\Users\example").replace('/', r"\");
         assert_eq!(extract_session_id_from_path("pi", &windows), Some(id.to_string()));
         // A senpi sibling that is not a session store carries no pi session.
         assert_eq!(
-            pi_session_id_from_path(&format!("/Users/indo/.senpi/agent/runtime/{id}.jsonl"), no_env),
+            pi_session_id_from_path(&format!("/Users/example/.senpi/agent/runtime/{id}.jsonl"), no_env),
             None
         );
     }
@@ -2310,23 +2310,23 @@ mod tests {
                 "title": "New session",
                 "updated": 1788364377094,
                 "created": 1788364376773,
-                "directory": "/Users/indo/code/project/orca-lite"
+                "directory": "/Users/example/code/project/orca-lite"
             },
             {
                 "id": "ses_other1234567890abcdef",
                 "title": "Other",
                 "updated": 1788360000000,
                 "created": 1788360000000,
-                "directory": "/Users/indo/code/other"
+                "directory": "/Users/example/code/other"
             }
         ]"#;
 
         assert_eq!(
-            parse_opencode_session_list_json(fixture, "/Users/indo/code/project/orca-lite"),
+            parse_opencode_session_list_json(fixture, "/Users/example/code/project/orca-lite"),
             Some("ses_f9d2d353affewnpwvJ0rOcNZls".to_string())
         );
         assert_eq!(
-            parse_opencode_session_list_json(fixture, "/Users/indo/code/other/sub"),
+            parse_opencode_session_list_json(fixture, "/Users/example/code/other/sub"),
             Some("ses_other1234567890abcdef".to_string())
         );
         assert_eq!(
@@ -2338,16 +2338,16 @@ mod tests {
     #[test]
     fn test_encode_pi_safe_path() {
         assert_eq!(
-            encode_pi_safe_path("/Users/indo/code/project/orca-lite"),
-            "--Users-indo-code-project-orca-lite--"
+            encode_pi_safe_path("/Users/example/code/project/orca-lite"),
+            "--Users-example-code-project-orca-lite--"
         );
         assert_eq!(
-            encode_pi_safe_path("/Users/indo/code/project/orca-lite/"),
-            "--Users-indo-code-project-orca-lite--"
+            encode_pi_safe_path("/Users/example/code/project/orca-lite/"),
+            "--Users-example-code-project-orca-lite--"
         );
         assert_eq!(
-            encode_pi_safe_path(r"C:\Users\indo\project"),
-            "--C--Users-indo-project--"
+            encode_pi_safe_path(r"C:\Users\example\project"),
+            "--C--Users-example-project--"
         );
     }
 

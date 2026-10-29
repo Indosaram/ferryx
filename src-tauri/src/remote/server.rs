@@ -8942,7 +8942,7 @@ mod tests {
             ..Default::default()
         });
         *backend.title_override.lock().unwrap() =
-            Some("Snapshot at /Volumes/T9-Mac/project/ferryx/x.json".into());
+            Some("Snapshot at /Volumes/Data/project/ferryx/x.json".into());
         let sanitized = client
             .get(format!("http://{addr}/api/v1/browser/sessions"))
             .header("Authorization", format!("Bearer {token}"))
@@ -10924,8 +10924,8 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
-        let cwd = "/Volumes/T9-Mac/project/ferryx";
-        let slug = "--Volumes-T9-Mac-project-ferryx--";
+        let cwd = "/Volumes/Data/project/ferryx";
+        let slug = "--Volumes-Data-project-ferryx--";
         let dir = home.join(".omo").join("agent").join("sessions").join(slug);
         std::fs::create_dir_all(&dir).expect("create sessions dir");
 
@@ -11087,8 +11087,8 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
-        let cwd = "/Volumes/T9-Mac/project/ferryx";
-        let slug = "--Volumes-T9-Mac-project-ferryx--";
+        let cwd = "/Volumes/Data/project/ferryx";
+        let slug = "--Volumes-Data-project-ferryx--";
         let dir = home.join(".omo").join("agent").join("sessions").join(slug);
         std::fs::create_dir_all(&dir).expect("create sessions dir");
 

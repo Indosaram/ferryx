@@ -6,7 +6,7 @@ It does not replace the objective or waive its historical conditions.
 ## Deliverable and verdict
 
 The requested deliverable is four isolated worktrees under
-`/Users/indo/code/project/orca-lite-wt`, implementing the disk-management,
+`<worktree-root>`, implementing the disk-management,
 agent-state watchdog, documentation, and regression-test tracks, with node and
 supervisor execution evidence, cleanup receipts, no commits, and the original
 live daemon PID preserved.

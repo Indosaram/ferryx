@@ -265,7 +265,7 @@ mod tests {
     fn projection() -> String {
         let (meta, blobs) = store();
         let root = cursor_meta_root(&meta).expect("meta names the root");
-        assert_eq!(root, "67db351a3eed0d714f7df5fd0f0c209b420c00cbdf7d0a73129da81e9acc7b03");
+        assert_eq!(root, "377ad79c140c48a6cb42caa33e9a93a57f9f52306f41cd611f69d1e7134f6107");
         cursor_projection(&root, |id| blobs.get(id).cloned()).expect("the root is a tree")
     }
 
@@ -326,7 +326,7 @@ mod tests {
         let root = cursor_meta_root(&meta).expect("meta names the root");
         assert_eq!(
             cursor_root_workspace(&blobs[&root]).as_deref(),
-            Some("/Users/indo/code/project/opencode-inflearn"),
+            Some("/Users/user/code/project/opencode-inflearn"),
             "field 21.1 of the root node is the chat's workspace"
         );
         assert_eq!(cursor_root_workspace(&[0x0a, 0x05, 0x01]), None, "a torn node names nothing");

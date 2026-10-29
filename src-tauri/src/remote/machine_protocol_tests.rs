@@ -59,7 +59,7 @@ fn legacy_valid_ssh_targets_roundtrip_without_normalization() {
 #[test]
 fn expanded_shared_parity_fixtures() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../docs/evidence/paired-daemon/fixtures");
+        .join("tests/fixtures/paired-daemon");
     let valid: Vec<Value> =
         serde_json::from_slice(&std::fs::read(root.join("parity-valid.json")).unwrap()).unwrap();
     for fixture in valid {
@@ -97,7 +97,7 @@ fn roundtrip<T: serde::de::DeserializeOwned + Serialize>(value: &Value, limit: u
 #[test]
 fn shared_fixtures_roundtrip_through_public_decoder() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../docs/evidence/paired-daemon/fixtures/contracts.json"
+        "../../tests/fixtures/paired-daemon/contracts.json"
     ))
     .unwrap();
     for fixture in fixtures {
@@ -146,7 +146,7 @@ fn identity_is_host_qualified_and_preserves_large_epoch() {
 #[test]
 fn lifecycle_and_descriptor_fixtures_roundtrip() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../docs/evidence/paired-daemon/fixtures/lifecycle.json"
+        "../../tests/fixtures/paired-daemon/lifecycle.json"
     ))
     .unwrap();
     for fixture in fixtures {
@@ -170,7 +170,7 @@ fn lifecycle_and_descriptor_fixtures_roundtrip() {
         }
     }
     let descriptor: Value = serde_json::from_str(include_str!(
-        "../../../docs/evidence/paired-daemon/fixtures/descriptor.json"
+        "../../tests/fixtures/paired-daemon/descriptor.json"
     ))
     .unwrap();
     roundtrip::<ProxyDescriptor>(&descriptor, MACHINE_JSON_MAX_BYTES);
@@ -185,7 +185,7 @@ fn lifecycle_and_descriptor_fixtures_roundtrip() {
 #[test]
 fn known_answer_full_hashes_match_shared_fixtures() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../docs/evidence/paired-daemon/fixtures/identities.json"
+        "../../tests/fixtures/paired-daemon/identities.json"
     ))
     .unwrap();
     for v in fixtures {
@@ -208,11 +208,11 @@ fn known_answer_full_hashes_match_shared_fixtures() {
 #[test]
 fn shared_invalid_fixtures_are_rejected() {
     let valid: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../docs/evidence/paired-daemon/fixtures/contracts.json"
+        "../../tests/fixtures/paired-daemon/contracts.json"
     ))
     .unwrap();
     let invalid: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../docs/evidence/paired-daemon/fixtures/invalid.json"
+        "../../tests/fixtures/paired-daemon/invalid.json"
     ))
     .unwrap();
     let mut accepted = Vec::new();

@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         platform: RemotePlatform::Windows,
                         executor: RemoteExecutor::Powershell,
                         version: "bridge-driver".into(),
-                        home: r"C:\Users\sook".into(),
+                        home: windows_home(),
                         temp: r"C:\Windows\Temp".into(),
                         git: false,
                     };
@@ -168,8 +168,13 @@ fn windows_environment() -> RemoteEnvironment {
         platform: RemotePlatform::Windows,
         executor: RemoteExecutor::Powershell,
         version: "bridge-driver".into(),
-        home: r"C:\Users\sook".into(),
+        home: windows_home(),
         temp: r"C:\Windows\Temp".into(),
         git: false,
     }
+}
+
+/// Home of the account running the driver on the Windows target.
+fn windows_home() -> String {
+    std::env::var("USERPROFILE").unwrap_or_else(|_| r"C:\Users\Default".into())
 }

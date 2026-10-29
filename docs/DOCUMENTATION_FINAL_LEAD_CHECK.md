@@ -1,6 +1,6 @@
 # Final documentation lead check
 
-Worktree: `/Users/indo/code/project/orca-lite-wt/sa-docs`.
+Worktree: `<worktree-root>/sa-docs`.
 Date: 2026-09-13.
 
 ## Current result
@@ -31,7 +31,7 @@ Verbatim decisive output:
 ```text
 FAIL  49 of 264 anchors did not verify:
 FINAL_ANCHOR_EXIT=1
-22:08:25 [WARN] [glob-loader] Duplicate id "privacy" found in /Users/indo/code/project/orca-lite-wt/sa-docs/site/src/content/docs/privacy.md. Later items with the same id will overwrite earlier ones.
+22:08:25 [WARN] [glob-loader] Duplicate id "privacy" found in <worktree-root>/sa-docs/site/src/content/docs/privacy.md. Later items with the same id will overwrite earlier ones.
 22:08:29   ├─ /privacy/index.html (+8ms)
 22:08:29 [build] 16 page(s) built in 4.33s
 22:08:29 [build] Complete!
@@ -84,7 +84,7 @@ captured build above. The subsequent lead-run site build covered those final
 edits; monitor `mon_S2WRTXGV20FS1T50`, session `bash_309`, captured:
 
 ```text
-22:13:58 [WARN] [glob-loader] Duplicate id "privacy" found in /Users/indo/code/project/orca-lite-wt/sa-docs/site/src/content/docs/privacy.md. Later items with the same id will overwrite earlier ones.
+22:13:58 [WARN] [glob-loader] Duplicate id "privacy" found in <worktree-root>/sa-docs/site/src/content/docs/privacy.md. Later items with the same id will overwrite earlier ones.
 22:14:02 [build] Complete!
 CREDENTIAL_DOCS_BUILD_EXIT=0
 watcher completed (exit code 0)
@@ -114,7 +114,7 @@ skips. Decisive command output:
 LEAD_ANCHOR_TEST_EXIT=0
 OK  354 structural references verified across 3 deliverables; 16 explicit token assertions verified (prose claims not checked)
 LEAD_ANCHOR_VERIFY_EXIT=0
-22:16:02 [WARN] [glob-loader] Duplicate id "privacy" found in /Users/indo/code/project/orca-lite-wt/sa-docs/site/src/content/docs/privacy.md. Later items with the same id will overwrite earlier ones.
+22:16:02 [WARN] [glob-loader] Duplicate id "privacy" found in <worktree-root>/sa-docs/site/src/content/docs/privacy.md. Later items with the same id will overwrite earlier ones.
 22:16:05 [build] Complete!
 LEAD_FINAL_SITE_EXIT=0
 LEAD_DIFF_CHECK_EXIT=0
@@ -143,7 +143,7 @@ failures. Earlier evidence records original live daemon PID 36170 and later PID
 1010. The current read-only process observation was:
 
 ```text
-21591 Sun Sep 13 19:27:52 2026     /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
+21591 Sun Sep 13 19:27:52 2026     <worktree-root>/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
 ```
 
 This is not an unchanged-PID result or a replacement baseline. No daemon was

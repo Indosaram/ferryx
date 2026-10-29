@@ -261,7 +261,7 @@ def prepare(root: Path, sshd: Path, ssh: Path, keygen: Path, port: int) -> dict:
         f"HostKey {host_key}", f"PidFile {root / 'sshd.pid'}", f"LogLevel VERBOSE",
         f"AuthorizedKeysFile {root / 'authorized_keys'}", "PubkeyAuthentication yes",
         "PasswordAuthentication no", "KbdInteractiveAuthentication no", "GSSAPIAuthentication no",
-        "HostbasedAuthentication no", "PermitEmptyPasswords no", "AllowUsers sook",
+        "HostbasedAuthentication no", "PermitEmptyPasswords no", f"AllowUsers {os.environ.get('USERNAME', 'UNKNOWN')}",
         "MaxStartups 64:30:128", "LoginGraceTime 30", "StrictModes no", "UseDNS no", "",
     ]), encoding="utf-8")
     authorized_keys = root / "authorized_keys"

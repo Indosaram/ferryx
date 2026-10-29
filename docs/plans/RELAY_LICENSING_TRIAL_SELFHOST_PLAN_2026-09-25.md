@@ -1556,7 +1556,7 @@ CREATE INDEX license_keys_user_id ON license_keys(user_id);
 
 ### 2.4 systemd drop-in 규약(호스트가 이미 쓰는 방식)
 
-- 프로덕션 릴레이는 `/etc/systemd/system/ferryx-relay.service`(`ExecStart=/home/indo/bin/ferryx-relay --port 8787`, `Restart=always`)에 drop-in 디렉터리를 사용하며, 현재 `debug.conf`(RUST_LOG)와 `machine-tokens.conf`(`FERRYX_RELAY_MACHINE_TOKENS`)가 있다(운영 기록: `notes/facts/ferryx-relay-live-deploy-omarchy.md` §Live edge topology). 오리진 전환도 drop-in으로 수행했다(`notes/facts/ferryx-relay-single-binary-and-headless-login.md` §1).
+- 프로덕션 릴레이는 `/etc/systemd/system/ferryx-relay.service`(`ExecStart=/home/<user>/bin/ferryx-relay --port 8787`, `Restart=always`)에 drop-in 디렉터리를 사용하며, 현재 `debug.conf`(RUST_LOG)와 `machine-tokens.conf`(`FERRYX_RELAY_MACHINE_TOKENS`)가 있다(운영 기록: `notes/facts/ferryx-relay-live-deploy-omarchy.md` §Live edge topology). 오리진 전환도 drop-in으로 수행했다(`notes/facts/ferryx-relay-single-binary-and-headless-login.md` §1).
 - 규약(신규 템플릿: `packaging/relay/dropins/{common,machine-tokens,mail,payment,store}.conf.example`, `scripts/relay/install-dropins.sh`): 시크릿은 `EnvironmentFile`(0600)로만, 유닛 본문에는 비시크릿 기본값만, 적용은 `daemon-reload` + `restart`, 롤백은 drop-in 파일 제거 후 재시작.
 
 ## 3. 관측가능성

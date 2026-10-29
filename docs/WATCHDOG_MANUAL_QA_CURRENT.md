@@ -7,7 +7,7 @@ replace its unconditional manual-reset success expectation.
 ## Launch
 
 ```sh
-cd /Users/indo/code/project/orca-lite-wt/sa-watchdog
+cd <worktree-root>/sa-watchdog
 bun tauri dev
 ```
 

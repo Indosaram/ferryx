@@ -119,7 +119,7 @@ ui/src/remote/input-latency-soak/soak.test.mjs:
 
 # Unhandled error between tests
 -------------------------------
-error: Cannot find module './soak.mjs' from '/Users/indo/code/project/orca-lite-wt/sa-tests/ui/src/remote/input-latency-soak/soak.test.mjs'
+error: Cannot find module './soak.mjs' from '<worktree-root>/sa-tests/ui/src/remote/input-latency-soak/soak.test.mjs'
 -------------------------------
 
 

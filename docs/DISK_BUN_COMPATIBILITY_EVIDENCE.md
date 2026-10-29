@@ -1,7 +1,7 @@
 # Disk Bun compatibility evidence
 
 Task: st_01a09af9. Scope: current C1 runner gap only.
-Working directory for every command: `/Users/indo/code/project/orca-lite-wt/sa-worktree-disk`.
+Working directory for every command: `<worktree-root>/sa-worktree-disk`.
 
 ## Change and coverage
 
@@ -41,7 +41,7 @@ TypeError: vi.hoisted is not a function. (In 'vi.hoisted(() => ({
   deleteWorktree: vi.fn(),
   deleteWorktreeDestructive: vi.fn()
 }))', 'vi.hoisted' is undefined)
-      at /Users/indo/code/project/orca-lite-wt/sa-worktree-disk/ui/src/components/WorktreeDeleteDialog.test.tsx:7:19
+      at <worktree-root>/sa-worktree-disk/ui/src/components/WorktreeDeleteDialog.test.tsx:7:19
 -------------------------------
 
 
@@ -73,7 +73,7 @@ ui/src/components/WorktreeDeleteDialog.test.tsx(59,93): error TS2339: Property '
 ## Final diagnostics
 
 Tool: `lsp_diagnostics`
-Arguments: `{"filePath":"/Users/indo/code/project/orca-lite-wt/sa-worktree-disk/ui/src/components/WorktreeDeleteDialog.test.tsx","severity":"all"}`
+Arguments: `{"filePath":"<worktree-root>/sa-worktree-disk/ui/src/components/WorktreeDeleteDialog.test.tsx","severity":"all"}`
 Full result: `No diagnostics found`. Tool has no process exit code.
 
 ## Final GREEN commands
@@ -164,7 +164,7 @@ Exit code: **0**. Full output:
 ```text
 $ vitest run --maxWorkers=1 "--cache=false" src/components/WorktreeDiskDialog.test.tsx src/components/WorktreeDiskDialog.lifecycle.test.tsx src/components/WorktreeDeleteDialog.test.tsx
 
- RUN  v3.2.7 /Users/indo/code/project/orca-lite-wt/sa-worktree-disk/ui
+ RUN  v3.2.7 <worktree-root>/sa-worktree-disk/ui
 
  ✓ src/components/WorktreeDiskDialog.test.tsx (8 tests) 136ms
  ✓ src/components/WorktreeDeleteDialog.test.tsx (11 tests) 110ms
@@ -254,7 +254,7 @@ and typecheck emitted no files. Direct before/after process observations were:
 
 ```text
 1010  Sun Sep 13 07:55:43 2026  /Applications/Ferryx.app/Contents/MacOS/ferryx --daemon
-21591 Sun Sep 13 19:27:52 2026  /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
+21591 Sun Sep 13 19:27:52 2026  <worktree-root>/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
 ```
 
 Neither daemon was contacted or signalled by the supervisor. This limited

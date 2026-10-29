@@ -569,7 +569,7 @@ all = [
                 "┌──────────────────────────────────────────────┐".to_string(),
                 "│ Welcome to Kimi Code CLI!                    │".to_string(),
                 "│ Send /help for help information.             │".to_string(),
-                "│ Directory: /Users/indo/code/project/orca-lite │".to_string(),
+                "│ Directory: /Users/example/code/project/orca-lite │".to_string(),
                 "│ Session: 550e8400-e29b-41d4-a716-446655440000 │".to_string(),
                 "│ Model: kimi-k1.5                             │".to_string(),
                 "└──────────────────────────────────────────────┘".to_string(),

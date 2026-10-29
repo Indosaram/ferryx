@@ -13,7 +13,8 @@ export async function main() {
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const scenario = process.argv[process.argv.indexOf('--scenario') + 1];
 assert(['transport-loss', 'daemon-restart', 'reconnect-safety'].includes(scenario), '--scenario transport-loss|daemon-restart|reconnect-safety required');
-const evidence = join(repo, 'docs/evidence/ssh-process-survival', `${scenario}.log`);
+// Evidence is local-only (untracked); override the root with FERRYX_QA_EVIDENCE_DIR.
+const evidence = join(resolve(repo, process.env.FERRYX_QA_EVIDENCE_DIR || '.qa-evidence'), 'ssh-process-survival', `${scenario}.log`);
 const records = [];
 function log(value) { const line = typeof value === 'string' ? value : JSON.stringify(value); records.push(line); console.log(line); }
 async function bounded(promise, label, ms = 30000) {
@@ -217,6 +218,7 @@ finally {
     log({ event: 'cleanup-receipt', root: root ?? null, remainingOwnedChildren: children.filter(p => p.exitCode === null && p.signalCode === null).map(p => p.pid), remainingSockets: sockets.size, fixtureRemoved: Boolean(root), trustUnchanged: true });
   } catch (e) { failure ??= e; log({ event: 'cleanup-failure', error: e.stack, retainedFixture: root }); }
   log({ status: failure ? 'INCOMPLETE' : 'PASS', scenario, nativeDesktopCoverage: false, linuxRemoteCoverage: false, windowsRemoteCoverage: false });
+  await mkdir(dirname(evidence), { recursive: true });
   await writeFile(evidence, records.join('\n') + '\n');
 }
 if (failure) process.exitCode = 1;

@@ -10,7 +10,9 @@ case "${1:-}" in
   *) echo 'usage: run-p30-cargo.sh red|green' >&2; exit 2 ;;
 esac
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-log="docs/evidence/windows-review-20260913/p30/${phase}.log"
+# Evidence is local-only (untracked); override the root with FERRYX_QA_EVIDENCE_DIR.
+log="${FERRYX_QA_EVIDENCE_DIR:-.qa-evidence}/windows-review-20260913/p30/${phase}.log"
+mkdir -p "$(dirname "$log")"
 if [[ -e "$log" ]]; then
   echo "Refusing to overwrite evidence: $log" >&2
   exit 2

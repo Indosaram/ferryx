@@ -2,14 +2,14 @@
   "dryRun": true,
   "command": "drill",
   "publicHostname": "relay.ferryx.dev",
-  "probeHost": "maho-win",
+  "probeHost": "windows-probe-host",
   "url": "https://relay.ferryx.dev/healthz",
   "stopSeconds": 120,
   "evidenceDir": ".omo/evidence/ferryx-adoption-objections-remediation/task-37",
   "steps": [
     {
       "id": "probe",
-      "host": "maho-win",
+      "host": "windows-probe-host",
       "kind": "run",
       "description": "poll https://relay.ferryx.dev/healthz every 5s for 180s and print \"<unix ms> <http code>\" lines",
       "command": "powershell -NoProfile -Command \"$end=(Get-Date).AddSeconds(180); while((Get-Date) -lt $end){ $t=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); $c=(curl.exe -s -o NUL -w '%{http_code}' --max-time 4 https://relay.ferryx.dev/healthz); Write-Output \\\"$t $c\\\"; Start-Sleep -Seconds 5 }\"",
@@ -17,7 +17,7 @@
     },
     {
       "id": "stop-primary",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "stop the primary relay for 120s, then start it again",
       "command": "date +%s%3N; sudo systemctl stop ferryx-relay.service; sleep 120; sudo systemctl start ferryx-relay.service; date +%s%3N"

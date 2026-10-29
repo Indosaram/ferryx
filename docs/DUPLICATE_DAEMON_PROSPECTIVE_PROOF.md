@@ -12,7 +12,7 @@ and ran restored GREEN. No permanent production or test change remains.
 All three executions used:
 
 ```sh
-cd /Users/indo/code/project/orca-lite-wt/sa-tests
+cd <worktree-root>/sa-tests
 export TMPDIR="$PWD/.dup-tmp" TMP="$PWD/.dup-tmp" TEMP="$PWD/.dup-tmp"
 export CARGO_TARGET_DIR="$PWD/target"
 cargo test --manifest-path src-tauri/Cargo.toml --test daemon_duplicate_prevention -- --nocapture
@@ -33,12 +33,12 @@ Execution identities and exit codes:
 Exact RED evidence:
 
 ```text
-isolated runtime=/Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-scNIxg/run data=/Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-scNIxg/data
+isolated runtime=<worktree-root>/sa-tests/.dup-tmp/fx-dup-scNIxg/run data=<worktree-root>/sa-tests/.dup-tmp/fx-dup-scNIxg/data
 spawned isolated daemon pid=35560
 spawned isolated daemon pid=35574
 reaped isolated daemon pid=35574 status=exit status: 0
 reaped isolated daemon pid=35560 status=exit status: 0
-cleanup verified: children reaped and /Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-scNIxg removed
+cleanup verified: children reaped and <worktree-root>/sa-tests/.dup-tmp/fx-dup-scNIxg removed
 thread 'second_daemon_refuses_already_locked_socket_directory' (4732262) panicked at tests/daemon_duplicate_prevention.rs:209:5:
 duplicate daemon reached readiness while owner held both locks
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.94s
@@ -53,7 +53,7 @@ spawned isolated daemon pid=36322
 Ferryx daemon error: Another daemon instance is already holding the lock.
 reaped isolated daemon pid=36322 status=exit status: 1
 reaped isolated daemon pid=36305 status=exit status: 0
-cleanup verified: children reaped and /Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-aBUMwr removed
+cleanup verified: children reaped and <worktree-root>/sa-tests/.dup-tmp/fx-dup-aBUMwr removed
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.09s
 DUP_RESTORED_GREEN_EXIT=0
 DUP_TEMP_PARENT_CLEANUP_EXIT=0
@@ -93,7 +93,7 @@ cleanup evidence described in `TEST_EVIDENCE_RECOVERY.md` remain missing.
 
 ## Read-only preflight
 
-Worktree: `/Users/indo/code/project/orca-lite-wt/sa-tests` (sole worktree used).
+Worktree: `<worktree-root>/sa-tests` (sole worktree used).
 Read: `docs/TEST_EVIDENCE_RECOVERY.md`, the complete
 `src-tauri/tests/daemon_duplicate_prevention.rs`, `src-tauri/Cargo.toml`, and
 the relevant lock acquisition, path-resolution, and listener startup code in

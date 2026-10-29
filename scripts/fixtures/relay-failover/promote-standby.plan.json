@@ -6,7 +6,7 @@
   "steps": [
     {
       "id": "fence-primary",
-      "host": "omarchy",
+      "host": "relay@primary.example.net",
       "kind": "run",
       "description": "stop the old primary's relay and replicator; if it is unreachable, power it off in the provider console before continuing",
       "command": "sudo systemctl disable --now ferryx-relay.service litestream.service",

@@ -10,7 +10,7 @@ import { dagStore } from "/src/state/dagStore";
 
 export const FIXTURE_ROOT_SESSION_ID = "01a0f117-dfe2-7de2-8c71-3343ae3ab192";
 export const FIXTURE_WORKSPACE_ID = "ssh:omarchy:omo-native-rs";
-export const FIXTURE_REMOTE_REPO_ROOT = "/home/indo/projects/omo-native-rs";
+export const FIXTURE_REMOTE_REPO_ROOT = "/home/qa/projects/omo-native-rs";
 
 export function createHarnessSession(
   id: string,

@@ -210,7 +210,7 @@ fn probe_build_log_with_waiting_does_not_return_blocked() {
     // Guard against: omo, grok, cursor false-blocking on build logs containing 'waiting'.
     let rows = [
         "$ cargo build",
-        "   Compiling ferryx v0.1.0 (/Users/indo/code/project/orca-lite/src-tauri)",
+        "   Compiling ferryx v0.1.0 (/Users/example/code/project/orca-lite/src-tauri)",
         "waiting for connection to database...",
         "    Finished dev [unoptimized + debuginfo] target(s) in 2.34s",
         "$ ",
@@ -265,7 +265,7 @@ fn probe_generic_selection_and_esc_cancel_do_not_fabricate_copilot() {
 const SENPI_IDLE_FOOTER: [&str; 4] = [
     "  Reloaded keybindings, extensions, skills, prompts, themes, and context files",
     "",
-    "/Volumes/T9-Mac/Noveling/noveling \u{2022} main \u{2022} $0.552 \u{2022} 359K/667K (53.8%) (auto)      (kiro-lb) claude-opus-5.5:medium",
+    "/Volumes/Data/Noveling/noveling \u{2022} main \u{2022} $0.552 \u{2022} 359K/667K (53.8%) (auto)      (kiro-lb) claude-opus-5.5:medium",
     "(\u{1f63a} OmO Native by Q Kim) mem:noveling-572243cf 10m ago (+53)",
 ];
 
@@ -282,7 +282,7 @@ fn probe_senpi_idle_footer_settles_a_pane_last_seen_working() {
 fn probe_senpi_live_working_line_above_footer_stays_working() {
     let rows = [
         "  \u{2022} Working (18s \u{2022} esc to interrupt)",
-        "/Volumes/T9-Mac/project/ferryx \u{2022} main \u{2022} $1.204 \u{2022} 120K/667K (18.0%) (auto)      claude-opus-5.5:medium",
+        "/Volumes/Data/project/ferryx \u{2022} main \u{2022} $1.204 \u{2022} 120K/667K (18.0%) (auto)      claude-opus-5.5:medium",
         "(\u{1f63a} OmO Native by Q Kim) mem:ferryx-f3088a01 just now (+20)",
     ];
     assert_eq!(

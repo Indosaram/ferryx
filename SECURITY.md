@@ -54,11 +54,11 @@ in this repository.
 Ferryx releases are built on operator-controlled machines, not on hosted CI. Every build uses one
 40-character source commit, recorded in the release's `provenance.json`:
 
-| Host | Builds |
+| Build host role | Builds |
 | --- | --- |
-| `macbook` (macOS, release coordinator) | universal updater archive, `Ferryx_universal.dmg`, `ferryx-cli-darwin-universal`; also assembles, signs and publishes the release |
-| `omaki` (Linux x86_64) | `Ferryx_amd64.AppImage`, `Ferryx_amd64.deb`, `ferryx-cli-linux-amd64` |
-| `maho-win` (Windows x64) | `Ferryx_x64.msix`, and the NSIS installer when it is shipped |
+| macOS release coordinator | universal updater archive, `Ferryx_universal.dmg`, `ferryx-cli-darwin-universal`; also assembles, signs and publishes the release |
+| Linux x86_64 build host | `Ferryx_amd64.AppImage`, `Ferryx_amd64.deb`, `ferryx-cli-linux-amd64` |
+| Windows x64 build host | `Ferryx_x64.msix`, and the NSIS installer when it is shipped |
 
 Each GitHub release carries:
 

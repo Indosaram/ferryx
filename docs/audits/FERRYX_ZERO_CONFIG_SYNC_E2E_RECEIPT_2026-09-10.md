@@ -17,15 +17,15 @@ product end-to-end attestation, and it must not be cited as closure for F01–F1
 Recorded after the fact on the Omaki host (`systemctl is-active ferryx-relay.service` ->
 `active`):
 
-- Binary: `/home/indo/bin/ferryx-relay`
+- Binary: `/home/<user>/bin/ferryx-relay`
 - SHA-256: `bb1b5520068495759cc437e2cb9bbf251971f2c7615e9c3a03ba7cebfb52902d`
 - Size / mtime: `4710200` bytes, `2026-09-10T21:26:55` (host local time)
 - Release profile. Installed binary is byte-identical to the build artifact at
-  `/home/indo/ferryx-relay-src/src-tauri/target/release/ferryx-relay` (both
+  `/home/<user>/ferryx-relay-src/src-tauri/target/release/ferryx-relay` (both
   `bb1b5520...52902d`), so the installed copy is the one that was compiled on the host.
 
 Source attribution, verified rather than asserted: the relay source synced to Omaki at
-`/home/indo/ferryx-relay-src/src-tauri/src/remote/relay_server.rs` hashes
+`/home/<user>/ferryx-relay-src/src-tauri/src/remote/relay_server.rs` hashes
 `198dd3c18201b39e9b4c2f969e1cb682ef9285adc9ec3cbb2c86d13def12032e`, which equals
 `git show 54b0801:src-tauri/src/remote/relay_server.rs` and also `git show HEAD:...` for the
 same path (commits after `54b0801` on this branch are documentation-only). The deployment is
@@ -166,7 +166,7 @@ the shared ticket budget and induce backend work.
 After deploying the remediation (worktree commit `c5fea8b`), the same probe that
 previously succeeded now fails closed.
 
-Deployed binary: `/home/indo/bin/ferryx-relay`, SHA-256
+Deployed binary: `/home/<user>/bin/ferryx-relay`, SHA-256
 `afd03af3a5b8a9dbac78a89644cc8a87d5b25b8b4ed6ba5791eedd5d1b4890d4`
 (`systemctl is-active` -> `active`). Supersedes the earlier `bb1b5520...52902d` build.
 

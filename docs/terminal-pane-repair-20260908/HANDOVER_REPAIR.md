@@ -52,7 +52,7 @@ not captured.
 - Regression tests use library targets; no shared-socket integration targets.
 - Test/build logs under this report's evidence directory are retained evidence.
 - The pre-existing debug journal is not modified.
-- LSP is unavailable at `/Users/indo/.omo/lsp-daemon/v0.1.0/daemon.sock`.
+- LSP is unavailable at `~/.omo/lsp-daemon/v0.1.0/daemon.sock`.
 - Default implementation child failed before tools due to OAuth 401.
   Read-only independent diagnosis uses the current parent provider instead.
 

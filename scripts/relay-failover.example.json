@@ -4,15 +4,15 @@
   "deploymentMode": "commercial",
   "port": 8787,
   "primary": {
-    "name": "omarchy",
-    "ssh": "omarchy",
-    "user": "indo",
-    "binary": "/home/indo/bin/ferryx-relay",
-    "dataDir": "/home/indo/.ferryx/account-data",
-    "relayDataDir": "/home/indo/.ferryx/relay",
-    "uiDistDir": "/home/indo/ferryx-relay-web/dist",
+    "name": "relay-primary",
+    "ssh": "relay@primary.example.net",
+    "user": "relay",
+    "binary": "/home/relay/bin/ferryx-relay",
+    "dataDir": "/home/relay/.ferryx/account-data",
+    "relayDataDir": "/home/relay/.ferryx/relay",
+    "uiDistDir": "/home/relay/ferryx-relay-web/dist",
     "directHostname": "relay-1.ferryx.dev",
-    "originAddress": "8681ba66-7b83-4645-8b8a-c4f5e1449d88.cfargotunnel.com"
+    "originAddress": "<primary-tunnel-origin-hostname>"
   },
   "standby": {
     "name": "relay-standby",
@@ -37,7 +37,7 @@
     "monitorIntervalSeconds": 15
   },
   "drill": {
-    "probeHost": "maho-win",
+    "probeHost": "windows-probe-host",
     "stopSeconds": 120,
     "probeEverySeconds": 5,
     "evidenceDir": ".omo/evidence/ferryx-adoption-objections-remediation/task-37"
