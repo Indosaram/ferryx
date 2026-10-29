@@ -1606,6 +1606,11 @@ export type FocusedTerminalPayload = {
   terminalTabs?: RemoteTerminalTabInfo[];
 };
 
+export async function reportDesktopWindowFocus(focused: boolean): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_remote_set_window_focused", { focused });
+}
+
 export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {
   if (!isTauri()) return;
   const terminalTabs = payload?.terminalTabs ?? payload?.tabs ?? [];

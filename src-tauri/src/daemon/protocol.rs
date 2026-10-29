@@ -983,6 +983,11 @@ pub enum DaemonRequest {
         ssh_store_path: Option<PathBuf>,
     },
     RemoteGetActiveSelection,
+    /// The desktop window's native focus. Phone pushes are held while it is focused.
+    #[serde(rename_all = "camelCase")]
+    RemoteSetWindowFocused {
+        focused: bool,
+    },
     /// Turns this connection into a one-way stream of desktop-directed remote
     /// events. Without it the gateway (which lives in the daemon) has no way to
     /// reach the GUI, so remote-issued selections are silently dropped.
@@ -1440,6 +1445,7 @@ pub enum DaemonResponse {
         device: DeviceInfo,
     },
     RemoteSetActiveSelectionOk,
+    RemoteSetWindowFocusedOk,
     #[serde(rename_all = "camelCase")]
     RemoteGetActiveSelectionOk {
         selection: Option<RemoteActiveDesktopSelection>,
