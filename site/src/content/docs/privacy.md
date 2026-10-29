@@ -63,7 +63,7 @@ What is deliberately not collected:
 
 Google Analytics receives the request metadata any web request carries, including your IP address, which Google uses for coarse geolocation before discarding it, and a first-party cookie identifier set when analytics is active (after you accept in the regions listed above, on arrival elsewhere). Clearing site data for `ferryx.dev` removes both the cookie and your stored choice.
 
-The site is served by Cloudflare, which reports aggregate request, page-view and visitor counts for the domain from its own edge logs. This sets no cookie and stores nothing on your device. If a build sets `PUBLIC_CF_BEACON_TOKEN`, the page also loads Cloudflare Web Analytics, which is likewise cookieless.
+The site is served by Cloudflare, which reports aggregate request, page-view and visitor counts for the domain from its own edge logs. Cloudflare also adds its Web Analytics script to every page at the edge. It measures page views, visits, referrers, countries and page-load timing for every visitor, sets no cookie, stores nothing on your device, and keeps no identifier that follows you between visits.
 
 A self-hosted, cookieless analytics script is also supported for forks: it renders only when both `PUBLIC_ANALYTICS_SRC` and `PUBLIC_ANALYTICS_DOMAIN` build environment variables are set (`site/src/components/SiteAnalytics.astro:106-110`). Neither variable is required by, nor related to, the Google Analytics path above.
 
