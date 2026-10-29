@@ -372,6 +372,19 @@ fn ssh_helper_unit_launch_args_forward_env_and_drop_connection_vars() {
             OsString::from("BASH_FUNC_probe%%"),
             OsString::from("() { :; }"),
         ),
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+        (
+            OsString::from("AWS_SECRET_ACCESS_KEY"),
+            OsString::from("secret"),
+        ),
+        (
+            OsString::from("FERRYX_AGENT_STATE_TOKEN"),
+            OsString::from("pane-token"),
+        ),
+        (OsString::from("XDG_SESSION_ID"), OsString::from("42")),
+        (OsString::from("SSH_AUTH_SOCK"), OsString::from("/tmp/ssh-x/agent.1")),
+        (OsString::from("TZ"), OsString::from("line\nbreak")),
     ];
     let args = unit_launch_args(
         std::path::Path::new("/home/u/.ferryx/bin/ferryx-remote-helper"),
@@ -395,6 +408,19 @@ fn ssh_helper_unit_launch_args_forward_env_and_drop_connection_vars() {
         .iter()
         .any(|arg| arg.starts_with("--setenv=XDG_RUNTIME_DIR=")));
     assert!(!text.iter().any(|arg| arg.contains("BASH_FUNC_probe")));
+    // Allowlist, not a denylist: only the named session variables reach the unit.
+    assert!(text.contains(&"--setenv=LANG=C.UTF-8".to_string()));
+    assert!(text.contains(&"--setenv=LC_ALL=C.UTF-8".to_string()));
+    let forwarded: Vec<&str> = text
+        .iter()
+        .filter_map(|arg| arg.strip_prefix("--setenv="))
+        .filter_map(|kv| kv.split_once('=').map(|(key, _)| key))
+        .collect();
+    assert_eq!(
+        forwarded,
+        ["FERRYX_HELPER_HYGIENE_SECS", "PATH", "LANG", "LC_ALL"],
+        "{text:?}"
+    );
     assert_eq!(
         &text[text.len() - 7..],
         &[

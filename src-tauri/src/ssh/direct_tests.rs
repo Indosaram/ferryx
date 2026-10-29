@@ -164,6 +164,7 @@ fn host() -> SshHost {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Key,
         disabled: None,
+        system_config_alias: None,
     }
 }
 
@@ -505,6 +506,7 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
         "/srv/repo",
         Some("session-123"),
         Some("/tmp/local-agent.sock"),
+        None,
     )
     .expect("plan");
 
@@ -533,8 +535,165 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
 }
 
 #[test]
+fn shell_plan_forwards_agent_socket_into_private_home_dir_not_shared_tmp() {
+    let plan = shell_plan_with_session(
+        &host(),
+        "/srv/repo",
+        Some("session-123"),
+        Some("/tmp/local-agent.sock"),
+        Some("/home/u/"),
+    )
+    .expect("plan");
+    assert!(plan.args.windows(2).any(|pair| pair
+        == [
+            "-R",
+            "/home/u/.ferryx/a/session-123.sock:/tmp/local-agent.sock"
+        ]), "{:?}", plan.args);
+    assert!(!plan.args.iter().any(|arg| arg.contains("/tmp/ferryx-agent-")), "{:?}", plan.args);
+    let remote_cmd = plan.args.last().unwrap();
+    assert!(remote_cmd.starts_with(
+        "d='/home/u/.ferryx/a'; if [ ! -L \"$d\" ] && { [ -d \"$d\" ] || [ ! -e \"$d\" ]; }; then \
+         (umask 077; mkdir -p \"$d\" && chmod 700 \"$d\") >/dev/null 2>&1; fi; "
+    ), "{remote_cmd}");
+    assert!(remote_cmd.contains("FERRYX_AGENT_STATE_SOCKET='/home/u/.ferryx/a/session-123.sock'"));
+    assert!(remote_cmd.contains("HERDR_SOCKET_PATH='/home/u/.ferryx/a/session-123.sock'"));
+
+    // A home too long for sun_path, or no known home, keeps the legacy socket path.
+    let long_home = format!("/home/{}", "h".repeat(80));
+    assert_eq!(
+        remote_agent_socket(Some(&long_home), "session-123"),
+        (None, "/tmp/ferryx-agent-session-123.sock".to_string())
+    );
+    assert_eq!(
+        remote_agent_socket(None, "session-123"),
+        (None, "/tmp/ferryx-agent-session-123.sock".to_string())
+    );
+    assert_eq!(
+        remote_agent_socket(Some("relative"), "session-123").1,
+        "/tmp/ferryx-agent-session-123.sock"
+    );
+}
+
+/// Runs `REMOTE_AGENT_DIR_PREFLIGHT` in a local `sh` with the given HOME; returns (status, output).
+#[cfg(unix)]
+fn run_agent_dir_preflight(home: &std::path::Path) -> (bool, String) {
+    let output = std::process::Command::new("sh")
+        .args(["-c", &format!("{REMOTE_AGENT_DIR_PREFLIGHT}echo done")])
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.success(), text)
+}
+
+/// sshd binds a pane's -R forward before the pane command runs, so the detect probe pre-creates
+/// the private directory: 0700, idempotent (tightening a loose mode), silent, never failing.
+#[cfg(unix)]
+#[test]
+fn agent_dir_preflight_creates_private_dir_idempotently() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = tempfile::tempdir().unwrap();
+    let dir = fixture.path().join(".ferryx/a");
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777, 0o700);
+    std::fs::write(dir.join("keep.sock"), "").unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777, 0o700);
+    assert!(dir.join("keep.sock").exists(), "existing entries survive");
+}
+
+/// A non-directory or a symlink (live or dangling) at the path is left alone, and the probe still
+/// succeeds; no relative or missing HOME makes it create anything.
+#[cfg(unix)]
+#[test]
+fn agent_dir_preflight_leaves_files_and_symlinks_untouched() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = tempfile::tempdir().unwrap();
+    let ferryx = fixture.path().join(".ferryx");
+    std::fs::create_dir(&ferryx).unwrap();
+    let dir = ferryx.join("a");
+
+    std::fs::write(&dir, "file").unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert_eq!(std::fs::read_to_string(&dir).unwrap(), "file");
+    std::fs::remove_file(&dir).unwrap();
+
+    let target = fixture.path().join("elsewhere");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&target, &dir).unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755);
+    std::fs::remove_file(&dir).unwrap();
+
+    let missing = fixture.path().join("missing");
+    std::os::unix::fs::symlink(&missing, &dir).unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert!(!missing.exists(), "a dangling symlink is not followed");
+    std::fs::remove_file(&dir).unwrap();
+
+    let relative = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new("sh")
+        .args(["-c", &format!("{REMOTE_AGENT_DIR_PREFLIGHT}echo done")])
+        .current_dir(relative.path())
+        .env("HOME", "rel")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!relative.path().join("rel").exists());
+}
+
+/// The private directory is created 0700 by the pane command itself, so later panes on the host
+/// bind their forward inside it.
+#[cfg(unix)]
+#[test]
+fn forwarded_remote_shell_creates_private_agent_dir() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = tempfile::tempdir().unwrap();
+    let home = fixture.path().to_str().unwrap().to_string();
+    std::fs::write(fixture.path().join(".profile"), "exit 0\n").unwrap();
+    let plan = shell_plan_with_session(&host(), &home, Some("s1"), Some("/tmp/local.sock"), Some(&home))
+        .expect("plan");
+    let output = std::process::Command::new("sh")
+        .args(["-c", plan.args.last().unwrap()])
+        .env("HOME", fixture.path())
+        .env("SHELL", "/bin/sh")
+        .env_remove("ENV")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let mode = std::fs::metadata(fixture.path().join(".ferryx/a")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+
+    // The backstop never follows a symlink planted at the directory path.
+    let dir = fixture.path().join(".ferryx/a");
+    std::fs::remove_dir(&dir).unwrap();
+    let target = fixture.path().join("elsewhere");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&target, &dir).unwrap();
+    let output = std::process::Command::new("sh")
+        .args(["-c", plan.args.last().unwrap()])
+        .env("HOME", fixture.path())
+        .env("SHELL", "/bin/sh")
+        .env_remove("ENV")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755);
+}
+
+#[test]
 fn shell_plan_without_a_forwarded_socket_exports_no_herdr_env() {
-    let plan = shell_plan_with_session(&host(), "/srv/repo", Some("session-123"), None)
+    let plan = shell_plan_with_session(&host(), "/srv/repo", Some("session-123"), None, None)
         .expect("plan");
     let remote_cmd = plan.args.last().unwrap();
     assert!(!remote_cmd.contains("HERDR_"), "{remote_cmd}");
@@ -550,7 +709,7 @@ fn forwarded_remote_shell_gets_herdr_env_unless_real_herdr_owns_it() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().to_str().unwrap().to_string();
     std::fs::write(fixture.path().join(".profile"), "env\nexit 0\n").unwrap();
-    let plan = shell_plan_with_session(&host(), &root, Some("session-123"), Some("/tmp/local.sock"))
+    let plan = shell_plan_with_session(&host(), &root, Some("session-123"), Some("/tmp/local.sock"), None)
         .expect("plan");
     let remote_cmd = plan.args.last().unwrap().clone();
     let env_of = |herdr: Option<(&str, &str)>| {
@@ -617,7 +776,7 @@ fn ssh_bridge_plan_options_disable_tty_and_enforce_strict_host_keys() {
     assert!(plan
         .args
         .windows(2)
-        .any(|pair| pair == ["-o", "BatchMode=yes"]));
+        .any(|pair| pair == ["-o", "BatchMode=no"]));
     assert!(plan
         .args
         .windows(2)
@@ -872,4 +1031,156 @@ async fn failed_probe_distinguishes_non_utf8_and_empty_stderr() {
         "got: {}",
         err_empty.message
     );
+}
+
+fn option_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|pair| pair[0] == "-o" && pair[1].starts_with(&format!("{name}=")))
+        .map(|pair| &pair[1][name.len() + 1..])
+}
+
+/// Todo 16: on unix, automated commands share one Ferryx-owned master per host; panes never do.
+#[cfg(unix)]
+#[test]
+fn unix_automated_plan_carries_a_per_host_control_master() {
+    let plan = ssh_plan(&host(), "true".into(), false).unwrap();
+    assert_eq!(option_value(&plan.args, "ControlMaster"), Some("auto"), "{:?}", plan.args);
+    assert_eq!(option_value(&plan.args, "ControlPersist"), Some("60"), "{:?}", plan.args);
+    let path = option_value(&plan.args, "ControlPath").unwrap();
+    let digest = &super::super::helper_setup::host_digest("host-one")[..12];
+    assert!(path.ends_with(&format!("/{digest}-%C")), "{path}");
+    assert!(path.starts_with('/') && !path.contains(' '), "{path}");
+    let dir = std::path::Path::new(path).parent().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700);
+    assert!(control_socket_len(dir.to_str().unwrap()) <= CONTROL_SOCKET_MAX);
+    // Exactly one value of each option, ahead of the target.
+    assert_eq!(plan.args.iter().filter(|a| a.starts_with("ControlMaster=")).count(), 1);
+    assert_eq!(plan.args.iter().filter(|a| a.starts_with("ControlPath=")).count(), 1);
+
+    let pane = ssh_plan(&host(), "true".into(), true).unwrap();
+    assert_eq!(option_value(&pane.args, "ControlMaster"), Some("no"), "{:?}", pane.args);
+    assert_eq!(option_value(&pane.args, "ControlPath"), Some("none"));
+    assert_eq!(option_value(&pane.args, "ControlPersist"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_plan_never_uses_a_control_master() {
+    for interactive in [false, true] {
+        let plan = ssh_plan(&host(), "true".into(), interactive).unwrap();
+        assert_eq!(option_value(&plan.args, "ControlMaster"), Some("no"), "{:?}", plan.args);
+        assert_eq!(option_value(&plan.args, "ControlPath"), Some("none"));
+        assert_eq!(option_value(&plan.args, "ControlPersist"), None);
+    }
+}
+
+#[test]
+fn control_options_fall_back_to_no_master_without_a_socket_dir() {
+    assert_eq!(control_options(None, &host()), NO_CONTROL_MASTER.map(String::from).to_vec());
+}
+
+#[test]
+fn control_sockets_are_never_shared_across_hosts() {
+    let mut other = host();
+    other.id = "host-two".into();
+    // Same endpoint, different Ferryx host: different socket.
+    assert_ne!(control_path("/tmp/d", &host()), control_path("/tmp/d", &other));
+    // `%C` hashes local host, remote host, port, user and jump host into the name, so different
+    // users or endpoints of one Ferryx host get different sockets too.
+    assert!(control_path("/tmp/d", &host()).ends_with("-%C"));
+    // Removing a host stops exactly the socket its plans used.
+    assert_eq!(control_path("/tmp/d", &host()), control_path("/tmp/d", &host()));
+}
+
+#[test]
+fn control_socket_path_respects_the_unix_socket_budget() {
+    // Real `%C` expansion is 40 hex characters plus ssh's 17-character temporary bind suffix.
+    let dir = "/tmp/ferryx-cm-4294967295";
+    let expanded = control_path(dir, &host()).replace("%C", &"f".repeat(40)) + ".0123456789abcdef";
+    assert_eq!(expanded.len(), control_socket_len(dir));
+    assert!(control_socket_len(dir) <= CONTROL_SOCKET_MAX);
+    assert!(control_socket_len("/run/user/4294967295/ferryx-cm") <= CONTROL_SOCKET_MAX);
+    #[cfg(unix)]
+    {
+        let long = format!("/tmp/{}", "d".repeat(40));
+        assert!(control_socket_len(&long) > CONTROL_SOCKET_MAX);
+        assert_eq!(prepare_control_dir(std::path::Path::new(&long)), None);
+        assert!(!std::path::Path::new(&long).exists(), "an over-long dir is not even created");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn control_dir_must_be_private_real_and_safe() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::Builder::new().prefix("fxcm").tempdir_in("/tmp").unwrap();
+    let fresh = root.path().join("cm");
+    assert_eq!(prepare_control_dir(&fresh).as_deref(), fresh.to_str());
+    assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o700);
+    // Idempotent on its own directory.
+    assert_eq!(prepare_control_dir(&fresh).as_deref(), fresh.to_str());
+
+    let shared = root.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(prepare_control_dir(&shared), None, "an existing non-0700 dir is refused");
+    assert_eq!(std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777, 0o755);
+
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&fresh, &link).unwrap();
+    assert_eq!(prepare_control_dir(&link), None, "a symlink is refused");
+
+    let file = root.path().join("file");
+    std::fs::write(&file, b"").unwrap();
+    assert_eq!(prepare_control_dir(&file), None);
+    assert_eq!(prepare_control_dir(std::path::Path::new("relative/cm")), None);
+    assert_eq!(prepare_control_dir(&root.path().join("has space")), None);
+    assert_eq!(prepare_control_dir(&root.path().join("pct%C")), None);
+}
+
+#[test]
+fn without_control_master_swaps_only_the_master_options() {
+    let plan = ShellCommandPlan {
+        program: "ssh".into(),
+        args: ["-o", "ControlMaster=auto", "-o", "ControlPath=/d/x-%C", "-o", "ControlPersist=60", "-o", "BatchMode=no", "-T", "u@h", "true"]
+            .map(String::from)
+            .to_vec(),
+    };
+    let fallback = without_control_master(&plan).unwrap();
+    assert_eq!(
+        fallback.args,
+        ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "BatchMode=no", "-T", "u@h", "true"].map(String::from)
+    );
+    assert_eq!(without_control_master(&fallback), None, "a plan without a master is left alone");
+}
+
+/// A fake ssh: with a master requested it fails the way OpenSSH does when the control socket
+/// cannot be bound; without one it runs the command (echoes its stdin).
+#[cfg(unix)]
+fn fake_ssh_plan() -> ShellCommandPlan {
+    let script = r#"case "$*" in
+  *ControlMaster=auto*) echo "unix_listener: cannot bind to path /gone/x-abc.123: No such file or directory" >&2; exit 255;;
+  *ControlMaster=no*ControlPath=none*) printf 'direct:'; cat;;
+  *) exit 9;;
+esac"#;
+    let mut args = vec!["-c".to_string(), script.to_string(), "fake-ssh".to_string()];
+    args.extend(["-o", "ControlMaster=auto", "-o", "ControlPath=/gone/x-%C", "-o", "ControlPersist=60", "u@h"].map(String::from));
+    ShellCommandPlan { program: "/bin/sh".into(), args }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unbindable_master_socket_falls_back_to_a_direct_connection() {
+    let plan = fake_ssh_plan();
+    assert_eq!(bounded_output(&plan, Duration::from_secs(10)).await.unwrap(), b"direct:");
+    assert_eq!(
+        bounded_output_with_stdin(&plan, Duration::from_secs(10), b"payload".to_vec()).await.unwrap(),
+        b"direct:payload"
+    );
+    // Any other failure is reported as is, never retried.
+    let mut other = fake_ssh_plan();
+    other.args[1] = "echo 'Permission denied (publickey).' >&2; exit 255".into();
+    let error = bounded_output(&other, Duration::from_secs(10)).await.unwrap_err();
+    assert!(error.message.contains("Permission denied"), "{}", error.message);
 }

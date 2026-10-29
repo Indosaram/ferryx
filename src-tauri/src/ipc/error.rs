@@ -138,6 +138,12 @@ pub enum IpcErrorCode {
     AuthExpired,
     NotFound,
     MethodNotAllowed,
+    /// OpenSSH refused the connection because the server's host key is not in known_hosts.
+    /// The UI offers a fingerprint confirmation step before the key is trusted.
+    HostKeyUnknown,
+    /// OpenSSH refused the connection because the server's host key differs from the pinned one.
+    /// Never trusted from the UI: the stale entry must be removed by the user.
+    HostKeyChanged,
     #[serde(untagged)]
     Custom(String),
 }
@@ -250,6 +256,8 @@ impl IpcErrorCode {
             "DAEMON_BUSY" => Self::DaemonBusy,
             "DAEMON_DETACH_UNAVAILABLE" => Self::DaemonDetachUnavailable,
             "NATIVE_RENDERER_UNAVAILABLE" => Self::NativeRendererUnavailable,
+            "HOST_KEY_UNKNOWN" => Self::HostKeyUnknown,
+            "HOST_KEY_CHANGED" => Self::HostKeyChanged,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -584,6 +592,8 @@ mod tests {
             (IpcErrorCode::DaemonUpdatePending, "DAEMON_UPDATE_PENDING"),
             (IpcErrorCode::DaemonBusy, "DAEMON_BUSY"),
             (IpcErrorCode::DaemonDetachUnavailable, "DAEMON_DETACH_UNAVAILABLE"),
+            (IpcErrorCode::HostKeyUnknown, "HOST_KEY_UNKNOWN"),
+            (IpcErrorCode::HostKeyChanged, "HOST_KEY_CHANGED"),
         ];
         for (code, wire) in cases {
             let encoded = serde_json::to_value(&code).expect("encode typed error");

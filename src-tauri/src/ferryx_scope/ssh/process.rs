@@ -593,23 +593,46 @@ fn valid_env_name(name: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+/// The only variables the helper unit receives from the starting SSH session. `systemd-run
+/// --setenv=K=V` puts each value on a command line other local users can read and freezes it
+/// into a unit that outlives the connection, so connection state (`SSH_*`, `XDG_SESSION_*`),
+/// per-pane agent variables and credentials never qualify; everything else the unit needs comes
+/// from the user manager's own environment.
+#[cfg(any(target_os = "linux", test))]
+const FORWARDED_ENV_KEYS: [&str; 16] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "FERRYX_HELPER_HYGIENE_SECS",
+    "FERRYX_REMOTE_ROOT",
+];
+
+#[cfg(any(target_os = "linux", test))]
+fn forwarded_env_key(key: &str) -> bool {
+    FORWARDED_ENV_KEYS.contains(&key) || (key.starts_with("LC_") && valid_env_name(key))
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn forwarded_env(env: &[(OsString, OsString)]) -> Vec<(String, String)> {
-    const DENY: [&str; 5] = [
-        "SSH_CONNECTION",
-        "SSH_CLIENT",
-        "SSH_TTY",
-        "SSH_SESSION_ID",
-        "SSH_ASKPASS",
-    ];
     env.iter()
         .filter_map(|(key, value)| {
             let key = key.to_str()?;
-            if DENY.contains(&key) || !valid_env_name(key) {
+            if !forwarded_env_key(key) {
                 return None;
             }
             let value = value.to_str()?;
-            if value.is_empty() {
+            if value.is_empty() || value.contains(['\n', '\r']) {
                 return None;
             }
             Some((key.to_string(), value.to_string()))

@@ -1208,6 +1208,7 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
         source: crate::ssh::SshHostSource::Config,
         auth_method: crate::ssh::SshAuthMethod::Agent,
         disabled: None,
+        system_config_alias: None,
     };
     std::fs::write(
         &store_path,

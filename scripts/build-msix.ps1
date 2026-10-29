@@ -287,6 +287,8 @@ try {
             "x86_64-pc-windows-msvc" { "ferryx-remote-helper.exe" }
             "x86_64-unknown-linux-gnu" { "ferryx-remote-helper" }
             "aarch64-unknown-linux-gnu" { "ferryx-remote-helper" }
+            "x86_64-unknown-linux-musl" { "ferryx-remote-helper" }
+            "aarch64-unknown-linux-musl" { "ferryx-remote-helper" }
             "aarch64-apple-darwin" { "ferryx-remote-helper" }
             "x86_64-apple-darwin" { "ferryx-remote-helper" }
             default { throw "ERROR: Unsupported helper manifest.json target: $($artifact.target)" }

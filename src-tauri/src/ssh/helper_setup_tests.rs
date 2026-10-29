@@ -17,6 +17,7 @@ fn sample_host(id: &str) -> SshHost {
         source: SshHostSource::Config,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        system_config_alias: None,
     }
 }
 
@@ -202,7 +203,34 @@ fn ssh_helper_setup_readiness_parser_rejects_missing_ready_event() {
 }
 
 #[test]
-fn ssh_helper_setup_ensure_started_exit_code_127_maps_to_missing_helper() {
+fn ssh_helper_setup_ensure_started_bare_exit_127_maps_to_exec_failed() {
+    let location = HelperLocation {
+        executable: "/home/u/.ferryx/bin/helper".into(),
+        root: "/home/u/.ferryx/helper/qa".into(),
+    };
+    // What busybox sh prints when a glibc helper's ELF interpreter is absent on Alpine.
+    let raw_err =
+        IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 127,
+            "stderr": "sh: /home/u/.ferryx/bin/helper: not found",
+        }));
+    let mapped = map_ensure_started_error(raw_err, &location);
+    assert_eq!(mapped.code, IpcErrorCode::Unsupported);
+    let details = mapped.details.as_ref().expect("details");
+    assert_eq!(
+        details.get("stage").and_then(serde_json::Value::as_str),
+        Some("helper_exec_failed")
+    );
+    assert_eq!(
+        details.get("stderr").and_then(serde_json::Value::as_str),
+        Some("sh: /home/u/.ferryx/bin/helper: not found")
+    );
+    assert!(!mapped.message.contains("not installed"));
+}
+
+#[test]
+fn ssh_helper_setup_ensure_started_exit_127_with_marker_maps_to_missing_helper() {
     let location = HelperLocation {
         executable: "/home/u/.ferryx/bin/helper".into(),
         root: "/home/u/.ferryx/helper/qa".into(),
@@ -211,7 +239,7 @@ fn ssh_helper_setup_ensure_started_exit_code_127_maps_to_missing_helper() {
         IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
             "stage": "execution",
             "exitCode": 127,
-            "stderr": "sh: helper: not found",
+            "stderr": "FERRYX_ERR_HELPER_MISSING\n",
         }));
     let mapped = map_ensure_started_error(raw_err, &location);
     assert_eq!(mapped.code, IpcErrorCode::CliExecutableNotFound);
@@ -427,6 +455,164 @@ fn ssh_helper_setup_probe_classifies_not_executable_sentinel_as_missing() {
     assert_eq!(
         classify_probe_result(Err(&posix_err)),
         HelperProbeState::Missing
+    );
+}
+
+#[test]
+fn ssh_helper_setup_probe_classifies_unrunnable_sentinel_as_missing() {
+    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1)").with_details(
+        serde_json::json!({
+            "stage": "execution",
+            "exitCode": 1,
+            "stderr": "FERRYX_ERR_HELPER_UNRUNNABLE sh: helper: not found\n",
+        }),
+    );
+    assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Missing);
+}
+
+fn probe_err(exit_code: i64, stderr: &str) -> IpcError {
+    IpcError::new(IpcErrorCode::IoError, "SSH command failed").with_details(serde_json::json!({
+        "stage": "execution",
+        "exitCode": exit_code,
+        "stderr": stderr,
+    }))
+}
+
+#[test]
+fn ssh_helper_setup_probe_exec_failure_reports_present_but_unrunnable_binary() {
+    let location = HelperLocation {
+        executable: "/home/u/.ferryx/bin/helper".into(),
+        root: "/home/u/.ferryx/helper/qa".into(),
+    };
+    // What the probe prints when a glibc helper is present on a musl host.
+    let unrunnable = probe_err(
+        1,
+        "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 sh: /home/u/.ferryx/bin/helper: not found\n",
+    );
+    assert_eq!(
+        classify_probe_result(Err(&unrunnable)),
+        HelperProbeState::Missing
+    );
+    let text = probe_exec_failure(&unrunnable, &location).expect("exec failure text");
+    assert!(text.contains("/home/u/.ferryx/bin/helper"), "{text}");
+    assert!(
+        text.contains("exit=127 sh: /home/u/.ferryx/bin/helper: not found"),
+        "{text}"
+    );
+    assert!(!text.contains("FERRYX_ERR_"), "{text}");
+
+    // An absent binary, a non-executable one, and a transport failure are not exec failures.
+    for err in [
+        probe_err(127, "FERRYX_ERR_HELPER_MISSING\n"),
+        probe_err(126, "FERRYX_ERR_HELPER_NOT_EXECUTABLE\n"),
+        probe_err(255, "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 x\n"),
+    ] {
+        assert_eq!(probe_exec_failure(&err, &location), None, "{err:?}");
+    }
+}
+
+#[tokio::test]
+async fn ssh_helper_setup_detailed_probe_carries_exec_failure_for_connection_test() {
+    let host = sample_host("qa-host-probe-unrunnable");
+    let env = sample_posix_env("/home/testuser");
+    let qualified = qualified_location(
+        &host,
+        &env,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("qualified_location");
+    let quoted_qualified = direct::quote_posix(&qualified.executable);
+    // Qualified helper present but unrunnable, legacy default absent.
+    let (state, exec_failure) = probe_ready_detailed_with(&host, &env, |_, script, _| {
+        std::future::ready(Err(if script.contains(&quoted_qualified) {
+            probe_err(
+                1,
+                "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 sh: helper: not found\n",
+            )
+        } else {
+            probe_err(127, "FERRYX_ERR_HELPER_MISSING\n")
+        }))
+    })
+    .await;
+    assert_eq!(
+        state,
+        HelperProbeState::Missing,
+        "must still route to reinstall"
+    );
+    let text = exec_failure.expect("connection test must carry the exec failure");
+    assert!(text.contains(&qualified.executable), "{text}");
+    assert!(text.contains("exit=127 sh: helper: not found"), "{text}");
+
+    // Both locations absent: plain Missing, no exec-failure text.
+    let (state, exec_failure) = probe_ready_detailed_with(&host, &env, |_, _, _| {
+        std::future::ready(Err(probe_err(127, "FERRYX_ERR_HELPER_MISSING\n")))
+    })
+    .await;
+    assert_eq!((state, exec_failure), (HelperProbeState::Missing, None));
+}
+
+/// Runs the real POSIX probe script locally with the same error shape as `bounded_output`.
+#[cfg(unix)]
+async fn probe_local_executable(executable: &Path) -> (HelperProbeState, Option<String>) {
+    let location = HelperLocation {
+        executable: executable.to_string_lossy().into_owned(),
+        root: "/unused".into(),
+    };
+    probe_ready_at_detailed_with(
+        &sample_posix_env("/home/testuser"),
+        &location,
+        |_, script, _| {
+            let output = Command::new("sh").args(["-c", &script]).output().unwrap();
+            std::future::ready(if output.status.success() {
+                Ok(output.stdout)
+            } else {
+                Err(
+                    IpcError::new(IpcErrorCode::IoError, "SSH command failed").with_details(
+                        serde_json::json!({
+                            "stage": "execution",
+                            "exitCode": output.status.code(),
+                            "stderr": String::from_utf8_lossy(&output.stderr),
+                        }),
+                    ),
+                )
+            })
+        },
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_helper_setup_probe_requires_the_binary_to_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let write_exe = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let runs = write_exe("runs", "#!/bin/sh\necho ferryx-remote-helper 2026.1027.1\n");
+    // A present, executable file whose interpreter is absent: the shell reports 127, exactly as a
+    // glibc helper does on a musl host.
+    let unrunnable = write_exe("unrunnable", "#!/nonexistent/ld-linux-x86-64.so.2\n");
+
+    assert_eq!(
+        probe_local_executable(&runs).await,
+        (HelperProbeState::Installed, None)
+    );
+    let (state, exec_failure) = probe_local_executable(&unrunnable).await;
+    assert_eq!(
+        state,
+        HelperProbeState::Missing,
+        "a binary that cannot run must not read as installed"
+    );
+    let text = exec_failure.expect("present-but-unrunnable must report why");
+    assert!(text.contains("exit="), "{text}");
+    assert!(text.contains(&*unrunnable.to_string_lossy()), "{text}");
+    assert_eq!(
+        probe_local_executable(&dir.path().join("absent")).await,
+        (HelperProbeState::Missing, None)
     );
 }
 
@@ -1064,7 +1250,7 @@ fn windows_install_uploads_through_raw_stdin_command_not_encodedcommand() {
         env.executor = executor;
         let location =
             qualified_location(&host, &env, "2026.930.1").expect("qualified_location");
-        let (cmd, input) = install_invocation(&env, &location, b"BINARY".to_vec());
+        let (cmd, input) = install_invocation(&env, &location, b"BINARY");
 
         assert_eq!(
             cmd,
@@ -1125,6 +1311,18 @@ fn ssh_helper_setup_probe_locations_checks_qualified_before_default() {
     let expected_win_default = default_location(&host, &env_win).expect("default_location win");
     assert_eq!(locs_win[0], expected_win_qualified);
     assert_eq!(locs_win[1], expected_win_default);
+}
+
+async fn probe_ready_with<F, Fut>(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    run: F,
+) -> HelperProbeState
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    probe_ready_detailed_with(host, environment, run).await.0
 }
 
 #[tokio::test]
@@ -1444,5 +1642,445 @@ fn windows_upload_script_grants_acl_via_sid_with_domain_and_username_fallback() 
     assert!(
         script.contains("$env:USERNAME"),
         "script must maintain legacy username fallback"
+    );
+}
+
+/// A PATH directory holding only the named tools that exist on this machine, so an upload
+/// script can be run as on a remote that lacks the rest (base64, openssl).
+#[cfg(unix)]
+fn restricted_path(tools: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for tool in tools {
+        if let Some(found) = std::env::split_paths(&path)
+            .map(|d| d.join(tool))
+            .find(|candidate| candidate.is_file())
+        {
+            std::os::unix::fs::symlink(found, dir.path().join(tool)).unwrap();
+        }
+    }
+    dir
+}
+
+#[cfg(unix)]
+const UPLOAD_TOOLS_WITHOUT_DECODER: [&str; 14] = [
+    "dirname", "mkdir", "chmod", "rm", "mv", "tr", "sed", "grep", "ps", "sha256sum", "shasum",
+    "wc", "cat", "kill",
+];
+
+#[cfg(unix)]
+fn run_upload_script(script: &str, path: Option<&Path>) -> std::process::Output {
+    use std::process::Stdio;
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-s")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[cfg(unix)]
+fn leftover_tmp_files(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp."))
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_upload_without_base64_names_missing_decoder_and_octal_fallback_installs() {
+    let tools = restricted_path(&UPLOAD_TOOLS_WITHOUT_DECODER);
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let exe = bin.join("ferryx-remote-helper");
+    let loc = HelperLocation {
+        executable: exe.to_str().unwrap().to_string(),
+        root: dir.path().join("root").to_str().unwrap().to_string(),
+    };
+    // Every byte value, NUL and '%' included, several printf lines long.
+    let payload: Vec<u8> = (0..3000u32).map(|i| (i % 256) as u8).collect();
+
+    let output = run_upload_script(&build_posix_upload_script(&loc, &payload), Some(tools.path()));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "stderr: {stderr}");
+    assert!(stderr.contains(UPLOAD_DECODER_MISSING_MARKER), "{stderr}");
+    for decoder in ["base64 -d", "base64 -D", "openssl"] {
+        assert!(stderr.contains(decoder), "decoder {decoder} not named: {stderr}");
+    }
+    assert!(!exe.exists(), "no binary may appear without a decoder");
+    assert!(leftover_tmp_files(&bin).is_empty());
+
+    let output = run_upload_script(
+        &build_posix_octal_upload_script(&loc, &payload),
+        Some(tools.path()),
+    );
+    assert!(
+        output.status.success(),
+        "octal fallback failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_install_output(&output.stdout, &loc).expect("install marker");
+    assert_eq!(std::fs::read(&exe).unwrap(), payload);
+    assert!(leftover_tmp_files(&bin).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_upload_script_aborts_on_checksum_mismatch_before_mv() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("ferryx-remote-helper");
+    std::fs::write(&exe, b"PREVIOUS_HELPER").unwrap();
+    let loc = HelperLocation {
+        executable: exe.to_str().unwrap().to_string(),
+        root: dir.path().join("root").to_str().unwrap().to_string(),
+    };
+    let payload = b"THE-REAL-HELPER-BINARY-PAYLOAD-0123456789".repeat(8);
+    let script = build_posix_upload_script(&loc, &payload);
+    // Corrupt one base64 character in transit: still decodable, wrong bytes.
+    let opener = "'FERRYX_HELPER_PAYLOAD_EOF' > \"$tmp\"\n";
+    let start = script.find(opener).unwrap() + opener.len() + 10;
+    let mut corrupted = script.into_bytes();
+    corrupted[start] = if corrupted[start] == b'A' { b'B' } else { b'A' };
+    let corrupted = String::from_utf8(corrupted).unwrap();
+
+    for (name, script) in [
+        ("base64", corrupted),
+        ("octal", {
+            let script = build_posix_octal_upload_script(&loc, &payload);
+            script.replacen("\\124", "\\125", 1)
+        }),
+    ] {
+        let output = run_upload_script(&script, None);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{name}: corrupted upload must fail");
+        assert!(stderr.contains(UPLOAD_CHECKSUM_MARKER), "{name}: {stderr}");
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains(INSTALL_READY_MARKER),
+            "{name}"
+        );
+        assert_eq!(std::fs::read(&exe).unwrap(), b"PREVIOUS_HELPER", "{name}: mv ran");
+        assert!(leftover_tmp_files(&bin).is_empty(), "{name}: partial file left");
+    }
+}
+
+#[test]
+fn upload_scripts_carry_the_payload_sha256() {
+    let loc = HelperLocation {
+        executable: "/home/u/.ferryx/versions/2026.1027.5/bin/ferryx-remote-helper".into(),
+        root: "/home/u/.ferryx/r/2026.1027.5/digest".into(),
+    };
+    let want = sha256_hex(b"abc");
+    assert_eq!(
+        want,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    for script in [
+        build_posix_upload_script(&loc, b"abc"),
+        build_posix_octal_upload_script(&loc, b"abc"),
+    ] {
+        assert!(script.contains(&format!("want={want};")), "{script}");
+        assert!(script.contains("want_len=3;"), "{script}");
+    }
+    assert!(build_posix_octal_upload_script(&loc, b"abc").contains("printf '\\141\\142\\143' >&3"));
+    let win_loc = HelperLocation {
+        executable: "C:\\Users\\u\\.ferryx\\versions\\2026.1027.5\\bin\\ferryx-remote-helper.exe"
+            .into(),
+        root: "C:\\Users\\u\\.ferryx\\r\\2026.1027.5\\digest".into(),
+    };
+    let win = build_windows_upload_script(&win_loc, b"abc");
+    assert!(win.contains(&format!("if ($got -ne '{want}')")), "{win}");
+    assert!(win.contains(UPLOAD_CHECKSUM_MARKER));
+    // The check sits between writing the temp file and moving it into place.
+    let check = win.find("$got -ne").unwrap();
+    assert!(win.find("WriteAllBytes($tmp").unwrap() < check);
+    assert!(check < win.find("[System.IO.File]::Move($tmp, $dest)").unwrap());
+}
+
+fn decoder_missing_error() -> IpcError {
+    IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 3)").with_details(
+        serde_json::json!({
+            "exitCode": 3,
+            "stderr": format!("{UPLOAD_DECODER_MISSING_MARKER}: no base64 decoder on this host"),
+        }),
+    )
+}
+
+#[tokio::test]
+async fn install_retries_with_octal_payload_when_decoder_missing() {
+    let env = sample_posix_env("/home/u");
+    let loc = qualified_location(&sample_host("h"), &env, "2026.1027.5").unwrap();
+    let payload = vec![7u8; 3 * 1024 * 1024];
+    let calls = std::sync::Mutex::new(Vec::<(String, String, Duration)>::new());
+    let result = install_with(&env, &loc, &payload, |cmd, input, deadline| {
+        let script = String::from_utf8(input).unwrap();
+        let first = calls.lock().unwrap().is_empty();
+        calls.lock().unwrap().push((cmd, script.chars().take(4096).collect(), deadline));
+        async move {
+            if first {
+                Err(decoder_missing_error())
+            } else {
+                Ok(format!("{INSTALL_READY_MARKER}\n").into_bytes())
+            }
+        }
+    })
+    .await;
+    result.expect("fallback install succeeds");
+    let calls = calls.into_inner().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].1.contains("FERRYX_HELPER_PAYLOAD_EOF"));
+    assert!(calls[1].1.contains("printf '\\007\\007"), "second attempt must be octal");
+    assert!(calls.iter().all(|(cmd, _, _)| cmd == &env.executor.command("sh -s")));
+    // Deadlines scale with the bytes on the wire instead of a fixed 60 s.
+    assert!(calls[0].2 > Duration::from_secs(60), "{:?}", calls[0].2);
+    assert!(calls[1].2 > calls[0].2, "{:?}", calls);
+}
+
+#[tokio::test]
+async fn install_fallback_failure_names_missing_decoders() {
+    let env = sample_posix_env("/home/u");
+    let loc = qualified_location(&sample_host("h"), &env, "2026.1027.5").unwrap();
+    let attempt = std::sync::atomic::AtomicUsize::new(0);
+    let err = install_with(&env, &loc, b"BIN", |_, _, _| {
+        let n = attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async move {
+            if n == 0 {
+                Err(decoder_missing_error())
+            } else {
+                Err(IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1)")
+                    .with_details(serde_json::json!({
+                        "exitCode": 1,
+                        "stderr": format!("{UPLOAD_CHECKSUM_MARKER} expected=a actual=b"),
+                    })))
+            }
+        }
+    })
+    .await
+    .expect_err("fallback failure surfaces");
+    assert_eq!(attempt.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let details = err.details.expect("details");
+    assert_eq!(details["decodersMissing"], serde_json::json!(["base64", "openssl"]));
+    assert_eq!(details["stage"], "install");
+    assert_eq!(details["reason"], "checksum_mismatch");
+    assert!(err.message.contains("base64") && err.message.contains("openssl"));
+
+    // A Windows remote never takes the POSIX fallback.
+    let win_env = sample_windows_env("C:\\Users\\u");
+    let win_loc = qualified_location(&sample_host("h"), &win_env, "2026.1027.5").unwrap();
+    let attempt = std::sync::atomic::AtomicUsize::new(0);
+    let err = install_with(&win_env, &win_loc, b"BIN", |_, _, _| {
+        attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Err(decoder_missing_error()) }
+    })
+    .await
+    .expect_err("windows error surfaces");
+    assert_eq!(attempt.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(err.details.unwrap().get("decodersMissing").is_none());
+}
+
+#[test]
+fn qualified_version_parts_only_matches_versioned_locations() {
+    let host = sample_host("h");
+    let posix = sample_posix_env("/home/u");
+    let windows = sample_windows_env("C:\\Users\\u");
+    let q = qualified_location(&host, &posix, "2026.1027.5").unwrap();
+    assert_eq!(
+        qualified_version_parts(RemotePlatform::Posix, &q),
+        Some(("/home/u/.ferryx/versions".to_string(), "2026.1027.5".to_string()))
+    );
+    let qw = qualified_location(&host, &windows, "2026.1027.5").unwrap();
+    assert_eq!(
+        qualified_version_parts(RemotePlatform::Windows, &qw),
+        Some(("C:\\Users\\u\\.ferryx\\versions".to_string(), "2026.1027.5".to_string()))
+    );
+    for location in [
+        default_location(&host, &posix).unwrap(),
+        qualified_location(&host, &posix, "dev-build").unwrap(),
+        qualified_location(&host, &posix, "2026.1027.5.1").unwrap(),
+    ] {
+        assert_eq!(qualified_version_parts(RemotePlatform::Posix, &location), None, "{location:?}");
+    }
+    assert_eq!(
+        qualified_version_parts(RemotePlatform::Windows, &default_location(&host, &windows).unwrap()),
+        None
+    );
+
+    // Only a qualified start prunes, and only after the start command succeeded.
+    let script = ensure_started_script(&host, &posix, &q);
+    assert!(script.contains("rc=$?; if [ \"$rc\" -eq 0 ]; then ("), "{script}");
+    assert!(script.contains("vb='/home/u/.ferryx/versions'; cur='2026.1027.5';"), "{script}");
+    let legacy = ensure_started_script(&host, &posix, &default_location(&host, &posix).unwrap());
+    assert!(legacy.contains("exec \"$exe\" start"), "{legacy}");
+    assert!(!legacy.contains("vb="), "{legacy}");
+    let win = ensure_started_script(&host, &windows, &qw);
+    assert!(win.contains("$rc = $LASTEXITCODE; if ($rc -eq 0) { try {"), "{win}");
+    assert!(win.ends_with("exit $rc"), "{win}");
+}
+
+#[cfg(unix)]
+#[test]
+fn posix_prune_keeps_newest_two_current_and_running_versions() {
+    let home = tempfile::tempdir().unwrap();
+    let fx = home.path().join(".ferryx");
+    let versions = fx.join("versions");
+    let tags = [
+        "2026.9.1",   // running: a process executes its binary
+        "2026.10.1",  // live endpoint pid in its runtime root
+        "2026.100.1", // the version being started (older than the newest two)
+        "2026.200.1", // removable
+        "2026.300.1", // removable
+        "2026.1027.4",
+        "2026.1027.5",
+    ];
+    for tag in tags {
+        std::fs::create_dir_all(versions.join(tag).join("bin")).unwrap();
+    }
+    std::fs::create_dir_all(versions.join("not-a-version")).unwrap();
+    std::fs::create_dir_all(versions.join("2026.1.1.1")).unwrap();
+
+    let running_exe = versions.join("2026.9.1/bin/ferryx-remote-helper");
+    std::fs::copy("/bin/sleep", &running_exe)
+        .or_else(|_| std::fs::copy("/usr/bin/sleep", &running_exe))
+        .unwrap();
+    let sleeper = Command::new(&running_exe).arg("30").spawn().unwrap();
+    let _sleeper = ChildGuard(Some(sleeper));
+    let holder = Command::new("sleep").arg("30").spawn().unwrap();
+    let holder_pid = holder.id();
+    let _holder = ChildGuard(Some(holder));
+    let root = fx.join("r/2026.10.1/digest");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("endpoint.json"), format!("{{ \"pid\": {holder_pid} }}")).unwrap();
+
+    let script = posix_prune_versions_script(versions.to_str().unwrap(), "2026.100.1");
+    let output = Command::new("/bin/sh").args(["-c", &script]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let mut left: Vec<String> = std::fs::read_dir(&versions)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            "2026.1.1.1",
+            "2026.10.1",
+            "2026.100.1",
+            "2026.1027.4",
+            "2026.1027.5",
+            "2026.9.1",
+            "not-a-version",
+        ]
+    );
+}
+
+#[cfg(windows)]
+fn run_powershell_stdin(script: &str) -> std::process::Output {
+    use std::process::Stdio;
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_upload_script_verifies_sha256_before_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let dest = bin.join("ferryx-remote-helper.exe");
+    let loc = HelperLocation {
+        executable: dest.to_str().unwrap().to_string(),
+        root: dir.path().join("root").to_str().unwrap().to_string(),
+    };
+    let payload = b"WINDOWS-HELPER-BYTES-0123456789".repeat(40);
+    let ok = run_powershell_stdin(&build_windows_upload_script(&loc, &payload));
+    assert!(ok.status.success(), "{}", String::from_utf8_lossy(&ok.stderr));
+    parse_install_output(&ok.stdout, &loc).expect("install marker");
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+
+    let script = build_windows_upload_script(&loc, &b"REPLACEMENT-HELPER-BYTES".repeat(40));
+    let start = script.find("$b64 = '").unwrap() + "$b64 = '".len() + 4;
+    let mut corrupted = script.into_bytes();
+    corrupted[start] = if corrupted[start] == b'A' { b'B' } else { b'A' };
+    let bad = run_powershell_stdin(&String::from_utf8(corrupted).unwrap());
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(!bad.status.success(), "corrupted upload must fail");
+    assert!(stderr.contains(UPLOAD_CHECKSUM_MARKER), "{stderr}");
+    assert_eq!(std::fs::read(&dest).unwrap(), payload, "move ran on a corrupted payload");
+    let leftovers: Vec<_> = std::fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp."))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_prune_keeps_newest_two_current_and_running_versions() {
+    use std::process::Stdio;
+    let home = tempfile::tempdir().unwrap();
+    let versions = home.path().join(".ferryx").join("versions");
+    for tag in ["2026.9.1", "2026.100.1", "2026.200.1", "2026.1027.4", "2026.1027.5"] {
+        std::fs::create_dir_all(versions.join(tag).join("bin")).unwrap();
+    }
+    std::fs::create_dir_all(versions.join("not-a-version")).unwrap();
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let running = versions.join("2026.9.1").join("bin").join("ferryx-remote-helper.exe");
+    std::fs::copy(Path::new(&system_root).join("System32").join("PING.EXE"), &running).unwrap();
+    let child = Command::new(&running)
+        .args(["-n", "60", "127.0.0.1"])
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _guard = ChildGuard(Some(child));
+
+    let script_path = home.path().join("prune.ps1");
+    std::fs::write(
+        &script_path,
+        windows_prune_versions_script(versions.to_str().unwrap(), "2026.100.1"),
+    )
+    .unwrap();
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let mut left: Vec<String> = std::fs::read_dir(&versions)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        ["2026.100.1", "2026.1027.4", "2026.1027.5", "2026.9.1", "not-a-version"]
     );
 }

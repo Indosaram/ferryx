@@ -4823,6 +4823,8 @@ impl DaemonServer {
                 crate::ipc::run_blocking(move || Ok(remove_owned_endpoint_artifacts(&artifacts))).await;
             tracing::info!(?removed, "Removed this owner's public endpoint artifacts");
         }
+        // Shared SSH connections end with the daemon instead of idling until ControlPersist.
+        crate::ssh::direct::stop_control_masters().await;
     }
 
     /// Records a public endpoint file this owner serves (data/control socket, or on loopback
@@ -5973,10 +5975,15 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
+                    let cleared = password.is_none().then(|| host.clone());
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
                         None => crate::ssh::password::clear(&host),
                     }).await;
+                    // A cleared password must not stay usable through a persisted connection.
+                    if let (Ok(()), Some(host)) = (&result, cleared) {
+                        crate::ssh::direct::close_control_master(&host).await;
+                    }
                     match result {
                         Ok(()) => DaemonResponse::Pong,
                         Err(error) => DaemonResponse::WorktreeError { error },

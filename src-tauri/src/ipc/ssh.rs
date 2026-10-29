@@ -80,7 +80,7 @@ mod tailscale_sync_tests {
     }
 
     fn host(id: &str, name: &str, source: crate::ssh::SshHostSource) -> SshHost {
-        SshHost { id: id.into(), label: name.into(), hostname: name.into(), username: Some("alice".into()), port: Some(2222), identity_file: Some("~/.ssh/id_test".into()), jump_host: Some("bastion".into()), source, auth_method: crate::ssh::SshAuthMethod::Key, disabled: None }
+        SshHost { id: id.into(), label: name.into(), hostname: name.into(), username: Some("alice".into()), port: Some(2222), identity_file: Some("~/.ssh/id_test".into()), jump_host: Some("bastion".into()), source, auth_method: crate::ssh::SshAuthMethod::Key, disabled: None, system_config_alias: None }
     }
 
     #[test]
@@ -373,18 +373,43 @@ pub async fn cmd_ssh_list_hosts<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Ssh
 pub async fn cmd_ssh_import_config<R: Runtime>(
     app: AppHandle<R>,
     config_text: String,
+    config_path: Option<String>,
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
-    run_blocking(move || import_config_into_store(&path, &config_text)).await
+    run_blocking(move || {
+        // Only hosts read from the ssh client's own default config connect by alias, and only when
+        // the text imported is that file as it is on disk now. Pasted text and custom paths keep
+        // explicit flags: a bare `ssh <alias>` would not find their Host block.
+        let system = system_ssh_config_path(&app);
+        let home = resolve_home_dir(&app);
+        let from_system = config_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|raw| expand_tilde_path(raw, home.as_deref()))
+            .zip(system)
+            .filter(|(selected, system)| selected == system)
+            .and_then(|(_, system)| std::fs::read_to_string(system).ok())
+            .is_some_and(|on_disk| on_disk == config_text);
+        import_config_into_store(&path, &config_text, from_system)
+    })
+    .await
 }
 
-fn import_config_into_store(path: &PathBuf, config_text: &str) -> Result<Vec<SshHost>, IpcError> {
+fn import_config_into_store(
+    path: &PathBuf,
+    config_text: &str,
+    from_system_config: bool,
+) -> Result<Vec<SshHost>, IpcError> {
     let _guard = lock_ssh_store();
     let mut store = load_store(path)?;
     let parsed = parse_ssh_config(config_text);
     let already_stored: Vec<String> = store.hosts.iter().map(|host| host.key()).collect();
     let imported = crate::ssh::config::import_aliases(&parsed, &already_stored);
-    for host in imported {
+    for mut host in imported {
+        host.system_config_alias = from_system_config
+            .then(|| host.id.strip_prefix("ssh-").map(str::to_string))
+            .flatten();
         let key = host.key();
         store.tombstones.retain(|tombstone| tombstone != &key);
         if let Some(position) = store
@@ -408,22 +433,32 @@ pub async fn cmd_ssh_update_host<R: Runtime>(
     host: SshHost,
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
-    run_blocking(move || {
-        let _guard = lock_ssh_store();
-        let mut store = load_store(&path)?;
-        if let Some(slot) = store
-            .hosts
-            .iter_mut()
-            .find(|existing| existing.id == host.id)
-        {
-            *slot = host;
-        } else {
-            store.hosts.push(host);
-        }
-        save_store(&path, &store)?;
-        Ok(store.hosts)
-    })
-    .await
+    run_blocking(move || update_host_in_store(&path, host)).await
+}
+
+fn update_host_in_store(path: &PathBuf, mut host: SshHost) -> Result<Vec<SshHost>, IpcError> {
+    let _guard = lock_ssh_store();
+    let mut store = load_store(path)?;
+    // Alias mode is granted by import only, never by the caller. It survives an edit that keeps the
+    // endpoint fields (label, user, auth method, disabled); changing hostname, port, identity or
+    // jump host switches the host to those explicit values, which the alias would otherwise override.
+    host.system_config_alias = store
+        .hosts
+        .iter()
+        .find(|existing| existing.id == host.id)
+        .filter(|existing| host.source == existing.source && existing.same_endpoint_fields(&host))
+        .and_then(|existing| existing.system_config_alias.clone());
+    if let Some(slot) = store
+        .hosts
+        .iter_mut()
+        .find(|existing| existing.id == host.id)
+    {
+        *slot = host;
+    } else {
+        store.hosts.push(host);
+    }
+    save_store(path, &store)?;
+    Ok(store.hosts)
 }
 
 #[cfg(feature = "desktop")]
@@ -433,9 +468,10 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
     id: String,
 ) -> Result<Vec<SshHost>, IpcError> {
     let path = get_ssh_store_path(&app)?;
-    run_blocking(move || {
+    let hosts = run_blocking(move || {
         let _guard = lock_ssh_store();
         let mut store = load_store(&path)?;
+        let mut removed_host = None;
         if let Some(position) = store.hosts.iter().position(|host| host.id == id) {
             let removed = store.hosts.remove(position);
             let discovery_key = format!("tailscale-host:{}", removed.hostname.to_ascii_lowercase());
@@ -451,11 +487,17 @@ pub async fn cmd_ssh_delete_host<R: Runtime>(
                     store.tombstones.push(key);
                 }
             }
+            removed_host = Some(removed);
         }
         save_store(&path, &store)?;
-        Ok(store.hosts)
+        Ok((store.hosts, removed_host))
     })
-    .await
+    .await?;
+    // A removed host keeps no shared connection alive behind it.
+    if let Some(removed) = hosts.1 {
+        crate::ssh::direct::close_control_master(&removed).await;
+    }
+    Ok(hosts.0)
 }
 
 /// Build a live SSH target summary for a host. Shared by the Tauri command and
@@ -471,14 +513,23 @@ pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
     };
     // Non-installing helper check, only when the host is reachable. Any probe
     // failure (timeout, transport error) classifies to Unknown, never an Err.
-    let helper = match &environment {
-        Some(environment) => Some(crate::ssh::helper_setup::probe_ready(&host, environment).await),
-        None => None,
+    // A present helper that cannot run stays Missing (so setup reinstalls it) but
+    // reports why through last_error instead of reading as plain "not installed".
+    let (helper, helper_exec_failure) = match &environment {
+        Some(environment) => {
+            let (state, exec_failure) =
+                crate::ssh::helper_setup::probe_ready_detailed(&host, environment).await;
+            (Some(state), exec_failure)
+        }
+        None => (None, None),
     };
     SshTargetSummary {
         host,
         reachable,
-        last_error: diagnostic.as_ref().map(|e| e.message.clone()),
+        last_error: diagnostic
+            .as_ref()
+            .map(|e| e.message.clone())
+            .or(helper_exec_failure),
         environment,
         helper,
         diagnostic,
@@ -504,6 +555,29 @@ pub async fn cmd_ssh_test_connection(
         clear_password_in_daemon(&daemon_client, host).await?;
     }
     Ok(summary)
+}
+
+/// Connects once with host-key acceptance redirected into a private temporary file and reports
+/// the keys the server presented, for the user to compare before trusting.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_scan_host_key(
+    host: SshHost,
+) -> Result<crate::ssh::host_key::HostKeyScan, IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::scan(&host).await
+}
+
+/// Pins the host key into the user's known_hosts only when a fresh scan still presents the
+/// fingerprint the user confirmed.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_trust_host_key(
+    host: SshHost,
+    fingerprint_sha256: String,
+) -> Result<(), IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::trust(&host, fingerprint_sha256).await
 }
 
 #[cfg(feature = "desktop")]
@@ -568,6 +642,35 @@ async fn clear_password_in_daemon(
             "Daemon does not support SSH password credentials",
         )),
     }
+}
+
+/// Registers or unregisters a UI listener for SSH auth prompts (passphrase, keyboard-interactive,
+/// OTP). Prompts raised while no listener is registered fail at once instead of waiting.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_auth_prompt_listeners<R: Runtime>(
+    app: AppHandle<R>,
+    active: bool,
+) -> Result<(), IpcError> {
+    use tauri::Emitter;
+    let sink: crate::ssh::password::PromptSink =
+        std::sync::Arc::new(move |prompt: &crate::ssh::password::AuthPrompt| {
+            if let Err(error) = app.emit(crate::ssh::password::AUTH_PROMPT_EVENT, prompt) {
+                tracing::warn!("failed to deliver an SSH auth prompt to the UI: {error}");
+            }
+        });
+    crate::ssh::password::prompts().set_listener(active, sink);
+    Ok(())
+}
+
+/// Answers a pending SSH auth prompt; `None` cancels it.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_answer_auth_prompt(
+    id: String,
+    answer: Option<crate::ssh::password::Password>,
+) -> Result<(), IpcError> {
+    crate::ssh::password::prompts().answer(&id, answer)
 }
 
 #[cfg(feature = "desktop")]
@@ -805,20 +908,19 @@ pub async fn cmd_ssh_install_ferryx_node<R: Runtime>(
     parse_node_install_report(&output)
 }
 
+fn parse_helper_target(
+    target_triple: &str,
+) -> Result<crate::ssh::helper_assets::HelperTarget, IpcError> {
+    crate::ssh::helper_assets::HelperTarget::from_triple(target_triple).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!("Unsupported target triple for helper asset: '{target_triple}'"),
+        )
+    })
+}
+
 pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, IpcError> {
-    let parsed_target = match target_triple {
-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
-        _ => {
-            return Err(IpcError::new(
-                IpcErrorCode::Unsupported,
-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
-            ));
-        }
-    };
+    let parsed_target = parse_helper_target(target_triple)?;
 
     let mut helper_dir_candidates = Vec::new();
 
@@ -858,19 +960,7 @@ pub fn bundled_helper_path<R: Runtime>(
     app: &AppHandle<R>,
     target_triple: &str,
 ) -> Result<PathBuf, IpcError> {
-    let parsed_target = match target_triple {
-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
-        _ => {
-            return Err(IpcError::new(
-                IpcErrorCode::Unsupported,
-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
-            ));
-        }
-    };
+    let parsed_target = parse_helper_target(target_triple)?;
 
     let mut helper_dir_candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -1139,7 +1229,7 @@ fn merge_tailscale_peers(store: &mut SshHostStore, peers: &[crate::remote::disco
             }
             host
         } else {
-            SshHost { id: id.clone(), label: peer.dns_name.clone().unwrap_or_else(|| peer.hostname.clone()), hostname: peer.ipv4.clone(), username: None, port: None, identity_file: None, jump_host: None, source: crate::ssh::SshHostSource::Tailscale, auth_method: crate::ssh::SshAuthMethod::Agent, disabled: None }
+            SshHost { id: id.clone(), label: peer.dns_name.clone().unwrap_or_else(|| peer.hostname.clone()), hostname: peer.ipv4.clone(), username: None, port: None, identity_file: None, jump_host: None, source: crate::ssh::SshHostSource::Tailscale, auth_method: crate::ssh::SshAuthMethod::Agent, disabled: None, system_config_alias: None }
         };
         if let Some(index) = store.hosts.iter().position(|current| current.id == host.id) {
             store.hosts[index] = host;
@@ -1413,6 +1503,7 @@ mod tests {
                 source: SshHostSource::Config,
                 auth_method: SshAuthMethod::Agent,
                 disabled: None,
+                system_config_alias: None,
             }],
             tombstones: vec!["maho-win:22".into()],
         };
@@ -1462,7 +1553,7 @@ mod tests {
         let original = b"{\"hosts\": [\n  {\"id\": \"saved-host\"},";
         std::fs::write(&path, original).expect("seed corrupt store");
 
-        let result = import_config_into_store(&path, "Host new-box\n  HostName new.example\n");
+        let result = import_config_into_store(&path, "Host new-box\n  HostName new.example\n", false);
         let saved = std::fs::read(&path).expect("read inventory after import");
         assert_eq!(
             (
@@ -1480,7 +1571,7 @@ mod tests {
         let path = dir.path().join("new-data").join("ssh_hosts.json");
         assert!(!path.exists());
 
-        let hosts = import_config_into_store(&path, "Host new-box\n  HostName new.example\n")
+        let hosts = import_config_into_store(&path, "Host new-box\n  HostName new.example\n", false)
             .expect("import into missing store");
         let saved: SshHostStore =
             serde_json::from_slice(&std::fs::read(&path).expect("read new store"))
@@ -1505,7 +1596,7 @@ mod tests {
         .expect("seed store");
 
         let hosts =
-            import_config_into_store(&path, "Host dev-box\n  HostName dev.example\n  User dev\n")
+            import_config_into_store(&path, "Host dev-box\n  HostName dev.example\n  User dev\n", false)
                 .expect("import config");
 
         assert_eq!(hosts.len(), 1);
@@ -1531,7 +1622,7 @@ mod tests {
         )
         .expect("seed store");
 
-        let imported = import_config_into_store(&path, config).expect("import config");
+        let imported = import_config_into_store(&path, config, false).expect("import config");
 
         assert_eq!(imported, hosts);
         assert_eq!(load_store(&path).expect("load saved store").hosts, hosts);
@@ -1544,15 +1635,77 @@ mod tests {
         let windows = "Host build\n  HostName maho-win\n";
         let linux = "Host build\n  HostName omarchy\n";
 
-        let first = import_config_into_store(&path, windows).expect("import windows endpoint");
+        let first = import_config_into_store(&path, windows, false).expect("import windows endpoint");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].hostname, "maho-win");
 
-        let second = import_config_into_store(&path, linux).expect("replace with linux endpoint");
+        let second = import_config_into_store(&path, linux, false).expect("replace with linux endpoint");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].id, first[0].id);
         assert_eq!(second[0].hostname, "omarchy");
         assert_eq!(load_store(&path).expect("load saved store").hosts, second);
+    }
+
+    /// D1: provenance is granted only for an import of the default config file. (An endpoint that
+    /// is already stored is skipped by import, as on base, so each case uses a fresh store.)
+    #[test]
+    fn only_a_system_config_import_records_alias_provenance() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let text = "Host box\n  HostName 10.9.8.7\n  Port 2200\n";
+        let pasted_path = dir.path().join("pasted.json");
+        let pasted = import_config_into_store(&pasted_path, text, false).expect("pasted import");
+        assert_eq!(pasted[0].config_alias(), None);
+        assert!(crate::ssh::exec::interactive_argv(&pasted[0])
+            .windows(2)
+            .any(|pair| pair == ["-p", "2200"]));
+        // A later file import of the same endpoint does not upgrade the pasted host.
+        let again = import_config_into_store(&pasted_path, text, true).expect("file re-import");
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].config_alias(), None);
+
+        let path = dir.path().join("ssh_hosts.json");
+        let system = import_config_into_store(&path, text, true).expect("system import");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0].config_alias(), Some("box"));
+        assert_eq!(load_store(&path).unwrap().hosts[0].config_alias(), Some("box"));
+    }
+
+    /// D2: an edit of an alias host's endpoint fields takes effect; an edit of other fields keeps
+    /// the alias; the caller can never grant provenance.
+    #[test]
+    fn editing_an_alias_host_endpoint_switches_it_to_the_edited_values() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("ssh_hosts.json");
+        let text = "Host pasted-box\n  HostName 10.9.8.7\n  User dev\n  Port 2200\n";
+        let stored = import_config_into_store(&path, text, true).expect("system import")[0].clone();
+        assert_eq!(stored.connect_target(), "dev@pasted-box");
+
+        let mut relabeled = stored.clone();
+        relabeled.label = "Renamed".into();
+        relabeled.system_config_alias = None; // the UI does not send it back
+        let hosts = update_host_in_store(&path, relabeled).expect("relabel");
+        assert_eq!(hosts[0].config_alias(), Some("pasted-box"));
+
+        let mut edited = hosts[0].clone();
+        edited.hostname = "10.1.1.1".into();
+        edited.port = Some(2222);
+        let hosts = update_host_in_store(&path, edited).expect("edit endpoint");
+        assert_eq!(hosts[0].config_alias(), None);
+        let argv = crate::ssh::exec::interactive_argv(&hosts[0]);
+        assert!(argv.windows(2).any(|pair| pair == ["-p", "2222"]), "{argv:?}");
+        assert_eq!(argv.last().map(String::as_str), Some("dev@10.1.1.1"));
+        assert_eq!(load_store(&path).unwrap().hosts[0].config_alias(), None);
+
+        // Restoring the original fields does not bring the alias back, and nor does a caller.
+        let mut forged = stored.clone();
+        forged.system_config_alias = Some("pasted-box".into());
+        let hosts = update_host_in_store(&path, forged).expect("forged");
+        assert_eq!(hosts[0].config_alias(), None);
+        let mut new_host = stored;
+        new_host.id = "ssh-new".into();
+        new_host.system_config_alias = Some("evil".into());
+        let hosts = update_host_in_store(&path, new_host).expect("new host");
+        assert!(hosts.iter().all(|host| host.config_alias().is_none()));
     }
 
     #[test]
@@ -1670,6 +1823,7 @@ Host dev-box
             source: SshHostSource::Manual,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+            system_config_alias: None,
         };
         save_store(
             &path,

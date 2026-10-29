@@ -224,6 +224,16 @@ describe("sshHosts library and useSshHosts hook", () => {
       expect(result).toEqual([mockHost1]);
     });
 
+    it("importSshConfig passes the source path only for a file import", async () => {
+      const config = "Host alias\n  HostName 10.0.0.1";
+      invokeMock.mockResolvedValueOnce([mockHost1]);
+      await importSshConfig(config, "/home/u/.ssh/config");
+      expect(invokeMock).toHaveBeenLastCalledWith("cmd_ssh_import_config", {
+        configText: config,
+        configPath: "/home/u/.ssh/config",
+      });
+    });
+
     it("testSshConnection invokes cmd_ssh_test_connection and returns summary", async () => {
       const summary = {
         host: mockHost1,
