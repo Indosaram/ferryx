@@ -22,6 +22,7 @@ import { MEMORY_REQUIRED_ASSERTIONS, USAGE_REQUIRED_ASSERTIONS } from './memory-
 import { LEGACY_REQUIRED_ASSERTIONS } from './legacy.mjs';
 import { CORRECTION_REQUIRED_ASSERTIONS } from './correction.mjs';
 import { REAL_AUTONOMY_REQUIRED_ASSERTIONS } from './real-autonomy.mjs';
+import { CHANNELS_REQUIRED_ASSERTIONS } from './channels.mjs';
 
 export const SLEEPER = fileURLToPath(new URL('./fixture-sleeper.mjs', import.meta.url));
 export const WORKER = fileURLToPath(new URL('./fixture-worker.mjs', import.meta.url));
@@ -2577,6 +2578,28 @@ const realAutonomyDeps = Object.freeze({
 });
 const loadRealAutonomy = async () => import('./real-autonomy.mjs');
 
+// The channels scenario (todo 17, channels.mjs) reuses these helpers.
+const channelsDeps = Object.freeze({
+  onPath,
+  shellQuote,
+  worker: WORKER,
+  promptTextOf,
+  convergenceMarker: CONVERGENCE_MARKER,
+  converged: AUTONOMY_CONVERGED,
+  freeLoopbackPort,
+  registerWorkspace,
+  openHubReader,
+  waitForChange,
+  readWorkerLogs,
+  stillAlive,
+  daemonExchange,
+  protocolVersion: DAEMON_PROTOCOL_VERSION,
+  prepareEngineEnv,
+  awaitEngine,
+  heldStates: HELD_STATES,
+});
+const loadChannels = async () => import('./channels.mjs');
+
 export const SCENARIOS = Object.freeze({
   // Task 6, implemented in mhc.mjs.
   runtime: RUNTIME_SCENARIO,
@@ -2767,7 +2790,23 @@ export const SCENARIOS = Object.freeze({
     ],
     run: (ctx) => loadLegacy().then((module) => module.runLegacy(ctx, legacyDeps)),
   }),
-  channels: planned('11,17', 'Approved Slack QA thread submit, desktop correction, phone pause/resume, Slack query: same supervisor/goal/revision, no leakage'),
+  channels: Object.freeze({
+    implemented: true,
+    task: '11,17',
+    // Opt-in: needs config.realSlack (the approved QA channel); --all leaves it out without it,
+    // a direct run refuses with PREREQUISITE_MISSING. Missing Slack auth is a release blocker.
+    optIn: 'realSlack',
+    summary: 'Owner submits in a thread of the approved real Slack QA channel, pauses/resumes from a paired phone, corrects from the desktop, then asks in the thread: one supervisor, one goal, the same revision on hub/desktop/phone/Slack, stale actions 409, no private DM text in the thread, QA messages deleted',
+    deadlineMs: 20 * 60_000,
+    requiredAssertions: CHANNELS_REQUIRED_ASSERTIONS,
+    notCovered: [
+      { clause: 'channel-bind-surface', reason: 'no product surface binds a Slack channel to the supervisor yet (bind_channel crates/ferryx-hub/src/supervisor.rs:1607 has no non-test caller); the run stops PRODUCT_GAP before posting until one exists', coveredBy: 'crates/ferryx-hub/src/chat/slack_supervisor.rs only_channels_the_owner_bound_reach_the_supervisor' },
+      { clause: 'real-worker', reason: 'the worker is the fixture worker (held first turn, obeys the correction); a real worker is covered by real-autonomy', coveredBy: 'real-autonomy' },
+      { clause: 'native-desktop-window-and-phone-ui', reason: 'desktop is the daemon request/snapshot the app uses (ferryx-cli supervisor request, supervisorSnapshot) and phone is the paired-device HTTP API; the rendered UIs are surfaces', coveredBy: 'surfaces' },
+      { clause: 'network-isolation-proof', reason: 'peers are sampled every second from /proc on Linux only', coveredBy: null },
+    ],
+    run: (ctx) => loadChannels().then((module) => module.runChannels(ctx, channelsDeps)),
+  }),
   // Task 14, implemented in surfaces.mjs.
   surfaces: SURFACES_SCENARIO,
   usage: Object.freeze({
@@ -2795,6 +2834,10 @@ function envMs(name, fallback) {
 const selfTest = (summary, deadlineMs, body) => Object.freeze({ implemented: true, task: '1', summary: `Self-test: ${summary}`, deadlineMs, ...body });
 
 export const SELF_TEST_SCENARIOS = Object.freeze({
+  // A planned (never implemented) entry for the self-test's refusal, run-lock and stale-evidence
+  // steps once every public scenario is implemented. It runs nothing (NOT_IMPLEMENTED), so
+  // resolveScenario accepts it without the internal flag.
+  '__selftest-planned': planned('selftest', 'Self-test stand-in for a planned scenario: always NOT_IMPLEMENTED'),
   // Deliberately failing child: misleading success output, a planted secret,
   // a SIGTERM-ignoring owned process with a descendant, and missing evidence.
   '__selftest-fail': selfTest('deliberately failing assertion with owned processes to tear down', 60_000, {
@@ -2943,7 +2986,7 @@ export const SELF_TEST_SCENARIOS = Object.freeze({
 
 export function resolveScenario(name, internal = false) {
   if (Object.hasOwn(SCENARIOS, name)) return SCENARIOS[name];
-  if (internal && Object.hasOwn(SELF_TEST_SCENARIOS, name)) return SELF_TEST_SCENARIOS[name];
+  if (Object.hasOwn(SELF_TEST_SCENARIOS, name) && (internal || !SELF_TEST_SCENARIOS[name].implemented)) return SELF_TEST_SCENARIOS[name];
   throw new HarnessError('UNKNOWN_SCENARIO', `unknown scenario ${name}; registered: ${Object.keys(SCENARIOS).join(', ')}`);
 }
 
