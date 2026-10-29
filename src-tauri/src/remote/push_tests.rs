@@ -292,6 +292,33 @@ async fn an_expired_device_gets_no_push_and_is_pruned_on_restart() {
 }
 
 #[tokio::test]
+async fn fan_out_follows_session_visibility_per_access_scope() {
+    use crate::remote::auth::{DeviceAccessScope, DevicePermission};
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mirror_mock = MockPush::start(StatusCode::CREATED).await;
+    let mut machine_mock = MockPush::start(StatusCode::CREATED).await;
+    let mirror = paired_device(&state);
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (_, machine) = state.auth_manager.exchange_pairing_code(&pin, "Machine phone").unwrap();
+    assert_eq!(machine.access_scope, DeviceAccessScope::Machine);
+    state.push.store.subscribe(&mirror, mirror_mock.subscription("m", true, FinishedMode::Off)).unwrap();
+    state.push.store.subscribe(&machine.id, machine_mock.subscription("x", true, FinishedMode::Off)).unwrap();
+    *state.machine_owned_override.write() = Some(Arc::new(|id: &str| id.starts_with("machine-")));
+
+    assert_eq!(state.dispatch_push("machine-1", PushKind::NeedsInput).await, 1);
+    assert_eq!(machine_mock.received().len(), 1, "a Machine Control device gets its machine session");
+    assert!(mirror_mock.received().is_empty(), "a Mirror device never sees a machine session");
+
+    assert_eq!(state.dispatch_push("desktop-1", PushKind::NeedsInput).await, 1);
+    assert_eq!(mirror_mock.received().len(), 1, "a Mirror device gets a mirrored session");
+    assert!(machine_mock.received().is_empty(), "a Machine device does not get mirrored sessions");
+}
+
+#[tokio::test]
 async fn gone_answer_deletes_the_subscription() {
     for answer in [StatusCode::GONE, StatusCode::NOT_FOUND] {
         let dir = tempfile::tempdir().unwrap();

@@ -826,6 +826,8 @@ pub struct RemoteGatewayState {
     /// focus: this is the native window's own focus, and a stale report counts as unfocused.
     desktop_window_focus: RwLock<Option<(bool, std::time::Instant)>>,
     push_dispatch_started: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) machine_owned_override: RwLock<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
@@ -1081,6 +1083,8 @@ impl RemoteGatewayState {
             push,
             desktop_window_focus: RwLock::new(None),
             push_dispatch_started: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            machine_owned_override: RwLock::new(None),
             active_selection: RwLock::new(None),
             active_selection_tx,
             ssh_store_path: RwLock::new(None),
@@ -1422,26 +1426,24 @@ impl RemoteGatewayState {
         });
     }
 
-    /// Sends `kind` for `session_id` to every subscription that wants it, unless the desktop
-    /// window is focused or the session is machine-private. Returns how many sends were made.
+    /// Sends `kind` for `session_id` to every subscription that wants it and whose device may
+    /// see the session, unless the desktop window is focused. Returns how many sends were made.
     pub async fn dispatch_push(&self, session_id: &str, kind: crate::remote::push::PushKind) -> usize {
         if self.desktop_window_focus_suppresses_push() {
             return 0;
         }
-        if self
-            .machine_services
-            .as_ref()
-            .is_some_and(|services| services.sessions.machine_only(session_id))
-        {
-            return 0;
-        }
+        let machine_owned = self.session_is_machine_owned(session_id);
         let targets: Vec<_> = self
             .push
             .store
             .list_subscriptions()
             .into_iter()
             .filter(|sub| kind.wanted_by(sub))
-            .filter(|sub| self.auth_manager.live_device(&sub.device_id).is_some())
+            .filter(|sub| {
+                self.auth_manager
+                    .live_device(&sub.device_id)
+                    .is_some_and(|device| device_sees_session(&device, machine_owned))
+            })
             .collect();
         if targets.is_empty() {
             return 0;
@@ -1479,6 +1481,17 @@ impl RemoteGatewayState {
             .or_else(|| details.and_then(|details| details.worktree_label))
             .filter(|label| !label.trim().is_empty());
         (agent, worktree)
+    }
+
+    /// Whether the machine journal owns `session_id` (a machine session, not a mirrored one).
+    fn session_is_machine_owned(&self, session_id: &str) -> bool {
+        #[cfg(test)]
+        if let Some(owned) = self.machine_owned_override.read().as_ref() {
+            return owned(session_id);
+        }
+        self.machine_services
+            .as_ref()
+            .is_some_and(|services| services.sessions.machine_only(session_id))
     }
 
     pub fn set_active_selection_opt(&self, selection: Option<RemoteActiveDesktopSelection>) {
@@ -1585,6 +1598,18 @@ impl RemoteGatewayState {
             "agent control setting changed"
         );
         Ok(self.agent_control_settings())
+    }
+}
+
+/// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device
+/// sees machine-owned sessions; a Mirror device sees mirrored (desktop) sessions only.
+fn device_sees_session(device: &crate::remote::auth::DeviceInfo, machine_owned: bool) -> bool {
+    use crate::remote::auth::{DeviceAccessScope, DevicePermission};
+    match device.access_scope {
+        DeviceAccessScope::Machine => {
+            machine_owned && device.permission == DevicePermission::Control
+        }
+        DeviceAccessScope::Mirror => !machine_owned,
     }
 }
 
