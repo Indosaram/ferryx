@@ -3,8 +3,8 @@
 //! Every path a caller passes is relative to the worktree root and is jailed to it; Git sees it
 //! as a literal pathspec after `--`. Pushes never force.
 
-use crate::worktree::git::run_git;
-use crate::worktree::model::WorktreeError;
+use crate::worktree::git::{parse_status_porcelain, run_git};
+use crate::worktree::model::{DirtyState, WorktreeError};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -166,6 +166,13 @@ pub fn git_diff(
         }
         _ => Ok(patch),
     }
+}
+
+/// File list for the Changes panel. Unlike the sidebar dirty check, untracked directories are
+/// expanded to their files (`-uall`) so each new file can be selected and previewed.
+pub fn git_changes_status(worktree: &Path) -> Result<DirtyState, GitChangeError> {
+    let output = run_git(worktree, &["status", "--porcelain", "-uall"])?;
+    Ok(parse_status_porcelain(&output))
 }
 
 /// Largest untracked file shown as a preview patch.
@@ -404,6 +411,18 @@ mod tests {
             let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some(quiet)).unwrap();
             assert!(patch.is_empty(), "{quiet}: {patch}");
         }
+    }
+
+    #[test]
+    fn changes_status_lists_files_inside_new_untracked_directories() {
+        let (_dir, repo, _bare) = repo_with_bare_remote();
+        fs::create_dir(repo.join("dir")).unwrap();
+        fs::write(repo.join("dir/new.txt"), "fresh\n").unwrap();
+        let paths: Vec<String> =
+            git_changes_status(&repo).unwrap().files.into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, vec!["dir/new.txt".to_string()]);
+        let patch = git_diff(&repo, &GitDiffScope::WorkingTree, Some(&paths[0])).unwrap();
+        assert!(patch.contains("+fresh"), "{patch}");
     }
 
     #[test]
