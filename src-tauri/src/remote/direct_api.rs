@@ -5,7 +5,7 @@
 //! and replay checks, independent trust lookup and signature verification all run
 //! BEFORE any DNS or UDP work. The answer is returned before punching starts, since
 //! the client cannot punch until it holds the answer.
-use super::server::{authenticate_machine_request, load_gateway_identity, machine_error};
+use super::server::{authenticate_machine_request, load_gateway_identity, machine_error, Refusal};
 use crate::paired_host::direct::{generate_ephemeral_cert, DirectConnectionAnswer};
 use crate::paired_host::direct_trust::{trusted_key, DirectTrustStore};
 use crate::paired_host::direct_wire::{
@@ -213,7 +213,7 @@ fn local_gateway_addr(state: &RemoteGatewayState) -> Option<SocketAddr> {
 }
 
 /// Token validation may persist auth state, so it runs on a blocking worker.
-async fn authorize(state: &Arc<RemoteGatewayState>, headers: &HeaderMap) -> Result<DeviceInfo, Response> {
+async fn authorize(state: &Arc<RemoteGatewayState>, headers: &HeaderMap) -> Result<DeviceInfo, Refusal> {
     let (state, headers) = (Arc::clone(state), headers.clone());
     let device = crate::ipc::run_blocking(move || {
         Ok(authenticate_machine_request(&state, &headers).map_err(|response| *response))
@@ -221,7 +221,7 @@ async fn authorize(state: &Arc<RemoteGatewayState>, headers: &HeaderMap) -> Resu
         .await
         .map_err(|_| machine_error(StatusCode::SERVICE_UNAVAILABLE, "MACHINE_SERVICE_UNAVAILABLE"))??;
     if device.access_scope != DeviceAccessScope::Machine || device.permission != DevicePermission::Control {
-        return Err(machine_error(StatusCode::FORBIDDEN, "FORBIDDEN"));
+        return Err(machine_error(StatusCode::FORBIDDEN, "FORBIDDEN").into());
     }
     Ok(device)
 }
@@ -234,7 +234,7 @@ pub async fn handle_offer(
 ) -> Response {
     match negotiate(state, headers, body, manager).await {
         Ok(answer) => ([(header::CACHE_CONTROL, "no-store")], Json(answer)).into_response(),
-        Err(response) => response,
+        Err(response) => response.into(),
     }
 }
 
@@ -243,16 +243,16 @@ async fn negotiate(
     headers: &HeaderMap,
     body: &[u8],
     manager: &DirectHostManager,
-) -> Result<DirectAnswerEnvelope, Response> {
+) -> Result<DirectAnswerEnvelope, Refusal> {
     authorize(&state, headers).await?;
     let bad_request = || machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST");
     if body.len() > MAX_DIRECT_BODY_BYTES {
-        return Err(machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"));
+        return Err(machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE").into());
     }
     let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| bad_request())?;
     // Unknown/legacy protocol versions simply get no direct path.
     if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
-        return Err(machine_error(StatusCode::NOT_FOUND, "DIRECT_UNSUPPORTED"));
+        return Err(machine_error(StatusCode::NOT_FOUND, "DIRECT_UNSUPPORTED").into());
     }
     let envelope: DirectOfferEnvelope = serde_json::from_value(value).map_err(|_| bad_request())?;
 
@@ -260,10 +260,10 @@ async fn negotiate(
     let forbidden = |code| machine_error(StatusCode::FORBIDDEN, code);
     let source = match check_offer_at(&envelope, &identity.machine_id, (manager.config.now_ms)()) {
         Ok(source) => source,
-        Err(WireError::Malformed) => return Err(bad_request()),
-        Err(WireError::WrongTarget) => return Err(forbidden("DIRECT_WRONG_TARGET")),
-        Err(WireError::Expired) => return Err(forbidden("DIRECT_OFFER_EXPIRED")),
-        Err(WireError::BadSignature) => return Err(forbidden("DIRECT_BAD_SIGNATURE")),
+        Err(WireError::Malformed) => return Err(bad_request().into()),
+        Err(WireError::WrongTarget) => return Err(forbidden("DIRECT_WRONG_TARGET").into()),
+        Err(WireError::Expired) => return Err(forbidden("DIRECT_OFFER_EXPIRED").into()),
+        Err(WireError::BadSignature) => return Err(forbidden("DIRECT_BAD_SIGNATURE").into()),
     };
     // Trust comes only from the local store; nothing the relay forwards can add it.
     let unavailable = || machine_error(StatusCode::SERVICE_UNAVAILABLE, "DIRECT_UNAVAILABLE");
@@ -278,7 +278,7 @@ async fn negotiate(
     if host_lease_required {
         let now_secs = (manager.config.now_ms)() / 1000;
         if state.host_lease.get_valid_lease(now_secs).is_none() {
-            return Err(machine_error(StatusCode::PAYMENT_REQUIRED, "REMOTE_SUSPENDED"));
+            return Err(machine_error(StatusCode::PAYMENT_REQUIRED, "REMOTE_SUSPENDED").into());
         }
     }
 
@@ -328,7 +328,7 @@ async fn negotiate(
     let cancellation = if host_lease_required {
         let now_secs = (manager.config.now_ms)() / 1000;
         if state.host_lease.get_valid_lease(now_secs).is_none() {
-            return Err(machine_error(StatusCode::PAYMENT_REQUIRED, "REMOTE_SUSPENDED"));
+            return Err(machine_error(StatusCode::PAYMENT_REQUIRED, "REMOTE_SUSPENDED").into());
         }
         Some(manager.subscribe_cancellation())
     } else {

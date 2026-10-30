@@ -710,7 +710,7 @@ fn lsof_session_id(pid: u32, agent_type: &str) -> Option<String> {
 }
 
 /// The session named by any open file of a process, read from its `/proc/<pid>/fd` symlinks.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn proc_fd_session_id(fd_dir: &std::path::Path, agent_type: &str) -> Option<String> {
     std::fs::read_dir(fd_dir)
         .ok()?

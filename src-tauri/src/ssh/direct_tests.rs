@@ -835,7 +835,7 @@ fn windows_bridge_command_quotes_spaces_and_metachars() {
     assert!(cmd.starts_with("pwsh -NoLogo -NoProfile -NonInteractive -EncodedCommand "));
     let encoded = cmd.rsplit_once(' ').unwrap().1;
     let bytes = STANDARD.decode(encoded).unwrap();
-    let utf16: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+    let utf16: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
     let script = String::from_utf16(&utf16).unwrap();
     assert!(script.contains(&crate::ssh::runtime::powershell_data(&location.executable)));
     let arguments = format!("bridge --stdio --root {}", quote_windows_cmd_arg(&location.root));

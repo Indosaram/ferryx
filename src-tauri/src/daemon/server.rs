@@ -4,15 +4,18 @@ mod machine_gateway;
 // Server side of the frozen control-v1 channel (todo 15).
 #[path = "control_server.rs"]
 mod control_server;
+#[cfg(any(unix, test))]
 use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
     AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
-    DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire,
+    DaemonResponse, DaemonStreamMessage, HistorySegmentWire,
     DAEMON_PROTOCOL_VERSION,
 };
+#[cfg(any(unix, test))]
+use crate::daemon::protocol::DaemonSessionDetails;
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
@@ -45,6 +48,7 @@ use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
+#[cfg(any(unix, test))]
 async fn rollback_transferred_readers<R, A, D>(
     relinquish: R,
     abort: impl FnOnce() -> A,
@@ -73,6 +77,7 @@ where
 /// client-request ownership a transferred session keeps, and installing it is what makes this
 /// daemon an authoritative owner *before* it takes the PTY master. A record that disagrees with the
 /// predecessor's declaration, or is missing, refuses the session so the predecessor keeps it.
+#[cfg(any(unix, test))]
 fn adopt_transferred_ownership(
     metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
     session_id: &str,
@@ -108,6 +113,7 @@ fn adopt_transferred_ownership(
 /// retirement): the adopted sessions are relinquished first, then the predecessor is told to
 /// abort. The abort is what resumes the readers it paused for the export; without it the
 /// predecessor keeps serving every session with its output frozen.
+#[cfg(any(unix, test))]
 async fn release_after_unconfirmed_commit<R, A>(
     relinquish: R,
     abort: impl FnOnce() -> A,
@@ -129,6 +135,7 @@ where
 
 /// Drops the ownership records a successor installed for sessions it handed back to the
 /// predecessor: a relinquished session must not leave this daemon claiming its workspace.
+#[cfg(any(unix, test))]
 fn release_adopted_ownership(
     metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
     session_ids: &[String],
@@ -1256,12 +1263,6 @@ impl DaemonLockFile {
         std::mem::forget(self);
         file
     }
-
-    /// Constructs a `DaemonLockFile` from an already-locked file handle received
-    /// during handover transfer.
-    pub(crate) fn from_locked_file(file: File) -> Self {
-        Self { file }
-    }
 }
 
 #[cfg(windows)]
@@ -1307,10 +1308,6 @@ impl DaemonLockFile {
         std::mem::forget(self);
         file
     }
-
-    pub(crate) fn from_locked_file(file: File) -> Self {
-        Self { _file: file }
-    }
 }
 
 #[derive(Debug)]
@@ -1330,6 +1327,7 @@ impl DaemonLockFiles {
     }
 
     /// Adopts pre-locked files received via handover descriptor transfer.
+    #[cfg(unix)]
     pub(crate) fn from_locked_files(persistent: Option<File>, legacy: File) -> Self {
         Self {
             _persistent: persistent.map(DaemonLockFile::from_locked_file),
@@ -1405,7 +1403,7 @@ fn lock_file_with_optional_wait_internal<F: FnMut()>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn acquire_daemon_locks(
     persistent_path: Option<&Path>,
     legacy_path: &Path,
@@ -3600,6 +3598,7 @@ fn request_session_id(request: &DaemonRequest) -> Option<&str> {
 /// shortfall is not a warning: committing retires the predecessor, and each undelivered session
 /// dies with the PTY master fd it still owned. Aborting instead leaves the predecessor serving all
 /// of them, which is always the survivable outcome.
+#[cfg(unix)]
 pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
     if accepted >= offered {
         return Ok(());
@@ -3633,6 +3632,7 @@ async fn refresh_cors_saved_host_origins(
 ///
 /// `owned == 0` means the peer is an older daemon that does not send the field; fall back to
 /// the delivery-only check rather than aborting every handover with such a predecessor.
+#[cfg(unix)]
 pub(crate) fn handover_delivery_verdict_owned(
     owned: usize,
     offered: usize,
@@ -3652,6 +3652,7 @@ pub(crate) fn handover_delivery_verdict_owned(
 /// Sessions the predecessor listed but did not export, whose durable remote snapshot lets the
 /// successor restore them after commit. An older predecessor counts these in `owned` even
 /// though only local PTYs travel over the handover socket.
+#[cfg(unix)]
 pub(crate) fn handover_restorable_unexported(
     listed: &[String],
     exported: &std::collections::HashSet<String>,
@@ -3671,6 +3672,7 @@ pub(crate) fn handover_restorable_unexported(
 /// `owned` although only local PTYs travel; those that the successor restores from the durable
 /// snapshot are not casualties. A newer predecessor already reports local PTYs only, so nothing
 /// is credited, and crediting it anyway would zero `owned` and disable the owned check.
+#[cfg(unix)]
 pub(crate) fn handover_effective_owned(
     owned: usize,
     listed_unique: usize,
@@ -3681,6 +3683,13 @@ pub(crate) fn handover_effective_owned(
     } else {
         owned
     }
+}
+
+/// The session output a stream pump forwards: its id, live broadcast and backing hub.
+pub(crate) struct SequencedStream {
+    pub(crate) session_id: String,
+    pub(crate) rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
+    pub(crate) hub: Arc<TerminalOutputHub>,
 }
 
 impl DaemonServer {
@@ -3967,7 +3976,7 @@ impl DaemonServer {
     }
 
     /// Parks every later Close handler after its response flush (see close_park).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_close_park_for_test(
         &self,
         park: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
@@ -6960,9 +6969,7 @@ impl DaemonServer {
                                 let _ = write_half.flush().await;
 
                                 self.pump_session_stream(
-                                    session_id,
-                                    attachment.receiver,
-                                    hub,
+                                    SequencedStream { session_id, rx: attachment.receiver, hub },
                                     write_half,
                                     Some(agent_subscription),
                                     Some(&mut reader),
@@ -7750,8 +7757,8 @@ impl DaemonServer {
                         }
                     }
                 }
+                #[cfg(unix)]
                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
-                    #[cfg(unix)]
                     {
                         crate::daemon::handover_request::note_transfer_started();
                         if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
@@ -7907,13 +7914,11 @@ impl DaemonServer {
                             }
                         }
                     }
-                    #[cfg(not(unix))]
-                    {
-                        DaemonResponse::HandoverRejected {
-                            reason: "Session transfer unsupported on non-Unix".to_string(),
-                        }
-                    }
                 }
+                #[cfg(not(unix))]
+                Ok(DaemonRequest::TransferSessions { .. }) => DaemonResponse::HandoverRejected {
+                    reason: "Session transfer unsupported on non-Unix".to_string(),
+                },
                 Ok(DaemonRequest::CommitHandover { .. }) => {
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
@@ -8557,13 +8562,19 @@ impl DaemonServer {
                         .unwrap_or(0),
                 )
             });
-            remaining
-                .fetch_update(
+            let mut left = remaining.load(std::sync::atomic::Ordering::SeqCst);
+            loop {
+                let Some(next) = left.checked_sub(1) else { break false };
+                match remaining.compare_exchange_weak(
+                    left,
+                    next,
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
-                    |left| left.checked_sub(1),
-                )
-                .is_ok()
+                ) {
+                    Ok(_) => break true,
+                    Err(current) => left = current,
+                }
+            }
         }
         #[cfg(not(feature = "local-split-qa"))]
         {
@@ -8891,9 +8902,7 @@ impl DaemonServer {
     {
         let exit_status = hub.exit_status(&session_id);
         Self::pump_sequenced_stream_with_agent_state(
-            session_id,
-            rx,
-            hub,
+            SequencedStream { session_id, rx, hub },
             writer,
             None,
             None::<tokio::io::Empty>,
@@ -8905,9 +8914,7 @@ impl DaemonServer {
 
     async fn pump_session_stream<W, R>(
         &self,
-        session_id: String,
-        rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
-        hub: Arc<TerminalOutputHub>,
+        stream: SequencedStream,
         writer: W,
         agent_rx: Option<AgentStateSubscription>,
         client_reader: Option<R>,
@@ -8916,6 +8923,7 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        let SequencedStream { session_id, rx, hub } = stream;
         // Captured before streaming: the PTY leaves the registry as soon as it exits, which is
         // exactly when the exit frame that must carry this incarnation is written.
         let incarnation = self
@@ -8929,7 +8937,8 @@ impl DaemonServer {
             if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch { return; }
             let (input, output) = tokio::io::duplex(64 * 1024);
             let pump = Self::pump_sequenced_stream_with_agent_state(
-                session_id.clone(), rx, hub, output, agent_rx, client_reader, incarnation, exit_status,
+                SequencedStream { session_id: session_id.clone(), rx, hub },
+                output, agent_rx, client_reader, incarnation, exit_status,
             );
             tokio::pin!(pump);
             let mut lines = BufReader::new(input).lines();
@@ -8995,9 +9004,7 @@ impl DaemonServer {
         }
         let Ok(mut updates) = self.terminal_service.remote().subscribe(&session_id) else {
             Self::pump_sequenced_stream_with_agent_state(
-                session_id,
-                rx,
-                hub,
+                SequencedStream { session_id, rx, hub },
                 writer,
                 agent_rx,
                 client_reader,
@@ -9009,9 +9016,7 @@ impl DaemonServer {
         };
         let (input, output) = tokio::io::duplex(64 * 1024);
         let pump = Self::pump_sequenced_stream_with_agent_state(
-            session_id.clone(),
-            rx,
-            hub,
+            SequencedStream { session_id: session_id.clone(), rx, hub },
             output,
             agent_rx,
             client_reader,
@@ -9055,9 +9060,7 @@ impl DaemonServer {
     }
 
     pub(crate) async fn pump_sequenced_stream_with_agent_state<W, R>(
-        session_id: String,
-        mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
-        hub: Arc<TerminalOutputHub>,
+        stream: SequencedStream,
         writer: W,
         mut agent_state_rx: Option<AgentStateSubscription>,
         mut client_reader: Option<R>,
@@ -9067,6 +9070,7 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        let SequencedStream { session_id, mut rx, hub } = stream;
         let mut writer = BufWriter::new(writer);
         if let Some(snapshot) = agent_state_rx
             .as_ref()
@@ -9548,7 +9552,7 @@ mod live_relay_apply_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
     let norm_repo = repo_root.replace('\\', "/");
     let norm_root = root.replace('\\', "/");
@@ -10070,9 +10074,7 @@ mod tests {
         let hub = Arc::new(TerminalOutputHub::default());
 
         let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            "exiting-session".to_string(),
-            rx,
-            hub,
+            SequencedStream { session_id: "exiting-session".to_string(), rx, hub },
             server_side,
             None,
             None::<tokio::io::Empty>,
@@ -10109,7 +10111,7 @@ mod tests {
         hub.record_exit("delayed-exit", Some(9));
         let (client, server_side) = tokio::io::duplex(4096);
         let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            "delayed-exit".to_string(), rx, hub, server_side, None,
+            SequencedStream { session_id: "delayed-exit".to_string(), rx, hub }, server_side, None,
             None::<tokio::io::Empty>, Some("original-incarnation".to_string()), Some(status),
         ));
         let mut reader = BufReader::new(client);
@@ -11657,9 +11659,7 @@ mod tests {
         let agent_rx = server.agent_states.subscribe(&session_id);
 
         let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            session_id.clone(),
-            rx,
-            hub,
+            SequencedStream { session_id: session_id.clone(), rx, hub },
             client,
             Some(agent_rx),
             None::<tokio::io::Empty>,
@@ -12586,9 +12586,7 @@ mod tests {
         let session_id = "test-idle-session".to_string();
 
         let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            session_id,
-            rx,
-            hub,
+            SequencedStream { session_id, rx, hub },
             server_write_side,
             None,
             Some(server_read_side),
@@ -13605,9 +13603,7 @@ mod instance_lock_deadline_tests {
         let pump_task = tokio::spawn(async move {
             pump_server
                 .pump_session_stream::<_, tokio::io::Empty>(
-                    pump_session_id,
-                    rx,
-                    hub,
+                    SequencedStream { session_id: pump_session_id, rx, hub },
                     server_writer,
                     None,
                     None,

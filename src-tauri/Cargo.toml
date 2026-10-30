@@ -297,3 +297,10 @@ strip = "none"
 [profile.test.build-override]
 strip = "none"
 
+# The daemon SHA-256 hashes its own executable for its generation key before it binds the
+# control endpoint and reports FERRYX_DAEMON_READY (owner_admission::current_generation_key).
+# A Linux debug binary is ~900 MB, and unoptimized sha2 takes ~14 s to hash it, past the
+# 10 s readiness bound. `test` inherits this from `dev`.
+[profile.dev.package.sha2]
+opt-level = 3
+

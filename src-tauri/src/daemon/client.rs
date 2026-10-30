@@ -505,7 +505,7 @@ fn handshake_error_for_response(message: String, code: Option<&str>) -> IpcError
 
 #[derive(Debug)]
 struct RequestAttemptError {
-    error: IpcError,
+    error: Box<IpcError>,
     may_have_been_delivered: bool,
     /// The peer closed before any reply byte arrived. Delivery is still ambiguous:
     /// the request may have executed before the connection or acknowledgment was lost.
@@ -515,7 +515,7 @@ struct RequestAttemptError {
 impl RequestAttemptError {
     fn not_delivered(error: IpcError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             may_have_been_delivered: false,
             peer_closed_before_reply: false,
         }
@@ -523,7 +523,7 @@ impl RequestAttemptError {
 
     fn ambiguous(error: IpcError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             may_have_been_delivered: true,
             peer_closed_before_reply: false,
         }
@@ -557,7 +557,7 @@ impl RequestAttemptError {
         if report_ambiguous && self.may_have_been_delivered {
             ambiguous_delivery_error(req, &self.error)
         } else {
-            self.error
+            *self.error
         }
     }
 }
@@ -2447,7 +2447,7 @@ impl DaemonClient {
         let result = match self
             .paired_host_request(DaemonRequest::PairedHostOperation { request })
             .await
-            .map_err(&transport_error)?
+            .map_err(transport_error)?
         {
             DaemonResponse::PairedHostOperationOk { response } => Ok(response),
             DaemonResponse::PairedHostOperationError { error } => Err(error),

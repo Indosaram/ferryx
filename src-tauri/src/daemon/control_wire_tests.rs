@@ -315,6 +315,7 @@ impl crate::daemon::handover_request::CandidateStarter for RecordingStarter {
     }
 }
 
+#[cfg(unix)]
 const UPGRADE_CHILD_ROOT: &str = "FERRYX_T8_UPGRADE_CHILD_ROOT";
 
 /// A successful RequestUpgrade (todo 8): the staged generation executable is accepted,
@@ -547,6 +548,7 @@ fn spawn_cat(server: &DaemonServer) -> (String, tokio::sync::mpsc::Receiver<Vec<
         .expect("spawn a live pty session")
 }
 
+#[cfg(unix)]
 fn spawn_request(id: &str) -> DaemonRequest {
     DaemonRequest::Spawn {
         client_request_id: id.into(),
@@ -562,6 +564,7 @@ fn spawn_request(id: &str) -> DaemonRequest {
     }
 }
 
+#[cfg(unix)]
 fn assert_daemon_retiring(response: DaemonResponse) {
     match response {
         DaemonResponse::Error { code, .. } => {

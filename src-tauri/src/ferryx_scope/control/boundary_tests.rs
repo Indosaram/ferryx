@@ -7,6 +7,40 @@ impl local::TaskLauncher for NoLauncher {
     fn start(&self,_:TargetRef,_:Value)->BoxFuture<'_,Result<Value>> { Box::pin(async {Err(error(ScopeErrorCode::Unsupported,"fixture already started"))}) }
     fn stop(&self,_:TargetRef)->BoxFuture<'_,Result<Value>> { Box::pin(async {Err(error(ScopeErrorCode::Unsupported,"fixture cleanup owns stop"))}) }
 }
+/// Runs on every platform: the router, its error mapping and the local adapter's refusal for a
+/// session the terminal service does not own, with no PTY involved.
+#[tokio::test]
+async fn loopback_router_maps_missing_sessions_and_auth_on_every_platform() {
+    let terminals = Arc::new(crate::terminal::TerminalService::default());
+    let target=TargetRef {host_id:"qa".into(),owner_id:"owner".into(),epoch:Epoch(1),backend_session_id:"absent-session".into()};
+    let auth=crate::remote::AuthManager::new();
+    let (token,device)=auth.exchange_pairing_code(&auth.create_pairing_code(crate::remote::DevicePermission::Control),"fixture").unwrap();
+    let service=service::Service::new(auth,16);
+    service.allow_control.store(true,Ordering::SeqCst); service.grant_hosts(device.id,vec!["qa".into()]);
+    service.register_backend("qa".into(),"owner".into(),Epoch(1),true,Arc::new(local::LocalBackend {sessions:terminals,launcher:Arc::new(NoLauncher)})).await;
+    service.inventory.lock().await.insert(Agent {target:target.clone(),workspace_id:"fixture".into(),label:"fixture".into(),state:"idle".into(),revision:0,source:TransitionSource::Lifecycle}).unwrap();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address=listener.local_addr().unwrap();
+    let (shutdown,closed)=tokio::sync::oneshot::channel::<()>();
+    let app=router::router(service.clone());
+    let server=tokio::spawn(async move {axum::serve(listener,app).with_graceful_shutdown(async {let _=closed.await;}).await.unwrap();});
+    let client=reqwest::Client::builder().no_proxy().build().unwrap();
+    let base=format!("http://{address}/api/v1");
+    let agent=format!("{base}/agents/{}",router::opaque_target(&target));
+    assert_eq!(client.get(format!("{base}/agents")).send().await.unwrap().status(),401);
+    for path in ["agents","hosts","events"] {
+        assert_eq!(client.get(format!("{base}/{path}")).bearer_auth(&token).send().await.unwrap().status(),200,"{path}");
+    }
+    let body=serde_json::json!({"requestId":"prompt-absent","params":{"text":"hello\n"}}).to_string();
+    let prompt=client.post(format!("{agent}/prompt")).bearer_auth(&token).header("content-type","application/json").body(body).send().await.unwrap();
+    assert_eq!(prompt.status(),409,"a session the terminal service does not own is expired");
+    assert_eq!(client.get(format!("{agent}/messages?limit=10")).bearer_auth(&token).send().await.unwrap().status(),409);
+    assert_eq!(client.get(format!("{agent}/wait?timeoutMs=1")).bearer_auth(&token).send().await.unwrap().status(),504);
+    assert_eq!(client.get(format!("{base}/agents/not-base64!/messages")).bearer_auth(&token).send().await.unwrap().status(),400);
+    let create=serde_json::json!({"requestId":"create-1","params":{"hostId":"qa"}}).to_string();
+    assert_eq!(client.post(format!("{base}/agents")).bearer_auth(&token).header("content-type","application/json").body(create).send().await.unwrap().status(),422);
+    shutdown.send(()).unwrap(); server.await.unwrap();
+}
 #[cfg(unix)]
 #[tokio::test]
 async fn loopback_router_delivers_exactly_once_to_real_disposable_pty() {

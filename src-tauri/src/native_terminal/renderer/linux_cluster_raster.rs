@@ -217,13 +217,13 @@ pub fn rasterize(
                 rgba[(row * width as usize + col) * 4..][..4].copy_from_slice(&[r, g, b, a]);
             }
         }
-        if !rgba.chunks_exact(4).any(|p| p[3] != 0) {
+        if !rgba.as_chunks::<4>().0.iter().any(|p| p[3] != 0) {
             return None;
         }
         Some(if colored {
             RasterizedGlyph::Color(rgba)
         } else {
-            RasterizedGlyph::Alpha(rgba.chunks_exact(4).map(|p| p[3]).collect())
+            RasterizedGlyph::Alpha(rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect())
         })
     }
 }
@@ -251,10 +251,10 @@ mod tests {
             let RasterizedGlyph::Color(pixels) = render(text) else {
                 panic!("{text:?} must produce color emoji pixels");
             };
-            assert!(pixels.chunks_exact(4).any(|p| p[3] > 0 && p[0] != p[1]));
+            assert!(pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0 && p[0] != p[1]));
             assert!(
                 pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>().0.iter()
                     .all(|p| p[..3].iter().all(|&c| c <= p[3])),
                 "RGBA must remain premultiplied for the atlas shader"
             );
@@ -272,10 +272,10 @@ mod tests {
             panic!("black/white emoji must not become a foreground-tinted alpha mask");
         };
         assert!(pixels
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .any(|p| p[3] > 128 && p[0] < p[3] / 2));
         assert!(pixels
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .any(|p| p[3] > 128 && p[0] > (u16::from(p[3]) * 3 / 4) as u8));
     }
 
@@ -300,7 +300,7 @@ mod tests {
                         }
                         RasterizedGlyph::Color(p) => {
                             assert_eq!(p.len(), (width * height * 4) as usize);
-                            assert!(p.chunks_exact(4).any(|v| v[3] != 0));
+                            assert!(p.as_chunks::<4>().0.iter().any(|v| v[3] != 0));
                         }
                         _ => panic!("Linux cluster path must not produce subpixel output"),
                     }
