@@ -5087,8 +5087,10 @@ impl NativeTerminalSurfaceHostState {
                         detail,
                         is_snapshot,
                         origin,
+                        state_source,
                         ..
                     } => {
+                        let origin = crate::daemon::protocol::AgentStateOrigin::from_wire(origin, state_source);
                         let reported = match state.as_ref() {
                             "working" => Some(crate::agent_detect::AgentActivity::Working),
                             "blocked" => Some(crate::agent_detect::AgentActivity::Blocked),
@@ -10449,6 +10451,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         })
         .await
         .expect("send agent state report");
@@ -10540,6 +10545,9 @@ mod tests {
                 detail: None,
                 is_snapshot: false,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                state_source: None,
+                outcome: None,
+                kind: None,
             })
             .await
             .expect("send agent state report");
@@ -10641,6 +10649,9 @@ mod tests {
                 detail: None,
                 is_snapshot: false,
                 origin,
+                state_source: None,
+                outcome: None,
+                kind: None,
             })
             .await
             .expect("send agent state report");
@@ -10695,6 +10706,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
+            state_source: None,
+            outcome: None,
+            kind: None,
         })
         .await
         .expect("send process sighting");
@@ -10775,6 +10789,9 @@ mod tests {
             }),
             is_snapshot: false,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         };
 
         // The agent stays "working" across `/new`, so an activity-only change test swallows the

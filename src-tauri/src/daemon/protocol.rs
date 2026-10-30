@@ -290,6 +290,25 @@ where
     Ok(value.and_then(|candidate| serde_json::from_value(candidate).ok()))
 }
 
+/// Decodes an optional field added after the frame shipped, so a value this build does not know
+/// (a newer peer's variant) reads as absent instead of failing the whole frame.
+pub(crate) fn deserialize_lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|candidate| serde_json::from_value(candidate).ok()))
+}
+
+/// An origin this build cannot name decodes to the same conservative default as an absent one.
+fn deserialize_lenient_origin<'de, D>(deserializer: D) -> Result<AgentStateOrigin, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(deserialize_lenient_option(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalStartup {
@@ -1545,8 +1564,35 @@ pub enum DaemonStreamMessage<'a> {
         detail: Option<Cow<'a, str>>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_snapshot: bool,
-        #[serde(default, skip_serializing_if = "AgentStateOrigin::is_self_reported")]
+        #[serde(
+            default,
+            skip_serializing_if = "AgentStateOrigin::is_wire_default",
+            deserialize_with = "deserialize_lenient_origin"
+        )]
         origin: AgentStateOrigin,
+        /// Names a producer `origin` cannot carry without breaking older peers, whose origin enum
+        /// has no fallback variant. A protocol report travels as the wire-default origin plus this
+        /// marker; [`AgentStateOrigin::from_wire`] recombines them.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_lenient_option"
+        )]
+        state_source: Option<AgentStateWireSource>,
+        /// How the turn behind an `idle` ended, when the producer said so.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_lenient_option"
+        )]
+        outcome: Option<AgentOutcome>,
+        /// What a `blocked` session needs from the user, when the producer said so.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_lenient_option"
+        )]
+        kind: Option<AgentBlockedKind>,
     },
     #[serde(rename_all = "camelCase")]
     RemoteStatus {
@@ -1596,6 +1642,11 @@ pub enum DaemonStreamMessage<'a> {
 /// agent back to screen inference), NOT because the producer is known. While a predecessor daemon
 /// still serves a session, its releases consequently do not re-arm screen inference on this side;
 /// that session recovers when its next origin-carrying frame arrives.
+///
+/// WIRE RULE: older peers decode `origin` with no fallback variant, so an origin they do not know
+/// fails the whole frame. [`AgentStateOrigin::Protocol`] therefore never serializes as itself
+/// (`#[serde(skip)]`): it travels as the omitted wire default plus `stateSource: "protocol"`. An
+/// unknown origin from a newer peer decodes to the default instead of failing the frame.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentStateOrigin {
@@ -1612,6 +1663,34 @@ pub enum AgentStateOrigin {
     ProcessDiscovered,
     /// The user reset this session's activity by hand.
     ManualReset,
+    /// The program in the pane reported its state through OSC 7501 (program status). It claims
+    /// the activity like a self-report, but never replaces a live extension report.
+    #[serde(skip)]
+    Protocol,
+}
+
+/// Wire marker for producers that `origin` cannot name compatibly. See [`AgentStateOrigin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentStateWireSource {
+    Protocol,
+}
+
+/// How a reported turn ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentOutcome {
+    Done,
+    Error,
+}
+
+/// What a blocked session needs from the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentBlockedKind {
+    Permission,
+    Question,
+    Auth,
 }
 
 impl AgentStateOrigin {
@@ -1621,13 +1700,46 @@ impl AgentStateOrigin {
         matches!(self, AgentStateOrigin::Agent)
     }
 
+    /// Origins that serialize as the omitted `origin` field: the self-report, and a protocol
+    /// report, which is marked by `stateSource` instead.
+    pub fn is_wire_default(&self) -> bool {
+        matches!(self, AgentStateOrigin::Agent | AgentStateOrigin::Protocol)
+    }
+
+    /// The `stateSource` marker this origin travels with.
+    pub fn wire_source(&self) -> Option<AgentStateWireSource> {
+        match self {
+            AgentStateOrigin::Protocol => Some(AgentStateWireSource::Protocol),
+            _ => None,
+        }
+    }
+
+    /// Recombines a decoded `origin` with its `stateSource` marker.
+    pub fn from_wire(origin: AgentStateOrigin, source: Option<AgentStateWireSource>) -> Self {
+        match (origin, source) {
+            (AgentStateOrigin::Agent, Some(AgentStateWireSource::Protocol)) => {
+                AgentStateOrigin::Protocol
+            }
+            (origin, _) => origin,
+        }
+    }
+
+    /// Whether the state is the program's own report (extension or OSC 7501), which outranks the
+    /// screen in `derive_status`.
+    pub fn is_provider_report(&self) -> bool {
+        matches!(self, AgentStateOrigin::Agent | AgentStateOrigin::Protocol)
+    }
+
     /// Whether a frame of this origin claims the session's activity, which suppresses screen
     /// inference on the consumer: the agent's own report (for as long as it lives) and a process
-    /// release (the exited agent's screen must not resurrect its activity). A process sighting, a
-    /// discovered provider session and a manual reset carry no activity of their own.
+    /// release (the exited agent's screen must not resurrect its activity), and a protocol report.
+    /// A process sighting, a discovered provider session and a manual reset carry no activity of
+    /// their own.
     pub fn claims_activity(&self) -> bool {
         match self {
-            AgentStateOrigin::Agent | AgentStateOrigin::ProcessReleased => true,
+            AgentStateOrigin::Agent
+            | AgentStateOrigin::ProcessReleased
+            | AgentStateOrigin::Protocol => true,
             AgentStateOrigin::ProcessObserved
             | AgentStateOrigin::ProcessDiscovered
             | AgentStateOrigin::ManualReset => false,
@@ -1755,6 +1867,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: AgentStateOrigin::ProcessDiscovered,
+            state_source: None,
+            outcome: None,
+            kind: None,
         };
         let line = serde_json::to_string(&frame).unwrap();
         assert!(line.contains("\"origin\":\"processDiscovered\""), "{line}");
@@ -2380,6 +2495,9 @@ mod tests {
             }),
             is_snapshot: false,
             origin: AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         };
 
         // When: serialized through the production framing contract.
@@ -2412,6 +2530,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
         };
         assert_eq!(
             encode_daemon_stream_frame(&live).expect("encode live frame"),
@@ -2451,6 +2572,9 @@ mod tests {
                 detail: None,
                 is_snapshot: false,
                 origin: AgentStateOrigin::Agent,
+                state_source: None,
+                outcome: None,
+                kind: None,
             })
             .expect("encode self-reported frame"),
             "{\"type\":\"agentState\",\"sessionId\":\"pty-1\",\"state\":\"idle\"}\n"
@@ -2466,6 +2590,9 @@ mod tests {
             detail: None,
             is_snapshot: false,
             origin: AgentStateOrigin::ProcessReleased,
+            state_source: None,
+            outcome: None,
+            kind: None,
         })
         .expect("encode release frame");
         assert!(
@@ -2479,6 +2606,143 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn protocol_frame(state: &'static str) -> DaemonStreamMessage<'static> {
+        DaemonStreamMessage::AgentState {
+            session_id: Cow::Borrowed("pty-1"),
+            state: Cow::Borrowed(state),
+            agent: Some(Cow::Borrowed("claude")),
+            provider_session: None,
+            detail: Some(Cow::Borrowed("Allow edit?")),
+            is_snapshot: false,
+            origin: AgentStateOrigin::Protocol,
+            state_source: AgentStateOrigin::Protocol.wire_source(),
+            outcome: Some(AgentOutcome::Done),
+            kind: Some(AgentBlockedKind::Permission),
+        }
+    }
+
+    #[test]
+    fn a_protocol_frame_round_trips_its_new_fields_without_a_new_origin_on_the_wire() {
+        let frame = encode_daemon_stream_frame(&protocol_frame("idle")).expect("encode");
+        let value: serde_json::Value = serde_json::from_str(frame.trim()).unwrap();
+        assert!(value.get("origin").is_none(), "protocol must not put a new origin on the wire: {frame}");
+        assert_eq!(value["stateSource"], "protocol");
+        assert_eq!(value["outcome"], "done");
+        assert_eq!(value["kind"], "permission");
+        match decode_daemon_stream_frame(&frame).expect("decode") {
+            DaemonStreamMessage::AgentState { origin, state_source, outcome, kind, .. } => {
+                assert_eq!(AgentStateOrigin::from_wire(origin, state_source), AgentStateOrigin::Protocol);
+                assert_eq!(outcome, Some(AgentOutcome::Done));
+                assert_eq!(kind, Some(AgentBlockedKind::Permission));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Without the new fields the frame is byte-identical to the pre-change encoding.
+        let plain = DaemonStreamMessage::AgentState {
+            session_id: Cow::Borrowed("pty-1"),
+            state: Cow::Borrowed("idle"),
+            agent: None,
+            provider_session: None,
+            detail: None,
+            is_snapshot: false,
+            origin: AgentStateOrigin::Agent,
+            state_source: None,
+            outcome: None,
+            kind: None,
+        };
+        let encoded = encode_daemon_stream_frame(&plain).unwrap();
+        assert_eq!(encoded, "{\"type\":\"agentState\",\"sessionId\":\"pty-1\",\"state\":\"idle\"}\n");
+        assert_eq!(decode_daemon_stream_frame(&encoded).unwrap(), plain);
+    }
+
+    #[test]
+    fn an_old_frame_without_the_new_fields_decodes() {
+        let old = r#"{"type":"agentState","sessionId":"pty-1","state":"blocked","detail":"q","origin":"processReleased"}"#;
+        match decode_daemon_stream_frame(old).expect("decode old frame") {
+            DaemonStreamMessage::AgentState { origin, state_source, outcome, kind, .. } => {
+                assert_eq!(origin, AgentStateOrigin::ProcessReleased);
+                assert_eq!((state_source, outcome, kind), (None, None, None));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_origin_and_field_values_from_a_newer_peer_do_not_fail_the_frame() {
+        let newer = r#"{"type":"agentState","sessionId":"pty-1","state":"idle","origin":"somethingNew","stateSource":"later","outcome":"cancelled","kind":"payment"}"#;
+        match decode_daemon_stream_frame(newer).expect("decode newer frame") {
+            DaemonStreamMessage::AgentState { origin, state_source, outcome, kind, .. } => {
+                assert_eq!(origin, AgentStateOrigin::Agent);
+                assert_eq!((state_source, outcome, kind), (None, None, None));
+            }
+            other => panic!("{other:?}"),
+        }
+        // `protocol` is never a wire origin, so a frame naming it gets the same fallback.
+        let named = r#"{"type":"agentState","sessionId":"pty-1","state":"idle","origin":"protocol"}"#;
+        assert!(matches!(
+            decode_daemon_stream_frame(named).unwrap(),
+            DaemonStreamMessage::AgentState { origin: AgentStateOrigin::Agent, .. }
+        ));
+    }
+
+    /// The `AgentState` frame exactly as builds before the protocol origin decoded it.
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "type", rename_all = "camelCase")]
+    enum PreProtocolStreamMessage {
+        #[serde(rename_all = "camelCase")]
+        AgentState {
+            session_id: String,
+            state: String,
+            #[serde(default)]
+            agent: Option<String>,
+            #[serde(default)]
+            detail: Option<String>,
+            #[serde(default)]
+            is_snapshot: bool,
+            #[serde(default)]
+            origin: PreProtocolOrigin,
+        },
+    }
+
+    #[derive(Debug, Default, PartialEq, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    enum PreProtocolOrigin {
+        #[default]
+        Agent,
+        ProcessReleased,
+        ProcessObserved,
+        ProcessDiscovered,
+        ManualReset,
+    }
+
+    #[test]
+    fn an_older_peer_decodes_a_protocol_frame_as_a_self_report() {
+        for state in ["working", "blocked", "idle"] {
+            let frame = encode_daemon_stream_frame(&protocol_frame(state)).unwrap();
+            let PreProtocolStreamMessage::AgentState { session_id, state: decoded, agent, detail, is_snapshot, origin } =
+                serde_json::from_str(frame.trim()).expect("older peer decodes the new frame");
+            assert_eq!((session_id.as_str(), decoded.as_str()), ("pty-1", state));
+            assert_eq!(agent.as_deref(), Some("claude"));
+            assert_eq!(detail.as_deref(), Some("Allow edit?"));
+            assert!(!is_snapshot);
+            assert_eq!(origin, PreProtocolOrigin::Agent);
+        }
+    }
+
+    #[test]
+    fn a_protocol_report_claims_activity_and_outranks_the_screen() {
+        assert!(AgentStateOrigin::Protocol.claims_activity());
+        assert!(!AgentStateOrigin::Protocol.is_self_reported());
+        assert!(AgentStateOrigin::Protocol.is_provider_report());
+        assert!(AgentStateOrigin::Protocol.is_wire_default());
+        assert_eq!(AgentStateOrigin::Agent.wire_source(), None);
+        assert_eq!(
+            AgentStateOrigin::from_wire(AgentStateOrigin::ProcessReleased, Some(AgentStateWireSource::Protocol)),
+            AgentStateOrigin::ProcessReleased,
+            "only the wire default is reinterpreted"
+        );
     }
 
     #[test]

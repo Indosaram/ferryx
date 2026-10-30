@@ -4343,6 +4343,8 @@ impl DaemonServer {
                 provider_session: ingress_publish_identity(outcome, reported, admitted),
                 detail,
                 origin,
+                outcome: None,
+                kind: None,
             },
         ))
     }
@@ -9080,6 +9082,9 @@ impl DaemonServer {
                 detail: snapshot.detail.as_deref().map(Cow::Borrowed),
                 is_snapshot: true,
                 origin: snapshot.origin,
+                state_source: snapshot.origin.wire_source(),
+                outcome: snapshot.outcome,
+                kind: snapshot.kind,
             };
             let Ok(frame) = crate::daemon::protocol::encode_daemon_stream_frame(&msg) else {
                 return;
@@ -9140,6 +9145,9 @@ impl DaemonServer {
                                         detail: report.state.detail.as_deref().map(Cow::Borrowed),
                                         is_snapshot: report.is_snapshot,
                                         origin: report.state.origin,
+                                        state_source: report.state.origin.wire_source(),
+                                        outcome: report.state.outcome,
+                                        kind: report.state.kind,
                                     };
                                     frame_buf.clear();
                                     if serde_json::to_writer(&mut frame_buf, &msg).is_err() {
@@ -9165,6 +9173,9 @@ impl DaemonServer {
                                                 detail: current.detail.as_deref().map(Cow::Borrowed),
                                                 is_snapshot: true,
                                                 origin: current.origin,
+                                                state_source: current.origin.wire_source(),
+                                                outcome: current.outcome,
+                                                kind: current.kind,
                                             };
                                             frame_buf.clear();
                                             if serde_json::to_writer(&mut frame_buf, &msg).is_err() { break; }
@@ -11595,6 +11606,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
         assert_eq!(
             server.agent_states.current(&session_id).unwrap().state,
@@ -11678,6 +11691,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
         server.agent_states.publish_canonical(AgentState {
             session_id: session_id.clone(),
@@ -11686,6 +11701,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
 
         let mut reader = BufReader::new(&mut server_side);
@@ -11740,6 +11757,8 @@ mod tests {
                 provider_session: None,
                 detail: None,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                outcome: None,
+                kind: None,
             });
 
             let (client_stream, server_stream) = UnixStream::pair().map_err(|e| e.to_string())?;
@@ -12025,6 +12044,8 @@ mod tests {
                 provider_session: None,
                 detail: Some("approve?".into()),
                 origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
+                outcome: None,
+                kind: None,
             };
             let (_, state, _, _, detail) =
                 discovered_machine_report("pane-1", agent, id, Some(&retained));
@@ -12048,6 +12069,8 @@ mod tests {
             provider_session: Some(provider.clone()),
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         };
         let report = discovered_machine_report("pane-1", "omo", &provider.id, Some(&retained));
         assert!(provider_has_no_process_bound_session("omo", &provider));

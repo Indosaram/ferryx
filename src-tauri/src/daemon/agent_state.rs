@@ -1,4 +1,5 @@
-use crate::daemon::protocol::{AgentProviderSession, AgentStateOrigin};
+use crate::daemon::protocol::{AgentBlockedKind, AgentOutcome, AgentProviderSession, AgentStateOrigin};
+use crate::terminal::program_status::{BlockedKind, ProgramState, ProgramStatusSummary};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +17,10 @@ pub(crate) struct AgentState {
     /// Who produced this state. `idle` from a running agent and `idle` from a daemon release are
     /// the same word with opposite meanings for screen inference, so the producer travels along.
     pub origin: AgentStateOrigin,
+    /// How the turn behind an `idle` ended, when the producer said so (OSC 7501 done/error).
+    pub outcome: Option<AgentOutcome>,
+    /// What a `blocked` session needs from the user, when the producer said so.
+    pub kind: Option<AgentBlockedKind>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,11 +86,71 @@ impl AgentStateHub {
             }
             state.state = previous.state.clone();
             state.detail = previous.detail.clone();
-            if previous.origin == AgentStateOrigin::Agent {
-                state.origin = AgentStateOrigin::Agent;
+            state.outcome = previous.outcome;
+            state.kind = previous.kind;
+            if previous.origin.is_provider_report() {
+                state.origin = previous.origin;
             }
         }
         retained.insert(state.session_id.clone(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
+        true
+    }
+
+    /// Publishes the pane program's OSC 7501 status (`None` once its records are cleared).
+    ///
+    /// Returns whether anything was published. A session whose agent reports through the
+    /// extension (`Agent` origin) is never touched: that report is authoritative while it lives.
+    /// A clear only releases a state the protocol itself installed, so a terminal reset in a pane
+    /// that never spoke OSC 7501 does not suppress screen inference. An unchanged state is not
+    /// re-broadcast.
+    pub(crate) fn publish_protocol(
+        &self,
+        session_id: &str,
+        summary: Option<&ProgramStatusSummary>,
+    ) -> bool {
+        let mut retained = self.retained.lock();
+        let previous = retained.get(session_id);
+        if previous.is_some_and(|state| state.origin == AgentStateOrigin::Agent) {
+            return false;
+        }
+        let reported = summary.filter(|summary| summary.state != ProgramState::Clear);
+        if reported.is_none()
+            && !previous.is_some_and(|state| state.origin == AgentStateOrigin::Protocol)
+        {
+            return false;
+        }
+        let (word, outcome) = match reported.map(|summary| summary.state) {
+            Some(ProgramState::Working) => ("working", None),
+            Some(ProgramState::Blocked) => ("blocked", None),
+            Some(ProgramState::Done) => ("idle", Some(AgentOutcome::Done)),
+            Some(ProgramState::Error) => ("idle", Some(AgentOutcome::Error)),
+            Some(ProgramState::Idle | ProgramState::Clear) | None => ("idle", None),
+        };
+        let blocked = reported.filter(|summary| summary.state == ProgramState::Blocked);
+        let state = AgentState {
+            session_id: session_id.to_string(),
+            state: word.to_string(),
+            agent: reported
+                .and_then(|summary| summary.app.clone())
+                .or_else(|| previous.and_then(|state| state.agent.clone())),
+            provider_session: previous.and_then(|state| state.provider_session.clone()),
+            detail: blocked.and_then(|summary| summary.message.clone()),
+            origin: AgentStateOrigin::Protocol,
+            outcome,
+            kind: blocked.and_then(|summary| summary.kind).map(|kind| match kind {
+                BlockedKind::Permission => AgentBlockedKind::Permission,
+                BlockedKind::Question => AgentBlockedKind::Question,
+                BlockedKind::Auth => AgentBlockedKind::Auth,
+            }),
+        };
+        if previous == Some(&state) {
+            return false;
+        }
+        retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
             state,
             is_snapshot: false,
@@ -103,6 +168,8 @@ impl AgentStateHub {
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
             detail: None,
             origin: AgentStateOrigin::ManualReset,
+            outcome: None,
+            kind: None,
         };
         tracing::info!(session_id, reason = "manual_reset",
             previous_state = ?previous.as_ref().map(|s| &s.state),
@@ -124,6 +191,8 @@ impl AgentStateHub {
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
             detail: None,
             origin: AgentStateOrigin::ProcessReleased,
+            outcome: None,
+            kind: None,
         };
         tracing::info!(session_id, reason = "foreground_agent_to_shell",
             previous_state = ?previous.as_ref().map(|s| &s.state),
@@ -237,6 +306,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         }
     }
 
@@ -257,6 +328,8 @@ mod tests {
             provider_session: Some(provider(id)),
             detail: None,
             origin: AgentStateOrigin::ProcessDiscovered,
+            outcome: None,
+            kind: None,
         }
     }
 
@@ -465,6 +538,96 @@ mod tests {
             subscription.receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    fn summary(state: ProgramState) -> ProgramStatusSummary {
+        ProgramStatusSummary {
+            state,
+            kind: Some(BlockedKind::Permission),
+            app: Some("claude".into()),
+            title: None,
+            message: Some("Allow edit?".into()),
+            progress: None,
+        }
+    }
+
+    #[test]
+    fn protocol_states_map_to_state_words_outcomes_and_kinds() {
+        let hub = AgentStateHub::new(16);
+        assert!(hub.publish_protocol("p", Some(&summary(ProgramState::Working))));
+        let working = hub.current("p").unwrap();
+        assert_eq!((working.state.as_str(), working.origin), ("working", AgentStateOrigin::Protocol));
+        assert_eq!((working.detail, working.kind, working.outcome), (None, None, None));
+        assert_eq!(working.agent.as_deref(), Some("claude"));
+
+        assert!(hub.publish_protocol("p", Some(&summary(ProgramState::Blocked))));
+        let blocked = hub.current("p").unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert_eq!(blocked.detail.as_deref(), Some("Allow edit?"));
+        assert_eq!(blocked.kind, Some(AgentBlockedKind::Permission));
+
+        assert!(hub.publish_protocol("p", Some(&summary(ProgramState::Done))));
+        let done = hub.current("p").unwrap();
+        assert_eq!((done.state.as_str(), done.outcome), ("idle", Some(AgentOutcome::Done)));
+        assert_eq!((done.detail, done.kind), (None, None));
+
+        assert!(hub.publish_protocol("p", Some(&summary(ProgramState::Error))));
+        assert_eq!(hub.current("p").unwrap().outcome, Some(AgentOutcome::Error));
+
+        assert!(hub.publish_protocol("p", Some(&summary(ProgramState::Idle))));
+        let idle = hub.current("p").unwrap();
+        assert_eq!((idle.state.as_str(), idle.outcome), ("idle", None));
+        // The same report again is not a new edge.
+        assert!(!hub.publish_protocol("p", Some(&summary(ProgramState::Idle))));
+    }
+
+    #[test]
+    fn a_protocol_clear_releases_only_what_the_protocol_installed() {
+        let hub = AgentStateHub::new(16);
+        assert!(!hub.publish_protocol("fresh", None), "nothing to release");
+        assert!(hub.current("fresh").is_none());
+
+        assert!(hub.publish_protocol("p", Some(&summary(ProgramState::Working))));
+        assert!(hub.publish_protocol("p", None));
+        let released = hub.current("p").unwrap();
+        assert_eq!((released.state.as_str(), released.origin), ("idle", AgentStateOrigin::Protocol));
+        assert!(!hub.publish_protocol("p", None), "a second clear is not a new edge");
+
+        hub.release_foreground("r");
+        assert!(!hub.publish_protocol("r", None));
+        assert_eq!(hub.current("r").unwrap().origin, AgentStateOrigin::ProcessReleased);
+    }
+
+    #[test]
+    fn a_protocol_report_never_overwrites_a_live_extension_report() {
+        let hub = Arc::new(AgentStateHub::new(16));
+        hub.publish_canonical(state("s1", "working"));
+        let mut subscription = hub.subscribe("s1");
+        assert!(!hub.publish_protocol("s1", Some(&summary(ProgramState::Done))));
+        assert!(!hub.publish_protocol("s1", None));
+        assert_eq!(hub.current("s1"), Some(state("s1", "working")));
+        assert!(matches!(
+            subscription.receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        // Once the extension's agent is released, the protocol may report again.
+        hub.release_foreground("s1");
+        assert!(hub.publish_protocol("s1", Some(&summary(ProgramState::Working))));
+        assert_eq!(hub.current("s1").unwrap().origin, AgentStateOrigin::Protocol);
+        // And an extension report takes the session back.
+        hub.publish_canonical(state("s1", "idle"));
+        assert!(!hub.publish_protocol("s1", Some(&summary(ProgramState::Working))));
+    }
+
+    #[test]
+    fn a_discovered_identity_keeps_a_protocol_origin_and_outcome() {
+        let hub = AgentStateHub::new(16);
+        assert!(hub.publish_protocol("p", Some(&summary(ProgramState::Done))));
+        assert!(hub.publish_discovered(discovered("p", "claude", "id-1"), None));
+        let current = hub.current("p").unwrap();
+        assert_eq!(current.origin, AgentStateOrigin::Protocol);
+        assert_eq!(current.outcome, Some(AgentOutcome::Done));
+        assert_eq!(current.provider_session, Some(provider("id-1")));
     }
 
     #[test]

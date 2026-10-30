@@ -590,13 +590,16 @@ impl Proxy {
                         return Err(error("PAIRED_HOST_WRONG_MACHINE"));
                     }
                     if let Some(sink) = &self.agent_sink {
+                        let origin = msg.origin();
                         sink.accept(crate::daemon::agent_state::AgentState {
                             session_id: self.id.clone(),
                             state: msg.state,
                             agent: msg.agent,
                             provider_session: msg.provider_session,
                             detail: msg.detail,
-                            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                            origin,
+                            outcome: msg.outcome,
+                            kind: msg.kind,
                         });
                     }
                 }
