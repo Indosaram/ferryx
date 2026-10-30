@@ -841,6 +841,14 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
       }))).toThrow(/isDriver must be boolean/i);
     });
 
+    // RED mutation: restore `obj.leaseEpoch !== null && typeof ...` (drop the `!== undefined` clause) in parseServerMessage.
+    it("accepts browserDriverChanged with leaseEpoch omitted (Rust skips None) (P6/F5)", () => {
+      const parsed = parseServerMessage(
+        JSON.stringify({ type: "browserDriverChanged", isDriver: false }),
+      );
+      expect(parsed.type).toBe("browserDriverChanged");
+    });
+
     it("rejects browserState with non-boolean loading or paused", () => {
       expect(() => parseServerMessage(JSON.stringify({
         type: "browserState",

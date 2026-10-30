@@ -44,6 +44,8 @@ export interface UseRemoteBrowserResult {
   hello: BrowserHelloMessage | null;
   error: Error | null;
   client: BrowserClient | null;
+  /** Active screencast subscription id, needed to claim the driver lease. */
+  subscriptionId?: string | null;
   reconnect: () => void;
   sendAck: (streamId: number, seq: number) => void;
   confirmPresented: (streamId: number, seq: number) => void;
@@ -69,6 +71,7 @@ export function useRemoteBrowser({
 
   const clientRef = useRef<BrowserClient | null>(null);
   const [client, setClient] = useState<BrowserClient | null>(null);
+  const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
   const currentStreamIdRef = useRef<number | null>(null);
   const lastDecodedSeqRef = useRef<number>(-1);
   const currentUrlRef = useRef<string | null>(null);
@@ -274,6 +277,7 @@ export function useRemoteBrowser({
           return;
         }
         currentStreamIdRef.current = subMsg.streamId;
+        setSubscriptionId(subMsg.subscriptionId);
         lastDecodedSeqRef.current = -1;
         setStatus("streaming");
       } catch (err) {
@@ -295,6 +299,7 @@ export function useRemoteBrowser({
         clientRef.current = null;
       }
       setClient(null);
+      setSubscriptionId(null);
       clearFrameBuffer();
       currentStreamIdRef.current = null;
       lastDecodedSeqRef.current = -1;
@@ -384,6 +389,7 @@ export function useRemoteBrowser({
     hello,
     error,
     client,
+    subscriptionId,
     reconnect,
     sendAck,
     confirmPresented,

@@ -276,20 +276,17 @@ export function useRemoteBrowserDriver({
     return () => clearInterval(checkInterval);
   }, [driverState, expiresAt]);
 
-  // Client/browser switch or unmount: clear heartbeat timers and release the lease this hook held.
-  // The effect closure captures the OLD client; guardsRef still carries that lease's state at cleanup time.
+  // Client/browser switch or unmount: clear heartbeat timers only. No release is sent from here: the owning
+  // useRemoteBrowser cleanup closes the socket first (so releaseDriver would always hit a closed client), and
+  // the server frees the lease when the connection drops.
   useEffect(() => {
     return () => {
       if (heartbeatTimerRef.current) {
         clearInterval(heartbeatTimerRef.current);
         heartbeatTimerRef.current = null;
       }
-      const { leaseEpoch: curEpoch, driverState: curState } = guardsRef.current;
-      if (client && curEpoch && curState === "driving") {
-        void client.releaseDriver(curEpoch).catch(() => {});
-      }
     };
-  }, [client, browserId]);
+  }, []);
 
   // A different client or browser invalidates the lease and any snapshot identifiers.
   const prevTargetRef = useRef({ client, browserId });

@@ -477,7 +477,8 @@ export interface BrowserDriverClaimedMessage {
 
 export interface BrowserDriverChangedMessage {
   type: "browserDriverChanged";
-  leaseEpoch: string | null;
+  /** The Rust server omits this when the lease had no epoch (Option<String>). */
+  leaseEpoch?: string | null;
   isDriver: boolean;
 }
 
@@ -831,7 +832,7 @@ export function parseServerMessage(jsonString: string): ServerMessage {
       return obj as unknown as BrowserDriverClaimedMessage;
     }
     case "browserDriverChanged": {
-      if (obj.leaseEpoch !== null && typeof obj.leaseEpoch !== "string") {
+      if (obj.leaseEpoch !== undefined && obj.leaseEpoch !== null && typeof obj.leaseEpoch !== "string") {
         throw new Error("browserDriverChanged: leaseEpoch must be string or null");
       }
       if (typeof obj.isDriver !== "boolean") throw new Error("browserDriverChanged: isDriver must be boolean");
