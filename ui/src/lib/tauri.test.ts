@@ -23,7 +23,12 @@ import {
   getTerminalPreferences,
   setTerminalAppearance,
   getWorktreeStatus,
-  listProjectBranches,
+  getWorktreeDiff,
+  stageWorktreePaths,
+  unstageWorktreePaths,
+  commitWorktree,
+  pushWorktree,
+  listProjectRefs,
   previewGitHubIssue,
   listTerminalSessions,
   onNativeTerminalScrollbar,
@@ -163,27 +168,30 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenCalledWith("cmd_project_initial", undefined);
   });
 
-  it("registers projects and lists real local branches through typed native DTOs", async () => {
-    core.invoke
-      .mockResolvedValueOnce({ workspaceId: "ferryx", repoRoot: "/repo/ferryx" })
-      .mockResolvedValueOnce([
-        { name: "feature/a", isCurrent: false },
-        { name: "main", isCurrent: true },
-      ]);
+  it("registers projects through typed native DTOs", async () => {
+    core.invoke.mockResolvedValueOnce({ workspaceId: "ferryx", repoRoot: "/repo/ferryx" });
 
     await expect(registerProject({ workspaceId: "ferryx", repoPath: "/repo/ferryx" })).resolves.toEqual({
       workspaceId: "ferryx",
       repoRoot: "/repo/ferryx",
     });
-    await expect(listProjectBranches("ferryx")).resolves.toEqual([
-      { name: "feature/a", isCurrent: false },
-      { name: "main", isCurrent: true },
-    ]);
 
-    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_project_register", {
+    expect(core.invoke).toHaveBeenCalledExactlyOnceWith("cmd_project_register", {
       request: { workspaceId: "ferryx", repoPath: "/repo/ferryx" },
     });
-    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_project_branches", {
+  });
+
+  it("lists local branches and tags as worktree base refs", async () => {
+    core.invoke.mockResolvedValueOnce({
+      branches: [{ name: "main", isCurrent: true }],
+      tags: ["v1.0.0"],
+    });
+
+    await expect(listProjectRefs("ferryx")).resolves.toEqual({
+      branches: [{ name: "main", isCurrent: true }],
+      tags: ["v1.0.0"],
+    });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_project_refs", {
       request: { workspaceId: "ferryx" },
     });
   });
@@ -450,6 +458,37 @@ describe("Tauri IPC wrapper contract", () => {
     expect(core.invoke).toHaveBeenNthCalledWith(4, "cmd_worktree_delete_destructive", {
       request: { ...request, deleteBranch: true },
     });
+  });
+
+  it("wraps worktree diff, stage, unstage, commit and push commands", async () => {
+    core.invoke
+      .mockResolvedValueOnce("+line")
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce("abc123")
+      .mockResolvedValueOnce({ remote: "origin", branch: "feature", setUpstream: true });
+    const request = { workspaceId: "workspace-main", worktree: { wsId: "ws-main", slug: "feature" } };
+
+    await expect(getWorktreeDiff({ ...request, scope: { kind: "staged" } })).resolves.toBe("+line");
+    await stageWorktreePaths({ ...request, paths: ["a.txt"] });
+    await unstageWorktreePaths({ ...request, paths: ["a.txt"] });
+    await expect(commitWorktree({ ...request, message: "msg" })).resolves.toBe("abc123");
+    await expect(pushWorktree(request)).resolves.toEqual({ remote: "origin", branch: "feature", setUpstream: true });
+
+    expect(core.invoke).toHaveBeenNthCalledWith(1, "cmd_worktree_diff", {
+      request: { ...request, scope: { kind: "staged" }, file: null },
+    });
+    expect(core.invoke).toHaveBeenNthCalledWith(2, "cmd_worktree_stage", { request: { ...request, paths: ["a.txt"] } });
+    expect(core.invoke).toHaveBeenNthCalledWith(3, "cmd_worktree_unstage", { request: { ...request, paths: ["a.txt"] } });
+    expect(core.invoke).toHaveBeenNthCalledWith(4, "cmd_worktree_commit", { request: { ...request, message: "msg" } });
+    expect(core.invoke).toHaveBeenNthCalledWith(5, "cmd_worktree_push", { request });
+  });
+
+  it("surfaces structured git change error codes", async () => {
+    core.invoke.mockRejectedValueOnce({ code: "GIT_NOTHING_TO_COMMIT", message: "Nothing is staged to commit" });
+    await expect(
+      commitWorktree({ workspaceId: "w", worktree: { wsId: "ws", slug: "s" }, message: "m" }),
+    ).rejects.toMatchObject({ code: "GIT_NOTHING_TO_COMMIT", details: { command: "cmd_worktree_commit" } });
   });
 
   it("wraps worktree disk scan commands and progress listener", async () => {

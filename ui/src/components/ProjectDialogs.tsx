@@ -20,12 +20,12 @@ import { formatSshTarget, useSshHosts } from "../lib/sshHosts";
 import {
   createWorktree,
   isTauriRuntime,
-  listProjectBranches,
+  listProjectRefs,
   previewGitHubIssue,
   registerProject,
   toIpcError,
   type GitHubIssuePreview,
-  type LocalBranch,
+  type ProjectRefs,
   type RegisteredProject,
 } from "../lib/tauri";
 import type { Worktree } from "../lib/types";
@@ -787,21 +787,43 @@ export function AddProjectDialog({
   );
 }
 
+/** Agent the new worktree should start in; omitted when the user picks "Shell only". */
+export type WorktreeAgentLaunch = { agentId: string };
+
 type AddWorktreeDialogProps = {
   project: RegisteredProject;
   onClose: () => void;
-  onCreated: (worktree: Worktree) => void | Promise<void>;
+  onCreated: (worktree: Worktree, launch?: WorktreeAgentLaunch) => void | Promise<void>;
+  /** Launchable agents (enabled and available), the same list the New Tab menu offers. */
+  agents?: ReadonlyArray<{ name: string }>;
+  defaultAgentId?: string | null;
 };
 
-export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDialogProps) {
+const EMPTY_REFS: ProjectRefs = { branches: [], tags: [] };
+const NO_AGENTS: ReadonlyArray<{ name: string }> = [];
+
+function agentLabel(name: string) {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+export function AddWorktreeDialog({
+  project,
+  onClose,
+  onCreated,
+  agents = NO_AGENTS,
+  defaultAgentId = null,
+}: AddWorktreeDialogProps) {
   const remoteTarget = project.target?.kind === "ssh" ? project.target : null;
   const isPaired = project.target?.kind === "pairedDaemon";
   const pairedActions = useMemo(() => isPaired ? createPairedWorktreeActions(project) : null, [project, isPaired]);
   const isRemote = remoteTarget !== null || isPaired;
   const isGitBacked = project.gitRoot !== null;
   const { hosts } = useSshHosts();
-  const [branches, setBranches] = useState<LocalBranch[]>([]);
+  const [refs, setRefs] = useState<ProjectRefs>(EMPTY_REFS);
   const [baseRef, setBaseRef] = useState("");
+  const [agentId, setAgentId] = useState(() =>
+    defaultAgentId && agents.some((agent) => agent.name === defaultAgentId) ? defaultAgentId : "",
+  );
   const [slug, setSlug] = useState("");
   const [loadingBranches, setLoadingBranches] = useState(!isRemote && isGitBacked);
   const [submitting, setSubmitting] = useState(false);
@@ -814,6 +836,9 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
   const submitInFlight = useRef(false);
   const issueRequestId = useRef(0);
   const supportsIssueIntake = isGitBacked && !isRemote;
+  // Remote and paired creation stay slug-only and never start an agent.
+  const offersAgents = isGitBacked && !isRemote && agents.length > 0;
+  const refListId = `worktree-base-refs-${project.workspaceId}`;
   // No dismissal while the create request is in flight: onClose would otherwise run
   // once for the dismissal and again when the create succeeds.
   const { dialogRef } = useModalDialog({ onEscape: onClose, dismissible: !submitting });
@@ -828,7 +853,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
 
   useEffect(() => {
     if (isRemote || !isGitBacked) {
-      setBranches([]);
+      setRefs(EMPTY_REFS);
       setBaseRef("");
       setLoadingBranches(false);
       return;
@@ -836,16 +861,16 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
     let alive = true;
     setLoadingBranches(true);
     setError(null);
-    void listProjectBranches(project.workspaceId)
+    void listProjectRefs(project.workspaceId)
       .then((items) => {
         if (!alive) return;
-        setBranches(items);
-        const preferred = items.find((branch) => branch.isCurrent) ?? items[0];
+        setRefs(items);
+        const preferred = items.branches.find((branch) => branch.isCurrent) ?? items.branches[0];
         setBaseRef(preferred?.name ?? "");
       })
       .catch((cause) => {
         if (!alive) return;
-        setError(extractErrorMessage(cause, "Could not load local branches."));
+        setError(extractErrorMessage(cause, "Could not load local branches and tags."));
       })
       .finally(() => {
         if (alive) setLoadingBranches(false);
@@ -891,7 +916,6 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
     // A ref guards the double click that lands before React re-renders; the
     // `submitting` state alone cannot, since both clicks see the same render.
     if (!trimmedSlug || submitting || submitInFlight.current) return;
-    if (!isRemote && !baseRef) return;
     submitInFlight.current = true;
     setSubmitting(true);
     setError(null);
@@ -915,12 +939,14 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
         };
         await onCreated(worktree);
       } else {
+        // An empty ref bases the worktree on HEAD; the backend validates any typed ref.
         const worktree = await createWorktree({
           workspaceId: project.workspaceId,
           worktree: { wsId: project.workspaceId, slug: trimmedSlug },
-          baseRef,
+          baseRef: baseRef.trim() || null,
         });
-        await onCreated(worktree);
+        if (offersAgents && agentId) await onCreated(worktree, { agentId });
+        else await onCreated(worktree);
       }
       onClose();
     } catch (cause) {
@@ -970,17 +996,48 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
               </label>
               {!isRemote ? (
                 <label className="block space-y-1 text-[11px] text-muted-foreground">
-                  <span>Base branch</span>
-                  <select
-                    aria-label="Base branch"
+                  <span>Base ref</span>
+                  <input
+                    type="text"
+                    role="combobox"
+                    aria-label="Base ref"
+                    list={refListId}
                     className={fieldClass}
                     value={baseRef}
-                    disabled={loadingBranches || branches.length === 0}
+                    disabled={loadingBranches || submitting}
+                    placeholder="Branch, tag or commit (empty = HEAD)"
+                    autoComplete="off"
+                    spellCheck={false}
                     onChange={(event) => setBaseRef(event.target.value)}
+                  />
+                  <datalist id={refListId}>
+                    {refs.branches.map((branch) => (
+                      <option key={`branch:${branch.name}`} value={branch.name}>
+                        {branch.isCurrent ? "current branch" : "branch"}
+                      </option>
+                    ))}
+                    {refs.tags.map((tag) => (
+                      <option key={`tag:${tag}`} value={tag}>
+                        tag
+                      </option>
+                    ))}
+                  </datalist>
+                </label>
+              ) : null}
+              {offersAgents ? (
+                <label className="block space-y-1 text-[11px] text-muted-foreground">
+                  <span>Agent</span>
+                  <select
+                    aria-label="Agent"
+                    className={fieldClass}
+                    value={agentId}
+                    disabled={submitting}
+                    onChange={(event) => setAgentId(event.target.value)}
                   >
-                    {branches.map((branch) => (
-                      <option key={branch.name} value={branch.name}>
-                        {branch.name}{branch.isCurrent ? " (current)" : ""}
+                    <option value="">Shell only</option>
+                    {agents.map((agent) => (
+                      <option key={agent.name} value={agent.name}>
+                        {agentLabel(agent.name)}
                       </option>
                     ))}
                   </select>
@@ -1079,7 +1136,7 @@ export function AddWorktreeDialog({ project, onClose, onCreated }: AddWorktreeDi
           {isGitBacked ? (
             <button
               type="submit"
-              disabled={submitting || (!isRemote && (loadingBranches || !baseRef)) || !slug.trim()}
+              disabled={submitting || (!isRemote && loadingBranches) || !slug.trim()}
               className="h-7 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-45"
             >
               Create Worktree{issue ? ` from Issue #${issue.number}` : ""}

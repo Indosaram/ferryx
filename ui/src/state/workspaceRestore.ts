@@ -11,7 +11,7 @@ import {
 } from "../lib/sessionLifecycle";
 import { getHostBootTimeMs, isTauriRuntime, listTerminalSessions, loadSession } from "../lib/tauri";
 import { defaultTauriTransport } from "../lib/terminalTransport/tauriTransport";
-import type { PersistedWorkspaceSession } from "../lib/types";
+import { isTerminalTab, type PersistedWorkspaceSession } from "../lib/types";
 import { switchDebug } from "../lib/switchDebug";
 import { getHmrWorkspaceState } from "./hmrWorkspaceState";
 import { getWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
@@ -132,7 +132,7 @@ function activeRestoreSessionIds(state: WorkspaceState): Set<string> {
     : state.layout.activeTabId;
   if (!activeTabId) return sessionIds;
   const tab = state.layout.tabs.find((candidate) => candidate.id === activeTabId);
-  if (!tab || tab.kind === "browser" || tab.kind === "file") return sessionIds;
+  if (!tab || !isTerminalTab(tab)) return sessionIds;
   sessionIds.add(tab.sessionId);
   const tabLayout = state.layout.layoutsByTabId?.[activeTabId];
   for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {

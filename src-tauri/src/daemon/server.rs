@@ -146,6 +146,127 @@ fn release_adopted_ownership(
     }
 }
 
+/// Whether `observation` shows another prompt occurrence (or none) than the last one seen for its
+/// session. Bounded by forgetting everything past [PROMPT_MOVED_SESSIONS] sessions: a forgotten
+/// session only costs one spare push.
+fn prompt_moved(
+    shown: &mut HashMap<String, Option<String>>,
+    observation: &crate::agent_control::events::AgentObservation,
+) -> bool {
+    if shown.get(&observation.session_id) == Some(&observation.prompt_id) {
+        return false;
+    }
+    if shown.len() >= PROMPT_MOVED_SESSIONS && !shown.contains_key(&observation.session_id) {
+        shown.clear();
+    }
+    shown.insert(observation.session_id.clone(), observation.prompt_id.clone());
+    true
+}
+
+const PROMPT_MOVED_SESSIONS: usize = 256;
+
+/// The desktop event for one `agentPromptChanged` frame. A frame that is not a JSON object is
+/// logged and skipped: relaying it as a null payload would tell no row anything.
+fn prompt_changed_event(frame: &str) -> Option<DaemonRemoteEvent> {
+    match serde_json::from_str::<serde_json::Value>(frame) {
+        Ok(payload) if payload.is_object() => Some(DaemonRemoteEvent {
+            event: crate::agent_control::events::AGENT_PROMPT_CHANGED_FRAME.to_string(),
+            payload,
+        }),
+        Ok(_) => {
+            tracing::warn!(frame, "agentPromptChanged frame is not an object; not relayed");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "agentPromptChanged frame is not JSON; not relayed");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_changed_event_tests {
+    use super::*;
+
+    #[test]
+    fn a_malformed_prompt_frame_is_not_relayed_as_null() {
+        assert!(prompt_changed_event("{not json").is_none());
+        assert!(prompt_changed_event("null").is_none());
+        assert!(prompt_changed_event("").is_none());
+    }
+
+    #[test]
+    fn a_filter_frame_is_relayed_with_its_session() {
+        let observation = crate::agent_control::events::AgentObservation {
+            sequence: 1,
+            session_id: "s-1".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: Some("p-1".into()),
+            kind: None,
+            screen_revision: Some("r-1".into()),
+        };
+        let frame = crate::agent_control::events::PromptChangeFilter::default()
+            .frame(&observation)
+            .expect("a first reading sends a frame");
+        let event = prompt_changed_event(&frame).expect("a filter frame is relayed");
+        assert_eq!(event.event, "agentPromptChanged");
+        assert_eq!(event.payload["sessionId"], "s-1");
+        assert_eq!(event.payload["promptId"], "p-1");
+    }
+
+    /// The daemon relays an agent-bus prompt change to its desktop subscribers.
+    #[tokio::test]
+    async fn a_published_prompt_change_reaches_the_desktop_event_stream() {
+        let server = DaemonServer::new();
+        let mut desktop = server.remote_event_tx.subscribe();
+        server.remote_state.agent_events.publish(crate::agent_control::events::ObservationDraft {
+            session_id: "relay-pane".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: Some("relay-prompt".into()),
+            kind: None,
+            screen_revision: Some("relay-rev".into()),
+            workspace_id: None,
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match desktop.recv().await {
+                    Ok(event) if event.event == "agentPromptChanged" => return event,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => panic!("the desktop stream closed"),
+                }
+            }
+        })
+        .await
+        .expect("agentPromptChanged reaches the desktop stream");
+        assert_eq!(event.payload["sessionId"], "relay-pane");
+        assert_eq!(event.payload["promptId"], "relay-prompt");
+    }
+
+    #[test]
+    fn a_repaint_under_the_same_prompt_is_not_a_prompt_change() {
+        let observation = |prompt: Option<&str>, revision: &str| crate::agent_control::events::AgentObservation {
+            sequence: 1,
+            session_id: "s".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: prompt.map(str::to_string),
+            kind: None,
+            screen_revision: Some(revision.into()),
+        };
+        let mut shown = HashMap::new();
+        assert!(prompt_moved(&mut shown, &observation(Some("p"), "r1")), "a first prompt is news");
+        assert!(!prompt_moved(&mut shown, &observation(Some("p"), "r2")), "a repaint is not");
+        assert!(prompt_moved(&mut shown, &observation(Some("p~1"), "r2")), "a new occurrence is");
+        assert!(prompt_moved(&mut shown, &observation(None, "r3")), "the card leaving is");
+        assert!(!prompt_moved(&mut shown, &observation(None, "r4")), "a repaint with no card is not");
+    }
+}
+
 #[cfg(test)]
 mod pane_reader_rollback_tests {
     use super::*;
@@ -3867,6 +3988,7 @@ impl DaemonServer {
             Arc::clone(&session_service.workspace_service.machine_events),
         );
         session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
+        remote_state.start_push_dispatch();
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -3883,6 +4005,35 @@ impl DaemonServer {
                 payload,
             });
         }));
+
+        // A prompt card that appears, moves or goes away (answered on the phone, say) reaches the
+        // desktop Inbox as `agentPromptChanged`, so its rows re-read the prompt without waiting
+        // for the pane's activity to flip.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let mut observations = remote_state.agent_events.subscribe();
+            let prompt_tx = remote_event_tx.clone();
+            runtime.spawn(async move {
+                let mut filter = crate::agent_control::events::PromptChangeFilter::default();
+                let mut shown = std::collections::HashMap::<String, Option<String>>::new();
+                loop {
+                    match observations.recv().await {
+                        Ok(observation) => {
+                            // The desktop re-reads a row's prompt on a push, so a repaint that keeps
+                            // the same prompt occurrence sends none.
+                            if !prompt_moved(&mut shown, &observation) {
+                                continue;
+                            }
+                            let Some(frame) = filter.frame(&observation) else { continue };
+                            if let Some(event) = prompt_changed_event(&frame) {
+                                let _ = prompt_tx.send(event);
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
 
         // P14: inventory transitions that originate inside the daemon-owned
         // PairedHostService (not just renderer-driven pair/migrate/forget)
@@ -6190,6 +6341,20 @@ impl DaemonServer {
                         Err(error) => daemon_error(format!("Resource sampling failed: {error}")),
                     }
                 }
+                Ok(DaemonRequest::AgentPromptGet { session_id, registry_id }) => {
+                    match crate::remote::server::agent_control_service::prompt_get(&self.remote_state, &session_id, registry_id).await {
+                        Ok(prompt) => DaemonResponse::AgentPromptGetOk { prompt },
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
+                Ok(DaemonRequest::AgentPromptAnswer { session_id, prompt_id, screen_revision, answer, registry_id }) => {
+                    match crate::remote::server::agent_control_service::prompt_answer(
+                        &self.remote_state, session_id, prompt_id, screen_revision, answer, registry_id,
+                    ).await {
+                        Ok(receipt) => DaemonResponse::AgentPromptAnswerOk { receipt },
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
@@ -7060,6 +7225,10 @@ impl DaemonServer {
                             })
                             .await
                             .unwrap_or_default(),
+                            token_configured: crate::remote::server::machine_token_configured(),
+                            pairing_window: Some(
+                                self.remote_state.auth_manager.pairing_window_status(),
+                            ),
                         },
                     }
                 }
@@ -7362,6 +7531,8 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -7663,6 +7834,35 @@ impl DaemonServer {
                         Err(err) => daemon_error(format!("Failed to persist revocation: {err}"),),
                     }
                 }
+                Ok(DaemonRequest::RemoteSetDevicePermission { device_id, permission }) => {
+                    let auth = Arc::clone(&self.remote_state.auth_manager);
+                    match crate::ipc::run_blocking(move || {
+                        Ok(auth.set_device_permission(&device_id, permission))
+                    })
+                    .await
+                    {
+                        Ok(Ok(device)) => DaemonResponse::RemoteSetDevicePermissionOk { device },
+                        Ok(Err(err)) => {
+                            let code = match err {
+                                crate::remote::auth::PermissionChangeError::NotFound => "NOT_FOUND",
+                                crate::remote::auth::PermissionChangeError::MachineRequiresControl => {
+                                    "INVALID_ARGUMENT"
+                                }
+                                crate::remote::auth::PermissionChangeError::Auth(_) => "IO_ERROR",
+                            };
+                            DaemonResponse::Error {
+                                message: err.to_string(),
+                                code: Some(code.to_string()),
+                                details: None,
+                            }
+                        }
+                        Err(err) => DaemonResponse::Error {
+                            message: err.to_string(),
+                            code: Some("INTERNAL_ERROR".into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {
                     if let Some(path) = ssh_store_path {
                         *self.remote_state.ssh_store_path.write() = Some(path);
@@ -7673,6 +7873,10 @@ impl DaemonServer {
                 Ok(DaemonRequest::RemoteGetActiveSelection) => {
                     let selection = self.remote_state.active_selection.read().clone();
                     DaemonResponse::RemoteGetActiveSelectionOk { selection }
+                }
+                Ok(DaemonRequest::RemoteSetWindowFocused { focused }) => {
+                    self.remote_state.set_desktop_window_focused(focused);
+                    DaemonResponse::RemoteSetWindowFocusedOk
                 }
                 Ok(DaemonRequest::SubscribeRemoteEvents) => {
                     let mut events = self.remote_event_tx.subscribe();

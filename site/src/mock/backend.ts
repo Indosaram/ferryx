@@ -51,7 +51,7 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
   const a = argsOf(rawArgs); const request = argsOf(a.request);
   switch (command) {
     case 'cmd_project_register': return { workspaceId: request.workspaceId, repoRoot: request.repoPath };
-    case 'cmd_project_branches': return [{ name: 'main', isCurrent: true }, { name: 'feature/live-demo', isCurrent: false }];
+    case 'cmd_project_refs': return { branches: [{ name: 'main', isCurrent: true }, { name: 'feature/live-demo', isCurrent: false }], tags: [] };
     case 'cmd_worktree_list': return worktrees;
     case 'cmd_worktree_status': { const result: DirtyState = { isDirty: false, files: [] }; return result; }
     case 'cmd_worktree_create': return { ...worktrees[1], path: `../${request.worktree?.slug ?? 'new-worktree'}` };

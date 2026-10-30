@@ -33,6 +33,7 @@ const createPairingCode = vi.fn();
 const enableRemoteGateway = vi.fn();
 const disableRemoteGateway = vi.fn();
 const revokeRemoteDevice = vi.fn();
+const setRemoteDevicePermission = vi.fn();
 
 vi.mock("../../lib/tauri", () => ({
   getRemoteStatus: () => getRemoteStatus(),
@@ -42,6 +43,7 @@ vi.mock("../../lib/tauri", () => ({
   enableRemoteGateway: (req: unknown) => enableRemoteGateway(req),
   disableRemoteGateway: () => disableRemoteGateway(),
   revokeRemoteDevice: (id: string) => revokeRemoteDevice(id),
+  setRemoteDevicePermission: (id: string, permission: "view" | "control") => setRemoteDevicePermission(id, permission),
   // The agent-control card is covered by RemoteAccessSection.agentControl.test.tsx; null hides it here.
   getAgentControlSettings: () => Promise.resolve(null),
   setAgentControlSettings: vi.fn(),
@@ -303,6 +305,110 @@ describe("RemoteAccessSection", () => {
     expect(createPairingCode).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
     expect(screen.queryByText(/PIN:/i)).toBeNull();
+  });
+
+  it("pairs a device for the chosen role and counts the code down to a new-code prompt", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 600 });
+    await act(async () => { render(<RemoteAccessSection />); });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Can type" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+
+    expect(createPairingCode).toHaveBeenCalledWith("control");
+    expect(screen.getByTestId("pair-device-code")).toHaveTextContent("482913");
+    expect(screen.getByTestId("pair-device-countdown")).toHaveTextContent("10:00");
+
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(screen.getByTestId("pair-device-countdown")).toHaveTextContent("9:59");
+    expect(screen.queryByRole("button", { name: "New code" })).toBeNull();
+
+    await act(async () => { vi.advanceTimersByTime(599_000); });
+    expect(screen.queryByTestId("pair-device-code")).toBeNull();
+    expect(screen.getByRole("button", { name: "New code" })).toBeInTheDocument();
+  });
+
+  it("refreshes the Access card after minting and ticks its pairing countdown", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 60 });
+    await act(async () => { render(<RemoteAccessSection />); });
+    expect(screen.getByTestId("access-fact-pairing")).toHaveTextContent("Pairing: closed, no live code");
+
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, pairingWindow: { open: true, secondsLeft: 60 } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+    const fact = screen.getByTestId("access-fact-pairing");
+    expect(fact).toHaveTextContent("Pairing: a code is live for 1:00");
+
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(fact).toHaveTextContent("Pairing: a code is live for 0:59");
+  });
+
+  it("refetches status when the Access card's pairing countdown runs out", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, pairingWindow: { open: true, secondsLeft: 2 } });
+    await act(async () => { render(<RemoteAccessSection />); });
+    const fact = screen.getByTestId("access-fact-pairing");
+    expect(fact).toHaveTextContent("Pairing: a code is live for 0:02");
+    const callsBefore = getRemoteStatus.mock.calls.length;
+
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, pairingWindow: { open: false, secondsLeft: 0 } });
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(fact).toHaveTextContent("Pairing: a code is live for 0:01");
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(getRemoteStatus.mock.calls.length).toBe(callsBefore + 1);
+    expect(screen.getByTestId("access-fact-pairing")).toHaveTextContent("Pairing: closed, no live code");
+    expect(screen.getByTestId("access-fact-pairing")).toHaveAttribute("data-open", "false");
+  });
+
+  it("binds the role to a live code and locks the role picker until the code expires", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    createPairingCode.mockResolvedValue({ code: "482913", expiresInSeconds: 60 });
+    await act(async () => { render(<RemoteAccessSection />); });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Can type" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pair a device" })); });
+
+    const watchOnly = screen.getByRole("tab", { name: "Watch only" });
+    expect(watchOnly).toBeDisabled();
+    expect(screen.getByRole("tab", { name: "Can type" })).toBeDisabled();
+    fireEvent.click(watchOnly);
+    expect(screen.getByRole("tab", { name: "Can type" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("pair-device-role")).toHaveAttribute("data-role", "control");
+    expect(createPairingCode).toHaveBeenCalledWith("control");
+
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(screen.queryByTestId("pair-device-role")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Watch only" })).toBeEnabled();
+  });
+
+  it("states loopback reach and relay exposure in the Access card", async () => {
+    getRemoteStatus.mockResolvedValue({ ...enabledStatus, boundAddress: "127.0.0.1:43821", bindScope: "loopback", publicExposure: false });
+    render(<RemoteAccessSection />);
+    const reach = await screen.findByTestId("access-fact-reach");
+    await waitFor(() => expect(reach).toHaveAttribute("data-scope", "loopback"));
+    expect(reach).toHaveTextContent("Reachable from: this computer only");
+    cleanup();
+
+    getRemoteStatus.mockResolvedValue({ ...relayStatus, bindScope: "relay", publicExposure: true });
+    render(<RemoteAccessSection />);
+    const exposure = await screen.findByTestId("access-fact-exposure");
+    await waitFor(() => expect(exposure).toHaveAttribute("data-exposed", "true"));
+    expect(exposure).toHaveTextContent("Public exposure: via relay");
+  });
+
+  it("changes a paired device to Watch only from its role control", async () => {
+    const phone = { id: "dev-phone", name: "Phone", permission: "control", accessScope: "mirror", createdAt: 0, lastSeenAt: 0, revoked: false };
+    listRemoteDevices.mockResolvedValue([phone]);
+    setRemoteDevicePermission.mockResolvedValue({ ...phone, permission: "view" });
+    render(<RemoteAccessSection />);
+
+    const watchOnly = await screen.findByRole("tab", { name: "Watch only for Phone" });
+    expect(screen.getByRole("tab", { name: "Can type for Phone" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(watchOnly);
+
+    await waitFor(() => expect(setRemoteDevicePermission).toHaveBeenCalledWith("dev-phone", "view"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Watch only for Phone" })).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByTestId("device-access-scope")).toHaveAttribute("data-scope", "mirror");
   });
 
   it("retires Remote Access QR/PIN control: Generate QR button and PIN are absent while the remaining surface renders", async () => {

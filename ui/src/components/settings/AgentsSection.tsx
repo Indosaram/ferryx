@@ -7,6 +7,8 @@ import {
 } from "../../lib/agentIcon";
 
 import {
+  CLAUDE_PERMISSION_MODES,
+  CODEX_SANDBOX_MODES,
   detectionTargets,
   loadAgentSettings,
   mergeDetections,
@@ -37,6 +39,68 @@ import { Switch } from "../ui/switch";
 import { SettingRow, SettingsHeading } from "./primitives";
 
 const DEFAULT_AGENT_AUTO = "__auto__";
+const AGENT_DEFAULT_MODE = "__agent_default__";
+
+const PERMISSION_MODE_LABELS: Record<(typeof CLAUDE_PERMISSION_MODES)[number], string> = {
+  default: "Default",
+  acceptEdits: "Accept edits",
+  plan: "Plan",
+  bypassPermissions: "Bypass permissions",
+};
+
+const SANDBOX_MODE_LABELS: Record<(typeof CODEX_SANDBOX_MODES)[number], string> = {
+  "read-only": "Read only",
+  "workspace-write": "Workspace write",
+  "danger-full-access": "Full access (dangerous)",
+};
+
+type LaunchModeSelectProps<T extends string> = {
+  id: string;
+  label: string;
+  flag: string;
+  value: T | undefined;
+  options: readonly T[];
+  labels: Record<T, string>;
+  onChange: (value: T | undefined) => void;
+};
+
+function LaunchModeSelect<T extends string>({
+  id,
+  label,
+  flag,
+  value,
+  options,
+  labels,
+  onChange,
+}: LaunchModeSelectProps<T>) {
+  return (
+    <div>
+      <Label htmlFor={id} className="block text-[11px] font-medium text-muted-foreground mb-1">
+        {label}
+      </Label>
+      <Select
+        value={value ?? AGENT_DEFAULT_MODE}
+        onValueChange={(next) => onChange(next === AGENT_DEFAULT_MODE ? undefined : (next as T))}
+      >
+        <SelectTrigger id={id} aria-label={label} className="no-drag h-8 w-[220px] text-[11px]">
+          <SelectValue placeholder="Agent default" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={AGENT_DEFAULT_MODE}>Agent default</SelectItem>
+          {options.map((option) => (
+            <SelectItem key={option} value={option}>
+              {labels[option]}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Adds <span className="font-mono">{flag}</span> to new launches unless Arguments already
+        set it.
+      </p>
+    </div>
+  );
+}
 
 function AgentIcon({ name, className }: { name: string; className?: string }) {
   const logo = resolveAgentLogoByCommandName(name);
@@ -612,6 +676,28 @@ export function AgentsSection() {
                         className="h-8 w-full font-mono text-[11px]"
                       />
                     </div>
+                    {agent.name === "claude" && !agent.custom ? (
+                      <LaunchModeSelect
+                        id="agent-permission-mode-claude"
+                        label="Permission mode"
+                        flag="--permission-mode"
+                        value={override.permissionMode}
+                        options={CLAUDE_PERMISSION_MODES}
+                        labels={PERMISSION_MODE_LABELS}
+                        onChange={(permissionMode) => updateOverride(agent.name, { permissionMode })}
+                      />
+                    ) : null}
+                    {agent.name === "codex" && !agent.custom ? (
+                      <LaunchModeSelect
+                        id="agent-sandbox-codex"
+                        label="Sandbox"
+                        flag="--sandbox"
+                        value={override.sandbox}
+                        options={CODEX_SANDBOX_MODES}
+                        labels={SANDBOX_MODE_LABELS}
+                        onChange={(sandbox) => updateOverride(agent.name, { sandbox })}
+                      />
+                    ) : null}
                   </div>
                 ) : null}
               </div>

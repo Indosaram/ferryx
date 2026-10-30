@@ -10,7 +10,9 @@ export type OnboardingStepId =
   | "features"
   | "agents"
   | "cli"
-  | "project";
+  | "project"
+  | "try"
+  | "phone";
 
 export const ONBOARDING_VERSION = 1;
 
@@ -19,14 +21,19 @@ export const ONBOARDING_VERSION = 1;
  * when the feature that needs it is first used (notifications on the first
  * notify, Full Disk Access when a read hits a TCC-protected path); Settings >
  * Permissions remains the place to review all of them.
+ *
+ * The product comes first; pairing a phone and signing in close the flow and
+ * can both be skipped.
  */
 export const ONBOARDING_STEP_ORDER: readonly OnboardingStepId[] = [
-  "account",
   "intro",
   "features",
   "agents",
   "cli",
   "project",
+  "try",
+  "phone",
+  "account",
 ];
 
 export const OPEN_ONBOARDING_EVENT = "ferryx:open-onboarding";
@@ -46,6 +53,8 @@ export type OnboardingContext = {
   projectCount: number;
   /** True once this computer is enrolled to the signed-in Ferryx account. */
   accountLinked?: boolean;
+  /** Paired remote devices, when known; unknown never nags. */
+  pairedDeviceCount?: number | null;
 };
 
 function browserStorage(): Storage | null {
@@ -235,6 +244,12 @@ export function isOnboardingStepSatisfied(
       return false;
     case "project":
       return ctx.projectCount > 0;
+    case "try":
+      // An offer, not a requirement: it is never pending, so it neither reopens the
+      // wizard nor becomes the landing step. Only a created worktree records it.
+      return true;
+    case "phone":
+      return ctx.pairedDeviceCount == null || ctx.pairedDeviceCount > 0;
   }
 }
 
@@ -254,7 +269,7 @@ export function satisfiedOnboardingSteps(
 ): OnboardingStepId[] {
   const completed = new Set<OnboardingStepId>(state.completedSteps);
   return wizardSteps(ctx).filter(
-    (step) => completed.has(step) || isOnboardingStepSatisfied(step, ctx)
+    (step) => completed.has(step) || (step !== "try" && isOnboardingStepSatisfied(step, ctx))
   );
 }
 
@@ -296,8 +311,8 @@ export function shouldAutoOpenOnboarding(
     // (users who finished the flow before it existed have no "cli" entry), so
     // neither may be the sole reason the wizard pops back open after an upgrade.
     pendingOnboardingSteps(state, ctx).some(
-      // "account" is optional for existing users too: signing in must not force the wizard open.
-      (step) => step !== "features" && step !== "cli" && step !== "account"
+      // "try", "account" and "phone" are optional for existing users too: none may force the wizard open.
+      (step) => step !== "features" && step !== "cli" && step !== "try" && step !== "account" && step !== "phone"
     )
   );
 }

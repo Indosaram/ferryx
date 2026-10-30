@@ -1,7 +1,7 @@
 import { isDesktopShell } from "./clientRuntime";
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import type { DagRunSnapshot } from "./dagTypes";
-import type { RunTarget } from "./scopedContracts";
+import type { DeliveryReceipt, RunTarget } from "./scopedContracts";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
 import { invoke, isTauri as isTauriShell } from "@tauri-apps/api/core";
@@ -90,6 +90,11 @@ export type LocalBranch = {
   isCurrent: boolean;
 };
 
+export type ProjectRefs = {
+  branches: LocalBranch[];
+  tags: string[];
+};
+
 export type GitHubIssuePreview = {
   number: number;
   title: string;
@@ -167,6 +172,10 @@ export type SpawnTerminalRequest = {
     kind: "pairedDaemon";
     hostId: string;
     remoteWorkspaceId: string;
+  } | {
+    kind: "agentLaunch";
+    command: string;
+    args: string[];
   } | null;
   createOnly?: boolean | null;
   preparedLocalSplit?: import("./types").PreparedLocalSplit | null;
@@ -289,8 +298,9 @@ export async function bootTrace(
   }).catch(() => {});
 }
 
-export async function listProjectBranches(workspaceId: string) {
-  return invokeCommand<LocalBranch[]>("cmd_project_branches", { request: { workspaceId } });
+/// Local branches and tags usable as a worktree base ref (no remote branches).
+export async function listProjectRefs(workspaceId: string) {
+  return invokeCommand<ProjectRefs>("cmd_project_refs", { request: { workspaceId } });
 }
 
 /// Reads one GitHub issue through the already authenticated `gh` executable.
@@ -440,6 +450,56 @@ export async function getWorktreeStatus(request: WorktreeStatusRequest) {
   return invokeCommand<DirtyState>("cmd_worktree_status", { request });
 }
 
+/** What a worktree diff compares: unstaged edits, the index, or one commit. */
+export type GitDiffScope =
+  | { kind: "workingTree" }
+  | { kind: "staged" }
+  | { kind: "commit"; sha: string };
+
+export type GitPushResult = { remote: string; branch: string; setUpstream: boolean };
+
+/**
+ * Which checkout a Changes command targets: a managed worktree by identity, or (with no
+ * identity) the main checkout or an unmanaged worktree by its path inside the project root.
+ */
+export type ChangesTarget = { workspaceId: string; worktree: WorktreeIdentity } | { workspaceId: string; worktreePath: string };
+
+function changesTarget(request: ChangesTarget) {
+  return "worktree" in request
+    ? { workspaceId: request.workspaceId, worktree: request.worktree }
+    : { workspaceId: request.workspaceId, worktreePath: request.worktreePath };
+}
+
+/** Status of a Changes target; managed worktrees go through the dirty-state tracking path. */
+export async function getChangesStatus(request: ChangesTarget) {
+  return invokeCommand<DirtyState>("cmd_worktree_changes_status", { request: changesTarget(request) });
+}
+
+/** Unified patch text; `file` is relative to the worktree root. */
+export async function getWorktreeDiff(request: ChangesTarget & { scope: GitDiffScope; file?: string | null }) {
+  return invokeCommand<string>("cmd_worktree_diff", {
+    request: { ...changesTarget(request), scope: request.scope, file: request.file ?? null },
+  });
+}
+
+export async function stageWorktreePaths(request: ChangesTarget & { paths: string[] }) {
+  await invokeCommand<void>("cmd_worktree_stage", { request: { ...changesTarget(request), paths: request.paths } });
+}
+
+export async function unstageWorktreePaths(request: ChangesTarget & { paths: string[] }) {
+  await invokeCommand<void>("cmd_worktree_unstage", { request: { ...changesTarget(request), paths: request.paths } });
+}
+
+/** Commits the staged changes; resolves to the new sha. Rejects with `GIT_NOTHING_TO_COMMIT`. */
+export async function commitWorktree(request: ChangesTarget & { message: string }) {
+  return invokeCommand<string>("cmd_worktree_commit", { request: { ...changesTarget(request), message: request.message } });
+}
+
+/** Pushes without force; rejects with `GIT_PUSH_REJECTED` or `GIT_NO_REMOTE`. */
+export async function pushWorktree(request: ChangesTarget) {
+  return invokeCommand<GitPushResult>("cmd_worktree_push", { request: changesTarget(request) });
+}
+
 export async function previewWorktreeDelete(request: WorktreeStatusRequest) {
   return invokeCommand<BranchDeletionPreview>("cmd_worktree_delete_preview", { request });
 }
@@ -537,6 +597,13 @@ function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTe
       kind: "pairedDaemon",
       hostId: String(startup.hostId ?? ""),
       remoteWorkspaceId: String(startup.remoteWorkspaceId ?? ""),
+    };
+  }
+  if (startup.kind === "agentLaunch") {
+    return {
+      kind: "agentLaunch",
+      command: String(startup.command ?? ""),
+      args: Array.isArray(startup.args) ? startup.args.map(String) : [],
     };
   }
   if (startup.kind !== "agentResume") return null;
@@ -1170,6 +1237,50 @@ export async function resetAgentState(sessionId: string): Promise<void> {
   });
 }
 
+export type AgentPromptKind = "choice" | "approval" | "freeText";
+
+/** The prompt an agent pane is asking now, read from its screen at `screenRevision`. */
+export interface AgentPrompt {
+  promptId: string;
+  screenRevision: string;
+  question: string;
+  /** `key` is the option's index on the card, as an answer names it. */
+  options: { key: string; label: string }[];
+  kind: AgentPromptKind;
+  /** An option answer goes out only after a confirm. Absent from older daemons: treat as true. */
+  needsConfirmation?: boolean;
+}
+
+/** Exactly one of an option's key or free text. */
+export type AgentPromptAnswer = { key: string } | { text: string };
+
+/** The daemon's push that a session's prompt card appeared, moved or went away. */
+export const AGENT_PROMPT_CHANGED_EVENT = "agentPromptChanged";
+
+export async function onAgentPromptChanged(handler: (sessionId: string) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<{ sessionId?: unknown }>(AGENT_PROMPT_CHANGED_EVENT, (event) => {
+    if (typeof event.payload?.sessionId === "string") handler(event.payload.sessionId);
+  });
+}
+
+/** Null when the pane holds no prompt a reader knows. `sessionId` is the daemon's session id. */
+export async function getAgentPrompt(sessionId: string): Promise<AgentPrompt | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<AgentPrompt | null>("cmd_agent_prompt_get", { sessionId });
+}
+
+/** Refused with REQUEST_CONFLICT, nothing typed, when the screen moved since the prompt was read. */
+export async function answerAgentPrompt(request: {
+  sessionId: string;
+  promptId: string;
+  screenRevision: string;
+  answer: AgentPromptAnswer;
+}): Promise<DeliveryReceipt> {
+  if (!isTauri()) throw toIpcError(new Error("Agent prompts are answered only in the desktop app"));
+  return invokeCommand<DeliveryReceipt>("cmd_agent_prompt_answer", request);
+}
+
 export interface AgentIntegrationStatus {
   enabled: boolean;
 }
@@ -1226,12 +1337,27 @@ export type RemoteGatewayStatus = {
   gateReason?: string | null;
   /** Insecure transport modes in effect (`direct`, `relay`); non-empty shows the red banner. */
   insecureModes?: string[];
+  relayConnected?: boolean;
+  controlChannelConnected?: boolean;
+  /** A static relay machine token is set in the gateway process. */
+  tokenConfigured?: boolean;
+  /** Who can reach the listener. */
+  bindScope?: RemoteBindScope;
+  /** True while the relay is connected or an insecure transport mode is in effect. */
+  publicExposure?: boolean;
+  pairingWindow?: { open: boolean; secondsLeft: number };
 };
+
+export type RemoteBindScope = "loopback" | "lan" | "relay";
+
+export type DevicePermission = "view" | "control";
 
 export type DeviceInfo = {
   id: string;
   name: string;
-  permission: "view" | "control";
+  permission: DevicePermission;
+  /** "machine" devices drive this computer as a paired host and must keep Control. */
+  accessScope?: "mirror" | "machine";
   createdAt: number;
   lastSeenAt: number;
   revoked: boolean;
@@ -1280,6 +1406,11 @@ export async function listRemoteDevices(): Promise<DeviceInfo[]> {
 
 export async function revokeRemoteDevice(deviceId: string): Promise<boolean> {
   return invokeCommand<boolean>("cmd_remote_device_revoke", { deviceId });
+}
+
+/** Owner-only role change for a paired device (desktop IPC). */
+export async function setRemoteDevicePermission(deviceId: string, permission: DevicePermission): Promise<DeviceInfo> {
+  return invokeCommand<DeviceInfo>("cmd_remote_device_set_permission", { deviceId, permission });
 }
 
 /** One agent-control call a paired device or the owner made, as the daemon audited it. */
@@ -1490,6 +1621,14 @@ export type FocusedTerminalPayload = {
     worktreeLabel: string | null;
     state: "waiting" | "done" | "working" | null;
   }>;
+  /** Every waiting or unseen-done session of every project, keyed by its backend session. */
+  sessionAttention?: Array<{
+    backendSessionId: string;
+    workspaceId: string;
+    worktreeSlug: string | null;
+    state: "waiting" | "done";
+    agentType?: string;
+  }>;
   workspaceId: string;
   worktreeSlug?: string | null;
   worktreeLabel?: string | null;
@@ -1499,6 +1638,11 @@ export type FocusedTerminalPayload = {
   tabs?: RemoteTerminalTabInfo[];
   terminalTabs?: RemoteTerminalTabInfo[];
 };
+
+export async function reportDesktopWindowFocus(focused: boolean): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_remote_set_window_focused", { focused });
+}
 
 export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {
   if (!isTauri()) return;
@@ -1513,6 +1657,7 @@ export async function publishFocusedTerminal(payload: FocusedTerminalPayload | n
       tabId,
       terminalTabs,
       attentionInventory: payload?.attentionInventory ?? [],
+      ...(payload?.sessionAttention?.length ? { sessionAttention: payload.sessionAttention } : {}),
     },
   });
 }
