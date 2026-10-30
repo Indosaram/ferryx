@@ -334,24 +334,6 @@ async fn populate(gateway: &Gateway) -> (ferryx_hub::goals::SqlitePool, String, 
     (pool, goal_id, project.project_id)
 }
 
-impl Gateway {
-    async fn post_to(
-        &self,
-        path: &str,
-        token: &str,
-        body: &str,
-    ) -> (u16, Option<String>, serde_json::Value) {
-        self.send(
-            client()
-                .post(format!("http://{}{path}", self.addr))
-                .bearer_auth(token)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body.to_owned()),
-        )
-        .await
-    }
-}
-
 async fn goal_row(pool: &ferryx_hub::goals::SqlitePool, goal_id: &str) -> (String, i64) {
     let goal = ferryx_hub::supervisor::goal_of(pool, goal_id)
         .await

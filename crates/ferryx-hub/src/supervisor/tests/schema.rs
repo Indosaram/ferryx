@@ -14,10 +14,10 @@ use crate::goals::types::GoalMode;
 use crate::supervisor::*;
 
 /// Last migration of a hub that predates the unified supervisor.
-const OLD_SCHEMA_VERSION: i64 = 19;
+const OLD_SCHEMA_VERSION: i64 = 21;
 
 /// Version of the migration under test.
-const SUPERVISOR_SCHEMA_VERSION: i64 = 20;
+const SUPERVISOR_SCHEMA_VERSION: i64 = 22;
 
 const SUPERVISOR_TABLES: &[&str] = &[
     "supervisor_identity",
