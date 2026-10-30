@@ -173,7 +173,9 @@ async fn revoke_drops_the_entry_and_the_revoked_generation_reads_checking() {
     assert!(service
         .record_reachability(host.host_id.clone(), host.generation, ReachabilityState::Online, None)
         .await);
-    service.revoke_on_auth_failure(host.host_id.clone(), host.generation).await;
+    service
+        .revoke_confirmed_auth_failure(host.host_id.clone(), host.generation, "UNAUTHORIZED")
+        .await;
     assert!(service.reachability.lock().unwrap().get(&host.host_id, host.generation).is_none());
     let entries = service.reachability_list().await.unwrap();
     assert_eq!(entries.len(), 1);

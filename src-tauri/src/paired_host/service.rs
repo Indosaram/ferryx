@@ -599,7 +599,17 @@ impl PairedHostService {
         Ok(())
     }
 
-    pub async fn revoke_on_auth_failure(&self, host_id: String, generation: Epoch) {
+    /// Unconditionally revokes one exact generation: marks it Revoked, clears its device
+    /// token and bumps the generation. Only for an auth failure a fresh re-check already
+    /// confirmed; every auth-failure caller goes through
+    /// [`super::client::MachineClient::confirm_and_revoke`], which calls this.
+    /// `confirming_code` is the re-check's error code (UNAUTHORIZED or TOKEN_EXPIRED).
+    pub(crate) async fn revoke_confirmed_auth_failure(
+        &self,
+        host_id: String,
+        generation: Epoch,
+        confirming_code: &str,
+    ) {
         let view = {
             let id = host_id.clone();
             self.run(move |store| {
@@ -612,7 +622,22 @@ impl PairedHostService {
             })
             .await
         };
+        if let Err(error) = &view {
+            tracing::info!(
+                host_id = %host_id,
+                generation = generation.0,
+                confirming_code,
+                error = %error.code,
+                "paired host revoke skipped: inventory refused the confirmed revoke"
+            );
+        }
         if let Ok(view) = view {
+            tracing::warn!(
+                host_id = %host_id,
+                generation = generation.0,
+                confirming_code,
+                "paired host revoked after a confirmed auth failure; device token cleared"
+            );
             self.drop_reachability(&host_id);
             self.authority_changed(&host_id);
             // Only the revoked (captured) generation is stopped; a newer worker survives.

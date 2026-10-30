@@ -300,7 +300,9 @@ pub(crate) enum ProbeOutcome {
     /// The host (or its relay control channel) cannot be reached right now. Carries no
     /// error: being offline is the whole finding.
     Unreachable,
-    /// The credential was rejected: revoke it and leave reachability untouched.
+    /// The credential was rejected. One rejection is not proof: the relay can answer 401
+    /// while the host's control channel flaps, so a revoke needs a confirming re-check
+    /// (see [`MachineClient::confirm_and_revoke`]).
     Unauthorized,
     /// Anything else the host or transport answered; still offline, with the code kept.
     Failed(String),
@@ -313,7 +315,7 @@ pub(crate) fn probe_outcome(result: &Result<m::Capabilities>, host: &HostView) -
         Ok(caps) if caps.machine_id == host.machine_id => ProbeOutcome::Online,
         Ok(_) => ProbeOutcome::Failed("PAIRED_HOST_WRONG_MACHINE".into()),
         Err(error) => match error.code.as_str() {
-            "HOST_UNAVAILABLE" | "TIMEOUT" | "MACHINE_SERVICE_UNAVAILABLE" => {
+            "HOST_UNAVAILABLE" | "TIMEOUT" | "MACHINE_SERVICE_UNAVAILABLE" | "MACHINE_OFFLINE" => {
                 ProbeOutcome::Unreachable
             }
             // The relay answers 404 with no body when the machine has no live control
@@ -779,7 +781,14 @@ fn map_operation_http_error(
             ambiguous: false,
         };
     }
+    // The relay answers 409 `{"code":"MACHINE_OFFLINE"}` when no live control channel can
+    // check the device token: the host is unreachable, not failing (as secure_http maps it).
+    let machine_offline = status.as_u16() == 409
+        && serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|body| {
+            body.get("code").and_then(serde_json::Value::as_str) == Some("MACHINE_OFFLINE")
+        });
     let code = match status.as_u16() {
+        409 if machine_offline => "HOST_UNAVAILABLE",
         401 => "UNAUTHORIZED",
         403 => "PERMISSION_DENIED",
         404 => "NOT_FOUND",
@@ -806,7 +815,7 @@ fn map_operation_http_error(
             details.insert("relayStage".into(), serde_json::json!(stage));
         }
     }
-    let retryable = matches!(status.as_u16(), 429 | 503 | 504);
+    let retryable = machine_offline || matches!(status.as_u16(), 429 | 503 | 504);
     let machine_error = m::MachineError {
         code: code.to_string(),
         message,
@@ -819,6 +828,32 @@ fn map_operation_http_error(
         request_id: None,
         machine_error: Some(Box::new(machine_error)),
         ambiguous: false,
+    }
+}
+
+/// Records a non-revoking probe outcome for one exact generation. Returns the state now
+/// recorded (`Checking` when the generation is no longer current).
+async fn record_outcome(
+    service: &PairedHostService,
+    host_id: String,
+    generation: Epoch,
+    outcome: ProbeOutcome,
+) -> ReachabilityState {
+    let (state, last_error) = match outcome {
+        ProbeOutcome::Online => (ReachabilityState::Online, None),
+        ProbeOutcome::Unreachable => (ReachabilityState::Offline, None),
+        ProbeOutcome::Failed(code) => (ReachabilityState::Offline, Some(code)),
+        // Callers route a rejection through `confirm_and_revoke` and never record it here;
+        // should one arrive, an unconfirmed rejection only says the host did not answer.
+        ProbeOutcome::Unauthorized => (ReachabilityState::Offline, Some("UNAUTHORIZED".into())),
+    };
+    if service
+        .record_reachability(host_id, generation, state, last_error)
+        .await
+    {
+        state
+    } else {
+        ReachabilityState::Checking
     }
 }
 
@@ -1433,6 +1468,19 @@ impl MachineClient {
             })=> result.map_err(|_|ClientError::local("TIMEOUT"))?
         }
     }
+    /// One Capabilities round-trip with `lease`, adopting a token the host rotated.
+    async fn capabilities_round_trip(
+        &self,
+        service: &PairedHostService,
+        host: &HostView,
+        lease: &CredentialLease,
+    ) -> Result<m::Capabilities> {
+        let route = Operation::Capabilities.route()?;
+        let (bytes, rotated) = self.http_rotating(host, lease, &route).await?;
+        adopt_rotation(service, lease, rotated).await;
+        decode::<m::Capabilities>(&bytes)
+    }
+
     /// Checks one paired host with a Capabilities round-trip and records the result.
     /// Returns the state now recorded for that generation (`Checking` when nothing was
     /// recorded: a stale generation, or a rejected credential that was revoked instead).
@@ -1446,33 +1494,61 @@ impl MachineClient {
         else {
             return ReachabilityState::Checking;
         };
-        let result = match Operation::Capabilities.route() {
-            Ok(route) => match self.http_rotating(&host, &lease, &route).await {
-                Ok((bytes, rotated)) => {
-                    adopt_rotation(service, &lease, rotated).await;
-                    decode::<m::Capabilities>(&bytes)
-                }
-                Err(error) => Err(error),
-            },
-            Err(error) => Err(error),
-        };
+        let result = self.capabilities_round_trip(service, &host, &lease).await;
         drop(lease);
-        let (state, last_error) = match probe_outcome(&result, &host) {
-            ProbeOutcome::Online => (ReachabilityState::Online, None),
-            ProbeOutcome::Unreachable => (ReachabilityState::Offline, None),
-            ProbeOutcome::Failed(code) => (ReachabilityState::Offline, Some(code)),
+        match probe_outcome(&result, &host) {
             ProbeOutcome::Unauthorized => {
-                service.revoke_on_auth_failure(host_id, generation).await;
-                return ReachabilityState::Checking;
+                let code = result.err().map(|error| error.code).unwrap_or_default();
+                self.confirm_and_revoke(service, host_id, generation, &code)
+                    .await
             }
+            outcome => record_outcome(service, host_id, generation, outcome).await,
+        }
+    }
+
+    /// The only auth-failure revoke path. A single UNAUTHORIZED answer (`first_code`) is
+    /// not proof the host dropped this pairing: the relay answers 401 while the host's
+    /// control channel flaps. Issues one fresh Capabilities request with the current lease
+    /// for the same host+generation and revokes only when that also answers UNAUTHORIZED or
+    /// TOKEN_EXPIRED. Any other answer records reachability as [`Self::probe`] does.
+    /// Returns the state now recorded (`Checking` after a revoke or for a stale generation).
+    pub async fn confirm_and_revoke(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+        first_code: &str,
+    ) -> ReachabilityState {
+        let Ok((host, lease)) = service.capture_operation(host_id.clone(), generation).await
+        else {
+            tracing::info!(
+                host_id = %host_id,
+                generation = generation.0,
+                first_code,
+                "paired host revoke skipped: generation is no longer current"
+            );
+            return ReachabilityState::Checking;
         };
-        if service
-            .record_reachability(host_id, generation, state, last_error)
-            .await
-        {
-            state
-        } else {
-            ReachabilityState::Checking
+        let result = self.capabilities_round_trip(service, &host, &lease).await;
+        drop(lease);
+        match probe_outcome(&result, &host) {
+            ProbeOutcome::Unauthorized => {
+                let code = result.err().map(|error| error.code).unwrap_or_default();
+                service
+                    .revoke_confirmed_auth_failure(host_id, generation, &code)
+                    .await;
+                ReachabilityState::Checking
+            }
+            outcome => {
+                tracing::info!(
+                    host_id = %host_id,
+                    generation = generation.0,
+                    first_code,
+                    recheck = ?outcome,
+                    "paired host revoke skipped: capabilities re-check did not confirm the auth failure"
+                );
+                record_outcome(service, host_id, generation, outcome).await
+            }
         }
     }
 

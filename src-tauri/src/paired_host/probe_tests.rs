@@ -9,15 +9,18 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
+    atomic::{AtomicU8, AtomicUsize, Ordering},
+    Arc, Mutex,
 };
 
 const OK: u8 = 0;
 const NO_CONTROL_CHANNEL: u8 = 1;
 const BAD_GATEWAY: u8 = 2;
 const REJECTED: u8 = 3;
+/// The relay's 409 `MACHINE_OFFLINE`: no live control channel could check the token.
+const MACHINE_OFFLINE: u8 = 4;
 
 fn caps() -> serde_json::Value {
     json!({"apiVersion":1,"machineId":"a","daemonEpoch":"1","platform":"linux","accessScope":"machine","permission":"control","capabilities":[],"limits":{"directoryEntries":10,"terminalSessions":10}})
@@ -28,12 +31,17 @@ struct Fixture {
     service: PairedHostService,
     host: HostView,
     mode: Arc<AtomicU8>,
+    /// Answers served one per Capabilities request, in order, before falling back to `mode`.
+    script: Arc<Mutex<VecDeque<u8>>>,
+    /// Capabilities requests the relay answered.
+    hits: Arc<AtomicUsize>,
     events: tokio::sync::mpsc::UnboundedReceiver<HostReachability>,
     task: tokio::task::JoinHandle<()>,
 }
 
-/// A loopback relay whose Capabilities answer is switched by `mode`. The host is paired
-/// while the relay answers, so the book starts at Online for its generation.
+/// A loopback relay whose Capabilities answer is the next entry of `script`, else `mode`.
+/// The host is paired while the relay answers, so the book starts at Online for its
+/// generation.
 async fn fixture() -> Fixture {
     let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap()))
         .await
@@ -42,18 +50,29 @@ async fn fixture() -> Fixture {
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let mode = Arc::new(AtomicU8::new(OK));
     let served = Arc::clone(&mode);
+    let script = Arc::new(Mutex::new(VecDeque::new()));
+    let scripted = Arc::clone(&script);
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
     let router = Router::new()
         .route("/api/v1/pair/exchange", post(|| async {
             Json(json!({"token":"fixture-secret","machineId":"a","device":{"id":"d","name":"d","permission":"control","accessScope":"machine","createdAt":1,"lastSeenAt":1}}))
         }))
         .route("/host/a/api/v1/capabilities", get(move || {
-            let mode = served.load(Ordering::SeqCst);
+            counted.fetch_add(1, Ordering::SeqCst);
+            let next = scripted.lock().unwrap().pop_front();
+            let mode = next.unwrap_or_else(|| served.load(Ordering::SeqCst));
             async move {
                 match mode {
                     OK => Json(caps()).into_response(),
                     // The relay's bodyless answer for a machine with no live control channel.
                     NO_CONTROL_CHANNEL => axum::http::StatusCode::NOT_FOUND.into_response(),
                     BAD_GATEWAY => axum::http::StatusCode::BAD_GATEWAY.into_response(),
+                    MACHINE_OFFLINE => (
+                        axum::http::StatusCode::CONFLICT,
+                        Json(json!({"code":"MACHINE_OFFLINE","message":"machine is offline"})),
+                    )
+                        .into_response(),
                     _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
                 }
             }
@@ -73,7 +92,7 @@ async fn fixture() -> Fixture {
     service.set_reachability_sink(Arc::new(move |entry| {
         let _ = tx.send(entry);
     }));
-    Fixture { root, service, host, mode, events, task }
+    Fixture { root, service, host, mode, script, hits, events, task }
 }
 
 impl Fixture {
@@ -91,6 +110,14 @@ impl Fixture {
         )
         .await
         .expect("probe bounded")
+    }
+    /// Serves `answers` to the next Capabilities requests, in order, and resets the count.
+    fn serve(&self, answers: &[u8]) {
+        *self.script.lock().unwrap() = answers.iter().copied().collect();
+        self.hits.store(0, Ordering::SeqCst);
+    }
+    async fn auth_status(&self) -> super::super::inventory::AuthStatus {
+        self.service.list().await.unwrap()[0].auth_status
     }
     async fn entry(&self) -> HostReachability {
         let mut entries = self.service.reachability_list().await.unwrap();
@@ -151,11 +178,99 @@ async fn c_relay_502_reads_offline() {
 async fn d_relay_401_revokes_and_leaves_reachability_unchanged() {
     let mut f = fixture().await;
     f.mode.store(REJECTED, Ordering::SeqCst);
+    f.serve(&[]);
     assert_eq!(f.probe().await, ReachabilityState::Checking);
+    assert_eq!(f.hits.load(Ordering::SeqCst), 2, "the 401 is confirmed by one re-check");
     assert!(f.events.try_recv().is_err(), "a rejected credential publishes no reachability");
     let rows = f.service.list().await.unwrap();
     assert_eq!(rows[0].auth_status, super::super::inventory::AuthStatus::Revoked);
     assert!(!rows[0].online);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn d_relay_401_then_recheck_200_keeps_the_pairing_online() {
+    let f = fixture().await;
+    f.serve(&[REJECTED, OK]);
+    assert_eq!(f.probe().await, ReachabilityState::Online);
+    assert_eq!(f.hits.load(Ordering::SeqCst), 2);
+    assert_eq!(f.auth_status().await, super::super::inventory::AuthStatus::Paired);
+    assert_eq!(f.entry().await.state, ReachabilityState::Online);
+    assert!(f.service.list().await.unwrap()[0].online);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn d_relay_401_then_recheck_502_keeps_the_pairing_and_reads_offline() {
+    let f = fixture().await;
+    f.serve(&[REJECTED, BAD_GATEWAY]);
+    assert_eq!(f.probe().await, ReachabilityState::Offline);
+    assert_eq!(f.hits.load(Ordering::SeqCst), 2);
+    assert_eq!(f.auth_status().await, super::super::inventory::AuthStatus::Paired);
+    let entry = f.entry().await;
+    assert_eq!((entry.state, entry.last_error), (ReachabilityState::Offline, None));
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn d_relay_401_then_recheck_409_machine_offline_keeps_the_pairing() {
+    let f = fixture().await;
+    f.serve(&[REJECTED, MACHINE_OFFLINE]);
+    assert_eq!(f.probe().await, ReachabilityState::Offline);
+    assert_eq!(f.auth_status().await, super::super::inventory::AuthStatus::Paired);
+    assert_eq!(f.entry().await.last_error, None, "MACHINE_OFFLINE is plain offline");
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn relay_409_machine_offline_reads_offline_without_an_error() {
+    let f = fixture().await;
+    f.mode.store(MACHINE_OFFLINE, Ordering::SeqCst);
+    f.serve(&[]);
+    assert_eq!(f.probe().await, ReachabilityState::Offline);
+    assert_eq!(f.hits.load(Ordering::SeqCst), 1, "only a rejection triggers a re-check");
+    let entry = f.entry().await;
+    assert_eq!((entry.state, entry.last_error), (ReachabilityState::Offline, None));
+    f.finish().await;
+}
+
+/// The daemon's `PairedHostRevoke` handler calls `confirm_and_revoke` with the operation's
+/// UNAUTHORIZED: the re-check alone decides.
+#[tokio::test]
+async fn confirm_and_revoke_skips_the_revoke_when_the_recheck_succeeds() {
+    let f = fixture().await;
+    f.serve(&[OK]);
+    let state = MachineClient::new()
+        .confirm_and_revoke(&f.service, f.host.host_id.clone(), f.host.generation, "UNAUTHORIZED")
+        .await;
+    assert_eq!(state, ReachabilityState::Online);
+    assert_eq!(f.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(f.auth_status().await, super::super::inventory::AuthStatus::Paired);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn confirm_and_revoke_revokes_when_the_recheck_answers_401() {
+    let f = fixture().await;
+    f.serve(&[REJECTED]);
+    let state = MachineClient::new()
+        .confirm_and_revoke(&f.service, f.host.host_id.clone(), f.host.generation, "UNAUTHORIZED")
+        .await;
+    assert_eq!(state, ReachabilityState::Checking);
+    assert_eq!(f.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(f.auth_status().await, super::super::inventory::AuthStatus::Revoked);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn confirm_and_revoke_skips_the_revoke_when_the_recheck_is_unreachable() {
+    let f = fixture().await;
+    f.serve(&[NO_CONTROL_CHANNEL]);
+    let state = MachineClient::new()
+        .confirm_and_revoke(&f.service, f.host.host_id.clone(), f.host.generation, "UNAUTHORIZED")
+        .await;
+    assert_eq!(state, ReachabilityState::Offline);
+    assert_eq!(f.auth_status().await, super::super::inventory::AuthStatus::Paired);
     f.finish().await;
 }
 
