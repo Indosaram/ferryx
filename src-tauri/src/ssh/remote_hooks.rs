@@ -9,6 +9,10 @@
 //! reporter, either to the pane's forwarded socket (`FERRYX_AGENT_STATE_SOCKET`) or to the
 //! helper's loopback TCP ingress (`FERRYX_AGENT_STATE_PORT` plus `FERRYX_AGENT_STATE_TOKEN`). On a
 //! Windows host the TCP ingress is the only channel.
+//!
+//! The Ferryx agent skill (`SKILL_FILES`) rides the same read-compare-write path: it is written
+//! where the agent's config directory exists, and only a skill whose frontmatter still says
+//! `ferryx-managed: true` is replaced or deleted.
 
 use super::helper_setup::{self, HelperProbeState};
 use super::operations::RemoteRemovalReport;
@@ -16,8 +20,9 @@ use super::runtime::{powershell_data, RemoteEnvironment, RemotePlatform};
 use super::{direct, SshHost};
 use crate::cli::agent_hook::HOOK_AGENTS;
 use crate::daemon::agent_hook_install::{
-    ferryx_script_event, hook_script_for, merged_settings_text, script_file_name_for,
-    stripped_settings_text, HookShape, Reporter, HOOK_FILES,
+    ferryx_script_event, hook_script_for, is_ferryx_skill, merged_settings_text,
+    script_file_name_for, stripped_settings_text, HookShape, Reporter, HOOK_FILES, SKILL_FILES,
+    SKILL_SOURCE,
 };
 use crate::ipc::IpcError;
 use std::future::Future;
@@ -33,7 +38,7 @@ pub(super) struct RemoteHookFile {
     pub agent: &'static str,
     /// The agent's config directory as in [`HOOK_FILES`]; `.config/` marks the XDG-rooted one.
     pub dir: &'static str,
-    /// The path inside that directory, `/`-separated.
+    /// The path inside that directory, `/`-separated; for [`Kind::Skill`] the path inside HOME.
     pub rel: String,
     pub kind: Kind,
 }
@@ -43,6 +48,8 @@ pub(super) enum Kind {
     Settings(HookShape, &'static [&'static str]),
     /// One of cline's per-event scripts.
     Script(&'static str),
+    /// The Ferryx agent skill, gated on the agent's directory but located from HOME.
+    Skill,
 }
 
 pub(super) fn hook_files(platform: RemotePlatform) -> Vec<RemoteHookFile> {
@@ -68,6 +75,9 @@ pub(super) fn hook_files(platform: RemotePlatform) -> Vec<RemoteHookFile> {
                 rel: file.to_string(),
                 kind: Kind::Settings(shape, events),
             });
+        }
+        if let Some((_, rel)) = SKILL_FILES.iter().find(|(name, _)| *name == agent) {
+            files.push(RemoteHookFile { agent, dir, rel: rel.to_string(), kind: Kind::Skill });
         }
     }
     files
@@ -114,7 +124,8 @@ fn posix_locate(file: &RemoteHookFile) -> String {
         ),
         None => format!("\"$HOME\"/{}", direct::quote_posix(file.dir)),
     };
-    format!("d={dir}; f=\"$d\"/{};", direct::quote_posix(&file.rel))
+    let root = if file.kind == Kind::Skill { "\"$HOME\"" } else { "\"$d\"" };
+    format!("d={dir}; f={root}/{};", direct::quote_posix(&file.rel))
 }
 
 fn windows_locate(file: &RemoteHookFile) -> String {
@@ -125,8 +136,9 @@ fn windows_locate(file: &RemoteHookFile) -> String {
         ),
         None => format!("$d=Join-Path $homeRoot {};", powershell_data(file.dir)),
     };
+    let root = if file.kind == Kind::Skill { "$homeRoot" } else { "$d" };
     format!(
-        "{dir} $f=Join-Path $d {};",
+        "{dir} $f=Join-Path {root} {};",
         powershell_data(&file.rel.replace('/', "\\"))
     )
 }
@@ -315,6 +327,13 @@ pub(super) fn install_change(
                 _ => Some((expect, Change::Write { bytes: body.into_bytes(), executable: true })),
             }
         }
+        Kind::Skill => match existing.as_deref() {
+            Some(text) if text == SKILL_SOURCE || !is_ferryx_skill(text) => None,
+            _ => Some((
+                expect,
+                Change::Write { bytes: SKILL_SOURCE.as_bytes().to_vec(), executable: false },
+            )),
+        },
     }
 }
 
@@ -339,6 +358,8 @@ pub(super) fn removal_change(
             Ok(Some((Expect::Bytes(bytes), Change::Delete)))
         }
         Kind::Script(_) => Ok(None),
+        Kind::Skill if is_ferryx_skill(&text) => Ok(Some((Expect::Bytes(bytes), Change::Delete))),
+        Kind::Skill => Ok(None),
     }
 }
 
