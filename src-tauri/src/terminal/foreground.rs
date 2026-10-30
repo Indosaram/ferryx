@@ -558,6 +558,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
         let mut states = hub.subscribe(&id);
         let mut transition = ProcessTransition::default();

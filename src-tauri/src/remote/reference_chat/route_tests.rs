@@ -1233,6 +1233,8 @@ async fn a_history_read_naming_a_rotated_provider_session_is_refused_target_expi
         }),
         detail: None,
         origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        outcome: None,
+        kind: None,
     });
     let stale = fixture.read_query(
         "omo",
@@ -1798,6 +1800,8 @@ fn publish_reference_provider(state: &RemoteGatewayState, session_id: &str, prov
             }),
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
 }
 
@@ -1823,6 +1827,8 @@ async fn reference_provider_rotation_case(rotation: &str, named: Option<&str>) {
             }),
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
     };
     let hook: Box<dyn Fn() + Send + Sync> = Box::new(rotate);

@@ -2154,7 +2154,8 @@ where
         state.agent.clone(),
         state.provider_session.clone(),
         state.detail.clone(),
-    );
+    )
+    .with_report_marks(state);
     let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
     // Guard against oversized metadata without dropping the PTY terminal connection:
     // If the full message (e.g. carrying an unusually long detail question or path)
@@ -2175,7 +2176,8 @@ where
                 state.state.clone(),
                 state.agent.clone(),
                 bounded_provider,
-            );
+            )
+            .with_report_marks(state);
             let compact_json = serde_json::to_string(&compact_msg).map_err(|_| ())?;
             match machine_control(Message::Text(compact_json.into())) {
                 Ok(control) => {

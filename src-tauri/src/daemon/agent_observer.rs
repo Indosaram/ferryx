@@ -187,7 +187,7 @@ fn provider_report(states: &AgentStateHub, session_id: &str) -> Option<ProviderR
     Some(ProviderReport {
         agent: state.agent,
         state: state.state,
-        self_reported: state.origin.is_self_reported(),
+        self_reported: state.origin.is_provider_report(),
         detail: state.detail,
     })
 }
@@ -330,7 +330,7 @@ async fn observe_session(
                         let provider = ProviderReport {
                             agent: update.state.agent.clone(),
                             state: update.state.state.clone(),
-                            self_reported: update.state.origin.is_self_reported(),
+                            self_reported: update.state.origin.is_provider_report(),
                             detail: update.state.detail.clone(),
                         };
                         publish_if_changed(
@@ -485,6 +485,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
         observers.attach(
             states,
@@ -508,6 +510,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         }
     }
 

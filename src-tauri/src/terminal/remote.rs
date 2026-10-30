@@ -1307,6 +1307,8 @@ fn process_agent_snapshot(
         provider_session,
         detail: snapshot.detail.clone(),
         origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        outcome: None,
+        kind: None,
     };
     let accepted = if let Some(sink) = sink {
         sink.accept(candidate)

@@ -315,6 +315,8 @@ async fn ssh_expired_session_settles_exited_and_preserves_agent_identity() {
         session_id: "ended-ssh".into(), state: "idle".into(), agent: Some("claude".into()),
         provider_session: Some(serde_json::from_value(serde_json::json!({"key":"session_id","id":"conversation-original"})).unwrap()),
         detail: None, origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+        outcome: None,
+        kind: None,
     });
     let before = daemon.session_service.agent_states.current("ended-ssh").unwrap();
     let startup = TerminalStartup::AgentResume {
