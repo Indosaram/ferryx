@@ -33,6 +33,10 @@ pub struct TerminalContext {
     pub cell_height: AtomicU32,
     pub rows: AtomicU16,
     pub cols: AtomicU16,
+    /// Receiver for OSC 7501 / prompt-start / reset events; `None` until opted in.
+    pub program_status_sink: Mutex<Option<super::program_status::ProgramStatusSink>>,
+    /// When set, the program status callbacks drop every event (seed or gap replay).
+    pub program_status_muted: AtomicBool,
 }
 
 #[repr(C)]
