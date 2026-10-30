@@ -78,6 +78,18 @@ export function SidebarWorktreeRow({
         >
           {node.label}
         </span>
+        {live.outcome && !live.supervisorTyping ? (
+          <span
+            data-testid="worktree-outcome-mark"
+            data-outcome={live.outcome}
+            className={cn(
+              "ml-auto shrink-0 text-[10px] leading-none",
+              live.outcome === "error" ? "text-destructive" : "text-status-success",
+            )}
+          >
+            {live.outcome}
+          </span>
+        ) : null}
         {live.supervisorTyping ? (
           <span data-testid="worktree-supervisor-slot" className="ml-auto inline-flex min-w-0 shrink-0 items-center gap-1 truncate text-[10px] leading-none text-foreground">
             <Eye aria-hidden="true" className="size-2.5 shrink-0" />
@@ -88,7 +100,7 @@ export function SidebarWorktreeRow({
             state={live.slot}
             host={node.hostLabel ?? undefined}
             title={slotTitle}
-            className="ml-auto min-w-0 truncate"
+            className={cn("min-w-0 truncate", live.outcome ? null : "ml-auto")}
             data-testid={live.slot ? "worktree-status-dot" : "remote-machine-badge"}
           />
         )}
