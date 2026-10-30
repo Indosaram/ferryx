@@ -442,6 +442,34 @@ async fn abort_failed(id: &str, part_path: Option<&Path>, err_msg: String) -> Br
     BrowserError::DownloadFailed(err_msg)
 }
 
+/// Ids become part of the `<path>.<id>.part` file name, so they must stay one plain file-name
+/// fragment: a separator or `..` would move the temp file out of the destination directory.
+fn is_valid_download_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':'))
+}
+
+/// Rejects a destination that cannot name a file, and an unusable caller-chosen id, before any
+/// network request or registry entry exists.
+fn validate_download_target(path: &Path, download_id: Option<&str>) -> Result<(), BrowserError> {
+    if path.file_name().is_none() {
+        return Err(BrowserError::DownloadFailed(
+            "download destination must name a file".into(),
+        ));
+    }
+    if let Some(id) = download_id {
+        if !is_valid_download_id(id) {
+            return Err(BrowserError::DownloadFailed(
+                "download id must be 1-128 characters of letters, digits, '-', '_' or ':'".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn download_url_with_cookies(
     url: &str,
     path: &Path,
@@ -454,6 +482,7 @@ pub async fn download_url_with_cookies(
             "about:blank cannot be downloaded".into(),
         ));
     }
+    validate_download_target(path, download_id)?;
 
     let id = download_id
         .map(|s| s.to_string())
@@ -676,6 +705,32 @@ mod tests {
             result.unwrap_err(),
             BrowserError::DownloadFailed("about:blank cannot be downloaded".into())
         );
+    }
+
+    /// A destination without a file name, or an id that could escape the destination
+    /// directory through the `.part` name, is refused before any request is made.
+    #[tokio::test]
+    async fn test_download_rejects_unusable_destination_and_unsafe_id() {
+        let url = "https://example.invalid/file.bin";
+        for path in [Path::new(""), Path::new("/"), Path::new("/tmp/..")] {
+            let result = download_url_with_cookies(url, path, None, None).await;
+            assert_eq!(
+                result,
+                Err(BrowserError::DownloadFailed(
+                    "download destination must name a file".into()
+                )),
+                "{path:?}"
+            );
+        }
+        for id in ["../escape", "a/b", "a\\b", "", "dl id"] {
+            let result =
+                download_url_with_cookies(url, Path::new("/tmp/ok.bin"), None, Some(id)).await;
+            assert!(
+                matches!(&result, Err(BrowserError::DownloadFailed(m)) if m.contains("download id")),
+                "{id:?}: {result:?}"
+            );
+        }
+        assert!(get_download("../escape").is_none(), "no record for a refused id");
     }
 
     #[tokio::test]

@@ -290,7 +290,14 @@ pub fn read_chromium_cookie_db(
                         match decrypt_chromium_value(&encrypted_value, key, expected_host) {
                             Ok(decrypted) => decrypted,
                             Err(_) => {
-                                decrypt_failed_count += 1;
+                                // `v11` rows are keyed by the OS keyring, not the key this
+                                // source holds (Linux libsecret/kwallet), so a failure means
+                                // the key is unavailable, not that the data is corrupt.
+                                if encrypted_value.starts_with(b"v11") {
+                                    unsupported_v11_count += 1;
+                                } else {
+                                    decrypt_failed_count += 1;
+                                }
                                 continue;
                             }
                         }
@@ -593,6 +600,49 @@ mod tests {
         assert_eq!(res.cookies.len(), 0);
         assert_eq!(res.unsupported_v11_count, 1);
         assert_eq!(res.decrypt_failed_count, 0);
+    }
+
+    #[test]
+    fn test_read_chromium_cookie_db_v11_with_wrong_key_counts_unsupported_v11() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix("test-cookie-db-v11-wrongkey-")
+            .tempdir()
+            .expect("create tempdir");
+        let db_path = temp_dir.path().join("Cookies");
+        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
+        conn.execute("CREATE TABLE meta(key TEXT, value TEXT);", [])
+            .expect("create meta");
+        conn.execute(
+            "CREATE TABLE cookies(
+                host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, path TEXT,
+                expires_utc INTEGER, is_secure INTEGER, is_httponly INTEGER, samesite INTEGER
+            );",
+            [],
+        )
+        .expect("create cookies");
+        // A v11 row this source cannot open (keyring-keyed on Linux) must be tallied as an
+        // unsupported v11 row. Malformed ciphertext makes the failure deterministic, where a
+        // wrong key could by chance still decrypt to valid padding.
+        let peanuts_key = derive_key_aes128(CHROMIUM_LINUX_V10_PASSWORD, 1);
+        let v11: &[u8] = b"v11-not-a-block";
+        let v10: &[u8] = b"v10-not-a-block";
+        conn.execute(
+            "INSERT INTO cookies VALUES ('.example.com', 'k11', '', ?1, '/', 0, 0, 0, 0);",
+            rusqlite::params![v11],
+        )
+        .expect("insert v11");
+        conn.execute(
+            "INSERT INTO cookies VALUES ('.example.com', 'k10', '', ?1, '/', 0, 0, 0, 0);",
+            rusqlite::params![v10],
+        )
+        .expect("insert v10");
+
+        let res = read_chromium_cookie_db(&db_path, &KeySource::RawKey(peanuts_key))
+            .expect("read tallies instead of failing");
+
+        assert!(res.cookies.is_empty());
+        assert_eq!(res.unsupported_v11_count, 1, "v11 needs the OS keyring key");
+        assert_eq!(res.decrypt_failed_count, 1, "a failing v10 row is a decrypt failure");
     }
 
     #[test]

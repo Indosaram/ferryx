@@ -7,6 +7,39 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
+/// Expands a leading `~`, `~/` (and `~\` where backslash is a separator) against `home`.
+/// `Ok(None)` means the path has no home prefix. A prefix that names only the home directory
+/// is refused: a screenshot needs a file, and writing to a directory can only fail later.
+fn expand_home_prefix(
+    trimmed: &str,
+    home: Option<PathBuf>,
+    backslash_is_separator: bool,
+) -> Result<Option<PathBuf>, IpcError> {
+    let is_separator = |c: char| c == '/' || (backslash_is_separator && c == '\\');
+    let rest = if trimmed == "~" {
+        ""
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        rest
+    } else if let Some(rest) = backslash_is_separator
+        .then(|| trimmed.strip_prefix("~\\"))
+        .flatten()
+    {
+        rest
+    } else {
+        return Ok(None);
+    };
+    if rest.trim_matches(is_separator).is_empty() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            "screenshot output path must name a file, not the home directory",
+        ));
+    }
+    let home = home.ok_or_else(|| {
+        IpcError::new(IpcErrorCode::InvalidPath, "failed to expand home directory")
+    })?;
+    Ok(Some(home.join(rest)))
+}
+
 pub fn resolve_screenshot_path(path_str: &str) -> Result<PathBuf, IpcError> {
     let trimmed = path_str.trim();
     if trimmed.is_empty() {
@@ -15,26 +48,9 @@ pub fn resolve_screenshot_path(path_str: &str) -> Result<PathBuf, IpcError> {
             "screenshot output path cannot be empty",
         ));
     }
-    let path = if let Some(stripped) = trimmed.strip_prefix("~/") {
-        if let Some(home) = dirs_home_dir() {
-            home.join(stripped)
-        } else {
-            return Err(IpcError::new(
-                IpcErrorCode::InvalidPath,
-                "failed to expand home directory",
-            ));
-        }
-    } else if trimmed == "~" {
-        if let Some(home) = dirs_home_dir() {
-            home
-        } else {
-            return Err(IpcError::new(
-                IpcErrorCode::InvalidPath,
-                "failed to expand home directory",
-            ));
-        }
-    } else {
-        PathBuf::from(trimmed)
+    let path = match expand_home_prefix(trimmed, dirs_home_dir(), cfg!(windows))? {
+        Some(expanded) => expanded,
+        None => PathBuf::from(trimmed),
     };
 
     let path = if path.is_relative() {
@@ -202,6 +218,32 @@ mod tests {
         let rel = resolve_screenshot_path("shots/rel.png").expect("relative path");
         assert!(rel.is_absolute(), "relative input must be anchored to the current dir");
         assert!(rel.ends_with("shots/rel.png"));
+    }
+
+    #[test]
+    fn expand_home_prefix_handles_windows_backslash_and_bare_tilde() {
+        let home = || Some(PathBuf::from("/home/tester"));
+        // The Windows `~\` form expands only where backslash is a separator.
+        assert_eq!(
+            expand_home_prefix(r"~\shots\a.png", home(), true).unwrap(),
+            Some(PathBuf::from("/home/tester").join(r"shots\a.png"))
+        );
+        assert_eq!(expand_home_prefix(r"~\a.png", home(), false).unwrap(), None);
+        assert_eq!(
+            expand_home_prefix("~/a.png", home(), false).unwrap(),
+            Some(PathBuf::from("/home/tester/a.png"))
+        );
+        // A path naming only the home directory is not a file.
+        for (bare, windows) in [("~", false), ("~/", false), ("~//", false), (r"~\", true)] {
+            let err = expand_home_prefix(bare, home(), windows)
+                .expect_err("home directory is not a screenshot file");
+            assert_eq!(err.code, IpcErrorCode::InvalidArgument, "{bare:?}");
+        }
+        let err = resolve_screenshot_path("~").expect_err("bare tilde must be refused");
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+        // Without a home directory the expansion reports InvalidPath.
+        let err = expand_home_prefix("~/a.png", None, false).expect_err("no home");
+        assert_eq!(err.code, IpcErrorCode::InvalidPath);
     }
 
     #[tokio::test]

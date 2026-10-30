@@ -86,9 +86,17 @@ fn push_history_url(session: &mut ManagedBrowserSession, url: &str) {
         .history
         .truncate(session.history_index.saturating_add(1));
     session.history.push(url.to_string());
+    if session.history.len() > HISTORY_ENTRY_CAP {
+        // Oldest entries fall off the front; the engine still owns what lies beyond the cap.
+        let excess = session.history.len() - HISTORY_ENTRY_CAP;
+        session.history.drain(..excess);
+    }
     session.history_index = session.history.len().saturating_sub(1);
     sync_history_flags(session);
 }
+
+/// Most shadow-history entries kept per tab; a long-lived tab otherwise grows without bound.
+pub const HISTORY_ENTRY_CAP: usize = 500;
 
 // Same strict charset as `is_valid_named_profile_id` in model.rs (ASCII
 // alphanumeric first byte, then alphanumeric / `.` / `_` / `-`), plus `:` —
@@ -854,6 +862,26 @@ pub fn order_sessions_by_creation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadow_history_is_capped_and_keeps_the_newest_entries() {
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("history-cap")).unwrap();
+        for index in 0..(HISTORY_ENTRY_CAP + 25) {
+            manager
+                .update_url("history-cap", &format!("https://example.com/page-{index}"))
+                .unwrap();
+        }
+        let guard = manager.sessions.read();
+        let session = guard.get("history-cap").unwrap();
+        assert_eq!(session.history.len(), HISTORY_ENTRY_CAP);
+        assert_eq!(session.history_index, HISTORY_ENTRY_CAP - 1);
+        assert_eq!(
+            session.history.last().map(String::as_str),
+            Some(format!("https://example.com/page-{}", HISTORY_ENTRY_CAP + 24).as_str())
+        );
+        assert!(session.can_go_back && !session.can_go_forward);
+    }
 
     #[test]
     fn popup_opens_are_capped_per_opener_per_second() {
