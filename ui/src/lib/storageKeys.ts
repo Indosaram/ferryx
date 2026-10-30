@@ -11,6 +11,8 @@ export const APPEARANCE_SETTINGS_STORAGE_KEY = "ferryx.settings.appearance";
 export const BROWSER_SETTINGS_STORAGE_KEY = "ferryx.settings.browser";
 export const BROWSER_HISTORY_STORAGE_KEY = "ferryx.browser.history";
 export const BROWSER_HISTORY_ENABLED_STORAGE_KEY = "ferryx.browser.history.enabled";
+/** URL-keyed scroll positions restored on revisit; cleared together with browsing history. */
+export const BROWSER_SCROLL_STORAGE_KEY = "ferryx.browser.scroll-positions";
 export const GENERAL_SETTINGS_STORAGE_KEY = "ferryx.settings.general";
 export const SHORTCUT_OVERRIDES_STORAGE_KEY = "ferryx.settings.shortcuts";
 export const SHORTCUT_PRESET_STORAGE_KEY = "ferryx.shortcuts.preset";

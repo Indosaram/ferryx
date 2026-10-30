@@ -1,9 +1,11 @@
 import { isHttpUrl, loadBrowserSettings } from "./browserSettings";
-import { BROWSER_HISTORY_STORAGE_KEY } from "./storageKeys";
+import { BROWSER_HISTORY_STORAGE_KEY, BROWSER_SCROLL_STORAGE_KEY } from "./storageKeys";
+
+export { BROWSER_SCROLL_STORAGE_KEY };
 
 export const BROWSER_HISTORY_EVENT = "ferryx:browser-history";
 export const BROWSER_HISTORY_LIMIT = 100;
-export const BROWSER_SCROLL_STORAGE_KEY = "ferryx.browser.scroll-positions";
+export const BROWSER_SCROLL_LIMIT = 200;
 
 export type BrowserScrollPosition = {
   x: number;
@@ -105,6 +107,8 @@ export function clearBrowserHistory(storage: Storage | null = historyStorage()):
   } catch {
     // Ignore disabled storage failures.
   }
+  // Scroll positions are keyed by visited URL, so they are browsing history too.
+  clearBrowserScroll(storage);
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent<BrowserHistoryEntry[]>(BROWSER_HISTORY_EVENT, { detail: [] }));
   }
@@ -124,11 +128,17 @@ export function recordBrowserScroll(
   try {
     const raw = storage?.getItem(BROWSER_SCROLL_STORAGE_KEY);
     const map: Record<string, BrowserScrollPosition> = raw ? JSON.parse(raw) : {};
-    map[`${browserId}:${url}`] = cleanPos;
-    map[url] = cleanPos;
+    // Delete-then-set moves the written keys to the end of insertion order, so the oldest
+    // keys come first and eviction is least-recently-written.
+    for (const key of [`${browserId}:${url}`, url]) {
+      delete map[key];
+      map[key] = cleanPos;
+    }
     const keys = Object.keys(map);
-    if (keys.length > 200) {
-      delete map[keys[0]];
+    let evict = 0;
+    while (keys.length - evict > BROWSER_SCROLL_LIMIT) {
+      delete map[keys[evict]];
+      evict += 1;
     }
     storage?.setItem(BROWSER_SCROLL_STORAGE_KEY, JSON.stringify(map));
   } catch {

@@ -74,21 +74,7 @@ function extractDroppedHttpUrl(dataTransfer: DataTransfer): string | null {
 }
 
 function parseErrorCode(err: unknown): string {
-  if (typeof extractBrowserErrorCode === "function") {
-    return extractBrowserErrorCode(err);
-  }
-  if (!err) return "UNKNOWN_ERROR";
-  if (typeof err === "object") {
-    const code = (err as Record<string, unknown>).code;
-    if (typeof code === "string" && code.trim()) return code.trim();
-    if (err instanceof Error && err.message) return err.message.trim();
-    const message = (err as Record<string, unknown>).message;
-    if (typeof message === "string" && message.trim()) return message.trim();
-  }
-  if (typeof err === "string" && err.trim()) {
-    return err.trim();
-  }
-  return "UNKNOWN_ERROR";
+  return extractBrowserErrorCode(err);
 }
 
 export function BrowserPane({
@@ -102,6 +88,9 @@ export function BrowserPane({
   const toolbarRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const [liveTab, setLiveTab] = useState<BrowserTab>(tab);
+  // Parents rebuild `tab` from store state that never sees `browser_state_changed`, so a new
+  // object with unchanged values must not roll the live url/title/navigation state back.
+  const previousTabRef = useRef<BrowserTab>(tab);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [findResult, setFindResult] = useState<BrowserFindResult>({ matchCount: 0, found: false });
@@ -131,7 +120,21 @@ export function BrowserPane({
   const maskAwareVisible = visible && surfaceVisible;
 
   useEffect(() => {
-    setLiveTab((current) => ({ ...current, ...tab }));
+    const previous = previousTabRef.current;
+    previousTabRef.current = tab;
+    if (previous === tab) return;
+    if (previous.browserId !== tab.browserId) {
+      setLiveTab(tab);
+      return;
+    }
+    const changed: Partial<BrowserTab> = {};
+    for (const key of Object.keys({ ...previous, ...tab }) as (keyof BrowserTab)[]) {
+      if (!Object.is(previous[key], tab[key])) {
+        (changed as Record<string, unknown>)[key] = tab[key];
+      }
+    }
+    if (Object.keys(changed).length === 0) return;
+    setLiveTab((current) => ({ ...current, ...changed }));
   }, [tab]);
 
   useEffect(() => {
@@ -369,10 +372,12 @@ export function BrowserPane({
 
   const saveDownload = async () => {
     if (!downloadUrl) return;
-    const filePath = await save({ defaultPath: suggestedDownloadName(downloadUrl) });
-    if (!filePath) return;
-    setDownloadStatus("Saving…");
+    let saveAttempted = false;
     try {
+      const filePath = await save({ defaultPath: suggestedDownloadName(downloadUrl) });
+      if (!filePath) return;
+      saveAttempted = true;
+      setDownloadStatus("Saving…");
       await downloadBrowserUrlWithSession(tab.browserId, downloadUrl, filePath);
       setDownloadStatus("Saved");
       setDownloadNeedsConfirmation(false);
@@ -380,8 +385,14 @@ export function BrowserPane({
       setDownloadStatus(extractBrowserErrorCode(error));
     } finally {
       // The registry only gains a record (completed or failed) once this call settles.
-      setDownloadsRefreshToken((current) => current + 1);
+      if (saveAttempted) setDownloadsRefreshToken((current) => current + 1);
     }
+  };
+
+  const openDownloadExternally = (url: string) => {
+    void Promise.resolve(openExternalUrl(url))
+      .then(() => setPaneAlert((current) => (current?.action === "Open in system browser" ? null : current)))
+      .catch((error: unknown) => setPaneAlert({ action: "Open in system browser", code: parseErrorCode(error) }));
   };
 
   return (
@@ -407,7 +418,7 @@ export function BrowserPane({
               placeholder="Find in page"
               className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-2 text-xs outline-none focus:border-ring"
             />
-            <span className="min-w-14 text-center text-[10px] text-muted-foreground">
+            <span aria-live="polite" className="min-w-14 text-center text-[10px] text-muted-foreground">
               {findQuery ? `${findResult.matchCount} matches` : "0 matches"}
             </span>
             <button type="button" aria-label="Previous match" onClick={() => void runFind(findQuery, true)} className="rounded p-1 hover:bg-accent"><ChevronUp className="size-3.5" /></button>
@@ -430,7 +441,7 @@ export function BrowserPane({
               </span>
             ) : null}
             {downloadStatus ? <span className="text-muted-foreground">{downloadStatus}</span> : null}
-            <button type="button" onClick={() => void openExternalUrl(downloadUrl)} className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"><ExternalLink className="size-3" /> Open in system browser</button>
+            <button type="button" onClick={() => openDownloadExternally(downloadUrl)} className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"><ExternalLink className="size-3" /> Open in system browser</button>
             <button type="button" onClick={() => void saveDownload()} className="rounded border border-border px-2 py-1 hover:bg-accent">{downloadNeedsConfirmation ? "Save" : "Save as…"}</button>
             <button type="button" aria-label="Dismiss download" onClick={() => { setDownloadUrl(null); setDownloadStatus(null); setDownloadNeedsConfirmation(false); }} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
           </div>

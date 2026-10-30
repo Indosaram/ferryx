@@ -2020,8 +2020,15 @@ export function useWorkspaceStore({
       if (!closingTab || closingTab.pinned) return;
 
       if (closingTab.kind === "browser") {
-        await closeBrowser(closingTab.browserId);
+        // The tab closes regardless of the native teardown: a rejected close must not leave the
+        // user with a tab that can never be closed. The webview is torn down only once no layout
+        // references its id any more.
         dispatch({ type: "CLOSE_TAB", tabId });
+        if (!isBrowserIdReferenced(stateRef.current, closingTab.browserId)) {
+          await closeBrowser(closingTab.browserId).catch((error: unknown) => {
+            console.warn("Failed to close browser webview:", closingTab.browserId, error);
+          });
+        }
         return;
       }
 

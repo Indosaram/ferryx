@@ -63,6 +63,24 @@ describe("browser settings", () => {
     expect(normalizeBrowserAddress("example.com", google)).toBe("https://example.com");
   });
 
+  it("treats ~-prefixed input as a search but keeps absolute HTML paths as file URLs", () => {
+    const google = normalizeBrowserSettings({ ...DEFAULT_BROWSER_SETTINGS, searchEngine: "google" });
+    expect(normalizeBrowserAddress("~/site/index.html", google))
+      .toBe("https://www.google.com/search?q=~%2Fsite%2Findex.html");
+    expect(normalizeBrowserAddress("/tmp/site/index.html", google)).toBe("file:///tmp/site/index.html");
+  });
+
+  it("matches http schemes case-insensitively and only bare localhost hosts", () => {
+    const google = normalizeBrowserSettings({ ...DEFAULT_BROWSER_SETTINGS, searchEngine: "google" });
+    expect(normalizeBrowserAddress("HTTP://Example.com/a", google)).toBe("HTTP://Example.com/a");
+    expect(normalizeBrowserAddress("HTTPS://example.com", google)).toBe("HTTPS://example.com");
+    expect(normalizeBrowserAddress("localhost", google)).toBe("http://localhost");
+    expect(normalizeBrowserAddress("LOCALHOST:8080/docs", google)).toBe("http://LOCALHOST:8080/docs");
+    expect(normalizeBrowserAddress("127.0.0.1:3000", google)).toBe("http://127.0.0.1:3000");
+    expect(normalizeBrowserAddress("localhost docs", google)).toBe("https://www.google.com/search?q=localhost%20docs");
+    expect(normalizeBrowserAddress("localhostfoo", google)).toBe("https://www.google.com/search?q=localhostfoo");
+  });
+
   it("exposes every required default zoom level", () => {
     expect(BROWSER_ZOOM_LEVELS).toEqual([75, 80, 90, 100, 110, 125, 150, 175, 200]);
     expect(normalizeBrowserSettings({ defaultZoom: 125 }).defaultZoom).toBe(125);

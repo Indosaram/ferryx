@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowserSection } from "./BrowserSection";
@@ -58,5 +58,21 @@ describe("BrowserSection silent failure surfacing", () => {
     const row = screen.getByText("Example").closest("div.flex");
     expect(row).not.toBeNull();
     expect(row?.contains(alert)).toBe(true);
+  });
+
+  it("re-lists open browsers before applying the reset default zoom", async () => {
+    render(<BrowserSection />);
+    await screen.findByRole("button", { name: "Focus browser tab Example" });
+
+    // A tab opened after the settings page mounted must also get the reset zoom.
+    browserMocks.listBrowsers.mockResolvedValue([
+      activeBrowser,
+      { ...activeBrowser, browserId: "browser-2", title: "Later" },
+    ]);
+    browserMocks.setBrowserZoom.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Reset to defaults" }));
+
+    await waitFor(() => expect(browserMocks.setBrowserZoom).toHaveBeenCalledWith("browser-2", 1));
+    expect(browserMocks.setBrowserZoom).toHaveBeenCalledWith("browser-1", 1);
   });
 });
