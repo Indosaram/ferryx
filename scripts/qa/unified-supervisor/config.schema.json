@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "scripts/qa/unified-supervisor/config.schema.json",
+  "title": "unified-supervisor QA runner config",
+  "description": "Isolated binaries and state roots for bun scripts/qa/unified-supervisor.mjs. The runner enforces this schema itself: unknown fields, missing required fields, relative or ~ paths, any path naming hub.sqlite, roots inside or containing production locations (~/.ferryx, Ferryx/mhc app-data and XDG directories, the daemon runtime roots /tmp/ferryx-<uid>[-dev] and /tmp/rorca-<uid>, the invoking shell's FERRYX_* locations; symlinks are resolved) or the home directory, overlapping roots, a dataRoot too long for the isolated daemon socket (100 bytes) and a dataRoot/memoryRoot already holding state this runner did not create are refused with exit 2 before anything is written.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ferryxCli", "ferryxApp", "mhcBin", "dataRoot", "memoryRoot", "projectRoot", "ownerPrincipal"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "$comment": { "type": "string" },
+    "ferryxCli": { "type": "string", "minLength": 1, "description": "Absolute path of the ferryx-cli binary built from the recorded source revision. The admission scenario runs it as the isolated daemon (--daemon, with its hub and supervisor dispatcher), as `supervisor setup` and as the owner's `mcp` channel; build it with the default hub features." },
+    "ferryxApp": { "type": "string", "minLength": 1, "description": "Absolute path of the Ferryx desktop binary or app bundle from the same revision; directories are tree-hashed." },
+    "mhcBin": { "type": "string", "minLength": 1, "description": "Absolute path of the mhc binary from the pinned capability-bearing revision." },
+    "ferryxRelay": { "type": ["string", "null"], "minLength": 1, "description": "Absolute path of the ferryx-relay binary from the same revision (debug build: the paired daemons need FERRYX_ALLOW_INSECURE_RELAY for a loopback ws:// relay). Required by remote-delivery, which runs it on a free loopback port to pair two isolated daemons; that scenario refuses to run without it (CONFIG_INVALID)." },
+    "ferryxUiDist": { "type": ["string", "null"], "minLength": 1, "description": "Absolute path of the built remote web client (ui/dist, holding index.html) from the same revision. Required by surfaces, which serves it through the loopback relay (FERRYX_UI_DIST_DIR) and drives it in a headless browser; that scenario refuses to run without it (CONFIG_INVALID). The browser comes from playwright-core resolvable from ui/ (or PLAYWRIGHT_CORE_PATH) with system Chrome (QA_BROWSER_CHANNEL overrides the channel)." },
+    "dataRoot": { "type": "string", "minLength": 1, "description": "Task-owned isolated Ferryx data root: absent or holding only .qa-unified-supervisor/ and runs/. Holds the ownership ledger (.qa-unified-supervisor/owned.jsonl) and per-run roots (runs/<runId>) that teardown removes. <dataRoot>/runs/<24-char runId>/runtime/daemon.sock must fit in 100 bytes." },
+    "memoryRoot": { "type": "string", "minLength": 1, "description": "Task-owned isolated mhc memory root (absent or holding only runs/); per-run roots live under runs/<runId>." },
+    "projectRoot": { "type": "string", "minLength": 1, "description": "Task-owned project/worktree root for the qa-supervisor fixture project." },
+    "pairedHostId": { "type": ["string", "null"], "minLength": 1, "description": "Paired host id for remote scenarios (remote-delivery, channels)." },
+    "ownerPrincipal": { "type": "string", "pattern": "^\\S+$", "description": "Authenticated owner principal used by fixtures, e.g. qa-owner. The admission scenario sets up the isolated installation's supervisor identity for it." },
+    "realEngine": {
+      "type": ["object", "null"],
+      "description": "Opt-in real engines for the real-autonomy scenario (plan todo 17). Without it that scenario refuses with PREREQUISITE_MISSING and --all leaves it out (summary.json excluded). Only env var NAMES are configured: the runner reads the key values from its own environment and never writes them to disk or evidence. The isolated daemon runs from ferryxApp, which must then be the ferryx executable (it dispatches the agent-hook reporter the daemon installs into <run HOME>/.claude/settings.json).",
+      "additionalProperties": false,
+      "required": ["provider", "api", "baseUrl", "model", "apiKeyEnv", "workerCli", "workerBin", "workerBaseUrl", "workerModel"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "description": "mhc provider name written to the run-local models.json and FERRYX_HUB_MHC_PROVIDER." },
+        "api": { "enum": ["openai-completions", "anthropic-messages"], "description": "mhc provider API shape." },
+        "baseUrl": { "type": "string", "format": "uri", "description": "Supervisor provider base URL, e.g. http://100.91.254.71:18801/v1 (mahoquot-gateway, OpenAI-compatible)." },
+        "model": { "type": "string", "minLength": 1, "description": "Supervisor model id (FERRYX_HUB_MHC_MODEL), e.g. claude-sonnet-5." },
+        "apiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Name of the env var holding the supervisor provider key; models.json apiKey is this name." },
+        "workerCli": { "const": "claude", "description": "The hook-integrated worker CLI driven in the pane." },
+        "workerBin": { "type": "string", "minLength": 1, "description": "Absolute path of the claude executable, e.g. /home/indo/.local/bin/claude." },
+        "workerBaseUrl": { "type": "string", "format": "uri", "description": "ANTHROPIC_BASE_URL for the worker, e.g. http://100.91.254.71:18801 (Anthropic-compatible)." },
+        "workerModel": { "type": "string", "minLength": 1, "description": "Worker model id passed as claude --model." },
+        "workerApiKeyEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "Env var holding the worker key (ANTHROPIC_AUTH_TOKEN); defaults to apiKeyEnv." }
+      }
+    },
+    "realSlack": {
+      "type": ["object", "null"],
+      "description": "Opt-in real Slack for the channels scenario (plan todo 17). Without it that scenario refuses with PREREQUISITE_MISSING and --all leaves it out. The isolated hub talks to https://slack.com/api (FERRYX_HUB_SLACK_API is never set; the product honours it for loopback only) with the QA app's bot and app tokens; the owner's own messages are posted with the owner's user token. Only env var NAMES are configured (each must contain TOKEN so the evidence redactor masks the value); an unset or rejected token is a named release blocker (PREREQUISITE_MISSING / SLACK_AUTH_FAILED), never a stubbed pass. Required Slack scopes: bot chat:write, channels:history, groups:history, im:history, im:write, reactions:write, users:read; app-level connections:write; user token chat:write (posts and deletes only the runner's own messages). Event subscriptions: message.channels, message.groups, message.im, app_mention.",
+      "additionalProperties": false,
+      "required": ["botTokenEnv", "appTokenEnv", "ownerUserTokenEnv", "teamId", "channelId", "ownerUserId"],
+      "properties": {
+        "botTokenEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*TOKEN[A-Z0-9_]*$", "description": "Env var holding the QA app's bot token (xoxb-), passed to the hub as SLACK_BOT_TOKEN." },
+        "appTokenEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*TOKEN[A-Z0-9_]*$", "description": "Env var holding the QA app's app-level token (xapp-, connections:write), passed as SLACK_APP_TOKEN." },
+        "ownerUserTokenEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*TOKEN[A-Z0-9_]*$", "description": "Env var holding the owner's user token (xoxp-, chat:write). Used only to post (and later delete) the owner's QA messages in the QA channel and the owner DM sentinel." },
+        "teamId": { "type": "string", "pattern": "^T[A-Z0-9]{6,}$", "description": "Slack team id; the owner principal is slack:<teamId>:<ownerUserId>." },
+        "channelId": { "type": "string", "pattern": "^[CG][A-Z0-9]{6,}$", "description": "The NEW dedicated QA channel the owner approved; the bot must be a member. Never a shared channel." },
+        "ownerUserId": { "type": "string", "pattern": "^[UW][A-Z0-9]{6,}$", "description": "Slack user id of the owner (the user token's user)." }
+      }
+    },
+    "slackChannel": { "type": ["string", "null"], "pattern": "^[CDG][A-Z0-9]{6,}$", "description": "Dedicated QA Slack channel approved in the current execution session; omit or null when no approval exists." }
+  }
+}

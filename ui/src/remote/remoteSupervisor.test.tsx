@@ -2,7 +2,11 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SUPERVISOR_ACTING_MS } from "../lib/supervisorModel";
 import {
+  fetchSupervisorConversation,
+  fetchSupervisorMemory,
   fetchSupervisorSnapshot,
+  postSupervisorMemory,
+  postSupervisorRequest,
   hasSupervisorCapability,
   isSupervisorChangedFrame,
   setRemoteLanePaused,
@@ -178,5 +182,48 @@ describe("useRemoteSupervisor", () => {
     expect(result.current.now).toBeGreaterThan(before + SUPERVISOR_ACTING_MS - 1);
     expect(fetchLike).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("unified supervisor remote calls", () => {
+  it("posts an envelope to the request route and returns the receipt", async () => {
+    const fetchLike = vi.fn<SupervisorFetch>(() => Promise.resolve(json(200, { goalId: "g", revision: 4, runState: "paused" })));
+    const envelope = { requestId: "phone-pause-1", goalId: "g", expectedRevision: 3, action: "pause", payload: {} };
+    await expect(postSupervisorRequest(fetchLike, envelope)).resolves.toEqual({ kind: "ok", value: { goalId: "g", revision: 4, runState: "paused" } });
+    expect(fetchLike).toHaveBeenCalledWith("/api/v1/supervisor/request", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(envelope) });
+  });
+
+  it("reads the machine error envelope's code for a stale revision", async () => {
+    const result = await postSupervisorRequest(
+      () => Promise.resolve(json(409, { error: { code: "REVISION_CONFLICT", message: "goal g revision changed", retryable: false, requestId: "", details: {} } })),
+      { requestId: "r", goalId: "g", expectedRevision: 1, action: "resume", payload: {} },
+    );
+    expect(result).toEqual({ kind: "error", code: "REVISION_CONFLICT", message: "goal g revision changed", status: 409 });
+  });
+
+  it("reads conversation and memory through their routes", async () => {
+    const fetchLike = vi.fn<SupervisorFetch>((path) =>
+      Promise.resolve(path.startsWith("/api/v1/supervisor/memory")
+        ? json(503, { error: { code: "MEMORY_RECEIPTS_UNAVAILABLE", message: "not yet" } })
+        : json(200, { projectId: "p 1", messages: [], next: 0 })),
+    );
+    await expect(fetchSupervisorConversation(fetchLike, "p 1", 5)).resolves.toMatchObject({ kind: "ok" });
+    expect(fetchLike).toHaveBeenCalledWith("/api/v1/supervisor/conversation?projectId=p+1&after=5");
+    await expect(fetchSupervisorMemory(fetchLike)).resolves.toMatchObject({ kind: "error", code: "MEMORY_RECEIPTS_UNAVAILABLE", status: 503 });
+    const teach = { requestId: "t", action: "teach", payload: { text: "x" } };
+    await postSupervisorMemory(fetchLike, teach);
+    expect(fetchLike).toHaveBeenLastCalledWith("/api/v1/supervisor/memory", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(teach) });
+  });
+
+  it("reports a thrown transport as OFFLINE", async () => {
+    await expect(postSupervisorRequest(() => Promise.reject(new Error("tunnel closed")), { requestId: "r", action: "message", payload: { text: "hi" } }))
+      .resolves.toMatchObject({ kind: "error", code: "OFFLINE", status: null });
+  });
+
+  it("carries the unified supervisor part of the snapshot", async () => {
+    const result = await fetchSupervisorSnapshot(() => Promise.resolve(json(200, snapshotBody({
+      supervisor: { identity: { supervisorId: "s", ownerPrincipal: "o" }, projects: [], goals: [], health: null },
+    }))));
+    expect(result.kind === "ok" ? result.snapshot.supervisor?.identity?.ownerPrincipal : "wrong").toBe("o");
   });
 });

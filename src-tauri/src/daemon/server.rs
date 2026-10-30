@@ -1724,6 +1724,25 @@ fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
 /// request is answered, including ones Ferryx does not translate, so the client never waits out
 /// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
 #[cfg(any(unix, test))]
+/// A supervisor worker report on the agent-state socket:
+/// `{"type":"supervisorReport","sessionId":…,"eventId":…,"body":…}`. The session id is the
+/// reporting pane's own (`FERRYX_SESSION_ID`), the same trust an `agentState` line has on this
+/// owner-only socket; the hub accepts it only for the open goal bound to that session.
+/// (`sessionId`, `eventId`, `body`), or `None` for any other line.
+fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Wire {
+        #[serde(rename = "type")]
+        kind: String,
+        session_id: String,
+        event_id: String,
+        body: String,
+    }
+    let wire: Wire = serde_json::from_str(line.trim()).ok()?;
+    (wire.kind == "supervisorReport").then_some((wire.session_id, wire.event_id, wire.body))
+}
+
 fn herdr_response_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if !value.get("method")?.as_str()?.starts_with("pane.") {
@@ -2097,6 +2116,9 @@ pub struct DaemonServer {
     /// RetirementGuard drops, the handler notifies .0 ("parked") and waits on .1 ("release").
     #[cfg(test)]
     close_park: std::sync::OnceLock<Arc<(tokio::sync::Notify, tokio::sync::Notify)>>,
+    /// Test-only pane child pids counted alongside the live sessions' (`supervisor_peer`).
+    #[cfg(test)]
+    pub(crate) test_pane_pids: Mutex<std::collections::HashSet<u32>>,
 }
 
 #[cfg(test)]
@@ -3939,6 +3961,8 @@ impl DaemonServer {
             _catalog_fixture: catalog_fixture,
             #[cfg(test)]
             close_park: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            test_pane_pids: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -4565,7 +4589,14 @@ impl DaemonServer {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
         while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-            if let Some(response) = herdr_response_line(&line) {
+            if let Some(report) = supervisor_report_line(&line) {
+                // A worker's ordinary report for its own supervisor goal: one JSON reply line.
+                let mut reply = crate::hub_runtime::supervisor_worker_report(report).await.to_string();
+                reply.push('\n');
+                if let Err(error) = write_half.write_all(reply.as_bytes()).await {
+                    tracing::debug!(%error, "supervisor report client left before its reply");
+                }
+            } else if let Some(response) = herdr_response_line(&line) {
                 // Answer before ingesting: the herdr client gives up after 500 ms, and admission
                 // may wait on a blocking journal read.
                 if let Err(error) = write_half.write_all(response.as_bytes()).await {
@@ -5868,6 +5899,9 @@ impl DaemonServer {
                         .note_accept(crate::daemon::handover::AuthorityListenerRole::Canonical);
                     let server = Arc::clone(&self);
                     tokio::spawn(async move {
+                        #[cfg(unix)]
+                        server.handle_unix_client(stream).await;
+                        #[cfg(not(unix))]
                         server.handle_client(stream).await;
                     });
                 }
@@ -5900,6 +5934,70 @@ impl DaemonServer {
 
     pub async fn handle_client<S>(self: Arc<Self>, stream: S)
     where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        // A transport without a peer pid: on unix that is an in-process pair; on the loopback
+        // TCP transport the token check below admits the connection. Neither may change the
+        // supervisor (supervisor_peer::refusal).
+        #[cfg(unix)]
+        let origin = super::supervisor_peer::PeerOrigin::Unknown;
+        #[cfg(not(unix))]
+        let origin = super::supervisor_peer::PeerOrigin::TokenAuthenticated;
+        self.handle_client_with_origin(stream, origin).await
+    }
+
+    /// Serves one owner-socket connection whose peer pid the kernel reported, so supervisor
+    /// mutations from a process inside a worker pane are refused (`supervisor_peer`).
+    #[cfg(unix)]
+    pub async fn handle_unix_client(self: Arc<Self>, stream: tokio::net::UnixStream) {
+        use std::os::unix::io::AsRawFd;
+        let pid = super::supervisor_peer::peer_pid(stream.as_raw_fd());
+        // The pid is bound to its process start time now, so a reused pid is noticed later.
+        let origin = tokio::task::spawn_blocking(move || super::supervisor_peer::identify(pid))
+            .await
+            .unwrap_or(super::supervisor_peer::PeerOrigin::Unknown);
+        self.handle_client_with_origin(stream, origin).await
+    }
+
+    /// Why this connection's peer may not change the supervisor, or `None`. The process-table
+    /// reads run on a blocking thread, never on a Tokio worker.
+    async fn supervisor_peer_refusal(
+        &self,
+        origin: super::supervisor_peer::PeerOrigin,
+    ) -> Option<String> {
+        use super::supervisor_peer::PeerOrigin;
+        if matches!(origin, PeerOrigin::TokenAuthenticated | PeerOrigin::Unknown) {
+            return super::supervisor_peer::refusal(
+                origin,
+                &super::supervisor_peer::PaneSet::default(),
+                &super::supervisor_peer::SystemProcs,
+            );
+        }
+        let pane_pids: Vec<u32> = self
+            .terminal_service
+            .list_sessions()
+            .into_iter()
+            .filter_map(|id| self.terminal_service.get_session(&id)?.pid())
+            .collect();
+        #[cfg(test)]
+        let pane_pids: Vec<u32> = pane_pids
+            .into_iter()
+            .chain(self.test_pane_pids.lock().iter().copied())
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let table = super::supervisor_peer::SystemProcs;
+            let panes = super::supervisor_peer::PaneSet::of(pane_pids, &table);
+            super::supervisor_peer::refusal(origin, &panes, &table)
+        })
+        .await
+        .unwrap_or_else(|error| Some(format!("the peer check failed: {error}")))
+    }
+
+    pub async fn handle_client_with_origin<S>(
+        self: Arc<Self>,
+        stream: S,
+        origin: super::supervisor_peer::PeerOrigin,
+    ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         // QaFixtureKind::DaemonListenerStall (QA builds only): accepted, handshake not answered until released.
@@ -5981,6 +6079,30 @@ impl DaemonServer {
                     // While a commit is decided (HandoverStatus::Committing) a new request is not
                     // admitted: it is answered HANDOVER_BUSY, retryable, and never half-served.
                     let mut busy_refusal = None;
+                    // A pane process may read the supervisor but never make the owner's
+                    // decisions. Gated: every unified request (SupervisorRequestV1) and a
+                    // mutating SupervisorDispatch (submit: owner work into a chosen pane);
+                    // its read-only `status` stays allowed. A lane
+                    // pause is checked here and applied only when it targets a supervisor
+                    // goal (hub_runtime::set_lane_paused); the legacy lane-goal requests keep
+                    // their pre-existing semantics for the owner's own shell in a pane, and a
+                    // supervisor goal's lane refuses them SUPERVISOR_OWNED anyway.
+                    let owner_decision = matches!(req.as_ref(), Ok(DaemonRequest::SupervisorRequestV1 { .. }))
+                        || matches!(req.as_ref(), Ok(DaemonRequest::SupervisorDispatch { request }) if request.mutates());
+                    let peer_refusal = if owner_decision {
+                        self.supervisor_peer_refusal(origin).await.map(|message| DaemonResponse::Error {
+                            code: Some(super::supervisor_peer::FORBIDDEN.into()),
+                            message,
+                            details: None,
+                        })
+                    } else {
+                        None
+                    };
+                    let pause_peer_refusal = if matches!(req.as_ref(), Ok(DaemonRequest::SupervisorSetPaused { .. })) {
+                        self.supervisor_peer_refusal(origin).await
+                    } else {
+                        None
+                    };
                     let retirement_guard = if holds_retirement_guard {
                         match self
                             .handover_manager
@@ -6003,6 +6125,7 @@ impl DaemonServer {
 
                     let resp = match req {
                 _ if busy_refusal.is_some() => busy_refusal.take().expect("checked above"),
+                _ if peer_refusal.is_some() => peer_refusal.expect("checked above"),
                 // A committed predecessor never serves a local session it transferred: the
                 // successor is that session's only owner (todo 8).
                 Ok(ref request) if request_session_id(request)
@@ -6243,6 +6366,8 @@ impl DaemonServer {
                     }
                 },
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) if self.serves_paired_here(&session_id) => {
+                    // Raw input: marked before it is written, so no supervisor delivery claims its turn.
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     match self.terminal_service.write_input_operation(&session_id, generation, data) {
                         Ok(op) => match op.await {
                             Ok(()) => if qa_hold_write_ack(&session_id, &mut reader).await { DaemonResponse::WriteOk } else { break },
@@ -6259,6 +6384,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RemoteWrite { session_id, generation, data }) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     match (!self.terminal_service.remote().contains(&session_id))
                         .then(|| self.session_service.router().find_legacy_peer_for_session(&session_id))
                         .flatten()
@@ -6547,6 +6673,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
                             Ok(()) => {
@@ -6568,6 +6695,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     #[cfg(feature = "local-split-qa")]
                     let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "write", &data);
                     if self.session_router.is_local_session(&session_id) {
@@ -6608,6 +6736,7 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::PasteWrite { session_id, paste_id, data, final_chunk }) => {
+                    crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
                     let served_here = self.serves_paired_here(&session_id);
                     if served_here || self.session_router.is_local_session(&session_id) {
                         let result = if served_here {
@@ -7219,8 +7348,13 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
+                    capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -7229,6 +7363,16 @@ impl DaemonServer {
                 Ok(DaemonRequest::SupervisorSnapshot) => DaemonResponse::SupervisorSnapshotOk {
                     snapshot: crate::hub_runtime::supervisor_snapshot(self.remote_state()).await,
                 },
+                Ok(DaemonRequest::SupervisorDispatch { request }) => {
+                    match crate::hub_runtime::supervisor_dispatch(self.remote_state(), request).await {
+                        Ok(result) => DaemonResponse::SupervisorDispatchOk { result },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::AgentControlSettingsGet) => DaemonResponse::AgentControlSettingsOk {
                     settings: self.remote_state.agent_control_settings(),
                 },
@@ -7249,8 +7393,14 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::SupervisorSetPaused { lane_key, paused }) => {
-                    match crate::hub_runtime::set_lane_paused(self.remote_state(), &lane_key, paused, "desktop").await {
+                    let gate = crate::hub_runtime::PauseGate { peer_refusal: pause_peer_refusal.clone() };
+                    match crate::hub_runtime::set_lane_paused_gated(self.remote_state(), &lane_key, paused, "desktop", gate).await {
                         Ok(_) => DaemonResponse::SupervisorSetPausedOk { paused },
+                        Err(crate::hub_runtime::LanePauseError::Supervisor(failure)) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
                         Err(error) => DaemonResponse::Error {
                             message: error.to_string(),
                             code: Some("SUPERVISOR_UNAVAILABLE".into()),
@@ -7265,6 +7415,43 @@ impl DaemonServer {
                             message: error.to_string(),
                             code: Some(error.code().into()),
                             details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorEngine { request }) => {
+                    match crate::hub_runtime::supervisor_engine(self.remote_state(), request).await {
+                        Ok(snapshot) => DaemonResponse::SupervisorEngineOk { snapshot },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorRequestV1 { envelope, cli, mcp }) => {
+                    let caller = if mcp {
+                        crate::hub_runtime::SupervisorCaller::Mcp
+                    } else if cli {
+                        crate::hub_runtime::SupervisorCaller::Cli
+                    } else {
+                        crate::hub_runtime::SupervisorCaller::Desktop
+                    };
+                    match crate::hub_runtime::supervisor_request(self.remote_state(), caller, envelope).await {
+                        Ok(receipt) => DaemonResponse::SupervisorRequestV1Ok { receipt },
+                        Err(failure) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorReadV1 { request }) => {
+                    match crate::hub_runtime::supervisor_read(self.remote_state(), request).await {
+                        Ok(value) => DaemonResponse::SupervisorReadV1Ok { value },
+                        Err(failure) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
                         },
                     }
                 }
@@ -7895,7 +8082,7 @@ impl DaemonServer {
             while let Ok((stream, _)) = listener.accept().await {
                 let s = Arc::clone(&self);
                 tokio::spawn(async move {
-                    s.handle_client(stream).await;
+                    s.handle_unix_client(stream).await;
                 });
             }
         });
@@ -8099,7 +8286,7 @@ impl DaemonServer {
             while let Ok((stream, _)) = listener.accept().await {
                 let s = Arc::clone(&self);
                 tokio::spawn(async move {
-                    s.handle_client(stream).await;
+                    s.handle_unix_client(stream).await;
                 });
             }
         });
@@ -8185,7 +8372,7 @@ impl DaemonServer {
                     Ok((stream, _)) => {
                         let server = Arc::clone(&self);
                         tokio::spawn(async move {
-                            server.handle_client(stream).await;
+                            server.handle_unix_client(stream).await;
                         });
                     }
                     Err(error) => {
@@ -8452,7 +8639,7 @@ impl DaemonServer {
             while let Ok((stream, _)) = listener.accept().await {
                 let s = Arc::clone(&self);
                 tokio::spawn(async move {
-                    s.handle_client(stream).await;
+                    s.handle_unix_client(stream).await;
                 });
             }
         });

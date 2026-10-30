@@ -26,6 +26,9 @@ pub enum GoalError {
     /// Reserved for the evaluators: no model, an open breaker, or a spent daily cap.
     #[error("the supervisor checker is unavailable")]
     JudgeUnavailable,
+    /// The retained mhc supervisor engine failed with a typed, secret-redacted fault.
+    #[error("the supervisor engine failed: {0}")]
+    SupervisorFault(crate::meta::mhc_fault::SupervisorFault),
     #[error("a turn is in flight on lane {0}; its contract cannot be replaced now")]
     TurnInFlight(String),
     #[error("lane {0} has no goal contract")]
@@ -103,6 +106,7 @@ goal_enum!(
         TurnLimit => "turn_limit",
         DeliveryUncertain => "delivery_uncertain",
         JudgeUnavailable => "judge_unavailable",
+        SupervisorDegraded => "supervisor_degraded",
     }
 );
 
@@ -294,6 +298,7 @@ mod tests {
                 "turn_limit",
                 "delivery_uncertain",
                 "judge_unavailable",
+                "supervisor_degraded",
             ]
         );
     }

@@ -107,7 +107,9 @@ fn hub_send_outcome(outcome: crate::agent_control::delivery::SendOutcome) -> fer
 impl AgentControl for DaemonBridge {
     async fn execute(&self, host_id: Option<&str>, op: AgentOp) -> Result<Value, HubError> {
         let request = to_agent_control_op(&op).map_err(HubError::message)?;
-        let host_id = host_id.filter(|host| *host != "local" && !host.is_empty()).map(str::to_owned);
+        let host_id = host_id
+            .filter(|host| *host != ferryx_hub::agent_control::LOCAL_HOST_ID && !host.is_empty())
+            .map(str::to_owned);
         let response = self
             .client
             .send_request(DaemonRequest::AgentControl { request, host_id })
@@ -129,7 +131,8 @@ impl AgentControl for DaemonBridge {
         text: &str,
         request_id: &str,
     ) -> ferryx_hub::goals::SendOutcome {
-        let local = host_id.is_none_or(|host| host.is_empty() || host == "local");
+        let local = host_id
+            .is_none_or(|host| host.is_empty() || host == ferryx_hub::agent_control::LOCAL_HOST_ID);
         // A local send is confirmed only by the in-process observer. Without one (the
         // standalone `ferryx-cli mcp` process) a raw send could never be confirmed, so it is
         // not attempted and never reported as started.
@@ -139,15 +142,15 @@ impl AgentControl for DaemonBridge {
             };
         }
         let Some(gateway) = self.gateway.as_ref().filter(|_| local) else {
-            let op = AgentOp::Send {
+            // A paired host's send counts as started only from that host's own start receipt
+            // naming this request and session; its acceptance alone never does.
+            let send = ferryx_hub::agent_control::WorkerSend {
+                host_id: host_id.map(str::to_owned),
                 session_id: session_id.to_owned(),
                 text: text.to_owned(),
                 request_id: request_id.to_owned(),
             };
-            return match self.execute(host_id, op).await {
-                Ok(_) => ferryx_hub::goals::SendOutcome::Started,
-                Err(error) => ferryx_hub::agent_control::send_error_outcome(&error.to_string()),
-            };
+            return self.deliver(&send).await.send_outcome(&send);
         };
         hub_send_outcome(
             crate::agent_control::delivery::send_confirmed(
@@ -159,6 +162,66 @@ impl AgentControl for DaemonBridge {
             )
             .await,
         )
+    }
+
+    /// One supervisor dispatch with a causal start receipt. On this machine the in-process
+    /// observer attributes the start (`agent_control::delivery::deliver`); a paired host runs
+    /// the same delivery and answers with its own receipt, and a host without
+    /// `agentControlReceiptsV1` is never sent it. Without an observer nothing is sent.
+    async fn deliver(
+        &self,
+        send: &ferryx_hub::agent_control::WorkerSend,
+    ) -> ferryx_hub::agent_control::Delivery {
+        use ferryx_hub::agent_control::Delivery;
+        let deadline = crate::agent_control::delivery::turn_start_deadline();
+        let op = AgentControlOp::Deliver {
+            session_id: send.session_id.clone(),
+            text: send.text.clone(),
+            request_id: send.request_id.clone(),
+            observe_ms: u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+        };
+        let remote = send
+            .host_id
+            .as_deref()
+            .filter(|host| !host.is_empty() && *host != ferryx_hub::agent_control::LOCAL_HOST_ID);
+        let Some(host_id) = remote else {
+            let Some(gateway) = self.gateway.as_ref() else {
+                return Delivery::Unsupported {
+                    code: ferryx_hub::goals::loop_driver::OBSERVER_UNAVAILABLE.into(),
+                };
+            };
+            // The supervisor's owner fence is asked inside the pane's input step, right before
+            // the first byte: a pause, cancel or correction that landed while the delivery
+            // waited for the pane refuses it with a code that proves nothing was typed. It is
+            // one-shot: once the first byte is allowed, the ask before Enter always passes.
+            let fence = crate::agent_control::delivery::supervisor_fence(&send.request_id);
+            return match crate::remote::server::agent_control_service::handle_as(
+                gateway,
+                op,
+                "owner",
+                Some(fence),
+            )
+            .await
+            {
+                Ok(result) => crate::agent_control::delivery::hub_delivery_from_reply(&result),
+                Err(error) => crate::agent_control::delivery::hub_delivery(Err(error)),
+            };
+        };
+        let request = DaemonRequest::AgentControl {
+            request: op,
+            host_id: Some(host_id.to_owned()),
+        };
+        match self.client.send_request(request).await {
+            Ok(DaemonResponse::AgentControlOk { result }) => {
+                crate::agent_control::delivery::hub_delivery_from_reply(&result)
+            }
+            Ok(DaemonResponse::Error { code, .. }) => Delivery::from_error_code(code.as_deref()),
+            // Whether the daemon forwarded the request cannot be known.
+            Ok(_) | Err(_) => Delivery::Uncertain {
+                accepted: false,
+                code: ferryx_hub::agent_control::SEND_FAILED.into(),
+            },
+        }
     }
 }
 
@@ -295,12 +358,38 @@ impl TaskLauncher for DaemonBridge {
         let workspace = ferryx_hub::hub_env::var("FERRYX_HUB_WORKSPACE").map_err(|_| {
             HubError::config("FERRYX_HUB_WORKSPACE is required before the hub can launch a pane")
         })?;
-        let shell = if command.is_empty() { None } else { Some(command.join(" ")) };
+        let shell = if command.is_empty() {
+            None
+        } else {
+            Some(command.join(" "))
+        };
         self.client
-            .spawn_terminal(format!("hub-{}", std::process::id()), workspace, crate::daemon::session_service::SpawnOptions { worktree: None, cwd: Some(cwd.to_owned()), cols: 100, rows: 32, shell })
+            .spawn_terminal(
+                hub_spawn_request_id(),
+                workspace,
+                crate::daemon::session_service::SpawnOptions {
+                    worktree: None,
+                    cwd: Some(cwd.to_owned()),
+                    cols: 100,
+                    rows: 32,
+                    shell,
+                },
+            )
             .await
             .map_err(|error| HubError::message(error.to_string()))
     }
+}
+
+/// A fresh daemon spawn request id for each pane the hub launches. The daemon treats a reused
+/// id as a retry of the same spawn (session_service `handle_spawn`): with the same options it
+/// returns the live pane it already made, with other options it refuses. One id per process
+/// therefore gave a second supervisor goal the first goal's pane, or refused its launch.
+fn hub_spawn_request_id() -> String {
+    format!(
+        "hub-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 /// `ferryx hub migrate [--from-omo <db>] [--dry-run]` copies live gateway state.
@@ -316,6 +405,9 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
     match rest.next().map(String::as_str) {
         Some("stop") => return hub_control(ferryx_hub::control::ControlOp::Stop, false),
         Some("start") => return hub_control(ferryx_hub::control::ControlOp::Start, false),
+        Some("cutover") => return hub_control(ferryx_hub::control::ControlOp::Cutover, false),
+        Some("rollback") => return hub_control(ferryx_hub::control::ControlOp::Rollback, false),
+        Some("intake") => return hub_control(ferryx_hub::control::ControlOp::Intake, false),
         Some("status") => {
             return match rest.next().map(String::as_str) {
                 None => hub_control(ferryx_hub::control::ControlOp::Status, false),
@@ -332,6 +424,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
             eprintln!("       ferryx hub stop | start | status [--check]");
+            eprintln!("       ferryx hub cutover | rollback | intake");
             eprintln!(
                 "       ferryx hub env import [--from-plist <omo plist>] | ferryx hub env keys"
             );
@@ -685,7 +778,13 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         .take(SUPERVISOR_ACTIONS_MAX)
         .collect();
     let Some((hub, running)) = SUPERVISOR_VIEW.get() else {
-        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions });
+        #[cfg(test)]
+        let test_hub = state.supervisor_test_hub.read().clone();
+        #[cfg(test)]
+        if let Some((pool, _)) = test_hub {
+            return json!({ "hub": { "available": true, "running": true, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": unified_snapshot(&pool).await });
+        }
+        return json!({ "hub": { "available": false, "running": false, "error": null }, "lanes": [], "watched": [], "actions": actions, "supervisor": null });
     };
     // A daemon that handed the hub to its successor no longer drives anything.
     let running = running.lock().await.is_some() && !HUB_TASKS.is_retired();
@@ -697,6 +796,7 @@ pub async fn supervisor_snapshot(state: &RemoteGatewayState) -> Value {
         "lanes": lanes.unwrap_or_default(),
         "watched": watched.unwrap_or_default(),
         "actions": actions,
+        "supervisor": unified_snapshot(&hub.pool).await,
     })
 }
 
@@ -787,11 +887,9 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
     if ferryx_hub::goals::turns::origin_for_request_id(request_id.as_deref()).is_none() {
         return;
     }
-    // The goal loop records its own `hub-goal-*` turn once the pane is seen starting it.
-    if request_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with(ferryx_hub::goals::turns::SUPERVISOR_REQUEST_PREFIX))
-    {
+    // The goal loop (`hub-goal-*`) and the supervisor dispatcher (`sv-*`) record their own
+    // turn once the pane is seen starting it.
+    if ferryx_hub::goals::turns::records_own_turn(request_id.as_deref()) {
         return;
     }
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else { return };
@@ -803,6 +901,32 @@ pub(crate) fn note_agent_control_input(op: &AgentControlOp) {
             tracing::warn!(%error, "a lane turn was not recorded");
         }
     });
+}
+
+/// A worker's ordinary report for its own supervisor goal, from the daemon's agent-state
+/// socket (`supervisorReport`): handed to the goal's wake service through the hub's lane
+/// event path ([`ferryx_hub::lanes::dispatch::report_from_worker`]). The reply is one JSON
+/// value: `{ok:true, ...}` or `{ok:false, code, message}`.
+pub async fn supervisor_worker_report((session_id, event_id, body): (String, String, String)) -> Value {
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return json!({"ok": false, "code": "SUPERVISOR_UNAVAILABLE", "message": "the supervisor hub is not open in this daemon"});
+    };
+    match ferryx_hub::lanes::dispatch::report_from_worker(
+        &hub.pool,
+        ferryx_hub::agent_control::LOCAL_HOST_ID,
+        &session_id,
+        &event_id,
+        &body,
+    )
+    .await
+    {
+        Ok(report) => {
+            let mut value = json!(report);
+            value["ok"] = json!(true);
+            value
+        }
+        Err(error) => json!({"ok": false, "code": error.code(), "message": error.to_string()}),
+    }
 }
 
 /// True once this daemon opened the hub, so the Supervisor view has lanes to show.
@@ -872,6 +996,18 @@ pub enum LanePauseError {
     Ended(&'static str),
     #[error("{0}")]
     Storage(String),
+    /// The lane is a supervisor goal's: the shared supervisor service answered (FORBIDDEN from
+    /// a pane, a revision conflict, SUPERVISOR_OWNED for an adopted lane, ...).
+    #[error("{0}")]
+    Supervisor(ferryx_hub::supervisor::request::RequestFailure),
+}
+
+/// What the transport knows about a lane-pause caller. `peer_refusal` is the daemon's pane
+/// peer check; it applies only when the lane is a supervisor goal's, so a legacy lane pause
+/// keeps its pre-existing semantics everywhere.
+#[derive(Debug, Clone, Default)]
+pub struct PauseGate {
+    pub peer_refusal: Option<String>,
 }
 
 /// A person pauses or resumes one lane. `by` names who: `desktop`, or `remote:<deviceId>` for
@@ -882,7 +1018,63 @@ pub async fn set_lane_paused(
     paused: bool,
     by: &str,
 ) -> Result<bool, LanePauseError> {
+    set_lane_paused_gated(state, lane_key, paused, by, PauseGate::default()).await
+}
+
+/// [`set_lane_paused`] behind the transport's peer gate. A supervisor goal's lane is paused or
+/// resumed through the shared supervisor service (revision bump, `paused` run state); every
+/// other lane keeps the legacy lane pause.
+pub async fn set_lane_paused_gated(
+    state: &RemoteGatewayState,
+    lane_key: &str,
+    paused: bool,
+    by: &str,
+    gate: PauseGate,
+) -> Result<bool, LanePauseError> {
     use ferryx_hub::lanes::state::LaneStatus;
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    if let Ok((pool, owner, control)) = supervisor_service(state).await {
+        let owned = ferryx_hub::supervisor::supervisor_owns_lane(&pool, lane_key)
+            .await
+            .map_err(|error| LanePauseError::Storage(error.to_string()))?;
+        if owned {
+            if let Some(message) = gate.peer_refusal {
+                return Err(LanePauseError::Supervisor(RequestFailure::new(
+                    "FORBIDDEN",
+                    message,
+                )));
+            }
+            let owner = owner.ok_or_else(|| {
+                LanePauseError::Supervisor(RequestFailure::new(
+                    "UNAUTHORIZED",
+                    "this installation has no single supervisor owner",
+                ))
+            })?;
+            let adapter = if by.starts_with("remote:") {
+                ferryx_hub::supervisor::ChannelProvider::Phone
+            } else {
+                ferryx_hub::supervisor::ChannelProvider::Desktop
+            };
+            let context = RequestContext {
+                principal: owner,
+                adapter,
+                channel_binding_id: None,
+                control,
+                memory: None,
+            };
+            match request::lane_pause(&pool, &context, lane_key, paused).await {
+                Ok(Some(changed)) => {
+                    crate::remote::server::agent_control_service::publish_supervisor_changed(
+                        state,
+                        json!({ "laneKey": lane_key, "by": by }),
+                    );
+                    return Ok(changed);
+                }
+                Ok(None) => {}
+                Err(failure) => return Err(LanePauseError::Supervisor(failure)),
+            }
+        }
+    }
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
         return Err(LanePauseError::Unavailable);
     };
@@ -915,6 +1107,351 @@ pub async fn set_lane_paused(
 
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorGoal`.
 pub const SUPERVISOR_GOAL_CAPABILITY: &str = "supervisorGoalV1";
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorEngine`.
+pub const SUPERVISOR_ENGINE_CAPABILITY: &str = "supervisorEngineV1";
+
+/// Why a supervisor engine action was refused: the engine's typed fault (`MHC_*`, including
+/// `MHC_NOT_RUNNING` when this daemon owns no engine) or an unavailable judge.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorEngineError {
+    #[error("{0}")]
+    Fault(ferryx_hub::meta::mhc_fault::SupervisorFault),
+    /// The hub database is not open yet, so an assessment could not be recorded.
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    #[error("{0}")]
+    Judge(String),
+}
+
+impl SupervisorEngineError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Fault(fault) => fault.code(),
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::Judge(_) => "JUDGE_UNAVAILABLE",
+        }
+    }
+}
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorRequestV1`.
+pub const SUPERVISOR_REQUEST_CAPABILITY: &str = "supervisorRequestV1";
+
+/// Which adapter a supervisor request reached the shared service through, recorded as the
+/// request's source adapter. The principal is always the installation owner, derived by the
+/// daemon: `Desktop` is the desktop app, `Cli` the owner's `ferryx-cli` and `Mcp` the
+/// `ferryx-cli mcp` server forwarding for an MCP client (all over the owner socket, behind
+/// its pane peer check); `Remote` a paired device the gateway authorized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorCaller {
+    Desktop,
+    Cli,
+    Mcp,
+    Remote { device_id: String },
+}
+
+impl SupervisorCaller {
+    fn adapter(&self) -> ferryx_hub::supervisor::ChannelProvider {
+        use ferryx_hub::supervisor::ChannelProvider;
+        match self {
+            Self::Desktop => ChannelProvider::Desktop,
+            Self::Cli => ChannelProvider::Cli,
+            Self::Mcp => ChannelProvider::Mcp,
+            Self::Remote { .. } => ChannelProvider::Phone,
+        }
+    }
+}
+
+impl From<ferryx_hub::goals::GoalError> for SupervisorEngineError {
+    fn from(error: ferryx_hub::goals::GoalError) -> Self {
+        match error {
+            ferryx_hub::goals::GoalError::SupervisorFault(fault) => Self::Fault(fault),
+            other => Self::Judge(other.to_string()),
+        }
+    }
+}
+
+/// The engine side of [`supervisor_engine`]: the installed engine's snapshot, and for
+/// `Assess` one structured judgment through the supervisor judge, which records its
+/// `judge_calls` row in `pool` (an assessment without the hub pool is refused, never left
+/// unrecorded). Only the installed mhc engine answers; with none installed the action is
+/// `MHC_NOT_RUNNING` and no other model is asked. Nothing is written to goals or dispatches
+/// and nothing is typed into a pane.
+async fn engine_view(
+    installed: Option<ferryx_hub::meta::mhc_supervisor::MhcSupervisor>,
+    pool: Option<ferryx_hub::goals::SqlitePool>,
+    control: Option<Arc<dyn AgentControl>>,
+    action: crate::daemon::protocol::SupervisorEngineAction,
+) -> Result<Value, SupervisorEngineError> {
+    use crate::daemon::protocol::SupervisorEngineAction as Action;
+    let Some(supervisor) = installed else {
+        return Err(SupervisorEngineError::Fault(
+            ferryx_hub::meta::mhc_fault::SupervisorFault::not_running(
+                "no mhc supervisor engine is installed in this daemon",
+            ),
+        ));
+    };
+    let assessment = match action {
+        Action::Status => None,
+        Action::Assess { prompt } => {
+            let pool = pool.ok_or(SupervisorEngineError::Unavailable)?;
+            let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+                .with_fallback(Arc::new(supervisor.model()))
+                .with_pool(pool);
+            let reply = ferryx_hub::usage::with_cause(
+                ferryx_hub::usage::CallCause::new("owner_probe"),
+                judge.structured(ferryx_hub::judge::Purpose::GapAssess, &prompt),
+            )
+            .await;
+            match reply {
+                Ok(reply) => Some(json!({ "purpose": "gap_assess", "reply": reply })),
+                Err(error) => {
+                    let error = SupervisorEngineError::from(error);
+                    tracing::warn!(code = error.code(), %error, "a supervisor engine assessment failed");
+                    return Err(error);
+                }
+            }
+        }
+        Action::AssessGoal { goal_id } => {
+            let pool = pool.ok_or(SupervisorEngineError::Unavailable)?;
+            let control = control.ok_or(SupervisorEngineError::Unavailable)?;
+            let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+                .with_fallback(Arc::new(supervisor.model()))
+                .with_pool(pool.clone());
+            Some(assess_goal(&pool, &judge, control.as_ref(), &goal_id).await?)
+        }
+    };
+    let mut view = json!({ "engine": supervisor.engine_snapshot().await });
+    if let (Some(assessment), Some(fields)) = (assessment, view.as_object_mut()) {
+        fields.insert("assessment".into(), assessment);
+    }
+    Ok(view)
+}
+
+/// One goal's real gap assessment through `judge`: the prompt the goal loop builds (stable
+/// instruction prefix, then the goal's contract, evidence and recent turns), attributed to the
+/// goal (`owner_assess`). Reads only; the assessment is returned, never applied.
+async fn assess_goal(
+    pool: &ferryx_hub::goals::SqlitePool,
+    judge: &ferryx_hub::judge::Judge,
+    control: &dyn AgentControl,
+    goal_id: &str,
+) -> Result<Value, SupervisorEngineError> {
+    use ferryx_hub::goals::{assess, contract, evidence, prompts, turns};
+    let unknown = || SupervisorEngineError::Judge(format!("NOT_FOUND: goal {goal_id} has no lane contract"));
+    let goal = ferryx_hub::supervisor::goal_of(pool, goal_id)
+        .await
+        .map_err(|error| SupervisorEngineError::Judge(error.to_string()))?
+        .ok_or_else(unknown)?;
+    let contract = contract::contract_of(pool, &goal.lane_key).await?.ok_or_else(unknown)?;
+    let bundle = evidence::collect(pool, control, &goal.lane_key).await?;
+    let recent = turns::turns_of(pool, &goal.lane_key).await?;
+    let prompt = prompts::gap_assess_prompt(&contract, &bundle, &recent);
+    let prefix = ferryx_hub::usage::split_prompt(&prompt).map(|(prefix, _)| prefix.to_owned());
+    let cause = ferryx_hub::usage::CallCause::new("owner_assess").goal(goal_id, Some(goal.revision));
+    let assessment = ferryx_hub::usage::with_cause(cause, assess::assess(judge, &contract, &bundle, &recent)).await?;
+    Ok(json!({
+        "purpose": "gap_assess",
+        "goalId": goal_id,
+        "goalRevision": goal.revision,
+        "laneKey": goal.lane_key,
+        "prefixSha256": prefix.as_deref().map(ferryx_hub::usage::sha256_hex),
+        "promptBytes": prompt.len(),
+        "assessment": assessment,
+    }))
+}
+
+/// Reads the retained mhc supervisor engine or asks it for one structured judgment, and adds
+/// the supervisor's recent pane input (`actions`, as in [`supervisor_snapshot`]) so a caller
+/// can see that nothing was typed. `hubOpen` says whether the hub database is open, which an
+/// assessment needs to record its `judge_calls` row. `supervisorIdentities` are the hub's
+/// supervisor identity rows (read-only; null while the hub is not open or the read failed), so
+/// the identity the engine serves can be compared across engine and daemon restarts.
+pub async fn supervisor_engine(
+    state: &RemoteGatewayState,
+    action: crate::daemon::protocol::SupervisorEngineAction,
+) -> Result<Value, SupervisorEngineError> {
+    let pool = SUPERVISOR_VIEW.get().map(|(hub, _)| hub.pool.clone());
+    let control = SUPERVISOR_VIEW.get().map(|(hub, _)| Arc::clone(&hub.control));
+    let hub_open = pool.is_some();
+    // engine_view refuses first (MHC_NOT_RUNNING) when no engine is installed, so the identity
+    // rows are read only for a view that is returned.
+    let mut view = engine_view(ferryx_hub::meta::mhc_supervisor::installed(), pool.clone(), control, action).await?;
+    let identities = match &pool {
+        Some(pool) => match ferryx_hub::supervisor::identities(pool).await {
+            Ok(rows) => json!(rows),
+            Err(error) => {
+                tracing::warn!(%error, "supervisor engine view could not read the supervisor identities");
+                Value::Null
+            }
+        },
+        None => Value::Null,
+    };
+    let actions = supervisor_snapshot(state).await.get("actions").cloned().unwrap_or_else(|| json!([]));
+    if let Some(fields) = view.as_object_mut() {
+        fields.insert("actions".into(), actions);
+        fields.insert("hubOpen".into(), json!(hub_open));
+        fields.insert("supervisorIdentities".into(), identities);
+    }
+    Ok(view)
+}
+
+/// The hub pool and its owner principal for the shared supervisor service, or
+/// SUPERVISOR_UNAVAILABLE (503) when this daemon has no open hub. The owner is the
+/// installation's one supervisor identity: callers here are the owner's own processes or
+/// devices the gateway already authorized, never a body-supplied actor.
+async fn supervisor_service(
+    state: &RemoteGatewayState,
+) -> Result<
+    (
+        ferryx_hub::goals::SqlitePool,
+        Option<String>,
+        Option<Arc<dyn AgentControl>>,
+    ),
+    ferryx_hub::supervisor::request::RequestFailure,
+> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    #[cfg(test)]
+    let test_hub = state.supervisor_test_hub.read().clone();
+    #[cfg(test)]
+    if let Some((pool, owner)) = test_hub {
+        return Ok((pool, Some(owner), None));
+    }
+    let _ = state;
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return Err(RequestFailure::new(
+            "SUPERVISOR_UNAVAILABLE",
+            "the supervisor hub is not open in this daemon",
+        ));
+    };
+    let owner = ferryx_hub::supervisor::admission::installation_owner(&hub.pool)
+        .await
+        .ok();
+    Ok((hub.pool.clone(), owner, Some(Arc::clone(&hub.control))))
+}
+
+/// Serves one supervisor request envelope through the hub's shared service, the same one MCP
+/// `supervisor.request` uses. A mutation tells the Supervisor views to refetch.
+pub async fn supervisor_request(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+    envelope: Value,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    // A malformed envelope is refused before the hub is even consulted.
+    request::parse_envelope(envelope.clone())?;
+    let (pool, owner, control) = supervisor_service(state).await?;
+    let owner = owner.ok_or_else(|| {
+        RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        )
+    })?;
+    let context = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control,
+        memory: ferryx_hub::meta::mhc_supervisor::installed_memory(),
+    };
+    let answer = request::handle(&pool, &context, envelope).await?;
+    let mut payload =
+        json!({ "supervisorRequest": answer.get("action").cloned().unwrap_or(Value::Null) });
+    if let (Some(fields), Some(goal)) = (payload.as_object_mut(), answer.get("goalId")) {
+        fields.insert("goalId".into(), goal.clone());
+    }
+    if let SupervisorCaller::Remote { device_id } = &caller {
+        if let Some(fields) = payload.as_object_mut() {
+            fields.insert("by".into(), json!(format!("remote:{device_id}")));
+        }
+    }
+    crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    Ok(answer)
+}
+
+/// The owner-message provenance of one project after a cursor.
+pub async fn supervisor_conversation(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+    project_id: &str,
+    after: i64,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    let (pool, owner, _) = supervisor_service(state).await?;
+    let owner = owner.ok_or_else(|| {
+        RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        )
+    })?;
+    let context = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control: None,
+        memory: None,
+    };
+    request::conversation(&pool, &context, project_id, after).await
+}
+
+/// The owner's native memory receipts with their provenance, read from the installed mhc
+/// engine. A closed hub is SUPERVISOR_UNAVAILABLE; a daemon without the engine is
+/// MEMORY_UNAVAILABLE, never an empty success.
+pub async fn supervisor_memory(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::{self, RequestContext, RequestFailure};
+    let (pool, owner, _) = supervisor_service(state).await?;
+    let owner = owner.ok_or_else(|| {
+        RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        )
+    })?;
+    let context = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control: None,
+        memory: ferryx_hub::meta::mhc_supervisor::installed_memory(),
+    };
+    request::memory_receipts(&pool, &context).await
+}
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorReadV1`.
+pub const SUPERVISOR_READ_CAPABILITY: &str = "supervisorReadV1";
+
+/// The desktop's read of the unified supervisor besides the snapshot: the same conversation
+/// page and memory view the remote `GET /api/v1/supervisor/{conversation,memory}` routes serve.
+pub async fn supervisor_read(
+    state: &RemoteGatewayState,
+    request: crate::daemon::protocol::SupervisorReadAction,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use crate::daemon::protocol::SupervisorReadAction;
+    match request {
+        SupervisorReadAction::Conversation { project_id, after } => {
+            supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
+        }
+        SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+    }
+}
+
+/// The unified supervisor's part of the snapshot: identity, engine health and every goal's
+/// run state, wait reason, next trigger and revision. Additive to the legacy lane view.
+async fn unified_snapshot(pool: &ferryx_hub::goals::SqlitePool) -> Value {
+    let mut unified = match ferryx_hub::supervisor::request::snapshot(pool).await {
+        Ok(value) => value,
+        Err(error) => json!({ "identity": null, "goals": [], "error": error.to_json() }),
+    };
+    let health = ferryx_hub::meta::mhc_supervisor::installed()
+        .map(|engine| serde_json::to_value(engine.health()).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+    if let Some(fields) = unified.as_object_mut() {
+        fields.insert("health".into(), health);
+    }
+    unified
+}
 
 /// Why a goal action was refused. Each maps to one wire code the CLI turns into an exit code.
 #[derive(Debug, thiserror::Error)]
@@ -960,7 +1497,9 @@ impl From<ferryx_hub::goals::GoalError> for SupervisorGoalError {
             | GoalError::EvidenceRequired { .. }
             | GoalError::QuoteNotFound
             | GoalError::InvalidDecision(_) => Self::Invalid(message),
-            GoalError::JudgeUnavailable | GoalError::Sql(_) | GoalError::Hub(_) => Self::Storage(message),
+            GoalError::JudgeUnavailable | GoalError::SupervisorFault(_) | GoalError::Sql(_) | GoalError::Hub(_) => {
+                Self::Storage(message)
+            }
         }
     }
 }
@@ -985,13 +1524,167 @@ pub async fn supervisor_goal(
     state: &RemoteGatewayState,
     action: crate::daemon::protocol::SupervisorGoalAction,
 ) -> Result<Value, SupervisorGoalError> {
-    use crate::daemon::protocol::SupervisorGoalAction as Action;
-    use ferryx_hub::goals::{contract, revision, GoalMode, ProposalState};
     let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
         return Err(SupervisorGoalError::Unavailable);
     };
-    let pool = &hub.pool;
-    if let Some(lane_key) = action.lane_key() {
+    let mutates = action.mutates();
+    let (lane_key, changed) = apply_goal_action(&hub.pool, hub.control.as_ref(), action).await?;
+    if mutates {
+        let mut payload = json!({ "laneKey": lane_key });
+        if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), changed) {
+            payload.extend(extra);
+        }
+        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    }
+    let view = ferryx_hub::lanes::supervised::goal_view(&hub.pool, &lane_key)
+        .await
+        .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?;
+    let mut snapshot = supervisor_snapshot(state).await;
+    if let Some(fields) = snapshot.as_object_mut() {
+        fields.insert("goal".into(), json!({ "laneKey": lane_key, "goalContract": view }));
+    }
+    Ok(snapshot)
+}
+
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorDispatch`.
+pub const SUPERVISOR_DISPATCH_CAPABILITY: &str = "supervisorDispatchV1";
+
+/// Why a supervisor dispatch request was refused: the admission's typed code (e.g.
+/// `UNAUTHORIZED`, `SESSION_ALREADY_BOUND`, `REQUEST_CONFLICT`), or an unopened hub.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorDispatchError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    #[error("{message}")]
+    Refused { code: &'static str, message: String },
+}
+
+impl SupervisorDispatchError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::Refused { code, .. } => code,
+        }
+    }
+}
+
+impl From<ferryx_hub::supervisor::admission::AdmissionError> for SupervisorDispatchError {
+    fn from(error: ferryx_hub::supervisor::admission::AdmissionError) -> Self {
+        Self::Refused { code: error.code(), message: error.to_string() }
+    }
+}
+
+impl From<ferryx_hub::supervisor::SupervisorError> for SupervisorDispatchError {
+    fn from(error: ferryx_hub::supervisor::SupervisorError) -> Self {
+        Self::Refused { code: error.code(), message: error.to_string() }
+    }
+}
+
+/// Owner work bound to a chosen pane (`submit`), or one goal's dispatch status (`status`),
+/// on the daemon's own hub. Only the local daemon socket carries this request, so the sender
+/// is any same-uid local process; it is admitted as the installation owner, as MCP
+/// `supervisor.request` is. `status` only reads.
+pub async fn supervisor_dispatch(
+    state: &RemoteGatewayState,
+    action: crate::daemon::protocol::SupervisorDispatchAction,
+) -> Result<Value, SupervisorDispatchError> {
+    let Some((hub, _)) = SUPERVISOR_VIEW.get() else {
+        return Err(SupervisorDispatchError::Unavailable);
+    };
+    let result = apply_dispatch_action(&hub.pool, action).await?;
+    if let Some(goal_id) = result.pointer("/receipt/goal_id") {
+        crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "goalId": goal_id }),
+        );
+    }
+    Ok(result)
+}
+
+/// The store side of [`supervisor_dispatch`].
+async fn apply_dispatch_action(
+    pool: &ferryx_hub::goals::SqlitePool,
+    action: crate::daemon::protocol::SupervisorDispatchAction,
+) -> Result<Value, SupervisorDispatchError> {
+    use crate::daemon::protocol::SupervisorDispatchAction as Action;
+    use ferryx_hub::supervisor::{self as sv, admission};
+    match action {
+        Action::Submit { message_id, body, host_id, session_id, work } => {
+            let actor = admission::ActorContext {
+                principal: admission::installation_owner(pool).await?,
+                source_adapter: sv::ChannelProvider::Cli,
+                source_message_id: message_id,
+                source_body: body,
+                channel_binding_id: None,
+                choices: admission::OwnerChoices { host_id, session_id, ..Default::default() },
+            };
+            let outcome = admission::submit_work(pool, &actor, &work).await?;
+            serde_json::to_value(&outcome).map_err(|error| SupervisorDispatchError::Refused {
+                code: "INTERNAL",
+                message: error.to_string(),
+            })
+        }
+        Action::Status { goal_id } => {
+            let goal = sv::goal_of(pool, &goal_id).await?.ok_or_else(|| SupervisorDispatchError::Refused {
+                code: "NOT_FOUND",
+                message: format!("goal not found: {goal_id}"),
+            })?;
+            let binding = sv::execution_binding_of(pool, &goal_id).await?;
+            let dispatches = sv::dispatches_of(pool, &goal_id).await?;
+            Ok(json!({
+                "goal": {
+                    "goalId": goal.goal_id,
+                    "laneKey": goal.lane_key,
+                    "runState": goal.run_state,
+                    "stateDetail": goal.state_detail,
+                    "revision": goal.revision,
+                    "updatedAt": goal.updated_at,
+                },
+                "binding": binding.map(|binding| json!({
+                    "kind": binding.kind,
+                    "hostId": binding.host_id,
+                    "providerSessionId": binding.provider_session_id,
+                    "runId": binding.run_id,
+                    "generation": binding.generation,
+                })),
+                "dispatches": dispatches.into_iter().map(|dispatch| json!({
+                    "requestId": dispatch.request_id,
+                    "ordinal": dispatch.ordinal,
+                    "generation": dispatch.generation,
+                    "state": dispatch.state,
+                    "runId": dispatch.run_id,
+                    "providerSessionId": dispatch.provider_session_id,
+                    "uncertainCode": dispatch.uncertain_code,
+                    "acceptedAt": dispatch.accepted_at,
+                    "startedAt": dispatch.started_at,
+                    "settledAt": dispatch.settled_at,
+                    "uncertainAt": dispatch.uncertain_at,
+                    "createdAt": dispatch.created_at,
+                })).collect::<Vec<_>>(),
+            }))
+        }
+    }
+}
+
+/// The store side of [`supervisor_goal`]: checks the lane, refuses a change to a lane the
+/// supervisor owns, and applies the action. Returns the lane the action named and what the
+/// action changed.
+async fn apply_goal_action(
+    pool: &ferryx_hub::goals::SqlitePool,
+    control: &dyn AgentControl,
+    action: crate::daemon::protocol::SupervisorGoalAction,
+) -> Result<(String, Value), SupervisorGoalError> {
+    use crate::daemon::protocol::SupervisorGoalAction as Action;
+    use ferryx_hub::goals::{contract, revision, GoalMode, ProposalState};
+    // A revision names its lane only through the store; it is fenced like the lane actions,
+    // so a legacy revision proposed before an adoption is not applied after it.
+    let revision_lane = match &action {
+        Action::AcceptRevision { id } | Action::RejectRevision { id } => {
+            revision::lane_of(pool, *id).await?
+        }
+        _ => None,
+    };
+    if let Some(lane_key) = action.lane_key().or(revision_lane.as_deref()) {
         if ferryx_hub::lanes::state::status_of(pool, lane_key)
             .await
             .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?
@@ -999,8 +1692,16 @@ pub async fn supervisor_goal(
         {
             return Err(SupervisorGoalError::NotFound(format!("lane not found: {lane_key}")));
         }
+        // A supervisor goal's lane changes only through the supervisor (which bumps the goal
+        // revision), like `lane.drive`: the legacy set, mode, approve, discard and revision
+        // paths are refused with SUPERVISOR_OWNED.
+        ferryx_hub::supervisor::refuse_legacy_goal_action(pool, lane_key, action.mutates())
+            .await
+            .map_err(|error| match error {
+                ferryx_hub::supervisor::SupervisorError::Sql(error) => SupervisorGoalError::Storage(error.to_string()),
+                refused => SupervisorGoalError::Conflict(refused.to_string()),
+            })?;
     }
-    let mutates = action.mutates();
     let mut changed = json!({});
     let lane_key: String = match action {
         Action::Show { lane_key } => lane_key,
@@ -1030,7 +1731,7 @@ pub async fn supervisor_goal(
                     "lane {lane_key} has no proposal awaiting approval"
                 )));
             }
-            let outcome = ferryx_hub::goals::r#loop::approve_proposal(pool, hub.control.as_ref(), &lane_key)
+            let outcome = ferryx_hub::goals::r#loop::approve_proposal(pool, control, &lane_key)
                 .await
                 // The proposal moved between the check and the send (a person spoke, a pass ran).
                 .map_err(|error| match error {
@@ -1066,21 +1767,7 @@ pub async fn supervisor_goal(
             lane_key.ok_or_else(|| SupervisorGoalError::Conflict(format!("no revision {id}")))?
         }
     };
-    if mutates {
-        let mut payload = json!({ "laneKey": lane_key });
-        if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), changed) {
-            payload.extend(extra);
-        }
-        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
-    }
-    let view = ferryx_hub::lanes::supervised::goal_view(pool, &lane_key)
-        .await
-        .map_err(|error| SupervisorGoalError::Storage(error.to_string()))?;
-    let mut snapshot = supervisor_snapshot(state).await;
-    if let Some(fields) = snapshot.as_object_mut() {
-        fields.insert("goal".into(), json!({ "laneKey": lane_key, "goalContract": view }));
-    }
-    Ok(snapshot)
+    Ok((lane_key, changed))
 }
 
 /// Handover commit: this daemon keeps serving retained sessions but no longer owns the hub.
@@ -1234,6 +1921,114 @@ struct Generation {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+/// The supervisor's dispatcher for this hub generation. It drains committed ready intents at
+/// start (the startup drain), then on every in-process admission wake and on a bounded rescan
+/// that picks up admissions committed by `ferryx-cli mcp`. Only this daemon transmits: the
+/// MCP process has no observer and only admits. `idle` is the observer loop's ledger of idle
+/// readings, read after each committed start.
+fn spawn_supervisor_dispatcher(
+    launch: &HubLaunch,
+    idle: Arc<ferryx_hub::supervisor::receipts::IdleLedger>,
+) -> tokio::task::JoinHandle<()> {
+    let dispatcher = ferryx_hub::supervisor::dispatcher::Dispatcher::new(
+        launch.hub.pool.clone(),
+        launch.bridge.clone(),
+        launch.bridge.clone(),
+        ferryx_hub::agent_control::LOCAL_HOST_ID,
+    )
+    .with_idle_ledger(idle);
+    tokio::spawn(dispatcher.run(ferryx_hub::supervisor::dispatcher::dispatch_wake()))
+}
+
+/// Settles the supervisor PTY run bound to a local pane from an idle reading of it. Noted in
+/// `idle` first: a run whose start commits after this reading finds it there.
+fn settle_pty_run(
+    pool: &ferryx_hub::goals::SqlitePool,
+    idle: &ferryx_hub::supervisor::receipts::IdleLedger,
+    instance: &str,
+    observation: &crate::agent_control::events::AgentObservation,
+) {
+    idle.note_idle(&observation.session_id, instance, observation.sequence);
+    let pool = pool.clone();
+    let session_id = observation.session_id.clone();
+    let instance = instance.to_owned();
+    let sequence = observation.sequence;
+    tokio::spawn(async move {
+        use ferryx_hub::supervisor::receipts::{record_pty_settle_across_restart, PtySettle};
+        // A run that started under an earlier daemon is ended by an idle reading of this one.
+        match record_pty_settle_across_restart(
+            &pool,
+            ferryx_hub::agent_control::LOCAL_HOST_ID,
+            &session_id,
+            &instance,
+            sequence,
+        )
+        .await
+        {
+            Ok(PtySettle::Settled(dispatch))
+                if !dispatch
+                    .run_id
+                    .as_deref()
+                    .is_some_and(|run| run.contains(&format!(":{instance}:"))) =>
+            {
+                tracing::info!(request_id = %dispatch.request_id, "a supervisor run started under an earlier daemon was settled by this daemon's idle reading");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, session_id = %session_id, "a supervisor run settle was not recorded");
+            }
+        }
+    });
+}
+
+/// The supervisor's wake scheduler for this hub generation: dependency, settle, deadline,
+/// owner and report wakes, decided by durable state checks before any judgment, so no model
+/// runs while a goal waits. It recovers pending wakes and the state-event cursor at start.
+fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let pool = launch.hub.pool.clone();
+    // Settled runs are verified from their durable receipts: the deterministic state moves,
+    // then the contract's assessment and blind convergence check on fresh evidence.
+    // The pool is given explicitly: alerts (and with them the judge's default pool) are
+    // installed later in this generation, and without a pool the configured supervisor
+    // budget is not enforced and no judge_calls rows are written.
+    let judge = std::sync::Arc::new(
+        ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+            .with_pool(pool.clone()),
+    );
+    let driver = ferryx_hub::supervisor::completion::CompletionDriver::new(
+        pool.clone(),
+        judge,
+        launch.bridge.clone(),
+        ferryx_hub::agent_control::LOCAL_HOST_ID,
+    );
+    let handler = std::sync::Arc::new(ferryx_hub::supervisor::completion::CompletionHandler::new(
+        pool.clone(),
+        driver,
+    ));
+    let scheduler = ferryx_hub::supervisor::wakes::WakeScheduler::new(pool, handler);
+    tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
+}
+
+/// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
+/// desktop and phone Supervisor views as `supervisor_changed {goalId}`, so a goal the
+/// dispatcher, a worker receipt or the wake scheduler moved is refetched without an owner
+/// action. A lagged forwarder sends one `{lagged: true}` change: the views refetch everything.
+fn spawn_supervisor_change_forwarder(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    use tokio::sync::broadcast::error::RecvError;
+    let state = Arc::clone(launch.server.remote_state());
+    let mut changes = ferryx_hub::supervisor::changes::subscribe();
+    tokio::spawn(async move {
+        loop {
+            let payload = match changes.recv().await {
+                Ok(goal_id) => json!({ "goalId": goal_id }),
+                Err(RecvError::Lagged(_)) => json!({ "lagged": true }),
+                Err(RecvError::Closed) => break,
+            };
+            crate::remote::server::agent_control_service::publish_supervisor_changed(&state, payload);
+        }
+    })
+}
+
 async fn spawn_generation(launch: &HubLaunch) -> Generation {
     let mut tasks = Vec::new();
     #[cfg(feature = "hub-discord")]
@@ -1250,6 +2045,10 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         ));
     }
     let mut events = launch.server.remote_state().agent_events.subscribe();
+    let watch_bus = Arc::clone(&launch.server.remote_state().agent_events);
+    let instance = watch_bus.instance().to_owned();
+    let idle = Arc::new(ferryx_hub::supervisor::receipts::IdleLedger::default());
+    let watch_idle = Arc::clone(&idle);
     let watch_hub = Arc::clone(&launch.hub);
     let watch_bridge = launch.bridge.clone();
     let watch_server = Arc::clone(&launch.server);
@@ -1261,10 +2060,23 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         let mut agents = std::collections::HashMap::new();
         let mut runs = std::collections::HashMap::new();
         let mut worked = std::collections::HashSet::new();
+        // Subscribed above, before this sweep: an idle reading that ended a supervisor run
+        // while no hub generation was listening (a hub stop and start under a running daemon)
+        // still settles it. A reading published after the subscription is also seen by the
+        // loop; a second settle of the same run is a no-op.
+        for latest in watch_bus.snapshot() {
+            if matches!(latest.state, AgentControlState::Idle) && latest.prompt_id.is_none() {
+                settle_pty_run(&watch_hub.pool, &watch_idle, &instance, &latest);
+            }
+        }
         loop {
             match events.recv().await {
                 Ok(observation) => {
                     let idle = matches!(observation.state, AgentControlState::Idle);
+                    if idle && observation.prompt_id.is_none() {
+                        // The idle reading after a supervisor run's start reading settles it.
+                        settle_pty_run(&watch_hub.pool, &watch_idle, &instance, &observation);
+                    }
                     if matches!(observation.state, AgentControlState::Working | AgentControlState::Blocked) {
                         worked.insert(observation.session_id.clone());
                     } else if idle && observation.prompt_id.is_none() && worked.remove(&observation.session_id) {
@@ -1280,11 +2092,23 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                         tracing::debug!(%error, "hub observer event was not applied");
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Readings were dropped, maybe an idle one that ends a supervisor run:
+                    // settle against the latest reading of every pane instead.
+                    for latest in watch_bus.snapshot() {
+                        if matches!(latest.state, AgentControlState::Idle) && latest.prompt_id.is_none() {
+                            settle_pty_run(&watch_hub.pool, &watch_idle, &instance, &latest);
+                        }
+                    }
+                    continue;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     }));
+    tasks.push(spawn_supervisor_dispatcher(launch, idle));
+    tasks.push(spawn_supervisor_change_forwarder(launch));
+    tasks.push(spawn_supervisor_wakes(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
@@ -1332,6 +2156,35 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 )));
             }
         }
+    }
+    // The retained mhc supervisor engine: one owned `mhc --mode rpc --multi-session` stdio host
+    // in `<data>/mhc-supervisor` with role-scoped sessions. Off unless FERRYX_HUB_MHC_SUPERVISOR
+    // in the hub env file turns it on. Hub generations share the one process-wide instance;
+    // each generation supervises it (launch, owned-exit watch, 5s..300s relaunch backoff).
+    // Aborting the generation's tasks (hub stop, handover retirement) closes the engine's stdin
+    // and kills it after a short grace; the next generation's supervise call re-enables it.
+    let mhc_supervisor = ferryx_hub::meta::mhc_profile::MhcProfileConfig::from_env().map(|config| {
+        ferryx_hub::meta::mhc_supervisor::install_with(|| {
+            let data_dir = ferryx_hub::meta::supervisor::state_dir_from_home()
+                .unwrap_or_else(|| std::path::PathBuf::from(".ferryx/hub"));
+            ferryx_hub::meta::mhc_supervisor::MhcSupervisor::new(
+                ferryx_hub::meta::mhc_profile::MhcProfile::new(&data_dir, config),
+                std::sync::Arc::new(ferryx_hub::meta::mhc_supervisor::ProcessLauncher::new()),
+            )
+        })
+    });
+    if let Some(runtime) = &mhc_supervisor {
+        tracing::info!(cwd = %runtime.profile().cwd().display(), "mhc supervisor engine is configured");
+        // Every engine call (decision, convergence, conversation, ingest) is recorded with its
+        // cause and usage in this hub's `supervisor_model_calls`.
+        runtime.set_usage_sink(launch.hub.pool.clone()).await;
+        // Slack owner conversations call the typed work tools; admission acts only for the
+        // authenticated Slack turn in flight for the calling scope.
+        #[cfg(feature = "hub-slack")]
+        runtime.set_work_handler(std::sync::Arc::new(
+            ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
+        ));
+        tasks.push(tokio::spawn(runtime.clone().supervise()));
     }
     #[cfg(unix)]
     {
@@ -1480,9 +2333,13 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                 tracing::warn!(%error, %lead, "kibitzer lead was not registered");
             }
             let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-            let model = ferryx_hub::meta::backend::RpcModel::new(binary);
+            // With the mhc supervisor configured it is the only model; there is no fallback.
+            let model: std::sync::Arc<dyn ferryx_hub::lanes::kibitzer::ModelTurn> = match mhc_supervisor {
+                Some(runtime) => std::sync::Arc::new(runtime.model()),
+                None => std::sync::Arc::new(ferryx_hub::meta::backend::RpcModel::new(binary)),
+            };
             loop {
-                match ferryx_hub::lanes::kibitzer::evaluate(&pool, &lead, &judge, &model).await {
+                match ferryx_hub::lanes::kibitzer::evaluate(&pool, &lead, &judge, model.as_ref()).await {
                     Ok(true) => tracing::info!(%lead, "kibitzer woke the owner lead"),
                     Ok(false) => {}
                     Err(error) => tracing::warn!(%error, %lead, "kibitzer evaluation failed"),
@@ -1652,8 +2509,13 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
                             if let Some(generation) = running.lock().await.take() {
-                                for task in generation.tasks {
+                                for task in &generation.tasks {
                                     task.abort();
+                                }
+                                // Wait for the aborted tasks to end, so a later `hub start`
+                                // reconciles only after the predecessor dispatcher stopped.
+                                for task in generation.tasks {
+                                    let _ = task.await;
                                 }
                             }
                             match persisted {
@@ -1674,6 +2536,40 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             }
                             Err(_) => "{\"status\":\"failed\",\"error\":\"hub start was not persisted\"}\n",
                         },
+                        Ok(op @ (ferryx_hub::control::ControlOp::Cutover
+                        | ferryx_hub::control::ControlOp::Rollback
+                        | ferryx_hub::control::ControlOp::Intake)) => {
+                            use ferryx_hub::control::ControlOp;
+                            use ferryx_hub::supervisor::cutover;
+                            let pool = &launch.hub.pool;
+                            // The installed engine's health is the only capability evidence;
+                            // without an engine a cutover is refused (MHC_NOT_RUNNING).
+                            let health = ferryx_hub::meta::mhc_supervisor::installed().map(|engine| engine.health());
+                            let (name, result) = match op {
+                                ControlOp::Cutover => ("cutover", cutover::cutover(pool, health.as_ref()).await),
+                                ControlOp::Rollback => ("rollback", cutover::rollback(pool).await),
+                                _ => (
+                                    "intake",
+                                    cutover::installation_intake(pool)
+                                        .await
+                                        .map(|intake| cutover::Transition { intake, steps: Vec::new() })
+                                        .map_err(ferryx_hub::supervisor::SupervisorError::from),
+                                ),
+                            };
+                            let mut reply = ferryx_hub::control::intake_reply(name, result);
+                            if let (Some(fields), Some(health)) = (reply.as_object_mut(), health) {
+                                fields.insert("engine".into(), serde_json::to_value(health).unwrap_or(Value::Null));
+                            }
+                            if name != "intake" && reply["status"] == "ok" {
+                                crate::remote::server::agent_control_service::publish_supervisor_changed(
+                                    launch.server.remote_state(),
+                                    json!({ "intake": reply["intake"].clone() }),
+                                );
+                            }
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
                         Ok(ferryx_hub::control::ControlOp::Status) => {
                             let running_now = running.lock().await.is_some();
                             let report = ferryx_hub::control::status_report(
@@ -1691,7 +2587,7 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             let _ = stream.write_all(reply.as_bytes()).await;
                             return;
                         }
-                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, status, or approve_rerun\"}\n",
+                        Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, status, approve_rerun, cutover, rollback, or intake\"}\n",
                     };
                     let mut stream = reader.into_inner();
                     let _ = stream.write_all(reply.as_bytes()).await;
@@ -1827,6 +2723,61 @@ async fn on_agent_event(
     Ok(())
 }
 
+/// Forwards every writing `supervisor.request` (submit, adopt, a message with work, goal
+/// control, memory) from `ferryx-cli mcp` to the daemon's `SupervisorRequestV1`, where the
+/// peer check sees this MCP process: run from inside a Ferryx pane it is refused `FORBIDDEN`,
+/// exactly like the CLI. Bounded by the CLI's goal timeout; a daemon that does not answer in
+/// time is `SUPERVISOR_UNAVAILABLE` (the request may still commit; a replay with the same
+/// `requestId` returns its result).
+struct DaemonOwnerRoute;
+
+#[async_trait]
+impl ferryx_hub::mcp::OwnerRoute for DaemonOwnerRoute {
+    async fn forward(
+        &self,
+        envelope: Value,
+    ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+        use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+        use ferryx_hub::supervisor::request::RequestFailure;
+        let request = DaemonRequest::SupervisorRequestV1 {
+            envelope,
+            cli: true,
+            mcp: true,
+        };
+        let exchange = crate::cli::supervisor_goal::exchange_once(
+            SUPERVISOR_REQUEST_CAPABILITY,
+            request,
+            true,
+        );
+        let Ok(answer) =
+            tokio::time::timeout(crate::cli::supervisor_goal::GOAL_CLI_TIMEOUT, exchange).await
+        else {
+            return Err(RequestFailure::new(
+                "SUPERVISOR_UNAVAILABLE",
+                "the daemon did not answer the supervisor request in time",
+            ));
+        };
+        match answer {
+            Ok(DaemonResponse::SupervisorRequestV1Ok { receipt }) => Ok(receipt),
+            Ok(DaemonResponse::Error { code, message, .. }) => Err(RequestFailure::new(
+                code.as_deref().unwrap_or("INTERNAL"),
+                message,
+            )),
+            Ok(other) => Err(RequestFailure::new(
+                "INTERNAL",
+                format!("unexpected daemon response: {other:?}"),
+            )),
+            Err((value, _)) => Err(RequestFailure::new(
+                value["code"].as_str().unwrap_or("SUPERVISOR_UNAVAILABLE"),
+                value["message"]
+                    .as_str()
+                    .unwrap_or("the daemon could not be reached")
+                    .to_owned(),
+            )),
+        }
+    }
+}
+
 /// `ferryx-cli mcp` — a stdio MCP server over this machine's daemon.
 pub fn run_mcp() -> i32 {
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -1858,6 +2809,7 @@ pub fn run_mcp() -> i32 {
             pool,
             meta_session_id: config.meta_session_id.unwrap_or_else(|| "meta".into()),
             tracker_token: config.tracker_owner_token.unwrap_or_default(),
+            owner_route: Some(Arc::new(DaemonOwnerRoute)),
         });
         if let Err(error) = ferryx_hub::mcp::serve(context).await {
             eprintln!("ferryx mcp: {error}");
@@ -1872,8 +2824,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_hub_pane_launch_gets_its_own_spawn_request_id() {
+        let first = hub_spawn_request_id();
+        let second = hub_spawn_request_id();
+        assert_ne!(
+            first, second,
+            "a reused id replays the earlier spawn's pane"
+        );
+        let prefix = format!("hub-{}-", std::process::id());
+        assert!(
+            first.starts_with(&prefix) && second.starts_with(&prefix),
+            "{first} {second}"
+        );
+    }
+
+    #[test]
     fn a_persons_relayed_words_are_not_supervisor_input() {
-        assert!(relayed_from_a_person(Some("slack-approval:local:pane-1:rev-42:prompt-9")));
+        assert!(relayed_from_a_person(Some(
+            "slack-approval:local:pane-1:rev-42:prompt-9"
+        )));
         assert!(relayed_from_a_person(Some("chat-lane:ledger-1700")));
         assert!(relayed_from_a_person(Some("lane-ledger-owner-msg7")));
         assert!(!relayed_from_a_person(Some("hub-auto-prompt-3")));
@@ -1901,6 +2870,144 @@ mod tests {
         let decided = revision_refusal(GoalError::InvalidContract("revision 3 is already accepted".into()));
         assert_eq!(decided.code(), "REQUEST_CONFLICT");
         assert_eq!(SupervisorGoalError::Unavailable.code(), "SUPERVISOR_UNAVAILABLE");
+    }
+
+    /// The desktop goal actions reach the SUPERVISOR_OWNED fence: on a supervisor goal's lane a
+    /// change is refused before anything is written, and show still answers.
+    #[tokio::test]
+    async fn a_desktop_goal_action_on_a_supervisor_lane_is_refused() {
+        use crate::daemon::protocol::SupervisorGoalAction as Action;
+        use ferryx_hub::goals::contract::{contract_of, RequirementSpec};
+        use ferryx_hub::goals::GoalMode;
+        use ferryx_hub::supervisor::{self as sv, AdmitRequest, ChannelProvider, ExecutionKind, ExecutionTarget};
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let owner = "slack:T1:U-owner";
+        let (identity, project, _) =
+            sv::provision_owner(&pool, owner, "ferryx", "github.com/example/ferryx", "host-a", "/repo/.git")
+                .await
+                .unwrap();
+        let request = AdmitRequest {
+            supervisor_id: identity.supervisor_id,
+            owner_principal: owner.into(),
+            source_adapter: ChannelProvider::Desktop,
+            source_message_id: "d-1".into(),
+            body: "Create result.txt containing READY.".into(),
+            project_id: project.project_id,
+            channel_binding_id: None,
+            target: ExecutionTarget { kind: ExecutionKind::Pty, host_id: "host-a".into() },
+            title: "Write result.txt".into(),
+            cwd: "/repo".into(),
+            instruction: "Create result.txt containing READY.".into(),
+            requirements: vec![RequirementSpec {
+                id: "r1".into(),
+                text: "result.txt contains READY".into(),
+                verifier: "test -f result.txt".into(),
+            }],
+            mode: GoalMode::Full,
+            turn_limit: 5,
+            operation_grant: sv::admission::OperationClass::BASELINE.to_vec(),
+        };
+        let lane = sv::admit_request(&pool, &request).await.unwrap().receipt.lane_key;
+        let control = ferryx_hub::agent_control::RecordingControl::default();
+
+        let refused = apply_goal_action(&pool, &control, Action::Mode { lane_key: lane.clone(), mode: GoalMode::Off })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&refused, SupervisorGoalError::Conflict(message) if message.starts_with("SUPERVISOR_OWNED")),
+            "{refused}"
+        );
+        assert_eq!(contract_of(&pool, &lane).await.unwrap().unwrap().mode, GoalMode::Full);
+        let (shown, _) = apply_goal_action(&pool, &control, Action::Show { lane_key: lane.clone() })
+            .await
+            .unwrap();
+        assert_eq!(shown, lane);
+        // A revision reaches the fence through its lane: proposed with the owner's words (the
+        // lane title), it is neither accepted nor rejected through the legacy path.
+        use ferryx_hub::goals::revision::{self, RevisionChange};
+        let proposed = revision::propose(
+            &pool,
+            &lane,
+            &RevisionChange::Waive { req_id: "r1".into() },
+            "Write result.txt",
+        )
+        .await
+        .unwrap();
+        let base = contract_of(&pool, &lane).await.unwrap().unwrap().revision;
+        for action in [
+            Action::AcceptRevision { id: proposed.id },
+            Action::RejectRevision { id: proposed.id },
+        ] {
+            let refused = apply_goal_action(&pool, &control, action)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&refused, SupervisorGoalError::Conflict(message) if message.starts_with("SUPERVISOR_OWNED")),
+                "{refused}"
+            );
+        }
+        assert_eq!(revision::list_pending(&pool, &lane).await.unwrap().len(), 1);
+        assert_eq!(
+            contract_of(&pool, &lane).await.unwrap().unwrap().revision,
+            base
+        );
+        assert!(control.ops().is_empty());
+    }
+
+    /// `supervisor submit` binds the chosen pane at admission and `dispatch status` reads it
+    /// back with its dispatch; a second goal on the same pane is refused SESSION_ALREADY_BOUND,
+    /// and reading the status writes nothing.
+    #[tokio::test]
+    async fn dispatch_submit_binds_the_pane_and_status_reads_without_writing() {
+        use crate::daemon::protocol::SupervisorDispatchAction as Action;
+        use ferryx_hub::supervisor as sv;
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        sv::provision_owner(&pool, "qa-owner", "qa", "qa:qa", "paired-1", "/work/qa/.git").await.unwrap();
+        let work: sv::admission::SubmitWork = serde_json::from_value(json!({
+            "title": "Write result.txt",
+            "instruction": "Create result.txt containing READY.",
+            "requirements": [{"id": "r1", "text": "result.txt contains READY", "verifier": "test -f result.txt"}],
+            "operations": ["edit"],
+        }))
+        .unwrap();
+        let submit = |message_id: &str| Action::Submit {
+            message_id: message_id.into(),
+            body: "Create result.txt containing READY.".into(),
+            host_id: Some("paired-1".into()),
+            session_id: Some("pane-1".into()),
+            work: Box::new(work.clone()),
+        };
+        let admitted = apply_dispatch_action(&pool, submit("m-1")).await.unwrap();
+        assert_eq!(admitted["outcome"], "admitted", "{admitted}");
+        let goal_id = admitted["receipt"]["goal_id"].as_str().unwrap().to_owned();
+        let refused = apply_dispatch_action(&pool, submit("m-2")).await.unwrap_err();
+        assert_eq!(refused.code(), sv::SESSION_ALREADY_BOUND, "{refused}");
+
+        // Every row the status reads, in full (revision and timestamps included).
+        let fingerprint = || async {
+            (
+                sv::goal_of(&pool, &goal_id).await.unwrap(),
+                sv::execution_binding_of(&pool, &goal_id).await.unwrap(),
+                sv::dispatches_of(&pool, &goal_id).await.unwrap(),
+            )
+        };
+        let before = fingerprint().await;
+        let status = apply_dispatch_action(&pool, Action::Status { goal_id: goal_id.clone() }).await.unwrap();
+        assert_eq!(fingerprint().await, before, "a status read writes nothing");
+        assert_eq!(status["goal"]["runState"], "ready", "{status}");
+        assert_eq!(status["goal"]["revision"], 1);
+        assert_eq!(status["binding"]["hostId"], "paired-1");
+        assert_eq!(status["binding"]["providerSessionId"], "pane-1");
+        let dispatches = status["dispatches"].as_array().unwrap();
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0]["requestId"], admitted["receipt"]["dispatch_request_id"]);
+        assert_eq!(dispatches[0]["state"], "ready");
+        assert!(dispatches[0]["acceptedAt"].is_null() && dispatches[0]["uncertainCode"].is_null());
+
+        let missing = apply_dispatch_action(&pool, Action::Status { goal_id: "00000000-0000-4000-8000-000000000000".into() })
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code(), "NOT_FOUND");
     }
 
     #[test]
@@ -2023,5 +3130,21 @@ mod tests {
             }
             other => panic!("expected an answer, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn an_engine_action_without_an_installed_engine_is_mhc_not_running() {
+        use crate::daemon::protocol::SupervisorEngineAction as Action;
+        assert_eq!(SUPERVISOR_ENGINE_CAPABILITY, "supervisorEngineV1");
+        for action in [
+            Action::Status,
+            Action::Assess { prompt: "grade this".into() },
+            Action::AssessGoal { goal_id: "g-1".into() },
+        ] {
+            let refused = engine_view(None, None, None, action).await.unwrap_err();
+            assert_eq!(refused.code(), "MHC_NOT_RUNNING");
+            assert!(refused.to_string().starts_with("MHC_NOT_RUNNING:"), "{refused}");
+        }
+        assert_eq!(SupervisorEngineError::Unavailable.code(), "SUPERVISOR_UNAVAILABLE");
     }
 }

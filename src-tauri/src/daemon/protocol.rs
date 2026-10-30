@@ -562,6 +562,59 @@ impl SupervisorGoalAction {
     }
 }
 
+/// Submit owner work bound to an existing pane, or read one goal's dispatch status. Gated by
+/// `supervisorDispatchV1`; carried only on the local daemon socket, so any same-uid local
+/// process can send it. `status` writes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorDispatchAction {
+    /// Admit `work` on behalf of the installation owner (adapter `cli`, dedupe id `message_id`). With
+    /// `session_id` the goal is bound at admission to that existing pane on `host_id`.
+    Submit {
+        message_id: String,
+        body: String,
+        host_id: Option<String>,
+        session_id: Option<String>,
+        work: Box<ferryx_hub::supervisor::admission::SubmitWork>,
+    },
+    /// The goal's state, binding and every dispatch with its receipts.
+    Status { goal_id: String },
+}
+
+impl SupervisorDispatchAction {
+    pub fn mutates(&self) -> bool {
+        matches!(self, Self::Submit { .. })
+    }
+}
+
+/// Read the retained mhc supervisor engine, or ask it for one structured judgment. Gated by
+/// `supervisorEngineV1`. Neither action writes goals or dispatches, nor types into a pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorEngineAction {
+    /// Engine health, persisted role bindings and the supervisor's recent pane input.
+    Status,
+    /// One structured judgment through the supervisor judge (a `judge_calls` row).
+    Assess { prompt: String },
+    /// The goal's real gap assessment (its contract, evidence and recent turns), attributed to
+    /// the goal and recorded like every engine call. Writes no goal, dispatch or contract.
+    AssessGoal { goal_id: String },
+}
+
+/// A read of the unified supervisor the desktop view needs besides the snapshot: one project's
+/// owner-message conversation after a cursor, or the memory receipts. Gated by
+/// `supervisorReadV1`. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "view", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SupervisorReadAction {
+    Conversation {
+        project_id: String,
+        #[serde(default)]
+        after: Option<i64>,
+    },
+    Memory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonRequest {
@@ -808,6 +861,11 @@ pub enum DaemonRequest {
     },
     /// What the supervisor drives and watches, and the input it recently typed.
     SupervisorSnapshot,
+    /// Submit owner work to a chosen pane, or read a goal's dispatches. Gated by
+    /// `supervisorDispatchV1`.
+    SupervisorDispatch {
+        request: SupervisorDispatchAction,
+    },
     /// A person pauses or resumes one supervised lane; the supervisor stops typing into it.
     #[serde(rename_all = "camelCase")]
     SupervisorSetPaused {
@@ -817,6 +875,31 @@ pub enum DaemonRequest {
     /// Show or steer one lane's goal contract. Gated by `supervisorGoalV1`.
     SupervisorGoal {
         request: SupervisorGoalAction,
+    },
+    /// Read or consult the retained mhc supervisor engine. Gated by `supervisorEngineV1`.
+    SupervisorEngine {
+        request: SupervisorEngineAction,
+    },
+    /// One unified supervisor request envelope `{requestId, projectId?, goalId?,
+    /// expectedRevision?, action, payload}`, served by the hub's shared request service.
+    /// Gated by `supervisorRequestV1`. The actor is server-derived; `cli` only says whether
+    /// the owner's CLI or desktop sent it, and `mcp` that the CLI forwarded it for
+    /// `ferryx-cli mcp` (recorded as the `mcp` adapter). `mcp` is omitted when false, so the
+    /// wire is unchanged for every other sender; a daemon that predates it ignores it and
+    /// records `cli`.
+    #[serde(rename = "supervisorRequestV1", rename_all = "camelCase")]
+    SupervisorRequestV1 {
+        envelope: serde_json::Value,
+        #[serde(default)]
+        cli: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mcp: bool,
+    },
+    /// A read-only unified supervisor view (conversation page or memory receipts), served by
+    /// the same hub service as the remote `GET /api/v1/supervisor/*` routes.
+    #[serde(rename = "supervisorReadV1", rename_all = "camelCase")]
+    SupervisorReadV1 {
+        request: SupervisorReadAction,
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
@@ -1290,6 +1373,11 @@ pub enum DaemonResponse {
     AgentIntegrationOk {
         enabled: bool,
     },
+    /// The admission outcome (`submit`) or the dispatch status (`status`).
+    #[serde(rename_all = "camelCase")]
+    SupervisorDispatchOk {
+        result: serde_json::Value,
+    },
     #[serde(rename_all = "camelCase")]
     SupervisorSnapshotOk {
         snapshot: serde_json::Value,
@@ -1302,6 +1390,21 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     SupervisorGoalOk {
         snapshot: serde_json::Value,
+    },
+    /// The engine snapshot after a `SupervisorEngine` action.
+    #[serde(rename_all = "camelCase")]
+    SupervisorEngineOk {
+        snapshot: serde_json::Value,
+    },
+    /// The shared service's receipt for a `SupervisorRequestV1`.
+    #[serde(rename = "supervisorRequestV1Ok", rename_all = "camelCase")]
+    SupervisorRequestV1Ok {
+        receipt: serde_json::Value,
+    },
+    /// The view a `SupervisorReadV1` asked for.
+    #[serde(rename = "supervisorReadV1Ok", rename_all = "camelCase")]
+    SupervisorReadV1Ok {
+        value: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
     AttachOk {
@@ -1949,6 +2052,171 @@ mod tests {
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorGoalOk""#), "{text}");
         assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorGoalOk { .. }));
+    }
+
+    #[test]
+    fn supervisor_dispatch_actions_round_trip_on_the_daemon_wire() {
+        let status = DaemonRequest::SupervisorDispatch {
+            request: SupervisorDispatchAction::Status { goal_id: "g-1".into() },
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({"type":"supervisorDispatch","request":{"action":"status","goalId":"g-1"}})
+        );
+        let wire = serde_json::json!({"type":"supervisorDispatch","request":{
+            "action":"submit","messageId":"m-1","body":"Create result.txt","hostId":"paired-1","sessionId":"pane-1",
+            "work":{"title":"t","instruction":"i","requirements":[{"id":"r1","text":"x","verifier":"v"}]}
+        }});
+        match serde_json::from_value::<DaemonRequest>(wire.clone()).unwrap() {
+            DaemonRequest::SupervisorDispatch { request } => {
+                assert!(request.mutates());
+                assert!(matches!(&request, SupervisorDispatchAction::Submit { session_id: Some(session), host_id: Some(host), .. }
+                    if session == "pane-1" && host == "paired-1"));
+                let back = DaemonRequest::SupervisorDispatch { request };
+                assert_eq!(serde_json::to_value(&back).unwrap()["request"]["sessionId"], "pane-1");
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        assert!(!SupervisorDispatchAction::Status { goal_id: "g".into() }.mutates());
+        // The pane is the owner's choice on the request, never a field of the model's work.
+        let smuggled = serde_json::json!({"type":"supervisorDispatch","request":{
+            "action":"submit","messageId":"m-1","body":"b",
+            "work":{"title":"t","instruction":"i","requirements":[],"sessionId":"pane-1"}
+        }});
+        assert!(serde_json::from_value::<DaemonRequest>(smuggled).is_err());
+        let ok = DaemonResponse::SupervisorDispatchOk { result: serde_json::json!({"goal": null}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorDispatchOk""#), "{text}");
+        assert!(matches!(serde_json::from_str::<DaemonResponse>(&text).unwrap(), DaemonResponse::SupervisorDispatchOk { .. }));
+    }
+
+    #[test]
+    fn every_supervisor_engine_action_round_trips_on_the_daemon_wire() {
+        let cases = vec![
+            (
+                SupervisorEngineAction::Status,
+                serde_json::json!({"type":"supervisorEngine","request":{"action":"status"}}),
+            ),
+            (
+                SupervisorEngineAction::Assess { prompt: "grade this".into() },
+                serde_json::json!({"type":"supervisorEngine","request":{"action":"assess","prompt":"grade this"}}),
+            ),
+            (
+                SupervisorEngineAction::AssessGoal { goal_id: "g-1".into() },
+                serde_json::json!({"type":"supervisorEngine","request":{"action":"assessGoal","goalId":"g-1"}}),
+            ),
+        ];
+        for (action, wire) in cases {
+            let request = DaemonRequest::SupervisorEngine { request: action.clone() };
+            assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+            match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
+                DaemonRequest::SupervisorEngine { request } => assert_eq!(request, action),
+                other => panic!("decoded as {other:?}"),
+            }
+        }
+        let refused = serde_json::from_value::<DaemonRequest>(serde_json::json!(
+            {"type":"supervisorEngine","request":{"action":"assess"}}
+        ));
+        assert!(
+            refused.is_err(),
+            "an assessment without a prompt is refused on the wire"
+        );
+        let ok = DaemonResponse::SupervisorEngineOk {
+            snapshot: serde_json::json!({"engine": {"state": "ready"}}),
+        };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorEngineOk""#), "{text}");
+        assert!(matches!(
+            serde_json::from_str::<DaemonResponse>(&text).unwrap(),
+            DaemonResponse::SupervisorEngineOk { .. }
+        ));
+    }
+
+    #[test]
+    fn the_supervisor_request_envelope_round_trips_on_the_daemon_wire() {
+        let envelope = serde_json::json!({"requestId": "r1", "goalId": "g1", "expectedRevision": 3,
+            "action": "pause", "payload": {"reason": "lunch"}});
+        let request = DaemonRequest::SupervisorRequestV1 {
+            envelope: envelope.clone(),
+            cli: true,
+            mcp: false,
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "supervisorRequestV1", "envelope": envelope, "cli": true})
+        );
+        match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
+            DaemonRequest::SupervisorRequestV1 {
+                envelope: decoded,
+                cli,
+                mcp,
+            } => {
+                assert_eq!(decoded, envelope);
+                assert!(cli);
+                assert!(!mcp);
+            }
+            other => panic!("decoded as {other:?}"),
+        }
+        // An MCP-forwarded request carries `mcp: true`; it round-trips.
+        let forwarded = DaemonRequest::SupervisorRequestV1 {
+            envelope: envelope.clone(),
+            cli: true,
+            mcp: true,
+        };
+        let wire = serde_json::to_value(&forwarded).unwrap();
+        assert_eq!(wire["mcp"], true);
+        assert!(matches!(
+            serde_json::from_value::<DaemonRequest>(wire).unwrap(),
+            DaemonRequest::SupervisorRequestV1 {
+                cli: true,
+                mcp: true,
+                ..
+            }
+        ));
+        // `cli` defaults to the desktop.
+        let desktop: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorRequestV1", "envelope": {"requestId": "r", "action": "message", "payload": {"text": "hi"}}}
+        ))
+        .unwrap();
+        assert!(matches!(
+            desktop,
+            DaemonRequest::SupervisorRequestV1 { cli: false, .. }
+        ));
+        let ok = DaemonResponse::SupervisorRequestV1Ok {
+            receipt: serde_json::json!({"goalId": "g1", "revision": 4}),
+        };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorRequestV1Ok""#), "{text}");
+        assert!(matches!(
+            serde_json::from_str::<DaemonResponse>(&text).unwrap(),
+            DaemonResponse::SupervisorRequestV1Ok { receipt } if receipt["revision"] == 4
+        ));
+    }
+
+    #[test]
+    fn the_supervisor_read_round_trips_on_the_daemon_wire() {
+        let conversation = DaemonRequest::SupervisorReadV1 {
+            request: SupervisorReadAction::Conversation { project_id: "p1".into(), after: Some(3) },
+        };
+        assert_eq!(
+            serde_json::to_value(&conversation).unwrap(),
+            serde_json::json!({"type": "supervisorReadV1", "request": {"view": "conversation", "projectId": "p1", "after": 3}})
+        );
+        let memory: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type": "supervisorReadV1", "request": {"view": "memory"}})).unwrap();
+        assert!(matches!(memory, DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Memory }));
+        let first: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorReadV1", "request": {"view": "conversation", "projectId": "p1"}}
+        ))
+        .unwrap();
+        assert!(matches!(
+            first,
+            DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Conversation { after: None, .. } }
+        ));
+        let ok = DaemonResponse::SupervisorReadV1Ok { value: serde_json::json!({"next": 4}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorReadV1Ok""#), "{text}");
     }
 
     #[test]

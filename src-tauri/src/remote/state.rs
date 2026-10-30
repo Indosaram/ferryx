@@ -873,6 +873,10 @@ pub struct RemoteGatewayState {
     snapshot_build_completed: Notify,
     #[cfg(test)]
     snapshot_post_build_hook: SnapshotPostBuildHook,
+    /// Test-only populated supervisor hub: `(pool, owner principal)`. Production reads the
+    /// daemon's opened hub instead.
+    #[cfg(test)]
+    pub(crate) supervisor_test_hub: RwLock<Option<(ferryx_hub::goals::SqlitePool, String)>>,
 }
 
 impl RemoteGatewayState {
@@ -1035,6 +1039,8 @@ impl RemoteGatewayState {
             browse_probe: RwLock::new(None),
             #[cfg(test)]
             agent_history_home: RwLock::new(None),
+            #[cfg(test)]
+            supervisor_test_hub: RwLock::new(None),
             auth_manager,
             terminal_service,
             daemon_epoch: AtomicU64::new(0),

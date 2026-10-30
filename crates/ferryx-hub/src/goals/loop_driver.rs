@@ -141,6 +141,12 @@ pub fn wrap_instruction(instruction: &str) -> String {
 
 /// Sends the lane's persisted proposal once and records what happened. Shared by full mode
 /// and by an owner approving a supervised proposal.
+///
+/// The proposal is already committed `pending`, which an adoption refuses under its write
+/// lock ([`crate::supervisor::admit_request_with`]). So the ownership re-check right before
+/// the send either sees an adoption that committed earlier (during the judge call, say) or
+/// none can commit until the turn is settled: a lane the supervisor owns, or one that ended,
+/// is never sent to; its proposal is superseded instead.
 async fn dispatch<C: AgentControl + ?Sized>(
     pool: &SqlitePool,
     control: &C,
@@ -166,6 +172,23 @@ async fn dispatch<C: AgentControl + ?Sized>(
             contract.turns_used
         )
     });
+    let live = matches!(lane_row(pool, lane_key).await?, Some((_, status)) if !ended(status));
+    // A cutover stopped the legacy intake: a committed legacy proposal is superseded, never
+    // sent, exactly as for an adopted lane.
+    if !live
+        || crate::supervisor::supervisor_owns_lane(pool, lane_key).await?
+        || !crate::supervisor::cutover::legacy_intake_runs(pool).await?
+    {
+        contract::set_proposal_state(
+            pool,
+            lane_key,
+            ProposalState::Superseded,
+            Some(&[ProposalState::Pending]),
+        )
+        .await?;
+        tracing::info!(lane = %lane_key, "the lane ended or was adopted before the supervisor proposal was sent; nothing was sent");
+        return Ok(LoopOutcome::new(lane_key));
+    }
     let host = state::lane_host(pool, lane_key).await.map_err(hub_error)?;
     let outcome = control
         .send_confirmed(
@@ -291,7 +314,8 @@ async fn finish(
     Ok(LoopOutcome::new(lane_key))
 }
 
-fn verification_instruction(unmet_ids: &[String]) -> String {
+/// The corrective instruction after the blind convergence check refused `complete`.
+pub fn verification_instruction(unmet_ids: &[String]) -> String {
     format!(
         "The lane goal is not verified yet. Requirements still unproven: {}. For each one, run the check its verifier names, fix what fails, and report the exact commands you ran and their results.",
         unmet_ids.join(", ")
@@ -312,6 +336,10 @@ async fn decide<C: AgentControl + ?Sized>(
         Ok(assessment) => assessment,
         Err(GoalError::JudgeUnavailable) => {
             return stop(pool, lane_key, StopReason::JudgeUnavailable, None).await;
+        }
+        Err(GoalError::SupervisorFault(fault)) => {
+            let detail = fault.to_string();
+            return stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await;
         }
         Err(error) => return Err(error),
     };
@@ -343,6 +371,10 @@ async fn decide<C: AgentControl + ?Sized>(
         Decision::Complete => match converge::converge(judge, contract, bundle).await {
             Err(GoalError::JudgeUnavailable) => {
                 stop(pool, lane_key, StopReason::JudgeUnavailable, None).await
+            }
+            Err(GoalError::SupervisorFault(fault)) => {
+                let detail = fault.to_string();
+                stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await
             }
             Err(error) => Err(error),
             Ok(ConvergenceOutcome::Converged { verdicts }) => {
@@ -378,7 +410,9 @@ async fn decide<C: AgentControl + ?Sized>(
 /// in flight is ignored.
 ///
 /// Returns `None` when nothing changed (no contract, mode off, a stopped or paused lane, an
-/// awaiting proposal), else what changed, for `supervisor_changed`.
+/// awaiting proposal, a lane the supervisor owns), else what changed, for `supervisor_changed`.
+/// An adopted legacy lane keeps its legacy contract as history; its work continues only in
+/// the adopting supervisor goal, so this loop never sends to its pane.
 pub async fn on_turn_settled<C: AgentControl + ?Sized>(
     pool: &SqlitePool,
     judge: &Judge,
@@ -390,6 +424,10 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
         return Ok(None);
     };
     if contract.mode == GoalMode::Off {
+        return Ok(None);
+    }
+    // After a cutover the legacy goal loop takes no new turn (and asks no judge).
+    if !crate::supervisor::cutover::legacy_intake_runs(pool).await? {
         return Ok(None);
     }
     let lock = lane_lock(lane_key);
@@ -405,6 +443,9 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
         return Ok(None);
     };
     if ended(status) || crate::lanes::pause::is_paused(pool, lane_key).await? {
+        return Ok(None);
+    }
+    if crate::supervisor::supervisor_owns_lane(pool, lane_key).await? {
         return Ok(None);
     }
     let mut superseded = false;
@@ -438,7 +479,15 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
             .ok_or_else(|| GoalError::NoContract(lane_key.to_owned()))?;
     }
     let bundle = evidence::collect(pool, control, lane_key).await?;
-    let outcome = decide(pool, judge, control, &contract, &session_id, &bundle).await;
+    // The assessment and convergence calls of this pass are attributed to the settled turn.
+    let cause = crate::usage::current_cause().unwrap_or_else(|| {
+        crate::usage::CallCause::new("lane_turn_settled").events([format!("lane:{lane_key}")])
+    });
+    let outcome = crate::usage::with_cause(
+        cause,
+        decide(pool, judge, control, &contract, &session_id, &bundle),
+    )
+    .await;
     if superseded {
         tracing::info!(lane = %lane_key, "a person spoke after the supervisor proposal; it was superseded");
     }
@@ -503,6 +552,7 @@ mod tests {
     use crate::goals::SendOutcome;
     use crate::lanes::kibitzer::ModelTurn;
     use crate::lanes::state::{insert_lane, set_pane, status_of, transition};
+    use crate::meta::mhc_fault::{SupervisorFault, TurnContext, TurnFault};
 
     const LANE: &str = "goal-a";
 
@@ -1016,5 +1066,178 @@ mod tests {
             Some(LaneStatus::Blocked)
         );
         assert!(control.sends().is_empty());
+    }
+
+    /// A backend that names its failure, as the retained mhc supervisor does.
+    struct FaultingModel;
+
+    #[async_trait]
+    impl ModelTurn for FaultingModel {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            Err(HubError::message("untyped path must not be used"))
+        }
+
+        async fn complete_typed(
+            &self,
+            _prompt: &str,
+            _context: crate::meta::mhc_fault::TurnContext,
+        ) -> std::result::Result<String, crate::meta::mhc_fault::TurnFault> {
+            Err(crate::meta::mhc_fault::TurnFault::Supervisor(
+                crate::meta::mhc_fault::SupervisorFault::quota("429 usage limit reached"),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typed_supervisor_fault_stops_the_lane_as_degraded_not_judge_unavailable() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(FaultingModel));
+        let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::SupervisorDegraded));
+        let detail = contract.stop_detail.unwrap_or_default();
+        assert!(detail.starts_with("MHC_QUOTA:"), "{detail}");
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        assert!(control.sends().is_empty());
+    }
+
+    /// The retained mhc supervisor that completes the assessment (a retained context) and
+    /// then faults on the convergence check (a fresh context).
+    struct ConvergeFaultingModel;
+
+    #[async_trait]
+    impl ModelTurn for ConvergeFaultingModel {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            Err(HubError::message("untyped path must not be used"))
+        }
+
+        async fn complete_typed(
+            &self,
+            _prompt: &str,
+            context: TurnContext,
+        ) -> std::result::Result<String, TurnFault> {
+            match context {
+                TurnContext::Retained => Ok(COMPLETE.to_owned()),
+                TurnContext::Fresh => Err(TurnFault::Supervisor(SupervisorFault::timeout(
+                    "supervisor turn",
+                ))),
+            }
+        }
+
+        fn owns_deadline(&self) -> bool {
+            true
+        }
+
+        fn is_supervisor_engine(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_fault_at_the_convergence_check_stops_the_lane_as_degraded() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(ConvergeFaultingModel));
+        let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::SupervisorDegraded));
+        let detail = contract.stop_detail.unwrap_or_default();
+        assert!(detail.starts_with("MHC_TIMEOUT:"), "{detail}");
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        assert!(control.sends().is_empty());
+    }
+
+    /// Scripted answers served as the retained mhc supervisor engine.
+    struct EngineModel(Arc<ScriptedModel>);
+
+    #[async_trait]
+    impl ModelTurn for EngineModel {
+        async fn complete(&self, prompt: &str) -> Result<String> {
+            self.0.complete(prompt).await
+        }
+
+        fn owns_deadline(&self) -> bool {
+            true
+        }
+
+        fn is_supervisor_engine(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_judge_breaker_and_a_spent_omo_cap_never_hold_a_supervisor_engine_goal() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        for _ in 0..crate::judge::FALLBACK_DAILY_CAP {
+            sqlx::query(
+                "INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at)
+                 VALUES(?, 'inbox_class', 'choice', 1, 'fyi', 1, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let breaker = Arc::new(Mutex::new(crate::judge::Breaker::default()));
+        for _ in 0..crate::judge::BREAKER_FAILURES {
+            breaker.lock().unwrap().failure(
+                true,
+                "401 Unauthorized",
+                std::time::Instant::now(),
+                chrono::Utc::now().date_naive(),
+            );
+        }
+        assert!(breaker
+            .lock()
+            .unwrap()
+            .open_until(std::time::Instant::now())
+            .is_some());
+
+        // The omo fallback model is held by both: the goal would stop as judge_unavailable.
+        let omo = Judge::bare()
+            .with_pool(pool.clone())
+            .with_breaker(breaker.clone())
+            .with_fallback(ScriptedModel::new(&[COMPLETE]));
+        assert!(matches!(
+            omo.structured(crate::judge::Purpose::GapAssess, "q").await,
+            Err(GoalError::JudgeUnavailable)
+        ));
+
+        let model = ScriptedModel::new(&[COMPLETE, CONVERGED]);
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_breaker(breaker)
+            .with_fallback(Arc::new(EngineModel(model.clone())));
+        let control = FakeControl::default();
+        let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, None);
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::VerifiedDone)
+        );
+        assert_eq!(model.calls(), 2);
     }
 }

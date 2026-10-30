@@ -186,6 +186,34 @@ pub trait ModelTurn: Send + Sync {
         let _ = (model, toolsets);
         self.complete(prompt).await
     }
+
+    /// Typed turn for the supervisor judge. A backend that can name its failure (the retained
+    /// mhc supervisor) returns [`TurnFault::Supervisor`](crate::meta::mhc_fault::TurnFault) and
+    /// honors `context`; the default runs [`Self::complete`] and reports a legacy error.
+    async fn complete_typed(
+        &self,
+        prompt: &str,
+        context: crate::meta::mhc_fault::TurnContext,
+    ) -> std::result::Result<String, crate::meta::mhc_fault::TurnFault> {
+        let _ = context;
+        self.complete(prompt)
+            .await
+            .map_err(crate::meta::mhc_fault::TurnFault::Other)
+    }
+
+    /// True when the backend bounds its own turns and reports a typed timeout, so a caller
+    /// must not cut the turn short with its own deadline (the retained mhc supervisor).
+    fn owns_deadline(&self) -> bool {
+        false
+    }
+
+    /// True only for the retained mhc supervisor engine. The judge then skips the
+    /// typesafe-judge breaker and the omo fallback daily cap (neither is this engine's), does
+    /// not count its calls toward that cap, and applies only an explicitly configured
+    /// supervisor budget, reported as a typed fault.
+    fn is_supervisor_engine(&self) -> bool {
+        false
+    }
 }
 
 const KIBITZER_PROMPT: &str = "Return only JSON with exactly wake (boolean), reason (string), suggested (string), target_lane (string or null). Decide whether the owner needs proactive action. Do not perform actions. Set wake to true only when there is something concrete the owner should act on now (from the open owner items, recent events and lanes); otherwise set wake to false. When wake is true, write suggested as a short Korean message to the owner that names the 1-3 most important concrete things to do now and why each matters.";
@@ -209,6 +237,10 @@ pub async fn evaluate_at(
     now: DateTime<Utc>,
 ) -> Result<bool> {
     ensure_lead(pool, lead).await?;
+    // The kibitzer is a legacy intake: after a cutover it never wakes the owner lead.
+    if !crate::supervisor::cutover::legacy_intake_runs(pool).await? {
+        return Ok(false);
+    }
     let state = load_arm(pool, lead, now).await?;
     if next_due(now, &state).is_none_or(|due| due > now) {
         return Ok(false);

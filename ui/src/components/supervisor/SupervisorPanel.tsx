@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { cn } from "../../lib/cn";
 import {
   actingSessionIds,
+  desktopUnifiedClient,
   setSupervisorLanePaused,
   supervisorGoal,
   supervisorStopReasonLabel,
@@ -17,7 +18,9 @@ import {
   type SupervisorRequirementStatus,
   type SupervisorSnapshot,
 } from "../../lib/supervisor";
+import { LANE_KEY_PREFIX, type SupervisorConnection, type UnifiedSupervisorClient, type UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { UnifiedSupervisorSection, type AdoptableLane } from "./UnifiedSupervisorSection";
 
 function clock(atMs: number): string {
   const date = new Date(atMs);
@@ -152,8 +155,59 @@ function LaneGoal({ lane, goal }: { lane: SupervisorLane; goal: SupervisorGoalVi
   );
 }
 
+/**
+ * The desktop's own daemon is the supervisor host it reaches. With no hub open there it says so
+ * and keeps the last view it saw; it never starts another supervisor.
+ */
+export function desktopConnection(snapshot: SupervisorSnapshot): SupervisorConnection {
+  if (snapshot.supervisor) return "live";
+  return snapshot.hub.error ? "disconnected" : "unavailable";
+}
+
+/**
+ * Legacy lanes that may be adopted: not a supervisor lane, and a goal contract that is on and has
+ * requirements (adoption keeps the legacy terms; an `off` loop is refused LEGACY_GOAL_OFF).
+ */
+export function adoptableLanes(snapshot: SupervisorSnapshot, unified: UnifiedSupervisorView | null): AdoptableLane[] {
+  if (!unified) return [];
+  const owned = new Set(unified.goals.map((goal) => goal.laneKey));
+  return snapshot.lanes
+    .filter((lane) => !lane.key.startsWith(LANE_KEY_PREFIX) && !owned.has(lane.key)
+      && lane.goalContract != null && lane.goalContract.mode !== "off" && lane.goalContract.requirements.length > 0)
+    .map((lane) => ({ key: lane.key, title: lane.title }));
+}
+
+function UnifiedForDesktop({ snapshot, lastUnified, client }: { snapshot: SupervisorSnapshot; lastUnified: UnifiedSupervisorView | null; client: UnifiedSupervisorClient }) {
+  const view = snapshot.supervisor ?? lastUnified;
+  if (!view) return null;
+  const connection = desktopConnection(snapshot);
+  return (
+    <div className="mx-2 mb-1.5">
+      <UnifiedSupervisorSection
+        surface="desktop"
+        hostLabel="this computer"
+        connection={connection}
+        connectionError={connection === "live" ? null : { code: connection === "disconnected" ? "DAEMON_UNREACHABLE" : "SUPERVISOR_UNAVAILABLE", message: snapshot.hub.error ?? "" }}
+        view={view}
+        client={connection === "live" ? client : null}
+        adoptable={connection === "live" ? adoptableLanes(snapshot, view) : []}
+      />
+    </div>
+  );
+}
+
 /** The Supervisor sidebar view: what the hub supervisor drives, its pause, and what it typed. */
-export function SupervisorPanelView({ snapshot, now }: { snapshot: SupervisorSnapshot; now: number }) {
+export function SupervisorPanelView({
+  snapshot,
+  now,
+  lastUnified = null,
+  client = desktopUnifiedClient,
+}: {
+  snapshot: SupervisorSnapshot;
+  now: number;
+  lastUnified?: UnifiedSupervisorView | null;
+  client?: UnifiedSupervisorClient;
+}) {
   const { hub, lanes, watched, actions } = snapshot;
   const acting = actingSessionIds(snapshot, now);
   const allPaused = lanes.length > 0 && lanes.every((lane) => lane.paused);
@@ -177,6 +231,9 @@ export function SupervisorPanelView({ snapshot, now }: { snapshot: SupervisorSna
               : "This daemon has no supervisor hub open, so no pane is watched or driven."}
         </span>
         {hub.error ? <span className="font-mono text-[10.5px]">{hub.error}</span> : null}
+        <div className="-mx-2">
+          <UnifiedForDesktop snapshot={snapshot} lastUnified={lastUnified} client={client} />
+        </div>
       </div>
     );
   }
@@ -199,6 +256,8 @@ export function SupervisorPanelView({ snapshot, now }: { snapshot: SupervisorSna
           )}
         </p>
       </div>
+
+      <UnifiedForDesktop snapshot={snapshot} lastUnified={lastUnified} client={client} />
 
       <div className="flex h-8 shrink-0 items-center justify-between px-3.5 text-[11px] font-medium text-muted-foreground">
         <span>Supervising</span><span>{lanes.length}</span>
@@ -268,8 +327,8 @@ export function SupervisorPanelView({ snapshot, now }: { snapshot: SupervisorSna
 }
 
 export function SupervisorPanel() {
-  const { snapshot, now } = useSupervisor();
-  return <SupervisorPanelView snapshot={snapshot} now={now} />;
+  const { snapshot, now, lastUnified } = useSupervisor();
+  return <SupervisorPanelView snapshot={snapshot} now={now} lastUnified={lastUnified} />;
 }
 
 /** Segment-label indicator: true while the supervisor typed somewhere moments ago. */

@@ -2485,6 +2485,55 @@ async fn r25_submit_http_admission_spends_arrival_budget() {
     }
 }
 
+/// A phone chat message marks the pane's input ledger at each write, never before its
+/// transaction types: a mark issued earlier would sit at or below the cursor of a supervisor
+/// delivery taken while the message waits, and its turn would then pass for the delivery's.
+#[tokio::test]
+async fn a_phone_chat_message_marks_the_pane_only_as_its_bytes_are_written() {
+    let session_id = "reference-route-input-marks";
+    let (backend, state, control) = unhubbed_pane(session_id, None);
+    let (entered_tx, mut entered) = tokio::sync::mpsc::unbounded_channel();
+    let mut isolated_runtime = crate::remote::server::ReferenceChatRuntime::default();
+    isolated_runtime.submit_staging_entered = Some(entered_tx);
+    let runtime: &'static _ = Box::leak(Box::new(isolated_runtime));
+    // The transaction parks at the staging read, after admission and before any byte.
+    let staging = runtime.hold_staging_sweep().await;
+    let bus = Arc::clone(&state.agent_events);
+    let before = bus.input_cursor();
+    let request = axum::http::Request::builder().method("POST")
+        .header("authorization", format!("Bearer {control}"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(unhubbed_submit(&state, session_id, "hello")))
+        .expect("request");
+    let clock = Arc::new(R25RouteClock(std::sync::atomic::AtomicU64::new(7_000)));
+    let handler_state = Arc::clone(&state);
+    let mut handler = tokio::spawn(async move {
+        crate::remote::server::reference_chat_submit_with_clock(
+            handler_state, session_id.to_string(), request, runtime, clock,
+        ).await
+    });
+    let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), entered.recv()).await;
+    assert!(admitted.is_ok_and(|entry| entry.is_some()), "the handler reached its transaction");
+    assert_eq!(bus.input_cursor(), before, "no mark before a byte is written");
+    assert!(backend.writes.lock().expect("writes").is_empty());
+
+    drop(staging);
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), &mut handler).await;
+    if completed.is_err() {
+        handler.abort();
+    }
+    let response = completed.expect("bounded handler").expect("handler");
+    let bytes = axum::body::to_bytes(response.into_body(), 65_536).await.expect("body");
+    let result: serde_json::Value = serde_json::from_slice(&bytes).expect("result");
+    assert_eq!(result["data"]["receipt"]["stage"], "accepted", "{result}");
+    assert_eq!(backend.writes.lock().expect("writes").clone(), vec![b"hello".to_vec(), b"\r".to_vec()]);
+    assert_eq!(bus.input_cursor(), before + 2, "one mark per write: the paste and its Enter");
+    assert!(
+        bus.foreign_input_since(session_id, before, "a-supervisor-delivery"),
+        "the message is foreign to any delivery whose cursor was taken while it waited"
+    );
+}
+
 /// rs-input-screen-r3-2: a caller that goes away between the paste and its Enter must not leave
 /// the paste unsent in the pane. The handler future is dropped exactly as hyper drops it on a
 /// disconnect, right after the paste is written.
