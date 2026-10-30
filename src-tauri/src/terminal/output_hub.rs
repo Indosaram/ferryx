@@ -1123,6 +1123,21 @@ impl TerminalOutputHub {
         Some(sequence)
     }
 
+    /// Text of the session's mirrored visible screen. The hub and mirror locks are held only
+    /// while the rows are copied out; trimming and gap-seam removal run after they are released.
+    pub fn visible_screen_text(
+        &self,
+        session_id: &str,
+    ) -> Option<super::screen_mirror::VisibleScreen> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let rows = {
+            let hub = session_hub.read();
+            let screen = hub.screen.as_ref()?.lock();
+            screen.visible_rows()
+        }?;
+        Some(rows.into_screen())
+    }
+
     pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
