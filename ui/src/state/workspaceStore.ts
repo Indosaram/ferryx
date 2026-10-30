@@ -2163,6 +2163,8 @@ export function useWorkspaceStore({
       const validWorktreePaths = new Set(worktrees.map((worktree) => worktree.path));
       const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(sessionWorktreePath(session)));
       dispatch({ type: "SET_WORKTREES", worktrees });
+      // Removing a worktree drops its parked layout, file tabs included.
+      releaseOrphanPreviews(stateRef.current);
       await Promise.allSettled(staleSessions.map((session) => closeBackendSession(session, services)));
     },
     [dispatch, services, workspaceId],
@@ -2312,9 +2314,12 @@ export function useWorkspaceStore({
       const snapshot = stateRef.current;
       const sourceWorktreePath = sessionWorktreePath(snapshot.sessions[source.sessionId]);
       const targetWorktreePath = sourceWorktreePath || snapshot.activeWorktreePath;
-      const existing = (targetWorktreePath === snapshot.activeWorktreePath ? snapshot.layout.tabs : []).find(
-        (tab) => tab.kind === "file" && tab.path === request.path && tab.backendSessionId === request.backendSessionId,
-      );
+      // An absolute path names one file whichever session (or the CLI, with no session) asked;
+      // only a relative path depends on the requesting session's cwd.
+      const absolute = /^(?:\/|\\\\|[a-zA-Z]:[\\/])/.test(request.path);
+      const sameFile = (tab: WorkspaceTab) =>
+        tab.kind === "file" && tab.path === request.path && (absolute || tab.backendSessionId === request.backendSessionId);
+      const existing = (targetWorktreePath === snapshot.activeWorktreePath ? snapshot.layout.tabs : []).find(sameFile);
       if (existing && existing.kind === "file") {
         retainFilePreview(existing.previewId, source, request);
         dispatch({
@@ -2328,9 +2333,7 @@ export function useWorkspaceStore({
 
       for (const [wtPath, parkedLayout] of Object.entries(snapshot.worktreeLayouts ?? {})) {
         if (sourceWorktreePath && wtPath !== sourceWorktreePath) continue;
-        const parkedTab = parkedLayout.tabs.find(
-          (tab) => tab.kind === "file" && tab.path === request.path && tab.backendSessionId === request.backendSessionId,
-        );
+        const parkedTab = parkedLayout.tabs.find(sameFile);
         if (parkedTab && parkedTab.kind === "file") {
           dispatch({ type: "SELECT_WORKTREE", path: wtPath });
           retainFilePreview(parkedTab.previewId, source, request);
@@ -4903,8 +4906,14 @@ function collectPreviewIds(state: { layout: LayoutState; worktreeLayouts?: Recor
   return ids;
 }
 
-function releaseOrphanPreviews(state: { layout: LayoutState; worktreeLayouts?: Record<string, LayoutState> }) {
+/** Releases controllers no layout references. The registry is process-wide while only one
+ * workspace is mounted, so previews parked in other workspaces' snapshots stay live. */
+function releaseOrphanPreviews(state: WorkspaceState) {
   const live = collectPreviewIds(state);
+  for (const [snapshotWorkspaceId, snapshot] of listWorkspaceSnapshots()) {
+    if (snapshotWorkspaceId === state.workspaceId) continue;
+    for (const id of collectPreviewIds(snapshot)) live.add(id);
+  }
   for (const id of listFilePreviewIds()) {
     if (!live.has(id)) void releaseFilePreview(id);
   }

@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
 import type { Worktree } from "../lib/types";
+import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
 import { useWorkspaceStore, type WorkspaceServices } from "./workspaceStore";
 
 vi.mock("../lib/filePreviewTabRegistry", () => ({
@@ -53,6 +54,8 @@ describe("file preview tabs", () => {
   const liveIds = new Set<string>();
   beforeEach(() => {
     liveIds.clear();
+    clearWorkspaceSnapshot();
+    vi.mocked(releaseFilePreview).mockClear();
     vi.mocked(retainFilePreview).mockImplementation((id) => {
       liveIds.add(id);
       return {} as never;
@@ -93,6 +96,76 @@ describe("file preview tabs", () => {
     });
     expect(releaseFilePreview).toHaveBeenCalledWith(firstId);
     expect(result.current.state.layout.tabs.some((item) => item.id === firstId)).toBe(false);
+  });
+
+  it("reuses the tab for an absolute path whichever session or the CLI asked", () => {
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    const request = { path: "/repo/readme.md", backendSessionId: "back-1", line: null, col: null };
+    let firstId = "";
+    act(() => {
+      firstId = result.current.openFilePreviewTab(source, request);
+    });
+    let cliId = "";
+    act(() => {
+      cliId = result.current.openFilePreviewTab(source, { ...request, backendSessionId: "" });
+    });
+    expect(cliId).toBe(firstId);
+    expect(result.current.state.layout.tabs.filter((tab) => tab.kind === "file")).toHaveLength(1);
+  });
+
+
+  it("keeps previews parked in another workspace when a tab closes here", async () => {
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    let mountedId = "";
+    act(() => {
+      mountedId = result.current.openFilePreviewTab(source, {
+        path: "/repo/a.md",
+        backendSessionId: "back-1",
+        line: 1,
+        col: 1,
+      });
+    });
+    const mounted = result.current.state;
+    setWorkspaceSnapshot("ws-other", {
+      ...mounted,
+      workspaceId: "ws-other",
+      layout: {
+        ...mounted.layout,
+        tabs: mounted.layout.tabs.map((tab) => (tab.kind === "file" ? { ...tab, previewId: "other-preview" } : tab)),
+        // Pane contents would otherwise still name the mounted tab's preview.
+        layoutsByTabId: {},
+      },
+    });
+    liveIds.add("other-preview");
+
+    await act(async () => {
+      await result.current.closeTab(mountedId);
+    });
+    expect(releaseFilePreview).toHaveBeenCalledWith(mountedId);
+    expect(releaseFilePreview).not.toHaveBeenCalledWith("other-preview");
+  });
+
+  it("releases file previews of a removed worktree", async () => {
+    const feature: Worktree = { ...worktree, path: "/repo/feature", branch: "refs/heads/feature" };
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree, feature], services }));
+    let tabId = "";
+    act(() => {
+      tabId = result.current.openFilePreviewTab(source, {
+        path: "/repo/shared.ts",
+        backendSessionId: "back-1",
+        line: 1,
+        col: 1,
+      });
+    });
+    act(() => {
+      result.current.dispatchWorkspaceAction({ type: "SELECT_WORKTREE", path: feature.path });
+    });
+    expect(result.current.state.worktreeLayouts?.[worktree.path]?.tabs.some((t) => t.id === tabId)).toBe(true);
+
+    await act(async () => {
+      await result.current.syncWorktrees([feature], { confirmedRemoval: true });
+    });
+    expect(releaseFilePreview).toHaveBeenCalledWith(tabId);
   });
 
   it("disambiguates duplicate basenames across file tabs", () => {

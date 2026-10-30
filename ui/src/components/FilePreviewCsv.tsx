@@ -40,7 +40,7 @@ export function FilePreviewCsv({
         {showRaw ? (
           <pre
             data-testid="file-preview-csv-raw"
-            className="p-3 font-mono text-[12px] text-foreground"
+            className="selectable p-3 font-mono text-[12px] text-foreground"
           >
             {text}
           </pre>
@@ -48,7 +48,7 @@ export function FilePreviewCsv({
           <div className="p-3">
             <table
               data-testid="file-preview-csv"
-              className="w-full border-collapse text-left text-[12px]"
+              className="selectable w-full border-collapse text-left text-[12px]"
             >
               {headerRow && (
                 <thead>

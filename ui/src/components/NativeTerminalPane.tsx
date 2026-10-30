@@ -90,6 +90,7 @@ import {
   readLinkLine,
   isLikelyRemoteFilePath,
   openRemoteFileToken,
+  remoteFileFetchErrorMessage,
   isSessionMouseTrackingEnabled,
   setSessionMouseTracking,
   TERMINAL_FILE_LINK_ACTION_EVENT,
@@ -1114,7 +1115,7 @@ export function NativeTerminalPane({
                 });
                 if (!opened) toast.error("This file could not be opened in the current client.");
               } catch (error) {
-                toast.error(extractIpcErrorMessage(error, "Could not download the remote file."));
+                toast.error(remoteFileFetchErrorMessage(error) ?? extractIpcErrorMessage(error, "Could not download the remote file."));
               }
               return;
             }
