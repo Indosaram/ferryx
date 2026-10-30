@@ -252,8 +252,13 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push("sessionOwnershipTransferV1");
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY);
             capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY);
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;
@@ -312,6 +317,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
             }
