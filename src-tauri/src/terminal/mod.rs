@@ -40,6 +40,7 @@ pub mod output_hub;
 pub mod paired_daemon;
 pub mod paired_runtime;
 pub mod preferences;
+pub mod program_status;
 pub mod protocol_dto;
 pub mod pty;
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
