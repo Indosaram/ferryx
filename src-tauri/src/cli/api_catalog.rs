@@ -90,7 +90,7 @@ macro_rules! switch {
 }
 
 macro_rules! sub {
-    ($name:expr, $args:expr, $flags:expr) => {
+    ($name:expr, $args:expr, $flags:expr $(,)?) => {
         Subcommand { name: $name, args: $args, flags: $flags }
     };
 }
