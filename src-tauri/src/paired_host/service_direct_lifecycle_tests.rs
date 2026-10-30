@@ -92,7 +92,7 @@ async fn revoke_on_auth_failure_drops_direct_route() {
         plant_route(&host.host_id);
         fixture
             .service
-            .revoke_on_auth_failure(host.host_id.clone(), host.generation)
+            .revoke_confirmed_auth_failure(host.host_id.clone(), host.generation, "UNAUTHORIZED")
             .await;
         assert!(!has_route(&host.host_id));
         fixture.finish().await;
@@ -127,7 +127,7 @@ async fn stale_generation_failure_keeps_fresh_direct_route() {
         plant_route(&host);
         fixture
             .service
-            .revoke_on_auth_failure(host.clone(), old.generation)
+            .revoke_confirmed_auth_failure(host.clone(), old.generation, "UNAUTHORIZED")
             .await;
         assert!(fixture.service.forget(host.clone(), old.generation).await.is_err());
         assert!(has_route(&host));

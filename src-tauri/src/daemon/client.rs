@@ -2148,6 +2148,9 @@ impl DaemonClient {
             + Self::PAIRED_TICKET_BUDGET_SECS
             + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
     );
+    pub const PAIRED_REVOKE_OUTER_TIMEOUT: Duration = Duration::from_secs(
+        Self::PAIRED_CAPABILITIES_BUDGET_SECS + Self::PAIRED_HANDSHAKE_MARGIN_SECS,
+    );
     pub const PAIRED_DEFAULT_OUTER_TIMEOUT: Duration = Duration::from_secs(45);
     pub const REMOTE_CONTROL_OUTER_TIMEOUT: Duration = Duration::from_secs(
         crate::ssh::bridge::DEFAULT_RPC_TIMEOUT.as_secs() * 2
@@ -2197,6 +2200,8 @@ impl DaemonClient {
                     + std::time::Duration::from_secs(25)
             }
             DaemonRequest::PairedTerminalReattach { .. } => Self::PAIRED_REATTACH_OUTER_TIMEOUT,
+            // The daemon re-checks Capabilities before it revokes.
+            DaemonRequest::PairedHostRevoke { .. } => Self::PAIRED_REVOKE_OUTER_TIMEOUT,
             DaemonRequest::RemoteWrite { .. } | DaemonRequest::RemoteResize { .. } => {
                 Self::REMOTE_CONTROL_OUTER_TIMEOUT
             }
@@ -2456,6 +2461,8 @@ impl DaemonClient {
                 // R5-N4: a definitive UNAUTHORIZED must fence the native inventory
                 // to a revoked state; otherwise a later same-generation cached
                 // event or list resurrects paired UI state without reauthentication.
+                // The daemon revokes only when its own Capabilities re-check confirms
+                // the rejection (`MachineClient::confirm_and_revoke`).
                 if error.code == "UNAUTHORIZED" {
                     let _ = self
                         .paired_host_request(DaemonRequest::PairedHostRevoke {

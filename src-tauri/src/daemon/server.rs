@@ -7328,7 +7328,11 @@ impl DaemonServer {
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
                 Ok(DaemonRequest::PairedHostRevoke { host_id, generation }) => {
-                    self.paired_hosts.revoke_on_auth_failure(host_id, generation).await;
+                    // Sent only after an operation answered UNAUTHORIZED: revoked only when a
+                    // fresh Capabilities re-check confirms the rejection.
+                    crate::paired_host::client::MachineClient::new()
+                        .confirm_and_revoke(&self.paired_hosts, host_id, generation, "UNAUTHORIZED")
+                        .await;
                     DaemonResponse::PairedHostForgetOk
                 }
                 Ok(DaemonRequest::GetCapabilities) => {
