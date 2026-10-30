@@ -2217,23 +2217,7 @@ async fn attach_session_handler(
         match state.authorize_device_token(&request.machine_id, &token).await {
             Ok(true) => {}
             Ok(false) => return unauthorized(),
-            // The token could not be checked because no control channel reaches the machine.
-            Err(status) if status == StatusCode::NOT_FOUND || status == StatusCode::GONE => {
-                return crate::account::service::ApiError::new(
-                    StatusCode::CONFLICT,
-                    "MACHINE_OFFLINE",
-                    "machine is offline",
-                )
-                .into_response();
-            }
-            Err(_) => {
-                return crate::account::service::ApiError::new(
-                    StatusCode::BAD_GATEWAY,
-                    "HOST_UNAVAILABLE",
-                    "the machine could not confirm this device token",
-                )
-                .into_response();
-            }
+            Err(status) => return device_token_unconfirmed(status),
         }
         if let Some(account) = account_state
             .clone()
@@ -2298,6 +2282,26 @@ async fn attach_session_handler(
         machine_id: request.machine_id,
         opaque: true,
     })
+    .into_response()
+}
+
+/// Answers a device-token check that never reached a verdict from the host. The token was not
+/// refused, so this must never be a 401: clients treat 401 as a revoked credential.
+fn device_token_unconfirmed(status: StatusCode) -> Response {
+    // The token could not be checked because no control channel reaches the machine.
+    if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
+        return crate::account::service::ApiError::new(
+            StatusCode::CONFLICT,
+            "MACHINE_OFFLINE",
+            "machine is offline",
+        )
+        .into_response();
+    }
+    crate::account::service::ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        "HOST_UNAVAILABLE",
+        "the machine could not confirm this device token",
+    )
     .into_response()
 }
 
@@ -2389,7 +2393,10 @@ async fn host_http_handler(
                 .map(str::trim)
                 .filter(|token| !token.is_empty());
             let device_authorized = match bearer_token {
-                Some(token) => state.authorize_device_token(&machine, token).await == Ok(true),
+                Some(token) => match state.authorize_device_token(&machine, token).await {
+                    Ok(authorized) => authorized,
+                    Err(status) => return Ok(device_token_unconfirmed(status)),
+                },
                 None => false,
             };
             if !device_authorized {
@@ -10297,6 +10304,87 @@ mod tests {
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["status"], "healthy");
         assert_eq!(body["paired"], true);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn host_proxy_device_token_on_offline_machine_is_409_not_401() {
+        // No control channel for owned-machine: the device-token check cannot reach the host.
+        let state = test_state(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let account = test_account_state(
+            tmp.path(),
+            "user-1",
+            "user-session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("{http_base}/host/owned-machine/api/v1/capabilities"))
+            .bearer_auth("paired-device-token")
+            .send()
+            .await
+            .unwrap();
+
+        // An unconfirmed token is not a revoked one: a 401 here would make clients drop it.
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "MACHINE_OFFLINE");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn host_proxy_device_token_check_failure_is_502_not_401() {
+        let state = test_state(vec![]);
+        let (_generation, mut notices, _grants) =
+            state.register_control_channel("owned-machine".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let account = test_account_state(
+            tmp.path(),
+            "user-1",
+            "user-session-token",
+            "owned-machine",
+            "other-machine",
+        );
+        let (base, server) =
+            spawn_test_relay_with_account_state(state.clone(), Some(account)).await;
+        let http_base = base.replace("ws://", "http://");
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{http_base}/host/owned-machine/api/v1/capabilities");
+            async move { client.get(url).bearer_auth("paired-device-token").send().await }
+        });
+
+        // The host answers the device check with neither a grant nor a refusal.
+        let (line, mut data) = next_machine_request(&base, &mut notices).await;
+        assert_eq!(line, DEVICE_PROBE_REQUEST_LINE);
+        reply_http(&mut data, StatusCode::INTERNAL_SERVER_ERROR, b"").await;
+
+        let response = timeout(Duration::from_secs(5), request)
+            .await
+            .expect("host proxy request must settle")
+            .expect("request task must not panic")
+            .expect("host proxy request must return a response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], "HOST_UNAVAILABLE");
 
         server.abort();
     }
