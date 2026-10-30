@@ -20,6 +20,12 @@
 
 export type SessionActivityState = "working" | "waiting" | "done";
 
+/** How a reported turn ended; only ever set alongside `done`. */
+export type SessionActivityOutcome = "done" | "error";
+
+/** What a `waiting` session needs from the user; only ever set alongside `waiting`. */
+export type SessionBlockedKind = "permission" | "question" | "auth";
+
 export type SessionActivitySource = "context_tabs" | "agent_state";
 
 export type SessionInventoryCompleteness = "complete" | "partial" | "unknown";
@@ -38,6 +44,9 @@ export type RemoteSessionInventoryEntry = {
   readonly activityState: SessionActivityState | null;
   readonly activitySource?: SessionActivitySource;
   readonly activityObservedAt?: number;
+  /** Program outcome of an unacknowledged `done`; dropped when the session is opened. */
+  readonly activityOutcome?: SessionActivityOutcome;
+  readonly activityKind?: SessionBlockedKind;
 };
 
 export type RemoteSessionInventory = {
@@ -59,6 +68,8 @@ export type SessionActivityObservation = {
   daemonEpoch?: string | null;
   agentType?: string | null;
   observedAt?: number;
+  outcome?: SessionActivityOutcome | null;
+  kind?: SessionBlockedKind | null;
 };
 
 export type SessionLookup = {
@@ -98,6 +109,14 @@ function epochText(value: unknown): string | null {
 
 function activityState(value: unknown): SessionActivityState | null {
   return value === "working" || value === "waiting" || value === "done" ? value : null;
+}
+
+function activityOutcome(value: unknown): SessionActivityOutcome | null {
+  return value === "done" || value === "error" ? value : null;
+}
+
+function blockedKind(value: unknown): SessionBlockedKind | null {
+  return value === "permission" || value === "question" || value === "auth" ? value : null;
 }
 
 /**
@@ -262,6 +281,8 @@ export function mergeSessionInventory(
       activityState: before.activityState,
       ...(before.activitySource ? { activitySource: before.activitySource } : {}),
       ...(before.activityObservedAt !== undefined ? { activityObservedAt: before.activityObservedAt } : {}),
+      ...(before.activityOutcome ? { activityOutcome: before.activityOutcome } : {}),
+      ...(before.activityKind ? { activityKind: before.activityKind } : {}),
     };
   });
 
@@ -478,21 +499,49 @@ export function applySessionActivity(
     }
     if (!matched) return entry;
     const agentType = matched.agentType ?? entry.agentType;
+    const outcome = matched.state === "done" ? matched.outcome ?? undefined : undefined;
+    const kind = matched.state === "waiting" ? matched.kind ?? undefined : undefined;
     const same =
       entry.activityState === matched.state &&
       (entry.activitySource ?? null) === matched.source &&
-      (entry.agentType ?? null) === (agentType ?? null);
+      (entry.agentType ?? null) === (agentType ?? null) &&
+      entry.activityOutcome === outcome &&
+      entry.activityKind === kind;
     if (same) return entry;
     changed = true;
+    const { activityOutcome: _outcome, activityKind: _kind, ...rest } = entry;
     return {
-      ...entry,
+      ...rest,
       agentType,
       activityState: matched.state,
       activitySource: matched.source,
       activityObservedAt: matched.observedAt ?? now,
+      ...(outcome ? { activityOutcome: outcome } : {}),
+      ...(kind ? { activityKind: kind } : {}),
     };
   });
   return changed ? { ...inventory, entries } : inventory;
+}
+
+/**
+ * Drops the program outcome of one session's completion: the user opened it, so the done/error
+ * mark has been read. Returns the same inventory when nothing changed.
+ */
+export function acknowledgeSessionOutcome(
+  inventory: RemoteSessionInventory | null,
+  sessionId: string,
+): RemoteSessionInventory | null {
+  if (!inventory || !inventory.entries.some((entry) => entry.sessionId === sessionId && entry.activityOutcome)) {
+    return inventory;
+  }
+  return {
+    ...inventory,
+    entries: inventory.entries.map((entry) => {
+      if (entry.sessionId !== sessionId || !entry.activityOutcome) return entry;
+      const { activityOutcome: _outcome, ...rest } = entry;
+      return rest;
+    }),
+  };
 }
 
 export type MachineAgentStateFrame = {
@@ -501,12 +550,20 @@ export type MachineAgentStateFrame = {
   daemonEpoch: string | null;
   state: SessionActivityState;
   agent: string | null;
+  /** Present only when the frame carried them (absent on older daemons). */
+  stateSource?: "protocol";
+  outcome?: SessionActivityOutcome;
+  kind?: SessionBlockedKind;
 };
 
 /**
  * Decodes an `agent_state` control frame from an attached terminal socket. Frames are
  * only accepted for the three known states, so an unfamiliar vocabulary stays
  * unreported instead of being guessed at.
+ *
+ * A frame that carries `stateSource`, `outcome` or `kind` speaks the daemon's own words:
+ * `blocked` reads as `waiting`, and `idle` reads as `done` only when it names an outcome (a
+ * bare idle reports nothing). Frames without those fields decode exactly as before.
  */
 export function parseMachineAgentStateFrame(raw: unknown): MachineAgentStateFrame | null {
   let value: unknown = raw;
@@ -521,7 +578,13 @@ export function parseMachineAgentStateFrame(raw: unknown): MachineAgentStateFram
   if (!frame || frame.type !== "agent_state") return null;
   const target = record(frame.target);
   const sessionId = text(target?.sessionId ?? target?.session_id);
-  const state = activityState(frame.state);
+  const stateSource = frame.stateSource === "protocol" ? "protocol" : null;
+  const outcome = activityOutcome(frame.outcome);
+  const kind = blockedKind(frame.kind);
+  const marked = stateSource !== null || outcome !== null || kind !== null;
+  const state =
+    activityState(frame.state) ??
+    (marked && frame.state === "blocked" ? "waiting" : marked && frame.state === "idle" && outcome ? "done" : null);
   if (!sessionId || !state) return null;
   return {
     machineId: text(target?.machineId ?? target?.machine_id),
@@ -529,6 +592,9 @@ export function parseMachineAgentStateFrame(raw: unknown): MachineAgentStateFram
     daemonEpoch: epochText(target?.daemonEpoch ?? target?.daemon_epoch),
     state,
     agent: text(frame.agent),
+    ...(stateSource ? { stateSource } : {}),
+    ...(state === "done" && outcome ? { outcome } : {}),
+    ...(state === "waiting" && kind ? { kind } : {}),
   };
 }
 

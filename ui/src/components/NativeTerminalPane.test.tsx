@@ -1599,6 +1599,21 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     });
   });
 
+  it("acknowledges the program outcome to the daemon when a pane with one gains focus, and not otherwise", async () => {
+    const session = createSession("term-session-ack", "daemon-pty-ack");
+    const plain: TerminalActivity = { isAgent: true, state: "done", title: "omo" };
+    const { rerender } = await renderNative(<NativeTerminalPane sessionId="term-session-ack" session={session} activity={plain} active />);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_set_focus", { sessionId: "daemon-pty-ack", focused: true });
+    });
+    expect(tauriCoreMocks.invoke.mock.calls.some(([cmd]) => cmd === "cmd_agent_acknowledge_outcome")).toBe(false);
+
+    rerender(<NativeTerminalPane sessionId="term-session-ack" session={session} activity={{ ...plain, outcome: "error" }} active />);
+    await waitFor(() => {
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_agent_acknowledge_outcome", { sessionId: "daemon-pty-ack" });
+    });
+  });
+
   it("positions the IME input sink at the native cursor receipt", async () => {
     tauriCoreMocks.invoke.mockResolvedValue({
       cols: 80,

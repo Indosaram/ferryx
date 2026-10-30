@@ -44,6 +44,8 @@ import {
 import { createBrowserPaneContent, isManagedBranchPrefix, isTerminalTab, worktreeIdentity } from "../lib/types";
 import type {
   AgentProviderSession,
+  AgentBlockedKind,
+  AgentOutcome,
   ActiveAgent,
   BrowserState,
   BrowserTab,
@@ -829,6 +831,8 @@ export type WorkspaceAction =
       providerSession?: AgentProviderSession | null;
       detail?: string | null;
       isSnapshot?: boolean;
+      outcome?: AgentOutcome | null;
+      kind?: AgentBlockedKind | null;
       observed?: boolean;
     }
   | { type: "RESET_AGENT_STATE"; sessionId: string }
@@ -1174,6 +1178,8 @@ export function useWorkspaceStore({
           providerSession: payload.providerSession,
           detail: payload.detail,
           isSnapshot: payload.isSnapshot,
+          outcome: payload.outcome,
+          kind: payload.kind,
         }));
         return;
       }
@@ -1187,6 +1193,8 @@ export function useWorkspaceStore({
         providerSession: payload.providerSession,
         detail: payload.detail,
         isSnapshot: payload.isSnapshot,
+        outcome: payload.outcome,
+        kind: payload.kind,
       });
       if (
         !stateRef.current.sessions[resolved.sessionId]?.workspaceId.startsWith("daemon:")
@@ -4155,6 +4163,8 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         source: "screen",
         agentSource,
         ...(action.detail ? { detail: action.detail } : {}),
+        ...(mappedState === "done" && action.outcome ? { outcome: action.outcome } : {}),
+        ...(mappedState === "waiting" && action.kind ? { kind: action.kind } : {}),
         ...(action.isSnapshot && mappedState !== "working"
           ? { seen: true, notificationSuppressed: true }
           : {}),
@@ -4482,7 +4492,9 @@ function applySessionActivity(
     previous.source === activity.source &&
     previous.agentSource === activity.agentSource &&
     previous.seen === activity.seen &&
-    previous.notificationSuppressed === activity.notificationSuppressed
+    previous.notificationSuppressed === activity.notificationSuppressed &&
+    previous.outcome === activity.outcome &&
+    previous.kind === activity.kind
   ) {
     return state;
   }

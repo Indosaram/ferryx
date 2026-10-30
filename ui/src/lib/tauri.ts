@@ -1170,6 +1170,15 @@ export async function resetAgentState(sessionId: string): Promise<void> {
   });
 }
 
+/**
+ * Tells the daemon the user has looked at this session, so it drops the program's done/error
+ * outcome (daemon request `acknowledgeAgentOutcome`). `sessionId` is the backend PTY id.
+ */
+export async function acknowledgeAgentOutcome(sessionId: string): Promise<void> {
+  if (!isTauri()) return;
+  await invokeCommand<void>("cmd_agent_acknowledge_outcome", { sessionId });
+}
+
 export interface AgentIntegrationStatus {
   enabled: boolean;
 }
