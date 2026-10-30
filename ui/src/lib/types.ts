@@ -680,6 +680,15 @@ export type LayoutState = {
 
 export type AgentState = "starting" | "working" | "waiting" | "exited" | "failed";
 
+/** How a reported turn ended (daemon `outcome`, set on `idle` frames only). */
+export type AgentOutcome = "done" | "error";
+
+/** What a blocked session needs from the user (daemon `kind`, set on `blocked` frames only). */
+export type AgentBlockedKind = "permission" | "question" | "auth";
+
+/** Producer marker the daemon adds when `origin` cannot name it (`protocol` = OSC 7501 report). */
+export type AgentStateSource = "protocol";
+
 export type ActiveAgent = {
   id: string;
   name: string;
@@ -746,6 +755,9 @@ export type NativeTerminalAgentStatePayload = {
   providerSession?: AgentProviderSession | null;
   detail?: string | null;
   isSnapshot?: boolean;
+  stateSource?: AgentStateSource | null;
+  outcome?: AgentOutcome | null;
+  kind?: AgentBlockedKind | null;
 };
 
 export type NativeTerminalBellPayload = {

@@ -1478,6 +1478,7 @@ export const RemoteHostConnection: React.FC<{
   );
   const {
     applyParsedInventoryEvent,
+    acknowledgeOutcome,
     noteSessionActivity,
     noteSessionsPayload,
   } = accountDiscovery;
@@ -3107,8 +3108,17 @@ export const RemoteHostConnection: React.FC<{
       machineId,
       daemonEpoch: frame.daemonEpoch,
       agentType: frame.agent,
+      outcome: frame.outcome ?? null,
+      kind: frame.kind ?? null,
     });
   }, [activeTunnelMachineId, noteSessionActivity]);
+
+  // Opening a session reads its completion, so its done/error mark goes out. Local only: the
+  // machine socket has no acknowledge message yet (todo 3 adds acknowledgeAgentOutcome on the
+  // daemon; the relay path to it does not exist).
+  useEffect(() => {
+    if (activeTunnelMachineId && effectiveSessionId) acknowledgeOutcome(activeTunnelMachineId, effectiveSessionId);
+  }, [acknowledgeOutcome, activeTunnelMachineId, effectiveSessionId]);
 
   useEffect(() => {
     // The identity belongs to the host that answered it: a new token or transport has none yet.

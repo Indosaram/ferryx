@@ -1,4 +1,4 @@
-import type { AgentState } from "./types";
+import type { AgentBlockedKind, AgentOutcome, AgentState } from "./types";
 
 export type TerminalActivityState = "working" | "waiting" | "done";
 
@@ -28,6 +28,10 @@ export type TerminalActivity = {
    * word without ever seeing the question, so a `waiting` entry from those paths has no detail.
    */
   detail?: string;
+  /** How the program said its turn ended; kept only on a `done` entry. */
+  outcome?: AgentOutcome;
+  /** What a `waiting` entry needs from the user, when the program said so. */
+  kind?: AgentBlockedKind;
 };
 
 export type ActivitySummary = {
@@ -40,6 +44,8 @@ export type ActivitySummary = {
   hasDone: boolean;
   hasUnread: boolean;
   agentType?: string;
+  /** The outcome of the unseen completions (`error` wins over `done`); absent when none reported one. */
+  outcome?: AgentOutcome;
 };
 
 export type ActivityIndicatorState = TerminalActivityState | "unread" | null;
@@ -51,6 +57,10 @@ function stateRank(state: TerminalActivityState): number {
   return 0;
 }
 
+function mergeOutcome(current: AgentOutcome | undefined, next: AgentOutcome | undefined): AgentOutcome | undefined {
+  return current === "error" || next === "error" ? "error" : (current ?? next);
+}
+
 export function summarizeActivities(
   activities: Iterable<TerminalActivity>,
   hasUnread = false,
@@ -60,12 +70,16 @@ export function summarizeActivities(
   let doneCount = 0;
   let bestRank = 0;
   let agentType: string | undefined = undefined;
+  let outcome: AgentOutcome | undefined = undefined;
 
   for (const activity of activities) {
     if (activity.state === "working") workingCount += 1;
     else if (!activity.seen) {
       if (activity.state === "waiting") waitingCount += 1;
-      else doneCount += 1;
+      else {
+        doneCount += 1;
+        outcome = mergeOutcome(outcome, activity.outcome);
+      }
     }
 
     if (activity.agentType !== undefined) {
@@ -87,6 +101,7 @@ export function summarizeActivities(
     hasDone: doneCount > 0,
     hasUnread,
     agentType,
+    ...(outcome ? { outcome } : {}),
   };
 }
 
@@ -107,12 +122,14 @@ export function combineActivitySummaries(
   let unread = hasUnread;
   let bestRank = 0;
   let agentType: string | undefined = undefined;
+  let outcome: AgentOutcome | undefined = undefined;
 
   for (const summary of summaries) {
     workingCount += summary.workingCount;
     waitingCount += summary.waitingCount;
     doneCount += summary.doneCount;
     unread ||= summary.hasUnread;
+    outcome = mergeOutcome(outcome, summary.outcome);
 
     if (summary.agentType !== undefined) {
       const rank = summaryRank(summary);
@@ -133,6 +150,7 @@ export function combineActivitySummaries(
     hasDone: doneCount > 0,
     hasUnread: unread,
     agentType,
+    ...(outcome ? { outcome } : {}),
   };
 }
 
