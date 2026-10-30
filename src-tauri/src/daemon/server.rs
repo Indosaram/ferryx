@@ -1839,15 +1839,12 @@ fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
     })
 }
 
-/// The reply line a herdr client reads, and discards, after each request it sends. Any `pane.*`
-/// request is answered, including ones Ferryx does not translate, so the client never waits out
-/// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
-#[cfg(any(unix, test))]
 /// A supervisor worker report on the agent-state socket:
 /// `{"type":"supervisorReport","sessionId":…,"eventId":…,"body":…}`. The session id is the
 /// reporting pane's own (`FERRYX_SESSION_ID`), the same trust an `agentState` line has on this
 /// owner-only socket; the hub accepts it only for the open goal bound to that session.
 /// (`sessionId`, `eventId`, `body`), or `None` for any other line.
+#[cfg(unix)]
 fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1862,6 +1859,10 @@ fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
     (wire.kind == "supervisorReport").then_some((wire.session_id, wire.event_id, wire.body))
 }
 
+/// The reply line a herdr client reads, and discards, after each request it sends. Any `pane.*`
+/// request is answered, including ones Ferryx does not translate, so the client never waits out
+/// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
+#[cfg(any(unix, test))]
 fn herdr_response_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if !value.get("method")?.as_str()?.starts_with("pane.") {

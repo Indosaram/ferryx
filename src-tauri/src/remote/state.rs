@@ -783,6 +783,10 @@ pub static RELAY_PAIRING_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic
 #[cfg(test)]
 type SnapshotPostBuildHook = Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
+/// Test-only stand-in for the machine journal's session ownership answer.
+#[cfg(test)]
+type MachineOwnedOverride = RwLock<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>;
+
 pub struct RemoteGatewayState {
     pub config: RwLock<RemoteGatewayConfig>,
     pub auth_manager: Arc<AuthManager>,
@@ -829,7 +833,7 @@ pub struct RemoteGatewayState {
     /// Bounds concurrent push dispatches so a slow push service never stalls the event loop.
     push_dispatch_slots: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
-    pub(crate) machine_owned_override: RwLock<Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>>,
+    pub(crate) machine_owned_override: MachineOwnedOverride,
     pub workspace_registry: WorkspaceRegistry,
     pub ssh_store_path: RwLock<Option<PathBuf>>,
     pub active_selection: RwLock<Option<RemoteActiveDesktopSelection>>,
