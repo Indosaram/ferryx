@@ -253,6 +253,27 @@ mod posix {
         let script = format!("XDG_CONFIG_HOME={}; {}", direct::quote_posix(&xdg.to_string_lossy()), read_script(RemotePlatform::Posix, &file));
         assert_eq!(parse_found(&run(home.path(), Step::Read(script)).await.unwrap()).unwrap(), Found::Absent);
     }
+
+    /// The skill goes to `~/.claude/skills` and `~/.agents/skills` on the host; a removal deletes
+    /// a managed one, and one the user took over (marker deleted) survives both.
+    #[tokio::test]
+    async fn the_skill_is_installed_on_the_host_and_a_users_copy_is_kept() {
+        let home = home();
+        make_all_agent_dirs(home.path());
+        let claude = home.path().join(".claude/skills/ferryx/SKILL.md");
+        let codex = home.path().join(".agents/skills/ferryx/SKILL.md");
+        let mine = SKILL_SOURCE.replace("ferryx-managed: true\n", "");
+        std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        std::fs::write(&codex, &mine).unwrap();
+
+        install(home.path()).await;
+        assert_eq!(std::fs::read_to_string(&claude).unwrap(), SKILL_SOURCE);
+        assert_eq!(std::fs::read_to_string(&codex).unwrap(), mine);
+        remove(home.path()).await;
+        assert!(!claude.exists());
+        assert_eq!(std::fs::read_to_string(&codex).unwrap(), mine);
+        assert_no_staging_left(home.path());
+    }
 }
 
 #[test]

@@ -13,6 +13,10 @@
 //! path is the one part allowed to differ, because the daemon runs from a generation-keyed staged
 //! copy whose path changes on every update; an install replaces an older generation's entry, and a
 //! removal deletes it. A group the user edited in any other way is no longer ours and survives both.
+//!
+//! Alongside the hooks, claude and codex get the Ferryx agent skill (`SKILL.md`, see
+//! [`SKILL_FILES`]). It is Ferryx's while its frontmatter says `ferryx-managed: true`; a skill file
+//! without that line belongs to the user and is never overwritten or deleted.
 
 use serde_json::{Map, Value};
 use std::ffi::OsString;
@@ -52,6 +56,8 @@ pub struct HookFileTarget {
     pub file: PathBuf,
     pub events: &'static [&'static str],
     pub shape: HookShape,
+    /// Where the Ferryx agent skill goes for this agent, when it reads one ([`SKILL_FILES`]).
+    pub skill: Option<PathBuf>,
 }
 
 /// Each hook-style agent's config directory, the path Ferryx writes inside it, and that file's
@@ -78,6 +84,29 @@ pub const HOOK_FILES: [(&str, &str, &str, HookShape); 7] = [
     ("cursor", ".cursor", "hooks.json", HookShape::CommandEntries),
 ];
 
+/// The Ferryx agent skill, embedded so the headless `ferryx-cli` needs no resource directory.
+pub(crate) const SKILL_SOURCE: &str = include_str!("../../resources/agent-skills/ferryx/SKILL.md");
+
+/// Each skill-reading agent and where its user skill lives, `/`-separated and relative to HOME:
+/// claude reads `~/.claude/skills`, codex reads the shared user skill directory `~/.agents/skills`.
+/// The skill is installed only where that agent's own config directory exists.
+pub const SKILL_FILES: [(&str, &str); 2] = [
+    ("claude", ".claude/skills/ferryx/SKILL.md"),
+    ("codex", ".agents/skills/ferryx/SKILL.md"),
+];
+
+/// Whether a skill file is Ferryx's: its YAML frontmatter carries `ferryx-managed: true`.
+pub(crate) fn is_ferryx_skill(text: &str) -> bool {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return false;
+    }
+    lines
+        .map(str::trim_end)
+        .take_while(|line| *line != "---")
+        .any(|line| line.trim() == "ferryx-managed: true")
+}
+
 pub fn hook_targets() -> Vec<HookFileTarget> {
     hook_targets_with_env(|key| std::env::var_os(key))
 }
@@ -102,12 +131,17 @@ pub(crate) fn hook_targets_with_env(get_env: impl Fn(&str) -> Option<OsString>) 
                 Some(rest) => config_home.join(rest),
                 None => home.join(dir),
             };
+            let skill = SKILL_FILES
+                .iter()
+                .find(|(name, _)| name == agent)
+                .map(|(_, rel)| rel.split('/').fold(home.clone(), |path, part| path.join(part)));
             Some(HookFileTarget {
                 agent,
                 file: agent_dir.join(file),
                 agent_dir,
                 events,
                 shape: *shape,
+                skill,
             })
         })
         .collect()
@@ -691,7 +725,62 @@ pub(crate) fn install_hook_targets(targets: &[HookFileTarget], exe: &Path) {
             Ok(false) => {}
             Err(error) => tracing::warn!(agent = target.agent, file = %target.file.display(), %error, "Failed to install Ferryx agent hooks"),
         }
+        match install_skill_into(target) {
+            Ok(true) => tracing::info!(agent = target.agent, "Installed the Ferryx agent skill"),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(agent = target.agent, %error, "Failed to install the Ferryx agent skill"),
+        }
     }
+}
+
+/// Writes the Ferryx skill for `target` and returns whether it wrote. Nothing is written for an
+/// agent without a skill path or without its config directory, and a file that is not a managed
+/// Ferryx skill (the user's own, or one they took over by deleting the marker) is left as is.
+/// Blocking: performs disk I/O.
+pub fn install_skill_into(target: &HookFileTarget) -> std::io::Result<bool> {
+    let Some(path) = &target.skill else { return Ok(false) };
+    if !target.agent_dir.is_dir() {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => return Ok(false),
+        Ok(_) => {
+            let existing = std::fs::read_to_string(path)?;
+            if existing == SKILL_SOURCE || !is_ferryx_skill(&existing) {
+                return Ok(false);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_file_name(".SKILL.md.ferryx.tmp");
+    std::fs::write(&tmp, SKILL_SOURCE)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(true)
+}
+
+/// Deletes the skill file for `target` when it is a managed Ferryx skill, and its `ferryx`
+/// directory when that is left empty. Returns whether the file went. Blocking: performs disk I/O.
+pub fn remove_skill_from(target: &HookFileTarget) -> std::io::Result<bool> {
+    let Some(path) = &target.skill else { return Ok(false) };
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    if !is_ferryx_skill(&std::fs::read_to_string(path)?) {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        // Fails, and is meant to, when the directory still holds anything else.
+        let _ = std::fs::remove_dir(parent);
+    }
+    Ok(true)
 }
 
 fn merge_for(shape: HookShape) -> Option<MergeShape> {
@@ -1268,5 +1357,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn skill_paths_are_claudes_and_the_shared_agents_dir_only() {
+        let home = temp_home();
+        for target in targets(home.path()) {
+            let expected = match target.agent {
+                "claude" => Some(home.path().join(".claude/skills/ferryx/SKILL.md")),
+                "codex" => Some(home.path().join(".agents/skills/ferryx/SKILL.md")),
+                _ => None,
+            };
+            assert_eq!(target.skill, expected, "{}", target.agent);
+        }
+        assert!(is_ferryx_skill(SKILL_SOURCE), "the shipped skill carries the marker");
+        assert!(SKILL_SOURCE.starts_with("---\nname: ferryx\n"));
+    }
+
+    #[test]
+    fn skill_install_creates_the_file_and_reinstall_is_idempotent() {
+        for agent in ["claude", "codex"] {
+            let home = temp_home();
+            let target = target(home.path(), agent);
+            let skill = target.skill.clone().unwrap();
+            assert!(!install_skill_into(&target).unwrap(), "{agent}: no config dir, no skill");
+            assert!(!skill.exists());
+
+            std::fs::create_dir_all(&target.agent_dir).unwrap();
+            install_hook_targets(std::slice::from_ref(&target), &exe());
+            assert_eq!(std::fs::read_to_string(&skill).unwrap(), SKILL_SOURCE, "{agent}");
+            assert!(!install_skill_into(&target).unwrap(), "{agent}: a second install is a no-op");
+            assert_eq!(std::fs::read_dir(skill.parent().unwrap()).unwrap().count(), 1, "no temp file is left");
+
+            // An older managed version is replaced.
+            std::fs::write(&skill, "---\nname: ferryx\nferryx-managed: true\n---\nold\n").unwrap();
+            assert!(install_skill_into(&target).unwrap());
+            assert_eq!(std::fs::read_to_string(&skill).unwrap(), SKILL_SOURCE);
+        }
+    }
+
+    #[test]
+    fn skill_removal_deletes_the_managed_file() {
+        let home = temp_home();
+        let target = target(home.path(), "claude");
+        std::fs::create_dir_all(&target.agent_dir).unwrap();
+        assert!(install_skill_into(&target).unwrap());
+        let skill = target.skill.clone().unwrap();
+        assert!(remove_skill_from(&target).unwrap());
+        assert!(!skill.exists());
+        assert!(!skill.parent().unwrap().exists(), "the emptied ferryx directory goes too");
+        assert!(skill.parent().unwrap().parent().unwrap().is_dir(), "the skills directory stays");
+        assert!(!remove_skill_from(&target).unwrap(), "a second removal finds nothing");
+    }
+
+    #[test]
+    fn skill_edited_by_the_user_survives_install_and_removal() {
+        let home = temp_home();
+        let target = target(home.path(), "codex");
+        std::fs::create_dir_all(&target.agent_dir).unwrap();
+        let skill = target.skill.clone().unwrap();
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        let mine = SKILL_SOURCE.replace("ferryx-managed: true\n", "");
+        assert!(!is_ferryx_skill(&mine));
+        std::fs::write(&skill, &mine).unwrap();
+
+        assert!(!install_skill_into(&target).unwrap());
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), mine);
+        assert!(!remove_skill_from(&target).unwrap());
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), mine);
+
+        // The marker counts only inside the frontmatter.
+        assert!(!is_ferryx_skill("# notes\nferryx-managed: true\n"));
+        assert!(!is_ferryx_skill("---\nname: x\n---\nferryx-managed: true\n"));
     }
 }
