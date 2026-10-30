@@ -1,10 +1,11 @@
 //! Per-session agent observer.
 //!
 //! One task per live PTY wakes on output-hub output (debounced) and on agent-state
-//! self-reports. It keeps its own headless terminal at the pane's real size, runs the
-//! existing screen detectors, and publishes a slim reading when the reading changes.
-//! Idle for a screen-only agent is a quiet-time timer, not a poll. The shared screen
-//! mirror and its `event_tx` are never used.
+//! self-reports. It reads the visible screen from the session's daemon screen mirror
+//! (`TerminalOutputHub::visible_screen_text`), which already tracks the pane's size, runs the
+//! existing screen detectors outside the mirror's lock, and publishes a slim reading when the
+//! reading changes. Output bytes are only a wake signal; the observer parses nothing itself.
+//! Idle for a screen-only agent is a quiet-time timer, not a poll.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,10 +18,8 @@ use tokio::sync::{broadcast, watch};
 use crate::agent_control::events::{classify_screen, AgentEventBus};
 use crate::agent_control::ProviderReport;
 use crate::daemon::agent_state::AgentStateHub;
-use crate::native_terminal::{NativeTerminal, TerminalEngine};
+use crate::terminal::screen_mirror::VisibleScreen;
 use crate::terminal::TerminalService;
-
-const DEFAULT_CAP: usize = 64;
 
 /// How long output has to settle, and how long a quiet screen waits before idle.
 #[derive(Debug, Clone, Copy)]
@@ -46,12 +45,11 @@ struct Slot {
 type Slots = Arc<Mutex<HashMap<String, Slot>>>;
 type WorkspaceLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// Observes every daemon-owned PTY the cap allows.
+/// Observes every daemon-owned PTY.
 pub struct AgentObserverHub {
     terminals: Arc<TerminalService>,
     bus: Arc<AgentEventBus>,
     slots: Slots,
-    cap: usize,
     timing: ObserverTiming,
     sources: Mutex<Option<Arc<AgentStateHub>>>,
     workspace_of: Mutex<Option<WorkspaceLookup>>,
@@ -60,20 +58,18 @@ pub struct AgentObserverHub {
 
 impl AgentObserverHub {
     pub fn new(terminals: Arc<TerminalService>, bus: Arc<AgentEventBus>) -> Self {
-        Self::with_limits(terminals, bus, default_cap(), ObserverTiming::default())
+        Self::with_timing(terminals, bus, ObserverTiming::default())
     }
 
-    pub fn with_limits(
+    pub fn with_timing(
         terminals: Arc<TerminalService>,
         bus: Arc<AgentEventBus>,
-        cap: usize,
         timing: ObserverTiming,
     ) -> Self {
         Self {
             terminals,
             bus,
             slots: Arc::new(Mutex::new(HashMap::new())),
-            cap: cap.max(1),
             timing,
             sources: Mutex::new(None),
             workspace_of: Mutex::new(None),
@@ -102,14 +98,12 @@ impl AgentObserverHub {
         self.slots.lock().len()
     }
 
-    /// Start observing `session_id` unless it is already observed or the cap is full.
+    /// Start observing `session_id` unless it is already observed. A watch costs no parser of
+    /// its own, so every session is observed.
     pub fn watch(&self, session_id: &str) -> bool {
         let mut slots = self.slots.lock();
         if slots.contains_key(session_id) {
             return true;
-        }
-        if slots.len() >= self.cap {
-            return false;
         }
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
         let (stop, stop_rx) = watch::channel(false);
@@ -154,32 +148,12 @@ impl AgentObserverHub {
         }
     }
 
-    /// Observe every PTY the terminal service currently owns, up to the cap.
+    /// Observe every PTY the terminal service currently owns.
     pub fn watch_live(&self) {
         for session_id in self.terminals.list_sessions() {
-            if !self.watch(&session_id) {
-                break;
-            }
+            self.watch(&session_id);
         }
     }
-}
-
-fn default_cap() -> usize {
-    std::env::var("FERRYX_AGENT_OBSERVER_CAP")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_CAP)
-}
-
-fn pane_size(terminals: &TerminalService, session_id: &str) -> (u16, u16) {
-    let (cols, rows) = terminals
-        .get_session(session_id)
-        .map(|pty| pty.get_size())
-        .unwrap_or((80, 24));
-    let cols = if cols == 0 { 80 } else { cols };
-    let rows = if rows == 0 { 24 } else { rows };
-    (cols, rows)
 }
 
 fn provider_report(states: &AgentStateHub, session_id: &str) -> Option<ProviderReport> {
@@ -192,19 +166,9 @@ fn provider_report(states: &AgentStateHub, session_id: &str) -> Option<ProviderR
     })
 }
 
-fn screen_text(engine: &NativeTerminal) -> String {
-    let rows = engine.rows().unwrap_or(0) as usize;
-    let mut lines = Vec::with_capacity(rows);
-    for row in 0..rows {
-        match engine.screen_row_text(row) {
-            Ok(text) => lines.push(text.trim_end().to_string()),
-            Err(_) => break,
-        }
-    }
-    while lines.last().is_some_and(|line| line.is_empty()) {
-        lines.pop();
-    }
-    lines.join("\n")
+/// The session's mirrored screen, or `None` once the service or the session is gone.
+fn read_screen(terminals: &std::sync::Weak<TerminalService>, session_id: &str) -> Option<VisibleScreen> {
+    terminals.upgrade()?.output_hub().visible_screen_text(session_id)
 }
 
 fn publish_if_changed(
@@ -212,11 +176,10 @@ fn publish_if_changed(
     session_id: &str,
     workspace_of: Option<&WorkspaceLookup>,
     provider: Option<&ProviderReport>,
-    engine: &NativeTerminal,
+    screen: &VisibleScreen,
     quiet_elapsed: bool,
 ) {
-    let (cols, rows) = engine.dimensions().unwrap_or((80, 24));
-    let mut draft = classify_screen(provider, cols, rows, &screen_text(engine), quiet_elapsed);
+    let mut draft = classify_screen(provider, screen.cols, screen.rows, &screen.text, quiet_elapsed);
     draft.session_id = session_id.to_string();
     draft.workspace_id = workspace_of.and_then(|lookup| lookup(session_id));
     let changed = match bus.latest(session_id) {
@@ -226,11 +189,6 @@ fn publish_if_changed(
     if changed {
         bus.publish(draft);
     }
-}
-
-fn rebuild(engine: &mut NativeTerminal, history: &[u8]) -> bool {
-    engine.reset();
-    engine.feed(history).is_ok()
 }
 
 async fn observe_session(
@@ -245,23 +203,12 @@ async fn observe_session(
     let Some(service) = terminals.upgrade() else {
         return;
     };
-    let Some((history, mut output)) = service.output_hub().subscribe(&session_id) else {
+    // The raw output stream is only a wake signal: the history is dropped and every chunk's
+    // bytes are ignored, since the hub's screen mirror has already parsed them.
+    let Some((_history, mut output)) = service.output_hub().subscribe(&session_id) else {
         return;
     };
-    let (cols, rows) = pane_size(&service, &session_id);
     drop(service);
-    let mut engine = match NativeTerminal::new(cols, rows) {
-        Ok(engine) => engine,
-        Err(error) => {
-            tracing::warn!(%error, %session_id, "agent observer could not open a headless terminal");
-            return;
-        }
-    };
-    engine.set_pty_writes_suppressed(true);
-    if engine.set_scrollback_limit_lines(Some(0)).is_err() || engine.feed(&history).is_err() {
-        tracing::warn!(%session_id, "agent observer could not replay the pane");
-        return;
-    }
     let mut agent_rx = sources
         .as_ref()
         .map(|states| states.subscribe(&session_id).receiver);
@@ -287,33 +234,14 @@ async fn observe_session(
             }
             incoming = output.recv() => {
                 match incoming {
-                    Ok(bytes) => {
-                        if engine.feed(&bytes).is_err() {
-                            tracing::warn!(%session_id, "agent observer stopped after a feed error");
-                            break;
-                        }
+                    // A lagged receiver missed only wake-ups; the mirror saw every byte.
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
                         dirty = true;
                         quiet_done = false;
                         debounce_at = tokio::time::Instant::now() + timing.debounce;
                         quiet_at = tokio::time::Instant::now() + timing.quiet;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let Some((history, fresh)) = terminals
-                            .upgrade()
-                            .and_then(|service| service.output_hub().subscribe(&session_id))
-                        else {
-                            break;
-                        };
-                        output = fresh;
-                        if !rebuild(&mut engine, &history) {
-                            break;
-                        }
-                        dirty = true;
-                        quiet_done = false;
-                        debounce_at = tokio::time::Instant::now() + timing.debounce;
-                        quiet_at = tokio::time::Instant::now() + timing.quiet;
-                    }
                 }
             }
             update = agent_wait => {
@@ -324,9 +252,7 @@ async fn observe_session(
                         // would fold a turn whose Working and Idle both arrive within one
                         // debounce (a fast turn, or reports queued behind pane output) into a
                         // single Idle, and a delivery would never see that turn start.
-                        let Some(service) = terminals.upgrade() else { break };
-                        sync_size(&service, &session_id, &mut engine);
-                        drop(service);
+                        let Some(screen) = read_screen(&terminals, &session_id) else { break };
                         let provider = ProviderReport {
                             agent: update.state.agent.clone(),
                             state: update.state.state.clone(),
@@ -338,7 +264,7 @@ async fn observe_session(
                             &session_id,
                             workspace_of.as_ref(),
                             Some(&provider),
-                            &engine,
+                            &screen,
                             false,
                         );
                         quiet_done = false;
@@ -357,32 +283,18 @@ async fn observe_session(
                 }
             }
             _ = tokio::time::sleep_until(debounce_at), if dirty => {
-                let Some(service) = terminals.upgrade() else { break };
-                sync_size(&service, &session_id, &mut engine);
-                drop(service);
+                let Some(screen) = read_screen(&terminals, &session_id) else { break };
                 let provider = sources.as_ref().and_then(|states| provider_report(states, &session_id));
-                publish_if_changed(&bus, &session_id, workspace_of.as_ref(), provider.as_ref(), &engine, false);
+                publish_if_changed(&bus, &session_id, workspace_of.as_ref(), provider.as_ref(), &screen, false);
                 dirty = false;
             }
             _ = tokio::time::sleep_until(quiet_at), if !dirty && !quiet_done => {
-                let Some(service) = terminals.upgrade() else { break };
-                sync_size(&service, &session_id, &mut engine);
-                drop(service);
+                let Some(screen) = read_screen(&terminals, &session_id) else { break };
                 let provider = sources.as_ref().and_then(|states| provider_report(states, &session_id));
-                publish_if_changed(&bus, &session_id, workspace_of.as_ref(), provider.as_ref(), &engine, true);
+                publish_if_changed(&bus, &session_id, workspace_of.as_ref(), provider.as_ref(), &screen, true);
                 quiet_done = true;
             }
         }
-    }
-}
-
-fn sync_size(terminals: &TerminalService, session_id: &str, engine: &mut NativeTerminal) {
-    let (cols, rows) = pane_size(terminals, session_id);
-    if engine.cols().ok() == Some(cols) && engine.rows().ok() == Some(rows) {
-        return;
-    }
-    if let Err(error) = engine.resize(cols, rows, 8, 16) {
-        tracing::debug!(%error, %session_id, "agent observer kept the previous pane size");
     }
 }
 
@@ -402,19 +314,16 @@ mod tests {
         }
     }
 
-    fn hub(
-        cap: usize,
-    ) -> (
+    fn hub() -> (
         Arc<TerminalService>,
         Arc<AgentEventBus>,
         Arc<AgentObserverHub>,
     ) {
         let terminals = Arc::new(TerminalService::default());
         let bus = Arc::new(AgentEventBus::new(32));
-        let observers = Arc::new(AgentObserverHub::with_limits(
+        let observers = Arc::new(AgentObserverHub::with_timing(
             Arc::clone(&terminals),
             Arc::clone(&bus),
-            cap,
             timing(),
         ));
         (terminals, bus, observers)
@@ -436,7 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_then_quiet_time_ends_idle_and_a_repeat_is_not_republished() {
-        let (terminals, bus, observers) = hub(4);
+        let (terminals, bus, observers) = hub();
         let session = "observer-quiet";
         terminals.output_hub().register_session(session);
         terminals
@@ -462,19 +371,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_cap_refuses_a_second_live_session() {
-        let (terminals, _bus, observers) = hub(1);
-        terminals.output_hub().register_session("observer-cap-a");
-        terminals.output_hub().register_session("observer-cap-b");
-        assert!(observers.watch("observer-cap-a"));
-        assert!(!observers.watch("observer-cap-b"));
-        assert_eq!(observers.watched(), 1);
-        observers.unwatch("observer-cap-a");
-    }
-
-    #[tokio::test]
     async fn a_provider_report_is_published_without_waiting_for_the_quiet_timer() {
-        let (terminals, bus, observers) = hub(4);
+        let (terminals, bus, observers) = hub();
         let states = Arc::new(AgentStateHub::default());
         let session = "observer-provider";
         terminals.output_hub().register_session(session);
@@ -542,10 +440,9 @@ mod tests {
         let terminals = Arc::new(TerminalService::default());
         let bus = Arc::new(AgentEventBus::new(32));
         // A debounce far longer than the turn: sampling at the debounce would see only Idle.
-        let observers = Arc::new(AgentObserverHub::with_limits(
+        let observers = Arc::new(AgentObserverHub::with_timing(
             Arc::clone(&terminals),
             Arc::clone(&bus),
-            4,
             ObserverTiming {
                 debounce: Duration::from_millis(500),
                 quiet: Duration::from_secs(5),
@@ -597,5 +494,246 @@ mod tests {
             "the second turn's start is in the log after the delivery cursor: {events:?}"
         );
         observers.unwatch(session);
+    }
+
+    /// Every session is observed now that a watch costs no parser of its own: 80 panes all
+    /// reach a reading.
+    #[tokio::test]
+    async fn eighty_sessions_are_all_observed_and_classified() {
+        let (terminals, bus, observers) = hub();
+        let mut readings = bus.subscribe();
+        let sessions: Vec<String> = (0..80).map(|index| format!("observer-many-{index}")).collect();
+        for session in &sessions {
+            terminals.output_hub().register_session(session);
+            terminals.output_hub().publish(session, format!("{session}\r\n$ ").into_bytes());
+            assert!(observers.watch(session));
+        }
+        assert_eq!(observers.watched(), sessions.len());
+        // The bus holds fewer readings than there are sessions, so a lagged receiver is only a
+        // wake-up here; the retained latest reading of each session is what is checked.
+        let all_idle = || {
+            sessions.iter().all(|session| {
+                bus.latest(session)
+                    .is_some_and(|reading| reading.state == AgentControlState::Idle)
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !all_idle() {
+                match readings.recv().await {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => panic!("bus closed"),
+                }
+            }
+        })
+        .await
+        .expect("every session reached a quiet-time reading");
+        for session in &sessions {
+            observers.unwatch(session);
+        }
+    }
+
+    /// The engine the observer used to own: a private parser at the pane size with no
+    /// scrollback, read top to bottom. Kept here only as the reference the mirror must match.
+    struct OldEngine(crate::native_terminal::NativeTerminal);
+
+    impl OldEngine {
+        fn new(cols: u16, rows: u16) -> Self {
+            let mut engine = crate::native_terminal::NativeTerminal::new(cols, rows).unwrap();
+            engine.set_pty_writes_suppressed(true);
+            engine.set_scrollback_limit_lines(Some(0)).unwrap();
+            Self(engine)
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            use crate::native_terminal::TerminalEngine;
+            self.0.feed(bytes).unwrap();
+        }
+
+        fn resize(&mut self, cols: u16, rows: u16) {
+            use crate::native_terminal::TerminalEngine;
+            self.0.resize(cols, rows, 8, 16).unwrap();
+        }
+
+        fn screen(&self) -> VisibleScreen {
+            use crate::native_terminal::TerminalEngine;
+            let (cols, rows) = self.0.dimensions().unwrap();
+            // The old reader started at row 0, which is the top of the screen only while no
+            // scrollback is retained; start past whatever the parser kept so the reference is
+            // the visible screen either way.
+            let top = self.0.scrollback_rows().unwrap();
+            let mut lines: Vec<String> = (top..top + usize::from(rows))
+                .map(|row| self.0.screen_row_text(row).unwrap().trim_end().to_string())
+                .collect();
+            while lines.last().is_some_and(|line| line.is_empty()) {
+                lines.pop();
+            }
+            VisibleScreen {
+                text: lines.join("\n"),
+                cols,
+                rows,
+                alt_screen: self.0.is_alternate_screen().unwrap(),
+            }
+        }
+    }
+
+    fn provider() -> ProviderReport {
+        ProviderReport {
+            agent: Some("claude".into()),
+            state: "working".into(),
+            self_reported: true,
+            detail: None,
+        }
+    }
+
+    /// The mirror's screen and the old engine's screen are the same text at the same size, and
+    /// classify to the same reading with and without a provider report.
+    fn assert_same_classification(mirror: &VisibleScreen, old: &VisibleScreen) {
+        assert_eq!(mirror, old);
+        let provider = provider();
+        for report in [None, Some(&provider)] {
+            for quiet in [false, true] {
+                assert_eq!(
+                    classify_screen(report, mirror.cols, mirror.rows, &mirror.text, quiet),
+                    classify_screen(report, old.cols, old.rows, &old.text, quiet),
+                );
+            }
+        }
+    }
+
+    fn mirrored(cols: u16, rows: u16, session: &str) -> crate::terminal::TerminalOutputHub {
+        let hub = crate::terminal::TerminalOutputHub::default();
+        hub.register_session(session);
+        hub.record_initial_size(session, cols, rows);
+        hub
+    }
+
+    fn scrolling_output(lines: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for line in 0..lines {
+            bytes.extend_from_slice(format!("output line {line}\r\n").as_bytes());
+        }
+        bytes
+    }
+
+    const PERMISSION_SCREEN: &[u8] = b"  Run this command?\r\n  rm -rf build/\r\n\r\n  Do you want to proceed?\r\n  1. Yes  2. No";
+
+    #[test]
+    fn mirror_text_classifies_like_the_old_engine_for_the_same_bytes() {
+        let chunks: [&[u8]; 3] = [&scrolling_output(60), b"\x1b[31mcolored\x1b[0m\r\n", PERMISSION_SCREEN];
+        let session = "observer-equal";
+        let hub = mirrored(80, 24, session);
+        let mut old = OldEngine::new(80, 24);
+        for chunk in chunks {
+            hub.publish(session, chunk.to_vec());
+            old.feed(chunk);
+            let screen = hub.visible_screen_text(session).unwrap();
+            assert!(!screen.text.contains("output line 0\n"), "scrollback is not part of the screen");
+            assert_same_classification(&screen, &old.screen());
+        }
+    }
+
+    #[test]
+    fn alternate_screen_text_comes_from_the_mirror() {
+        let session = "observer-alt";
+        let hub = mirrored(80, 24, session);
+        let mut old = OldEngine::new(80, 24);
+        let mut bytes = scrolling_output(40);
+        bytes.extend_from_slice(b"\x1b[?1049h\x1b[H");
+        bytes.extend_from_slice(PERMISSION_SCREEN);
+        hub.publish(session, bytes.clone());
+        old.feed(&bytes);
+        let screen = hub.visible_screen_text(session).unwrap();
+        assert!(screen.alt_screen);
+        assert!(screen.text.starts_with("  Run this command?"), "{:?}", screen.text);
+        assert_same_classification(&screen, &old.screen());
+
+        hub.publish(session, b"\x1b[?1049l".to_vec());
+        old.feed(b"\x1b[?1049l");
+        let screen = hub.visible_screen_text(session).unwrap();
+        assert!(!screen.alt_screen);
+        assert!(screen.text.contains("output line 39"));
+        assert_same_classification(&screen, &old.screen());
+    }
+
+    /// The size comes from the mirror, which the hub resizes on every recorded resize. The
+    /// output stays within the screen before the grow: growing rows over retained scrollback
+    /// pulls history down in the mirror (as in the real pane), which the old engine kept none of.
+    #[test]
+    fn a_recorded_resize_reaches_the_mirror_text() {
+        let session = "observer-resize";
+        let hub = mirrored(80, 24, session);
+        let mut old = OldEngine::new(80, 24);
+        hub.publish(session, scrolling_output(10));
+        old.feed(&scrolling_output(10));
+        assert_same_classification(&hub.visible_screen_text(session).unwrap(), &old.screen());
+
+        hub.record_resize(session, 120, 40);
+        old.resize(120, 40);
+        hub.publish(session, PERMISSION_SCREEN.to_vec());
+        old.feed(PERMISSION_SCREEN);
+        let screen = hub.visible_screen_text(session).unwrap();
+        assert_eq!((screen.cols, screen.rows), (120, 40));
+        assert_same_classification(&screen, &old.screen());
+
+        hub.record_resize(session, 50, 12);
+        old.resize(50, 12);
+        let screen = hub.visible_screen_text(session).unwrap();
+        assert_eq!((screen.cols, screen.rows), (50, 12));
+        assert_same_classification(&screen, &old.screen());
+    }
+
+    /// `publish_gap` writes a seam line into the mirror that the old engine never received; the
+    /// observer's text leaves it out (and restores the rows it scrolled away), so the reading is
+    /// unchanged. A narrow pane wraps the seam over two rows.
+    #[test]
+    fn the_gap_seam_is_not_part_of_the_classified_text() {
+        for (cols, rows) in [(80, 24), (40, 10)] {
+            let session = format!("observer-gap-{cols}");
+            let hub = mirrored(cols, rows, &session);
+            let mut old = OldEngine::new(cols, rows);
+            hub.publish(&session, scrolling_output(30));
+            old.feed(&scrolling_output(30));
+            hub.publish_gap(&session).unwrap();
+            let screen = hub.visible_screen_text(&session).unwrap();
+            assert!(!screen.text.contains("Ferryx: output stream gap"), "{:?}", screen.text);
+            assert_same_classification(&screen, &old.screen());
+
+            hub.publish(&session, b"after the gap\r\n".to_vec());
+            old.feed(b"after the gap\r\n");
+            hub.publish_gap(&session).unwrap();
+            hub.publish(&session, PERMISSION_SCREEN.to_vec());
+            old.feed(PERMISSION_SCREEN);
+            let screen = hub.visible_screen_text(&session).unwrap();
+            assert!(!screen.text.contains("Ferryx: output stream gap"), "{:?}", screen.text);
+            assert_same_classification(&screen, &old.screen());
+        }
+    }
+
+    /// Measures (records, does not assert) how long `visible_screen_text` holds the mirror
+    /// lock for a full 300x100 screen with full scrollback: the copy-out in `visible_rows`.
+    #[test]
+    fn mirror_lock_hold_for_a_large_screen_is_recorded() {
+        let mut mirror = crate::terminal::screen_mirror::ScreenMirror::new(300, 100).unwrap();
+        let mut bytes = Vec::new();
+        for line in 0..2_500 {
+            bytes.extend_from_slice(format!("line {line:05} {}\r\n", "y".repeat(280)).as_bytes());
+        }
+        mirror.feed(&bytes);
+        let mut holds = Vec::new();
+        let mut rows = None;
+        for _ in 0..20 {
+            let started = Instant::now();
+            rows = mirror.visible_rows();
+            holds.push(started.elapsed());
+        }
+        holds.sort();
+        eprintln!(
+            "agent observer mirror lock hold 300x100: median={:?} max={:?}",
+            holds[holds.len() / 2],
+            holds[holds.len() - 1]
+        );
+        let screen = rows.unwrap().into_screen();
+        assert_eq!((screen.cols, screen.rows), (300, 100));
+        assert!(screen.text.contains("line 02499"));
     }
 }

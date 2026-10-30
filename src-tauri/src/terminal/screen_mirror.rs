@@ -30,6 +30,10 @@ const CELL_HEIGHT_PX: u32 = 16;
 /// frame stays inside the handover payload limit next to the ring itself.
 pub const MAX_HANDOVER_SEED_BYTES: usize = 1024 * 1024;
 
+/// Visible text of the seam line `TerminalOutputHub::publish_gap` feeds into the mirror. Readers
+/// that classify the screen drop it: it is Ferryx's marker, not program output.
+pub const GAP_SEAM_TEXT: &str = "[Ferryx: output stream gap - some terminal output was missed]";
+
 pub struct ScreenMirror {
     terminal: NativeTerminal,
     /// Idle scrollback compression; output and resizes restart its delay.
@@ -56,6 +60,84 @@ fn encode_bytes<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::
 fn decode_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
     let text = String::deserialize(deserializer)?;
     STANDARD.decode(text).map_err(serde::de::Error::custom)
+}
+
+/// The rows of a mirror's visible screen, copied out under its lock and not yet processed.
+pub struct VisibleRows {
+    cols: u16,
+    rows: u16,
+    alt_screen: bool,
+    /// Up to [`seam_slack`] scrollback rows above the visible screen, then the visible rows.
+    lines: Vec<String>,
+}
+
+/// Plain text of a mirror's visible screen: rows trimmed at the end, trailing blank rows and the
+/// gap seam dropped, joined with `\n`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleScreen {
+    pub text: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub alt_screen: bool,
+}
+
+impl VisibleRows {
+    /// Turns the copied rows into text. Runs outside the mirror's lock.
+    ///
+    /// The text is the screen the program's own output produced: gap seams are removed and the
+    /// last `rows` remaining rows kept, so the rows a seam scrolled off the top come back from
+    /// the slack above. A seam starts with CRLF, so when the cursor was already at column 0 it
+    /// leaves a blank row above the seam that the program never wrote; that row is dropped with
+    /// the seam.
+    pub fn into_screen(self) -> VisibleScreen {
+        let seam: String = GAP_SEAM_TEXT.split_whitespace().collect();
+        let mut lines: Vec<String> = Vec::with_capacity(self.lines.len());
+        let mut index = 0;
+        while index < self.lines.len() {
+            if let Some(span) = gap_seam_rows(&self.lines[index..], &seam) {
+                if lines.last().is_some_and(|line| line.is_empty()) {
+                    lines.pop();
+                }
+                index += span;
+                continue;
+            }
+            lines.push(self.lines[index].trim_end().to_string());
+            index += 1;
+        }
+        let excess = lines.len().saturating_sub(usize::from(self.rows));
+        lines.drain(..excess);
+        while lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        VisibleScreen {
+            text: lines.join("\n"),
+            cols: self.cols,
+            rows: self.rows,
+            alt_screen: self.alt_screen,
+        }
+    }
+}
+
+/// Scrollback rows copied above the visible screen: enough to restore what two gap seams, each
+/// wrapped at `cols` and preceded by a blank row, scrolled off the top.
+fn seam_slack(cols: u16) -> usize {
+    2 * (GAP_SEAM_TEXT.len().div_ceil(usize::from(cols.max(1))) + 1)
+}
+
+/// How many rows at the head of `rows` hold one gap seam, which wraps on narrow screens.
+/// Whitespace is ignored so a wrap that falls on a space still matches.
+fn gap_seam_rows(rows: &[String], seam: &str) -> Option<usize> {
+    let mut joined = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        joined.extend(row.split_whitespace());
+        if joined.is_empty() || !seam.starts_with(joined.as_str()) {
+            return None;
+        }
+        if joined.len() == seam.len() {
+            return Some(index + 1);
+        }
+    }
+    None
 }
 
 impl ScreenMirror {
@@ -133,6 +215,24 @@ impl ScreenMirror {
 
     pub fn is_alternate_screen(&self) -> bool {
         self.terminal.is_alternate_screen().unwrap_or(true)
+    }
+
+    /// Copies the visible screen's rows plus a few scrollback rows above them (see
+    /// [`VisibleRows::into_screen`]). Screen coordinates count the active screen's scrollback
+    /// first, so the visible rows start after it. Reads only; idle compression is not re-armed.
+    pub fn visible_rows(&self) -> Option<VisibleRows> {
+        let (cols, rows) = self.terminal.dimensions().ok()?;
+        let top = self.terminal.scrollback_rows().ok()?;
+        let alt_screen = self.terminal.is_alternate_screen().ok()?;
+        let first = top.saturating_sub(seam_slack(cols));
+        let mut lines = Vec::with_capacity(top - first + usize::from(rows));
+        for row in first..top + usize::from(rows) {
+            match self.terminal.screen_row_text(row) {
+                Ok(text) => lines.push(text),
+                Err(_) => break,
+            }
+        }
+        Some(VisibleRows { cols, rows, alt_screen, lines })
     }
 
     /// The mirror's screen as a seed, or `None` when the parser cannot serialize it.
