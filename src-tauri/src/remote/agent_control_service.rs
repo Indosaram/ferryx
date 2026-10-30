@@ -711,7 +711,11 @@ pub(crate) async fn prompt_answer(
         let runtime = reference_chat_runtime();
         let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
         let screen = ReferenceGatewayScreenReader { backend: Arc::clone(&state.session_backend) };
-        let writer = reference_input::ReferenceSessionWriter::new(state.session_backend.as_ref());
+        let writer = reference_input::ReferenceSessionWriter::new(
+            state.session_backend.as_ref(),
+            &state.agent_events,
+            &request_id,
+        );
         let clock = reference_input::SystemReferenceClock;
         runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
     });
