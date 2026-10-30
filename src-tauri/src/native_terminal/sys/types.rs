@@ -131,6 +131,37 @@ pub struct GhosttyBuffer {
     pub len: usize,
 }
 
+/// OSC 7501 program status report matching `GhosttyTerminalProgramStatus` in
+/// `include/ghostty/vt/terminal.h`. `state` and `kind` are C enums (int-sized); every string
+/// is borrowed and only valid during the callback.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct GhosttyTerminalProgramStatus {
+    pub size: usize,
+    pub state: c_int,
+    pub kind: c_int,
+    pub progress: i8,
+    pub id: GhosttyString,
+    pub app: GhosttyString,
+    pub title: GhosttyString,
+    pub message: GhosttyString,
+}
+
+/// Shell integration event (OSC 133) matching `GhosttyTerminalSemanticPrompt` in
+/// `include/ghostty/vt/terminal.h`. Strings are borrowed and only valid during the callback.
+/// Fields Ferryx does not read carry a leading underscore; the layout is unchanged.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct GhosttyTerminalSemanticPrompt {
+    pub size: usize,
+    pub kind: c_int,
+    pub prompt_kind: c_int,
+    pub _has_exit_code: bool,
+    pub _exit_code: i32,
+    pub _command: GhosttyString,
+    pub _error: GhosttyString,
+}
+
 /// RGB color structure matching `include/ghostty/vt/color.h`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -532,4 +563,14 @@ const _: () = {
     assert!(std::mem::size_of::<GhosttyRenderStateCursor>() == 24);
     // size(8) + compression_supported(1) + pad(7) + 12 x uint64_t(96)
     assert!(std::mem::size_of::<GhosttyTerminalMemoryUsage>() == 112);
+    // size(8) + state(4) + kind(4) + progress(1) + pad(7) + 4 x GhosttyString(16)
+    assert!(std::mem::size_of::<GhosttyTerminalProgramStatus>() == 88);
+    assert!(std::mem::offset_of!(GhosttyTerminalProgramStatus, progress) == 16);
+    assert!(std::mem::offset_of!(GhosttyTerminalProgramStatus, id) == 24);
+    assert!(std::mem::offset_of!(GhosttyTerminalProgramStatus, message) == 72);
+    // size(8) + kind(4) + prompt_kind(4) + has_exit_code(1) + pad(3) + exit_code(4)
+    // + 2 x GhosttyString(16)
+    assert!(std::mem::size_of::<GhosttyTerminalSemanticPrompt>() == 56);
+    assert!(std::mem::offset_of!(GhosttyTerminalSemanticPrompt, _exit_code) == 20);
+    assert!(std::mem::offset_of!(GhosttyTerminalSemanticPrompt, _command) == 24);
 };
