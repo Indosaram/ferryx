@@ -132,6 +132,18 @@ pub fn unlink(popup_browser_id: &str) -> Option<PopupLink> {
     links().lock().remove(popup_browser_id)
 }
 
+/// Drops every pending close and popup link whose opener is `opener_browser_id`, for a
+/// closing tab. Nothing can consume them once the opener is gone, so without this they
+/// would live for the rest of the process. The popup tabs themselves stay open.
+pub fn forget_opener(opener_browser_id: &str) {
+    pending_closes()
+        .lock()
+        .retain(|(opener, _)| opener != opener_browser_id);
+    links()
+        .lock()
+        .retain(|_, link| link.opener_browser_id != opener_browser_id);
+}
+
 /// Drops every link and pending close. Tests only: the registry is process-wide.
 #[cfg(test)]
 pub fn clear_all() {
@@ -161,6 +173,20 @@ pub fn origin_of(url: &str) -> Option<String> {
 pub fn target_origin_allows(opener_origin: &str, target_origin: &str) -> bool {
     let target = target_origin.trim();
     target == "*" || target == opener_origin
+}
+
+/// Whether a message may be delivered to a recipient whose recorded origin may be unknown.
+///
+/// A page that named no `targetOrigin` is delivered as before. A named `targetOrigin` is
+/// checked against the recipient's recorded origin; when that origin is unknown (for example
+/// a popup still on about:blank) only `*` permits delivery, because nothing proves the
+/// recipient is the origin the page asked for.
+pub fn target_origin_permits(recipient_origin: Option<&str>, target_origin: Option<&str>) -> bool {
+    match (recipient_origin, target_origin) {
+        (_, None) => true,
+        (Some(recipient), Some(target)) => target_origin_allows(recipient, target),
+        (None, Some(target)) => target.trim() == "*",
+    }
 }
 
 /// JSON-encodes a string for embedding in a script, escaping the sequences that would
@@ -496,6 +522,27 @@ mod tests {
     }
 
     #[test]
+    fn forget_opener_drops_only_that_openers_pending_closes_and_links() {
+        let _guard = registry_test_lock().blocking_lock();
+        clear_all();
+        record_pending_close("opener-gone", "g-p1");
+        record_pending_close("opener-kept", "k-p1");
+        assert!(link("popup-of-gone", "opener-gone", "g-p2"));
+        assert!(link("popup-of-kept", "opener-kept", "k-p2"));
+
+        forget_opener("opener-gone");
+
+        assert!(!is_pending_close("opener-gone", "g-p1"));
+        assert_eq!(lookup("popup-of-gone"), None);
+        assert!(is_pending_close("opener-kept", "k-p1"));
+        assert_eq!(
+            popup_for_handle("opener-kept", "k-p2").as_deref(),
+            Some("popup-of-kept")
+        );
+        clear_all();
+    }
+
+    #[test]
     fn popup_message_script_embeds_opener_origin_and_binds_opener_source() {
         // RED when Object.defineProperty fails silently instead of logging diagnostics,
         // or when source configuration suppresses event dispatch.
@@ -593,6 +640,16 @@ mod tests {
         assert!(rejected.contains("https://app.example.com"));
         assert!(rejected.contains("https://auth.example.com"));
         assert!(!rejected.contains("dispatchEvent"));
+    }
+
+    #[test]
+    fn unknown_recipient_origin_permits_only_a_wildcard_target() {
+        assert!(target_origin_permits(None, None));
+        assert!(target_origin_permits(None, Some("*")));
+        assert!(!target_origin_permits(None, Some("https://a.com")));
+        assert!(target_origin_permits(Some("https://a.com"), Some("https://a.com")));
+        assert!(!target_origin_permits(Some("https://b.com"), Some("https://a.com")));
+        assert!(target_origin_permits(Some("https://b.com"), None));
     }
 
     #[test]
