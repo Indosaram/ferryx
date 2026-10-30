@@ -36,6 +36,9 @@ export function parseDelimited(text: string, delimiter: "," | "\t"): string[][] 
   let currentRow: string[] = [];
   let currentField = "";
   let inQuotes = false;
+  // A quote opens a quoted field only as the field's first character (RFC 4180);
+  // anywhere else (e.g. `5" pipe`) it is literal text.
+  let fieldStarted = false;
   let i = 0;
   const len = text.length;
 
@@ -59,8 +62,9 @@ export function parseDelimited(text: string, delimiter: "," | "\t"): string[][] 
         continue;
       }
     } else {
-      if (char === '"') {
+      if (char === '"' && !fieldStarted) {
         inQuotes = true;
+        fieldStarted = true;
         i++;
         continue;
       }
@@ -68,6 +72,7 @@ export function parseDelimited(text: string, delimiter: "," | "\t"): string[][] 
       if (char === delimiter) {
         currentRow.push(currentField);
         currentField = "";
+        fieldStarted = false;
         i++;
         continue;
       }
@@ -80,6 +85,7 @@ export function parseDelimited(text: string, delimiter: "," | "\t"): string[][] 
         rows.push(currentRow);
         currentRow = [];
         currentField = "";
+        fieldStarted = false;
         i++;
         continue;
       }
@@ -89,11 +95,13 @@ export function parseDelimited(text: string, delimiter: "," | "\t"): string[][] 
         rows.push(currentRow);
         currentRow = [];
         currentField = "";
+        fieldStarted = false;
         i++;
         continue;
       }
 
       currentField += char;
+      fieldStarted = true;
       i++;
     }
   }

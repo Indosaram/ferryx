@@ -164,30 +164,61 @@ export function isLikelyRemoteFilePath(path: string): boolean {
 
 const PROSE_SLASH_WORDS = new Set(["n/a", "w/o", "and/or", "yes/no", "on/off", "he/she", "his/her", "s/he", "c/o"]);
 
+type RemoteFetchResult = { localPath: string; remotePath: string; byteLength: number };
+
+/** One fetch per (workspace, cwd, path) at a time: a fetch can move up to 8 MiB over SSH, so
+ * repeated clicks while it runs share it instead of starting parallel downloads. */
+const inFlightRemoteFetches = new Map<string, Promise<RemoteFetchResult>>();
+
+/** User copy for a failed remote fetch, keyed on the backend's machine reason. */
+export function remoteFileFetchErrorMessage(error: unknown): string | null {
+  const details = (error as { details?: { reason?: unknown; maxBytes?: unknown } | null } | null)?.details ?? {};
+  switch (details.reason) {
+    case "remoteFileMissing":
+      return "The remote file does not exist or is not a regular file.";
+    case "remoteFileTooLarge":
+      return typeof details.maxBytes === "number"
+        ? `Remote files larger than ${Math.round(details.maxBytes / (1024 * 1024))} MiB cannot be opened.`
+        : "The remote file is too large to open.";
+    case "invalidRemotePath":
+      return "This link does not name a valid path on the remote host.";
+    case "remoteFileNotLaunchable":
+      return "Files from a remote host only open in the preview or an editor, not with the system opener.";
+    default:
+      return null;
+  }
+}
+
 export async function openRemoteFileToken(
   token: TerminalFileToken,
   opts: OpenRemoteFileTokenOptions,
 ): Promise<boolean> {
   const paired = opts.workspaceId.startsWith("daemon:");
-  const fetched = await opts.invokeFn<{
-    localPath: string;
-    remotePath: string;
-    byteLength: number;
-  }>(
-    paired ? "cmd_paired_file_fetch" : "cmd_remote_file_fetch",
-    paired
-      ? {
-          workspaceId: opts.workspaceId,
-          path: token.path,
-          cwd: opts.cwd ?? null,
-          sessionId: opts.sessionId ?? null,
-        }
-      : {
-          workspaceId: opts.workspaceId,
-          path: token.path,
-          cwd: opts.cwd ?? null,
-        },
-  );
+  const key = [opts.workspaceId, opts.cwd ?? "", paired ? (opts.sessionId ?? "") : "", token.path].join("\0");
+  let pending = inFlightRemoteFetches.get(key);
+  if (!pending) {
+    pending = opts.invokeFn<RemoteFetchResult>(
+      paired ? "cmd_paired_file_fetch" : "cmd_remote_file_fetch",
+      paired
+        ? {
+            workspaceId: opts.workspaceId,
+            path: token.path,
+            cwd: opts.cwd ?? null,
+            sessionId: opts.sessionId ?? null,
+          }
+        : {
+            workspaceId: opts.workspaceId,
+            path: token.path,
+            cwd: opts.cwd ?? null,
+          },
+    );
+    inFlightRemoteFetches.set(key, pending);
+    const settled = () => {
+      if (inFlightRemoteFetches.get(key) === pending) inFlightRemoteFetches.delete(key);
+    };
+    pending.then(settled, settled);
+  }
+  const fetched = await pending;
 
   return opts.openLocal({
     ...token,

@@ -178,4 +178,87 @@ describe("FilePreviewText review fixes", () => {
     expect(await screen.findByAltText("logo")).toHaveAttribute("src", childAsset().mediaUrl);
     expect(requestImage).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps an already-loaded image when the child-handle budget reaches zero", async () => {
+    const requestImage = vi.fn(async () => childAsset());
+    const md = "![logo](./img/logo.png)\n";
+    // Like the controller's capability, one object per generation whose budget
+    // is a live getter that drops as children are granted.
+    let remaining = 32;
+    const capability = capabilityOf({ requestImage });
+    Object.defineProperty(capability, "remainingChildHandles", { get: () => remaining });
+    const { rerender } = render(<FilePreviewText {...markdownProps(md, { markdown: capability })} />);
+    expect(await screen.findByAltText("logo")).toHaveAttribute("src", childAsset().mediaUrl);
+
+    remaining = 0;
+    rerender(<FilePreviewText {...markdownProps(md, { markdown: capability })} />);
+    expect(await screen.findByAltText("logo")).toHaveAttribute("src", childAsset().mediaUrl);
+    expect(screen.queryByTestId("file-preview-rejected-image")).toBeNull();
+    expect(requestImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("still blocks an image that never requested a handle once the budget is spent", () => {
+    const requestImage = vi.fn(async () => childAsset());
+    render(
+      <FilePreviewText
+        {...markdownProps("![logo](./img/logo.png)\n", {
+          markdown: capabilityOf({ requestImage, remainingChildHandles: 0 }),
+        })}
+      />,
+    );
+    expect(screen.getByTestId("file-preview-rejected-image")).toHaveAttribute("data-reason", "child-handle-limit");
+    expect(requestImage).not.toHaveBeenCalled();
+  });
+
+  it("scrolls the TOC target inside its own document, not a same-id element elsewhere", () => {
+    const decoy = document.createElement("h2");
+    decoy.id = "install";
+    const decoyScroll = vi.fn();
+    decoy.scrollIntoView = decoyScroll;
+    document.body.prepend(decoy);
+    try {
+      const { container } = render(<FilePreviewText {...markdownProps("# Intro\n\n## Install\n")} />);
+      const heading = container.querySelector('[id="install"]') as HTMLElement;
+      const headingScroll = vi.fn();
+      heading.scrollIntoView = headingScroll;
+      fireEvent.click(screen.getByTestId("file-preview-md-toc-toggle"));
+      fireEvent.click(screen.getByTestId("file-preview-md-toc-item-install"));
+      expect(headingScroll).toHaveBeenCalledWith({ block: "start" });
+      expect(decoyScroll).not.toHaveBeenCalled();
+    } finally {
+      decoy.remove();
+    }
+  });
+
+  it("keeps the caret marker on a line that also has search matches", () => {
+    render(
+      <FilePreviewText
+        {...propsOf({ payload: payloadOf({ text: "hello world\n" }), target: { line: 1, col: 3 } })}
+      />,
+    );
+    expect(screen.getByTestId("file-preview-caret")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("file-preview-search-input"), { target: { value: "hello" } });
+    expect(screen.getByTestId("file-preview-match-0")).toBeInTheDocument();
+    expect(screen.getByTestId("file-preview-caret")).toBeInTheDocument();
+    expect(screen.getByTestId("file-preview-line-1")).toHaveTextContent("hello world");
+  });
+
+  it("announces search status politely", () => {
+    render(<FilePreviewText {...propsOf({ payload: payloadOf({ text: "ab\n" }) })} />);
+    fireEvent.change(screen.getByTestId("file-preview-search-input"), { target: { value: "ab" } });
+    expect(screen.getByTestId("file-preview-search-status")).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("marks the toolbar and TOC as hidden from print and keeps content selectable", () => {
+    render(<FilePreviewText {...markdownProps("# Title\n")} />);
+    fireEvent.click(screen.getByTestId("file-preview-md-toc-toggle"));
+    expect(screen.getByTestId("file-preview-text-toolbar")).toHaveAttribute("data-print-hide");
+    expect(screen.getByTestId("file-preview-md-toc")).toHaveAttribute("data-print-hide");
+    expect(screen.getByTestId("file-preview-markdown")).toHaveClass("selectable");
+  });
+
+  it("makes the source view selectable", () => {
+    render(<FilePreviewText {...propsOf()} />);
+    expect(screen.getByTestId("file-preview-source")).toHaveClass("selectable");
+  });
 });

@@ -7,8 +7,21 @@
     visibility: visible;
   }
   [data-file-preview-print-root] {
-    position: absolute;
-    inset: 0;
-    overflow: visible;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+  }
+  /* Export PDF must paginate the whole document, not the scrolled viewport. */
+  [data-file-preview-print-root],
+  [data-file-preview-print-root] * {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+  }
+  [data-file-preview-print-root] [data-print-hide],
+  [data-file-preview-print-root] [data-print-hide] * {
+    display: none !important;
   }
 }

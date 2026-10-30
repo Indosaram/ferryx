@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ChevronDown, ExternalLink, FileDown, RotateCcw } from "lucide-react";
 import { toast } from "./ui/sonner";
 
@@ -13,7 +14,10 @@ import type { FilePreviewController, FilePreviewState } from "../lib/filePreview
 import { checkFilePreviewChanged } from "../lib/filePreviewCommands";
 import { getFilePreview, retainFilePreview, subscribeFilePreviews } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
+import { filePreviewErrorReason } from "../lib/filePreviewTypes";
+import { failureHeadline } from "../lib/filePreviewFailureCopy";
 import { extractIpcErrorMessage } from "../lib/sshHosts";
+import { openPermissionsSystemSettings } from "../lib/tauri";
 import { listOpenWithApps, openWithApp, printCurrentWebview, type OpenWithApps } from "../lib/fileOpenWith";
 import "../styles/filePreviewPrint.css";
 
@@ -78,6 +82,8 @@ function FilePreviewPaneBody({
   const [appsData, setAppsData] = useState<OpenWithApps>({ apps: [], supportsChooser: false });
   const [isLoadingApps, setIsLoadingApps] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const openWithTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const openWithMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setHasDiskChange(false);
@@ -94,7 +100,12 @@ function FilePreviewPaneBody({
             setHasDiskChange(true);
           }
         })
-        .catch(() => {});
+        .catch((error: unknown) => {
+          // A tab can outlive its backend capability (15 min idle lease). Once the
+          // handle is revoked every later read 404s, so reopen instead of leaving a
+          // dead view that never reports changes again.
+          if (filePreviewErrorReason(error) === "ExpiredHandle") void controller.reload();
+        });
     };
 
     const handleVisibilityChange = () => {
@@ -110,23 +121,8 @@ function FilePreviewPaneBody({
       window.removeEventListener("focus", onCheckChange);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [state.status === "ready" ? state.payload.handle : null]);
+  }, [state.status === "ready" ? state.payload.handle : null, controller]);
 
-  if (state.status === "closed") {
-    return <div data-testid="file-preview-pane-pending" data-status="closed" className="h-full w-full" />;
-  }
-  const rendererProps = {
-    generation: state.generation,
-    onReload: () => {
-      void controller.reload();
-    },
-    onExternalOpen: () => {
-      void controller.openExternal();
-    },
-    onFailure: (failure: Parameters<FilePreviewController["reportFailure"]>[1]) => {
-      controller.reportFailure(state.generation, failure);
-    },
-  };
   const filePath =
     state.status === "ready"
       ? ((state.payload as { resolvedPath?: string | null }).resolvedPath ?? path)
@@ -141,20 +137,46 @@ function FilePreviewPaneBody({
       }
     };
 
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpenWithOpen(false);
-      }
-    };
-
     document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
 
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
     };
   }, [openWithOpen]);
+
+  // Opening the menu moves focus into it, as a menu button should.
+  useEffect(() => {
+    if (!openWithOpen) return;
+    openWithMenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+  }, [openWithOpen]);
+
+  const handleOpenWithKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (!openWithOpen) return;
+      if (event.key === "Escape") {
+        // Escape belongs to the menu here, not to the pane or tab around it.
+        event.preventDefault();
+        event.stopPropagation();
+        setOpenWithOpen(false);
+        openWithTriggerRef.current?.focus();
+        return;
+      }
+      const items = Array.from(
+        openWithMenuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [],
+      );
+      if (items.length === 0) return;
+      const current = items.indexOf(document.activeElement as HTMLElement);
+      let next: number;
+      if (event.key === "ArrowDown") next = current < 0 ? 0 : (current + 1) % items.length;
+      else if (event.key === "ArrowUp") next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = items.length - 1;
+      else return;
+      event.preventDefault();
+      items[next]?.focus();
+    },
+    [openWithOpen],
+  );
 
   const handleToggleOpenWith = useCallback(() => {
     const next = !openWithOpen;
@@ -206,6 +228,24 @@ function FilePreviewPaneBody({
     }
   }, []);
 
+  // Every hook above runs on every render: the closed state returns only here,
+  // so a closed <-> loading transition never changes the hook order.
+  if (state.status === "closed") {
+    return <div data-testid="file-preview-pane-pending" data-status="closed" className="h-full w-full" />;
+  }
+  const rendererProps = {
+    generation: state.generation,
+    onReload: () => {
+      void controller.reload();
+    },
+    onExternalOpen: () => {
+      void controller.openExternal();
+    },
+    onFailure: (failure: Parameters<FilePreviewController["reportFailure"]>[1]) => {
+      controller.reportFailure(state.generation, failure);
+    },
+  };
+
   return (
     <div data-testid="file-preview-pane" data-preview-id={previewId} className="flex h-full min-h-0 w-full flex-col bg-background">
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-border px-2">
@@ -248,8 +288,9 @@ function FilePreviewPaneBody({
             <ExternalLink className="size-3" aria-hidden />
             Open externally
           </button>
-          <div className="relative inline-block" ref={menuRef}>
+          <div className="relative inline-block" ref={menuRef} onKeyDown={handleOpenWithKeyDown}>
             <button
+              ref={openWithTriggerRef}
               type="button"
               data-testid="file-preview-open-with"
               aria-haspopup="menu"
@@ -262,6 +303,7 @@ function FilePreviewPaneBody({
             </button>
             {openWithOpen && (
               <div
+                ref={openWithMenuRef}
                 role="menu"
                 aria-label="Open with"
                 className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
@@ -276,8 +318,7 @@ function FilePreviewPaneBody({
                 </button>
                 {isLoadingApps ? (
                   <div
-                    role="menuitem"
-                    aria-disabled="true"
+                    role="presentation"
                     className="px-2 py-1.5 text-[12px] text-muted-foreground"
                   >
                     Loading…
@@ -297,8 +338,7 @@ function FilePreviewPaneBody({
                     ))}
                     {appsData.apps.length === 0 && (
                       <div
-                        role="menuitem"
-                        aria-disabled="true"
+                        role="presentation"
                         className="px-2 py-1.5 text-[12px] text-muted-foreground"
                       >
                         No other apps found
@@ -341,7 +381,19 @@ function FilePreviewPaneBody({
       <div className="min-h-0 flex-1 overflow-hidden">
         {state.status === "failed" ? (
           <div data-testid="file-preview-failure" data-reason={state.failure.reason ?? "unknown"} className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-            <p className="text-[13px] font-semibold text-foreground">{state.failure.message}</p>
+            <p className="text-[13px] font-semibold text-foreground">{failureHeadline(state.failure.reason)}</p>
+            <p className="selectable max-w-prose break-words text-[11px] text-muted-foreground">{state.failure.message}</p>
+            {state.failure.details?.fullDiskAccessRequired === true ? (
+              <div data-testid="file-preview-fda-explainer" className="flex max-w-prose flex-col items-center gap-2 rounded-md border border-border bg-muted/20 px-4 py-3">
+                <p className="text-[12px] text-foreground">
+                  macOS blocked this read because the file is in a protected folder. Turn on Full Disk Access for Ferryx, then reload.
+                </p>
+                <button type="button" data-testid="file-preview-open-fda-settings" className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-[11px]" onClick={() => void openPermissionsSystemSettings("full_disk_access").catch(() => {})}>
+                  <ExternalLink className="size-3.5" aria-hidden />
+                  Open System Settings
+                </button>
+              </div>
+            ) : null}
             <button type="button" data-testid="file-preview-reload" className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-[11px]" onClick={() => void controller.reload()}>
               <RotateCcw className="size-3.5" aria-hidden />
               Reload

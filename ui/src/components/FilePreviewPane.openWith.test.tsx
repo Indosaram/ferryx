@@ -295,4 +295,74 @@ describe("FilePreviewPane openWith and print", () => {
 
     expect(screen.queryByTestId("file-preview-export-pdf")).toBeNull();
   });
+
+  it("status rows are not menu items and the menu supports keyboard navigation and Escape", async () => {
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_file_open_with_apps") {
+        return { apps: [{ id: "editor-1", name: "Custom Editor" }], supportsChooser: true };
+      }
+      return undefined;
+    });
+    const outerKeyDown = vi.fn();
+    render(
+      <FilePreviewPane
+        previewId="preview-1"
+        path="a.txt"
+        backendSessionId="back-1"
+        line={null}
+        col={null}
+        workspaceId={null}
+      />,
+    );
+    const trigger = screen.getByTestId("file-preview-open-with");
+    fireEvent.click(trigger);
+    const defaultApp = screen.getByRole("menuitem", { name: "Default app" });
+    expect(defaultApp).toHaveFocus();
+    expect(screen.getByText("Loading…")).toHaveAttribute("role", "presentation");
+    expect(screen.getAllByRole("menuitem")).toHaveLength(1);
+
+    const editor = await screen.findByRole("menuitem", { name: "Custom Editor" });
+    const chooser = screen.getByRole("menuitem", { name: "Choose application..." });
+    const menu = screen.getByRole("menu");
+
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(editor).toHaveFocus();
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(chooser).toHaveFocus();
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    expect(defaultApp).toHaveFocus();
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(chooser).toHaveFocus();
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(defaultApp).toHaveFocus();
+
+    // Escape must stay inside the menu: a document-level handler (the pane or
+    // dialog closing on Escape) must never see it.
+    document.addEventListener("keydown", outerKeyDown);
+    fireEvent.keyDown(defaultApp, { key: "Escape" });
+    document.removeEventListener("keydown", outerKeyDown);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(outerKeyDown).not.toHaveBeenCalled();
+  });
+
+  it("renders 'No other apps found' as a presentation row", async () => {
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cmd_file_open_with_apps") return { apps: [], supportsChooser: false };
+      return undefined;
+    });
+    render(
+      <FilePreviewPane
+        previewId="preview-1"
+        path="a.txt"
+        backendSessionId="back-1"
+        line={null}
+        col={null}
+        workspaceId={null}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("file-preview-open-with"));
+    expect(await screen.findByText("No other apps found")).toHaveAttribute("role", "presentation");
+    expect(screen.getAllByRole("menuitem")).toHaveLength(1);
+  });
 });

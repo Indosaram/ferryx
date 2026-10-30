@@ -1,9 +1,67 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+
+const openExternalUrl = vi.hoisted(() => vi.fn(async (_url: string) => undefined));
+vi.mock("../lib/browserTauri", () => ({ openExternalUrl }));
 
 import { FilePreviewNotebook } from "./FilePreviewNotebook";
 
 describe("FilePreviewNotebook", () => {
+  afterEach(cleanup);
+
+  it("renders http links as buttons that open the system browser and other links as inert text", () => {
+    const notebook = JSON.stringify({
+      cells: [{ cell_type: "markdown", source: "[docs](https://example.com/x) [bad](javascript:alert(1))" }],
+    });
+    const { container } = render(<FilePreviewNotebook text={notebook} />);
+    expect(container.querySelector("a")).toBeNull();
+    const links = screen.getAllByTestId("notebook-link");
+    expect(links).toHaveLength(1);
+    const docs = links[0];
+    expect(docs.tagName).toBe("BUTTON");
+    expect(docs).toHaveAttribute("type", "button");
+    fireEvent.click(docs);
+    expect(openExternalUrl).toHaveBeenCalledWith("https://example.com/x");
+    openExternalUrl.mockClear();
+    const bad = screen.getByText("bad");
+    expect(bad.tagName).toBe("SPAN");
+    fireEvent.click(bad);
+    expect(openExternalUrl).not.toHaveBeenCalled();
+  });
+
+  it("styles markdown lists and headings without a typography plugin and allows selection", () => {
+    const notebook = JSON.stringify({
+      cells: [{ cell_type: "markdown", source: "## Section\n\n- one\n- two\n\n`x`" }],
+    });
+    const { container } = render(<FilePreviewNotebook text={notebook} />);
+    expect(screen.getByRole("heading", { level: 2 }).className).toContain("font-semibold");
+    expect(container.querySelector("ul")?.className).toContain("list-disc");
+    expect(container.querySelector("code")?.className).toContain("font-mono");
+    expect(screen.getByTestId("file-preview-notebook")).toHaveClass("selectable");
+  });
+
+  it("does not fetch remote markdown images", () => {
+    const notebook = JSON.stringify({
+      cells: [{ cell_type: "markdown", source: "![pixel](https://tracker.example/p.png)" }],
+    });
+    const { container } = render(<FilePreviewNotebook text={notebook} />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByTestId("notebook-image-blocked")).toHaveTextContent("pixel");
+  });
+
+  it("strips ANSI colors from stream output", () => {
+    const notebook = JSON.stringify({
+      cells: [{
+        cell_type: "code",
+        execution_count: 1,
+        source: "print()",
+        outputs: [{ output_type: "stream", name: "stdout", text: "\u001b[32mok\u001b[0m" }],
+      }],
+    });
+    render(<FilePreviewNotebook text={notebook} />);
+    expect(screen.getByText("ok")).toBeInTheDocument();
+  });
+
   it("renders invalid banner when parseNotebook returns null", () => {
     render(<FilePreviewNotebook text="not json" />);
     const invalidElem = screen.getByTestId("file-preview-notebook-invalid");
