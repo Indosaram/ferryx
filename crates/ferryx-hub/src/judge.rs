@@ -25,6 +25,16 @@ pub enum Purpose {
     GapAssess,
     /// Supervisor goal loop: the blind second check before a lane is called complete.
     ConvergenceCheck,
+    /// Owner reporting: whether an owner message objects to or restores a kind of report.
+    ReportFeedback,
+    /// Owner reporting: whether a borderline report body is internal progress text.
+    ReportLeak,
+    /// Owner reporting: whether a bot message promises later work.
+    Commitment,
+    /// Owner reporting: whether a new owner directive supersedes an older one.
+    DirectiveConflict,
+    /// Lesson ledger: rules learned from a closed goal or an objected report.
+    LessonReflect,
 }
 
 /// The fixed instruction of every engine choice call: its stable prompt prefix.
@@ -41,6 +51,11 @@ impl Purpose {
             Self::CronCause => "cron_cause",
             Self::GapAssess => "gap_assess",
             Self::ConvergenceCheck => "convergence_check",
+            Self::ReportFeedback => "report_feedback",
+            Self::ReportLeak => "report_leak",
+            Self::Commitment => "commitment",
+            Self::DirectiveConflict => "directive_conflict",
+            Self::LessonReflect => "lesson_reflect",
         }
     }
 
@@ -52,6 +67,9 @@ impl Purpose {
             Self::CronCause => "needs_owner_login_or_quota",
             Self::DoneDiff => "diff_gate_failed",
             Self::GapAssess | Self::ConvergenceCheck => "judge_unavailable",
+            Self::ReportFeedback | Self::Commitment | Self::DirectiveConflict => "none",
+            Self::ReportLeak => "owner_facing",
+            Self::LessonReflect => "no_lesson",
         }
     }
 
@@ -63,6 +81,9 @@ impl Purpose {
             Self::CronCause => "needs_owner_login_or_quota",
             Self::DoneDiff => "diff_gate_failed",
             Self::GapAssess | Self::ConvergenceCheck => "judge_unavailable",
+            Self::ReportFeedback | Self::Commitment | Self::DirectiveConflict => "none",
+            Self::ReportLeak => "owner_facing",
+            Self::LessonReflect => "no_lesson",
         }
     }
 

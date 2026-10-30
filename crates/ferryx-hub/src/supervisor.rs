@@ -3688,6 +3688,7 @@ pub mod completion;
 pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
+pub mod lessons;
 pub mod memory;
 pub mod receipts;
 pub mod request;
