@@ -62,6 +62,18 @@ pub fn clamp_capture_dimensions(width: u32, height: u32) -> (u32, u32) {
     (clamped_w, clamped_h)
 }
 
+/// WKSnapshotConfiguration.snapshotWidth is in points, and WebKit renders the snapshot at
+/// the window's backing scale. Returns the point width whose bitmap is `target_pixels`
+/// wide, so a 2x display does not double the frame past the capture caps.
+pub fn snapshot_width_points(target_pixels: u32, backing_scale: f64) -> f64 {
+    let scale = if backing_scale.is_finite() && backing_scale >= 1.0 {
+        backing_scale
+    } else {
+        1.0
+    };
+    target_pixels as f64 / scale
+}
+
 /// The target image encoding for browser snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SnapshotFormat {
@@ -492,9 +504,16 @@ pub async fn capture_webview_snapshot_with_coordinator<R: tauri::Runtime>(
             };
 
             let config: Option<Retained<AnyObject>> = if let Some(tw) = target_w {
+                let window: Option<Retained<AnyObject>> = msg_send![view, window];
+                let backing_scale: f64 = match window.as_deref() {
+                    Some(window) => msg_send![window, backingScaleFactor],
+                    None => 1.0,
+                };
                 let conf: Retained<AnyObject> = msg_send![class!(WKSnapshotConfiguration), new];
-                let width_num: Retained<AnyObject> =
-                    msg_send![class!(NSNumber), numberWithDouble: tw as f64];
+                let width_num: Retained<AnyObject> = msg_send![
+                    class!(NSNumber),
+                    numberWithDouble: snapshot_width_points(tw, backing_scale)
+                ];
                 let _: () = msg_send![&*conf, setSnapshotWidth: &*width_num];
                 Some(conf)
             } else {
@@ -1178,5 +1197,16 @@ mod tests {
         let received = rx.blocking_recv().expect("Channel has message");
         let snapshot = received.expect("Snapshot ok");
         assert_eq!(snapshot.width, 1);
+    }
+
+    // A 2x display renders the snapshot at twice its point width, so the requested pixel
+    // width is halved into points; a bad scale falls back to 1x.
+    #[test]
+    fn snapshot_width_points_divides_out_the_backing_scale() {
+        assert_eq!(snapshot_width_points(2048, 2.0), 1024.0);
+        assert_eq!(snapshot_width_points(1500, 3.0), 500.0);
+        assert_eq!(snapshot_width_points(1024, 1.0), 1024.0);
+        assert_eq!(snapshot_width_points(1024, 0.0), 1024.0);
+        assert_eq!(snapshot_width_points(1024, f64::NAN), 1024.0);
     }
 }
