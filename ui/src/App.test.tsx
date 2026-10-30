@@ -4401,6 +4401,9 @@ describe("App project workspace flow", () => {
           { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "bugfix", state: null },
           { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "docs", state: null },
         ],
+        sessionAttention: [
+          { backendSessionId: "pty-1", workspaceId: "orca-lite", worktreeSlug: null, agentType: "claude", state: "waiting" },
+        ],
         worktreeSlug: null,
         worktreeLabel: "main",
         backendSessionId: "pty-1",
