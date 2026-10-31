@@ -599,6 +599,31 @@ fn write_response(resp: DaemonResponse) -> Result<(), IpcError> {
     }
 }
 
+/// Maps a daemon's outcome acknowledgement reply by its structured code, keeping
+/// the code in the details so the desktop can tell the failures apart.
+pub(crate) fn acknowledge_outcome_response(resp: DaemonResponse) -> Result<(), IpcError> {
+    match resp {
+        DaemonResponse::AcknowledgeAgentOutcomeOk => Ok(()),
+        DaemonResponse::Error { message, code, .. } => {
+            let kind = match code.as_deref() {
+                Some("SESSION_NOT_FOUND") => IpcErrorCode::SessionNotFound,
+                Some("OUTCOME_ACK_NO_MIRROR" | "OUTCOME_ACK_UNSUPPORTED") => IpcErrorCode::Unsupported,
+                Some("OUTCOME_ACK_UNCERTAIN") => IpcErrorCode::Timeout,
+                Some("OUTCOME_ACK_UNREACHABLE") => IpcErrorCode::HostUnavailable,
+                _ => IpcErrorCode::InternalError,
+            };
+            let error = IpcError::new(kind, message);
+            Err(match code {
+                Some(code) => error.with_details(json!({ "code": code })),
+                None => error,
+            })
+        }
+        _ => Err(IpcError::internal(
+            "Unexpected daemon acknowledge agent outcome response",
+        )),
+    }
+}
+
 /// A daemon that serves the prompt requests types every failure, so an untyped error is a daemon
 /// that predates them.
 fn agent_prompt_failure(response: DaemonResponse) -> IpcError {
@@ -3965,18 +3990,12 @@ impl DaemonClient {
 
     /// Drops the session's OSC 7501 `done`/`error` outcome once the user has seen it.
     pub async fn acknowledge_agent_outcome(&self, session_id: &str) -> Result<(), IpcError> {
-        match self
-            .send_request(DaemonRequest::AcknowledgeAgentOutcome {
+        acknowledge_outcome_response(
+            self.send_request(DaemonRequest::AcknowledgeAgentOutcome {
                 session_id: session_id.to_string(),
             })
-            .await?
-        {
-            DaemonResponse::AcknowledgeAgentOutcomeOk => Ok(()),
-            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
-            _ => Err(IpcError::internal(
-                "Unexpected daemon acknowledge agent outcome response",
-            )),
-        }
+            .await?,
+        )
     }
 
     /// Streams desktop-directed remote events (the gateway lives in the daemon,
@@ -5757,6 +5776,31 @@ mod tests {
     use crate::daemon::protocol::{
         DaemonRequest, DaemonResponse, DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
     };
+
+    #[test]
+    fn outcome_acknowledgement_errors_keep_the_daemon_code() {
+        use crate::remote::backend::OutcomeAckError;
+        assert!(acknowledge_outcome_response(DaemonResponse::AcknowledgeAgentOutcomeOk).is_ok());
+        for (code, expected) in [
+            (Some("SESSION_NOT_FOUND"), IpcErrorCode::SessionNotFound),
+            (Some(OutcomeAckError::NoMirror.code()), IpcErrorCode::Unsupported),
+            (Some(OutcomeAckError::Unsupported.code()), IpcErrorCode::Unsupported),
+            (Some(OutcomeAckError::Uncertain(String::new()).code()), IpcErrorCode::Timeout),
+            (Some(OutcomeAckError::Unreachable(String::new()).code()), IpcErrorCode::HostUnavailable),
+            (Some(OutcomeAckError::Rejected(String::new()).code()), IpcErrorCode::InternalError),
+            (None, IpcErrorCode::InternalError),
+        ] {
+            let error = acknowledge_outcome_response(DaemonResponse::Error {
+                message: "refused".into(),
+                code: code.map(str::to_owned),
+                details: None,
+            })
+            .unwrap_err();
+            assert_eq!(error.code, expected, "{code:?}");
+            assert_eq!(error.message, "refused");
+            assert_eq!(error.details.as_ref().map(|details| &details["code"]), code.map(|code| json!(code)).as_ref(), "{code:?}");
+        }
+    }
 
     #[test]
     fn a_goal_approval_outlasts_the_turn_start_wait_and_other_requests_keep_fifteen_seconds() {
