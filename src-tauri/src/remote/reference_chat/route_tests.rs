@@ -3556,3 +3556,50 @@ async fn a_staged_file_of_an_exited_session_can_still_be_deleted() {
     fixture.server.stop().await;
 }
 
+
+/// The owner downgrades a typing device from the desktop; its next input is refused as View.
+#[tokio::test]
+async fn a_device_downgraded_from_the_desktop_can_no_longer_type() {
+    let fixture = fixture().await;
+    let pin = fixture
+        .state
+        .auth_manager
+        .create_pairing_code(DevicePermission::Control);
+    let (phone, device) = fixture
+        .state
+        .auth_manager
+        .exchange_pairing_code(&pin, "reference-route-phone")
+        .expect("phone token");
+    // The pre-change role is read from the token rather than by typing: a typed turn waits on the
+    // pane's own writer, which is the platform's PTY and not what this test is about.
+    assert_eq!(
+        fixture.state.auth_manager.validate_token(&phone).expect("phone").permission,
+        DevicePermission::Control
+    );
+
+    let manager = crate::ipc::remote::RemoteGatewayManager::new(Arc::clone(&fixture.state));
+    let changed = crate::ipc::remote::set_device_permission(
+        &manager,
+        device.id.clone(),
+        DevicePermission::View,
+    )
+    .await
+    .expect("desktop role change");
+    assert_eq!(changed.permission, DevicePermission::View);
+
+    let (status, body) = fixture
+        .server
+        .request(
+            "POST",
+            &fixture.route("submit"),
+            Some(&phone),
+            Some(&fixture.mutation(
+                &uuid::Uuid::new_v4().to_string(),
+                serde_json::json!({ "text": "never typed\n", "origin": "chat" }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 403, "a downgraded device must not type: {body}");
+    assert!(body.contains("FORBIDDEN"), "{body}");
+    fixture.server.stop().await;
+}

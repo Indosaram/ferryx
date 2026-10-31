@@ -40,6 +40,17 @@ const NO_MATCHES: readonly PreviewMatch[] = [];
 const EMPTY_HEADING_INDEX: MarkdownHeadingIndex = { headings: [], slugByLine: new Map() };
 
 /**
+ * Scrolls to a heading id inside one rendered document only; a global
+ * `document.getElementById` could land on another preview's heading.
+ */
+function scrollToFragmentIn(host: HTMLElement | null, id: string): void {
+  if (!host || id.length === 0) return;
+  const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
+  const anchor = host.querySelector(`#${escaped}`);
+  if (anchor instanceof HTMLElement) anchor.scrollIntoView({ block: "start" });
+}
+
+/**
  * Read-only text and Markdown renderer for the file-preview modal (plan task 3).
  *
  * Everything here is display-only: no textarea, no `contentEditable`, no editor
@@ -181,7 +192,11 @@ export function FilePreviewText({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-foreground" data-testid="file-preview-text">
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-worktree-sidebar-border px-2">
+      <div
+        data-testid="file-preview-text-toolbar"
+        data-print-hide=""
+        className="flex h-9 shrink-0 items-center gap-2 border-b border-worktree-sidebar-border px-2"
+      >
         {showSource ? (
           <div className="flex min-w-0 items-center gap-1">
             <label className="flex h-7 min-w-0 items-center gap-1.5 rounded-md bg-background px-2 focus-within:ring-1 focus-within:ring-ring">
@@ -205,6 +220,7 @@ export function FilePreviewText({
               <>
                 <span
                   data-testid="file-preview-search-status"
+                  aria-live="polite"
                   className="whitespace-nowrap text-[11px] tabular-nums text-muted-foreground"
                 >
                   {matches.length === 0 ? "No matches" : `${activeMatch + 1} of ${matches.length}`}
@@ -331,7 +347,7 @@ export function FilePreviewText({
           aria-readonly="true"
           aria-label={`${payload.displayName} source`}
           tabIndex={0}
-          className="min-h-0 flex-1 overflow-auto px-2 py-2 font-mono text-[12px] leading-5 focus-visible:outline-none"
+          className="selectable min-h-0 flex-1 overflow-auto px-2 py-2 font-mono text-[12px] leading-5 focus-visible:outline-none"
         >
           {/* Every line stays mounted (no windowing); memoized lines with stable props keep a
               search keystroke from re-rendering lines whose matches did not change. */}
@@ -360,6 +376,7 @@ export function FilePreviewText({
           {showToc ? (
             <aside
               data-testid="file-preview-md-toc"
+              data-print-hide=""
               className="w-56 shrink-0 overflow-y-auto border-r border-worktree-sidebar-border p-3 text-[12px]"
             >
               <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -375,7 +392,7 @@ export function FilePreviewText({
                       type="button"
                       data-testid={`file-preview-md-toc-item-${heading.slug}`}
                       onClick={() => {
-                        document.getElementById(heading.slug)?.scrollIntoView({ block: "start" });
+                        scrollToFragmentIn(documentRef.current, heading.slug);
                       }}
                       className={cn(
                         "text-left text-muted-foreground hover:text-foreground hover:underline transition-colors truncate",
@@ -397,7 +414,7 @@ export function FilePreviewText({
             data-testid="file-preview-markdown"
             style={{ fontSize: `${markdownFontSize}px` }}
             className={cn(
-              "min-h-0 flex-1 overflow-auto px-4 py-3 leading-6 [overflow-wrap:anywhere]",
+              "selectable min-h-0 flex-1 overflow-auto px-4 py-3 leading-6 [overflow-wrap:anywhere]",
               markdownWide ? "w-full" : "max-w-[72ch] mx-auto",
             )}
           >
@@ -526,18 +543,12 @@ const SourceLine = memo(function SourceLine({
       </span>
       {matches.length > 0 ? (
         <span className={contentClass}>
-          {renderMatchSegments(line, matches, activeMatch, matchOffset)}
+          {renderMatchSegments(line, matches, activeMatch, matchOffset, caret)}
         </span>
       ) : caret ? (
         <span className={contentClass}>
           {line.slice(0, caret.offset)}
-          <span
-            data-testid="file-preview-caret"
-            data-offset={caret.offset}
-            data-column={caret.column}
-            aria-hidden
-            className="inline-block h-4 w-px -translate-y-px align-middle bg-status-working"
-          />
+          <CaretMarker caret={caret} />
           {line.slice(caret.offset)}
         </span>
       ) : highlightedHtml ? (
@@ -555,17 +566,53 @@ const SourceLine = memo(function SourceLine({
   );
 });
 
+function CaretMarker({ caret }: { caret: PreviewCaret }) {
+  return (
+    <span
+      data-testid="file-preview-caret"
+      data-offset={caret.offset}
+      data-column={caret.column}
+      aria-hidden
+      className="inline-block h-4 w-px -translate-y-px align-middle bg-status-working"
+    />
+  );
+}
+
+/** Literal text for [start, end), with the caret marker spliced in when it falls inside. */
+function sliceWithCaret(
+  line: string,
+  start: number,
+  end: number,
+  caret: PreviewCaret | null,
+  includeEnd: boolean,
+): ReactNode {
+  if (!caret || caret.offset < start || caret.offset > end || (caret.offset === end && !includeEnd)) {
+    return line.slice(start, end);
+  }
+  return (
+    <>
+      {line.slice(start, caret.offset)}
+      <CaretMarker caret={caret} />
+      {line.slice(caret.offset, end)}
+    </>
+  );
+}
+
 function renderMatchSegments(
   line: string,
   matches: readonly PreviewMatch[],
   activeMatch: number,
   matchOffset: number,
+  caret: PreviewCaret | null,
 ): ReactNode[] {
   const nodes: ReactNode[] = [];
   let cursor = 0;
   matches.forEach((match, index) => {
-    if (match.start > cursor) nodes.push(line.slice(cursor, match.start));
+    if (match.start > cursor) {
+      nodes.push(<span key={`t${cursor}`}>{sliceWithCaret(line, cursor, match.start, caret, false)}</span>);
+    }
     const flatIndex = matchOffset + index;
+    const isLast = index === matches.length - 1 && match.end >= line.length;
     nodes.push(
       <mark
         key={`m${flatIndex}`}
@@ -577,12 +624,14 @@ function renderMatchSegments(
             : "bg-status-warning/30 text-foreground",
         )}
       >
-        {line.slice(match.start, match.end)}
+        {sliceWithCaret(line, match.start, match.end, caret, isLast)}
       </mark>,
     );
     cursor = match.end;
   });
-  if (cursor < line.length) nodes.push(line.slice(cursor));
+  if (cursor < line.length) {
+    nodes.push(<span key={`t${cursor}`}>{sliceWithCaret(line, cursor, line.length, caret, true)}</span>);
+  }
   return nodes;
 }
 
@@ -603,13 +652,7 @@ function PreviewMarkdownDocument({
   slugByLine,
 }: PreviewMarkdownDocumentProps) {
   const scrollToFragment = useCallback(
-    (id: string) => {
-      const host = containerRef.current;
-      if (!host || id.length === 0) return;
-      const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
-      const anchor = host.querySelector(`#${escaped}`);
-      if (anchor instanceof HTMLElement) anchor.scrollIntoView({ block: "start" });
-    },
+    (id: string) => scrollToFragmentIn(containerRef.current, id),
     [containerRef],
   );
 
@@ -840,8 +883,11 @@ type ImageState =
  */
 function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNodeProps) {
   const classified = useMemo(() => classifyPreviewImage(src), [src]);
-  const budgetExhausted = classified.kind === "local" && (capability?.remainingChildHandles ?? 0) <= 0;
   const [state, setState] = useState<ImageState>({ status: "idle" });
+  // The budget only blocks nodes that never issued a request: once this node is loading or
+  // loaded, the handle it holds counts toward the budget, so hitting 0 must not hide it.
+  const budgetExhausted =
+    classified.kind === "local" && state.status === "idle" && (capability?.remainingChildHandles ?? 0) <= 0;
   // R1: acquire each image at most once per generation. The in-flight request lives in a ref,
   // so a StrictMode effect replay (or a capability identity change) re-subscribes to the same
   // promise instead of opening a second child handle. The capability has no per-handle release;
@@ -856,7 +902,7 @@ function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNode
     if (classified.kind !== "local" || !capability) return;
     let request = requestRef.current;
     if (!request || request.generation !== generation || request.path !== classified.relativePath) {
-      if (budgetExhausted) return;
+      if (capability.remainingChildHandles <= 0) return;
       request = {
         generation,
         path: classified.relativePath,
@@ -880,7 +926,7 @@ function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNode
     };
     // `generation` is a dependency on purpose: a superseded request must not
     // paint, and a reload must re-acquire its child handle.
-  }, [budgetExhausted, capability, classified, generation]);
+  }, [capability, classified, generation]);
 
   if (classified.kind === "rejected" || budgetExhausted) {
     const label = budgetExhausted

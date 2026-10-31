@@ -128,7 +128,11 @@ async fn machine_worktree_http_contract() {
     let mut gateway = tokio::spawn(async move {
         axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
     });
+    // A session is spawned only on unix; elsewhere nothing needs closing.
+    #[cfg(unix)]
     let mut owned_session: Option<String> = None;
+    #[cfg(not(unix))]
+    let owned_session: Option<String> = None;
     let mut restart_replay = None;
     let outcome = std::panic::AssertUnwindSafe(async {
         let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(40)).build().unwrap();

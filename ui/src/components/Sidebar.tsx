@@ -43,6 +43,7 @@ import {
 } from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
 import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
+import type { AttentionPrompts } from "../features/ferryx/attention/attentionPrompts";
 import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
@@ -93,6 +94,7 @@ type SidebarProps = {
   onCreateWorktree: (project?: RegisteredProject) => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
   onResetAgentState?: (worktree: Worktree) => void;
+  onShowChanges?: (worktree: Worktree) => void;
   onManageDisk?: (project: RegisteredProject) => void;
   onOpenHistory?: (project: RegisteredProject) => void;
   onOpenCommandPalette?: () => void;
@@ -110,6 +112,10 @@ export type SidebarAttention = {
   onOpen: (row: AttentionRow) => void;
   onDismiss: (row: AttentionRow) => void;
   onDismissAll: () => void;
+  /** Lets a needs-you row answer its pane's prompt inline. */
+  prompts?: AttentionPrompts;
+  /** Working panes the Inbox lists only once the daemon reads a prompt on them. */
+  candidates?: readonly AttentionRow[];
   inboxOpen: boolean;
   onInboxOpenChange: (open: boolean) => void;
 };
@@ -139,6 +145,7 @@ export function Sidebar({
   onCreateWorktree,
   onDeleteWorktree = noop,
   onResetAgentState,
+  onShowChanges,
   onManageDisk,
   onOpenHistory,
   onOpenSettings,
@@ -340,6 +347,7 @@ export function Sidebar({
           onCreateWorktree: canCreateWorktree(project) ? () => onCreateWorktree(project) : undefined,
           onDelete: onDeleteWorktree,
           onResetAgentState,
+          onShowChanges,
           sortableWorkspaceId: node.groupId,
           agentsByPath,
         })}

@@ -4,7 +4,9 @@ import { Check, X } from "lucide-react";
 import type { ResolvedAgent } from "../../lib/agentsSettings";
 import { cn } from "../../lib/cn";
 import type { OnboardingStepId } from "../../lib/onboarding";
-import type { CliLauncherStatus } from "../../lib/types";
+import type { RegisteredProject } from "../../lib/tauri";
+import type { CliLauncherStatus, Worktree } from "../../lib/types";
+import type { WorktreeAgentLaunch } from "../ProjectDialogs";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
 import { AccountStep } from "./AccountStep";
@@ -13,6 +15,8 @@ import { CliStep } from "./CliStep";
 import { FeaturesStep } from "./FeaturesStep";
 import { FirstProjectStep } from "./FirstProjectStep";
 import { IntroStep } from "./IntroStep";
+import { PhoneStep } from "./PhoneStep";
+import { TryWorktreeStep } from "./TryWorktreeStep";
 
 export type WelcomeWizardProps = {
   steps: readonly OnboardingStepId[];
@@ -28,6 +32,10 @@ export type WelcomeWizardProps = {
   loadCliStatus?: () => Promise<CliLauncherStatus>;
   installCli?: () => Promise<CliLauncherStatus>;
   initialStepIndex?: number;
+  /** The local project the "try" step creates its first worktree in, when there is one. */
+  tryProject?: RegisteredProject | null;
+  defaultAgentId?: string | null;
+  onTryWorktreeCreated?: (worktree: Worktree, launch?: WorktreeAgentLaunch) => void | Promise<void>;
 };
 
 const STEP_TITLES: Record<OnboardingStepId, string> = {
@@ -37,6 +45,8 @@ const STEP_TITLES: Record<OnboardingStepId, string> = {
   agents: "Agents",
   cli: "Command line",
   project: "First project",
+  try: "First worktree",
+  phone: "Phone",
 };
 
 const STEP_HEADINGS: Record<OnboardingStepId, string> = {
@@ -46,6 +56,8 @@ const STEP_HEADINGS: Record<OnboardingStepId, string> = {
   agents: "Choose your default agent",
   cli: "Install the command-line tool",
   project: "Open your first project",
+  try: "Try your first worktree",
+  phone: "Connect your phone",
 };
 
 function clampStepIndex(index: number, total: number): number {
@@ -70,11 +82,20 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     loadCliStatus,
     installCli,
     initialStepIndex = 0,
+    tryProject = null,
+    defaultAgentId = null,
+    onTryWorktreeCreated,
   } = props;
 
   const [stepIndex, setStepIndex] = useState(() =>
     clampStepIndex(initialStepIndex, steps.length),
   );
+  const [accountLinked, setAccountLinked] = useState(() =>
+    doneSteps.includes("account"),
+  );
+  const [phonePaired, setPhonePaired] = useState(false);
+  // True while the try step creates its worktree; the footer waits for it.
+  const [tryBusy, setTryBusy] = useState(false);
 
   const panelRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -83,6 +104,11 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const currentStep = steps[currentStepIndex];
   const isFirst = currentStepIndex === 0;
   const isLast = currentStepIndex === steps.length - 1;
+  const finishingWithoutAccount = currentStep === "account" && !accountLinked;
+  // Optional steps record themselves when their action succeeds (a paired phone, a created
+  // worktree); leaving one before that is a skip and is not recorded as completed.
+  const skippingOptional =
+    (currentStep === "phone" && !phonePaired) || currentStep === "try";
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true });
@@ -93,7 +119,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   }
 
   const handleNext = () => {
-    onStepCompleted(currentStep);
+    if (!skippingOptional) onStepCompleted(currentStep);
     setStepIndex((prev) => Math.min(steps.length - 1, prev + 1));
   };
 
@@ -102,7 +128,10 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   };
 
   const handleFinish = () => {
-    onStepCompleted(currentStep);
+    // Skipping sign-in must not record the account step as completed.
+    if (!finishingWithoutAccount && !skippingOptional) {
+      onStepCompleted(currentStep);
+    }
     onFinish();
   };
 
@@ -143,9 +172,9 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
   const getLedeText = (step: OnboardingStepId): string => {
     switch (step) {
       case "account":
-        return "Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone.";
+        return "Optional. Sign in with your email and this computer is linked to your account, so you can open its worktrees from your phone.";
       case "intro":
-        return "A short setup, then we'll get your first project open.";
+        return "A short tour and setup. Signing in comes last and is optional.";
       case "features":
         return "The parts you'll use every day.";
       case "agents":
@@ -154,13 +183,24 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return "Optional. Use ferryx from any terminal. You can also install it later in Settings > General.";
       case "project":
         return "Start with a folder on this computer, or pair another machine.";
+      case "try":
+        return "Optional. A worktree is an isolated checkout of your project with its own branch and agent tab.";
+      case "phone":
+        return "Optional. Pair your phone to follow and answer agents away from your desk.";
     }
   };
 
   const renderStepContent = () => {
     switch (currentStep) {
       case "account":
-        return <AccountStep onLinked={() => onStepCompleted("account")} />;
+        return (
+          <AccountStep
+            onLinked={() => {
+              setAccountLinked(true);
+              onStepCompleted("account");
+            }}
+          />
+        );
       case "intro":
         return <IntroStep steps={steps} />;
       case "features":
@@ -169,6 +209,20 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
         return <AgentsCliStep agents={agents} />;
       case "cli":
         return <CliStep loadCliStatus={loadCliStatus} installCli={installCli} />;
+      case "try":
+        return (
+          <TryWorktreeStep
+            project={onTryWorktreeCreated ? tryProject : null}
+            agents={agents}
+            defaultAgentId={defaultAgentId}
+            onCreated={(worktree, launch) => onTryWorktreeCreated?.(worktree, launch)}
+            onBusyChange={setTryBusy}
+            onFinish={() => {
+              onStepCompleted("try");
+              onFinish();
+            }}
+          />
+        );
       case "project":
         return (
           <FirstProjectStep
@@ -179,6 +233,16 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
             onConnectMachine={() => {
               onStepCompleted("project");
               onConnectMachine();
+            }}
+          />
+        );
+      case "phone":
+        return (
+          <PhoneStep
+            paired={phonePaired}
+            onPaired={() => {
+              setPhonePaired(true);
+              onStepCompleted("phone");
             }}
           />
         );
@@ -303,6 +367,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
               variant="ghost"
               size="sm"
               data-testid="onboarding-skip"
+              disabled={tryBusy}
               onClick={onSkip}
               className="text-muted-foreground hover:text-foreground"
             >
@@ -315,6 +380,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                   variant="ghost"
                   size="sm"
                   data-testid="onboarding-back"
+                  disabled={tryBusy}
                   onClick={handleBack}
                 >
                   Back
@@ -325,19 +391,21 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
                 <Button
                   size="sm"
                   data-testid="onboarding-finish"
+                  disabled={tryBusy}
                   onClick={handleFinish}
                   className="min-w-24"
                 >
-                  Done
+                  {finishingWithoutAccount ? "Finish without signing in" : skippingOptional ? "Skip" : "Done"}
                 </Button>
               ) : (
                 <Button
                   size="sm"
                   data-testid="onboarding-next"
+                  disabled={tryBusy}
                   onClick={handleNext}
                   className="min-w-24"
                 >
-                  Continue
+                  {skippingOptional ? "Skip" : "Continue"}
                 </Button>
               )}
             </div>

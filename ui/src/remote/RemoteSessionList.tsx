@@ -74,6 +74,16 @@ export type RemoteContextOption = {
 export type RemoteWorkspaceModel = {
   context: RemoteContext;
   options: RemoteContextOption[];
+  /** The host's waiting or unseen-done sessions across every project (`sessionAttention`). */
+  sessionAttention?: RemoteSessionAttention[];
+};
+
+export type RemoteSessionAttention = {
+  sessionId: string;
+  workspaceId: string;
+  worktreeSlug: string | null;
+  state: "waiting" | "done";
+  agentType: string | null;
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -363,6 +373,21 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
     });
   }
 
+  const sessionAttention: RemoteSessionAttention[] = [];
+  for (const item of records(state.sessionAttention)) {
+    const sessionId = safeContextText(item.backendSessionId);
+    const entryWorkspaceId = safeContextText(item.workspaceId);
+    const entryState = parseActivityState(item.state);
+    if (!sessionId || !entryWorkspaceId || (entryState !== "waiting" && entryState !== "done")) continue;
+    sessionAttention.push({
+      sessionId,
+      workspaceId: entryWorkspaceId,
+      worktreeSlug: safeContextText(item.worktreeSlug),
+      state: entryState,
+      agentType: safeContextText(item.agentType),
+    });
+  }
+
   return {
     context: {
       workspaceId: activeWorkspaceId,
@@ -374,6 +399,7 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
       daemonEpoch: declaredEpoch,
     },
     options,
+    ...(sessionAttention.length > 0 ? { sessionAttention } : {}),
   };
 }
 

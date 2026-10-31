@@ -130,7 +130,7 @@ fn test_dense_scale_2_working_set_pixel_readback_integrity() {
         for i in 0..count {
             let expected = tile(&batch, i);
             assert!(
-                expected.chunks_exact(4).any(|p| p[0] != 0),
+                expected.as_chunks::<4>().0.iter().any(|p| p[0] != 0),
                 "reference ink {}",
                 start + i
             );
@@ -208,7 +208,7 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
     let mask_coverages: Vec<f32> = if bpp == 1 {
         mask.iter().map(|&b| b as f32 / 255.0).collect()
     } else {
-        mask.chunks_exact(4).map(|chunk| chunk[3] as f32 / 255.0).collect()
+        mask.as_chunks::<4>().0.iter().map(|chunk| chunk[3] as f32 / 255.0).collect()
     };
 
     // When: the real WGPU renderer draws that glyph.
@@ -229,7 +229,7 @@ fn test_glyph_pixels_blend_once_and_leave_uncovered_pixels_as_cell_background() 
     let mut uncovered = 0;
     let mut partial_gain = 0.0f32;
     let mut partial_count = 0;
-    for (raw, frame_pixel) in mask_coverages.into_iter().zip(frame.pixels.chunks_exact(4)) {
+    for (raw, frame_pixel) in mask_coverages.into_iter().zip(frame.pixels.as_chunks::<4>().0) {
         let coverage = raw.powf(TEXT_COVERAGE_EXPONENT);
         for channel in 0..3 {
             let expected = bg[channel] as f32 * (1.0 - coverage) + fg[channel] as f32 * coverage;
@@ -455,7 +455,7 @@ fn test_render_snapshot_offscreen_frame_with_color_emoji() {
     assert_eq!(frame.width_px, 200);
     assert_eq!(frame.height_px, 40);
 
-    let non_zero_pixels = frame.pixels.chunks_exact(4).filter(|p| p[3] > 0).count();
+    let non_zero_pixels = frame.pixels.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
     assert!(
         non_zero_pixels > 0,
         "rendered frame with emoji must produce visible pixels"

@@ -348,7 +348,7 @@ impl DownloadRegistry {
 
     pub fn list(&self) -> Vec<DownloadRecord> {
         let mut list: Vec<DownloadRecord> = self.records.read().values().cloned().collect();
-        list.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        list.sort_by_key(|record| std::cmp::Reverse(record.created_at_ms));
         list
     }
 

@@ -10,7 +10,9 @@ export function Hero({ basePath, locale }: { readonly basePath: string; readonly
       <div className="absolute inset-0 bg-[radial-gradient(60%_50%_at_50%_0%,rgb(var(--ink-rgb)/0.05),transparent)] pointer-events-none" />
 
       <div className="relative mx-auto max-w-6xl px-4 sm:px-6 text-center">
-        <h1 className="text-[clamp(2.75rem,7vw,5.25rem)] font-medium tracking-[-0.045em] leading-[0.95] text-ink max-w-4xl mx-auto">
+        {/* CJK has no spaces to wrap at: at the English 2.75rem floor the nine-glyph first
+            line splits mid-word on phones, so the Chinese title gets a smaller floor. */}
+        <h1 className={`${locale.code === 'zh-cn' ? 'text-[clamp(2.25rem,7vw,5.25rem)]' : 'text-[clamp(2.75rem,7vw,5.25rem)]'} font-medium tracking-[-0.045em] leading-[0.95] text-ink max-w-4xl mx-auto`}>
           {locale.hero.title}
           <br />
           {locale.hero.titleEnd}

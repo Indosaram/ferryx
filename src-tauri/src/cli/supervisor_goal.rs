@@ -740,18 +740,20 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = git_repo(temp.path());
         let common = repo.join(".git").to_string_lossy().into_owned();
-        let mut spellings = vec![
+        let spellings = vec![
             common.clone(),
             format!("{common}{}", std::path::MAIN_SEPARATOR),
             repo.to_string_lossy().into_owned(),
         ];
         #[cfg(unix)]
-        {
+        let spellings = {
+            let mut spellings = spellings;
             let link = temp.path().join("link");
             std::os::unix::fs::symlink(&repo, &link).unwrap();
             spellings.push(link.join(".git").to_string_lossy().into_owned());
             spellings.push(link.to_string_lossy().into_owned());
-        }
+            spellings
+        };
         for spelling in &spellings {
             assert_eq!(canonical_git_common_dir("local", spelling).unwrap(), common, "{spelling}");
         }

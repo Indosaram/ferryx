@@ -53,12 +53,14 @@ const ROOT_WINDOW_LABEL: &str = "main";
 
 /// Origins the capability server answers to. Never a wildcard.
 const ALLOWED_ORIGINS: &[&str] = &[
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
     "tauri://localhost",
     "http://tauri.localhost",
     "https://tauri.localhost",
 ];
+
+/// Vite dev server origins. Only a debug build loads its UI from there; a
+/// release build must not trust whatever local app happens to own port 5173.
+const DEV_ORIGINS: &[&str] = &["http://127.0.0.1:5173", "http://localhost:5173"];
 
 /// Extensions that name a media/document format this preview deliberately does
 /// not support. They are refused as `UnsupportedFormat` instead of being
@@ -305,9 +307,16 @@ pub fn image_signature(bytes: &[u8]) -> Option<ImageSignature> {
 }
 
 /// Sniffs content prefix for Image or PDF signatures when the file extension
-/// does not identify a specific preview kind.
+/// does not identify a specific preview kind. Only unambiguous magic numbers
+/// count: source files that merely contain `<svg` or start with "BM" stay text.
 pub fn sniff_kind(prefix: &[u8]) -> Option<FilePreviewKind> {
-    if image_signature(prefix).is_some() {
+    let strong_image = image_signature(prefix).is_some_and(|signature| {
+        matches!(
+            signature.media_type,
+            "image/png" | "image/gif" | "image/jpeg" | "image/webp"
+        )
+    });
+    if strong_image {
         Some(FilePreviewKind::Image)
     } else if prefix.starts_with(b"%PDF-") {
         Some(FilePreviewKind::Pdf)
@@ -428,10 +437,7 @@ fn decode_utf16(bytes: &[u8], convert: fn([u8; 2]) -> u16) -> Option<String> {
     if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| convert([pair[0], pair[1]]))
-        .collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|pair| convert(*pair)).collect();
     String::from_utf16(&units).ok()
 }
 
@@ -488,15 +494,42 @@ pub fn clamp_target(text: &str, line: Option<u32>, col: Option<u32>) -> Option<F
     let total = count_lines(text).max(1) as u32;
     let line = line.clamp(1, total);
     let col = col.map(|col| {
-        let content = text
-            .split('\n')
-            .nth(line as usize - 1)
-            .unwrap_or("")
-            .trim_end_matches('\r');
+        let content = nth_line(text, line as usize - 1);
         let scalars = content.chars().count() as u32;
         col.clamp(1, scalars + 1)
     });
     Some(FilePreviewTarget { line, col })
+}
+
+/// The zero-based line `index` under the same universal-newline rule as
+/// [`count_lines`]: \r\n, lone \r and lone \n each end one line.
+fn nth_line(text: &str, index: usize) -> &str {
+    let bytes = text.as_bytes();
+    let mut line = 0usize;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let terminator = match bytes[i] {
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => 2,
+            b'\r' | b'\n' => 1,
+            _ => 0,
+        };
+        if terminator == 0 {
+            i += 1;
+            continue;
+        }
+        if line == index {
+            return &text[start..i];
+        }
+        line += 1;
+        i += terminator;
+        start = i;
+    }
+    if line == index {
+        &text[start..]
+    } else {
+        ""
+    }
 }
 
 /// Only the desktop root window may hold capabilities; child webviews such as
@@ -514,7 +547,7 @@ pub fn ensure_trusted_window(label: &str) -> Result<(), IpcError> {
 
 /// Exact-match origin allowlist for the capability server. No wildcards.
 pub fn is_allowed_origin(origin: &str) -> bool {
-    ALLOWED_ORIGINS.contains(&origin)
+    ALLOWED_ORIGINS.contains(&origin) || (cfg!(debug_assertions) && DEV_ORIGINS.contains(&origin))
 }
 
 /// Turns a session-resolution refusal into the frozen `RemoteUnsupported`
@@ -543,10 +576,11 @@ struct HandleRecord {
     /// other platforms fall back to canonical-path containment alone.
     parent_identity: Option<(u64, u64)>,
     revoked: Arc<AtomicBool>,
-    /// Serializes cursor-moving media streams of this document: every range
-    /// body holds this guard for its lifetime, so concurrent responses can
-    /// never interleave seeks on the shared underlying file description.
-    stream_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Media-gate permits of this capability's in-flight bodies. Revoking the
+    /// capability drops them at once, so a closed but back-pressured player
+    /// (never polled again) cannot pin a global media slot.
+    stream_permits: Mutex<HashMap<u64, OwnedSemaphorePermit>>,
+    next_stream_id: AtomicU64,
     /// Milliseconds since service start of the last capability request.
     last_access_ms: AtomicU64,
     resolved_path: PathBuf,
@@ -569,13 +603,41 @@ struct WindowSlot {
 struct Registry {
     handles: HashMap<String, Arc<HandleRecord>>,
     windows: HashMap<String, WindowSlot>,
+    /// Registry-wide open generation. Epochs stay comparable even after an
+    /// idle slot is dropped and recreated, so a dropped slot never turns an
+    /// in-flight open into a false "superseded".
+    last_epoch: u64,
 }
 
 impl Registry {
     fn revoke(&mut self, handle: &str) {
         if let Some(record) = self.handles.remove(handle) {
             record.revoked.store(true, Ordering::SeqCst);
+            record.stream_permits.lock().clear();
         }
+    }
+}
+
+/// One in-flight body's claim on its parked media permit.
+struct StreamPermit {
+    record: Arc<HandleRecord>,
+    id: u64,
+}
+
+impl StreamPermit {
+    fn park(record: &Arc<HandleRecord>, permit: OwnedSemaphorePermit) -> Self {
+        let id = record.next_stream_id.fetch_add(1, Ordering::Relaxed);
+        record.stream_permits.lock().insert(id, permit);
+        Self {
+            record: Arc::clone(record),
+            id,
+        }
+    }
+}
+
+impl Drop for StreamPermit {
+    fn drop(&mut self) {
+        self.record.stream_permits.lock().remove(&self.id);
     }
 }
 
@@ -838,6 +900,11 @@ impl FilePreviewService {
         if slot.main.as_deref() == Some(handle) {
             let children = std::mem::take(&mut slot.children);
             slot.main = None;
+            // An idle owner (a closed tab) keeps nothing worth a slot; only an
+            // open still in flight needs its epoch to stay comparable.
+            if slot.pending_children == 0 {
+                registry.windows.remove(&key);
+            }
             for child in children {
                 registry.revoke(&child);
             }
@@ -882,11 +949,15 @@ impl FilePreviewService {
             });
             let record = registry.handles.get(handle);
             match (is_owned, record) {
-                (true, Some(record)) if !record.revoked.load(Ordering::SeqCst) => (
-                    record.resolved_path.clone(),
-                    record.byte_length,
-                    record.modified,
-                ),
+                (true, Some(record)) if !record.revoked.load(Ordering::SeqCst) => {
+                    // R6: a text or Markdown tab never fetches its capability URL,
+                    // so the change poll is what keeps an on-screen preview leased.
+                    record.last_access_ms.store(
+                        self.started_at.elapsed().as_millis() as u64,
+                        Ordering::Relaxed,
+                    );
+                    (record.resolved_path.clone(), record.byte_length, record.modified)
+                }
                 _ => {
                     return Err(preview_error(
                         FilePreviewErrorReason::ExpiredHandle,
@@ -985,12 +1056,14 @@ impl FilePreviewService {
 
     fn begin_main_open(&self, window_label: &str) -> u64 {
         let mut registry = self.registry.lock();
+        registry.last_epoch += 1;
+        let epoch = registry.last_epoch;
         let slot = registry
             .windows
             .entry(window_label.to_string())
             .or_default();
-        slot.epoch += 1;
-        slot.epoch
+        slot.epoch = epoch;
+        epoch
     }
 
     fn register_main(
@@ -1022,7 +1095,7 @@ impl FilePreviewService {
             .windows
             .entry(window_label.to_string())
             .or_default();
-        if previous.epoch != epoch {
+        if previous.epoch > epoch {
             // R3: a newer open already owns this window; drop the stale
             // descriptor instead of revoking the newer preview.
             drop(opened);
@@ -1032,6 +1105,7 @@ impl FilePreviewService {
                 None,
             ));
         }
+        previous.epoch = epoch;
         let stale_main = previous.main.take();
         let stale_children = std::mem::take(&mut previous.children);
         previous.main = Some(handle.clone());
@@ -1080,31 +1154,35 @@ impl FilePreviewService {
 
     /// R6: revokes capabilities whose lease expired without any request.
     fn revoke_expired(&self) {
-        let now_ms = self.started_at.elapsed().as_millis() as u64;
-        let mut expired: Vec<String> = Vec::new();
-        {
-            let registry = self.registry.lock();
-            for (handle, record) in registry.handles.iter() {
-                if now_ms.saturating_sub(record.last_access_ms.load(Ordering::Relaxed))
-                    > HANDLE_TTL.as_millis() as u64
-                {
-                    expired.push(handle.clone());
-                }
-            }
-        }
-        if expired.is_empty() {
-            return;
-        }
+        self.revoke_expired_at(self.started_at.elapsed().as_millis() as u64);
+    }
+
+    /// Selects and revokes under one lock, so a lease renewed between the two
+    /// steps is never revoked. An expired document takes its image children
+    /// with it, exactly as `close` does.
+    fn revoke_expired_at(&self, now_ms: u64) {
+        let ttl_ms = HANDLE_TTL.as_millis() as u64;
         let mut registry = self.registry.lock();
+        let expired: Vec<String> = registry
+            .handles
+            .iter()
+            .filter(|(_, record)| {
+                now_ms.saturating_sub(record.last_access_ms.load(Ordering::Relaxed)) > ttl_ms
+            })
+            .map(|(handle, _)| handle.clone())
+            .collect();
         for handle in expired {
-            if registry.handles.contains_key(&handle) {
-                registry.revoke(&handle);
-                for slot in registry.windows.values_mut() {
-                    if slot.main.as_deref() == Some(handle.as_str()) {
-                        slot.main = None;
-                    }
-                    slot.children.retain(|child| child != &handle);
+            let mut orphaned = Vec::new();
+            for slot in registry.windows.values_mut() {
+                if slot.main.as_deref() == Some(handle.as_str()) {
+                    slot.main = None;
+                    orphaned.append(&mut slot.children);
                 }
+                slot.children.retain(|child| child != &handle);
+            }
+            registry.revoke(&handle);
+            for child in orphaned {
+                registry.revoke(&child);
             }
         }
     }
@@ -1118,7 +1196,8 @@ fn record_of(opened: OpenedFile, started_at: std::time::Instant) -> Arc<HandleRe
         parent_dir: opened.parent_dir,
         parent_identity: opened.parent_identity,
         revoked: Arc::new(AtomicBool::new(false)),
-        stream_lock: Arc::new(tokio::sync::Mutex::new(())),
+        stream_permits: Mutex::new(HashMap::new()),
+        next_stream_id: AtomicU64::new(0),
         last_access_ms: AtomicU64::new(started_at.elapsed().as_millis() as u64),
         resolved_path: opened.resolved_path,
         modified: opened.modified,
@@ -1172,10 +1251,7 @@ fn new_handle() -> String {
 // --------------------------------------------------------------- open (blocking)
 
 fn io_failure(error: &std::io::Error, path: &Path) -> IpcError {
-    let reason = match error.kind() {
-        std::io::ErrorKind::NotFound => FilePreviewErrorReason::MissingFile,
-        _ => FilePreviewErrorReason::PermissionDenied,
-    };
+    let reason = io_failure_reason(error);
     let fda_required = cfg!(target_os = "macos")
         && full_disk_access_required(error, path, crate::ipc::file_link::home_dir().as_deref());
     preview_error(
@@ -1279,9 +1355,96 @@ fn open_blocking(
         cwd.as_deref(),
         crate::ipc::file_link::home_dir(),
     );
+    // Without a session cwd a relative token (or `~user`) would resolve against
+    // the GUI process's own working directory.
+    if !resolved.has_root() {
+        return Err(preview_error(
+            FilePreviewErrorReason::MissingFile,
+            "The terminal's current directory could not be read. Use an absolute file path.",
+            None,
+        ));
+    }
     open_blocking_path(&resolved, line, col)
 }
 
+/// True when `path` can only be resolved against a terminal's cwd: anything
+/// but an absolute path or a home-rooted (`~`, `~/`) one, judged on the
+/// cleaned token exactly as `open_blocking` will see it.
+fn needs_session_cwd(path: &str) -> bool {
+    let token = crate::ipc::file_link::sanitize_path_token(path).unwrap_or(path);
+    !(crate::ipc::file_link::is_absolute_token(token)
+        || token == "~"
+        || token.starts_with("~/")
+        || token.starts_with("~\\"))
+}
+
+/// ENOTDIR (`file.txt/x`) and an invalid name mean "no such file", not a
+/// permission problem.
+fn io_failure_reason(error: &std::io::Error) -> FilePreviewErrorReason {
+    match error.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::NotADirectory
+        | std::io::ErrorKind::InvalidFilename => FilePreviewErrorReason::MissingFile,
+        _ => FilePreviewErrorReason::PermissionDenied,
+    }
+}
+
+/// `std::fs::canonicalize` on Windows returns verbatim `\\?\` paths: the UI
+/// would show them, and a `/`-separated Markdown reference joined onto one is
+/// taken literally. The plain form names the same file.
+fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(strip_verbatim_prefix)
+}
+
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+            return PathBuf::from(rest);
+        }
+    }
+    path
+}
+
+/// Opens read-only without ever waiting: a FIFO swapped in after the type
+/// check would otherwise block a pool thread until a writer appears.
+fn open_read_only(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
+/// After the open, `canonical` must still resolve to itself and name the very
+/// file the descriptor holds. A symlink swapped in between resolution and
+/// open (to escape a Markdown boundary, say) fails here instead of being served.
+fn descriptor_still_at(file: &std::fs::File, canonical: &Path) -> bool {
+    if canonical_path(canonical).ok().as_deref() != Some(canonical) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        match (file.metadata(), std::fs::metadata(canonical)) {
+            (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        true
+    }
+}
 
 /// Canonicalizes once, verifies a regular file, retains the descriptor and
 /// applies the per-kind bounds. Symlinks are resolved exactly here.
@@ -1290,7 +1453,7 @@ fn open_blocking_path(
     line: Option<u32>,
     col: Option<u32>,
 ) -> Result<OpenedFile, IpcError> {
-    let canonical = std::fs::canonicalize(path).map_err(|error| io_failure(&error, path))?;
+    let canonical = canonical_path(path).map_err(|error| io_failure(&error, path))?;
     let display_name = canonical
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1301,8 +1464,7 @@ fn open_blocking_path(
     if !metadata.is_file() {
         return Err(not_regular_file(&display_name));
     }
-    let mut file =
-        std::fs::File::open(&canonical).map_err(|error| io_failure(&error, &canonical))?;
+    let mut file = open_read_only(&canonical).map_err(|error| io_failure(&error, &canonical))?;
     // Re-check through the descriptor itself, so a swap between stat and open
     // cannot hand us a device or directory.
     let metadata = file
@@ -1310,6 +1472,13 @@ fn open_blocking_path(
         .map_err(|error| io_failure(&error, &canonical))?;
     if !metadata.is_file() {
         return Err(not_regular_file(&display_name));
+    }
+    if !descriptor_still_at(&file, &canonical) {
+        return Err(preview_error(
+            FilePreviewErrorReason::PermissionDenied,
+            "the file was replaced while it was being opened",
+            Some(json!({ "displayName": display_name })),
+        ));
     }
     let byte_length = metadata.len();
     let modified = metadata.modified().ok();
@@ -1575,8 +1744,8 @@ fn resolve_contained_child(boundary: &ChildBoundary, relative: &str) -> Result<P
         return Err(outside_boundary(relative));
     }
     let candidate = boundary.dir.join(relative);
-    let canonical = std::fs::canonicalize(&candidate).map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => preview_error(
+    let canonical = canonical_path(&candidate).map_err(|error| match io_failure_reason(&error) {
+        FilePreviewErrorReason::MissingFile => preview_error(
             FilePreviewErrorReason::MissingFile,
             "this document reference does not exist",
             Some(json!({ "displayName": relative })),
@@ -1741,18 +1910,15 @@ async fn serve_capability(
     let Ok(clone) = record.file.try_clone() else {
         return status_only(StatusCode::CONFLICT);
     };
-    // R2: the stream owns the per-record lock for its whole lifetime. Rust
-    // File clones share the underlying file description cursor, so without
-    // this guard two concurrent range responses would interleave seeks and
-    // read each other's bytes.
-    let stream_guard = record.stream_lock.clone().lock_owned().await;
+    // R2: every chunk is a positional read, so concurrent range bodies of one
+    // document never share a cursor and never wait on one another: a player
+    // that stops reading cannot stall the seek that follows it.
     *response.body_mut() = Body::from_stream(chunk_stream(
-        tokio::fs::File::from_std(clone),
+        Arc::new(clone),
         start,
         body_length,
-        Arc::clone(&record.revoked),
-        permit,
-        stream_guard,
+        StreamPermit::park(&record, permit),
+        service.started_at,
     ));
     response
 }
@@ -1769,44 +1935,76 @@ fn apply_cors(response: &mut Response, origin: Option<&str>) {
 }
 
 struct ChunkState {
-    file: tokio::fs::File,
+    file: Arc<std::fs::File>,
     remaining: u64,
-    started: bool,
     offset: u64,
-    revoked: Arc<AtomicBool>,
-    permit: Option<OwnedSemaphorePermit>,
-    /// Held for the whole stream; see serve_capability (R2).
-    _stream_guard: tokio::sync::OwnedMutexGuard<()>,
+    /// Parked media permit; revoking the capability drops it even while the
+    /// body is back-pressured and never polled again.
+    permit: Option<StreamPermit>,
+    started_at: std::time::Instant,
+}
+
+/// Reads at an absolute offset without touching the shared file cursor.
+fn read_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_at(file, buffer, offset)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_read(file, buffer, offset)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (file, buffer, offset);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "positional reads are unavailable on this platform",
+        ))
+    }
+}
+
+/// Fills up to `want` bytes from `offset`; fewer only at end of file.
+fn read_chunk(file: &std::fs::File, offset: u64, want: usize) -> std::io::Result<Vec<u8>> {
+    let mut buffer = vec![0u8; want];
+    let mut filled = 0usize;
+    while filled < want {
+        match read_at(file, &mut buffer[filled..], offset + filled as u64) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    buffer.truncate(filled);
+    Ok(buffer)
 }
 
 /// Streams the selected byte window in fixed 64 KiB chunks, never allocating the
 /// whole file. Revocation is observed at every chunk boundary; the permit is
-/// released before the aborted body reaches the client.
+/// released before the aborted body reaches the client. Each delivered chunk
+/// renews the idle lease, so one long playback request never expires mid-way.
 fn chunk_stream(
-    file: tokio::fs::File,
+    file: Arc<std::fs::File>,
     offset: u64,
     remaining: u64,
-    revoked: Arc<AtomicBool>,
-    permit: OwnedSemaphorePermit,
-    stream_guard: tokio::sync::OwnedMutexGuard<()>,
+    permit: StreamPermit,
+    started_at: std::time::Instant,
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
     futures_util::stream::unfold(
         ChunkState {
             file,
             remaining,
-            started: false,
             offset,
-            revoked,
             permit: Some(permit),
-            _stream_guard: stream_guard,
+            started_at,
         },
         |mut state| async move {
-            use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
             if state.remaining == 0 {
                 return None;
             }
-            if state.revoked.load(Ordering::SeqCst) {
+            let record = state.permit.as_ref().map(|permit| Arc::clone(&permit.record))?;
+            if record.revoked.load(Ordering::SeqCst) {
                 state.permit.take();
                 return Some((
                     Err(std::io::Error::new(
@@ -1816,31 +2014,24 @@ fn chunk_stream(
                     state,
                 ));
             }
-            if !state.started {
-                if let Err(error) = state
-                    .file
-                    .seek(std::io::SeekFrom::Start(state.offset))
-                    .await
-                {
+            record.last_access_ms.store(
+                state.started_at.elapsed().as_millis() as u64,
+                Ordering::Relaxed,
+            );
+            let want = state.remaining.min(limits::STREAM_CHUNK_BYTES as u64) as usize;
+            let file = Arc::clone(&state.file);
+            let offset = state.offset;
+            let read = tokio::task::spawn_blocking(move || read_chunk(&file, offset, want))
+                .await
+                .unwrap_or_else(|error| Err(std::io::Error::other(error)));
+            let buffer = match read {
+                Ok(buffer) => buffer,
+                Err(error) => {
                     state.permit.take();
                     return Some((Err(error), state));
                 }
-                state.started = true;
-            }
-            let want = state.remaining.min(limits::STREAM_CHUNK_BYTES as u64) as usize;
-            let mut buffer = vec![0u8; want];
-            let mut filled = 0usize;
-            while filled < want {
-                match state.file.read(&mut buffer[filled..]).await {
-                    Ok(0) => break,
-                    Ok(read) => filled += read,
-                    Err(error) => {
-                        state.permit.take();
-                        return Some((Err(error), state));
-                    }
-                }
-            }
-            if filled == 0 {
+            };
+            if buffer.is_empty() {
                 // the retained inode shrank under us: refuse to pad the body
                 state.permit.take();
                 return Some((
@@ -1851,8 +2042,8 @@ fn chunk_stream(
                     state,
                 ));
             }
-            buffer.truncate(filled);
-            state.remaining -= filled as u64;
+            state.offset += buffer.len() as u64;
+            state.remaining -= buffer.len() as u64;
             Some((Ok(Bytes::from(buffer)), state))
         },
     )
@@ -1884,7 +2075,7 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
         workspace_id,
     )
     .await?;
-    if cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path) && !path.starts_with('~') {
+    if cwd.is_none() && needs_session_cwd(&path) {
         return Err(preview_error(
             FilePreviewErrorReason::MissingFile,
             "The terminal's current directory could not be read. Use an absolute file path.",
@@ -2013,7 +2204,7 @@ pub async fn cmd_file_preview_resolve<R: tauri::Runtime>(
         workspace_id,
     )
     .await?;
-    if cwd.is_none() && !crate::ipc::file_link::is_absolute_token(&path) && !path.starts_with('~') {
+    if cwd.is_none() && needs_session_cwd(&path) {
         return Err(preview_error(
             FilePreviewErrorReason::MissingFile,
             "The terminal's current directory could not be read. Use an absolute file path.",

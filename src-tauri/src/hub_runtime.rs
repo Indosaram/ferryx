@@ -698,6 +698,7 @@ fn hub_env_cli(args: &[String]) -> i32 {
 /// Exit code for a control reply. A `"status":"failed"` reply is a failure, so the cutover
 /// script never boots omo out after a start that was not persisted, and rollback never loads
 /// omo after a stop that did not take. `--check` also needs `"healthy":true`.
+#[cfg(any(unix, test))]
 fn control_exit_code(reply: &str, check: bool) -> i32 {
     let ok = if check {
         ferryx_hub::control::reply_healthy(reply)
@@ -1896,6 +1897,7 @@ impl Drop for HttpBound {
     }
 }
 
+#[cfg(unix)]
 fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
     ferryx_hub::control::LiveHub {
         running,
@@ -1918,6 +1920,7 @@ fn live_hub(running: bool, config: &HubConfig) -> ferryx_hub::control::LiveHub {
 }
 
 struct Generation {
+    #[cfg(unix)]
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -2410,7 +2413,10 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     for task in &tasks {
         HUB_TASKS.track(task);
     }
-    Generation { tasks }
+    Generation {
+        #[cfg(unix)]
+        tasks,
+    }
 }
 
 async fn post_cron_delivery(item: &ferryx_hub::schedule::DueDelivery) -> Option<String> {

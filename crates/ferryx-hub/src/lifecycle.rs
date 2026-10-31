@@ -17,11 +17,13 @@
 //! * [`bind_control_socket`]: the control socket is replaced by the daemon that owns the hub,
 //!   so `ferryx hub start|stop` reaches the current daemon, not a draining one.
 
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(unix)]
 use crate::{HubError, Result};
 
 /// Abort handles of the hub tasks running in this process.

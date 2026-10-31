@@ -182,14 +182,13 @@ impl MachineOperationJournal {
         #[cfg(test)]
         self.probe("persist");
         let result = super::auth::write_private_json(&self.path, &candidate)
-            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".to_string())
-            .and_then(|_| {
-                #[cfg(unix)]
-                std::fs::File::open(self.path.parent().expect("journal parent"))
-                    .and_then(|f| f.sync_all())
-                    .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".to_string())?;
-                Ok(())
-            });
+            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".to_string());
+        #[cfg(unix)]
+        let result = result.and_then(|()| {
+            std::fs::File::open(self.path.parent().expect("journal parent"))
+                .and_then(|f| f.sync_all())
+                .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE".to_string())
+        });
         match result {
             Ok(()) => {
                 *state = Ok(candidate);

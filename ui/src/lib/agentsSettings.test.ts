@@ -1,5 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { splitAgentArgs } from "./agentsSettings";
+
+describe("splitAgentArgs", () => {
+  it("keeps quoted arguments whole and backslashes literal", () => {
+    expect(splitAgentArgs(`--append-system-prompt "a b" --name 'c d'  ""`)).toEqual([
+      "--append-system-prompt", "a b", "--name", "c d", "",
+    ]);
+    expect(splitAgentArgs(`-c "say \\"hi\\"" 'it'"'"'s'`)).toEqual(["-c", `say "hi"`, "it's"]);
+    expect(splitAgentArgs(`--config C:\\Users\\me\\cfg.toml --dir "C:\\Program Files\\X\\bin"`)).toEqual([
+      "--config", "C:\\Users\\me\\cfg.toml", "--dir", "C:\\Program Files\\X\\bin",
+    ]);
+    expect(splitAgentArgs("  ")).toEqual([]);
+  });
+});
+
 import {
   AGENT_CANDIDATES,
   AGENTS_SETTINGS_CHANGED_EVENT,
@@ -163,6 +178,41 @@ describe("agentsSettings persistence and pure helpers", () => {
         args: "--resume",
         custom: true,
       });
+    });
+  });
+
+  describe("launch mode flags", () => {
+    const argsFor = (name: string, overrides: AgentSettings["overrides"]) =>
+      mergeDetections({ ...DEFAULT_AGENT_SETTINGS, overrides }, []).find((r) => r.name === name)!
+        .args;
+
+    it("appends --permission-mode for claude when a permission mode is set", () => {
+      expect(argsFor("claude", { claude: { permissionMode: "plan" } })).toBe(
+        "--permission-mode plan",
+      );
+      expect(
+        argsFor("claude", { claude: { args: "--model opus", permissionMode: "plan" } }),
+      ).toMatch(/--permission-mode plan$/);
+    });
+
+    it("keeps a --permission-mode the user already put in args", () => {
+      expect(
+        argsFor("claude", {
+          claude: { args: "--permission-mode acceptEdits", permissionMode: "plan" },
+        }),
+      ).toBe("--permission-mode acceptEdits");
+    });
+
+    it("appends --sandbox for codex when a sandbox is set", () => {
+      expect(argsFor("codex", { codex: { sandbox: "read-only" } })).toBe("--sandbox read-only");
+    });
+
+    it("leaves args unchanged when no mode is set or for other agents", () => {
+      expect(argsFor("claude", { claude: { args: "--model opus" } })).toBe("--model opus");
+      expect(argsFor("codex", {})).toBe("");
+      expect(
+        argsFor("aider", { aider: { args: "--chat", permissionMode: "plan", sandbox: "read-only" } }),
+      ).toBe("--chat");
     });
   });
 

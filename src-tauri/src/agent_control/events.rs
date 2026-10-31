@@ -20,6 +20,71 @@ use super::{derive_status, AgentControlState, AgentStateSource, AgentTier, Provi
 /// Machine-events type for one slim agent-control change.
 pub const AGENT_CONTROL_EVENT: &str = "agentControlChanged";
 
+/// Events-socket frame telling a remote client that a session's prompt card may have changed.
+pub const AGENT_PROMPT_CHANGED_FRAME: &str = "agentPromptChanged";
+
+/// How many sessions one socket's prompt filter remembers. The oldest is forgotten first: a
+/// forgotten reading only costs one spare frame, a forgotten verdict one more ownership read.
+pub const PROMPT_FILTER_SESSIONS: usize = 256;
+
+/// Per-socket memory of the prompt and screen each session last showed, so a state-only change
+/// sends no frame. A session the socket has not seen yet always sends one: a spare refetch is
+/// cheaper than a card left open on another device. It also caches whether the socket's surface
+/// may see a session at all, so the ownership read runs once per session.
+#[derive(Default)]
+pub struct PromptChangeFilter {
+    seen: HashMap<String, (Option<String>, Option<String>)>,
+    exposure: HashMap<String, bool>,
+    order: VecDeque<String>,
+}
+
+impl PromptChangeFilter {
+    /// The cached verdict for whether this socket may see `session_id`.
+    pub fn exposure(&self, session_id: &str) -> Option<bool> {
+        self.exposure.get(session_id).copied()
+    }
+
+    pub fn remember_exposure(&mut self, session_id: &str, exposed: bool) {
+        self.track(session_id);
+        self.exposure.insert(session_id.to_string(), exposed);
+    }
+
+    fn track(&mut self, session_id: &str) {
+        if self.seen.contains_key(session_id) || self.exposure.contains_key(session_id) {
+            return;
+        }
+        self.order.push_back(session_id.to_string());
+        while self.order.len() > PROMPT_FILTER_SESSIONS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+                self.exposure.remove(&oldest);
+            }
+        }
+    }
+
+    /// The `agentPromptChanged` frame for this observation, if its prompt or screen moved.
+    pub fn frame(&mut self, observation: &AgentObservation) -> Option<String> {
+        let reading = (
+            observation.prompt_id.clone(),
+            observation.screen_revision.clone(),
+        );
+        if self.seen.get(&observation.session_id) == Some(&reading) {
+            return None;
+        }
+        self.track(&observation.session_id);
+        self.seen.insert(observation.session_id.clone(), reading);
+        Some(
+            json!({
+                "type": AGENT_PROMPT_CHANGED_FRAME,
+                "sessionId": observation.session_id,
+                "promptId": observation.prompt_id,
+                "screenRevision": observation.screen_revision,
+            })
+            .to_string(),
+        )
+    }
+}
+
 /// How many observations the log retains. Older cursors come back as a gap.
 pub const AGENT_EVENT_RETAIN: usize = 256;
 
@@ -597,6 +662,37 @@ mod tests {
             screen_revision: Some("rev".into()),
             workspace_id: None,
         }
+    }
+
+    #[test]
+    fn the_prompt_filter_forgets_the_oldest_session_past_its_bound() {
+        let mut filter = PromptChangeFilter::default();
+        let observation = |session: String| AgentObservation {
+            sequence: 1,
+            session_id: session,
+            state: AgentControlState::Blocked,
+            state_source: AgentStateSource::Screen,
+            tier: AgentTier::Screen,
+            prompt_id: Some("p".into()),
+            kind: None,
+            screen_revision: Some("rev".into()),
+        };
+        filter.remember_exposure("s0", true);
+        for index in 0..=PROMPT_FILTER_SESSIONS {
+            assert!(filter.frame(&observation(format!("s{index}"))).is_some());
+        }
+        assert_eq!(filter.order.len(), PROMPT_FILTER_SESSIONS);
+        assert!(filter.seen.len() <= PROMPT_FILTER_SESSIONS);
+        assert_eq!(
+            filter.exposure("s0"),
+            None,
+            "the oldest session is forgotten"
+        );
+        // A forgotten session's unchanged reading sends one spare frame; a remembered one none.
+        assert!(filter.frame(&observation("s0".into())).is_some());
+        assert!(filter
+            .frame(&observation(format!("s{PROMPT_FILTER_SESSIONS}")))
+            .is_none());
     }
 
     #[test]

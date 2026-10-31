@@ -334,7 +334,7 @@ fn decode_hex(hex_str: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = Vec::with_capacity(hex_str.len() / 2);
-    for chunk in hex_str.as_bytes().chunks_exact(2) {
+    for chunk in hex_str.as_bytes().as_chunks::<2>().0 {
         let high = char_to_nibble(chunk[0])?;
         let low = char_to_nibble(chunk[1])?;
         bytes.push((high << 4) | low);

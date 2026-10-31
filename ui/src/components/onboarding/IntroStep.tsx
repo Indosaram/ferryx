@@ -20,6 +20,14 @@ const OVERVIEW_ROWS: Record<OverviewStepId, { title: string; description: string
     title: "First project",
     description: "Open a folder on this computer or pair another machine.",
   },
+  try: {
+    title: "First worktree",
+    description: "Optionally create a worktree and start your default agent in it.",
+  },
+  phone: {
+    title: "Your phone",
+    description: "Optionally pair a phone to follow and answer agents remotely.",
+  },
 };
 
 export type IntroStepProps = {

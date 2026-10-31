@@ -49,6 +49,13 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
 };
 
 const TERMINAL_SETTINGS_EVENT = "orca:terminal-settings";
+/**
+ * Schema marker written into the stored terminal settings blob. Blobs without it
+ * predate the 50,000-line default: the old normalizer always persisted
+ * `scrollback`, so a stored 10,000 there is the old implicit default, not a choice.
+ */
+const TERMINAL_SETTINGS_VERSION = 2;
+const LEGACY_DEFAULT_SCROLLBACK = 10_000;
 const FONT_SIZE_MIN = 10;
 const FONT_SIZE_MAX = 36;
 const SCROLLBACK_MIN = 1_000;
@@ -98,7 +105,11 @@ export function loadTerminalSettings(storage: Pick<Storage, "getItem" | "setItem
   try {
     const raw = getMigratedItem(TERMINAL_SETTINGS_STORAGE_KEY, storage);
     if (!raw) return DEFAULT_TERMINAL_SETTINGS;
-    return normalizeTerminalSettings(JSON.parse(raw) as Partial<TerminalSettings>);
+    const stored = JSON.parse(raw) as Partial<TerminalSettings> & { version?: unknown };
+    if (stored.version !== TERMINAL_SETTINGS_VERSION && stored.scrollback === LEGACY_DEFAULT_SCROLLBACK) {
+      delete stored.scrollback;
+    }
+    return normalizeTerminalSettings(stored);
   } catch {
     return DEFAULT_TERMINAL_SETTINGS;
   }
@@ -110,7 +121,10 @@ export function saveTerminalSettings(
 ): TerminalSettings {
   const normalized = normalizeTerminalSettings(next);
   try {
-    storage?.setItem(TERMINAL_SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
+    storage?.setItem(
+      TERMINAL_SETTINGS_STORAGE_KEY,
+      JSON.stringify({ ...normalized, version: TERMINAL_SETTINGS_VERSION }),
+    );
   } catch {
   }
   if (typeof window !== "undefined") {
@@ -201,7 +215,8 @@ async function syncNativeOverrides(settings: TerminalSettings): Promise<void> {
     fontSize: settings.fontSize,
     macosOptionAsAlt: settings.macosOptionAsAlt,
     shell: settings.shell,
-    scrollback: settings.scrollback,
+    // The default is "unset": let the native side keep Ghostty's own scrollback-limit.
+    scrollback: settings.scrollback === DEFAULT_TERMINAL_SETTINGS.scrollback ? null : settings.scrollback,
     scrollbackCompression: settings.scrollbackCompression,
   };
   const serialized = JSON.stringify(payload);

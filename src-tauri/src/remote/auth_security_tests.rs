@@ -204,3 +204,38 @@ async fn revocation_is_latched_and_registration_after_validation_cannot_miss_it(
         Err(AuthError::Unauthorized)
     ));
 }
+
+#[tokio::test]
+async fn permission_change_ends_live_sockets_and_keeps_machine_control() {
+    let auth = AuthManager::new();
+    let code = auth.create_pairing_code(DevicePermission::Control);
+    let (token, device) = auth.exchange_pairing_code(&code, "phone").unwrap();
+    let mut live = auth.device_revocation(&device.id).unwrap();
+    let changed = auth
+        .set_device_permission(&device.id, DevicePermission::View)
+        .unwrap();
+    assert_eq!(changed.permission, DevicePermission::View);
+    tokio::time::timeout(Duration::from_secs(5), live.wait_for(|ended| *ended))
+        .await
+        .unwrap()
+        .unwrap();
+    // Still paired: the next request is admitted under the new role.
+    assert_eq!(
+        auth.validate_token(&token).unwrap().permission,
+        DevicePermission::View
+    );
+    assert!(auth.device_revocation(&device.id).is_ok());
+
+    let machine = auth
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .unwrap();
+    let (_, machine_device) = auth.exchange_pairing_code(&machine, "host").unwrap();
+    assert!(matches!(
+        auth.set_device_permission(&machine_device.id, DevicePermission::View),
+        Err(PermissionChangeError::MachineRequiresControl)
+    ));
+    assert!(matches!(
+        auth.set_device_permission("missing", DevicePermission::View),
+        Err(PermissionChangeError::NotFound)
+    ));
+}

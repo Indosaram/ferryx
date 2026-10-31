@@ -1,6 +1,11 @@
 import { ExternalLink, Maximize2, Minus, Plus, RefreshCw, RotateCcw, Scan, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, ReactNode, SyntheticEvent } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  SyntheticEvent,
+} from "react";
 
 import { IconButton } from "./ui/IconButton";
 import { cn } from "../lib/cn";
@@ -16,11 +21,12 @@ import type { FilePreviewImageProps } from "../lib/filePreviewTypes";
  * or pixel bound (the payload carries no intrinsic dimensions — the 32 MiB /
  * 40 MP limits are enforced before `mediaUrl` exists), and never renders SVG as
  * an active document. Failures stay inside the modal with retry, reload and an
- * explicit external action; nothing is launched implicitly.
+ * explicit external action (the controller's failure screen, reached through
+ * `onFailure`); nothing is launched implicitly.
  *
  * Every visual state is driven by real `load`/`error` events on the actual
- * `img`. The element is keyed by generation+handle+attempt, so a replacement
- * preview (or a retry) unmounts the previous element with its in-flight load:
+ * `img`. The element is keyed by generation+handle, so a replacement
+ * preview unmounts the previous element with its in-flight load:
  * a late `load`/`error` from an image the modal already replaced can no longer
  * reach this component and corrupt the current view.
  */
@@ -77,10 +83,10 @@ export function FilePreviewImage({
   const [view, setView] = useState<ViewState>(INITIAL_VIEW);
   const [natural, setNatural] = useState<Natural | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [attempt, setAttempt] = useState(0);
   const [isExpanded, setIsExpanded] = useState(false);
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
   const reportedRef = useRef<string | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -92,9 +98,8 @@ export function FilePreviewImage({
     typeof payload.mediaType === "string" &&
     IMAGE_MEDIA_TYPES.includes(payload.mediaType);
 
-  /** Element identity: a new request or a retry is a new DOM element, never a reused one. */
+  /** Element identity: a new request is a new DOM element, never a reused one. */
   const requestKey = `${generation}::${payload.handle}`;
-  const sourceKey = `${requestKey}::${attempt}`;
 
   const failureRef = useRef(onFailure);
   failureRef.current = onFailure;
@@ -104,7 +109,6 @@ export function FilePreviewImage({
     setView(INITIAL_VIEW);
     setNatural(null);
     setStatus("loading");
-    setAttempt(0);
     setIsExpanded(false);
     dragRef.current = null;
   }, [requestKey]);
@@ -133,6 +137,8 @@ export function FilePreviewImage({
 
   const handleError = useCallback(
     () => {
+      // The controller swaps the whole renderer for its failure screen (retry,
+      // reload, open externally), so there is no local error UI to show here.
       setStatus("error");
       failureRef.current({
         reason: null,
@@ -146,6 +152,20 @@ export function FilePreviewImage({
   const setZoomPercent = useCallback((next: number) => {
     setView((current) => ({ mode: "zoom", zoom: clampZoom(next), pan: current.pan }));
   }, []);
+
+  /**
+   * The percentage Fit is actually drawing at, so the first zoom step continues
+   * from what the user sees. Fit never upscales (max-w/max-h-full), hence the
+   * 100 cap; an unmeasured viewport falls back to 100.
+   */
+  const fitPercent = useCallback((): number => {
+    const host = viewportRef.current;
+    if (!natural || !host || natural.width <= 0 || natural.height <= 0) return 100;
+    const vw = host.clientWidth;
+    const vh = host.clientHeight;
+    if (vw <= 0 || vh <= 0) return 100;
+    return Math.round(Math.min(100, Math.min(vw / natural.width, vh / natural.height) * 100));
+  }, [natural]);
 
   const handlePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -179,12 +199,6 @@ export function FilePreviewImage({
     }
   }, []);
 
-  const retry = useCallback(() => {
-    setStatus("loading");
-    setNatural(null);
-    setAttempt((value) => value + 1);
-  }, []);
-
   const openExpanded = useCallback(() => {
     if (status === "ready") {
       setIsExpanded(true);
@@ -197,22 +211,20 @@ export function FilePreviewImage({
   }, []);
 
   useEffect(() => {
-    if (!isExpanded) return;
+    if (isExpanded) closeButtonRef.current?.focus();
+  }, [isExpanded]);
 
-    closeButtonRef.current?.focus();
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        closeExpanded();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [isExpanded, closeExpanded]);
+  // Escape is handled on the lightbox itself and stops there, so it closes only
+  // the lightbox and never also reaches the modal's own Escape handling.
+  const handleLightboxKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      event.preventDefault();
+      closeExpanded();
+    },
+    [closeExpanded],
+  );
 
   if (!supported) {
     return (
@@ -240,6 +252,7 @@ export function FilePreviewImage({
   return (
     <div data-testid="file-preview-image" className="flex h-full w-full flex-col bg-background">
       <div
+        ref={viewportRef}
         data-testid="file-preview-image-viewport"
         role="group"
         aria-label={`${payload.displayName} image viewport`}
@@ -252,48 +265,26 @@ export function FilePreviewImage({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        {status === "error" ? (
-          <div
-            data-testid="file-preview-image-error"
-            className="flex flex-col items-center gap-3 p-6 text-center"
-          >
-            <p className="text-sm font-medium text-foreground">This image could not be displayed</p>
-            <p className="max-w-sm text-xs text-muted-foreground">
-              {payload.displayName} ({formatBytes(payload.byteLength)}) failed to decode, or its preview is no longer
-              valid. Retry the image, reload the file, or open it externally.
-            </p>
-            <div className="flex items-center gap-2">
-              <ActionButton label="Retry" icon={<RefreshCw className="size-3.5" />} onClick={retry} />
-              <ActionButton label="Reload file" icon={<RotateCcw className="size-3.5" />} onClick={onReload} />
-              <ActionButton
-                label="Open externally"
-                icon={<ExternalLink className="size-3.5" />}
-                onClick={onExternalOpen}
-              />
-            </div>
-          </div>
-        ) : (
-          <div
-            data-testid="file-preview-image-canvas"
-            className="flex max-h-full max-w-full items-center justify-center"
-            style={panned ? { transform: `translate(${view.pan.x}px, ${view.pan.y}px)` } : undefined}
-          >
-            <img
-              key={sourceKey}
-              src={mediaUrl ?? undefined}
-              alt={payload.displayName}
-              draggable={false}
-              decoding="async"
-              onLoad={handleLoad}
-              onError={handleError}
-              className={cn(
-                "select-none",
-                zoomed ? "max-w-none" : "max-h-full max-w-full object-contain",
-              )}
-              style={imageWidth ? { width: imageWidth, height: "auto" } : undefined}
-            />
-          </div>
-        )}
+        <div
+          data-testid="file-preview-image-canvas"
+          className="flex max-h-full max-w-full items-center justify-center"
+          style={panned ? { transform: `translate(${view.pan.x}px, ${view.pan.y}px)` } : undefined}
+        >
+          <img
+            key={requestKey}
+            src={mediaUrl ?? undefined}
+            alt={payload.displayName}
+            draggable={false}
+            decoding="async"
+            onLoad={handleLoad}
+            onError={handleError}
+            className={cn(
+              "select-none",
+              zoomed ? "max-w-none" : "max-h-full max-w-full object-contain",
+            )}
+            style={imageWidth ? { width: imageWidth, height: "auto" } : undefined}
+          />
+        </div>
       </div>
 
       <div className="flex h-9 shrink-0 items-center gap-2 border-t border-border bg-card px-2">
@@ -310,7 +301,7 @@ export function FilePreviewImage({
           label="Zoom out"
           size="sm"
           disabled={status !== "ready" || (zoomed && view.zoom <= ZOOM_MIN_PCT)}
-          onClick={() => setZoomPercent((zoomed ? view.zoom : 100) - ZOOM_STEP_PCT)}
+          onClick={() => setZoomPercent((zoomed ? view.zoom : fitPercent()) - ZOOM_STEP_PCT)}
         >
           <Minus className="size-3.5" />
         </IconButton>
@@ -318,7 +309,7 @@ export function FilePreviewImage({
           label="Zoom in"
           size="sm"
           disabled={status !== "ready" || (zoomed && view.zoom >= ZOOM_MAX_PCT)}
-          onClick={() => setZoomPercent((zoomed ? view.zoom : 100) + ZOOM_STEP_PCT)}
+          onClick={() => setZoomPercent((zoomed ? view.zoom : fitPercent()) + ZOOM_STEP_PCT)}
         >
           <Plus className="size-3.5" />
         </IconButton>
@@ -366,6 +357,7 @@ export function FilePreviewImage({
           aria-label="Expanded image"
           data-testid="file-preview-image-lightbox"
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onKeyDown={handleLightboxKeyDown}
           onClick={(event) => {
             if (event.target === event.currentTarget) {
               closeExpanded();

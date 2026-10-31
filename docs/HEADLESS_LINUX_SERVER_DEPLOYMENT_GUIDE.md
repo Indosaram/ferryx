@@ -521,10 +521,10 @@ On success, the server responds with HTTP 200:
 }
 ```
 
-Error responses return plain text for authentication errors (`src-tauri/src/remote/server.rs:354-368`):
-* Invalid PIN returns HTTP 400 with plain text `Invalid pairing code`.
-* Expired PIN returns HTTP 401 with plain text `Pairing code expired`.
-* Rate limiting returns HTTP 429 with JSON `{"code":"pairing_rate_limited"}`.
+Authentication errors return JSON (`src-tauri/src/remote/server.rs:405-480`). `details.remainingAttempts` is the number of failed attempts this source may still make before it is rate limited:
+* Invalid PIN returns HTTP 400 with `{"code":"INVALID_PIN","message":"Invalid pairing code","details":{"remainingAttempts":N}}`.
+* Expired PIN returns HTTP 401 with the same shape and `"code":"PIN_EXPIRED"`, `"message":"Pairing code expired"`.
+* Rate limiting returns HTTP 429 with JSON `{"code":"pairing_rate_limited","error":{"code":"PAIRING_RATE_LIMITED",...}}` (unchanged).
 
 ### Pre-approving from the CLI
 
@@ -738,10 +738,11 @@ The daemon continues running its local UDS client accept loop (`src-tauri/src/da
 **Symptom:** Exchanging a pairing code fails with HTTP 400 or HTTP 401.
 
 **Cause:** Pairing PINs expire 60 seconds after creation (`src-tauri/src/remote/auth.rs:383`).
-The server returns plain text error bodies (`src-tauri/src/remote/server.rs:354-368`):
-* HTTP 400 returns `Invalid pairing code`.
-* HTTP 401 returns `Pairing code expired`.
-Expired codes may be pruned before lookup, resulting in `Invalid pairing code`.
+The server returns JSON error bodies (`src-tauri/src/remote/server.rs:405-480`):
+* HTTP 400 returns `"code":"INVALID_PIN"` (`Invalid pairing code`).
+* HTTP 401 returns `"code":"PIN_EXPIRED"` (`Pairing code expired`).
+Both carry `details.remainingAttempts`, the failed attempts this source has left.
+Expired codes may be pruned before lookup, resulting in `INVALID_PIN`.
 
 **Resolution:**
 The current CLI cannot mint a replacement PIN. Re-enroll through `ferryx-cli account login`

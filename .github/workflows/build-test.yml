@@ -289,6 +289,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.legacy == true
     name: Rust Check (${{ matrix.os_name }})
     runs-on: ${{ matrix.platform }}
+    # Same CMake 4 policy floor as the precheck job: audiopus_sys 0.2.2 bundles Opus with a
+    # CMake 3.1 policy declaration, which current macOS and Windows runner images reject.
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
     strategy:
       fail-fast: false
       matrix:
@@ -443,6 +447,17 @@ jobs:
       - name: Build remote helper (debug, required by ssh bridge suites)
         if: matrix.os_name == 'linux'
         run: cargo build --manifest-path remote-helper/Cargo.toml
+
+      # The P19 overlay gate suites need a CGNAT address on a non-loopback interface, as in the
+      # precheck job. On Linux add it to the default-route interface as a /32.
+      - name: Provision overlay address for host-dependent suites
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          OVERLAY_ADDRESS=100.64.1.2
+          interface=$(ip -o -4 route show default | awk '{print $5; exit}')
+          sudo -n ip addr add "$OVERLAY_ADDRESS/32" dev "$interface"
+          ip -o -4 addr show | grep "$OVERLAY_ADDRESS" && echo "PROVISION overlay_alias=present on $interface"
 
       # Suites that cannot run on a hosted runner, each skipped with the reason it was measured
       # to fail. They stay verified on real hosts: the renderer contract suite on GPU hardware,
