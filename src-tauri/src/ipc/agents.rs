@@ -57,6 +57,17 @@ pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
     Ok(())
 }
 
+/// A focused pane has been read: the daemon drops the program's OSC 7501 `done`/`error` outcome.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_agent_acknowledge_outcome(
+    daemon_client: tauri::State<'_, std::sync::Arc<crate::daemon::client::DaemonClient>>,
+    session_id: String,
+) -> Result<(), super::IpcError> {
+    daemon_client.acknowledge_agent_outcome(&session_id).await?;
+    Ok(())
+}
+
 pub(crate) fn discover_agent_session_id(root_pid: u32, agent_type: &str) -> Option<String> {
     discover_agent_session(root_pid, agent_type).map(|(id, _)| id)
 }
