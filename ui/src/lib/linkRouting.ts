@@ -1,4 +1,4 @@
-import type { FilePreviewSource } from "./filePreviewTypes";
+import type { FilePreviewSource, RemotePreviewOrigin } from "./filePreviewTypes";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { isHttpUrl, loadBrowserSettings } from "./browserSettings";
@@ -17,6 +17,8 @@ export type TerminalToken =
   | { readonly type: "url"; readonly target: string }
   | {
       readonly type: "file";
+      readonly remote?: RemotePreviewOrigin;
+      readonly freshRemoteSnapshot?: boolean;
       readonly path: string;
       readonly line?: number;
       readonly col?: number;
@@ -420,6 +422,8 @@ export async function openTerminalToken(
               // Tab identity keys on request.path: use the absolute resolved path so the same
               // relative token from different cwds (or "./x" vs "x") maps to the right single tab.
               path: resolved?.resolvedPath ?? token.path,
+              ...(token.remote ? { remote: token.remote } : {}),
+              ...(token.freshRemoteSnapshot ? { freshRemoteSnapshot: true } : {}),
               backendSessionId: source.backendSessionId,
               line: token.line ?? null,
               col: token.col ?? null,

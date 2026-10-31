@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
@@ -83,11 +83,16 @@ export function BrowserToolbar({
   onGoBack,
   onGoForward,
   onToggleElementPick,
-  elementPicking = false,
+  elementPicking: elementPickingProp,
   designFeedbackTargets = [],
 }: BrowserToolbarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const omniboxId = useId();
+  const omniboxListId = `${omniboxId}-history`;
   const [inputUrl, setInputUrl] = useState(tab.url);
+  // Set while the user has typed into the omnibox and not yet submitted, blurred or escaped, so
+  // a live URL update from the page cannot overwrite half-typed text.
+  const inputDirtyRef = useRef(false);
   const [historyQuery, setHistoryQuery] = useState("");
   const [zoomFactor, setZoomFactor] = useState(tab.zoomFactor ?? 1.0);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -99,6 +104,9 @@ export function BrowserToolbar({
   const [designSnapshot, setDesignSnapshot] = useState<BrowserDesignSnapshot | null>(null);
   const [designSending, setDesignSending] = useState(false);
   const [designError, setDesignError] = useState<string | null>(null);
+  // The toolbar owns the picker's armed state so the element-pick -> design-feedback flow works
+  // without a parent; a parent that passes `elementPicking` still drives it.
+  const [elementPicking, setElementPicking] = useState(elementPickingProp ?? false);
   const { settings, updateSettings } = useBrowserSettings();
 
   // Picking needs native snapshot capture AND this tab's isolated-world bridge, which the
@@ -112,6 +120,21 @@ export function BrowserToolbar({
   }, [historyEntries, historyQuery, settings.rememberBrowsingHistory]);
 
   useEffect(() => {
+    if (elementPickingProp !== undefined) setElementPicking(elementPickingProp);
+  }, [elementPickingProp]);
+
+  const pickBrowserIdRef = useRef(tab.browserId);
+  useEffect(() => {
+    // A picker armed for one browser must not stay pressed for another reusing this toolbar.
+    if (pickBrowserIdRef.current === tab.browserId) return;
+    pickBrowserIdRef.current = tab.browserId;
+    setElementPicking(false);
+    setDesignSnapshot(null);
+    setDesignError(null);
+  }, [tab.browserId]);
+
+  useEffect(() => {
+    if (inputDirtyRef.current) return;
     setInputUrl(tab.url);
     setHistoryQuery("");
   }, [tab.url]);
@@ -196,8 +219,14 @@ export function BrowserToolbar({
     }
   };
 
+  // The shortcut listener must not re-subscribe on every render (parents pass inline callbacks),
+  // so it reads the latest handlers through a ref instead of depending on them.
+  const shortcutHandlersRef = useRef({ onReload, goBack: handleGoBack, goForward: handleGoForward });
+  shortcutHandlersRef.current = { onReload, goBack: handleGoBack, goForward: handleGoForward };
+
   useEffect(() => {
     const runShortcut = (action: BrowserShortcutAction) => {
+      const handlers = shortcutHandlersRef.current;
       switch (action) {
         case "focus-address":
           inputRef.current?.focus();
@@ -208,16 +237,16 @@ export function BrowserToolbar({
           if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
           break;
         case "reload":
-          onReload();
+          handlers.onReload();
           break;
         case "reload-hard":
-          onReload({ ignoreCache: true });
+          handlers.onReload({ ignoreCache: true });
           break;
         case "back":
-          void handleGoBack();
+          void handlers.goBack();
           break;
         case "forward":
-          void handleGoForward();
+          void handlers.goForward();
           break;
         case "find":
           // BrowserPane owns the find overlay and receives the same event.
@@ -252,9 +281,7 @@ export function BrowserToolbar({
       unlisten?.();
       window.removeEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
     };
-    // The navigation handlers intentionally follow the current browser tab state.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onReload, settings.rememberBrowsingHistory, tab.browserId, tab.canGoBack, tab.canGoForward]);
+  }, [settings.rememberBrowsingHistory, tab.browserId]);
 
   useEffect(() => {
     if (!elementPicking) return;
@@ -262,6 +289,8 @@ export function BrowserToolbar({
     let unlisten: (() => void) | undefined;
     void onBrowserElementPicked((payload) => {
       if (payload.browserId !== tab.browserId) return;
+      // The backend disarms the picker as part of finishing the pick.
+      setElementPicking(false);
       // A completion that cannot snapshot must not vanish as an unhandled rejection: the
       // capability gate keeps the picker from being armed off macOS, and anything that still
       // slips through surfaces below the toolbar instead of leaving the pick silently dead.
@@ -289,6 +318,7 @@ export function BrowserToolbar({
 
   const navigateFromAddress = (raw: string) => {
     const url = normalizeBrowserAddress(raw, settings);
+    inputDirtyRef.current = false;
     setInputUrl(url);
     setHistoryQuery("");
     setOmniboxOpen(false);
@@ -309,6 +339,7 @@ export function BrowserToolbar({
   const handleAddressKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      inputDirtyRef.current = false;
       setOmniboxOpen(false);
       setSelectedHistoryIndex(-1);
       return;
@@ -338,7 +369,9 @@ export function BrowserToolbar({
     const previousZoom = zoomFactor;
     setZoomFactor(nextZoom);
     try {
-      await setBrowserZoom(tab.browserId, nextZoom);
+      const applied = await setBrowserZoom(tab.browserId, nextZoom);
+      // The backend answers the zoom it actually applied; show that rather than the request.
+      if (typeof applied === "number" && Number.isFinite(applied)) setZoomFactor(applied);
       setActionError(null);
     } catch (error) {
       setZoomFactor(previousZoom);
@@ -367,6 +400,7 @@ export function BrowserToolbar({
     try {
       const state = await getBrowserState(tab.browserId);
       if (state.url && state.url !== inputUrl) {
+        inputDirtyRef.current = false;
         setInputUrl(state.url);
         setHistoryQuery("");
       }
@@ -398,6 +432,8 @@ export function BrowserToolbar({
   };
 
   const hardReloadSupported = isHardReloadSupportedPlatform();
+  const omniboxListOpen = settings.rememberBrowsingHistory && omniboxOpen && omniboxEntries.length > 0;
+  const omniboxOptionId = (index: number) => `${omniboxId}-option-${index}`;
 
   const handleReload = (event: React.MouseEvent<HTMLButtonElement>) => {
     if (hardReloadSupported && event.shiftKey) {
@@ -455,17 +491,28 @@ export function BrowserToolbar({
               if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
             }}
             onChange={(event) => {
+              inputDirtyRef.current = true;
               setInputUrl(event.target.value);
               setHistoryQuery(event.target.value);
               setSelectedHistoryIndex(-1);
               if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
             }}
+            onBlur={() => {
+              inputDirtyRef.current = false;
+            }}
             onKeyDown={handleAddressKeyDown}
             placeholder="Search or enter URL"
             aria-label="URL address bar"
             data-shortcut="browser.focusAddress"
-            aria-expanded={settings.rememberBrowsingHistory && omniboxOpen}
-            aria-controls="browser-omnibox-history"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={omniboxListOpen}
+            aria-controls={omniboxListOpen ? omniboxListId : undefined}
+            aria-activedescendant={
+              omniboxListOpen && selectedHistoryIndex >= 0 && selectedHistoryIndex < omniboxEntries.length
+                ? omniboxOptionId(selectedHistoryIndex)
+                : undefined
+            }
             className="w-full bg-background border border-border rounded px-2.5 py-1 text-xs text-foreground focus:outline-none focus:border-primary font-mono"
           />
         </form>
@@ -511,12 +558,18 @@ export function BrowserToolbar({
             onClick={() => {
               // Arming the picker is the user's action; a rejection here would otherwise leave the
               // button pressed with nothing listening for a pick.
+              const nextPicking = !elementPicking;
               const togglePicker = elementPicking
                 ? removeBrowserElementPicker(tab.browserId)
                 : injectBrowserElementPicker(tab.browserId);
+              setElementPicking(nextPicking);
               void togglePicker
                 .then(() => setActionError(null))
-                .catch((error: unknown) => setActionError(actionFailureMessage("Element picker", error)));
+                .catch((error: unknown) => {
+                  // The page kept its previous picker state, so the button does too.
+                  setElementPicking(!nextPicking);
+                  setActionError(actionFailureMessage("Element picker", error));
+                });
               onToggleElementPick?.();
             }}
             title={elementPickSupported ? "Select element" : "Select element (unavailable on this platform)"}
@@ -555,15 +608,16 @@ export function BrowserToolbar({
                 setDesignSending(false);
               });
           }}
-          onCancel={() => { setDesignSnapshot(null); setDesignError(null); }}
+          onCancel={() => { setDesignSnapshot(null); setDesignError(null); setElementPicking(false); }}
         />
       ) : null}
 
-      {settings.rememberBrowsingHistory && omniboxOpen && omniboxEntries.length > 0 ? (
-        <div id="browser-omnibox-history" role="listbox" aria-label="Address bar history" className="border-t border-border/70 bg-popover px-3 py-1">
+      {omniboxListOpen ? (
+        <div id={omniboxListId} role="listbox" aria-label="Address bar history" className="border-t border-border/70 bg-popover px-3 py-1">
           {omniboxEntries.map((entry, index) => (
             <button
               key={entry.id}
+              id={omniboxOptionId(index)}
               type="button"
               role="option"
               aria-selected={selectedHistoryIndex === index}

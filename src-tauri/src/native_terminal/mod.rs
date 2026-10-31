@@ -32,6 +32,7 @@ mod paste;
 pub mod platform;
 mod placeholders;
 mod png_decoder;
+mod program_status;
 mod queries;
 mod render_pass;
 #[cfg(feature = "native-terminal")]
@@ -74,6 +75,10 @@ pub use images::{ImagePlacementSnapshot, TerminalImage};
 pub use input::NativeTerminalInput;
 pub use key::{KeyAction, KeyCode, KeyEvent, KeyModifiers};
 pub use mouse::{MouseAction, MouseButton, MouseEvent, MousePosition, MouseRendererSize};
+pub use program_status::{
+    ProgramStatusEvent, ProgramStatusKind, ProgramStatusReport, ProgramStatusSink,
+    ProgramStatusState, PromptKind,
+};
 #[cfg(feature = "native-terminal")]
 pub use renderer::{
     canonical_scenario, GlyphAtlasStats, NativeTerminalRenderer, OffscreenFrame, RendererConfig,

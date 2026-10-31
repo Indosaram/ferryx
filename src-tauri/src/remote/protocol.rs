@@ -5,6 +5,9 @@ use std::collections::HashMap;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum MachineTerminalControl {
+    AcknowledgeAgentOutcome {
+        generation: crate::scoped_contracts::Epoch,
+    },
     Resize {
         generation: crate::scoped_contracts::Epoch,
         cols: u16,
@@ -346,6 +349,7 @@ pub struct RemoteDeleteWorktreeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientControlMessage {
+    AcknowledgeAgentOutcome,
     RemoteWrite {
         generation: String,
         data: String,
@@ -786,6 +790,20 @@ mod tests {
         )
         .is_err());
         assert!(serde_json::from_value::<PairingState>(json!("unknown")).is_err());
+    }
+
+    #[test]
+    fn outcome_acknowledgement_requires_a_generation_on_machine_sockets() {
+        let mirror = r#"{"type":"acknowledgeAgentOutcome"}"#;
+        assert_eq!(
+            serde_json::from_str::<ClientControlMessage>(mirror).unwrap(),
+            ClientControlMessage::AcknowledgeAgentOutcome,
+        );
+        assert!(serde_json::from_str::<MachineTerminalControl>(mirror).is_err());
+        let machine = serde_json::from_str::<MachineTerminalControl>(
+            r#"{"type":"acknowledgeAgentOutcome","generation":"9"}"#,
+        ).unwrap();
+        assert!(matches!(machine, MachineTerminalControl::AcknowledgeAgentOutcome { generation } if generation.0 == 9));
     }
 
     #[test]

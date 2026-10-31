@@ -346,6 +346,22 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
     }
   };
 
+  const handleImageError = (boundUrl: string) => {
+    // A frame that cannot be decoded is never committed, but it must still be acknowledged: an unconfirmed
+    // frame would let the ACK-deadline sweeper close the whole session over one bad image.
+    const failed = framesByUrlRef.current.get(boundUrl);
+    framesByUrlRef.current.delete(boundUrl);
+    if (!failed) return;
+    if (displayedFrameRef.current && failed.seq > displayedFrameRef.current.seq) {
+      setDisplayedFrame(null);
+    }
+    if (confirmPresented) {
+      confirmPresented(failed.metadata.streamId, failed.seq);
+    } else if (sendAck) {
+      sendAck(failed.metadata.streamId, failed.seq);
+    }
+  };
+
   return (
     <div
       className={`relative flex flex-col w-full h-full bg-[#0a0a0a] text-[#f5f5f5] overflow-hidden select-none ${className}`}
@@ -418,6 +434,7 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
             className="w-full h-full object-contain pointer-events-none"
             draggable={false}
             onLoad={() => handleImageLoad(imageUrl, frame)}
+            onError={() => handleImageError(imageUrl)}
           />
         ) : (
           <div className="flex flex-col items-center justify-center text-[#818181] text-sm">

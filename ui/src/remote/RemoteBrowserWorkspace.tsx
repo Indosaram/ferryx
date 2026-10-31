@@ -26,6 +26,15 @@ export interface RemoteBrowserWorkspaceProps {
   className?: string;
 }
 
+// The remote page tracks the highest fill revision per element (`__ferryx_tracked_revision`) and refuses
+// anything older. A per-mount counter restarts at 1 and would be refused after a remount, so revisions
+// come from one module-level, strictly increasing, clock-seeded counter shared by every mount.
+let lastImeRevision = 0;
+function nextImeRevision(): number {
+  lastImeRevision = Math.max(lastImeRevision + 1, Date.now());
+  return lastImeRevision;
+}
+
 export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   baseUrl,
   browserId,
@@ -49,15 +58,20 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     hello,
     error: browserError,
     client,
+    subscriptionId,
   } = session;
 
   // Extract browser identity guards for command dispatcher
+  // No invented instance/epoch fallbacks: a missing identity must make the driver's guard checks refuse the command.
   const browserInstanceId =
-    frame?.metadata.browserInstanceId ?? hello?.browserInstanceId ?? "bi1";
+    frame?.metadata.browserInstanceId ?? hello?.browserInstanceId ?? null;
   const desktopEpoch =
-    frame?.metadata.desktopEpoch ?? hello?.desktopEpoch ?? "1";
-  const documentGeneration =
-    frame?.metadata.documentGeneration ?? browserState?.documentGeneration ?? "1";
+    frame?.metadata.desktopEpoch ?? hello?.desktopEpoch ?? null;
+  const frameGeneration = frame?.metadata.documentGeneration;
+  const stateGeneration = browserState?.documentGeneration;
+  const documentGeneration = frameGeneration && stateGeneration
+    ? (BigInt(frameGeneration) > BigInt(stateGeneration) ? frameGeneration : stateGeneration)
+    : frameGeneration ?? stateGeneration ?? "1";
   const viewportRevision = frame?.metadata.viewportRevision;
 
   // Track snapshotId and mapRevision (reconciled to decimal string)
@@ -81,6 +95,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
   const driver = useRemoteBrowserDriver({
     client,
     browserId,
+    subscriptionId,
     browserInstanceId,
     desktopEpoch,
     documentGeneration,
@@ -109,12 +124,23 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     submittedChunk: string;
     fullValue: string;
     targetRef: string;
+    queueKey: string;
     completed: boolean;
     superseded?: boolean;
     executing?: boolean;
   }
-  const imeSubmissionSeqRef = useRef<number>(0);
   const pendingImeSubmissionsRef = useRef<ImeSubmissionRecord[]>([]);
+  // Text the remote field already holds per (target, lease). The fill command replaces the whole field value,
+  // so every fill must carry committed + still-unsubmitted text, never just the unsubmitted tail.
+  const committedImeRef = useRef<Map<string, string>>(new Map());
+  const [imeError, setImeError] = useState<Error | null>(null);
+  const [actionError, setActionError] = useState<Error | null>(null);
+  const surfaceAction = (action: Promise<unknown>) => {
+    setActionError(null);
+    action.catch((err: unknown) => {
+      setActionError(err instanceof Error ? err : new Error(String(err)));
+    });
+  };
   // Per (target, lease) latest queued revision tracking (R5-13)
   const latestQueuedRevRef = useRef<Map<string, number>>(new Map());
 
@@ -123,7 +149,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     if (driver.driverState !== "driving" || !canPointClick || !pointClickEnabled) {
       return;
     }
-    void driver.click({
+    return driver.click({
       ...point,
       u: point.u,
       v: point.v,
@@ -159,7 +185,8 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     // Monotonic submission revision counter
     const targetRef = imeTargetRef || "active";
     const queueKey = `${targetRef}:${driver.leaseEpoch || "none"}`;
-    const submissionRev = ++imeSubmissionSeqRef.current;
+    setImeError(null);
+    const submissionRev = nextImeRevision();
     latestQueuedRevRef.current.set(queueKey, submissionRev);
 
     // Cancel any older non-executing pending submissions for the same target and lease (R5-13)
@@ -169,12 +196,14 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
       }
     }
 
-    const fullValue = imeText; // Coherent full-value replacement prevents suffix overwriting earlier text
+    // Coherent full-value replacement: the remote already holds the committed text, the buffer holds the rest.
+    const fullValue = `${committedImeRef.current.get(queueKey) ?? ""}${imeText}`;
     const record: ImeSubmissionRecord = {
       revision: submissionRev,
       submittedChunk: unsubmittedText,
       fullValue,
       targetRef,
+      queueKey,
       completed: false,
     };
     pendingImeSubmissionsRef.current.push(record);
@@ -185,6 +214,10 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
         pendingImeSubmissionsRef.current[0].completed
       ) {
         const head = pendingImeSubmissionsRef.current.shift()!;
+        committedImeRef.current.set(
+          head.queueKey,
+          `${committedImeRef.current.get(head.queueKey) ?? ""}${head.submittedChunk}`
+        );
         setImeText((current) => {
           // Only slice if current buffer starts with this chunk, preserving unrelated edits
           if (current.startsWith(head.submittedChunk)) {
@@ -238,7 +271,7 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     }
 
     try {
-      if (client && driver.leaseEpoch) {
+      if (client && driver.leaseEpoch && browserInstanceId && desktopEpoch && documentGeneration) {
         const fillParams: Record<string, unknown> = {
           value: record.fullValue,
           text: record.fullValue,
@@ -262,9 +295,9 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
         await client.sendCommand({
           browserId,
           leaseEpoch: driver.leaseEpoch,
-          browserInstanceId: browserInstanceId || "default",
-          desktopEpoch: desktopEpoch || "1",
-          documentGeneration: documentGeneration || "1",
+          browserInstanceId,
+          desktopEpoch,
+          documentGeneration,
           command: "fill",
           params: fillParams,
         });
@@ -288,8 +321,9 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
       // Mark this submission record completed
       record.completed = true;
       retireCompleted();
-    } catch {
-      // On failure, remove from queue without slicing so user does not lose typed text
+    } catch (err) {
+      // On failure, remove from queue without slicing so user does not lose typed text, and tell the user
+      setImeError(err instanceof Error ? err : new Error(String(err)));
       const idx = pendingImeSubmissionsRef.current.indexOf(record);
       if (idx !== -1) {
         pendingImeSubmissionsRef.current.splice(idx, 1);
@@ -335,12 +369,12 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
         canPointClick={canPointClick}
         pointClickEnabled={pointClickEnabled}
         onTogglePointClick={() => setPointClickEnabled((prev) => !prev)}
-        onClaim={driver.claim}
+        onClaim={() => surfaceAction(driver.claim())}
         onRelease={driver.release}
-        onNavigate={driver.navigate}
-        onBack={driver.back}
-        onForward={driver.forward}
-        onReload={driver.reload}
+        onNavigate={(url) => surfaceAction(driver.navigate(url))}
+        onBack={() => surfaceAction(driver.back())}
+        onForward={() => surfaceAction(driver.forward())}
+        onReload={() => surfaceAction(driver.reload())}
         onFill={driver.fill}
         onKeypress={driver.keypress}
         onEval={driver.evalJs}
@@ -371,7 +405,17 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
             onCompositionEnd={(e) => {
               setIsComposing(false);
               if (e.data) {
-                setImeText((prev) => (prev.endsWith(e.data) ? prev : `${prev}${e.data}`));
+                // Prefer the field's real value: with the caret mid-text the composed text is already in place
+                // and appending it again would duplicate it.
+                const domValue = e.currentTarget.value;
+                const composed = e.data;
+                setImeText((prev) =>
+                  domValue.includes(composed)
+                    ? domValue
+                    : prev.endsWith(composed)
+                    ? prev
+                    : `${prev}${composed}`
+                );
               }
             }}
             placeholder="Type confirmed text..."
@@ -389,12 +433,12 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
       )}
 
       {/* Driver or browser error banner if error occurred */}
-      {(driver.error || browserError) && (
+      {(driver.error || imeError || actionError || browserError) && (
         <div
           data-testid="remote-browser-driver-error"
           className="px-2 py-1 bg-[#ff6467]/15 border-b border-[#ff6467]/30 text-[#ff6467] text-xs flex items-center justify-between"
         >
-          <span>{driver.error ? driver.error.message : browserError?.message}</span>
+          <span>{(driver.error ?? imeError ?? actionError ?? browserError)?.message}</span>
         </div>
       )}
     </div>

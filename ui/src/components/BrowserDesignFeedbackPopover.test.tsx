@@ -132,5 +132,38 @@ describe("BrowserDesignFeedbackPopover", () => {
     const memoInput = screen.getByLabelText("Design feedback note");
     fireEvent.change(memoInput, { target: { value: "some text" } });
     expect(sendBtn.hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByText("Target")).toBeNull();
+  });
+
+  it("falls back to the first live target when the selected session leaves the target list", () => {
+    const onSend = vi.fn();
+    const props = { snapshot, sending: false, error: null, onSend, onCancel: vi.fn() };
+    const { rerender } = render(<BrowserDesignFeedbackPopover {...props} targets={targets} />);
+
+    fireEvent.change(screen.getByLabelText("Delivery target"), { target: { value: "term-2" } });
+    rerender(
+      <BrowserDesignFeedbackPopover
+        {...props}
+        targets={[targets[0], { sessionId: "term-3", workspaceId: "ws-1", label: "Terminal 3" }]}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Design feedback note"), { target: { value: "fix it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(onSend).toHaveBeenCalledWith({ sessionId: "term-1", workspaceId: "ws-1", memo: "fix it" });
+  });
+
+  it("selects the first target once targets arrive after an empty list", () => {
+    const onSend = vi.fn();
+    const props = { snapshot, sending: false, error: null, onSend, onCancel: vi.fn() };
+    const { rerender } = render(<BrowserDesignFeedbackPopover {...props} targets={[]} />);
+
+    rerender(<BrowserDesignFeedbackPopover {...props} targets={targets} />);
+    fireEvent.change(screen.getByLabelText("Design feedback note"), { target: { value: "late" } });
+    const sendBtn = screen.getByRole("button", { name: "Send" });
+    expect(sendBtn.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(sendBtn);
+
+    expect(onSend).toHaveBeenCalledWith({ sessionId: "term-1", workspaceId: "ws-1", memo: "late" });
   });
 });

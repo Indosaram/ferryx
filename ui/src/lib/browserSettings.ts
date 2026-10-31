@@ -304,7 +304,7 @@ export function normalizeBrowserAddress(
 ): string {
   const trimmed = input.trim();
   if (!trimmed) return "about:blank";
-  if (trimmed === "about:blank" || trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
+  if (trimmed === "about:blank" || /^https?:\/\//i.test(trimmed)) return trimmed;
 
   // Block dangerous execution schemes from turning into navigations.
   if (/^(javascript|data|vbscript|blob):/i.test(trimmed)) {
@@ -320,8 +320,12 @@ export function normalizeBrowserAddress(
     return `file:///${stripped}`.replace(/\s+/g, "%20");
   }
 
-  // Local filesystem path: Unix (/...), home (~/...), or Windows (C:\... or C:/...).
-  const isUnixPath = trimmed.startsWith("/") || trimmed.startsWith("~/");
+  // `~` needs the user's home directory, which the UI cannot resolve; `file://~/x` would be an
+  // invalid file URL, so tilde input is a search instead.
+  if (trimmed.startsWith("~")) return searchUrlFor(settings.searchEngine, trimmed);
+
+  // Local filesystem path: Unix (/...) or Windows (C:\... or C:/...).
+  const isUnixPath = trimmed.startsWith("/");
   const isWindowsPath = /^[a-zA-Z]:[\\/]/.test(trimmed);
   if (isUnixPath || isWindowsPath) {
     if (hasHtmlFileExtension(trimmed)) {
@@ -335,7 +339,7 @@ export function normalizeBrowserAddress(
     return searchUrlFor(settings.searchEngine, trimmed);
   }
 
-  if (trimmed.startsWith("localhost") || trimmed.startsWith("127.0.0.1")) return `http://${trimmed}`;
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(trimmed)) return `http://${trimmed}`;
   if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?(\/.*)?$/.test(trimmed)) return `http://${trimmed}`;
 
   const looksLikeHost =

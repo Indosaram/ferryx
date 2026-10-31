@@ -1,4 +1,5 @@
-use crate::daemon::protocol::{AgentProviderSession, AgentStateOrigin};
+use crate::daemon::protocol::{AgentBlockedKind, AgentOutcome, AgentProviderSession, AgentStateOrigin};
+use crate::terminal::program_status::{BlockedKind, ProgramState, ProgramStatusSummary};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +17,10 @@ pub(crate) struct AgentState {
     /// Who produced this state. `idle` from a running agent and `idle` from a daemon release are
     /// the same word with opposite meanings for screen inference, so the producer travels along.
     pub origin: AgentStateOrigin,
+    /// How the turn behind an `idle` ended, when the producer said so (OSC 7501 done/error).
+    pub outcome: Option<AgentOutcome>,
+    /// What a `blocked` session needs from the user, when the producer said so.
+    pub kind: Option<AgentBlockedKind>,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +37,9 @@ pub(crate) struct AgentStateSubscription {
 
 pub(crate) struct AgentStateHub {
     retained: Mutex<HashMap<String, AgentState>>,
+    /// Revision of the newest OSC 7501 summary seen per session. Locked only while `retained`
+    /// is held, so the revision check and the state it guards change together.
+    protocol_revisions: Mutex<HashMap<String, u64>>,
     tx: broadcast::Sender<AgentStateUpdate>,
 }
 
@@ -45,6 +53,7 @@ impl AgentStateHub {
     fn new(capacity: usize) -> Self {
         Self {
             retained: Mutex::new(HashMap::new()),
+            protocol_revisions: Mutex::new(HashMap::new()),
             tx: broadcast::channel(capacity).0,
         }
     }
@@ -81,11 +90,106 @@ impl AgentStateHub {
             }
             state.state = previous.state.clone();
             state.detail = previous.detail.clone();
-            if previous.origin == AgentStateOrigin::Agent {
-                state.origin = AgentStateOrigin::Agent;
+            state.outcome = previous.outcome;
+            state.kind = previous.kind;
+            if previous.origin.is_provider_report() {
+                state.origin = previous.origin;
             }
         }
         retained.insert(state.session_id.clone(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
+        true
+    }
+
+    /// Publishes the pane program's OSC 7501 status (`None` once its records are cleared).
+    ///
+    /// `revision` orders the summaries of a session: the mirror numbers each change under its
+    /// lock, but publication runs after the lock is released, so two changes can arrive here in
+    /// the opposite order. One older than a revision already seen is dropped, and the mirror never
+    /// re-reports its newer summary, so accepting it would pin the session to stale state.
+    ///
+    /// Returns whether anything was published. A session whose agent reports through the
+    /// extension (`Agent` origin) is never touched: that report is authoritative while it lives.
+    /// A clear only releases a state the protocol itself installed, so a terminal reset in a pane
+    /// that never spoke OSC 7501 does not suppress screen inference. The release hands the
+    /// session back to screen inference (an origin that claims no activity); an explicit `idle`
+    /// report stays the program's own. An unchanged state is not re-broadcast.
+    pub(crate) fn publish_protocol(
+        &self,
+        session_id: &str,
+        revision: u64,
+        summary: Option<&ProgramStatusSummary>,
+    ) -> bool {
+        let mut retained = self.retained.lock();
+        {
+            let mut revisions = self.protocol_revisions.lock();
+            let newest = revisions.entry(session_id.to_string()).or_insert(0);
+            if revision <= *newest {
+                return false;
+            }
+            *newest = revision;
+        }
+        let previous = retained.get(session_id);
+        if previous.is_some_and(|state| state.origin == AgentStateOrigin::Agent) {
+            return false;
+        }
+        let state = match summary.filter(|summary| summary.state != ProgramState::Clear) {
+            Some(reported) => {
+                let (word, outcome) = match reported.state {
+                    ProgramState::Working => ("working", None),
+                    ProgramState::Blocked => ("blocked", None),
+                    ProgramState::Done => ("idle", Some(AgentOutcome::Done)),
+                    ProgramState::Error => ("idle", Some(AgentOutcome::Error)),
+                    ProgramState::Idle | ProgramState::Clear => ("idle", None),
+                };
+                let blocked = Some(reported).filter(|summary| summary.state == ProgramState::Blocked);
+                AgentState {
+                    session_id: session_id.to_string(),
+                    state: word.to_string(),
+                    agent: reported
+                        .app
+                        .clone()
+                        .or_else(|| previous.and_then(|state| state.agent.clone())),
+                    provider_session: previous.and_then(|state| state.provider_session.clone()),
+                    detail: blocked.and_then(|summary| summary.message.clone()),
+                    origin: AgentStateOrigin::Protocol,
+                    outcome,
+                    kind: blocked.and_then(|summary| summary.kind).map(|kind| match kind {
+                        BlockedKind::Permission => AgentBlockedKind::Permission,
+                        BlockedKind::Question => AgentBlockedKind::Question,
+                        BlockedKind::Auth => AgentBlockedKind::Auth,
+                    }),
+                }
+            }
+            None => {
+                let Some(previous) =
+                    previous.filter(|state| state.origin == AgentStateOrigin::Protocol)
+                else {
+                    return false;
+                };
+                // No record is left, so the program claims nothing any more. A `Protocol`
+                // origin here would suppress screen inference forever. `ProcessObserved` is the
+                // existing wire origin that carries no activity of its own and re-arms
+                // inference, exactly as a process sighting does after a release.
+                AgentState {
+                    session_id: session_id.to_string(),
+                    state: "idle".to_string(),
+                    agent: previous.agent.clone(),
+                    provider_session: previous.provider_session.clone(),
+                    detail: None,
+                    origin: AgentStateOrigin::ProcessObserved,
+                    outcome: None,
+                    kind: None,
+                }
+            }
+        };
+        if previous == Some(&state) {
+            return false;
+        }
+        retained.insert(session_id.to_string(), state.clone());
         let _ = self.tx.send(AgentStateUpdate {
             state,
             is_snapshot: false,
@@ -103,6 +207,8 @@ impl AgentStateHub {
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
             detail: None,
             origin: AgentStateOrigin::ManualReset,
+            outcome: None,
+            kind: None,
         };
         tracing::info!(session_id, reason = "manual_reset",
             previous_state = ?previous.as_ref().map(|s| &s.state),
@@ -124,6 +230,8 @@ impl AgentStateHub {
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
             detail: None,
             origin: AgentStateOrigin::ProcessReleased,
+            outcome: None,
+            kind: None,
         };
         tracing::info!(session_id, reason = "foreground_agent_to_shell",
             previous_state = ?previous.as_ref().map(|s| &s.state),
@@ -198,7 +306,9 @@ impl AgentStateHub {
     }
 
     pub fn remove(&self, session_id: &str) {
-        self.retained.lock().remove(session_id);
+        let mut retained = self.retained.lock();
+        retained.remove(session_id);
+        self.protocol_revisions.lock().remove(session_id);
     }
 }
 
@@ -237,6 +347,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         }
     }
 
@@ -257,6 +369,8 @@ mod tests {
             provider_session: Some(provider(id)),
             detail: None,
             origin: AgentStateOrigin::ProcessDiscovered,
+            outcome: None,
+            kind: None,
         }
     }
 
@@ -465,6 +579,149 @@ mod tests {
             subscription.receiver.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    fn summary(state: ProgramState) -> ProgramStatusSummary {
+        ProgramStatusSummary {
+            state,
+            kind: Some(BlockedKind::Permission),
+            app: Some("claude".into()),
+            title: None,
+            message: Some("Allow edit?".into()),
+            progress: None,
+        }
+    }
+
+    /// Publishes under a fresh revision, as the screen mirror numbers each change.
+    fn protocol(hub: &AgentStateHub, session_id: &str, summary: Option<&ProgramStatusSummary>) -> bool {
+        hub.publish_protocol(
+            session_id,
+            crate::terminal::program_status_ingest::next_revision(),
+            summary,
+        )
+    }
+
+    #[test]
+    fn protocol_states_map_to_state_words_outcomes_and_kinds() {
+        let hub = AgentStateHub::new(16);
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Working))));
+        let working = hub.current("p").unwrap();
+        assert_eq!((working.state.as_str(), working.origin), ("working", AgentStateOrigin::Protocol));
+        assert_eq!((working.detail, working.kind, working.outcome), (None, None, None));
+        assert_eq!(working.agent.as_deref(), Some("claude"));
+
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Blocked))));
+        let blocked = hub.current("p").unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert_eq!(blocked.detail.as_deref(), Some("Allow edit?"));
+        assert_eq!(blocked.kind, Some(AgentBlockedKind::Permission));
+
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Done))));
+        let done = hub.current("p").unwrap();
+        assert_eq!((done.state.as_str(), done.outcome), ("idle", Some(AgentOutcome::Done)));
+        assert_eq!((done.detail, done.kind), (None, None));
+
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Error))));
+        assert_eq!(hub.current("p").unwrap().outcome, Some(AgentOutcome::Error));
+
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Idle))));
+        let idle = hub.current("p").unwrap();
+        assert_eq!((idle.state.as_str(), idle.outcome), ("idle", None));
+        // An explicit idle report is the program's own: it keeps claiming the activity.
+        assert_eq!(idle.origin, AgentStateOrigin::Protocol);
+        // The same report again is not a new edge.
+        assert!(!protocol(&hub, "p", Some(&summary(ProgramState::Idle))));
+    }
+
+    /// Finding 2: once no record is left the program claims nothing; the release must hand the
+    /// session back to screen inference instead of keeping a `Protocol` claim forever.
+    #[test]
+    fn a_protocol_clear_releases_only_what_the_protocol_installed() {
+        let hub = AgentStateHub::new(16);
+        assert!(!protocol(&hub, "fresh", None), "nothing to release");
+        assert!(hub.current("fresh").is_none());
+
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Working))));
+        assert!(protocol(&hub, "p", None));
+        let released = hub.current("p").unwrap();
+        assert_eq!(released.state, "idle");
+        assert!(!released.origin.claims_activity(), "{:?}", released.origin);
+        assert!(!released.origin.is_provider_report());
+        assert_eq!(released.agent.as_deref(), Some("claude"));
+        assert_eq!((released.detail, released.outcome, released.kind), (None, None, None));
+        assert!(!protocol(&hub, "p", None), "a second clear is not a new edge");
+        // A later report claims the session again.
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Working))));
+        assert_eq!(hub.current("p").unwrap().origin, AgentStateOrigin::Protocol);
+
+        hub.release_foreground("r");
+        assert!(!protocol(&hub, "r", None));
+        assert_eq!(hub.current("r").unwrap().origin, AgentStateOrigin::ProcessReleased);
+    }
+
+    #[test]
+    fn a_protocol_release_keeps_the_provider_session_and_never_touches_an_agent_origin() {
+        let hub = AgentStateHub::new(16);
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Blocked))));
+        assert!(hub.publish_discovered(discovered("p", "claude", "id-1"), None));
+        assert!(protocol(&hub, "p", None));
+        assert_eq!(hub.current("p").unwrap().provider_session, Some(provider("id-1")));
+
+        // An extension report that took the session over is never released by the protocol.
+        hub.publish_canonical(state("p", "working"));
+        assert!(!protocol(&hub, "p", None));
+        assert_eq!(hub.current("p"), Some(state("p", "working")));
+    }
+
+    /// Finding 3: an older revision arriving after a newer one is dropped, also across a
+    /// release, and a removed session starts its ordering afresh.
+    #[test]
+    fn protocol_publications_older_than_the_newest_revision_are_dropped() {
+        let hub = AgentStateHub::new(16);
+        assert!(hub.publish_protocol("p", 10, Some(&summary(ProgramState::Working))));
+        assert!(!hub.publish_protocol("p", 9, None), "stale clear");
+        assert_eq!(hub.current("p").unwrap().state, "working");
+        assert!(!hub.publish_protocol("p", 10, Some(&summary(ProgramState::Done))), "same revision");
+        assert!(hub.publish_protocol("p", 12, None));
+        assert!(!hub.publish_protocol("p", 11, Some(&summary(ProgramState::Working))), "stale working");
+        assert!(!hub.current("p").unwrap().origin.claims_activity());
+
+        // A replacement session under the same id is not held back by the old one's revisions.
+        hub.remove("p");
+        assert!(hub.publish_protocol("p", 13, Some(&summary(ProgramState::Working))));
+        assert_eq!(hub.current("p").unwrap().state, "working");
+    }
+
+    #[test]
+    fn a_protocol_report_never_overwrites_a_live_extension_report() {
+        let hub = Arc::new(AgentStateHub::new(16));
+        hub.publish_canonical(state("s1", "working"));
+        let mut subscription = hub.subscribe("s1");
+        assert!(!protocol(&hub, "s1", Some(&summary(ProgramState::Done))));
+        assert!(!protocol(&hub, "s1", None));
+        assert_eq!(hub.current("s1"), Some(state("s1", "working")));
+        assert!(matches!(
+            subscription.receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        // Once the extension's agent is released, the protocol may report again.
+        hub.release_foreground("s1");
+        assert!(protocol(&hub, "s1", Some(&summary(ProgramState::Working))));
+        assert_eq!(hub.current("s1").unwrap().origin, AgentStateOrigin::Protocol);
+        // And an extension report takes the session back.
+        hub.publish_canonical(state("s1", "idle"));
+        assert!(!protocol(&hub, "s1", Some(&summary(ProgramState::Working))));
+    }
+
+    #[test]
+    fn a_discovered_identity_keeps_a_protocol_origin_and_outcome() {
+        let hub = AgentStateHub::new(16);
+        assert!(protocol(&hub, "p", Some(&summary(ProgramState::Done))));
+        assert!(hub.publish_discovered(discovered("p", "claude", "id-1"), None));
+        let current = hub.current("p").unwrap();
+        assert_eq!(current.origin, AgentStateOrigin::Protocol);
+        assert_eq!(current.outcome, Some(AgentOutcome::Done));
+        assert_eq!(current.provider_session, Some(provider("id-1")));
     }
 
     #[test]

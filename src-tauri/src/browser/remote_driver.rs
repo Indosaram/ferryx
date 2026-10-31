@@ -287,6 +287,12 @@ impl RemoteDriverBroker {
         self.epoch_counter.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// The next epoch this broker would hand out. A forced epoch below it is refused as stale,
+    /// so every other issuer of epochs for the same lease must stay at or above this value.
+    pub fn epoch_floor(&self) -> u64 {
+        self.epoch_counter.load(Ordering::SeqCst)
+    }
+
     pub fn validate_lease(
         &self,
         browser_id: &str,

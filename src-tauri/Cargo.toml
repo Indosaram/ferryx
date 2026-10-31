@@ -210,6 +210,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSImageRep",
     "NSBitmapImageRep",
     "NSWorkspace",
+    "NSPrintInfo",
+    "NSPrintOperation",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",

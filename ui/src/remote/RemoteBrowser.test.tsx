@@ -343,6 +343,33 @@ describe("BrowserClient", () => {
     expect(res.result).toEqual({ ok: true });
   });
 
+  // RED mutation: delete the `rejectPending(failedRequestId, error)` call in handleIncomingMessage.
+  it("rejects the pending request when its reply fails validation (F6)", async () => {
+    const client = new BrowserClient("ws://localhost:9000/browser/b1");
+    const ws = MockWebSocket.instances[0];
+    await drainAsync();
+
+    const claim = client.claimDriver("b1", "sub-1");
+    const sent = JSON.parse(ws.sentMessages[0] as string);
+    const rejected = claim.then(
+      () => null,
+      (err: unknown) => err as Error,
+    );
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "browserError",
+        requestId: sent.requestId,
+        code: "BROWSER_DRIVER_BUSY",
+        message: "busy",
+        retryable: false,
+        details: { code: "x" }, // invalid: details must carry all four string keys
+      }),
+    });
+    const err = await rejected;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/details/i);
+  });
+
   it("decodes incoming binary frames and dispatches to onFrame", async () => {
     const client = new BrowserClient("ws://localhost:9000/browser/b1");
     const ws = MockWebSocket.instances[0];
@@ -607,6 +634,7 @@ describe("useRemoteBrowser", () => {
     return (
       <div>
         <div data-testid="status">{state.status}</div>
+        <div data-testid="subscriptionId">{state.subscriptionId ?? "none"}</div>
         <div data-testid="streamId">{state.frame?.metadata.streamId ?? "none"}</div>
         <div data-testid="seq">{state.frame?.seq ?? "none"}</div>
         <div data-testid="imageUrl">{state.imageUrl ?? "none"}</div>
@@ -643,6 +671,7 @@ describe("useRemoteBrowser", () => {
     await establishStreaming(ws);
 
     expect(screen.getByTestId("status").textContent).toBe("streaming");
+    expect(screen.getByTestId("subscriptionId").textContent).toBe("sub-1");
 
     // When frame arrives, image URL is created. Frame ACK is NOT sent yet (presentation-gated ACK)
     const frame = makeTestFrame(1, 1);
@@ -1032,7 +1061,8 @@ describe("RemoteBrowser component", () => {
     ).rejects.toThrow(/stale viewportRevision/i);
   });
 
-  it("releases driving lease on unmount (P1-12)", async () => {
+  // RED mutation: restore the `releaseDriver` call in the unmount cleanup of useRemoteBrowserDriver.
+  it("does not send a release on unmount; the server releases on disconnect (P1-12/F10)", async () => {
     const releaseSpy = vi.fn().mockResolvedValue({});
     const mockClient = {
       sendCommand: vi.fn().mockResolvedValue({ ok: true }),
@@ -1074,7 +1104,8 @@ describe("RemoteBrowser component", () => {
       unmountFn();
     });
 
-    expect(releaseSpy).toHaveBeenCalledWith("epoch-99");
+    // The lease is freed by the server on disconnect; the hook no longer sends a release it cannot deliver.
+    expect(releaseSpy).not.toHaveBeenCalled();
   });
 
   it("invokes browserRemoteReclaim when clicking Reclaim Control (P1-03)", async () => {
@@ -1097,6 +1128,41 @@ describe("RemoteBrowser component", () => {
 
     expect(mockReclaim).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("reclaim-feedback-msg").textContent).toContain("Control reclaimed");
+  });
+
+  // RED mutation: in handleReclaim use `isSharing: internalSessionsCount > 0` again.
+  it("reclaim keeps isSharing true while the prop says viewers remain (F9)", async () => {
+    const seen: boolean[] = [];
+    const listener = (e: Event) => seen.push((e as CustomEvent).detail.isSharing);
+    window.addEventListener("remote-browser-sharing", listener);
+    try {
+      render(<RemoteBrowserSharingIndicator isSharing={true} onReclaim={vi.fn().mockResolvedValue(1)} />);
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("reclaim-control-btn"));
+      });
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen[seen.length - 1]).toBe(true);
+    } finally {
+      window.removeEventListener("remote-browser-sharing", listener);
+    }
+  });
+
+  // RED mutation: delete the feedback TTL effect -> the message never clears.
+  it("clears the reclaim feedback message after its TTL (F9)", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<RemoteBrowserSharingIndicator isSharing={true} onReclaim={vi.fn().mockResolvedValue(1)} />);
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("reclaim-control-btn"));
+      });
+      expect(screen.getByTestId("reclaim-feedback-msg")).toBeDefined();
+      await act(async () => {
+        vi.advanceTimersByTime(5000);
+      });
+      expect(screen.queryByTestId("reclaim-feedback-msg")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("supports browserDriverRevoked: updates client state to viewing and transitions driver to revoked (R3)", async () => {
@@ -1138,6 +1204,16 @@ describe("RemoteBrowser component", () => {
     const revokedListener = vi.fn();
     client.onDriverRevoked(revokedListener);
 
+    let commandError: unknown;
+    const command = client.sendCommand({
+      browserId: "b1",
+      leaseEpoch: "epoch-100",
+      browserInstanceId: "bi1",
+      desktopEpoch: "1",
+      documentGeneration: "1",
+      command: "getState",
+    }).catch((error: unknown) => { commandError = error; });
+
     // Server sends browserDriverRevoked
     await act(async () => {
       ws.onmessage?.({
@@ -1159,6 +1235,9 @@ describe("RemoteBrowser component", () => {
     expect(client.driverState).toBe("viewing");
     expect(capturedDriver.driverState).toBe("revoked");
     expect(capturedDriver.leaseEpoch).toBeNull();
+    expect(commandError).toMatchObject({ code: "BROWSER_FORBIDDEN", retryable: false });
+    await command;
+    client.close();
   });
 
   it("strictly derives point click metadata from displayedFrame committed via img onLoad (R8)", async () => {

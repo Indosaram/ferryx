@@ -51,6 +51,36 @@ pub struct DriverBroker {
     current_lease: Mutex<Option<DriverLease>>,
     epoch_counter: AtomicU64,
     reclaim_tx: tokio::sync::broadcast::Sender<String>,
+    /// The service-side broker whose epoch floor every admission epoch must clear, because the
+    /// gateway forces the admission epoch onto that broker (A9).
+    service_broker: Mutex<Option<Arc<crate::browser::remote_driver::RemoteDriverBroker>>>,
+}
+
+/// Why a driver claim was refused. Converts to the wire code string the WS layer sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverClaimError {
+    /// Another device and subscription holds an unexpired lease.
+    DriverBusy,
+}
+
+impl DriverClaimError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::DriverBusy => "BROWSER_DRIVER_BUSY",
+        }
+    }
+}
+
+impl std::fmt::Display for DriverClaimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl From<DriverClaimError> for String {
+    fn from(err: DriverClaimError) -> Self {
+        err.code().to_string()
+    }
 }
 
 impl Default for DriverBroker {
@@ -66,7 +96,16 @@ impl DriverBroker {
             current_lease: Mutex::new(None),
             epoch_counter: AtomicU64::new(1),
             reclaim_tx,
+            service_broker: Mutex::new(None),
         }
+    }
+
+    /// Makes new admission epochs adopt the service broker's epoch floor.
+    pub fn attach_service_broker(
+        &self,
+        broker: Arc<crate::browser::remote_driver::RemoteDriverBroker>,
+    ) {
+        *self.service_broker.lock() = Some(broker);
     }
 
     pub fn subscribe_reclaim(&self) -> tokio::sync::broadcast::Receiver<String> {
@@ -80,7 +119,7 @@ impl DriverBroker {
         subscription_id: &str,
         browser_id: &str,
         now: Instant,
-    ) -> Result<DriverLease, String> {
+    ) -> Result<DriverLease, DriverClaimError> {
         let mut guard = self.current_lease.lock();
         if let Some(existing) = guard.as_ref() {
             if now < existing.expires_at {
@@ -96,10 +135,18 @@ impl DriverBroker {
                     *guard = Some(renewed.clone());
                     return Ok(renewed);
                 }
-                return Err("BROWSER_DRIVER_BUSY".to_string());
+                return Err(DriverClaimError::DriverBusy);
             }
         }
 
+        let service_floor = self
+            .service_broker
+            .lock()
+            .as_ref()
+            .map(|b| b.epoch_floor());
+        if let Some(floor) = service_floor {
+            self.epoch_counter.fetch_max(floor, Ordering::SeqCst);
+        }
         let next_epoch = self.epoch_counter.fetch_add(1, Ordering::SeqCst);
         let new_lease = DriverLease {
             device_id: device_id.to_string(),
@@ -305,6 +352,7 @@ impl TokenBucket {
 
 pub struct DeviceRateLimiter {
     commands: Mutex<TokenBucket>,
+    viewer_controls: Mutex<TokenBucket>,
     claims: Mutex<TokenBucket>,
     evals: Mutex<TokenBucket>,
 }
@@ -313,6 +361,11 @@ impl DeviceRateLimiter {
     pub fn new(now: Instant) -> Self {
         Self {
             commands: Mutex::new(TokenBucket::new(
+                COMMAND_RATE_LIMIT_PER_SEC,
+                COMMAND_BURST_MAX,
+                now,
+            )),
+            viewer_controls: Mutex::new(TokenBucket::new(
                 COMMAND_RATE_LIMIT_PER_SEC,
                 COMMAND_BURST_MAX,
                 now,
@@ -332,6 +385,10 @@ impl DeviceRateLimiter {
 
     pub fn check_command(&self, now: Instant) -> bool {
         self.commands.lock().try_consume(1.0, now)
+    }
+
+    pub fn check_viewer_control(&self, now: Instant) -> bool {
+        self.viewer_controls.lock().try_consume(1.0, now)
     }
 
     pub fn check_claim(&self, now: Instant) -> bool {
@@ -423,6 +480,8 @@ impl AdmissionController {
         &self,
         service: Arc<crate::browser::remote_service::BrowserRemoteService>,
     ) {
+        self.broker
+            .attach_service_broker(Arc::clone(service.driver_broker()));
         self.set_eligibility_hook(Arc::new(
             move |browser_id, service_sub_id, paused, stalled| {
                 service.set_viewer_paused(browser_id, service_sub_id, paused);
@@ -484,6 +543,7 @@ impl AdmissionController {
         }
         if let Some(old_sub) = to_replace {
             browser_viewers.remove(&old_sub);
+            self.forget_service_subscription(&old_sub);
         } else if browser_viewers.len() >= MAX_VIEWERS_PER_BROWSER {
             return Err(format!(
                 "Max viewers per browser ({}) exceeded",
@@ -532,12 +592,26 @@ impl AdmissionController {
         }
         drop(viewers_map);
         drop(captured);
-        self.mapped_service_subs.lock().remove(subscription_id);
+        self.forget_service_subscription(subscription_id);
         // The last owned viewer leaving halts capture: a producer must never keep
         // running with zero viewers (R4-6).
         if halted {
             let _ = self.capture_tx.send((browser_id.to_string(), false));
         }
+    }
+
+    /// Drops both mapping keys registered for an admission subscription: the admission key and
+    /// the service key it points at (A2).
+    fn forget_service_subscription(&self, admission_sub: &str) {
+        let mut map = self.mapped_service_subs.lock();
+        if let Some(service_sub) = map.remove(admission_sub) {
+            map.remove(&service_sub);
+        }
+    }
+
+    #[cfg(test)]
+    fn mapped_service_sub_count(&self) -> usize {
+        self.mapped_service_subs.lock().len()
     }
 
     pub fn should_capture(&self, browser_id: &str) -> bool {
@@ -1057,5 +1131,74 @@ pub mod tests {
             !unstalled_viewer.stalled,
             "Viewer stall clear must reach BrowserRemoteService"
         );
+    }
+
+    /// A9: after a desktop reclaim on both brokers, the first gateway claim must carry an
+    /// epoch the service broker accepts (admission adopts the service floor).
+    #[test]
+    fn test_a9_first_claim_after_reclaim_clears_the_service_epoch_floor() {
+        use crate::browser::remote_driver::RemoteDriverBroker;
+        use crate::browser::remote_service::BrowserRemoteService;
+        use crate::browser::BrowserManager;
+
+        let service_broker = Arc::new(RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new(
+            BrowserManager::new(),
+            Arc::clone(&service_broker),
+        ));
+        let ctrl = AdmissionController::new();
+        ctrl.connect_remote_service(service);
+
+        // `cmd_browser_remote_reclaim` reclaims on both brokers.
+        ctrl.reclaim_desktop();
+        service_broker.desktop_reclaim();
+
+        let now = Instant::now();
+        let lease = ctrl
+            .broker
+            .claim_driver("dev1", "conn1", "sub1", "b1", now)
+            .unwrap();
+        service_broker
+            .claim_with_epoch("dev1", "conn1", "sub1", "b1", true, lease.lease_epoch)
+            .expect("the first claim after a reclaim must not be stale on the service broker");
+    }
+
+    /// A2: unsubscribing and replacing a viewer both drop the admission key and the service key.
+    #[test]
+    fn test_a2_unsubscribe_and_replacement_do_not_leak_service_mappings() {
+        let ctrl = AdmissionController::new();
+        ctrl.try_subscribe("b1", "adm-1", "dev1", "v1").unwrap();
+        ctrl.register_service_subscription("adm-1", "svc-1");
+        assert_eq!(ctrl.mapped_service_sub_count(), 2);
+
+        ctrl.unsubscribe("b1", "adm-1");
+        assert_eq!(
+            ctrl.mapped_service_sub_count(),
+            0,
+            "unsubscribe must remove both mapping keys"
+        );
+
+        // Replacement: same (device, viewer instance) on the same browser.
+        ctrl.try_subscribe("b1", "adm-2", "dev1", "v1").unwrap();
+        ctrl.register_service_subscription("adm-2", "svc-2");
+        ctrl.try_subscribe("b1", "adm-3", "dev1", "v1").unwrap();
+        assert_eq!(
+            ctrl.mapped_service_sub_count(),
+            0,
+            "a replaced viewer must not leave its mapping behind"
+        );
+    }
+
+    /// A8: the busy refusal is a typed error whose wire code is `BROWSER_DRIVER_BUSY`.
+    #[test]
+    fn test_a8_busy_claim_is_a_typed_error() {
+        let broker = DriverBroker::new();
+        let now = Instant::now();
+        broker.claim_driver("dev1", "conn1", "sub1", "b1", now).unwrap();
+        let err = broker
+            .claim_driver("dev2", "conn2", "sub2", "b1", now)
+            .unwrap_err();
+        assert_eq!(err, DriverClaimError::DriverBusy);
+        assert_eq!(String::from(err), "BROWSER_DRIVER_BUSY");
     }
 }

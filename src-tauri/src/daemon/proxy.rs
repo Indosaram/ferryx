@@ -433,6 +433,9 @@ impl LegacyPeer {
                 detail: snapshot.detail.as_deref().map(Into::into),
                 is_snapshot: true,
                 origin: snapshot.origin,
+                state_source: snapshot.origin.wire_source(),
+                outcome: snapshot.outcome,
+                kind: snapshot.kind,
             };
             let frame = crate::daemon::protocol::encode_daemon_stream_frame(&message)
                 .map_err(|error| error.to_string())?;
@@ -474,6 +477,9 @@ impl LegacyPeer {
                             detail: report.state.detail.as_deref().map(Into::into),
                             is_snapshot: report.is_snapshot,
                             origin: report.state.origin,
+                            state_source: report.state.origin.wire_source(),
+                            outcome: report.state.outcome,
+                            kind: report.state.kind,
                         };
                         let frame = crate::daemon::protocol::encode_daemon_stream_frame(&message)
                             .map_err(|error| error.to_string())?;
@@ -489,6 +495,9 @@ impl LegacyPeer {
                                 detail: current.detail.as_deref().map(Into::into),
                                 is_snapshot: true,
                                 origin: current.origin,
+                                state_source: current.origin.wire_source(),
+                                outcome: current.outcome,
+                                kind: current.kind,
                             };
                             let frame = crate::daemon::protocol::encode_daemon_stream_frame(&message)
                                 .map_err(|error| error.to_string())?;
@@ -502,12 +511,14 @@ impl LegacyPeer {
                     let Some(mut line) = read.map_err(|error| error.to_string())? else { break; };
                     line.push('\n');
                     match serde_json::from_str::<DaemonStreamMessage<'_>>(line.trim()) {
-                        Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, detail, is_snapshot, origin }) => {
+                        Ok(DaemonStreamMessage::AgentState { session_id, state, agent, provider_session, detail, is_snapshot, origin, state_source, outcome, kind }) => {
                             agent_state_hub.publish_legacy(AgentState {
                                 session_id: session_id.into_owned(), state: state.into_owned(),
                                 agent: agent.map(|value| value.into_owned()), provider_session,
                                 detail: detail.map(|value| value.into_owned()),
-                                origin,
+                                origin: crate::daemon::protocol::AgentStateOrigin::from_wire(origin, state_source),
+                                outcome,
+                                kind,
                             }, is_snapshot);
                         }
                         Ok(DaemonStreamMessage::Exit { .. }) => {
@@ -901,6 +912,24 @@ impl SessionRouter {
 }
 
 impl RemoteSessionBackend for SessionRouter {
+    fn acknowledge_agent_outcome<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.validate_ssh_workspace(id).await?;
+            if self.is_local_session(id) {
+                return self.terminal_service.acknowledge_agent_outcome(id).await;
+            }
+            let peer = self.find_legacy_peer_for_session(id).ok_or("Session unavailable")?;
+            match peer.send_request(&DaemonRequest::AcknowledgeAgentOutcome {
+                session_id: id.into(),
+            }).await? {
+                DaemonResponse::AcknowledgeAgentOutcomeOk => Ok(()),
+                _ => Err("Outcome acknowledgement rejected".into()),
+            }
+        })
+    }
     fn recovery<'a>(
         &'a self,
         id: &'a str,

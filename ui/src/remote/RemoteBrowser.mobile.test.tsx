@@ -973,7 +973,8 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       expect(lastSent.length).toBeGreaterThan(0);
       const fillMsg = JSON.parse(lastSent[lastSent.length - 1] as string);
       expect(fillMsg.params).toBeDefined();
-      expect(fillMsg.params.revision).toBe(1);
+      // Revisions come from a module-level clock-seeded counter, never a per-mount 1.
+      expect(fillMsg.params.revision).toBeGreaterThan(1_000_000);
     });
 
     it("sends distinct fill payloads for active element, CSS selector, and snapshot reference (R6-10)", async () => {
@@ -1108,6 +1109,299 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       expect(snapMsg.params.snapshotId).toBe("snap-42");
       expect(snapMsg.params.mapRevision).toBe("42");
       expect(snapMsg.params.value).toBe("snapshot text");
+    });
+  });
+
+  describe("Workspace regressions (ui_remote F1-F4, F7, F8, F11)", () => {
+    async function mountDriving(browserId: string, leaseEpoch: string) {
+      const socketIndex = MockWebSocket.instances.length;
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId={browserId}
+          deviceToken="token-regress"
+          onBack={vi.fn()}
+        />,
+      );
+      const ws = await waitForSocket(socketIndex);
+      await establishStreaming(ws);
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({ type: "browserDriverChanged", leaseEpoch, isDriver: true }),
+        });
+      });
+      return ws;
+    }
+
+    function sentCommands(ws: MockWebSocket, command: string) {
+      return ws.sentMessages
+        .map((m) => {
+          try {
+            return JSON.parse(m as string);
+          } catch {
+            return null;
+          }
+        })
+        .filter((m) => m && m.command === command);
+    }
+
+    async function ok(ws: MockWebSocket, requestId: string) {
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({ type: "browserResult", requestId, result: { ok: true } }),
+        });
+      });
+    }
+
+    // RED mutation: in handleImeSubmit set `const fullValue = imeText;` -> second fill drops "first part".
+    it("F1: a second fill carries the text the remote field already holds", async () => {
+      const ws = await mountDriving("b-f1", "epoch-f1");
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      const imeBar = screen.getByTestId("remote-browser-ime-bar");
+
+      fireEvent.change(imeInput, { target: { value: "first part" } });
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+      const fill1 = sentCommands(ws, "fill")[0];
+      expect(fill1.params.value).toBe("first part");
+      await ok(ws, fill1.requestId);
+      expect(imeInput).toHaveValue("");
+
+      fireEvent.change(imeInput, { target: { value: " + more" } });
+      await act(async () => {
+        fireEvent.submit(imeBar);
+      });
+      const fill2 = sentCommands(ws, "fill")[1];
+      expect(fill2.params.value).toBe("first part + more");
+    });
+
+    // RED mutation: make nextImeRevision() return `++lastImeRevision` (drop Date.now()) -> revision restarts low.
+    it("F2: fill revisions keep increasing across workspace remounts", async () => {
+      const ws1 = await mountDriving("b-f2a", "epoch-f2");
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      fireEvent.change(screen.getByTestId("remote-browser-ime-text-input"), { target: { value: "a" } });
+      await act(async () => {
+        fireEvent.submit(screen.getByTestId("remote-browser-ime-bar"));
+      });
+      const first = sentCommands(ws1, "fill")[0].params.revision;
+      cleanup();
+
+      const ws2 = await mountDriving("b-f2b", "epoch-f2");
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      fireEvent.change(screen.getByTestId("remote-browser-ime-text-input"), { target: { value: "b" } });
+      await act(async () => {
+        fireEvent.submit(screen.getByTestId("remote-browser-ime-bar"));
+      });
+      const second = sentCommands(ws2, "fill")[0].params.revision;
+      expect(second).toBeGreaterThan(first);
+    });
+
+    // RED mutation: delete the `setImeError(...)` call in the fill catch -> no banner.
+    it("F2: a rejected fill is shown in the error banner and keeps the typed text", async () => {
+      const ws = await mountDriving("b-f2err", "epoch-f2err");
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      fireEvent.change(imeInput, { target: { value: "keep me" } });
+      await act(async () => {
+        fireEvent.submit(screen.getByTestId("remote-browser-ime-bar"));
+      });
+      const fill = sentCommands(ws, "fill")[0];
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserError",
+            requestId: fill.requestId,
+            code: "BROWSER_COMMAND_FAILED",
+            message: "fill superseded",
+            retryable: false,
+          }),
+        });
+      });
+      expect(screen.getByTestId("remote-browser-driver-error").textContent).toContain("fill superseded");
+      expect(imeInput).toHaveValue("keep me");
+    });
+
+    // RED mutation: restore `setImeText((prev) => (prev.endsWith(e.data) ? prev : `${prev}${e.data}`))`.
+    it("F3: compositionend with the caret mid-text does not duplicate the composed text", async () => {
+      await mountDriving("b-f3", "epoch-f3");
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      const imeInput = screen.getByTestId("remote-browser-ime-text-input");
+      fireEvent.compositionStart(imeInput);
+      fireEvent.change(imeInput, { target: { value: "A\uD55C\uAE00B" } });
+      fireEvent.compositionEnd(imeInput, { data: "\uD55C\uAE00" });
+      expect(imeInput).toHaveValue("A\uD55C\uAE00B");
+    });
+
+    // RED mutation: change `return driver.click({` back to `void driver.click({` -> no banner.
+    it("F4: a refused point click reaches the refusal banner through the workspace", async () => {
+      const ws = await mountDriving("b-f4", "epoch-f4");
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 1, 640, 400)).buffer as ArrayBuffer });
+      });
+      await act(async () => {
+        fireEvent.load(screen.getByAltText("Remote browser stream"));
+      });
+      const viewport = screen.getByTestId("remote-browser-viewport");
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0, top: 0, right: 640, bottom: 400, width: 640, height: 400, x: 0, y: 0, toJSON: () => {},
+      });
+      await act(async () => {
+        fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+      });
+      const click = sentCommands(ws, "click")[0];
+      expect(click).toBeDefined();
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserError",
+            requestId: click.requestId,
+            code: "UNSUPPORTED",
+            message: "point input refused",
+            retryable: false,
+            details: {
+              code: "UNSUPPORTED",
+              reason: "point input on iframes is unsupported",
+              inputClass: "iframe_point",
+              remediation: "Use a DOM reference.",
+            },
+          }),
+        });
+      });
+      expect(screen.getByTestId("remote-browser-refusal-banner")).toBeDefined();
+      expect(screen.getByTestId("remote-browser-refusal-remediation").textContent).toBe("Use a DOM reference.");
+    });
+
+    // RED mutation: wrap `onNavigate={(url) => driver.navigate(url)}` without surfaceAction -> no banner.
+    it("F7: a failed navigate is shown instead of becoming an unhandled rejection", async () => {
+      const ws = await mountDriving("b-f7", "epoch-f7");
+      // establishStreaming's hello supplies the browser identity guards.
+      fireEvent.change(screen.getByTestId("remote-browser-url-input"), {
+        target: { value: "https://example.com" },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("remote-browser-navigate-btn"));
+      });
+      const nav = sentCommands(ws, "navigate")[0];
+      expect(nav).toBeDefined();
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({
+            type: "browserError",
+            requestId: nav.requestId,
+            code: "BROWSER_COMMAND_FAILED",
+            message: "navigation blocked",
+            retryable: false,
+          }),
+        });
+      });
+      expect(screen.getByTestId("remote-browser-driver-error").textContent).toContain("navigation blocked");
+    });
+
+    // RED mutation: delete the `onError={() => handleImageError(imageUrl)}` prop -> no ACK.
+    it("F8: an undecodable frame is acknowledged so the ACK sweeper does not close the session", async () => {
+      render(
+        <RemoteBrowser baseUrl="http://localhost:8080" browserId="b-f8" deviceToken="token-f8" />,
+      );
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(7, 1, 640, 400)).buffer as ArrayBuffer });
+      });
+      await act(async () => {
+        fireEvent.error(screen.getByAltText("Remote browser stream"));
+      });
+      const acks = ws.sentMessages
+        .map((m) => {
+          try {
+            return JSON.parse(m as string);
+          } catch {
+            return null;
+          }
+        })
+        .filter((m) => m && m.type === "browserFrameAck");
+      expect(acks.map((a) => a.seq)).toContain(7);
+    });
+
+    it("does not click the old frame after acknowledging a newer undecodable frame", async () => {
+      const ws = await mountDriving("b-mobile", "1");
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 1, 640, 400)).buffer });
+      });
+      fireEvent.load(screen.getByAltText("Remote browser stream"));
+      const viewport = screen.getByTestId("remote-browser-viewport");
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0, top: 0, right: 640, bottom: 400, width: 640, height: 400, x: 0, y: 0, toJSON: () => ({}),
+      });
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(2, 1, 640, 400)).buffer });
+      });
+      fireEvent.error(screen.getByAltText("Remote browser stream"));
+      await act(async () => {
+        fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+      });
+      expect(sentCommands(ws, "click")).toHaveLength(0);
+    });
+
+    it.each([
+      ["1", "2", "2"],
+      ["3", "2", "3"],
+    ])("uses the latest generation from frame %s and state %s", async (frameGeneration, stateGeneration, expected) => {
+      render(<RemoteBrowserWorkspace baseUrl="http://localhost:8080" browserId="b-mobile" deviceToken="token-generation" onBack={vi.fn()} />);
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+      const frame = makeTestFrame(1);
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame({
+          ...frame,
+          metadata: { ...frame.metadata, documentGeneration: frameGeneration },
+        }).buffer });
+        ws.onmessage?.({ data: JSON.stringify({
+          type: "browserState", browserId: "b-mobile",
+          documentGeneration: stateGeneration, viewportRevision: "1",
+          loading: false, paused: false,
+        }) });
+        ws.onmessage?.({ data: JSON.stringify({
+          type: "browserDriverChanged", leaseEpoch: "1", isDriver: true,
+        }) });
+      });
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      fireEvent.change(screen.getByTestId("remote-browser-ime-text-input"), { target: { value: "next page" } });
+      await act(async () => {
+        fireEvent.submit(screen.getByTestId("remote-browser-ime-bar"));
+      });
+      const fills = sentCommands(ws, "fill");
+      expect(fills).toHaveLength(1);
+      expect(fills[0].documentGeneration).toBe(expected);
+    });
+
+    // RED mutation: in RemoteBrowserWorkspace restore `?? "bi1"` on browserInstanceId -> a fill goes out.
+    it("F11: without a known browser identity no command is sent with invented ids", async () => {
+      render(
+        <RemoteBrowserWorkspace
+          baseUrl="http://localhost:8080"
+          browserId="b-f11"
+          deviceToken="token-f11"
+          onBack={vi.fn()}
+        />,
+      );
+      const ws = await waitForSocket(0);
+      await act(async () => {
+        await drainAsync();
+      });
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({ type: "browserDriverChanged", leaseEpoch: "epoch-f11", isDriver: true }),
+        });
+      });
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      fireEvent.change(screen.getByTestId("remote-browser-ime-text-input"), { target: { value: "x" } });
+      await act(async () => {
+        fireEvent.submit(screen.getByTestId("remote-browser-ime-bar"));
+      });
+      expect(sentCommands(ws, "fill")).toHaveLength(0);
+      expect(screen.getByTestId("remote-browser-driver-error").textContent).toContain("guard missing");
     });
   });
 });

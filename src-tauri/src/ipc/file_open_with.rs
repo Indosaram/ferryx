@@ -475,10 +475,22 @@ pub async fn cmd_file_open_with<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn cmd_webview_print<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
-) -> Result<(), IpcError> {
+) -> Result<bool, IpcError> {
+    print_completion::print(webview).await
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "file_print_completion.rs"]
+mod print_completion;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+mod print_completion {
+pub async fn print<R: tauri::Runtime>(webview: tauri::Webview<R>) -> Result<bool, super::IpcError> {
     webview
         .print()
-        .map_err(|e| IpcError::internal(e.to_string()))
+        .map(|()| false)
+        .map_err(|e| super::IpcError::internal(e.to_string()))
+}
 }
 
 #[cfg(test)]

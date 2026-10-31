@@ -111,8 +111,137 @@ function harness(overrides: Partial<FilePreviewDeps> = {}): Harness {
 }
 
 describe("filePreview controller", () => {
+  it("consumes a fresh remote snapshot once and fetches again on reload", async () => {
+    const h = harness();
+    const remote = { workspaceId: "ssh:host", path: "/srv/file.txt", sessionId: null };
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === FILE_PREVIEW_COMMANDS.open) return textPayload("snapshot");
+      throw new Error("offline");
+    });
+    await h.controller.open(SOURCE, { ...REQUEST, remote, freshRemoteSnapshot: true });
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+    expect(h.invoke).toHaveBeenCalledWith(FILE_PREVIEW_COMMANDS.open, expect.objectContaining({ path: REQUEST.path }));
+    expect(h.controller.getState()).toMatchObject({ status: "ready", request: { remote } });
+    const state = h.controller.getState();
+    if (state.status !== "ready") throw new Error("missing preview");
+    expect(state.request).not.toHaveProperty("freshRemoteSnapshot");
+    await h.controller.reload();
+    expect(h.invoke).toHaveBeenCalledWith("cmd_remote_file_fetch", {
+      workspaceId: remote.workspaceId, path: remote.path, cwd: null, sessionId: null,
+    });
+    expect(h.controller.getState()).toMatchObject({ status: "ready", payload: { handle: "snapshot" }, refreshFailure: { message: "offline" } });
+  });
+
+  it("retains the ready payload and capabilities when remote refresh fails", async () => {
+    const h = harness();
+    const request = { ...REQUEST, remote: { workspaceId: "daemon:host", path: "/srv/readme.md", sessionId: "remote-session" } };
+    const refresh = deferred<{ localPath: string; remotePath: string }>();
+    let fetches = 0;
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_paired_file_fetch") {
+        if (++fetches > 1) return refresh.promise;
+        return { localPath: "/cache/one.md", remotePath: request.remote.path };
+      }
+      if (command === FILE_PREVIEW_COMMANDS.open) return markdownPayload("original");
+      if (command === FILE_PREVIEW_COMMANDS.openChild) return childAsset("image");
+      return null;
+    });
+    await h.controller.open(SOURCE, request);
+    const capability = h.controller.markdownCapability();
+    const pending = h.controller.reload();
+    expect(h.controller.getState()).toMatchObject({ status: "ready", refreshing: true, payload: { handle: "original" } });
+    expect(h.closedHandles()).toEqual([]);
+    refresh.reject(new Error("offline"));
+    await pending;
+    expect(h.controller.getState()).toMatchObject({ status: "ready", refreshing: false, refreshFailure: { message: "offline" } });
+    await expect(capability?.requestImage("image.png")).resolves.toMatchObject({ handle: "image" });
+    expect(h.closedHandles()).toEqual([]);
+  });
+
+  it("discards an older remote fetch after a newer refresh commits", async () => {
+    const h = harness();
+    const request = { ...REQUEST, remote: { workspaceId: "ssh:host", path: "/srv/file.txt", sessionId: null } };
+    const oldFetch = deferred<{ localPath: string; remotePath: string }>();
+    let fetches = 0;
+    h.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "cmd_remote_file_fetch") {
+        if (++fetches === 2) return oldFetch.promise;
+        return { localPath: `/cache/${fetches}.txt`, remotePath: request.remote.path };
+      }
+      if (command === FILE_PREVIEW_COMMANDS.open) return textPayload(String(args.path));
+      return null;
+    });
+    await h.controller.open(SOURCE, request);
+    const older = h.controller.reload();
+    await h.controller.reload();
+    oldFetch.resolve({ localPath: "/cache/stale.txt", remotePath: request.remote.path });
+    await older;
+    expect(h.controller.getState()).toMatchObject({ status: "ready", payload: { handle: "/cache/3.txt" } });
+    expect(h.invoke.mock.calls.filter(([command]) => command === FILE_PREVIEW_COMMANDS.open)).toHaveLength(2);
+    expect(h.closedHandles()).toEqual(["/cache/1.txt"]);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("isolates staged backend owners and releases late opens without replacing the winner", async () => {
+    const h = harness();
+    const request = { ...REQUEST, remote: { workspaceId: "ssh:host", path: "/srv/file.txt", sessionId: null } };
+    const staged = deferred<FilePreviewPayload>();
+    const entered = deferred<void>();
+    let opens = 0;
+    const owners: unknown[] = [];
+    h.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "cmd_remote_file_fetch") return { localPath: "/cache/new.txt", remotePath: request.remote.path };
+      if (command === FILE_PREVIEW_COMMANDS.open) {
+        owners.push(args.ownerId);
+        if (++opens === 2) { entered.resolve(); return staged.promise; }
+        return textPayload(`handle-${opens}`);
+      }
+      return null;
+    });
+    await h.controller.open(SOURCE, request);
+    const older = h.controller.reload();
+    await entered.promise;
+    expect(h.closedHandles()).toEqual([]);
+    await h.controller.reload();
+    staged.resolve(textPayload("stale"));
+    await older;
+    expect(new Set(owners).size).toBe(3);
+    expect(owners.every((owner) => typeof owner === "string")).toBe(true);
+    expect(h.controller.getState()).toMatchObject({ status: "ready", payload: { handle: "handle-3" } });
+    expect(h.closedHandles()).toEqual(["handle-1", "stale"]);
+  });
+
+  it("keeps the previous remote preview when opening fetched bytes fails", async () => {
+    const h = harness();
+    const request = { ...REQUEST, remote: { workspaceId: "ssh:host", path: "/srv/file.txt", sessionId: null } };
+    let opens = 0;
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "cmd_remote_file_fetch") return { localPath: "/cache/new.txt", remotePath: request.remote.path };
+      if (command === FILE_PREVIEW_COMMANDS.open) {
+        if (++opens > 1) throw new Error("unreadable");
+        return textPayload("original");
+      }
+      return null;
+    });
+    await h.controller.open(SOURCE, request);
+    await h.controller.reload();
+    expect(h.controller.getState()).toMatchObject({ status: "ready", payload: { handle: "original" }, refreshFailure: { message: "unreadable" } });
+    expect(h.closedHandles()).toEqual([]);
+  });
+
+  it("does not reopen a closed preview when its remote fetch completes", async () => {
+    const h = harness();
+    const fetched = deferred<{ localPath: string; remotePath: string }>();
+    h.invoke.mockImplementation(async () => fetched.promise);
+    const pending = h.controller.open(SOURCE, { ...REQUEST, remote: { workspaceId: "ssh:host", path: "/srv/file.txt", sessionId: null } });
+    await h.controller.close();
+    fetched.resolve({ localPath: "/cache/late.txt", remotePath: "/srv/file.txt" });
+    await pending;
+    expect(h.controller.getState()).toEqual({ status: "closed" });
+    expect(h.invoke.mock.calls.filter(([command]) => command === FILE_PREVIEW_COMMANDS.open)).toHaveLength(0);
   });
 
   it("starts closed and reports a ready payload after open resolves", async () => {

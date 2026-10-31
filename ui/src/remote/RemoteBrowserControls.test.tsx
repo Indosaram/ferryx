@@ -107,3 +107,43 @@ describe("RemoteBrowserControls refusals it decides locally", () => {
     );
   });
 });
+
+describe("RemoteBrowserControls command failures and URL sync", () => {
+  // RED mutation: in commandFailureRefusal drop the `details?.code ||` term / use `|| "KEY_NOT_ALLOWED"` again.
+  it("keeps the server's structured details for a rejected keypress (F16)", async () => {
+    const details = {
+      code: "KEY_NOT_ALLOWED",
+      reason: "key refused by page allowlist",
+      inputClass: "key",
+      remediation: "Use an allowlisted key.",
+    };
+    const onKeypress = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("refused"), { code: "BROWSER_INPUT_REFUSED", details }));
+    render(<RemoteBrowserControls url="https://example.com" driverState="driving" onKeypress={onKeypress} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remote-browser-key-Enter"));
+    });
+    expect(screen.getByTestId("remote-browser-controls-refusal-code").textContent).toBe("KEY_NOT_ALLOWED");
+    expect(screen.getByTestId("remote-browser-controls-refusal-reason").textContent).toBe(details.reason);
+  });
+
+  // RED mutation: restore `|| "KEY_NOT_ALLOWED"` as the fallback code for a failed keypress.
+  it("does not label a non-refusal keypress failure as KEY_NOT_ALLOWED (F16)", async () => {
+    const onKeypress = vi.fn().mockRejectedValue(new Error("Request timed out"));
+    render(<RemoteBrowserControls url="https://example.com" driverState="driving" onKeypress={onKeypress} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("remote-browser-key-Enter"));
+    });
+    expect(screen.getByTestId("remote-browser-controls-refusal-code").textContent).toBe("COMMAND_FAILED");
+  });
+
+  // RED mutation: make the url-sync effect unconditional again (`setInputUrl(url)` without the edited check).
+  it("does not overwrite a URL being typed when the page url changes (F15)", async () => {
+    const { rerender } = render(<RemoteBrowserControls url="https://a.example" driverState="driving" />);
+    const input = screen.getByTestId("remote-browser-url-input");
+    fireEvent.change(input, { target: { value: "https://typed.example" } });
+    rerender(<RemoteBrowserControls url="https://redirect.example" driverState="driving" />);
+    expect(input).toHaveValue("https://typed.example");
+  });
+});

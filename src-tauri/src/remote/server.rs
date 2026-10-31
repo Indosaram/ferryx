@@ -2309,7 +2309,8 @@ where
         state.agent.clone(),
         state.provider_session.clone(),
         state.detail.clone(),
-    );
+    )
+    .with_report_marks(state);
     let json_str = serde_json::to_string(&msg).map_err(|_| ())?;
     // Guard against oversized metadata without dropping the PTY terminal connection:
     // If the full message (e.g. carrying an unusually long detail question or path)
@@ -2330,7 +2331,8 @@ where
                 state.state.clone(),
                 state.agent.clone(),
                 bounded_provider,
-            );
+            )
+            .with_report_marks(state);
             let compact_json = serde_json::to_string(&compact_msg).map_err(|_| ())?;
             match machine_control(Message::Text(compact_json.into())) {
                 Ok(control) => {
@@ -2793,6 +2795,12 @@ async fn handle_machine_terminal_socket(
                     }
                     Message::Text(text) if text.len() <= 16 * 1024 => {
                         match serde_json::from_str::<MachineTerminalControl>(&text) {
+                            Ok(MachineTerminalControl::AcknowledgeAgentOutcome {
+                                generation: supplied,
+                            }) if supplied.0 == generation => {
+                                state.session_backend
+                                    .acknowledge_agent_outcome(&target.session_id).await
+                            }
                             Ok(MachineTerminalControl::Resize {
                                 generation: supplied,
                                 cols,
@@ -3083,11 +3091,22 @@ async fn handle_terminal_socket(
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                                    | ClientControlMessage::AcknowledgeAgentOutcome
                             ) {
                                 continue;
                             }
                         }
                         match ctrl {
+                            ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
+                                if let Err(error) = session_backend
+                                    .acknowledge_agent_outcome(&session_id_clone).await
+                                {
+                                    tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
+                                }
+                            }
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
@@ -3612,11 +3631,22 @@ async fn handle_terminal_grid_socket(
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                                    | ClientControlMessage::AcknowledgeAgentOutcome
                             ) {
                                 continue;
                             }
                         }
                         match ctrl {
+                            ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
+                                if let Err(error) = session_backend
+                                    .acknowledge_agent_outcome(&session_id_clone).await
+                                {
+                                    tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
+                                }
+                            }
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
@@ -4847,8 +4877,7 @@ async fn ensure_file_read_session_is_host_local(
 
 /// Where a relative file-read path anchors. The session's live shell cwd wins: it is
 /// what the terminal printed relative to, while the request cwd is only the desktop's
-/// stored spawn directory. Without a live cwd an explicit request cwd stays
-/// authoritative (`None` here), then the session's worktree.
+/// stored spawn directory. Neither that stale directory nor the worktree is a fallback.
 async fn file_read_session_base(
     backend: &dyn crate::remote::backend::RemoteSessionBackend,
     req: &super::machine_protocol::FileReadRequest,
@@ -4863,16 +4892,7 @@ async fn file_read_session_base(
     if let Some(live) = backend.live_cwd(id).await.filter(|p| p.is_absolute()) {
         return Ok(Some(live));
     }
-    if req.cwd.is_some() {
-        return Ok(None);
-    }
-    backend
-        .describe_session(id)
-        .await
-        .ok()
-        .and_then(|details| details.worktree_path)
-        .map(Some)
-        .ok_or_else(|| machine_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND").into())
+    Err(machine_error(StatusCode::BAD_REQUEST, "REMOTE_CWD_UNKNOWN").into())
 }
 
 /// A live shell cwd replaces the desktop-supplied cwd, which is only the session's
@@ -5039,12 +5059,23 @@ mod file_read_session_base_tests {
     }
 
     #[tokio::test]
-    async fn relative_path_falls_back_to_worktree_without_live_cwd() {
+    async fn relative_path_refuses_worktree_and_stale_supplied_cwd_without_live_cwd() {
         let backend = LiveCwdBackend { worktree: PathBuf::from("/wt"), live: None };
-        let base = file_read_session_base(&backend, &req("shot.png", None)).await.ok().flatten();
-        assert_eq!(base, Some(PathBuf::from("/wt")));
-        let explicit = file_read_session_base(&backend, &req("shot.png", Some("/other"))).await.ok().flatten();
-        assert_eq!(explicit, None, "without a live cwd the explicit request cwd stays authoritative");
+        for cwd in [None, Some("/other")] {
+            let refusal = match file_read_session_base(&backend, &req("shot.png", cwd)).await {
+                Err(refusal) => refusal,
+                Ok(_) => panic!("unknown live cwd must not use a fallback"),
+            };
+            let response = refusal.into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "REMOTE_CWD_UNKNOWN");
+        }
+        let absolute = std::env::temp_dir().join("file-preview.txt");
+        for path in [absolute.to_str().unwrap(), "~/file-preview.txt"] {
+            assert!(matches!(file_read_session_base(&backend, &req(path, None)).await, Ok(None)));
+        }
     }
 
     #[tokio::test]
@@ -6970,6 +7001,78 @@ async fn reference_chat_screen(
     }
 }
 
+async fn reference_chat_acknowledge_outcome(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await {
+        Ok(read) => read,
+        Err(response) => return response.into(),
+    };
+    if read.device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot acknowledge an agent outcome",
+        );
+    }
+    if let Err(response) = authenticate_machine_request(&state, &headers) {
+        return *response;
+    }
+    match state.session_backend.acknowledge_agent_outcome(&session_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => {
+            let (status, code) = acknowledge_outcome_failure_status(&message);
+            machine_error_with_details(status, code, &message, serde_json::Map::new())
+        }
+    }
+}
+
+/// Not found only when the backend no longer knows the session; an owner that
+/// cannot be reached or did not answer in time is an upstream failure.
+fn acknowledge_outcome_failure_status(message: &str) -> (StatusCode, &'static str) {
+    if message.contains("TIMEOUT") || message.contains("PAIRED_UNCERTAIN_SEND") {
+        (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT")
+    } else if message.contains("PAIRED_PROXY_MISSING")
+        || message.contains("Session unavailable")
+        || message.contains("not found")
+    {
+        (StatusCode::NOT_FOUND, "NOT_FOUND")
+    } else if message.contains("unsupported") || message.contains("no program status mirror") {
+        (StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED")
+    } else {
+        (StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE")
+    }
+}
+
+#[cfg(test)]
+mod acknowledge_outcome_status_tests {
+    use super::*;
+
+    #[test]
+    fn acknowledgement_failures_map_to_accurate_statuses() {
+        for (message, status, code) in [
+            ("General error: PAIRED_PROXY_MISSING", StatusCode::NOT_FOUND, "NOT_FOUND"),
+            ("Session unavailable", StatusCode::NOT_FOUND, "NOT_FOUND"),
+            ("Session 's' not found", StatusCode::NOT_FOUND, "NOT_FOUND"),
+            ("Disconnected: PAIRED_NOT_SENT", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            ("Disconnected: PAIRED_PROXY_UNAVAILABLE", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            ("Disconnected: HOST_UNAVAILABLE", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            ("Disconnected: PAIRED_UNCERTAIN_SEND", StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            ("Disconnected: TIMEOUT", StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            ("Outcome acknowledgement unsupported", StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            ("Session has no program status mirror", StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+        ] {
+            assert_eq!(acknowledge_outcome_failure_status(message), (status, code), "{message}");
+        }
+    }
+}
+
 /// GET /api/v1/reference-chat/{sessionId}/prompt
 ///
 /// The card is detected in the pane's own session record and remembered, so the answer route can
@@ -7836,6 +7939,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/reference-chat/{sessionId}/screen",
             get(reference_chat_screen),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/acknowledge-outcome",
+            post(reference_chat_acknowledge_outcome),
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/prompt",

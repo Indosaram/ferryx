@@ -16,6 +16,8 @@ import {
   type RemoteBrowserSharingState,
 } from "../remote/browserProtocol";
 
+const FEEDBACK_MESSAGE_TTL_MS = 5000;
+
 export interface RemoteBrowserSharingIndicatorProps {
   isSharing?: boolean;
   activeSessionsCount?: number;
@@ -110,6 +112,13 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
     };
   }, [applySharingState]);
 
+  // Transient result messages clear themselves so a finished reclaim/revoke cannot pin the bar on screen.
+  React.useEffect(() => {
+    if (!feedbackMessage) return;
+    const timer = setTimeout(() => setFeedbackMessage(null), FEEDBACK_MESSAGE_TTL_MS);
+    return () => clearTimeout(timer);
+  }, [feedbackMessage]);
+
   const active = internalSharing || internalDriverStatus === "driving" || internalSessionsCount > 0;
 
   if (!active && !feedbackMessage) {
@@ -125,10 +134,11 @@ export const RemoteBrowserSharingIndicator: React.FC<RemoteBrowserSharingIndicat
         await onReclaim();
       }
       // Reclaiming revokes the driver; retain viewing status if viewers remain
+      const viewersRemain = internalSharing || internalSessionsCount > 0;
       const reclaimed: RemoteBrowserSharingState = {
-        isSharing: internalSessionsCount > 0,
+        isSharing: viewersRemain,
         activeSessionsCount: internalSessionsCount,
-        driverStatus: internalSessionsCount > 0 ? "viewing" : "idle",
+        driverStatus: viewersRemain ? "viewing" : "idle",
         driverDeviceId: null,
       };
       applySharingState(reclaimed);

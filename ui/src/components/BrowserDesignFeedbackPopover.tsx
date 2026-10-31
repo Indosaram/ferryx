@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { BrowserDesignSnapshot, DesignFeedbackTarget } from "../lib/browserTauri";
 
 export interface BrowserDesignFeedbackPopoverProps {
@@ -20,6 +20,13 @@ export function BrowserDesignFeedbackPopover({
 }: BrowserDesignFeedbackPopoverProps) {
   const [memo, setMemo] = useState("");
   const [targetSessionId, setTargetSessionId] = useState(targets[0]?.sessionId ?? "");
+  // Targets follow the workspace's live sessions; a selection that left the list must not keep
+  // addressing a session that can no longer receive the feedback.
+  useEffect(() => {
+    if (!targets.some((target) => target.sessionId === targetSessionId)) {
+      setTargetSessionId(targets[0]?.sessionId ?? "");
+    }
+  }, [targets, targetSessionId]);
   const first = snapshot.dom_elements[0];
   const summary = first
     ? `${first.tag}#${first.id} ${first.bounds[2]}x${first.bounds[3]} at (${first.bounds[0]}, ${first.bounds[1]})`
@@ -41,27 +48,29 @@ export function BrowserDesignFeedbackPopover({
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="design-feedback-target-select" className="text-muted-foreground">
-            Target
-          </label>
           {targets.length === 0 ? (
             <p role="status" className="text-muted-foreground">
               No terminal session in this workspace can receive the feedback.
             </p>
           ) : (
-            <select
-              id="design-feedback-target-select"
-              aria-label="Delivery target"
-              className="rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-              value={targetSessionId}
-              onChange={(e) => setTargetSessionId(e.target.value)}
-            >
-              {targets.map((target) => (
-                <option key={target.sessionId} value={target.sessionId}>
-                  {target.label}
-                </option>
-              ))}
-            </select>
+            <>
+              <label htmlFor="design-feedback-target-select" className="text-muted-foreground">
+                Target
+              </label>
+              <select
+                id="design-feedback-target-select"
+                aria-label="Delivery target"
+                className="rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                value={targetSessionId}
+                onChange={(e) => setTargetSessionId(e.target.value)}
+              >
+                {targets.map((target) => (
+                  <option key={target.sessionId} value={target.sessionId}>
+                    {target.label}
+                  </option>
+                ))}
+              </select>
+            </>
           )}
         </div>
 

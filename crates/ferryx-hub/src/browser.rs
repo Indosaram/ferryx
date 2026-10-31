@@ -28,64 +28,51 @@ fn owned_tabs() -> &'static Mutex<HashSet<String>> {
     TABS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Parses `raw` with the WHATWG URL parser Chrome uses and returns the serialized parsed
+/// URL, so the host checked here is the host Chrome opens.
 pub fn public_http_url(raw: &str) -> Result<String> {
-    let parsed = reqwest_url(raw)?;
-    if !matches!(parsed.0.as_str(), "http" | "https") {
+    let parsed = url::Url::parse(raw)
+        .map_err(|error| HubError::message(format!("invalid URL: {raw}: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return Err(HubError::message(
             "browser navigation only supports http and https URLs",
         ));
     }
-    if is_internal_host(&parsed.1) {
+    let internal = match parsed.host() {
+        Some(url::Host::Domain(domain)) => is_internal_domain(domain),
+        Some(url::Host::Ipv4(addr)) => is_internal_ipv4(addr),
+        Some(url::Host::Ipv6(addr)) => is_internal_ipv6(addr),
+        None => true,
+    };
+    if internal {
         return Err(HubError::message(
             "browser navigation refuses loopback and private hosts",
         ));
     }
-    Ok(parsed.2)
+    Ok(parsed.as_str().to_owned())
 }
 
-fn reqwest_url(raw: &str) -> Result<(String, String, String)> {
-    let (scheme, rest) = raw
-        .split_once("://")
-        .ok_or_else(|| HubError::message(format!("invalid URL: {raw}")))?;
-    let hostport = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let host = hostport
-        .rsplit_once('@')
-        .map(|(_, host)| host)
-        .unwrap_or(hostport);
-    let host = host.strip_prefix('[').unwrap_or(host);
-    let host = host.split([']', ':']).next().unwrap_or(host);
-    if host.is_empty() {
-        return Err(HubError::message(format!("invalid URL: {raw}")));
-    }
-    Ok((
-        scheme.to_ascii_lowercase(),
-        host.to_ascii_lowercase(),
-        raw.to_owned(),
-    ))
+fn is_internal_domain(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.');
+    domain == "localhost"
+        || domain.ends_with(".localhost")
+        || domain == "metadata.google.internal"
 }
 
-fn is_internal_host(host: &str) -> bool {
-    if matches!(
-        host,
-        "localhost" | "localhost." | "0.0.0.0" | "127.0.0.1" | "::1" | "metadata.google.internal"
-    ) {
-        return true;
-    }
-    if let Ok(addr) = host.parse::<std::net::Ipv4Addr>() {
-        return addr.is_loopback()
-            || addr.is_private()
-            || addr.is_link_local()
-            || addr.is_unspecified()
-            || addr.is_broadcast();
-    }
-    if let Ok(addr) = host.parse::<std::net::Ipv6Addr>() {
-        return addr.is_loopback() || addr.is_unspecified() || is_unique_local(&addr);
-    }
-    false
+fn is_internal_ipv4(addr: std::net::Ipv4Addr) -> bool {
+    addr.is_loopback()
+        || addr.is_private()
+        || addr.is_link_local()
+        || addr.is_unspecified()
+        || addr.is_broadcast()
 }
 
-fn is_unique_local(addr: &std::net::Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xfe00) == 0xfc00
+fn is_internal_ipv6(addr: std::net::Ipv6Addr) -> bool {
+    addr.is_loopback()
+        || addr.is_unspecified()
+        || addr.is_unique_local()
+        || addr.is_unicast_link_local()
+        || addr.to_ipv4_mapped().is_some()
 }
 
 /// Runs one browser action against the CDP HTTP endpoint on `port`.
@@ -131,9 +118,17 @@ async fn execute_cdp(port: u16, args: &Value) -> Result<Value> {
     match action {
         "snapshot" => {
             let listed = pages.as_array().cloned().unwrap_or_default();
-            let owned = owned_tabs()
+            let mut owned = owned_tabs()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
+            // Forget tabs that are no longer open so the owned set does not grow forever.
+            {
+                let live: HashSet<&str> = listed
+                    .iter()
+                    .filter_map(|page| page.get("id").and_then(Value::as_str))
+                    .collect();
+                owned.retain(|id| live.contains(id.as_str()));
+            }
             let mine: Vec<Value> = listed
                 .into_iter()
                 .filter(|page| {
@@ -224,6 +219,54 @@ mod tests {
         );
     }
 
+    // Every form below names an internal host under the WHATWG parser Chrome uses.
+    #[test]
+    fn whatwg_host_forms_of_internal_addresses_are_refused() {
+        for raw in [
+            "http://127.0.0.1\\@evil.com/",
+            "http:\\\\127.0.0.1\\admin",
+            "http://user:pass@127.0.0.1/",
+            "http://2130706433/",
+            "http://0x7f.1/",
+            "http://127.1/",
+            "http://0177.0.0.1/",
+            "http://%31%32%37.0.0.1/",
+            "http://127.0.0.1./",
+            "  http://127.0.0.1/",
+            "http://0.0.0.0/",
+            "http://172.16.0.1/",
+            "http://169.254.169.254/latest/meta-data",
+            "http://255.255.255.255/",
+            "http://LOCALHOST/",
+            "http://localhost./",
+            "http://app.localhost/",
+            "http://metadata.google.internal/",
+            "http://[::1]/",
+            "http://[::]/",
+            "http://[fc00::1]/",
+            "http://[fd12:3456::1]/",
+            "http://[fe80::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:7f00:1]/",
+            "http://[::ffff:8.8.8.8]/",
+        ] {
+            assert!(public_http_url(raw).is_err(), "{raw} must be refused");
+        }
+    }
+
+    #[test]
+    fn public_url_is_returned_in_parsed_form() {
+        assert_eq!(
+            public_http_url("HTTPS://Example.COM/a b").unwrap(),
+            "https://example.com/a%20b"
+        );
+        // The backslash ends the host under WHATWG, so this opens example.com.
+        assert_eq!(
+            public_http_url("http://example.com\\@127.0.0.1/").unwrap(),
+            "http://example.com/@127.0.0.1/"
+        );
+    }
+
     #[cfg(any(feature = "hub-slack", feature = "hub-discord", feature = "hub-voice"))]
     #[tokio::test]
     async fn navigate_opens_a_cdp_tab_and_snapshot_lists_only_that_tab() {
@@ -288,6 +331,14 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(blocked.contains("private"));
+
+        // A tab that is no longer listed is dropped from the owned set.
+        pages.lock().unwrap().clear();
+        let snap = execute_at(port, &json!({"action": "snapshot"}))
+            .await
+            .unwrap();
+        assert_eq!(snap["active_pages_count"], 0);
+        assert!(!owned_tabs().lock().unwrap().contains("tab-1"));
     }
 
     #[cfg(any(feature = "hub-slack", feature = "hub-discord", feature = "hub-voice"))]

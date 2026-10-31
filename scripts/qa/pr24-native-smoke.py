@@ -131,7 +131,9 @@ def guarded_skip_setup_point(width, height, expected_pid, owner_pid, window_id, 
         raise RuntimeError('Skip setup coordinate requires reviewed 1278x850 client geometry')
     if expected_pid <= 0 or owner_pid != expected_pid or active_window_id != window_id:
         raise RuntimeError('Skip setup requires the active app-owned window')
-    return 530, 599
+    # Recalibrated after the onboarding wizard grew (agent install help, phone and first-worktree
+    # steps): the footer, and with it Skip setup, now sits at y=716 in the reviewed screenshot.
+    return 530, 716
 
 
 def xprop_window_ids(output, property_name):

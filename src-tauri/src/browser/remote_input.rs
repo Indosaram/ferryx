@@ -365,7 +365,9 @@ impl RemoteInputError {
     }
 }
 
-/// Maps normalized coordinate (u, v) in [0.0, 1.0] onto logical capture rect.
+/// Maps normalized coordinate (u, v) in [0.0, 1.0] onto the captured viewport, in the
+/// viewport-relative CSS pixels `document.elementFromPoint` expects. The rect's x/y place
+/// the webview inside the app window and are display geometry only, so they are not added.
 /// Enforces v1 binding decision: MAIN-FRAME only! Iframes, canvas, dialogs are explicitly rejected as unsupported.
 pub fn map_point_mainframe(
     u: f64,
@@ -396,8 +398,8 @@ pub fn map_point_mainframe(
         return Err(RemoteInputError::OutOfBounds { u, v });
     }
 
-    let x = capture_rect.x + u * capture_rect.width;
-    let y = capture_rect.y + v * capture_rect.height;
+    let x = u * capture_rect.width;
+    let y = v * capture_rect.height;
 
     Ok(LogicalPoint { x, y })
 }
@@ -460,6 +462,11 @@ pub fn validate_page_key(key: &str) -> Result<String, RemoteInputError> {
     if key.chars().any(char::is_control) {
         return Err(RemoteInputError::KeyNotAllowed("control character".into()));
     }
+    // The KeyboardEvent key value for the space bar is " ", which trimming would erase.
+    // "Space" is its `code` name, accepted as an alias and dispatched as the key value.
+    if key == " " || key.trim() == "Space" {
+        return Ok(" ".to_string());
+    }
     let trimmed = key.trim();
     if trimmed.is_empty() {
         return Err(RemoteInputError::KeyNotAllowed("empty key".into()));
@@ -504,7 +511,6 @@ pub fn validate_page_key(key: &str) -> Result<String, RemoteInputError> {
             | "PageDown"
             | "Home"
             | "End"
-            | "Space"
     );
 
     let is_single_char = trimmed.chars().count() == 1;
@@ -707,15 +713,21 @@ mod tests {
             height: 600.0,
         };
 
-        // Center of viewport (0.5, 0.5)
+        // Center of viewport (0.5, 0.5). The webview sits at (50, 100) in the window, but
+        // the click point is viewport-relative, so that offset is not added.
         let pt = map_point_mainframe(0.5, 0.5, &rect, false, false, false).unwrap();
-        assert_eq!(pt.x, 50.0 + 400.0);
-        assert_eq!(pt.y, 100.0 + 300.0);
+        assert_eq!(pt.x, 400.0);
+        assert_eq!(pt.y, 300.0);
 
         // Top-left (0.0, 0.0)
         let pt_tl = map_point_mainframe(0.0, 0.0, &rect, false, false, false).unwrap();
-        assert_eq!(pt_tl.x, 50.0);
-        assert_eq!(pt_tl.y, 100.0);
+        assert_eq!(pt_tl.x, 0.0);
+        assert_eq!(pt_tl.y, 0.0);
+
+        // Bottom-right (1.0, 1.0) is the viewport's far corner.
+        let pt_br = map_point_mainframe(1.0, 1.0, &rect, false, false, false).unwrap();
+        assert_eq!(pt_br.x, 800.0);
+        assert_eq!(pt_br.y, 600.0);
     }
 
     #[test]
@@ -882,6 +894,10 @@ mod tests {
         assert_eq!(validate_page_key("Backspace").unwrap(), "Backspace");
         assert_eq!(validate_page_key("Tab").unwrap(), "Tab");
         assert_eq!(validate_page_key("ArrowDown").unwrap(), "ArrowDown");
+        // The space bar is dispatched with its KeyboardEvent key value " ", whether the
+        // client sends that value or the "Space" code name.
+        assert_eq!(validate_page_key(" ").unwrap(), " ");
+        assert_eq!(validate_page_key("Space").unwrap(), " ");
 
         // Disallowed chrome shortcuts
         assert!(matches!(
