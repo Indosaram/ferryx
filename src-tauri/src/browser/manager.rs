@@ -596,6 +596,22 @@ impl BrowserManager {
         Ok((s.bounds.clone(), s.zoom_factor, s.viewport_revision))
     }
 
+    pub fn get_identity_snapshot(
+        &self,
+        browser_id: &str,
+    ) -> Result<(BrowserState, String, Option<LogicalRect>, u64), BrowserError> {
+        let guard = self.sessions.read();
+        let s = guard
+            .get(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        Ok((
+            browser_state(s),
+            s.instance_id.clone(),
+            s.bounds.clone(),
+            s.viewport_revision,
+        ))
+    }
+
     pub fn set_visible(&self, browser_id: &str, visible: bool) -> Result<(), BrowserError> {
         let mut guard = self.sessions.write();
         let s = guard
@@ -862,6 +878,26 @@ pub fn order_sessions_by_creation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_snapshot_reads_the_live_session_and_fails_after_close() {
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("identity-a")).unwrap();
+        let bounds = LogicalRect { x: 1.0, y: 2.0, width: 300.0, height: 200.0 };
+        manager.set_bounds("identity-a", bounds.clone()).unwrap();
+        let (state, instance_id, snap_bounds, viewport_revision) =
+            manager.get_identity_snapshot("identity-a").unwrap();
+        assert_eq!(state.browser_id, "identity-a");
+        assert_eq!(instance_id, manager.get_instance_id("identity-a").unwrap());
+        assert!(!instance_id.is_empty());
+        assert_eq!(snap_bounds, Some(bounds));
+        assert_eq!(viewport_revision, 2);
+        manager.remove_session("identity-a");
+        assert!(matches!(
+            manager.get_identity_snapshot("identity-a"),
+            Err(BrowserError::NotFound(_))
+        ));
+    }
 
     #[test]
     fn shadow_history_is_capped_and_keeps_the_newest_entries() {

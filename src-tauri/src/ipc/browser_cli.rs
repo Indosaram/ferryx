@@ -965,10 +965,8 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
             }))
         }
         RemoteBrowserOperation::GetState { browser_id } => {
-            let state = manager.get_state(&browser_id)?;
-            let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
-            let (bounds, _, viewport_revision) =
-                manager.get_geometry(&browser_id).unwrap_or((None, 1.0, 1));
+            let (state, instance_id, bounds, viewport_revision) =
+                manager.get_identity_snapshot(&browser_id)?;
             let (service_epoch, desktop_epoch) = if let Some(svc) =
                 app.try_state::<Arc<crate::browser::remote_service::BrowserRemoteService>>()
             {
@@ -1226,14 +1224,14 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                     })?;
                 let stream_id = service.active_stream_id(&browser_id).unwrap_or(1);
                 // The subscription is live from here on: a failure must not leave it behind.
-                let state = match manager.get_state(&browser_id) {
-                    Ok(state) => state,
+                let (state, instance_id, _, _) = match manager.get_identity_snapshot(&browser_id)
+                {
+                    Ok(snapshot) => snapshot,
                     Err(error) => {
                         service.unsubscribe(&browser_id, &sub_id);
                         return Err(error.into());
                     }
                 };
-                let instance_id = manager.get_instance_id(&browser_id).unwrap_or_default();
 
                 let negotiated_options = crate::remote::browser_protocol::BrowserSubscribeOptions {
                     format: match negotiated_prof.format {
@@ -5495,6 +5493,82 @@ mod tests {
             }
             _ => panic!("Expected Wait operation"),
         }
+    }
+
+    fn identity_request(browser_id: &str) -> CreateBrowserRequest {
+        CreateBrowserRequest {
+            browser_id: Some(browser_id.into()),
+            workspace_id: Some("ws1".into()),
+            worktree_path: None,
+            url: "https://example.com".into(),
+            profile: None,
+            zoom_factor: None,
+            bounds: None,
+            visible: Some(true),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_state_reports_the_session_identity_and_refuses_a_closed_browser() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        manager.register_session(identity_request("b-identity")).unwrap();
+        let bounds = crate::browser::LogicalRect { x: 0.0, y: 0.0, width: 640.0, height: 480.0 };
+        manager.set_bounds("b-identity", bounds).unwrap();
+        let instance_id = manager.get_instance_id("b-identity").unwrap();
+
+        let get_state = || RemoteBrowserOperation::GetState { browser_id: "b-identity".into() };
+        let value = execute_remote_operation(&app.handle().clone(), &manager, get_state())
+            .await
+            .expect("live browser state");
+        assert_eq!(value["browserInstanceId"], instance_id.as_str());
+        assert_eq!(value["viewportRevision"], "2");
+        assert_eq!(value["bounds"]["width"], 640.0);
+
+        manager.remove_session("b-identity");
+        let err = execute_remote_operation(&app.handle().clone(), &manager, get_state())
+            .await
+            .expect_err("a closed browser must not report an identity");
+        assert_eq!(err.code, IpcErrorCode::BrowserNotFound);
+    }
+
+    #[tokio::test]
+    async fn subscribe_identity_carries_the_session_instance_and_leaves_no_viewer_on_failure() {
+        use crate::browser::BrowserRemoteService;
+        use tauri::Manager;
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let broker = Arc::new(crate::browser::remote_driver::RemoteDriverBroker::new());
+        let service = Arc::new(BrowserRemoteService::new((*manager).clone(), broker));
+        app.manage(Arc::clone(&service));
+        manager.register_session(identity_request("b-sub-identity")).unwrap();
+        let instance_id = manager.get_instance_id("b-sub-identity").unwrap();
+
+        let subscribe = |browser_id: &str| RemoteBrowserOperation::SubscribeViewer {
+            browser_id: browser_id.into(),
+            device_id: "dev".into(),
+            viewer_instance_id: "viewer".into(),
+            options: None,
+        };
+        let value =
+            execute_remote_operation(&app.handle().clone(), &manager, subscribe("b-sub-identity"))
+                .await
+                .expect("subscribe to a live browser");
+        assert_eq!(value["identity"]["browserInstanceId"], instance_id.as_str());
+        let sub_id = value["subscriptionId"].as_str().unwrap().to_string();
+        service.unsubscribe("b-sub-identity", &sub_id);
+
+        manager.remove_session("b-sub-identity");
+        let err =
+            execute_remote_operation(&app.handle().clone(), &manager, subscribe("b-sub-identity"))
+                .await
+                .expect_err("a closed browser must not yield a subscription identity");
+        assert_eq!(ipc_error_code_string(err.code), "BROWSER_SUBSCRIPTION_FAILED");
+        assert_eq!(service.subscriber_count("b-sub-identity"), 0);
     }
 
     #[tokio::test]
