@@ -16,6 +16,7 @@ import { openExternalUrl } from "./browserTauri";
 import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 
 import { loadFileLinkEditor } from "./fileLinkSettings";
+import { previewServiceFailureHeadline } from "./filePreviewFailureCopy";
 import { resolveMarkdownDocumentPath } from "./markdownDocLink";
 import {
   FILE_PREVIEW_COMMANDS,
@@ -120,11 +121,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function toFilePreviewFailure(error: unknown, fallbackMessage: string): FilePreviewFailure {
   if (error instanceof FilePreviewCapabilityError) return error.failure;
   const reason = filePreviewErrorReason(error);
-  const message = isRecord(error) && typeof error.message === "string" && error.message.length > 0
-    ? error.message
-    : error instanceof Error && error.message.length > 0
+  // A refusal from the preview service itself (not one of the file-level reasons) gets
+  // our own copy, keyed on its machine reason rather than on backend prose.
+  const message = previewServiceFailureHeadline(error)
+    ?? (isRecord(error) && typeof error.message === "string" && error.message.length > 0
       ? error.message
-      : fallbackMessage;
+      : error instanceof Error && error.message.length > 0
+        ? error.message
+        : fallbackMessage);
   const rawDetails = isRecord(error) ? error.details : null;
   const details = isRecord(rawDetails) && isFilePreviewErrorReason(rawDetails.reason)
     ? (rawDetails as unknown as FilePreviewErrorDetails)

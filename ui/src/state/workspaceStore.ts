@@ -31,7 +31,6 @@ import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
 import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
-import { disambiguateFileTabLabels } from "../lib/fileTabLabels";
 import {
   LocalSplitLifecycle,
   localSplitIntent,
@@ -2385,31 +2384,7 @@ export function useWorkspaceStore({
       };
       retainFilePreview(tabId, source, request);
       dispatch({ type: "ADD_TAB_WITH_SESSION", tab, targetWorktreePath: targetWorktreePath ?? undefined });
-
-      const updatedSnapshot = stateRef.current;
-      const allFileTabs = (targetWorktreePath === updatedSnapshot.activeWorktreePath ? updatedSnapshot.layout.tabs : []).filter(
-        (t): t is FileTab => t.kind === "file",
-      );
-      const hasDuplicateBasename = allFileTabs.some(
-        (t) => t.id !== tabId && (t.path.split(/[/\\]/).pop() || t.path) === label,
-      );
-      if (hasDuplicateBasename) {
-        const disambiguatedLabels = disambiguateFileTabLabels(
-          allFileTabs.map((t) => t.path),
-        );
-        for (let i = 0; i < allFileTabs.length; i++) {
-          const fileTab = allFileTabs[i];
-          const nextLabel = disambiguatedLabels[i];
-          if (fileTab.label !== nextLabel) {
-            dispatch({
-              type: "RENAME_TAB",
-              tabId: fileTab.id,
-              label: nextLabel,
-            });
-          }
-        }
-      }
-
+      // The stored label stays the basename; TabBar disambiguates duplicates at render time.
       return tabId;
     },
     [dispatch],

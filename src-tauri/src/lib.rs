@@ -1317,9 +1317,16 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
     let in_process_backend_setup = Arc::clone(&in_process_backend);
     let browser_remote_service_setup = Arc::clone(&browser_remote_service);
+    // A failed loopback bind must not take the app down: run without previews, and
+    // the preview commands answer `previewServiceUnavailable` instead.
     let file_preview_service =
-        tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start())
-            .expect("file preview service failed to start");
+        match tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start()) {
+            Ok(service) => Some(service),
+            Err(error) => {
+                tracing::error!(%error, "File preview service failed to start; previews are disabled");
+                None
+            }
+        };
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1579,8 +1586,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(Arc::clone(&in_process_backend)
             as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
         .manage(in_process_backend)
-        .manage(file_preview_service)
         .manage(crate::ipc::updater::UpdaterDownloadState::default());
+    let builder = match file_preview_service {
+        Some(service) => builder.manage(service),
+        None => builder,
+    };
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {
