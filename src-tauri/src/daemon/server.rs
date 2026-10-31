@@ -2109,10 +2109,10 @@ impl crate::terminal::program_status_ingest::ProgramStatusPublisher for ProgramS
     fn publish(
         &self,
         session_id: &str,
-        summary: Option<&crate::terminal::program_status::ProgramStatusSummary>,
+        change: &crate::terminal::program_status_ingest::ProgramStatusChange,
     ) {
         use crate::terminal::program_status::ProgramState;
-        let transient = summary.is_some_and(|summary| {
+        let transient = change.summary.as_ref().is_some_and(|summary| {
             matches!(
                 summary.state,
                 ProgramState::Working | ProgramState::Blocked | ProgramState::Idle
@@ -2123,8 +2123,10 @@ impl crate::terminal::program_status_ingest::ProgramStatusPublisher for ProgramS
             .upgrade()
             .and_then(|terminal| terminal.get_session(session_id))
             .and_then(|session| foreground_marker(&session));
-        self.reporters.reported(session_id, transient, group);
-        self.states.publish_protocol(session_id, summary);
+        self.reporters
+            .reported(session_id, change.revision, transient, group);
+        self.states
+            .publish_protocol(session_id, change.revision, change.summary.as_ref());
     }
 }
 
@@ -8778,21 +8780,19 @@ impl DaemonServer {
         }
     }
 
-    /// The user saw the session: drops its OSC 7501 `done`/`error` records and republishes the
-    /// summary. A session without program status (paired, unknown) is left alone.
+    /// The user saw the session: drops its OSC 7501 `done`/`error` records. The output hub
+    /// publishes the summary afterwards through the program status publisher, ordered with live
+    /// feeds. A session without program status (paired, unknown) is left alone.
     fn acknowledge_agent_outcome(&self, session_id: &str) {
-        let hub = self.terminal_service.output_hub();
-        if let Some(summary) = hub.acknowledge_program_outcome(session_id) {
-            self.agent_states.publish_protocol(session_id, summary.as_ref());
-        }
+        self.terminal_service
+            .output_hub()
+            .acknowledge_program_outcome(session_id);
     }
 
-    /// The session's foreground agent left: drops its transient OSC 7501 records and republishes.
+    /// The session's foreground agent left: drops its transient OSC 7501 records; the output hub
+    /// publishes the summary afterwards, as for an acknowledgement.
     fn program_exited(&self, session_id: &str) {
-        let hub = self.terminal_service.output_hub();
-        if let Some(summary) = hub.program_exited(session_id) {
-            self.agent_states.publish_protocol(session_id, summary.as_ref());
-        }
+        self.terminal_service.output_hub().program_exited(session_id);
     }
 
     /// A paired session id is handled by this daemon's own paired runtime unless an older
@@ -9778,7 +9778,8 @@ mod protocol_release_tests {
         .await
         .expect("the shell owning the foreground again must release the report");
         assert_eq!(released.state, "idle");
-        assert_eq!(released.origin, crate::daemon::protocol::AgentStateOrigin::Protocol);
+        // The release hands the pane back to screen inference (finding 2).
+        assert!(!released.origin.claims_activity(), "{:?}", released.origin);
 
         server.terminal_service.write_input(&id, b"exit\n").unwrap();
         server.terminal_service.close_session(&id).await.unwrap();

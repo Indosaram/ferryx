@@ -20,7 +20,9 @@ use crate::native_terminal::{
     CompressionScheduler, CompressionStep, NativeTerminal, NativeTerminalError, TerminalEngine,
 };
 use crate::terminal::program_status::{ProgramStatusRecords, ProgramStatusSummary};
-use crate::terminal::program_status_ingest::{apply_event, ProgramStatusIngest};
+use crate::terminal::program_status_ingest::{
+    apply_event, next_revision, ProgramStatusChange, ProgramStatusIngest,
+};
 
 /// Rows of history the mirror keeps above the screen. Bounds both memory and the size of the
 /// reconstruction that a full attach and a handover carry.
@@ -221,40 +223,41 @@ impl ScreenMirror {
     /// Drains the query replies kept since the last call and reports the summary when it changed.
     pub fn take_program_status(&mut self) -> ProgramStatusIngest {
         let replies = self.terminal.take_program_status_replies();
-        let summary = self.program_status_summary_change(|_| {});
+        let summary = self
+            .update_program_status(|_| {})
+            .filter(|(changed, _)| *changed)
+            .map(|(_, change)| change);
         ProgramStatusIngest { replies, summary }
     }
 
     /// The user saw the session: drops `done`/`error` records. `None` when not opted in, else
-    /// the summary afterwards.
-    pub fn acknowledge_program_status(&mut self) -> Option<Option<ProgramStatusSummary>> {
-        self.program_status.as_ref()?;
-        self.program_status_summary_change(ProgramStatusRecords::acknowledge);
-        Some(self.published_summary.clone())
+    /// whether the summary changed and the summary afterwards.
+    pub fn acknowledge_program_status(&mut self) -> Option<(bool, ProgramStatusChange)> {
+        self.update_program_status(ProgramStatusRecords::acknowledge)
     }
 
     /// The foreground program exited: drops `working`/`blocked`/`idle` records. `None` when not
-    /// opted in, else the summary afterwards.
-    pub fn program_status_exited(&mut self) -> Option<Option<ProgramStatusSummary>> {
-        self.program_status.as_ref()?;
-        self.program_status_summary_change(ProgramStatusRecords::program_exited);
-        Some(self.published_summary.clone())
+    /// opted in, else whether the summary changed and the summary afterwards.
+    pub fn program_status_exited(&mut self) -> Option<(bool, ProgramStatusChange)> {
+        self.update_program_status(ProgramStatusRecords::program_exited)
     }
 
-    fn program_status_summary_change(
+    /// Applies `update` and returns whether the summary changed, with the summary afterwards
+    /// under a revision taken here, while the caller holds this mirror's lock. A publisher
+    /// drops a change only when it already applied a newer one, so unchanged summaries need no
+    /// re-publication.
+    fn update_program_status(
         &mut self,
         update: impl FnOnce(&mut ProgramStatusRecords),
-    ) -> Option<Option<ProgramStatusSummary>> {
+    ) -> Option<(bool, ProgramStatusChange)> {
         let summary = {
             let mut records = self.program_status.as_ref()?.lock();
             update(&mut records);
             records.summary()
         };
-        if summary == self.published_summary {
-            return None;
-        }
+        let changed = summary != self.published_summary;
         self.published_summary = summary.clone();
-        Some(summary)
+        Some((changed, ProgramStatusChange { revision: next_revision(), summary }))
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
