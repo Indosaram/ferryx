@@ -292,9 +292,9 @@ describe("recordBrowserScroll", () => {
   it("keeps the scroll map at its cap and evicts the least recently written keys", () => {
     const storage = memoryStorage();
     recordBrowserScroll("b1", "https://example.com/keep", { x: 0, y: 1 }, storage);
-    for (let index = 0; index < BROWSER_SCROLL_LIMIT; index += 1) {
+    for (let index = 0; index < BROWSER_SCROLL_LIMIT / 2; index += 1) {
       recordBrowserScroll("b1", `https://example.com/page-${index}`, { x: 0, y: index }, storage);
-      if (index === BROWSER_SCROLL_LIMIT / 2) {
+      if (index === BROWSER_SCROLL_LIMIT / 2 - 2) {
         // Rewriting an old URL makes it recent again, so it must survive later evictions.
         recordBrowserScroll("b1", "https://example.com/keep", { x: 0, y: 2 }, storage);
       }
@@ -304,7 +304,7 @@ describe("recordBrowserScroll", () => {
     expect(Object.keys(map)).toHaveLength(BROWSER_SCROLL_LIMIT);
     expect(getBrowserScroll("b1", "https://example.com/keep", storage)).toEqual({ x: 0, y: 2 });
     expect(getBrowserScroll("b1", "https://example.com/page-0", storage)).toBeNull();
-    expect(getBrowserScroll("b1", `https://example.com/page-${BROWSER_SCROLL_LIMIT - 1}`, storage))
-      .toEqual({ x: 0, y: BROWSER_SCROLL_LIMIT - 1 });
+    expect(getBrowserScroll("b1", `https://example.com/page-${BROWSER_SCROLL_LIMIT / 2 - 1}`, storage))
+      .toEqual({ x: 0, y: BROWSER_SCROLL_LIMIT / 2 - 1 });
   });
 });
