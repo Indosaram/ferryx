@@ -360,6 +360,19 @@ describe("reference chat lane (task 12)", () => {
     expect(await screen.findByTestId("mobile-chat-workspace")).toBeInTheDocument();
   });
 
+  it("acknowledges the opened chat on its owning daemon incarnation", async () => {
+    setWidth(390);
+    const harness = installFetch();
+    const acknowledged = harness.whenCalled("/acknowledge-outcome", 2000, "POST");
+    render(<RemoteApp />);
+    const call = await acknowledged;
+    const url = new URL(call.url, "http://harness.invalid");
+    expect(url.pathname).toBe(`/api/v1/reference-chat/${SESSION_ID}/acknowledge-outcome`);
+    expect(url.searchParams.get("backendSessionId")).toBe(SESSION_ID);
+    expect(url.searchParams.get("epoch")).toBe(DAEMON_EPOCH);
+    expect(url.searchParams.get("ownerId")).toBe(REFERENCE_OWNER_ID);
+  });
+
   it("QA-02: the transcript comes from the reference route bound to the original target", async () => {
     setWidth(390);
     const harness = installFetch();

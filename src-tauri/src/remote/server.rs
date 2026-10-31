@@ -2795,6 +2795,12 @@ async fn handle_machine_terminal_socket(
                     }
                     Message::Text(text) if text.len() <= 16 * 1024 => {
                         match serde_json::from_str::<MachineTerminalControl>(&text) {
+                            Ok(MachineTerminalControl::AcknowledgeAgentOutcome {
+                                generation: supplied,
+                            }) if supplied.0 == generation => {
+                                state.session_backend
+                                    .acknowledge_agent_outcome(&target.session_id).await
+                            }
                             Ok(MachineTerminalControl::Resize {
                                 generation: supplied,
                                 cols,
@@ -3085,11 +3091,19 @@ async fn handle_terminal_socket(
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                                    | ClientControlMessage::AcknowledgeAgentOutcome
                             ) {
                                 continue;
                             }
                         }
                         match ctrl {
+                            ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if let Err(error) = session_backend
+                                    .acknowledge_agent_outcome(&session_id_clone).await
+                                {
+                                    tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
+                                }
+                            }
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
@@ -3614,11 +3628,19 @@ async fn handle_terminal_grid_socket(
                             if !matches!(
                                 ctrl,
                                 ClientControlMessage::Scroll { .. } | ClientControlMessage::Ping
+                                    | ClientControlMessage::AcknowledgeAgentOutcome
                             ) {
                                 continue;
                             }
                         }
                         match ctrl {
+                            ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if let Err(error) = session_backend
+                                    .acknowledge_agent_outcome(&session_id_clone).await
+                                {
+                                    tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
+                                }
+                            }
                             ClientControlMessage::RemoteWrite { .. }
                             | ClientControlMessage::RemoteResize { .. } => {}
                             ClientControlMessage::Resize { cols, rows } => {
@@ -6972,6 +6994,28 @@ async fn reference_chat_screen(
     }
 }
 
+async fn reference_chat_acknowledge_outcome(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    if let Err(response) = reference_chat_read_context(&state, &headers, &session_id, &query, false).await {
+        return response.into();
+    }
+    if let Err(response) = authenticate_machine_request(&state, &headers) {
+        return *response;
+    }
+    match state.session_backend.acknowledge_agent_outcome(&session_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => reference_chat_error(ScopeErrorCode::NotFound, message),
+    }
+}
+
 /// GET /api/v1/reference-chat/{sessionId}/prompt
 ///
 /// The card is detected in the pane's own session record and remembered, so the answer route can
@@ -7838,6 +7882,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/reference-chat/{sessionId}/screen",
             get(reference_chat_screen),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/acknowledge-outcome",
+            post(reference_chat_acknowledge_outcome),
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/prompt",

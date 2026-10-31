@@ -3293,12 +3293,32 @@ export const RemoteHostConnection: React.FC<{
     });
   }, [activeTunnelMachineId, noteSessionActivity]);
 
-  // Opening a session reads its completion, so its done/error mark goes out. Local only: the
-  // machine socket has no acknowledge message yet (todo 3 adds acknowledgeAgentOutcome on the
-  // daemon; the relay path to it does not exist).
   useEffect(() => {
     if (activeTunnelMachineId && effectiveSessionId) acknowledgeOutcome(activeTunnelMachineId, effectiveSessionId);
   }, [acknowledgeOutcome, activeTunnelMachineId, effectiveSessionId]);
+
+  useEffect(() => {
+    const target = chatTargetRef.current;
+    if (viewMode !== "chat" || !target || !token) return;
+    const controller = new AbortController();
+    const sessionId = target.target.backendSessionId;
+    const query = referenceChatReadQuery(target, "");
+    const path = `/api/v1/reference-chat/${encodeURIComponent(sessionId)}/acknowledge-outcome?${query}`;
+    const init = {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    };
+    const request = activeTunnelConnection
+      ? activeTunnelConnection.transport.fetchLike(path, init)
+      : remoteFetch(transportBaseUrl, path, init);
+    void request.then((response) => {
+      if (!response.ok) throw new Error(`Outcome acknowledgement failed: ${response.status}`);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) console.warn("Could not acknowledge the agent outcome", { sessionId, error });
+    });
+    return () => controller.abort();
+  }, [activeTunnelConnection, chatTargetKey, token, transportBaseUrl, viewMode]);
 
   useEffect(() => {
     // The identity belongs to the host that answered it: a new token or transport has none yet.

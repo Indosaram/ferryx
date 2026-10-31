@@ -2644,7 +2644,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // the machine's own gateway authenticates, fences the target and enforces the
             // read-only policy, exactly as it does for a direct caller.
             | ("GET", ["reference-chat", _, "history" | "screen" | "prompt" | "files"])
-            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files"])
+            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files" | "acknowledge-outcome"])
             | ("GET" | "DELETE", ["reference-chat", _, "files", _])
             // Agent control. Reads and mutations are separate paths so a dropped mutation
             // reply is outcome-unknown and a dropped wait stays a timeout.
@@ -2750,7 +2750,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         // `prompt` and the staged-file routes all deserialize the host's own
         // `ReferenceChatReadQuery`, so they admit exactly its fields. A mutation's target
         // travels in its own envelope body, so its query must stay empty.
-        ["reference-chat", _, "history" | "screen" | "prompt"] => reference_chat_read_fields,
+        ["reference-chat", _, "history" | "screen" | "prompt" | "acknowledge-outcome"] => reference_chat_read_fields,
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
         ["agent-control", "events"] => &["after"],
