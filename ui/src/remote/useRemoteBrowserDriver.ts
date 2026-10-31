@@ -288,12 +288,17 @@ export function useRemoteBrowserDriver({
     };
   }, []);
 
-  // A different client or browser invalidates the lease and any snapshot identifiers.
+  // A different client or browser invalidates the lease and any snapshot identifiers. The old client is still
+  // open here (unlike on unmount), so the lease it held is released explicitly instead of waiting for a drop.
   const prevTargetRef = useRef({ client, browserId });
   useEffect(() => {
     const prev = prevTargetRef.current;
     if (prev.client === client && prev.browserId === browserId) return;
     prevTargetRef.current = { client, browserId };
+    const { leaseEpoch: heldEpoch, driverState: heldState } = guardsRef.current;
+    if (prev.client && heldEpoch && heldState === "driving") {
+      void prev.client.releaseDriver(heldEpoch).catch(() => {});
+    }
     setDriverState("viewing");
     setLeaseEpoch(null);
     setExpiresAt(null);
