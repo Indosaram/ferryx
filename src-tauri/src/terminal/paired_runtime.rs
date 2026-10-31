@@ -2097,10 +2097,30 @@ mod tests {
         assert!(!proxy.consumes_ack_rejection(&tagged_other), "a tagged error answering another control");
         let untagged_other = serde_json::json!({"type":"error","code":"STALE_GENERATION"});
         assert!(!proxy.consumes_ack_rejection(&untagged_other), "an untagged error outside the legacy rejection codes");
+        // Shapes an older owner never answers an acknowledgement with on its machine socket,
+        // which serves only local PTYs: they come from write, resize or signal, or from
+        // routes (paired chain, SSH workspace, legacy peer) that socket never takes.
+        for code in [
+            "Disconnected: TIMEOUT",
+            "Disconnected: PAIRED_UNCERTAIN_SEND",
+            "Remote project is not registered",
+            "Legacy request timed out",
+            "Session unavailable",
+            "PTY input failed after 0 bytes: closed",
+        ] {
+            let frame = serde_json::json!({"type":"error","code":code});
+            assert!(!proxy.consumes_ack_rejection(&frame), "{code}");
+        }
         let tagged_ack = serde_json::json!({"type":"error","code":"Session unavailable","op":"acknowledgeAgentOutcome"});
         assert!(proxy.consumes_ack_rejection(&tagged_ack));
         let legacy = serde_json::json!({"type":"error","code":"INVALID_CONTROL_OR_GENERATION"});
         assert!(!proxy.consumes_ack_rejection(&legacy), "the tagged rejection already answered the only acknowledgement");
+        for code in ["INVALID_CONTROL_OR_GENERATION", "Session has no program status mirror"] {
+            proxy.acknowledge_agent_outcome(Epoch(7)).await.unwrap();
+            let legacy = serde_json::json!({"type":"error","code":code});
+            assert!(proxy.consumes_ack_rejection(&legacy), "{code}");
+            assert!(!proxy.consumes_ack_rejection(&legacy), "{code} answers only an outstanding acknowledgement");
+        }
         proxy.detach().await.unwrap();
         shutdown.send(()).unwrap();
         server.await.unwrap();
