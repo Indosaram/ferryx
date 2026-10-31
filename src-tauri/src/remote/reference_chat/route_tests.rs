@@ -792,6 +792,29 @@ async fn outcome_acknowledgement_clears_only_the_authenticated_current_target() 
     let (status, _) = fixture.server.request("POST", &format!("{path}?{stale}"), Some(&fixture.control), None).await;
     assert_eq!(status, 410);
     assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
+    let foreign_host = fixture.read_query("", &fixture.daemon_epoch, "not-this-host", &[]);
+    let foreign_owner = fixture.read_query_naming_owner(
+        &fixture.session_id,
+        "",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        ROUTE_TEST_FOREIGN_OWNER,
+        &[],
+    );
+    let foreign_session = fixture.read_query_for(
+        &uuid::Uuid::new_v4().to_string(),
+        "",
+        &fixture.daemon_epoch,
+        &reference_files::reference_host_id(),
+        &[],
+    );
+    for foreign in [foreign_host, foreign_owner, foreign_session] {
+        let (status, body) = fixture.server
+            .request("POST", &format!("{path}?{foreign}"), Some(&fixture.control), None)
+            .await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
+    }
     let (status, body) = fixture.server.request("POST", &format!("{path}?{query}"), Some(&fixture.control), None).await;
     assert_eq!(status, 204, "{body}");
     assert_eq!(states.current(&fixture.session_id).unwrap().outcome, None);
