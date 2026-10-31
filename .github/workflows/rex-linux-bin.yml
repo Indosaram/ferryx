@@ -1,0 +1,53 @@
+name: rex-linux-bin
+# Builds the headless Linux binaries the todo-9 live E2E harness (.github/rex-e2e) runs against
+# (plan rex-learnings-20261030). Build only; the harness itself runs on a picked Linux host.
+on:
+  push:
+    branches: ['ci/rex-bin*']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev jq
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # tauri-build (src-tauri/build.rs) checks frontendDist even for the CLI; a stub is enough.
+          mkdir -p ui/dist
+          [ -f ui/dist/index.html ] || echo '<!doctype html>' > ui/dist/index.html
+          # Same invocation as the Linux release packager (scripts/lib/release-platforms.mjs:635).
+          # `ferryx-cli --daemon` is the headless daemon: bin/cli.rs LaunchMode::Daemon ->
+          # run_daemon_headless (cli.rs:4011 parse_launch_mode, cli.rs:4093).
+          cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli
+          # Hook reporter for scenario `claude` run 2. ferryx-cli has no `agent-hook` dispatch
+          # (src-tauri/src/bin/cli.rs; only main.rs:13 of the desktop `ferryx` bin has it), the
+          # remote helper does (src-tauri/src/ferryx_scope/ssh/process.rs:954).
+          cargo build --manifest-path remote-helper/Cargo.toml --release
+          mkdir -p out
+          cp src-tauri/target/release/ferryx-cli remote-helper/target/release/ferryx-remote-helper out/
+          cp -R .github/rex-e2e out/rex-e2e
+          git rev-parse HEAD > out/SOURCE_COMMIT
+          ./out/ferryx-cli --version | tee out/VERSION
+          (cd out && sha256sum ferryx-cli ferryx-remote-helper > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rex-linux-bin
+          path: out
+          if-no-files-found: error
