@@ -26,6 +26,28 @@ fn end_output(output_hub: &Arc<TerminalOutputHub>, session_id: &str) {
     });
 }
 
+/// Writes OSC 7501 support query replies the session's screen mirror produced to its PTY, on a
+/// blocking worker so the output pump never waits for the PTY input queue.
+fn spawn_program_status_replies(
+    pty_manager: &Arc<PtyManager>,
+    session_id: &str,
+    replies: Vec<Vec<u8>>,
+) {
+    if replies.is_empty() {
+        return;
+    }
+    let pty_manager = Arc::clone(pty_manager);
+    let session_id = session_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        for reply in replies {
+            if let Err(error) = pty_manager.write_input(&session_id, &reply) {
+                tracing::debug!(session_id, %error, "program status query reply not written");
+                return;
+            }
+        }
+    });
+}
+
 #[derive(Clone)]
 pub struct TerminalService {
     pty_manager: Arc<PtyManager>,
@@ -554,10 +576,13 @@ impl TerminalService {
         let _raw_rx = self.output_hub.register_session(&session_id);
         drop(_raw_rx);
         self.output_hub.record_initial_size(&session_id, cols, rows);
+        // A local PTY: this daemon is the one terminal that answers its OSC 7501 query.
+        self.output_hub.enable_program_status(&session_id);
 
         let (lifecycle_tx, lifecycle_rx) = watch::channel(());
         // Spawn output pump task from PTY reader to OutputHub
         let output_hub = Arc::clone(&self.output_hub);
+        let pty_manager = Arc::clone(&self.pty_manager);
         let lifecycle = Arc::clone(&self.lifecycle);
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
@@ -567,7 +592,11 @@ impl TerminalService {
                     &session_id_clone,
                     chunk.len(),
                 );
-                output_hub.publish_with_read_timestamp(&session_id_clone, chunk, read_unix_micros);
+                if let Some((_chunk, replies)) =
+                    output_hub.publish_with_replies(&session_id_clone, chunk, read_unix_micros)
+                {
+                    spawn_program_status_replies(&pty_manager, &session_id_clone, replies);
+                }
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id_clone);
             end_output(&output_hub, &session_id_clone);
@@ -594,7 +623,10 @@ impl TerminalService {
         session_id: String,
         mut pty_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     ) {
+        // The imported mirror was seeded muted; from here on it answers like a fresh session.
+        self.output_hub.enable_program_status(&session_id);
         let output_hub = Arc::clone(&self.output_hub);
+        let pty_manager = Arc::clone(&self.pty_manager);
         let lifecycle = Arc::clone(&self.lifecycle);
         tokio::spawn(async move {
             while let Some(chunk) = pty_rx.recv().await {
@@ -602,7 +634,11 @@ impl TerminalService {
                     &session_id,
                     chunk.len(),
                 );
-                output_hub.publish_with_read_timestamp(&session_id, chunk, read_unix_micros);
+                if let Some((_chunk, replies)) =
+                    output_hub.publish_with_replies(&session_id, chunk, read_unix_micros)
+                {
+                    spawn_program_status_replies(&pty_manager, &session_id, replies);
+                }
             }
             crate::terminal::metrics::clear_pty_read_timestamps(&session_id);
             end_output(&output_hub, &session_id);
