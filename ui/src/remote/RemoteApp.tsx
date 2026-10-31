@@ -3313,7 +3313,9 @@ export const RemoteHostConnection: React.FC<{
       ? activeTunnelConnection.transport.fetchLike(path, init)
       : remoteFetch(transportBaseUrl, path, init);
     void request.then((response) => {
-      if (!response.ok) throw new Error(`Outcome acknowledgement failed: ${response.status}`);
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`Outcome acknowledgement failed: ${response.status}`);
+      }
     }).catch((error: unknown) => {
       if (!controller.signal.aborted) console.warn("Could not acknowledge the agent outcome", { sessionId, error });
     });
