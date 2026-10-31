@@ -76,10 +76,8 @@ fn test_local_filesystem_path_redaction() {
     let unix_user = "Failed to load /Users/alice/Library/Application Support/orca/settings.json";
     let redacted_user = sanitize_public_string(unix_user);
     assert!(!redacted_user.contains("/Users/"));
-    assert_eq!(
-        redacted_user,
-        "Failed to load [redacted-path] Support/orca/settings.json"
-    );
+    // "Application Support" holds a space: the whole path is redacted, not just its head (S4).
+    assert_eq!(redacted_user, "Failed to load [redacted-path]");
 
     let unix_home = "Exception in /home/developer/code/project/src/main.rs:42";
     let redacted_home = sanitize_public_string(unix_home);
