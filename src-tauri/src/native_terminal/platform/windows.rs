@@ -519,7 +519,7 @@ mod tests {
     struct Windows {
         parent: Hwnd,
         child: Hwnd,
-        destroyed_on: Box<Vec<u32>>,
+        destroyed_on: Vec<u32>,
     }
 
     impl Drop for Windows {
@@ -559,7 +559,9 @@ mod tests {
         let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
         ensure_child_class(instance).unwrap();
         let static_class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-        let mut windows = Windows {
+        // Boxed so `destroyed_on` keeps the address handed to the subclass for the whole test,
+        // including the `drop(windows)` that may destroy a surviving child.
+        let mut windows = Box::new(Windows {
             parent: unsafe {
                 CreateWindowExW(
                     0,
@@ -577,8 +579,8 @@ mod tests {
                 )
             },
             child: std::ptr::null_mut(),
-            destroyed_on: Box::default(),
-        };
+            destroyed_on: Vec::new(),
+        });
         assert!(!windows.parent.is_null(), "native parent creation failed");
         windows.child = unsafe {
             CreateWindowExW(
@@ -611,7 +613,7 @@ mod tests {
                     windows.child,
                     Some(observe_destroy),
                     1,
-                    (&mut *windows.destroyed_on as *mut Vec<u32>) as usize,
+                    (&mut windows.destroyed_on as *mut Vec<u32>) as usize,
                 )
             },
             0
@@ -677,7 +679,7 @@ mod tests {
                 break;
             }
         }
-        let observed = windows.destroyed_on.as_ref().clone();
+        let observed = windows.destroyed_on.clone();
         let child_live = unsafe { IsWindow(windows.child) } != 0;
         eprintln!("D6 barrier={completed} child_live={child_live} destruction_threads={observed:?} owner={owner}");
         // Crucially, RED's surviving child is destroyed on its owner BEFORE the assertion.

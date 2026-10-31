@@ -1,5 +1,7 @@
 import { X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+
+import type { AgentPrompt, AgentPromptAnswer } from "../../../lib/tauri";
 
 import { cn } from "../../../lib/cn";
 import {
@@ -9,22 +11,32 @@ import {
   countAttentionRows,
   formatAttentionTime,
   groupAttentionRows,
+  sortAttentionRows,
   type AttentionRow,
   type AttentionState,
 } from "./attentionModel";
+import type { AttentionPrompts } from "./attentionPrompts";
 
 type AttentionFilter = "all" | AttentionState;
 
 export type AttentionInboxProps = {
   rows: readonly AttentionRow[];
+  /**
+   * Entries whose pane reads working: each is listed, as needs-you, only once the daemon reads a
+   * prompt on its pane. Needs `prompts`.
+   */
+  candidates?: readonly AttentionRow[];
   onOpen: (row: AttentionRow) => void;
   onDismiss?: (row: AttentionRow) => void;
+  /** Present where a needs-you row may answer its pane's prompt inline (the desktop). */
+  prompts?: AttentionPrompts;
   compact?: boolean;
   now?: number;
   className?: string;
 };
 
 const CLOCK_TICK_MS = 30_000;
+const NO_ROWS: readonly AttentionRow[] = [];
 
 function useMinuteClock(fixed: number | undefined): number {
   const [now, setNow] = useState(() => fixed ?? Date.now());
@@ -51,16 +63,88 @@ const MARKER: Record<AttentionState, string> = {
   done: "bg-status-success",
 };
 
+/**
+ * A done row, or a candidate whose pane reads working, is waiting on the user when the daemon can
+ * read a prompt on its pane, whatever the activity detector said: it is shown as needs-you so its
+ * answer is reachable. A candidate without a prompt is not shown. Only the daemon's prompt read
+ * decides this, never the row's terminal text. A push re-reads only the row it names.
+ */
+function usePromptedRows(
+  rows: readonly AttentionRow[],
+  candidates: readonly AttentionRow[],
+  prompts: AttentionPrompts | undefined,
+): readonly AttentionRow[] {
+  // Row id -> whether its pane holds a prompt, for the rows the daemon has answered about.
+  const [prompted, setPrompted] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const probed = [...rows.filter((row) => row.state === "done"), ...candidates];
+  const probedRef = useRef(probed);
+  probedRef.current = probed;
+  const probeKey = probed.map((row) => `${row.id}\u0000${row.revision}\u0000${row.text ?? ""}`).join("\u0001");
+
+  useEffect(() => {
+    if (!prompts) return;
+    const generation = new Map<string, number>();
+    let live = true;
+    const probe = (row: AttentionRow) => {
+      const turn = (generation.get(row.id) ?? 0) + 1;
+      generation.set(row.id, turn);
+      void prompts.read(row).then(
+        (prompt) => prompt !== null,
+        () => false,
+      ).then((has) => {
+        if (!live || generation.get(row.id) !== turn) return;
+        setPrompted((current) => {
+          if (current.get(row.id) === has) return current;
+          const next = new Map(current);
+          next.set(row.id, has);
+          return next;
+        });
+      });
+    };
+    const rowsNow = probedRef.current;
+    setPrompted((current) => {
+      const ids = new Set(rowsNow.map((row) => row.id));
+      const kept = [...current].filter(([id]) => ids.has(id));
+      return kept.length === current.size ? current : new Map(kept);
+    });
+    rowsNow.forEach(probe);
+    const stops = prompts.subscribe ? rowsNow.map((row) => prompts.subscribe!(row, () => probe(row))) : [];
+    return () => {
+      live = false;
+      stops.forEach((stop) => stop());
+    };
+  }, [probeKey, prompts]);
+
+  if (!prompts || probed.length === 0) return rows;
+  let changed = false;
+  const next = rows.map((row) => {
+    if (row.state !== "done" || prompted.get(row.id) !== true) return row;
+    changed = true;
+    return { ...row, state: "needs-you" as const };
+  });
+  const ids = new Set(rows.map((row) => row.id));
+  for (const candidate of candidates) {
+    if (prompted.get(candidate.id) === true && !ids.has(candidate.id)) {
+      next.push(candidate);
+      changed = true;
+    }
+  }
+  return changed ? sortAttentionRows(next) : rows;
+}
+
 export function AttentionInbox({
-  rows,
+  rows: givenRows,
+  candidates = NO_ROWS,
   onOpen,
   onDismiss,
+  prompts,
   compact = false,
   now: fixedNow,
   className,
 }: AttentionInboxProps) {
   const now = useMinuteClock(fixedNow);
   const [filter, setFilter] = useState<AttentionFilter>("all");
+  const rows = usePromptedRows(givenRows, candidates, prompts);
   const counts = countAttentionRows(rows);
   const bothStates = counts["needs-you"] > 0 && counts.done > 0;
   const activeFilter: AttentionFilter = bothStates ? filter : "all";
@@ -129,6 +213,7 @@ export function AttentionInbox({
                   compact={compact}
                   onOpen={onOpen}
                   onDismiss={onDismiss}
+                  {...(prompts && row.state === "needs-you" ? { prompts } : {})}
                 />
               ))}
             </ul>
@@ -145,17 +230,20 @@ function AttentionInboxRow({
   compact,
   onOpen,
   onDismiss,
+  prompts,
 }: {
   row: AttentionRow;
   now: number;
   compact: boolean;
   onOpen: (row: AttentionRow) => void;
   onDismiss?: (row: AttentionRow) => void;
+  prompts?: AttentionPrompts;
 }) {
   const when = row.at !== undefined ? formatAttentionTime(row.at, now) : undefined;
   const summary = [row.who, row.supervisorLabel ?? ATTENTION_STATE_LABEL[row.state], row.location, row.text].filter(Boolean).join(", ");
   return (
-    <li className="group relative">
+    <li>
+      <div className="group relative">
       <button
         type="button"
         data-testid="attention-row"
@@ -210,6 +298,177 @@ function AttentionInboxRow({
           <X className="size-3" aria-hidden="true" />
         </button>
       ) : null}
+      </div>
+      {prompts ? <AttentionPromptPanel row={row} prompts={prompts} /> : null}
     </li>
+  );
+}
+
+const PROMPT_CHANGED = "The question changed - open the pane";
+
+const OPTION_BUTTON =
+  "flex w-full min-w-0 items-baseline gap-1.5 rounded-md border border-worktree-sidebar-border bg-white/[0.03] px-2 py-1 text-left text-[11px] text-worktree-sidebar-foreground transition-colors hover:bg-white/[0.07] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
+
+/**
+ * The question a needs-you row's pane is asking, answered in place. Read when the row renders and
+ * again whenever its entry moves; a pane with no readable prompt shows nothing here.
+ */
+function AttentionPromptPanel({ row, prompts }: { row: AttentionRow; prompts: AttentionPrompts }) {
+  const [prompt, setPrompt] = useState<AgentPrompt | null>(null);
+  const [confirming, setConfirming] = useState<{ key: string; label: string } | null>(null);
+  const [text, setText] = useState("");
+  const [pending, setPending] = useState(false);
+  const [stale, setStale] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const promptsRef = useRef(prompts);
+  promptsRef.current = prompts;
+  const rowRef = useRef(row);
+  rowRef.current = row;
+  const shownRef = useRef<AgentPrompt | null>(null);
+  shownRef.current = prompt;
+  const [pushes, setPushes] = useState(0);
+
+  // The daemon's agentPromptChanged push: re-read now rather than wait for the activity to flip.
+  useEffect(
+    () => promptsRef.current.subscribe?.(rowRef.current, () => setPushes((count) => count + 1)),
+    [row.workspaceId, row.sessionId],
+  );
+
+  useEffect(() => {
+    let current = true;
+    const pushed = pushes > 0;
+    setStale(false);
+    setError(null);
+    setConfirming(null);
+    void promptsRef.current.read(rowRef.current).then(
+      (next) => {
+        if (!current) return;
+        // A pushed re-read that finds the card gone means it was answered elsewhere (the phone,
+        // the pane): the row no longer waits on the user.
+        if (pushed && !next && shownRef.current) promptsRef.current.onAnswered(rowRef.current);
+        setPrompt(next);
+      },
+      () => {
+        if (current) setPrompt(null);
+      },
+    );
+    return () => {
+      current = false;
+    };
+    // Re-read on the row's own moves: its entry revision, the activity detail it shows, and pushes.
+  }, [row.workspaceId, row.sessionId, row.revision, row.text, pushes]);
+
+  if (stale) {
+    return (
+      <p data-testid="attention-prompt-stale" role="status" className="mx-1 mt-1 text-[11px] text-status-warning">
+        {PROMPT_CHANGED}
+      </p>
+    );
+  }
+  if (!prompt) return null;
+
+  const send = async (answer: AgentPromptAnswer) => {
+    setPending(true);
+    setError(null);
+    try {
+      const outcome = await promptsRef.current.answer(row, prompt, answer);
+      if (outcome === "stale") {
+        setStale(true);
+        setConfirming(null);
+      } else {
+        promptsRef.current.onAnswered(row);
+      }
+    } catch (failure) {
+      const message = (failure as { message?: unknown } | null)?.message;
+      setError(typeof message === "string" && message ? message : "The answer could not be sent");
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const pick = (option: { key: string; label: string }) => {
+    // The daemon says which answers act on a stray pick (approvals, plans, menus); a daemon that
+    // does not say is asked to confirm.
+    if (prompt.needsConfirmation !== false) setConfirming(option);
+    else void send({ key: option.key });
+  };
+
+  const submitText = (event: FormEvent) => {
+    event.preventDefault();
+    const answer = text.trim();
+    if (answer) void send({ text: answer });
+  };
+
+  return (
+    <div
+      data-testid="attention-prompt"
+      data-prompt-kind={prompt.kind}
+      className="mx-1 mt-1 flex flex-col gap-1 rounded-md border border-status-warning/25 bg-status-warning/[0.06] px-2 py-1.5"
+    >
+      <p className="line-clamp-3 break-words text-[11px] font-medium leading-snug text-worktree-sidebar-foreground">
+        {prompt.question}
+      </p>
+      {confirming ? (
+        <div className="flex flex-col gap-1">
+          <p className="break-words text-[11px] text-muted-foreground">
+            Send <span className="font-semibold text-worktree-sidebar-foreground">{confirming.label}</span>?
+          </p>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => void send({ key: confirming.key })}
+              className="h-6 rounded-md bg-status-warning/20 px-2.5 text-[11px] font-semibold text-status-warning hover:bg-status-warning/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+            >
+              Confirm
+            </button>
+            <button
+              type="button"
+              disabled={pending}
+              onClick={() => setConfirming(null)}
+              className="h-6 rounded-md px-2.5 text-[11px] text-muted-foreground hover:bg-white/[0.07] hover:text-worktree-sidebar-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : prompt.kind === "freeText" || prompt.options.length === 0 ? (
+        <form onSubmit={submitText} className="flex gap-1">
+          <input
+            type="text"
+            aria-label={`Answer ${row.who}`}
+            value={text}
+            disabled={pending}
+            onChange={(event) => setText(event.target.value)}
+            className="h-6 min-w-0 flex-1 rounded-md border border-worktree-sidebar-border bg-black/20 px-1.5 text-[11px] text-worktree-sidebar-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          <button
+            type="submit"
+            disabled={pending || !text.trim()}
+            className="h-6 shrink-0 rounded-md bg-status-warning/20 px-2.5 text-[11px] font-semibold text-status-warning hover:bg-status-warning/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+          >
+            Send
+          </button>
+        </form>
+      ) : (
+        <div role="group" aria-label={prompt.question} className="flex flex-col gap-1">
+          {prompt.options.map((option, index) => (
+            <button
+              key={option.key}
+              type="button"
+              data-testid="attention-prompt-option"
+              data-option-key={option.key}
+              disabled={pending}
+              onClick={() => pick(option)}
+              className={OPTION_BUTTON}
+            >
+              <span aria-hidden="true" className="shrink-0 font-mono text-[10px] text-muted-foreground">{index + 1}.</span>
+              <span className="min-w-0 break-words">{option.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {error ? <p role="alert" className="break-words text-[10.5px] text-destructive">{error}</p> : null}
+    </div>
   );
 }

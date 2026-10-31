@@ -1,0 +1,2 @@
+# Agent skills are shipped byte-for-byte (include_str!), so keep them LF on every checkout.
+src-tauri/resources/agent-skills/**/*.md text eol=lf

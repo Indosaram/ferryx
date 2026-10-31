@@ -201,7 +201,7 @@ impl Default for TerminalService {
 }
 
 impl TerminalService {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn with_remote_connector_for_test(connector: Arc<dyn super::remote::Connector>) -> Self {
         let mut service = Self::default();
         service.remote = Arc::new(super::remote::RemoteRuntime::with_connector(
@@ -618,6 +618,7 @@ impl TerminalService {
     /// `register_output`, the hub state is already present (the predecessor's snapshot was
     /// imported during adoption), so this must not register the session again or record a new
     /// initial size.
+    #[cfg(unix)]
     pub(crate) fn pump_adopted_output(
         &self,
         session_id: String,
@@ -1534,7 +1535,7 @@ mod preparation_tests {
                     accumulated.extend_from_slice(&chunk);
                 }
                 assert!(dsr_answers > 0, "ConPTY did not issue a DSR query");
-                tokio::time::timeout_at(deadline, output_pump.changed())
+                let _ = tokio::time::timeout_at(deadline, output_pump.changed())
                     .await
                     .expect("the command's output ended within the shared drain bound");
             })

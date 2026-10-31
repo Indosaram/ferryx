@@ -172,6 +172,16 @@ rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", 
 # enable their aws-lc defaults.
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-acme = { version = "=0.15.4", default-features = false, features = ["ring", "webpki-roots"] }
+# Phone push (remote/push.rs): VAPID signing and RFC 8291 aes128gcm payload encryption. Exact
+# versions reviewed for the scope push harness (src/ferryx_scope/push/harness). web-push without
+# its isahc/hyper clients: requests go out through the reqwest client above. jwt-simple on its
+# pure-Rust (RustCrypto p256) backend instead of BoringSSL. web-push enables ece's default OpenSSL
+# backend, the only one ece ships, so OpenSSL is vendored and linked statically: a release must
+# not depend on a Homebrew or system libssl, and Windows MSVC has none.
+web-push = { version = "=0.11.0", default-features = false }
+ece = "=2.3.1"
+jwt-simple = { version = "=0.12.11", default-features = false, features = ["pure-rust"] }
+openssl = { version = "=0.10.81", features = ["vendored"] }
 
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
@@ -296,4 +306,11 @@ strip = "none"
 
 [profile.test.build-override]
 strip = "none"
+
+# The daemon SHA-256 hashes its own executable for its generation key before it binds the
+# control endpoint and reports FERRYX_DAEMON_READY (owner_admission::current_generation_key).
+# A Linux debug binary is ~900 MB, and unoptimized sha2 takes ~14 s to hash it, past the
+# 10 s readiness bound. `test` inherits this from `dev`.
+[profile.dev.package.sha2]
+opt-level = 3
 

@@ -19,13 +19,15 @@ type SegmentedControlProps<T extends string> = {
   options: readonly SegmentedControlOption<T>[];
   onChange: (value: T) => void;
   className?: string;
+  /** Locks every tab, e.g. while the current choice is bound to something live. */
+  disabled?: boolean;
 };
 
 /**
  * ui/DESIGN.md section 2: a `role="tablist"` of equal-width tabs with `aria-selected` and
  * arrow-key roving. Selection is a fill, never a border.
  */
-export function SegmentedControl<T extends string>({ label, value, options, onChange, className }: SegmentedControlProps<T>) {
+export function SegmentedControl<T extends string>({ label, value, options, onChange, className, disabled = false }: SegmentedControlProps<T>) {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -53,11 +55,12 @@ export function SegmentedControl<T extends string>({ label, value, options, onCh
             aria-selected={selected}
             aria-label={option.ariaLabel}
             tabIndex={selected ? 0 : -1}
+            disabled={disabled}
             data-shortcut={option["data-shortcut"]}
             onClick={() => onChange(option.value)}
             onKeyDown={(event) => handleKeyDown(event, index)}
             className={cn(
-              "flex h-6 min-w-0 flex-1 items-center justify-center gap-1 rounded-sm px-2 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              "flex h-6 min-w-0 flex-1 items-center justify-center gap-1 rounded-sm px-2 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
               selected ? "bg-worktree-sidebar-accent text-foreground" : "text-muted-foreground hover:text-foreground",
             )}
           >

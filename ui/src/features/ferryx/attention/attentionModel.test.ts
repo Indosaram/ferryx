@@ -4,6 +4,7 @@ import type { NotificationEntry } from "../../../lib/notificationCenter/types";
 import {
   activityLookupFrom,
   buildAttentionRows,
+  buildPromptCandidateRows,
   buildRemoteAttentionRows,
   countAttentionEntries,
   countAttentionRows,
@@ -32,6 +33,25 @@ function entry(overrides: Partial<NotificationEntry> & Pick<NotificationEntry, "
 }
 
 const seen = { seen: true, seenAt: 5_000 } as const;
+
+describe("buildPromptCandidateRows", () => {
+  it("offers only unread entries whose pane reads working, as needs-you candidates", () => {
+    const activity: Record<string, AttentionActivity> = {
+      w: { state: "working" },
+      d: { state: "done" },
+      r: { state: "working" },
+    };
+    const entries = [
+      entry({ sessionId: "w" }),
+      entry({ sessionId: "d" }),
+      entry({ sessionId: "r", read: seen }),
+    ];
+    const candidates = buildPromptCandidateRows(entries, (_, sessionId) => activity[sessionId]);
+    expect(candidates.map((row) => [row.sessionId, row.state])).toEqual([["w", "needs-you"]]);
+    // A working entry is still no row by itself.
+    expect(buildAttentionRows(entries, (_, sessionId) => activity[sessionId]).map((row) => row.sessionId)).toEqual(["d"]);
+  });
+});
 
 describe("buildAttentionRows", () => {
   it("maps waiting to needs-you and done to done", () => {

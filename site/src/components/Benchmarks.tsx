@@ -5,14 +5,14 @@ export function Benchmarks({ locale }: { locale: LandingLocale }) {
     { component: "终端解析器", implementation: "libghostty-vt", evidence: "src-tauri/src/native_terminal/sys/ffi.rs" },
     { component: "桌面渲染器", implementation: "WGPU 原生子表面", evidence: "src-tauri/src/native_terminal/renderer/" },
     { component: "PTY 生命周期", implementation: "无头 Rust 守护进程与顺序回放", evidence: "src-tauri/src/daemon/ · terminal/output_hub.rs" },
-    { component: "嵌入式浏览器", implementation: "原生 WebView 分屏标签", evidence: "ui/src/components/browser/" },
+    { component: "嵌入式浏览器", implementation: "原生 WebView 分屏标签", evidence: "ui/src/components/BrowserPane.tsx" },
     { component: "移动终端", implementation: "无需依赖的 DOM 网格", evidence: "ui/src/remote/RemoteTerminal.tsx" },
     { component: "智能体监控", implementation: "基于清单的状态检测", evidence: "src-tauri/src/agent_detect/" },
   ] : [
     { component: "Terminal parser", implementation: "libghostty-vt", evidence: "src-tauri/src/native_terminal/sys/ffi.rs" },
     { component: "Desktop renderer", implementation: "WGPU native child surfaces", evidence: "src-tauri/src/native_terminal/renderer/" },
     { component: "PTY lifecycle", implementation: "Headless Rust daemon with sequenced replay", evidence: "src-tauri/src/daemon/ · terminal/output_hub.rs" },
-    { component: "Embedded browser", implementation: "Native WebView split-tabs", evidence: "ui/src/components/browser/" },
+    { component: "Embedded browser", implementation: "Native WebView split-tabs", evidence: "ui/src/components/BrowserPane.tsx" },
     { component: "Mobile terminal", implementation: "Dependency-free DOM grid", evidence: "ui/src/remote/RemoteTerminal.tsx" },
     { component: "Agent supervision", implementation: "Manifest-driven status detection", evidence: "src-tauri/src/agent_detect/" },
   ];
@@ -21,7 +21,7 @@ export function Benchmarks({ locale }: { locale: LandingLocale }) {
     <section id="architecture" className="py-24 sm:py-28 border-t border-line bg-page relative">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <div className="text-center max-w-2xl mx-auto mb-16">
-          <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+          <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink text-balance">
             {locale.benchmarks.title}
           </h2>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Check, Plus, RotateCw, TerminalSquare } from "lucide-react";
+import { Check, Copy, Plus, RotateCw, TerminalSquare } from "lucide-react";
 
 import {
   isMonochromeAgentLogoByCommandName,
@@ -14,9 +14,12 @@ import {
   type CustomAgentValidationError,
   type ResolvedAgent,
 } from "../../lib/agentsSettings";
+import { copyTextToClipboard } from "../../lib/clipboard";
+import { getHostPlatform } from "../../lib/platform";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { getAgentInstallCommand } from "./agentInstallCommands";
 import { WizardRow, WizardRowList } from "./WizardPrimitives";
 
 export type AgentsCliStepProps = {
@@ -92,6 +95,17 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
   const unavailableNames = agents
     .filter((agent) => !agent.available)
     .map((agent) => agent.name);
+  const hostPlatform = getHostPlatform();
+  const installHelp = agents.flatMap((agent) => {
+    if (agent.available || agent.custom) return [];
+    const command = getAgentInstallCommand(agent.name, hostPlatform);
+    return command ? [{ name: agent.name, command }] : [];
+  });
+  const [copiedName, setCopiedName] = useState<string | null>(null);
+
+  async function handleCopyInstall(name: string, command: string): Promise<void> {
+    if (await copyTextToClipboard(command)) setCopiedName(name);
+  }
 
   const options: AgentOption[] = [
     {
@@ -273,6 +287,63 @@ export function AgentsCliStep(props: AgentsCliStepProps): JSX.Element {
           />
         </WizardRowList>
       )}
+
+      {installHelp.length > 0 ? (
+        <div
+          data-testid="onboarding-agent-install-help"
+          className="mt-3 grid gap-1.5 rounded-md border border-border bg-background/40 p-3"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-muted-foreground">
+              Install a missing agent
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="onboarding-agent-check-again"
+              onClick={handleRescan}
+              className="h-7 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <RotateCw className="size-3" />
+              Check again
+            </Button>
+          </div>
+          {installHelp.map((entry) => (
+            <div
+              key={entry.name}
+              data-testid={`onboarding-agent-install-${entry.name}`}
+              className="flex items-center gap-2"
+            >
+              <AgentBrandIcon name={entry.name} />
+              <span className="w-20 shrink-0 truncate text-[12px] font-medium text-foreground">
+                {entry.name}
+              </span>
+              <code
+                data-testid={`onboarding-agent-install-command-${entry.name}`}
+                className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+                title={entry.command}
+              >
+                {entry.command}
+              </code>
+              <Button
+                variant="ghost"
+                size="sm"
+                data-testid={`onboarding-agent-install-copy-${entry.name}`}
+                aria-label={`Copy install command for ${entry.name}`}
+                onClick={() => void handleCopyInstall(entry.name, entry.command)}
+                className="h-7 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                {copiedName === entry.name ? (
+                  <Check className="size-3 text-status-success" />
+                ) : (
+                  <Copy className="size-3" />
+                )}
+                {copiedName === entry.name ? "Copied" : "Copy"}
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="mt-3">
         {draftOpen ? (

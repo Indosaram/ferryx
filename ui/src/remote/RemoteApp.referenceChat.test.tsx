@@ -484,6 +484,40 @@ describe("reference chat lane (task 12)", () => {
     expect(bubbles[0]).toHaveTextContent("what changed in the parser?");
   });
 
+  it("a FORBIDDEN send on a plain shell pane names the View role, not the missing agent", async () => {
+    setWidth(390);
+    const harness = installFetch({
+      state: () => ({
+        activeContext: {
+          ...remoteState.activeContext,
+          activeTerminal: { sessionId: SESSION_ID, title: "zsh", running: true },
+          terminalTabs: [{ id: "tab-main", sessionId: SESSION_ID, label: "zsh", activityState: "idle", worktreeLabel: "main" }],
+        },
+      }),
+      submit: () => ({
+        ok: false,
+        error: { code: "FORBIDDEN", message: "a view-only device cannot type into a pane", retryable: false },
+      }),
+    });
+    render(<RemoteApp />);
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-history-warning")).toHaveTextContent(/no transcript reader/i);
+    });
+
+    fireEvent.change(screen.getByTestId("chat-composer-textarea"), { target: { value: "ls" } });
+    const submitted = harness.whenCalled("/submit");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    await submitted;
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-composer-warning")).toHaveTextContent(/View-only access: this device cannot type into a pane/);
+    });
+    expect(screen.getByTestId("chat-composer-warning")).not.toHaveTextContent(/runs no agent/);
+    expect(screen.getByTestId("chat-composer-textarea")).toHaveValue("ls");
+  });
+
   it("ui-reference-logic-r17-1: a send that fails on the current pane ends its draft send", async () => {
     setWidth(390);
     // the spy calls through: it only records which target the composer's send began on
@@ -1305,6 +1339,26 @@ describe("reference chat lane review fixes", () => {
     cleanup();
     localStorage.clear();
     vi.unstubAllGlobals();
+  });
+
+  it("ui-prompt-push-1: a pushed agentPromptChanged with no prompt closes the card without waiting for the poll", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let current: Record<string, unknown> = promptBody("A", false);
+    installLane(({ url }) => (url.includes("/prompt") ? jsonResponse(current) : undefined));
+    render(<RemoteApp />);
+    await screen.findByText("Question A");
+
+    // Answered on another device: the pane's screen no longer shows the menu.
+    current = { prompt: null, screenRevision: "rev-after", cols: 80, rows: 24 };
+    await act(async () => {
+      for (const socket of StubWebSocket.instances) {
+        socket.onmessage?.({
+          data: JSON.stringify({ type: "agentPromptChanged", sessionId: SESSION_ID, promptId: null, screenRevision: "rev-after" }),
+        } as MessageEvent);
+      }
+    });
+
+    await waitFor(() => expect(screen.queryByText("Question A")).toBeNull());
   });
 
   it("ui-composer-prompt-1: a new prompt gets a fresh card, never the previous prompt's picks", async () => {

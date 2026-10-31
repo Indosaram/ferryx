@@ -67,4 +67,14 @@ describe("filePreviewTabRegistry", () => {
     registry.retainFilePreview("preview-1", source, request);
     expect(open).not.toHaveBeenCalled();
   });
+
+  it("re-resolves a relative request on every click, since the session cwd may have moved", async () => {
+    const registry = await import("./filePreviewTabRegistry");
+    status = "ready";
+    const relative = { ...request, path: "readme.md" };
+    registry.retainFilePreview("preview-1", source, relative);
+    open.mockClear();
+    registry.retainFilePreview("preview-1", source, relative);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
 });

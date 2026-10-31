@@ -226,7 +226,7 @@ mod tests {
 
         // Find at least one pixel where alpha > 200 and NOT all channels equal (proves color, not silhouette)
         let mut found_color_pixel = false;
-        for chunk in buffer.chunks_exact(4) {
+        for chunk in buffer.as_chunks::<4>().0 {
             let r = chunk[0];
             let g = chunk[1];
             let b = chunk[2];

@@ -168,6 +168,22 @@ describe("FilePreviewImage zoom and pan", () => {
     expect(zoomOut).toBeDisabled();
   });
 
+  it("steps zoom from the actual fit percentage, not from 100%", () => {
+    renderImage(imagePayload());
+    const host = viewport();
+    Object.defineProperty(host, "clientWidth", { configurable: true, value: 500 });
+    Object.defineProperty(host, "clientHeight", { configurable: true, value: 400 });
+    loadImage(screen.getByRole("img") as HTMLImageElement, 2000, 1000);
+
+    // Fit draws at min(500/2000, 400/1000) = 25%.
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(screen.getByTestId("file-preview-image-zoom")).toHaveTextContent("35%");
+
+    fireEvent.click(screen.getByRole("button", { name: "Fit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));
+    expect(screen.getByTestId("file-preview-image-zoom")).toHaveTextContent("15%");
+  });
+
   it("pans only while zoomed and resets pan and zoom together", () => {
     renderImage(imagePayload());
     loadImage(screen.getByRole("img") as HTMLImageElement, 2000, 1500);
@@ -210,28 +226,17 @@ describe("FilePreviewImage zoom and pan", () => {
 });
 
 describe("FilePreviewImage failure handling", () => {
-  it("shows a recoverable error with retry, reload and external actions", () => {
+  it("hands a decode failure to the controller instead of a local error view", () => {
     const spies = handlers();
     renderImage(imagePayload({ displayName: "corrupt.png" }), 1, spies);
     const img = screen.getByRole("img") as HTMLImageElement;
 
     fireEvent.error(img);
 
-    expect(screen.getByTestId("file-preview-image-error")).toBeInTheDocument();
     expect(spies.onFailure).toHaveBeenCalledTimes(1);
     expect(spies.onFailure.mock.calls[0][0]).toMatchObject({ reason: null, details: null });
-
-    fireEvent.click(screen.getByRole("button", { name: "Open externally" }));
-    expect(spies.onExternalOpen).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(screen.getByRole("button", { name: "Reload file" }));
-    expect(spies.onReload).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(screen.queryByTestId("file-preview-image-error")).toBeNull();
-    const retried = screen.getByRole("img") as HTMLImageElement;
-    expect(retried.getAttribute("src")).toBe(imagePayload().mediaUrl);
-    expect(retried).not.toBe(img);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("reports one failure per failed load, not one per render", () => {
@@ -270,7 +275,6 @@ describe("FilePreviewImage failure handling", () => {
 
     fireEvent.error(stale);
 
-    expect(screen.queryByTestId("file-preview-image-error")).toBeNull();
     expect(spies.onFailure).not.toHaveBeenCalled();
     expect(screen.getByRole("img")).toBeInTheDocument();
   });
@@ -325,18 +329,22 @@ describe("FilePreviewImage expanded lightbox view", () => {
     expect(dialogImg.getAttribute("alt")).toBe(payload.displayName);
   });
 
-  it("Escape closes the expanded dialog and restores focus to expand button", () => {
+  it("Escape closes the expanded dialog, stops propagation and restores focus to expand button", () => {
+    const outerKeyDown = vi.fn();
     renderImage(imagePayload());
+    document.addEventListener("keydown", outerKeyDown);
     loadImage(screen.getByRole("img") as HTMLImageElement, 1200, 800);
 
     const expandButton = screen.getByTestId("file-preview-image-expand");
     fireEvent.click(expandButton);
     expect(screen.getByTestId("file-preview-image-lightbox")).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(screen.getByTestId("file-preview-image-lightbox-close"), { key: "Escape" });
+    document.removeEventListener("keydown", outerKeyDown);
 
     expect(screen.queryByTestId("file-preview-image-lightbox")).toBeNull();
     expect(expandButton).toHaveFocus();
+    expect(outerKeyDown).not.toHaveBeenCalled();
   });
 
   it("backdrop click closes the expanded dialog and restores focus", () => {

@@ -1159,15 +1159,14 @@ async fn interrupted_fixture(active: bool) {
     .await
     .unwrap();
     let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    #[cfg(unix)]
     if active {
         let hook = root.path().join("repo/.git/hooks/post-checkout");
         let port = ready.local_addr().unwrap().port();
         tokio::task::spawn_blocking(move || {
-            #[cfg(unix)] {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::write(&hook, format!("#!/bin/bash\nexec 3<>/dev/tcp/127.0.0.1/{port}\nprintf '%s %s %s\\n' \"$$\" \"$PPID\" \"$PWD\" >&3\nread -r release <&3\n")).unwrap();
-                std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o700)).unwrap();
-            }
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&hook, format!("#!/bin/bash\nexec 3<>/dev/tcp/127.0.0.1/{port}\nprintf '%s %s %s\\n' \"$$\" \"$PPID\" \"$PWD\" >&3\nread -r release <&3\n")).unwrap();
+            std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o700)).unwrap();
         }).await.unwrap();
     }
     let outcome = std::panic::AssertUnwindSafe(async {

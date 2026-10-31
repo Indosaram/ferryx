@@ -2635,7 +2635,9 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["workspace", "file-read" | "paste-upload"])
             | ("POST", ["pair", "exchange"])
             | ("POST", ["direct", "offer"])
-            | ("POST", ["push", "subscribe" | "unsubscribe"])
+            | ("GET", ["push", "vapid-public-key"])
+            | ("POST", ["push", "subscribe" | "unsubscribe" | "preferences"])
+            | ("POST", ["push", "test"])
             | ("GET", ["session", _])
             | ("GET", ["agent-history", _])
             // Reference chat (plan task 13). The relay only admits the frozen route table;
@@ -3721,7 +3723,7 @@ async fn download_cli_artifact_from_candidate_dirs(
     axum::response::Redirect::temporary(&github_url).into_response()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn download_artifact_router(
     candidate_dirs: Vec<std::path::PathBuf>,
 ) -> axum::Router {
@@ -4676,6 +4678,16 @@ mod tests {
         assert!(!allowed_http_route(&Method::GET, "attach/../secret"));
         assert!(!allowed_http_route(&Method::GET, "api/v1/attach"));
         assert!(allowed_http_route(&Method::GET, "capabilities"));
+    }
+
+    #[test]
+    fn test_allowed_http_route_admits_push_registration() {
+        assert!(allowed_http_route(&Method::GET, "push/vapid-public-key"));
+        for route in ["push/subscribe", "push/unsubscribe", "push/preferences", "push/test"] {
+            assert!(allowed_http_route(&Method::POST, route), "{route}");
+            assert!(!allowed_http_route(&Method::GET, route), "{route} is POST only");
+        }
+        assert!(!allowed_http_route(&Method::POST, "push/vapid-public-key"));
     }
 
     #[test]
@@ -7035,7 +7047,7 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_hdr_async(
                 tcp,
-                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                crate::remote::InspectHandshake(|request: &tokio_tungstenite::tungstenite::handshake::server::Request| {
                     assert_eq!(request.uri().path(), "/api/v1/terminal/t1");
                     assert_eq!(
                         request.uri().query(),
@@ -7045,8 +7057,7 @@ mod tests {
                         request.headers()["authorization"],
                         "Bearer test-device-token"
                     );
-                    Ok(response)
-                },
+                }),
             )
             .await
             .unwrap();

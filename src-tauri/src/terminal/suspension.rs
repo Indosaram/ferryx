@@ -13,8 +13,11 @@
 //! observe a stop reports `Unknown` (never `External`, never auto-resume) instead of
 //! guessing.
 
+#[cfg(any(unix, test))]
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::sync::OnceLock;
+#[cfg(any(unix, test))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -84,6 +87,7 @@ pub enum SuspensionError {
     NotOwned { pid: u32 },
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcessIdentity {
     started_at_unix_ms: u64,
@@ -92,11 +96,13 @@ struct ProcessIdentity {
     incarnation: Option<String>,
 }
 
+#[cfg(any(unix, test))]
 struct Observation {
     identity: ProcessIdentity,
     stopped: bool,
 }
 
+#[cfg(any(unix, test))]
 trait Process {
     fn observe(&self) -> Result<Observation, SuspensionError>;
     /// Must acknowledge a real stop on this pinned process before returning success.
@@ -104,17 +110,20 @@ trait Process {
     fn resume(&self) -> Result<(), SuspensionError>;
 }
 
+#[cfg(any(unix, test))]
 struct OwnedStop {
     target: SuspensionTarget,
     identity: ProcessIdentity,
     receipt: ActuationReceipt,
 }
 
+#[cfg(any(unix, test))]
 #[derive(Default)]
 struct Ownership {
     stops: HashMap<u32, OwnedStop>,
 }
 
+#[cfg(any(unix, test))]
 fn verify(target: &SuspensionTarget, identity: &ProcessIdentity) -> Result<(), SuspensionError> {
     if target.pid == 0
         || target.incarnation.is_empty()
@@ -126,6 +135,7 @@ fn verify(target: &SuspensionTarget, identity: &ProcessIdentity) -> Result<(), S
     Ok(())
 }
 
+#[cfg(any(unix, test))]
 impl Ownership {
     fn stop(&mut self, target: &SuspensionTarget, process: &impl Process) -> Result<ActuationReceipt, SuspensionError> {
         let before = process.observe()?;
@@ -191,6 +201,7 @@ impl Ownership {
     }
 }
 
+#[cfg(unix)]
 fn ownership() -> &'static parking_lot::Mutex<Ownership> {
     static OWNERSHIP: OnceLock<parking_lot::Mutex<Ownership>> = OnceLock::new();
     OWNERSHIP.get_or_init(|| parking_lot::Mutex::new(Ownership::default()))

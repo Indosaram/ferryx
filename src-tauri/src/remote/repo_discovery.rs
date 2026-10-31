@@ -7,6 +7,7 @@ use super::{
     auth::{DeviceAccessScope, DevicePermission},
     filesystem::{self, BrowseLimits, CancelOnDrop, FsError},
     machine_protocol::{DiscoveredRepository, Repositories, DIRECTORY_JSON_MAX_BYTES},
+    server::Refusal,
     state::RemoteGatewayState,
 };
 use axum::{
@@ -420,7 +421,7 @@ pub(crate) async fn repositories(
     Extension(limits): Extension<Arc<BrowseLimits>>,
     headers: HeaderMap,
     RawQuery(raw): RawQuery,
-) -> Result<Response, Response> {
+) -> Result<Response, Refusal> {
     // Start the complete read budget before admission or blocking auth I/O.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let cancel = CancelOnDrop(Arc::new(AtomicBool::new(false)));
@@ -456,13 +457,13 @@ pub(crate) async fn repositories(
         return Err(super::server::machine_error(
             StatusCode::FORBIDDEN,
             "MACHINE_ACCESS_REQUIRED",
-        ));
+        ).into());
     }
     if state.machine_services.is_none() {
         return Err(super::server::machine_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "MACHINE_SERVICE_UNAVAILABLE",
-        ));
+        ).into());
     }
     let mut revoked = state
         .auth_manager
@@ -470,7 +471,7 @@ pub(crate) async fn repositories(
         .map_err(|_| super::server::machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED"))?;
     let query = query(raw.as_deref()).map_err(fs_response)?;
     if tokio::time::Instant::now() >= deadline {
-        return Err(fs_response(FsError::Timeout));
+        return Err(fs_response(FsError::Timeout).into());
     }
     let permit = limits.acquire(&device.id).map_err(|response| *response)?;
     let flag = cancel.0.clone();
@@ -490,17 +491,17 @@ pub(crate) async fn repositories(
     });
     let listing = tokio::select! {
         biased;
-        _ = revoked.wait_for(|value| *value) => return Err(super::server::machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")),
+        _ = revoked.wait_for(|value| *value) => return Err(super::server::machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED").into()),
         result = tokio::time::timeout_at(deadline, work) => result.map_err(|_| fs_response(FsError::Timeout))?.map_err(|_| fs_response(FsError::Unavailable))?.map_err(fs_response)?,
     };
     if *revoked.borrow() {
         return Err(super::server::machine_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
-        ));
+        ).into());
     }
     if tokio::time::Instant::now() >= deadline {
-        return Err(fs_response(FsError::Timeout));
+        return Err(fs_response(FsError::Timeout).into());
     }
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(listing)).into_response())
 }
