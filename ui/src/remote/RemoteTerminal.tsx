@@ -1114,6 +1114,9 @@ export function RemoteTerminal({
           if (disposed || sequence !== dialSequence || socketRef.current !== socket) return;
           wheelRemainderRowsRef.current = 0;
           onSocketLifecycle?.(socketRequest.sessionId, "open");
+          if (!isAccountSession && !createLocalSocket) {
+            socket.send(JSON.stringify({ type: "acknowledgeAgentOutcome" }));
+          }
           if (isTerminalReadyRef.current) {
             flushOutboundBuffer();
           }
@@ -1294,6 +1297,10 @@ export function RemoteTerminal({
                   backoffAttempt = 0;
                   setConnected(true);
                   machineGenerationRef.current = parsed.generation;
+                  socket.send(JSON.stringify({
+                    type: "acknowledgeAgentOutcome",
+                    generation: parsed.generation,
+                  }));
                   lastSentMachineGenerationRef.current = null;
                   flushOutboundBuffer();
                   requestResizeRef.current();

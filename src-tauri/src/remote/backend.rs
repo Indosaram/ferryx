@@ -58,6 +58,12 @@ pub struct RemotePairedRecoveryOutcome {
 
 /// Object-safe abstraction for session routing across local and legacy daemon backends.
 pub trait RemoteSessionBackend: Send + Sync {
+    fn acknowledge_agent_outcome<'a>(
+        &'a self,
+        _session_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("Outcome acknowledgement unsupported".into()) })
+    }
     /// None identifies a local PTY. Errors must never downgrade SSH to local input.
     fn recovery<'a>(
         &'a self,
@@ -131,6 +137,12 @@ pub trait RemoteSessionBackend: Send + Sync {
 /// The router retains Local/SSH/legacy transport and generation validation;
 /// the shared service supplies authoritative metadata to HTTP and IPC alike.
 impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionService {
+    fn acknowledge_agent_outcome<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        self.router().acknowledge_agent_outcome(session_id)
+    }
     fn recovery<'a>(
         &'a self,
         id: &'a str,
@@ -227,6 +239,17 @@ impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionServi
 }
 
 impl RemoteSessionBackend for TerminalService {
+    fn acknowledge_agent_outcome<'a>(
+        &'a self,
+        session_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.output_hub()
+                .acknowledge_program_outcome(session_id)
+                .ok_or_else(|| "Session has no program status mirror".to_string())?;
+            Ok(())
+        })
+    }
     fn recovery<'a>(
         &'a self,
         id: &'a str,
