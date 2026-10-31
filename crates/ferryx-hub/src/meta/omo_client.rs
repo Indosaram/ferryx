@@ -20,6 +20,15 @@ pub const TURN_START_ACK_WINDOW: Duration = Duration::from_secs(30);
 /// How long a successful turn's engine gets to exit on its own after stdin closes. A SIGKILL
 /// right after a good turn makes mhc record the session as interrupted on the next resume.
 const GRACEFUL_EXIT_WINDOW: Duration = Duration::from_secs(5);
+/// How long after a turn's final `agent_end` mhc gets to record whether the session settled or
+/// is waiting on background work (it records that about a second after the reply).
+const LIFECYCLE_SETTLE_WINDOW: Duration = Duration::from_secs(10);
+const LIFECYCLE_POLL: Duration = Duration::from_millis(200);
+/// How often a held engine re-reads the session lifecycle while it waits for a wake.
+const BACKGROUND_RECHECK: Duration = Duration::from_secs(60);
+/// The tail of the session file searched for the latest lifecycle record.
+const LIFECYCLE_TAIL_BYTES: u64 = 256 * 1024;
+pub const BACKGROUND_MAX_DEFAULT: Duration = Duration::from_secs(6 * 3600);
 /// mhc's tool permission dialog arrives as a `select` with this title prefix.
 const PERMISSION_TITLE_PREFIX: &str = "Permission required:";
 const PERMISSION_ALLOW: &str = "Allow once";
@@ -46,6 +55,9 @@ pub struct OmoClientConfig {
     pub connect_timeout: Duration,
     pub workspace: Option<protocol::Workspace>,
     pub ack_window: Duration,
+    /// How long an engine stays up after its turn for background work (senpi-task children)
+    /// it started; the work is stopped and the owner told when it runs longer.
+    pub background_max: Duration,
 }
 impl Default for OmoClientConfig {
     fn default() -> Self {
@@ -61,6 +73,7 @@ impl OmoClientConfig {
             connect_timeout: Duration::from_secs(15),
             workspace: None,
             ack_window: TURN_START_ACK_WINDOW,
+            background_max: BACKGROUND_MAX_DEFAULT,
         }
     }
     pub fn with_env_timeouts(mut self) -> Self {
@@ -77,6 +90,9 @@ impl OmoClientConfig {
         if let Some(v) = secs("OMON_OMO_TURN_TOTAL_TIMEOUT_SECS") {
             self.total_timeout = v;
         }
+        if let Some(v) = secs("OMON_OMO_BACKGROUND_MAX_SECS") {
+            self.background_max = v;
+        }
         self
     }
 }
@@ -89,6 +105,9 @@ pub struct TurnRequest {
     pub toolsets: Option<Vec<String>>,
     pub text: String,
     pub pin_model: bool,
+    /// Where replies of runs the engine starts after this turn (background completion wakes)
+    /// go. With a sink the engine stays up while the session waits on background work.
+    pub followups: Option<UnboundedSender<String>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnOutcome {
@@ -619,14 +638,40 @@ impl Drop for GuardDirectory {
     }
 }
 
-pub async fn run_turn(
-    config: &OmoClientConfig,
-    request: &TurnRequest,
-    progress: Option<UnboundedSender<String>>,
-) -> Result<TurnOutcome> {
+/// One owned mhc RPC process. The launchctl guard directory sits on its PATH, so it lives
+/// exactly as long as the process; `group` kills the private process group if the
+/// engine is dropped without a reap (a hub shutdown while it is held).
+struct Engine {
+    child: Child,
+    rpc: Rpc,
+    group: GroupKill,
+    _launch: GuardDirectory,
+}
+struct GroupKill(Option<u32>);
+impl GroupKill {
+    fn kill(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.take() {
+            // Tool subprocesses inherit the private group; stop them with their owned engine.
+            let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(error=%std::io::Error::last_os_error(), "mhc RPC process group kill failed");
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = self.0.take();
+    }
+}
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+async fn spawn_engine(config: &OmoClientConfig, request: &TurnRequest) -> Result<(Engine, Option<String>)> {
     let stored_id = request.thread_id.clone();
     let binary = PathBuf::from(&config.binary);
-    let (child_path, _guard, session_path) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (child_path, guard, session_path) = tokio::task::spawn_blocking(move || -> Result<_> {
         let path = crate::child_env::child_path().to_owned();
         // A private guard must never write into the running user's ~/.ferryx/hub.
         let dir = std::env::temp_dir().join(format!("ferryx-mhc-guard-{}", uuid::Uuid::new_v4()));
@@ -680,18 +725,46 @@ pub async fn run_turn(
     let mut child = cmd
         .spawn()
         .map_err(|e| HubError::message(format!("spawn mhc RPC: {e}")))?;
-    let mut rpc = Rpc {
+    let rpc = Rpc {
         input: child.stdin.take().expect("piped mhc stdin"),
         lines: BufReader::new(child.stdout.take().expect("piped mhc stdout")).lines(),
         allowed: 0,
         denied: 0,
         eof: false,
     };
-    let process_group = child.id();
+    let group = GroupKill(child.id());
+    Ok((
+        Engine {
+            child,
+            rpc,
+            group,
+            _launch: guard,
+        },
+        session_path,
+    ))
+}
+
+pub async fn run_turn(
+    config: &OmoClientConfig,
+    request: &TurnRequest,
+    progress: Option<UnboundedSender<String>>,
+) -> Result<TurnOutcome> {
+    // A session whose last turn left background work running still has its engine: the turn
+    // runs there, because a second process on the same session would restore the background
+    // children without their running state.
+    let (mut engine, session_path) = match take_held(request.thread_id.as_deref()).await {
+        Some(engine) => {
+            tracing::info!(session = ?request.thread_id, "turn runs on the session's held mhc engine");
+            (engine, request.thread_id.clone())
+        }
+        None => spawn_engine(config, request).await?,
+    };
+    engine.rpc.allowed = 0;
+    engine.rpc.denied = 0;
     let key = crate::chat::turns::current_key();
     let mut cancel = key.as_deref().and_then(crate::chat::turns::cancelled);
     let work = run_owned(
-        &mut rpc,
+        &mut engine.rpc,
         config,
         request,
         progress,
@@ -707,10 +780,10 @@ pub async fn run_turn(
             }
         } => Err(HubError::message(STOPPED)),
     };
-    if rpc.eof {
+    if engine.rpc.eof {
         // Only inspect exit after stdout is drained: racing wait() against reads can hide
         // a successful final boundary already buffered in the pipe.
-        let status = match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+        let status = match tokio::time::timeout(Duration::from_secs(1), engine.child.wait()).await {
             Ok(Ok(status)) => status.to_string(),
             Ok(Err(error)) => format!("status unavailable: {error}"),
             Err(_) => "process still running after stdout EOF".to_owned(),
@@ -719,9 +792,37 @@ pub async fn run_turn(
             "mhc RPC process exited before completing the turn ({status})"
         )));
     }
-    // No path may orphan the owned engine. Closing stdin first lets the host observe EOF;
-    // kill + wait bounds cleanup even when an extension or provider refuses cancellation.
-    if result.is_err() {
+    // Background work the turn started (senpi-task children) lives inside this process:
+    // closing it now would kill that work. A holder keeps the engine until the session settles,
+    // so a completion wake runs as a follow-up turn whose reply reaches the owner. It registers
+    // before the reply is posted, so the session's next turn always finds it.
+    if let (Ok(outcome), Some(followups)) = (&result, request.followups.as_ref()) {
+        let holder = hold(
+            engine,
+            config.clone(),
+            register_held(&outcome.thread_id),
+            followups.clone(),
+        );
+        let _holder = match APPROVER.try_with(std::sync::Arc::clone) {
+            Ok(approver) => tokio::spawn(APPROVER.scope(approver, holder)),
+            Err(_) => tokio::spawn(holder),
+        };
+        return result;
+    }
+    close(engine, result.is_ok()).await;
+    result
+}
+
+/// Ends an engine. No path may orphan it: closing stdin first lets the host observe EOF;
+/// kill + wait bounds cleanup even when an extension or provider refuses cancellation.
+async fn close(engine: Engine, succeeded: bool) {
+    let Engine {
+        mut child,
+        mut rpc,
+        mut group,
+        _launch,
+    } = engine;
+    if !succeeded {
         let abort = protocol::command("abort", "abort");
         match tokio::time::timeout(Duration::from_secs(1), rpc.send(abort)).await {
             Ok(Ok(())) => {}
@@ -729,7 +830,6 @@ pub async fn run_turn(
             Err(error) => tracing::warn!(%error,"mhc abort write timed out"),
         }
     }
-    let succeeded = result.is_ok();
     drop(rpc);
     if succeeded {
         // Closed stdin asks mhc to finish and record the session cleanly. reap still runs
@@ -741,20 +841,10 @@ pub async fn run_turn(
             Err(_) => tracing::warn!("mhc RPC did not exit after stdin close; killing it"),
         }
     }
-    reap(&mut child, process_group).await;
-    result
+    reap(&mut child, &mut group).await;
 }
-async fn reap(child: &mut Child, process_group: Option<u32>) {
-    #[cfg(not(unix))]
-    let _ = process_group;
-    #[cfg(unix)]
-    if let Some(pid) = process_group {
-        // Tool subprocesses inherit the private group; stop them with their owned engine.
-        let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!(error=%std::io::Error::last_os_error(), "mhc RPC process group kill failed");
-        }
-    }
+async fn reap(child: &mut Child, group: &mut GroupKill) {
+    group.kill();
     match child.try_wait() {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -771,6 +861,342 @@ async fn reap(child: &mut Child, process_group: Option<u32>) {
     }
     if let Err(e) = child.wait().await {
         tracing::warn!(error=%e,"mhc RPC child reap failed");
+    }
+}
+
+/// The last `session-lifecycle` record mhc wrote to the session file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Lifecycle {
+    state: String,
+    run_active: bool,
+    /// Background sources and children the session still waits on; a session waiting on the
+    /// owner (`waiting_human`) can have them too.
+    pending_work: bool,
+}
+impl Lifecycle {
+    fn waiting(&self) -> bool {
+        self.pending_work
+            || matches!(self.state.as_str(), "waiting_background" | "waiting_children")
+    }
+}
+async fn latest_lifecycle(path: &str) -> Option<Lifecycle> {
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let len = file.metadata().await.ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(LIFECYCLE_TAIL_BYTES)))
+        .await
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await.ok()?;
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .rev()
+        .filter(|line| line.contains("\"session-lifecycle\""))
+        .find_map(|line| {
+            let entry: Value = serde_json::from_str(line).ok()?;
+            if entry["customType"] != "session-lifecycle" {
+                return None;
+            }
+            let data = &entry["data"];
+            let waits = &data["waitingOn"];
+            let background = waits["background"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|source| source["activeCount"].as_u64().unwrap_or(1) > 0);
+            Some(Lifecycle {
+                state: data["state"].as_str()?.to_owned(),
+                run_active: data["runActive"].as_bool().unwrap_or(false),
+                pending_work: background || waits["children"].as_u64().unwrap_or(0) > 0,
+            })
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settle {
+    /// Nothing the session waits on: the engine can close.
+    Done,
+    /// The session waits on background work or children it started.
+    Waiting,
+    /// A follow-up run (a completion wake) already started.
+    Started,
+}
+/// What the session waits on once its run ended. mhc records it shortly after the final
+/// `agent_end`; stdout is drained meanwhile so the engine never blocks on a full pipe. A
+/// session file without lifecycle records (an older mhc) settles at once.
+async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle> {
+    let until = tokio::time::Instant::now() + LIFECYCLE_SETTLE_WINDOW;
+    loop {
+        match latest_lifecycle(thread).await {
+            None => return Ok(Settle::Done),
+            Some(lifecycle) if !lifecycle.run_active => {
+                return Ok(if lifecycle.waiting() {
+                    Settle::Waiting
+                } else {
+                    Settle::Done
+                })
+            }
+            Some(_) if tokio::time::Instant::now() >= until => return Ok(Settle::Done),
+            Some(_) => {}
+        }
+        tokio::select! {
+            frame = rpc.read() => {
+                let frame = frame?;
+                rpc.ui(&frame, cwd).await?;
+                if frame["type"] == "agent_start" {
+                    return Ok(Settle::Started);
+                }
+            }
+            _ = tokio::time::sleep(LIFECYCLE_POLL) => {}
+        }
+    }
+}
+
+/// A turn that wants a held engine: the holder answers between follow-up runs.
+type Handover = oneshot::Sender<Engine>;
+type HeldEntry = (String, UnboundedSender<Handover>);
+fn held() -> &'static Mutex<HashMap<String, HeldEntry>> {
+    static HELD: OnceLock<Mutex<HashMap<String, HeldEntry>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn unregister_held(thread: &str, id: &str) {
+    let mut held = held().lock().expect("mhc held registry");
+    if held.get(thread).is_some_and(|(owner, _)| owner == id) {
+        held.remove(thread);
+    }
+}
+struct HeldGuard {
+    thread: String,
+    id: String,
+}
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        unregister_held(&self.thread, &self.id);
+    }
+}
+async fn take_held(thread: Option<&str>) -> Option<Engine> {
+    let sender = held()
+        .lock()
+        .expect("mhc held registry")
+        .get(thread?)
+        .map(|(_, sender)| sender.clone())?;
+    let (reply, engine) = oneshot::channel();
+    sender.send(reply).ok()?;
+    // A holder that ended first drops the request; the turn then starts a fresh engine.
+    engine.await.ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldEnd {
+    Settled,
+    Expired,
+    Exited,
+    Failed,
+}
+pub const BACKGROUND_EXPIRED: &str = "⚠️ 백그라운드 작업이 최대 대기 시간을 넘겨 중단됐어요. 필요하면 다시 시켜 주세요.";
+pub const BACKGROUND_LOST: &str = "⚠️ 백그라운드 작업을 실행하던 엔진이 끝나 버려 결과를 받지 못했어요. 필요하면 다시 시켜 주세요.";
+
+/// A registered holder: the session's next turn asks it for the engine.
+struct HeldSlot {
+    guard: HeldGuard,
+    sender: UnboundedSender<Handover>,
+    handovers: mpsc::UnboundedReceiver<Handover>,
+}
+fn register_held(thread: &str) -> HeldSlot {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (sender, handovers) = mpsc::unbounded_channel::<Handover>();
+    held()
+        .lock()
+        .expect("mhc held registry")
+        .insert(thread.to_owned(), (id.clone(), sender.clone()));
+    HeldSlot {
+        guard: HeldGuard {
+            thread: thread.to_owned(),
+            id,
+        },
+        sender,
+        handovers,
+    }
+}
+impl HeldSlot {
+    /// Gives the engine to a waiting turn; hands it back when that turn is gone.
+    fn hand_over(&self, reply: Handover, engine: Engine) -> std::result::Result<(), Engine> {
+        unregister_held(&self.guard.thread, &self.guard.id);
+        reply.send(engine).map_err(|engine| {
+            held().lock().expect("mhc held registry").insert(
+                self.guard.thread.clone(),
+                (self.guard.id.clone(), self.sender.clone()),
+            );
+            engine
+        })
+    }
+}
+
+/// Keeps a finished turn's engine while its session waits on background work: completion
+/// wakes run as follow-up turns whose replies go to `followups`, the session's next turn takes
+/// the engine over, and `background_max` bounds the whole hold. A session that waits on
+/// nothing closes its engine as before.
+async fn hold(
+    mut engine: Engine,
+    config: OmoClientConfig,
+    mut slot: HeldSlot,
+    followups: UnboundedSender<String>,
+) {
+    let thread = slot.guard.thread.clone();
+    let cwd = config.workspace.as_ref().map(|w| w.cwd.clone());
+    let cwd = cwd.as_deref();
+    let deadline = tokio::time::Instant::now() + config.background_max;
+    let mut announced = false;
+    let end = 'hold: loop {
+        let state = match tokio::time::timeout_at(deadline, settle(&mut engine.rpc, &thread, cwd)).await {
+            Err(_) => break HoldEnd::Expired,
+            Ok(Err(_)) => break HoldEnd::Exited,
+            Ok(Ok(state)) => state,
+        };
+        match state {
+            // A turn that asked meanwhile gets no engine and starts its own once this one is
+            // closed.
+            Settle::Done => break HoldEnd::Settled,
+            Settle::Started => {
+                let run = follow_up(&mut engine.rpc, cwd, config.idle_timeout, &followups);
+                match tokio::time::timeout_at(deadline, run).await {
+                    Err(_) => break HoldEnd::Expired,
+                    Ok(Err(error)) => {
+                        tracing::warn!(session = %thread, %error, "background follow-up turn failed");
+                        let _ = followups.send(owner_failure_text(&error.to_string()));
+                        break HoldEnd::Failed;
+                    }
+                    Ok(Ok(())) => continue,
+                }
+            }
+            Settle::Waiting => {}
+        }
+        if !announced {
+            announced = true;
+            tracing::info!(session = %thread, "mhc engine kept for its session's background work");
+        }
+        loop {
+            let recheck = tokio::time::Instant::now() + BACKGROUND_RECHECK;
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break 'hold HoldEnd::Expired,
+                Some(reply) = slot.handovers.recv() => match slot.hand_over(reply, engine) {
+                    Ok(()) => {
+                        tracing::info!(session = %thread, "held mhc engine handed to the session's next turn");
+                        return;
+                    }
+                    Err(back) => engine = back,
+                },
+                frame = engine.rpc.read() => match frame {
+                    Err(_) => break 'hold HoldEnd::Exited,
+                    Ok(frame) => {
+                        if let Err(error) = engine.rpc.ui(&frame, cwd).await {
+                            tracing::warn!(session = %thread, %error, "held mhc engine request failed");
+                            break 'hold HoldEnd::Failed;
+                        }
+                        if frame["type"] == "agent_start" {
+                            let run = follow_up(&mut engine.rpc, cwd, config.idle_timeout, &followups);
+                            match tokio::time::timeout_at(deadline, run).await {
+                                Err(_) => break 'hold HoldEnd::Expired,
+                                Ok(Err(error)) => {
+                                    tracing::warn!(session = %thread, %error, "background follow-up turn failed");
+                                    let _ = followups.send(owner_failure_text(&error.to_string()));
+                                    break 'hold HoldEnd::Failed;
+                                }
+                                Ok(Ok(())) => continue 'hold,
+                            }
+                        }
+                    }
+                },
+                _ = tokio::time::sleep_until(recheck) => continue 'hold,
+            }
+        }
+    };
+    match end {
+        HoldEnd::Expired => {
+            tracing::warn!(session = %thread, limit_secs = config.background_max.as_secs(), "background work outlived its limit; stopping its engine");
+            let _ = followups.send(BACKGROUND_EXPIRED.to_owned());
+        }
+        HoldEnd::Exited => {
+            tracing::warn!(session = %thread, "held mhc engine exited before its background work settled");
+            let _ = followups.send(BACKGROUND_LOST.to_owned());
+        }
+        HoldEnd::Settled if announced => {
+            tracing::info!(session = %thread, "background work settled; closing its mhc engine")
+        }
+        HoldEnd::Settled | HoldEnd::Failed => {}
+    }
+    close(engine, end == HoldEnd::Settled).await;
+    // Only now does a turn that asked for this engine hear there is none and start its own,
+    // so two engines never run the same session file.
+    drop(slot);
+    drop(followups);
+}
+
+/// One engine-started run (a completion wake): relays its replies like a turn's interim
+/// messages, the last one included.
+async fn follow_up(
+    rpc: &mut Rpc,
+    cwd: Option<&str>,
+    idle: Duration,
+    sink: &UnboundedSender<String>,
+) -> Result<()> {
+    let progress = Some(sink.clone());
+    let mut pending = String::new();
+    let mut delivered = 0;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let f = tokio::time::timeout(idle, rpc.read())
+            .await
+            .map_err(|_| HubError::message("mhc no output within idle timeout"))??;
+        rpc.ui(&f, cwd).await?;
+        match f["type"].as_str().unwrap_or("") {
+            "message_end" => {
+                let message = &f["message"];
+                if let Some(error) = message_error(message) {
+                    return Err(failure(error, true));
+                }
+                if message["role"] != "assistant" {
+                    continue;
+                }
+                let identity = message
+                    .get("id")
+                    .filter(|v| !v.is_null())
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| message.to_string());
+                if !seen.insert(identity) {
+                    continue;
+                }
+                let text = message_text(message);
+                if !text.is_empty() {
+                    relay(&mut pending, &progress, &mut delivered);
+                    pending = text;
+                }
+            }
+            "tool_execution_start" => relay(&mut pending, &progress, &mut delivered),
+            "agent_end" => {
+                if f["willRetry"].as_bool().is_none() || f["willRetry"] == true {
+                    continue;
+                }
+                if f["aborted"] == true {
+                    return Err(HubError::message("mhc turn interrupted"));
+                }
+                for message in f["messages"].as_array().into_iter().flatten() {
+                    if let Some(error) = message_error(message) {
+                        return Err(failure(error, true));
+                    }
+                }
+                relay(&mut pending, &progress, &mut delivered);
+                return Ok(());
+            }
+            "error" => {
+                return Err(failure(
+                    f["error"].as_str().unwrap_or("mhc RPC error").to_owned(),
+                    true,
+                ))
+            }
+            _ => {}
+        }
     }
 }
 
@@ -995,8 +1421,9 @@ mod rpc_tests {
             std::fs::create_dir_all(&dir).unwrap();
             let binary = dir.join("mhc");
             std::fs::write(&binary,r#"#!/usr/bin/env python3
-import json, sys, pathlib
+import json, os, sys, pathlib, threading
 root = pathlib.Path(__file__).parent
+with (root / 'pids').open('a') as out: out.write(str(os.getpid())+'\n')
 session = root / 'session.jsonl'
 log = root / 'commands.jsonl'
 scenario = ''
@@ -1008,6 +1435,16 @@ def answer(c, data=None):
     emit(dict(type='response',id=c['id'],command=c['type'],success=True,data=data))
 def message(text, ident, **kw):
     event('message_end',message=dict(role='assistant',id=ident,content=[dict(type='text',text=text)],**kw))
+def lifecycle(state, active):
+    with session.open('a') as out: out.write(json.dumps(dict(type='custom',customType='session-lifecycle',data=dict(state=state,runActive=active)))+'\n')
+def wake():
+    # A senpi-task child finishes once the test opens the release pipe for writing.
+    with open(root / 'release') as gate: gate.read()
+    lifecycle('running',True)
+    event('agent_start')
+    message('background done','wake-1')
+    lifecycle('done',False)
+    event('agent_end',messages=[],willRetry=False)
 assert '--mode' in sys.argv and 'rpc' in sys.argv
 assert sys.argv[1:4] == ['--mode','rpc','--no-model-fallback']
 assert '--multi-session' not in sys.argv
@@ -1028,6 +1465,10 @@ for line in sys.stdin:
         scenario=c['message']
         if scenario=='exit': sys.exit(17)
         answer(c)
+        lifecycle('running',True)
+        if scenario=='background':
+            os.mkfifo(root / 'release')
+            threading.Thread(target=wake,daemon=True).start()
         event('agent_start')
         event('extension_ui_request',id='status',method='setStatus',statusKey='test')
         if scenario=='retry':
@@ -1060,6 +1501,8 @@ for line in sys.stdin:
             event('tool_execution_start',toolCallId='tool-1',toolName='read',args={})
             message('final','m2')
             event('agent_end',messages=[])
+            # Recorded before the boundary so a released wake always comes after it.
+            lifecycle('waiting_background' if scenario=='background' else 'done',False)
             event('agent_end',messages=[],willRetry=False)
             if scenario=='success-exit': sys.exit(0)
     elif kind=='extension_ui_response':
@@ -1119,6 +1562,43 @@ for line in sys.stdin:
                 progress,
             )
             .await
+        }
+        async fn run_followed(
+            &self,
+            text: &str,
+            thread_id: Option<String>,
+        ) -> (Result<TurnOutcome>, mpsc::UnboundedReceiver<String>) {
+            let (followups, replies) = mpsc::unbounded_channel();
+            let result = run_turn(
+                &self.config,
+                &TurnRequest {
+                    text: text.into(),
+                    thread_id,
+                    followups: Some(followups),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+            (result, replies)
+        }
+        fn session(&self) -> String {
+            self.dir.join("session.jsonl").to_string_lossy().into_owned()
+        }
+        fn pids(&self) -> Vec<i32> {
+            std::fs::read_to_string(self.dir.join("pids"))
+                .unwrap()
+                .lines()
+                .map(|line| line.parse().unwrap())
+                .collect()
+        }
+        /// Lets the fixture's background task finish: its reader blocks until a writer opens.
+        async fn release_background(&self) {
+            let path = self.dir.join("release");
+            tokio::task::spawn_blocking(move || std::fs::write(path, b"go"))
+                .await
+                .unwrap()
+                .unwrap();
         }
         async fn run_with_tools(&self, toolsets: &[&str]) -> Result<TurnOutcome> {
             run_turn(
@@ -1423,6 +1903,119 @@ for line in sys.stdin:
                 .await
                 .unwrap());
         }
+    }
+    #[tokio::test]
+    async fn the_latest_lifecycle_record_decides_whether_the_session_waits() {
+        let script = Script::new();
+        let path = script.dir.join("lifecycle.jsonl");
+        let record = |state: &str, active: bool, background: u64, children: u64| {
+            json!({"type":"custom","customType":"session-lifecycle","data":{"state":state,"runActive":active,
+                "waitingOn":{"children":children,"background":[{"source":"senpi-task","activeCount":background}],"human":[]}}})
+            .to_string()
+        };
+        let path_str = path.to_str().unwrap();
+        assert_eq!(latest_lifecycle(path_str).await, None);
+        std::fs::write(&path, "{\"type\":\"session\"}\n").unwrap();
+        assert_eq!(latest_lifecycle(path_str).await, None);
+        // The evidence: the final reply, then waiting_background with one senpi-task child.
+        std::fs::write(
+            &path,
+            [
+                record("running", true, 1, 1),
+                json!({"type":"custom","customType":"work-custody","data":{}}).to_string(),
+                record("waiting_background", false, 1, 0),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let latest = latest_lifecycle(path_str).await.unwrap();
+        assert!(!latest.run_active && latest.waiting());
+        // A question to the owner does not hide background work still running.
+        std::fs::write(&path, record("waiting_human", false, 1, 0)).unwrap();
+        assert!(latest_lifecycle(path_str).await.unwrap().waiting());
+        std::fs::write(&path, record("done", false, 0, 0)).unwrap();
+        assert!(!latest_lifecycle(path_str).await.unwrap().waiting());
+    }
+    fn alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    async fn closed(replies: &mut mpsc::UnboundedReceiver<String>) {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), replies.recv())
+                .await
+                .expect("the held engine closes"),
+            None
+        );
+    }
+    #[tokio::test]
+    async fn background_work_outlives_its_turn_and_its_wake_reply_is_delivered() {
+        let script = Script::new();
+        let (result, mut replies) = script.run_followed("background", None).await;
+        assert_eq!(result.unwrap().text, "final");
+        let pid = script.pids()[0];
+        // The turn ended but the engine that runs the background task is still up.
+        assert!(alive(pid));
+        script.release_background().await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), replies.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("background done")
+        );
+        closed(&mut replies).await;
+        assert!(!alive(pid));
+    }
+    #[tokio::test]
+    async fn the_next_turn_takes_over_a_held_engine() {
+        let script = Script::new();
+        let (first, mut replies) = script.run_followed("background", None).await;
+        first.unwrap();
+        let second = script
+            .run("normal", Some(script.session()), None)
+            .await
+            .unwrap();
+        assert!(second.resumed);
+        assert_eq!(second.text, "final");
+        // One process served both turns, so the background task was never restored.
+        assert_eq!(script.pids().len(), 1);
+        assert_eq!(
+            script
+                .commands()
+                .iter()
+                .filter(|c| c["type"] == "prompt")
+                .count(),
+            2
+        );
+        closed(&mut replies).await;
+        assert!(!alive(script.pids()[0]));
+    }
+    #[tokio::test]
+    async fn background_work_is_stopped_at_its_limit_and_the_owner_told() {
+        let mut script = Script::new();
+        script.config.background_max = Duration::from_millis(500);
+        let (result, mut replies) = script.run_followed("background", None).await;
+        result.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), replies.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(BACKGROUND_EXPIRED)
+        );
+        closed(&mut replies).await;
+        assert!(!alive(script.pids()[0]));
+    }
+    #[tokio::test]
+    async fn turns_without_a_follow_up_sink_or_background_work_close_their_engine() {
+        let script = Script::new();
+        script.run("background", None, None).await.unwrap();
+        let (result, mut replies) = script.run_followed("normal", None).await;
+        result.unwrap();
+        closed(&mut replies).await;
+        let pids = script.pids();
+        assert_eq!(pids.len(), 2);
+        assert!(pids.iter().all(|pid| !alive(*pid)));
     }
     #[tokio::test]
     #[ignore = "requires installed mhc and isolated agent credentials"]
