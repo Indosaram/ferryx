@@ -502,6 +502,51 @@ async fn ssh_daemon_restart_restores_identity_without_local_pty() {
     assert!(serving.await.unwrap_err().is_cancelled());
 }
 
+/// An SSH agent pane draws inline and never clears the whole screen, so after one reconnect gap
+/// its history only became whole again by retention evicting the gap seam. Agent control must
+/// read that pane's screen once the seam is gone, and keep refusing while it is still there.
+#[tokio::test]
+async fn ssh_agent_screen_is_readable_once_retention_evicts_the_gap_seam() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(serde_json::json!({
+        "backendSessionId":"inline-agent-pane", "target":{"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"inline-agent-target"},
+        "config":{"host":{"id":"host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:abcd","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId":"inline-agent-request","remoteCursor":"0","cols":80,"rows":24
+    })).unwrap();
+    server.terminal_service.remote().restore(descriptor).unwrap();
+    let hub = server.terminal_service.output_hub();
+    hub.publish("inline-agent-pane", b"before the gap\r\n".to_vec());
+    hub.publish_gap("inline-agent-pane").unwrap();
+    hub.publish("inline-agent-pane", b"\x1b[2Kworking\r\n".to_vec());
+    let read = || async {
+        crate::remote::server::agent_control_service::handle(
+            &server.remote_state,
+            crate::agent_control::AgentControlOp::Read { session_id: "inline-agent-pane".into() },
+        )
+        .await
+        .expect("read")
+    };
+
+    let gapped = read().await;
+    assert_eq!(gapped["session"]["screenReadable"], false, "{gapped}");
+    assert_eq!(gapped["session"]["screen"]["gap"], true, "{gapped}");
+
+    // Inline redraws only (erase line, never erase display), well past the retention budget.
+    let line = format!("\x1b[2K{}\r\n", "x".repeat(96));
+    for _ in 0..(2 * crate::terminal::output_hub::retained_history::DEFAULT_TEXT_RETENTION_BYTES / line.len()) {
+        hub.publish("inline-agent-pane", line.clone().into_bytes());
+    }
+    hub.publish("inline-agent-pane", b"\x1b[2Kagent ready>".to_vec());
+
+    let whole = read().await;
+    assert_eq!(whole["session"]["screenReadable"], true, "{whole}");
+    assert_eq!(whole["session"]["screen"]["gap"], false, "{whole}");
+    let text = whole["session"]["screen"]["text"].as_str().unwrap();
+    assert!(text.ends_with("agent ready>"), "{text}");
+    assert!(!text.contains("[Ferryx: output stream gap"), "{text}");
+}
+
 /// A full attach to a remote session is a gap only when its history really lost output: marking
 /// every full replay gapped left each reader behind a peer daemon (agent control after a
 /// handover) unable to read any SSH pane's screen, so chat input to it was always refused.

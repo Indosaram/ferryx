@@ -787,8 +787,21 @@ impl SessionHub {
             screen_seed: self
                 .screen_seed()
                 .filter(|seed| seed.bytes.len() <= super::screen_mirror::MAX_HANDOVER_SEED_BYTES),
-            history_incomplete: self.history_incomplete,
+            history_incomplete: self.history_incomplete(),
         }
+    }
+
+    /// Whether a full replay still carries output lost to a gap. It stops doing so once the
+    /// screen was redrawn, or once retention evicted the gap seam: the lost output then lies
+    /// before the replay's start like any other evicted output. Without the second case a pane
+    /// that never clears the whole screen (an inline TUI such as an agent's) stayed unreadable
+    /// for good after one reconnect gap.
+    pub(crate) fn history_incomplete(&self) -> bool {
+        self.history_incomplete
+            && !self
+                .buffer
+                .retained_start_sequence()
+                .is_some_and(|start| start >= self.buffer.gap_floor)
     }
 
     /// The mirrored screen, when it can stand in for retained replay.
@@ -1202,7 +1215,7 @@ impl TerminalOutputHub {
             history,
             history_segments: Vec::new(),
             gap,
-            history_incomplete: hub.history_incomplete,
+            history_incomplete: hub.history_incomplete(),
         };
         let ended = hub.ended;
         drop(hub);
