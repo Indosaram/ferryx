@@ -823,6 +823,24 @@ async fn outcome_acknowledgement_clears_only_the_authenticated_current_target() 
     fixture.server.stop().await;
 }
 
+#[tokio::test]
+async fn a_view_only_device_cannot_acknowledge_an_outcome() {
+    use crate::daemon::protocol::AgentOutcome;
+    let fixture = fixture().await;
+    let hub = fixture.state.terminal_service.output_hub();
+    let states = fixture.state.machine_services.as_ref().unwrap().sessions.agent_state_hub();
+    assert!(hub.enable_program_status(&fixture.session_id));
+    hub.publish(&fixture.session_id, b"\x1b]7501;state=done\x1b\\".to_vec()).unwrap();
+    let path = fixture.route("acknowledge-outcome");
+    let query = fixture.read_query("", &fixture.daemon_epoch, &reference_files::reference_host_id(), &[]);
+    let (status, body) = fixture.server.request("POST", &format!("{path}?{query}"), Some(&fixture.view), None).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("FORBIDDEN"), "{body}");
+    assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
+    fixture.state.terminal_service.close_session(&fixture.session_id).await.unwrap();
+    fixture.server.stop().await;
+}
+
 /// The target fences: the daemon incarnation, the owning host and the session itself.
 #[tokio::test]
 async fn a_reference_chat_read_refuses_a_foreign_target() {
