@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        revision: ['a3beca3f', '1b25ce6a']
+        revision: ['a3beca3fe8606252df0a4feb7b6b38e968308a00', '1b25ce6a31ce8845036e1622be604cbf393f9982']
     steps:
       - uses: actions/checkout@v4
         with:
