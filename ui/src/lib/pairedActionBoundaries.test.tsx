@@ -59,15 +59,26 @@ it("paired shell recovery cannot spawn a local replacement", async () => {
   await expect(replaceExitedShellSession(session.id, { getSessions: () => ({ pane: session }), dispatch: vi.fn(), spawn })).rejects.toBeTruthy();
   expect(spawn).not.toHaveBeenCalled();
 });
-it("paired agent recovery resumes on the paired workspace, never on this machine", async () => {
-  const spawn = vi.fn().mockRejectedValue({ code: "SPAWN_FAILED", message: "remote spawn refused" });
-  const agent = { ...session, agentType: "claude", providerSession: { key: "session_id" as const, id: "remote-provider" } };
-  await expect(reconnectAgentSession(agent.id, { getSessions: () => ({ pane: agent }), dispatch: vi.fn(), spawn, attach: vi.fn() })).rejects.toMatchObject({ code: "SPAWN_FAILED" });
-  // The only spawn is addressed to the pane's own paired workspace, so its host starts the agent.
+it("paired agent recovery resumes on the paired host, not via local provider APIs", async () => {
+  const backend = { sessionId: "backend-new", workspaceId: session.workspaceId, worktree: null,
+    cwd: session.cwd, cols: 80, rows: 24, running: true };
+  const spawned = { sessionId: "backend-new", daemonEpoch: "42", session: backend };
+  const spawn = vi.fn(async () => spawned);
+  const dispatch = vi.fn();
+  const providerSession = { key: "session_id" as const, id: "remote-provider" };
+  const agent = { ...session, agentType: "claude", providerSession };
+  await reconnectAgentSession(agent.id, {
+    getSessions: () => ({ pane: agent }), dispatch, spawn, attach: vi.fn(async () => undefined),
+  });
+  // The spawn names the paired workspace, so the backend starts the resume on the paired host.
   expect(spawn).toHaveBeenCalledOnce();
   expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
-    workspaceId: session.workspaceId,
-    startup: expect.objectContaining({ kind: "agentResume", agentType: "claude" }),
+    workspaceId: session.workspaceId, cwd: session.cwd,
+    startup: { kind: "agentResume", agentType: "claude", providerSession },
+  }));
+  expect(native.invoke).not.toHaveBeenCalledWith("cmd_terminal_spawn", expect.anything());
+  expect(dispatch).toHaveBeenLastCalledWith(expect.objectContaining({
+    type: "REBIND_SESSION_BACKEND", sessionId: agent.id, clearAgent: false,
   }));
 });
 it("paired recovery never mounts local terminal or DAG tooling while proxy support is absent", () => {

@@ -1,27 +1,52 @@
+[data-file-preview-print-document] {
+  display: none;
+}
+
 @media print {
-  body * {
-    visibility: hidden;
+  @page {
+    margin: 15mm;
   }
-  [data-file-preview-print-root],
-  [data-file-preview-print-root] * {
-    visibility: visible;
+  html,
+  body {
+    color-scheme: light !important;
+    background: white !important;
   }
-  [data-file-preview-print-root] {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
+  body > :not([data-file-preview-print-document]) {
+    display: none !important;
   }
-  /* Export PDF must paginate the whole document, not the scrolled viewport. */
-  [data-file-preview-print-root],
-  [data-file-preview-print-root] * {
+  body > [data-file-preview-print-document] {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    color: black;
+    background: white;
+  }
+  [data-file-preview-print-document],
+  [data-file-preview-print-document] * {
+    color: black !important;
+    background-color: white !important;
     overflow: visible !important;
     height: auto !important;
     max-height: none !important;
     min-height: 0 !important;
+    min-width: 0 !important;
   }
-  [data-file-preview-print-root] [data-print-hide],
-  [data-file-preview-print-root] [data-print-hide] * {
+  [data-file-preview-print-document] [data-print-hide] {
     display: none !important;
+  }
+  [data-file-preview-print-document] pre,
+  [data-file-preview-print-document] [data-line-window-row] > span {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+  }
+  [data-file-preview-print-document] [data-testid="file-preview-source"] {
+    display: block !important;
+  }
+  [data-file-preview-print-document] [data-testid="file-preview-text"] {
+    display: block !important;
+  }
+  [data-file-preview-print-document] [data-line-window-row] {
+    width: 100% !important;
+    break-inside: auto;
   }
 }

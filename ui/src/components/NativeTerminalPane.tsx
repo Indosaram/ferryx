@@ -41,6 +41,7 @@ import {
 import { openTerminalToken, resolveTokenAtCol } from "../lib/linkRouting";
 import { loadFileLinkEditor } from "../lib/fileLinkSettings";
 import {
+  acknowledgeAgentOutcome,
   attachTerminal,
   isStructuredIpcError,
   onNativeTerminalCopyOrInterrupt,
@@ -1348,6 +1349,16 @@ export function NativeTerminalPane({
       }
     }
   }, [active, sendFocus, targetSessionId, visible]);
+
+  // A focused pane has been read: the daemon drops the program's done/error outcome. The local
+  // mark is cleared by the store marking the completion seen on the same focus.
+  const activityOutcome = activity?.outcome;
+  useEffect(() => {
+    if (!active || !visible || !targetSessionId || !isTauri()) return;
+    acknowledgeAgentOutcome(targetSessionId).catch((error: unknown) => {
+      console.warn("Could not acknowledge the agent outcome", { sessionId: targetSessionId, error });
+    });
+  }, [active, activityOutcome, targetSessionId, visible]);
 
   const measureGeometry = useCallback((): GeometryState | null => {
     const element = viewportRef.current;

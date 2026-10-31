@@ -101,7 +101,8 @@ export function computeFileTabLabels(tabs: readonly WorkspaceTab[]): Record<stri
   const generated: FileTab[] = [];
   for (const tab of tabs) {
     if (tab.kind !== "file") continue;
-    if (isGeneratedFileTabLabel(tab.label, tab.path)) generated.push(tab);
+    if (tab.customLabel !== undefined) result[tab.id] = tab.customLabel;
+    else if (isGeneratedFileTabLabel(tab.label, tab.path)) generated.push(tab);
     else result[tab.id] = tab.label;
   }
   const labels = disambiguateFileTabLabels(generated.map((tab) => tab.path));

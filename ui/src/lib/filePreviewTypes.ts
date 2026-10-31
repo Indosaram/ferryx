@@ -97,7 +97,16 @@ export type FilePreviewTarget = {
 };
 
 /** `cmd_file_preview_open` arguments. */
+export type RemotePreviewOrigin = {
+  readonly workspaceId: string;
+  readonly path: string;
+  readonly sessionId: string | null;
+};
+
 export type FilePreviewOpenRequest = {
+  readonly remote?: RemotePreviewOrigin;
+  /** A just-fetched immutable snapshot; consumed once and never persisted. */
+  readonly freshRemoteSnapshot?: boolean;
   readonly path: string;
   readonly backendSessionId: string;
   readonly line: number | null;

@@ -19,6 +19,10 @@ use tokio::sync::Notify;
 use crate::native_terminal::{
     CompressionScheduler, CompressionStep, NativeTerminal, NativeTerminalError, TerminalEngine,
 };
+use crate::terminal::program_status::{ProgramStatusRecords, ProgramStatusSummary};
+use crate::terminal::program_status_ingest::{
+    apply_event, next_revision, ProgramStatusChange, ProgramStatusIngest,
+};
 
 /// Rows of history the mirror keeps above the screen. Bounds both memory and the size of the
 /// reconstruction that a full attach and a handover carry.
@@ -30,6 +34,10 @@ const CELL_HEIGHT_PX: u32 = 16;
 /// frame stays inside the handover payload limit next to the ring itself.
 pub const MAX_HANDOVER_SEED_BYTES: usize = 1024 * 1024;
 
+/// Visible text of the seam line `TerminalOutputHub::publish_gap` feeds into the mirror. Readers
+/// that classify the screen drop it: it is Ferryx's marker, not program output.
+pub const GAP_SEAM_TEXT: &str = "[Ferryx: output stream gap - some terminal output was missed]";
+
 pub struct ScreenMirror {
     terminal: NativeTerminal,
     /// Idle scrollback compression; output and resizes restart its delay.
@@ -37,6 +45,14 @@ pub struct ScreenMirror {
     /// Signalled on activity and on drop, so a compression driver can wait without a timer
     /// until there is something to compress, and notice when the mirror is gone.
     activity: Arc<Notify>,
+    /// OSC 7501 records, present only once [`Self::enable_program_status`] opted this mirror in.
+    /// The parser's sink fills it during `feed`, under the mirror's own mutex.
+    program_status: Option<Arc<parking_lot::Mutex<ProgramStatusRecords>>>,
+    /// The summary last handed out by [`Self::take_program_status`], to report only changes.
+    published_summary: Option<ProgramStatusSummary>,
+    /// The revision of the newest program status update, 0 before any. Every record applied
+    /// so far carries this revision or an older one.
+    program_status_revision: u64,
 }
 
 /// A mirror's screen in transferable form: the size it was taken at and the VT bytes that
@@ -58,6 +74,84 @@ fn decode_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D
     STANDARD.decode(text).map_err(serde::de::Error::custom)
 }
 
+/// The rows of a mirror's visible screen, copied out under its lock and not yet processed.
+pub struct VisibleRows {
+    cols: u16,
+    rows: u16,
+    alt_screen: bool,
+    /// Up to [`seam_slack`] scrollback rows above the visible screen, then the visible rows.
+    lines: Vec<String>,
+}
+
+/// Plain text of a mirror's visible screen: rows trimmed at the end, trailing blank rows and the
+/// gap seam dropped, joined with `\n`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleScreen {
+    pub text: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub alt_screen: bool,
+}
+
+impl VisibleRows {
+    /// Turns the copied rows into text. Runs outside the mirror's lock.
+    ///
+    /// The text is the screen the program's own output produced: gap seams are removed and the
+    /// last `rows` remaining rows kept, so the rows a seam scrolled off the top come back from
+    /// the slack above. A seam starts with CRLF, so when the cursor was already at column 0 it
+    /// leaves a blank row above the seam that the program never wrote; that row is dropped with
+    /// the seam.
+    pub fn into_screen(self) -> VisibleScreen {
+        let seam: String = GAP_SEAM_TEXT.split_whitespace().collect();
+        let mut lines: Vec<String> = Vec::with_capacity(self.lines.len());
+        let mut index = 0;
+        while index < self.lines.len() {
+            if let Some(span) = gap_seam_rows(&self.lines[index..], &seam) {
+                if lines.last().is_some_and(|line| line.is_empty()) {
+                    lines.pop();
+                }
+                index += span;
+                continue;
+            }
+            lines.push(self.lines[index].trim_end().to_string());
+            index += 1;
+        }
+        let excess = lines.len().saturating_sub(usize::from(self.rows));
+        lines.drain(..excess);
+        while lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        VisibleScreen {
+            text: lines.join("\n"),
+            cols: self.cols,
+            rows: self.rows,
+            alt_screen: self.alt_screen,
+        }
+    }
+}
+
+/// Scrollback rows copied above the visible screen: enough to restore what two gap seams, each
+/// wrapped at `cols` and preceded by a blank row, scrolled off the top.
+fn seam_slack(cols: u16) -> usize {
+    2 * (GAP_SEAM_TEXT.len().div_ceil(usize::from(cols.max(1))) + 1)
+}
+
+/// How many rows at the head of `rows` hold one gap seam, which wraps on narrow screens.
+/// Whitespace is ignored so a wrap that falls on a space still matches.
+fn gap_seam_rows(rows: &[String], seam: &str) -> Option<usize> {
+    let mut joined = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        joined.extend(row.split_whitespace());
+        if joined.is_empty() || !seam.starts_with(joined.as_str()) {
+            return None;
+        }
+        if joined.len() == seam.len() {
+            return Some(index + 1);
+        }
+    }
+    None
+}
+
 impl ScreenMirror {
     pub fn new(cols: u16, rows: u16) -> Option<Self> {
         let mut terminal = match NativeTerminal::new(cols, rows) {
@@ -77,13 +171,39 @@ impl ScreenMirror {
             terminal,
             compression: CompressionScheduler::default(),
             activity: Arc::new(Notify::new()),
+            program_status: None,
+            published_summary: None,
+            program_status_revision: 0,
         })
     }
 
+    /// Built from a seed. The seed is replayed before any opt-in, so it never produces program
+    /// status reports or query replies.
     pub fn from_seed(seed: &ScreenSeed) -> Option<Self> {
         let mut mirror = Self::new(seed.cols, seed.rows)?;
-        mirror.feed(&seed.bytes);
+        mirror.feed_replay(&seed.bytes);
         Some(mirror)
+    }
+
+    /// Makes this mirror the session's OSC 7501 consumer and support query replier. Only for
+    /// sessions this daemon answers for. Every other PTY write stays suppressed. Returns false
+    /// when the parser refused the callbacks.
+    pub fn enable_program_status(&mut self) -> bool {
+        if self.program_status.is_some() {
+            return true;
+        }
+        let records = Arc::new(parking_lot::Mutex::new(ProgramStatusRecords::new()));
+        let sink_records = Arc::clone(&records);
+        if let Err(error) = self
+            .terminal
+            .enable_program_status(move |event| apply_event(&mut sink_records.lock(), event))
+        {
+            tracing::warn!(%error, "screen mirror program status unavailable");
+            return false;
+        }
+        self.terminal.set_program_status_reply_capture(true);
+        self.program_status = Some(records);
+        true
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -91,6 +211,68 @@ impl ScreenMirror {
             tracing::warn!(%error, "screen mirror feed failed");
         }
         self.mark_activity();
+    }
+
+    /// Feeds bytes that already reached the program before (seed, retained history, a gap seam):
+    /// no program status report is ingested and no query reply is kept.
+    pub fn feed_replay(&mut self, bytes: &[u8]) {
+        self.terminal.set_program_status_muted(true);
+        self.terminal.set_program_status_reply_capture(false);
+        self.feed(bytes);
+        self.terminal.set_program_status_muted(false);
+        self.terminal
+            .set_program_status_reply_capture(self.program_status.is_some());
+    }
+
+    /// Drains the query replies kept since the last call and reports the summary when it changed.
+    pub fn take_program_status(&mut self) -> ProgramStatusIngest {
+        let replies = self.terminal.take_program_status_replies();
+        let summary = self
+            .update_program_status(|_| {})
+            .filter(|(changed, _)| *changed)
+            .map(|(_, change)| change);
+        ProgramStatusIngest { replies, summary }
+    }
+
+    /// The user saw the session: drops `done`/`error` records. `None` when not opted in, else
+    /// whether the summary changed and the summary afterwards.
+    pub fn acknowledge_program_status(&mut self) -> Option<(bool, ProgramStatusChange)> {
+        self.update_program_status(ProgramStatusRecords::acknowledge)
+    }
+
+    /// The foreground program exited, as proven by evidence gathered while `through` was the
+    /// session's newest published revision: drops the `working`/`blocked`/`idle` records applied
+    /// by then, under this mirror's lock, and keeps any applied later. `None` when not opted in,
+    /// else whether the summary changed and the summary afterwards.
+    pub fn program_status_exited(&mut self, through: u64) -> Option<(bool, ProgramStatusChange)> {
+        self.update_program_status(|records| records.program_exited(through))
+    }
+
+    /// The revision of the newest program status update, 0 before any: evidence gathered after
+    /// reading it covers every record applied by then.
+    pub fn program_status_revision(&self) -> u64 {
+        self.program_status_revision
+    }
+
+    /// Applies `update` and returns whether the summary changed, with the summary afterwards
+    /// under a revision taken here, while the caller holds this mirror's lock. A publisher
+    /// drops a change only when it already applied a newer one, so unchanged summaries need no
+    /// re-publication. Records applied since the last update are stamped with that revision.
+    fn update_program_status(
+        &mut self,
+        update: impl FnOnce(&mut ProgramStatusRecords),
+    ) -> Option<(bool, ProgramStatusChange)> {
+        let revision = next_revision();
+        let summary = {
+            let mut records = self.program_status.as_ref()?.lock();
+            update(&mut records);
+            records.stamp(revision);
+            records.summary()
+        };
+        self.program_status_revision = revision;
+        let changed = summary != self.published_summary;
+        self.published_summary = summary.clone();
+        Some((changed, ProgramStatusChange { revision, summary }))
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -133,6 +315,24 @@ impl ScreenMirror {
 
     pub fn is_alternate_screen(&self) -> bool {
         self.terminal.is_alternate_screen().unwrap_or(true)
+    }
+
+    /// Copies the visible screen's rows plus a few scrollback rows above them (see
+    /// [`VisibleRows::into_screen`]). Screen coordinates count the active screen's scrollback
+    /// first, so the visible rows start after it. Reads only; idle compression is not re-armed.
+    pub fn visible_rows(&self) -> Option<VisibleRows> {
+        let (cols, rows) = self.terminal.dimensions().ok()?;
+        let top = self.terminal.scrollback_rows().ok()?;
+        let alt_screen = self.terminal.is_alternate_screen().ok()?;
+        let first = top.saturating_sub(seam_slack(cols));
+        let mut lines = Vec::with_capacity(top - first + usize::from(rows));
+        for row in first..top + usize::from(rows) {
+            match self.terminal.screen_row_text(row) {
+                Ok(text) => lines.push(text),
+                Err(_) => break,
+            }
+        }
+        Some(VisibleRows { cols, rows, alt_screen, lines })
     }
 
     /// The mirror's screen as a seed, or `None` when the parser cannot serialize it.

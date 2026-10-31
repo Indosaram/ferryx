@@ -11,10 +11,17 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const stateEvents = vi.hoisted(() => ({
   handlers: new Set<(event: { payload: unknown }) => void>(),
+  pickedHandlers: new Set<(event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (eventName: string, handler: (event: { payload: unknown }) => void) => {
+    if (eventName === "browser_element_picked") {
+      stateEvents.pickedHandlers.add(handler);
+      return () => {
+        stateEvents.pickedHandlers.delete(handler);
+      };
+    }
     if (eventName !== "browser_state_changed") return () => undefined;
     stateEvents.handlers.add(handler);
     return () => {
@@ -25,6 +32,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 function emitStateChanged(payload: Record<string, unknown>) {
   for (const handler of [...stateEvents.handlers]) handler({ payload });
+}
+
+function emitElementPicked(payload: Record<string, unknown>) {
+  for (const handler of [...stateEvents.pickedHandlers]) handler({ payload });
 }
 
 vi.mock("../lib/browserTauri", async (importOriginal) => ({
@@ -180,5 +191,29 @@ describe("BrowserToolbar devtools", () => {
 
     fireEvent.click(picker);
     expect(elementPickerSpy).toHaveBeenCalledWith("browser-42");
+  });
+
+  it("opens the design feedback popover after Select element and a pick, without parent-owned picking state", async () => {
+    finishPickerSpy.mockResolvedValue({
+      session_id: "s",
+      timestamp_ms: 1,
+      screenshot_png_base64: "iVBORw0KGgo=",
+      dom_elements: [{ id: "el-1", tag: "button", bounds: [1, 2, 100, 40] as [number, number, number, number] }],
+    });
+    renderToolbar();
+
+    const picker = screen.getByRole("button", { name: "Select element" });
+    await act(async () => undefined);
+    fireEvent.click(picker);
+    expect(picker.getAttribute("aria-pressed")).toBe("true");
+    await waitFor(() => expect(stateEvents.pickedHandlers.size).toBeGreaterThan(0));
+
+    act(() => emitElementPicked({ browserId: "browser-42" }));
+
+    expect(await screen.findByTestId("design-feedback-popover")).toBeTruthy();
+    expect(finishPickerSpy).toHaveBeenCalledWith("browser-42");
+    // The completed pick disarms the picker, so the button and its subscription are released.
+    expect(picker.getAttribute("aria-pressed")).toBe("false");
+    await waitFor(() => expect(stateEvents.pickedHandlers.size).toBe(0));
   });
 });

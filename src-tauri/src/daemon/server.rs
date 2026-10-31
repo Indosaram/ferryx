@@ -2095,6 +2095,41 @@ fn foreground_marker(session: &crate::terminal::session::PtySession) -> Option<u
     }
 }
 
+/// Publishes OSC 7501 summaries as Protocol states and remembers, per session, which foreground
+/// process group reported the last transient one, so the foreground observer can release it when
+/// the shell takes the terminal back (see [`crate::terminal::foreground::ProtocolReporters`]).
+struct ProgramStatusRelay {
+    states: Arc<AgentStateHub>,
+    reporters: Arc<crate::terminal::foreground::ProtocolReporters>,
+    /// Weak: the terminal service's output hub owns this relay.
+    terminal_service: std::sync::Weak<TerminalService>,
+}
+
+impl crate::terminal::program_status_ingest::ProgramStatusPublisher for ProgramStatusRelay {
+    fn publish(
+        &self,
+        session_id: &str,
+        change: &crate::terminal::program_status_ingest::ProgramStatusChange,
+    ) {
+        use crate::terminal::program_status::ProgramState;
+        let transient = change.summary.as_ref().is_some_and(|summary| {
+            matches!(
+                summary.state,
+                ProgramState::Working | ProgramState::Blocked | ProgramState::Idle
+            )
+        });
+        let group = self
+            .terminal_service
+            .upgrade()
+            .and_then(|terminal| terminal.get_session(session_id))
+            .and_then(|session| foreground_marker(&session));
+        self.reporters
+            .reported(session_id, change.revision, transient, group);
+        self.states
+            .publish_protocol(session_id, change.revision, change.summary.as_ref());
+    }
+}
+
 /// The observer's probe bookkeeping for one pane's current agent process.
 struct MachineIdentityProbe {
     agent_pid: u32,
@@ -2239,6 +2274,8 @@ pub struct DaemonServer {
     /// Test-only pane child pids counted alongside the live sessions' (`supervisor_peer`).
     #[cfg(test)]
     pub(crate) test_pane_pids: Mutex<std::collections::HashSet<u32>>,
+    /// Which foreground process group reported each session's transient OSC 7501 records.
+    protocol_reporters: Arc<crate::terminal::foreground::ProtocolReporters>,
 }
 
 #[cfg(test)]
@@ -3952,6 +3989,19 @@ impl DaemonServer {
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
+        // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
+        let protocol_reporters =
+            Arc::new(crate::terminal::foreground::ProtocolReporters::default());
+        let program_status_publisher: Arc<
+            dyn crate::terminal::program_status_ingest::ProgramStatusPublisher,
+        > = Arc::new(ProgramStatusRelay {
+            states: session_service.agent_state_hub(),
+            reporters: Arc::clone(&protocol_reporters),
+            terminal_service: Arc::downgrade(&terminal_service),
+        });
+        terminal_service
+            .output_hub()
+            .set_program_status_publisher(program_status_publisher);
         #[cfg(test)]
         let remote_state = Arc::new(RemoteGatewayState::new_with_paths_and_service(
             Arc::clone(&session_router) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -4124,6 +4174,7 @@ impl DaemonServer {
             close_park: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_pane_pids: Mutex::new(std::collections::HashSet::new()),
+            protocol_reporters,
         }
     }
 
@@ -4504,6 +4555,8 @@ impl DaemonServer {
                 provider_session: ingress_publish_identity(outcome, reported, admitted),
                 detail,
                 origin,
+                outcome: None,
+                kind: None,
             },
         ))
     }
@@ -4962,6 +5015,9 @@ impl DaemonServer {
                     .collect();
                 transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
                 probes.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
+                server
+                    .protocol_reporters
+                    .retain(|id| sessions.iter().any(|(live, _)| live == id));
                 while let Ok((id, agent_pid, finished)) = probe_done.try_recv() {
                     if let Some(probe) = probes.get_mut(&id).filter(|p| p.agent_pid == agent_pid) {
                         probe.in_flight = false;
@@ -4989,6 +5045,19 @@ impl DaemonServer {
                 }
                 sampled_markers = markers;
                 last_snapshot_at = Some(now);
+                // Each session's newest OSC 7501 revision, read before the listing is requested:
+                // a report applied by then was written by a process that already existed, so a
+                // listing without any such process proves it gone. A report applied later is
+                // never released by this listing. The mirror's own revision also covers records
+                // that changed no summary and so never reached the reporters.
+                let requested_revisions: HashMap<String, u64> = sessions
+                    .iter()
+                    .map(|(id, _)| {
+                        let mirror =
+                            server.terminal_service.output_hub().program_status_revision(id);
+                        (id.clone(), server.protocol_reporters.newest(id).max(mirror))
+                    })
+                    .collect();
                 let capture = Arc::clone(&capture);
                 let observations = crate::ipc::run_blocking(move || {
                     // One process listing per tick. On Windows that listing is a full
@@ -5003,7 +5072,7 @@ impl DaemonServer {
                         .map(|(id, session)| {
                             let observation = match &snapshot {
                                 Ok(snapshot) => {
-                                    crate::terminal::foreground::inspect_with_snapshot(
+                                    crate::terminal::foreground::observe_with_snapshot(
                                         &session, snapshot,
                                     )
                                 }
@@ -5021,7 +5090,11 @@ impl DaemonServer {
                     Ok(observations) => {
                         for (id, observation) in observations {
                             match observation {
-                                Ok(observation) => {
+                                Ok(observed) => {
+                                    let observation = observed.map(|observed| observed.foreground);
+                                    let alone_after = observed
+                                        .filter(|observed| observed.shell_alone)
+                                        .and_then(|_| requested_revisions.get(&id).copied());
                                     let edge = transitions
                                         .entry(id.clone())
                                         .or_default()
@@ -5045,14 +5118,48 @@ impl DaemonServer {
                                         }
                                         None => {}
                                     }
+                                    // A program that reported a transient OSC 7501 state may
+                                    // never have been sampled as an agent (it lived shorter
+                                    // than a tick, or is no agent at all), so it has no
+                                    // Released edge. The shell owning the foreground again from
+                                    // a group other than the reporter's ends it, and so does a
+                                    // listing requested after the report that shows the shell
+                                    // alone, for a report not attributed to the shell's own
+                                    // group: that covers ConPTY, which has no group at all.
+                                    // `Some` when the pending report is proven gone.
+                                    let released =
+                                        server.protocol_reporters.foreground_returned(
+                                            &id,
+                                            observation,
+                                            sampled_markers.get(&id).copied().flatten(),
+                                            alone_after,
+                                            || {
+                                                server
+                                                    .terminal_service
+                                                    .get_session(&id)
+                                                    .and_then(|session| foreground_marker(&session))
+                                            },
+                                        );
                                     if server.terminal_service.get_session(&id).is_some() {
+                                        // The mirror drops only records applied before this
+                                        // listing was requested (or the released report): one
+                                        // parsed since may belong to a program it never saw.
+                                        let through = requested_revisions
+                                            .get(&id)
+                                            .copied()
+                                            .unwrap_or(0)
+                                            .max(released.unwrap_or(0));
                                         match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
                                             server.agent_states.release_foreground(&id);
                                             server.session_service.release_provider_claim(&id);
+                                            server.program_exited(&id, through);
                                         }
                                         Some(crate::terminal::foreground::AgentProcessEdge::Observed) => {
                                             server.agent_states.observe_foreground_agent(&id);
+                                        }
+                                        None if released.is_some() => {
+                                            server.program_exited(&id, through)
                                         }
                                         None => {}
                                     }
@@ -6818,6 +6925,14 @@ impl DaemonServer {
                         }
                     } else {
                         daemon_session_not_found(&session_id, "daemon_discover_agent")
+                    }
+                }
+                Ok(DaemonRequest::AcknowledgeAgentOutcome { session_id }) => {
+                    match crate::remote::backend::RemoteSessionBackend::acknowledge_agent_outcome(
+                        self.session_router.as_ref(), &session_id,
+                    ).await {
+                        Ok(()) => DaemonResponse::AcknowledgeAgentOutcomeOk,
+                        Err(message) => daemon_error(message),
                     }
                 }
                 Ok(DaemonRequest::ResetAgentState { session_id }) => {
@@ -8708,6 +8823,15 @@ impl DaemonServer {
         }
     }
 
+    /// The session's foreground agent left, as proven by evidence gathered while `through` was
+    /// its newest OSC 7501 revision: drops the transient records applied by then, under the
+    /// mirror lock; the output hub publishes the summary afterwards, as for an acknowledgement.
+    fn program_exited(&self, session_id: &str, through: u64) {
+        self.terminal_service
+            .output_hub()
+            .program_exited(session_id, through);
+    }
+
     /// A paired session id is handled by this daemon's own paired runtime unless an older
     /// generation kept it across an upgrade and still serves it (todo 8): then it is routed.
     fn serves_paired_here(&self, session_id: &str) -> bool {
@@ -9296,6 +9420,9 @@ impl DaemonServer {
                 detail: snapshot.detail.as_deref().map(Cow::Borrowed),
                 is_snapshot: true,
                 origin: snapshot.origin,
+                state_source: snapshot.origin.wire_source(),
+                outcome: snapshot.outcome,
+                kind: snapshot.kind,
             };
             let Ok(frame) = crate::daemon::protocol::encode_daemon_stream_frame(&msg) else {
                 return;
@@ -9356,6 +9483,9 @@ impl DaemonServer {
                                         detail: report.state.detail.as_deref().map(Cow::Borrowed),
                                         is_snapshot: report.is_snapshot,
                                         origin: report.state.origin,
+                                        state_source: report.state.origin.wire_source(),
+                                        outcome: report.state.outcome,
+                                        kind: report.state.kind,
                                     };
                                     frame_buf.clear();
                                     if serde_json::to_writer(&mut frame_buf, &msg).is_err() {
@@ -9381,6 +9511,9 @@ impl DaemonServer {
                                                 detail: current.detail.as_deref().map(Cow::Borrowed),
                                                 is_snapshot: true,
                                                 origin: current.origin,
+                                                state_source: current.origin.wire_source(),
+                                                outcome: current.outcome,
+                                                kind: current.kind,
                                             };
                                             frame_buf.clear();
                                             if serde_json::to_writer(&mut frame_buf, &msg).is_err() { break; }
@@ -9577,6 +9710,119 @@ mod ssh_survival_tests;
 #[cfg(all(test, unix))]
 #[path = "remote_ssh_tests.rs"]
 mod remote_ssh_tests;
+
+#[cfg(all(test, unix))]
+mod protocol_release_tests {
+    use super::*;
+
+    /// Collects the pane's output until `marker` appears; a protocol handshake, not a delay.
+    async fn output_until(output: &mut broadcast::Receiver<Vec<u8>>, marker: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut seen = Vec::new();
+            loop {
+                match output.recv().await {
+                    Ok(chunk) => seen.extend(chunk),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("PTY closed before {marker}")
+                    }
+                }
+                if String::from_utf8_lossy(&seen).contains(marker) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("pane marker");
+    }
+
+    /// Live E2E `release` (plan rex-learnings-20261030, R12): a program reports `working` over
+    /// OSC 7501 and exits without the observer ever sampling it as an agent. The shell taking
+    /// the foreground back must still drop the report instead of pinning the pane to working.
+    #[tokio::test]
+    async fn shell_regaining_the_foreground_releases_an_unsampled_reporter() {
+        let (directory, script) = crate::ipc::run_blocking(|| {
+            let directory = tempfile::tempdir().unwrap();
+            // Not an agent name: ProcessTransition can never see this program as an Agent,
+            // exactly like a reporter that exits within one observation tick.
+            let script = directory.path().join("reporter");
+            std::fs::write(
+                &script,
+                "printf '\\033]7501;state=working:app=e2e\\033\\\\'\nread answer\n",
+            )
+            .unwrap();
+            Ok((directory, script))
+        })
+        .await
+        .unwrap();
+        let server = Arc::new(DaemonServer::new());
+        let mut command = portable_pty::CommandBuilder::new("/bin/bash");
+        command.args(["--noprofile", "--norc", "-i"]);
+        let (id, _lifecycle) = server
+            .terminal_service
+            .spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                crate::terminal::pty::ResolvedSpawnContext {
+                    root: directory.path().to_owned(),
+                    cwd: directory.path().to_owned(),
+                    managed_workspace_id: None,
+                },
+            )
+            .unwrap();
+        let (_history, mut output) = server
+            .terminal_service
+            .output_hub()
+            .observe_for_test(&id)
+            .unwrap();
+        let mut states = server.agent_states.subscribe(&id);
+        // The quotes keep the echoed command line from containing the marker itself.
+        server
+            .terminal_service
+            .write_input(&id, b"stty -echo; PS1='SHELL_''READY>'\n")
+            .unwrap();
+        output_until(&mut output, "SHELL_READY>").await;
+        server
+            .terminal_service
+            .write_input(&id, format!("/bin/sh '{}'\n", script.display()).as_bytes())
+            .unwrap();
+        // The report is published while the reporter blocks in `read`, in front of its pane.
+        let reported = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let update = states.receiver.recv().await.unwrap();
+                if update.state.origin == crate::daemon::protocol::AgentStateOrigin::Protocol {
+                    return update.state;
+                }
+            }
+        })
+        .await
+        .expect("protocol report");
+        assert_eq!(reported.state, "working");
+        server.terminal_service.write_input(&id, b"done\n").unwrap();
+        output_until(&mut output, "SHELL_READY>").await;
+
+        server.spawn_foreground_observer();
+        let released = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let update = states.receiver.recv().await.unwrap();
+                if update.state.state != "working" {
+                    return update.state;
+                }
+            }
+        })
+        .await
+        .expect("the shell owning the foreground again must release the report");
+        assert_eq!(released.state, "idle");
+        // The release hands the pane back to screen inference (finding 2).
+        assert!(!released.origin.claims_activity(), "{:?}", released.origin);
+
+        server.terminal_service.write_input(&id, b"exit\n").unwrap();
+        server.terminal_service.close_session(&id).await.unwrap();
+        drop(directory);
+    }
+}
 
 #[cfg(all(test, unix))]
 mod idle_cost_tests {
@@ -11809,6 +12055,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
         assert_eq!(
             server.agent_states.current(&session_id).unwrap().state,
@@ -11890,6 +12138,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
         server.agent_states.publish_canonical(AgentState {
             session_id: session_id.clone(),
@@ -11898,6 +12148,8 @@ mod tests {
             provider_session: None,
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         });
 
         let mut reader = BufReader::new(&mut server_side);
@@ -11952,6 +12204,8 @@ mod tests {
                 provider_session: None,
                 detail: None,
                 origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                outcome: None,
+                kind: None,
             });
 
             let (client_stream, server_stream) = UnixStream::pair().map_err(|e| e.to_string())?;
@@ -12237,6 +12491,8 @@ mod tests {
                 provider_session: None,
                 detail: Some("approve?".into()),
                 origin: crate::daemon::protocol::AgentStateOrigin::ProcessObserved,
+                outcome: None,
+                kind: None,
             };
             let (_, state, _, _, detail) =
                 discovered_machine_report("pane-1", agent, id, Some(&retained));
@@ -12260,6 +12516,8 @@ mod tests {
             provider_session: Some(provider.clone()),
             detail: None,
             origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
         };
         let report = discovered_machine_report("pane-1", "omo", &provider.id, Some(&retained));
         assert!(provider_has_no_process_bound_session("omo", &provider));
@@ -12647,8 +12905,10 @@ mod tests {
         write_file.write_all(test_message).expect("write to pipe");
         drop(write_file); // Close writer so reader hits EOF
 
-        // 5. Spawn /bin/sh to read from inherited read_fd
-        let output = std::process::Command::new("/bin/sh")
+        // 5. Spawn a shell to read from inherited read_fd. Not /bin/sh: dash (Ubuntu's sh)
+        // only parses single-digit fds in `<&N`, and under a parallel test run the pipe is
+        // routinely allocated at fd 10 or above. bash accepts any fd number.
+        let output = std::process::Command::new("/bin/bash")
             .arg("-c")
             .arg(format!("read -r line <&{}; echo \"$line\"", read_fd))
             .output()

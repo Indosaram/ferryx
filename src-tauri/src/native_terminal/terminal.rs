@@ -228,6 +228,41 @@ impl NativeTerminal {
         self.context.write_pty_buffer.lock().clone()
     }
 
+    /// Opts this terminal into OSC 7501 program status reports, OSC 133 prompt starts and
+    /// full-reset events, delivered synchronously to `sink` from inside `feed`.
+    ///
+    /// Off by default. Once enabled, libghostty answers the `OSC 7501 ; ?` support query
+    /// through the PTY write path, so enable it on exactly one engine per PTY. Calling it
+    /// again replaces the sink.
+    pub fn enable_program_status(
+        &mut self,
+        sink: impl FnMut(super::program_status::ProgramStatusEvent) + Send + 'static,
+    ) -> Result<(), NativeTerminalError> {
+        super::program_status::register(self.handle, &self.context, Box::new(sink))
+    }
+
+    /// Drops every program status event while `muted` (for seed and gap replay). The support
+    /// query reply is governed by `set_pty_writes_suppressed`, not by this flag.
+    pub fn set_program_status_muted(&self, muted: bool) {
+        self.context
+            .program_status_muted
+            .store(muted, Ordering::Release);
+    }
+
+    /// While PTY writes are suppressed, keeps OSC 7501 support query replies for
+    /// [`Self::take_program_status_replies`] instead of dropping them. Every other write stays
+    /// suppressed, so an engine that is not the client can answer this one query alone.
+    pub fn set_program_status_reply_capture(&self, capture: bool) {
+        self.context
+            .program_status_reply_capture
+            .store(capture, Ordering::Release);
+    }
+
+    /// Drains the OSC 7501 support query replies kept since the last call, oldest first.
+    pub fn take_program_status_replies(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut *self.context.program_status_replies.lock())
+    }
+
     /// Sends the unsolicited DEC 2031 color scheme report for `appearance` when the running
     /// program enabled mode 2031, through the same PTY write path VT query replies use.
     ///

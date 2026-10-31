@@ -16,9 +16,13 @@ export type AttentionRow = {
   at?: number;
   /** Set on supervisor hand-offs: the fixed stop-reason or awaiting-approval label. */
   supervisorLabel?: string;
+  /** What a `needs-you` row is blocked on, when the program said so. */
+  kind?: AttentionBlockedKind;
 };
 
-export type AttentionActivity = { state?: string; detail?: string; seen?: boolean };
+export type AttentionBlockedKind = "permission" | "question" | "auth";
+
+export type AttentionActivity = { state?: string; detail?: string; seen?: boolean; kind?: AttentionBlockedKind };
 
 export type AttentionActivityLookup = (
   workspaceId: string,
@@ -46,6 +50,17 @@ export const ATTENTION_KIND_LABEL: Record<AttentionState, string> = {
   "needs-you": "Waiting",
   done: "Done",
 };
+
+export const ATTENTION_BLOCKED_KIND_LABEL: Record<AttentionBlockedKind, string> = {
+  permission: "Permission",
+  question: "Question",
+  auth: "Sign-in",
+};
+
+/** The row's kind chip: the program's blocked kind when it named one, else the state's kind. */
+export function attentionKindLabel(row: Pick<AttentionRow, "state" | "kind">): string {
+  return row.state === "needs-you" && row.kind ? ATTENTION_BLOCKED_KIND_LABEL[row.kind] : ATTENTION_KIND_LABEL[row.state];
+}
 
 /** The first source that names a workspace owns it, so pass the mounted state before cached snapshots. */
 export function activityLookupFrom(sources: Iterable<ActivitySource | null | undefined>): AttentionActivityLookup {
@@ -129,6 +144,7 @@ export function buildAttentionRows(
     const title = displayTitle(entry.labels.terminalTitle);
     const who = entry.labels.agentLabel?.trim() || title || "Terminal";
     const question = activity?.state === "waiting" ? activity.detail?.trim() || undefined : undefined;
+    const kind = state === "needs-you" && activity?.state === "waiting" ? activity.kind : undefined;
     const supervisorLabel = entry.reason === "supervisor" && entry.supervisor
       ? supervisorStopReasonLabel(entry.supervisor.stopReason, entry.supervisor.awaitingApproval) ?? undefined
       : undefined;
@@ -143,6 +159,7 @@ export function buildAttentionRows(
       text: question ?? (title !== who ? title : undefined),
       at: entry.lastOccurredAt,
       ...(supervisorLabel ? { supervisorLabel } : {}),
+      ...(kind ? { kind } : {}),
     });
   }
   return sortAttentionRows(rows);

@@ -33,6 +33,8 @@ pub enum SecurityError {
     RateLimitExceeded(&'static str),
     #[error("Request outcome unknown: request sequence expired")]
     OutcomeUnknown,
+    #[error("Request is still in flight: its result is not available yet")]
+    RequestInFlight,
 }
 
 pub fn require_permission(
@@ -68,7 +70,11 @@ pub const REDACTED_PATH: &str = "[redacted-path]";
 /// Characters that terminate a public URL token.
 fn url_token_end(rest: &str) -> usize {
     rest.find(|c: char| {
-        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>' | ')' | '}' | ']')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '`' | '<' | '>' | ')' | '}' | ']' | ',' | ';'
+            )
     })
     .unwrap_or(rest.len())
 }
@@ -93,6 +99,28 @@ fn is_path_token_start(prev: Option<char>) -> bool {
         None => true,
         Some(c) => !(c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '~')),
     }
+}
+
+/// Extends a path token over following space-separated segments (`/Users/a/My Project/k.pem`).
+/// A segment continues the path only while the path so far has no file extension and the next
+/// word itself contains a slash, so ordinary prose after a path is left alone.
+fn extend_over_spaced_segments(rest: &str, mut end: usize) -> usize {
+    loop {
+        let last_segment = rest[..end].rsplit('/').next().unwrap_or("");
+        if last_segment.contains('.') {
+            break;
+        }
+        let Some(tail) = rest[end..].strip_prefix(' ') else {
+            break;
+        };
+        let word_end = path_token_end(tail);
+        let word = &tail[..word_end];
+        if !word.chars().next().is_some_and(char::is_alphanumeric) || !word.contains('/') {
+            break;
+        }
+        end += 1 + word_end;
+    }
+    end
 }
 
 /// Length of a leading absolute filesystem path, or `None` when `rest` does not
@@ -125,7 +153,7 @@ fn absolute_path_len(rest: &str) -> Option<usize> {
 
     // Home-relative path: ~/dir
     if let Some(body) = token.strip_prefix("~/") {
-        return (!body.is_empty()).then_some(end);
+        return (!body.is_empty()).then(|| extend_over_spaced_segments(rest, end));
     }
 
     // Absolute POSIX path: requires a named first segment starting with alphanumeric, '.', '_', or '-'.
@@ -135,7 +163,7 @@ fn absolute_path_len(rest: &str) -> Option<usize> {
     if !(first.is_alphanumeric() || matches!(first, '.' | '_' | '-')) {
         return None;
     }
-    Some(end)
+    Some(extend_over_spaced_segments(rest, end))
 }
 
 /// Redacts every absolute filesystem path while leaving HTTP(S) URLs byte-identical,
@@ -199,6 +227,9 @@ pub fn truncate_eval_result(result_str: &str) -> (String, bool) {
 
 pub struct RequestDeduplicator {
     cache: Mutex<HashMap<u64, (Instant, Vec<u8>)>>,
+    /// Sequence numbers accepted but not yet completed, with their acceptance time. A retry of
+    /// one of these is reported as in flight rather than as an expired (unknown) outcome.
+    in_flight: Mutex<HashMap<u64, Instant>>,
     highest_seen_seq: Mutex<u64>,
 }
 
@@ -212,6 +243,7 @@ impl RequestDeduplicator {
     pub fn new() -> Self {
         Self {
             cache: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::new()),
             highest_seen_seq: Mutex::new(0),
         }
     }
@@ -224,28 +256,56 @@ impl RequestDeduplicator {
         let mut cache = self.cache.lock();
         // Prune expired entries
         cache.retain(|_, (ts, _)| now.saturating_duration_since(*ts) <= DEDUP_CACHE_TTL);
+        let mut in_flight = self.in_flight.lock();
+        in_flight.retain(|_, ts| now.saturating_duration_since(*ts) <= DEDUP_CACHE_TTL);
 
         let mut highest = self.highest_seen_seq.lock();
         if seq <= *highest {
             if let Some((_, result)) = cache.get(&seq) {
                 return Ok(Some(result.clone()));
+            } else if in_flight.contains_key(&seq) {
+                return Err(SecurityError::RequestInFlight);
             } else {
                 return Err(SecurityError::OutcomeUnknown);
             }
         }
 
         *highest = seq;
+        in_flight.insert(seq, now);
         Ok(None)
+    }
+
+    /// Marks a sequence as finished without a cacheable result (an error, or no value), so its
+    /// retries are reported as an unknown outcome instead of staying "in flight".
+    pub fn finish(&self, seq: u64) {
+        self.in_flight.lock().remove(&seq);
     }
 
     pub fn record_result(&self, seq: u64, result: Vec<u8>, now: Instant) {
         let mut cache = self.cache.lock();
-        if cache.len() < DEDUP_CACHE_MAX_ENTRIES {
-            let total_bytes: usize = cache.values().map(|(_, b)| b.len()).sum();
-            if total_bytes + result.len() <= DEDUP_CACHE_MAX_BYTES {
-                cache.insert(seq, (now, result));
+        self.in_flight.lock().remove(&seq);
+        if result.len() > DEDUP_CACHE_MAX_BYTES {
+            return;
+        }
+        // The newest result is the one a retry is most likely to ask for: make room by
+        // dropping the oldest entries rather than refusing the new one.
+        let mut total_bytes: usize = cache.values().map(|(_, b)| b.len()).sum();
+        while cache.len() >= DEDUP_CACHE_MAX_ENTRIES
+            || total_bytes + result.len() > DEDUP_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = cache
+                .iter()
+                .map(|(seq, (ts, _))| (*ts, *seq))
+                .min()
+                .map(|(_, seq)| seq)
+            else {
+                break;
+            };
+            if let Some((_, evicted)) = cache.remove(&oldest) {
+                total_bytes -= evicted.len();
             }
         }
+        cache.insert(seq, (now, result));
     }
 }
 

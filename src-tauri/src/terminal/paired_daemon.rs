@@ -15,7 +15,7 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
 #[cfg(feature = "local-split-qa")]
 use {crate::paired_host::secure_http::PairedStream, tokio_tungstenite::MaybeTlsStream};
@@ -23,6 +23,10 @@ type Result<T> = std::result::Result<T, ClientError>;
 /// Bound on one relay->direct upgrade. Input queued in the owner mailbox while
 /// it runs must still be answered well inside the 30s operation deadline.
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an owner rejection may trail an outcome acknowledgement. The owner
+/// answers a successful acknowledgement with nothing and a rejected one with an
+/// uncorrelated error frame, so an error inside this window is that rejection.
+const ACK_REPLY_WINDOW: Duration = Duration::from_secs(30);
 fn error(code: &str) -> ClientError {
     ClientError::local(code)
 }
@@ -96,6 +100,8 @@ pub struct Proxy {
     reconnect_delay: Duration,
     blocked: Option<String>,
     exit_code: Option<i32>,
+    /// Send instants of outcome acknowledgements whose rejection may still arrive.
+    pending_acks: VecDeque<tokio::time::Instant>,
 }
 #[cfg(feature = "local-split-qa")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -140,6 +146,7 @@ impl Proxy {
             reconnect_delay: Duration::from_millis(500),
             blocked: None,
             exit_code: None,
+            pending_acks: VecDeque::new(),
         })
     }
     pub(crate) fn set_agent_sink(&mut self, sink: Arc<dyn crate::terminal::remote::AgentStateSink>) {
@@ -273,6 +280,7 @@ impl Proxy {
         }
         self.hub.record_initial_size(&self.id, cols, rows);
         self.controller = Some(generation);
+        self.pending_acks.clear();
         self.blocked = None;
         self.reconnect_delay = Duration::from_millis(500);
         self.replay_pending = true;
@@ -447,6 +455,27 @@ impl Proxy {
         self.desired_geometry = Some((cols, rows));
         Ok(())
     }
+    /// Fire-and-forget: Ok means the frame was sent, not that the owner applied it.
+    /// The wire carries no request id and the owner answers success with nothing,
+    /// so a rejection (any error shape, including older owners'
+    /// INVALID_CONTROL_OR_GENERATION) is consumed in `receive` and never tears
+    /// down the stream.
+    pub async fn acknowledge_agent_outcome(&mut self, generation: Epoch) -> Result<()> {
+        self.send(generation, Message::Text(serde_json::json!({
+            "type": "acknowledgeAgentOutcome",
+            "generation": generation,
+        }).to_string().into())).await?;
+        self.pending_acks.push_back(tokio::time::Instant::now());
+        Ok(())
+    }
+    /// Consumes one outstanding acknowledgement if an error frame may answer it.
+    pub(crate) fn take_pending_ack(&mut self) -> bool {
+        let now = tokio::time::Instant::now();
+        while self.pending_acks.front().is_some_and(|sent| now.duration_since(*sent) > ACK_REPLY_WINDOW) {
+            self.pending_acks.pop_front();
+        }
+        self.pending_acks.pop_front().is_some()
+    }
     pub async fn interrupt(&mut self, generation: Epoch) -> Result<()> {
         self.interrupt_with_intent(generation, None).await
     }
@@ -555,6 +584,14 @@ impl Proxy {
                     self.controller = None;
                     self.transport = None;
                 } else if value["type"].as_str() == Some("error") {
+                    if self.take_pending_ack() {
+                        tracing::warn!(
+                            session_id = %self.id,
+                            code = value["code"].as_str().or_else(|| value["error"]["code"].as_str()).unwrap_or("unknown"),
+                            "paired owner rejected an outcome acknowledgement",
+                        );
+                        return Ok(None);
+                    }
                     let m::Control::Error { error: rejection } = serde_json::from_value(value.clone())
                         .map_err(|_| error("PAIRED_HOST_INVALID_RESPONSE"))? else {
                             return Err(error("PAIRED_HOST_INVALID_RESPONSE"));
@@ -590,13 +627,16 @@ impl Proxy {
                         return Err(error("PAIRED_HOST_WRONG_MACHINE"));
                     }
                     if let Some(sink) = &self.agent_sink {
+                        let origin = msg.origin();
                         sink.accept(crate::daemon::agent_state::AgentState {
                             session_id: self.id.clone(),
                             state: msg.state,
                             agent: msg.agent,
                             provider_session: msg.provider_session,
                             detail: msg.detail,
-                            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+                            origin,
+                            outcome: msg.outcome,
+                            kind: msg.kind,
                         });
                     }
                 }

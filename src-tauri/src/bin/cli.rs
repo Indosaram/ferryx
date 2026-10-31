@@ -1,4 +1,5 @@
 use ferryx_lib::cli::{
+    api_catalog::{run_api_cli, CLI_GROUPS},
     parse_account_cli, parse_browser_cli, parse_direct_trust_cli, parse_handover_from,
     parse_launch_mode, parse_open_cli, parse_pair_cli, parse_remote_cli, print_browser_cli_error,
     run_account_cli, run_browser_cli, run_daemon_headless, run_daemon_supervisor,
@@ -21,23 +22,29 @@ fn main() {
         println!("{}", ferryx_lib::cli::cli_version_line());
         return;
     }
+    // Only the groups named in CLI_GROUPS dispatch here; everything else falls through to
+    // the launch-mode handling below.
+    let group = args.get(1).map(String::as_str).filter(|arg| CLI_GROUPS.contains(arg));
+    if group == Some("api") {
+        std::process::exit(run_api_cli(&args));
+    }
     // Before the generic `supervisor` dispatch: `supervisor engine` has its own parser.
-    if args.get(1).is_some_and(|arg| arg == "supervisor") && args.get(2).is_some_and(|arg| arg == "engine") {
+    if group == Some("supervisor") && args.get(2).is_some_and(|arg| arg == "engine") {
         std::process::exit(ferryx_lib::cli::supervisor_engine::run_supervisor_engine_cli(&args));
     }
-    if args.get(1).is_some_and(|arg| arg == "agents") {
+    if group == Some("agents") {
         std::process::exit(ferryx_lib::agent_control::run_agents_cli(&args));
     }
-    if args.get(1).is_some_and(|arg| arg == "supervisor") {
+    if group == Some("supervisor") {
         std::process::exit(ferryx_lib::cli::supervisor_goal::run_supervisor_cli(&args));
     }
-    if args.get(1).is_some_and(|arg| arg == "hub") {
+    if group == Some("hub") {
         std::process::exit(ferryx_lib::hub_runtime::run_hub_cli(&args));
     }
-    if args.get(1).is_some_and(|arg| arg == "mcp") {
+    if group == Some("mcp") {
         std::process::exit(ferryx_lib::hub_runtime::run_mcp());
     }
-    if args.get(1).is_some_and(|arg| arg == "open") {
+    if group == Some("open") {
         let outcome = std::env::current_dir()
             .map_err(|e| format!("failed to determine current directory: {e}"))
             .and_then(|cwd| parse_open_cli(&args, &cwd))
@@ -50,13 +57,13 @@ fn main() {
             }
         }
     }
-    if args.get(1).is_some_and(|arg| arg == "up") {
+    if group == Some("up") {
         std::process::exit(ferryx_lib::cli::up_cli_main(&args));
     }
-    if args.get(1).is_some_and(|arg| arg == "service") {
+    if group == Some("service") {
         std::process::exit(ferryx_lib::cli::service_cli_main(&args));
     }
-    if args.get(1).is_some_and(|arg| arg == "account") {
+    if group == Some("account") {
         let outcome = parse_account_cli(&args)
             .map_err(AccountCliError::usage)
             .and_then(run_account_cli);
@@ -68,7 +75,7 @@ fn main() {
             }
         }
     }
-    if args.get(1).is_some_and(|arg| arg == "browser") {
+    if group == Some("browser") {
         match parse_browser_cli(&args).and_then(run_browser_cli) {
             Ok(()) => return,
             Err(error) => {
@@ -77,7 +84,7 @@ fn main() {
             }
         }
     }
-    if args.get(1).is_some_and(|arg| arg == "pair") {
+    if group == Some("pair") {
         match parse_pair_cli(&args).and_then(run_pair_cli) {
             Ok(ferryx_lib::cli::PairCliOutcome::Done) => return,
             Ok(ferryx_lib::cli::PairCliOutcome::AccountLoginRequired) => {
@@ -94,7 +101,7 @@ fn main() {
             }
         }
     }
-    if args.get(1).is_some_and(|arg| arg == "direct-trust") {
+    if group == Some("direct-trust") {
         match parse_direct_trust_cli(&args).and_then(run_direct_trust_cli) {
             Ok(()) => return,
             Err(error) => {
@@ -103,7 +110,7 @@ fn main() {
             }
         }
     }
-    if args.get(1).is_some_and(|arg| arg == "remote") {
+    if group == Some("remote") {
         match parse_remote_cli(&args).and_then(run_remote_cli) {
             Ok(()) => return,
             Err(error) => {
@@ -127,7 +134,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|api <list|describe <command>>|--daemon>");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),

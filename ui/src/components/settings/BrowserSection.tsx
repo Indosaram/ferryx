@@ -226,11 +226,17 @@ export function BrowserSection() {
               setHomeDraft(next.homePage);
               setHomeError(null);
               setTabActionError(null);
-              void Promise.all(activeBrowsers.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100))).catch((error: unknown) => {
-                setTabActionError(
-                  `Settings were reset, but the default zoom could not be applied to every open tab: ${extractBrowserErrorCode(error)}`,
-                );
-              });
+              // Re-list first, as update() does: the mount-time list misses tabs opened since.
+              void listBrowsers()
+                .then((list) => {
+                  setActiveBrowsers(list);
+                  return Promise.all(list.map((browser) => setBrowserZoom(browser.browserId, next.defaultZoom / 100)));
+                })
+                .catch((error: unknown) => {
+                  setTabActionError(
+                    `Settings were reset, but the default zoom could not be applied to every open tab: ${extractBrowserErrorCode(error)}`,
+                  );
+                });
             }}
             className="no-drag h-7 shrink-0 gap-1.5 px-2 text-[11px] text-muted-foreground hover:text-foreground"
           >

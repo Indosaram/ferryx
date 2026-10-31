@@ -34,13 +34,18 @@ function loadBroker(): void {
   run(fakeGlobal, fakeWindow, doc, hooks);
 }
 
-function clickLink(attrs: Record<string, string>): MouseEvent {
+// A document click bubbles on to its window. The per-test document has no window of its
+// own, so the finished event is dispatched again on the fake window, which is the bubble
+// phase at window where the broker decides.
+function clickLink(attrs: Record<string, string>, pageHandler?: (event: MouseEvent) => void): MouseEvent {
   const anchor = doc.createElement('a');
   for (const [name, value] of Object.entries(attrs)) anchor.setAttribute(name, value);
   anchor.textContent = 'link';
   doc.body.appendChild(anchor);
+  if (pageHandler) doc.addEventListener('click', pageHandler as EventListener);
   const event = new MouseEvent('click', { bubbles: true, cancelable: true });
   anchor.dispatchEvent(event);
+  fakeWindow.dispatchEvent(event);
   return event;
 }
 
@@ -89,6 +94,44 @@ describe('isolated-world broker', () => {
     trusted = false;
     loadBroker();
     const event = clickLink({ href: 'https://example.com/next' });
+    expect(event.defaultPrevented).toBe(false);
+    expect(posts).toEqual([]);
+  });
+
+  // A client-side router checks `!event.defaultPrevented` and then cancels the click
+  // itself; the broker must neither cancel first nor ask the host to navigate as well.
+  it('lets the page see an uncancelled link click and keep it when the page cancels it', () => {
+    loadBroker();
+    const seenByPage: boolean[] = [];
+    const event = clickLink({ href: 'https://example.com/next' }, (pageEvent) => {
+      seenByPage.push(pageEvent.defaultPrevented);
+      pageEvent.preventDefault();
+    });
+    expect(seenByPage).toEqual([false]);
+    expect(event.defaultPrevented).toBe(true);
+    expect(posts).toEqual([]);
+  });
+
+  it('does not post a download the page cancelled', () => {
+    loadBroker();
+    clickLink({ href: 'https://example.com/file.zip', download: '' }, (pageEvent) => pageEvent.preventDefault());
+    expect(posts).toEqual([]);
+  });
+
+  it('intercepts a download click the page left alone', () => {
+    loadBroker();
+    const event = clickLink({ href: 'https://example.com/file.zip', download: '' });
+    expect(event.defaultPrevented).toBe(true);
+    expect(posts.map((body) => JSON.parse(body))).toEqual([
+      { v: 1, kind: 'download', url: 'https://example.com/file.zip' },
+    ]);
+  });
+
+  it('leaves a same-document fragment link to the native in-page jump', () => {
+    loadBroker();
+    // The per-test document is about:blank, so the fragment link is written against the
+    // page location the broker compares with (an http URL under vitest's jsdom).
+    const event = clickLink({ href: `${location.href.split('#')[0]}#section` });
     expect(event.defaultPrevented).toBe(false);
     expect(posts).toEqual([]);
   });

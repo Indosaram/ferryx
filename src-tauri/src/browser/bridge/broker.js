@@ -78,7 +78,25 @@
   };
   const isMac = /Mac|iPhone|iPod|iPad/.test(navigator.platform || '') || /Macintosh/.test(navigator.userAgent || '');
   const api = { picker: null, post, activationAgeMs, isTrusted, channel };
+  // A link click to a fragment of the current document stays a native in-page jump.
+  const isSameDocumentFragment = (url) => {
+    try {
+      const next = new URL(url);
+      const here = new URL(location.href);
+      next.hash = '';
+      here.hash = '';
+      return url.includes('#') && next.href === here.href;
+    } catch (error) {
+      return false;
+    }
+  };
+  // The capture phase only records a trusted link click. The decision waits for the
+  // bubble phase at window, after the page's own handlers ran, so a page that cancels the
+  // click (a client-side router, a confirm dialog) keeps it, and the host is not asked to
+  // navigate as well.
+  let pendingLink = null;
   document.addEventListener('click', (event) => {
+    pendingLink = null;
     if (!isTrusted(event)) return;
     if (api.picker && api.picker.armed) return;
     const target = event.target;
@@ -87,19 +105,28 @@
     if (!(anchor instanceof HTMLAnchorElement)) return;
     const url = resolveHttpUrl(anchor.href);
     if (!url) return;
+    const download = anchor.hasAttribute('download');
+    if (!download && isSameDocumentFragment(url)) return;
+    const modifier = isMac ? (event.metaKey && !event.ctrlKey) : (event.ctrlKey && !event.metaKey);
+    const blank = (anchor.target || '').toLowerCase() === '_blank';
+    pendingLink = { event, url, download, modifier: Boolean(modifier || blank) };
+  }, true);
+  window.addEventListener('click', (event) => {
+    const pending = pendingLink;
+    if (!pending || pending.event !== event) return;
+    pendingLink = null;
+    // The page cancelled the click itself: it owns the outcome.
+    if (event.defaultPrevented) return;
     // No channel: leave the event alone so native navigation or download proceeds.
     const send = channel();
     if (!send) return;
-    if (anchor.hasAttribute('download')) {
-      event.preventDefault();
-      send(JSON.stringify({ v: 1, kind: 'download', url }));
+    event.preventDefault();
+    if (pending.download) {
+      send(JSON.stringify({ v: 1, kind: 'download', url: pending.url }));
       return;
     }
-    const modifier = isMac ? (event.metaKey && !event.ctrlKey) : (event.ctrlKey && !event.metaKey);
-    const blank = (anchor.target || '').toLowerCase() === '_blank';
-    event.preventDefault();
-    send(JSON.stringify({ v: 1, kind: 'link', url, modifier: Boolean(modifier || blank) }));
-  }, true);
+    send(JSON.stringify({ v: 1, kind: 'link', url: pending.url, modifier: pending.modifier }));
+  }, false);
   document.addEventListener('ferryx-intent', (event) => {
     let intent;
     try {

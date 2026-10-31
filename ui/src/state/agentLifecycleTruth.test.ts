@@ -86,30 +86,34 @@ function exitedState(lifecycle: "exited" | "failed" = "exited"): WorkspaceState 
 }
 
 describe("remote status death clears live agent work", () => {
-  it("settles the working activity when the daemon confirms the remote session expired", () => {
+  it("settles the working activity when the daemon reports the remote session expired", () => {
     const next = workspaceReducer(remoteState(), {
       type: "SESSION_REMOTE_STATUS",
-      status: { sessionId: "backend-a", state: "expired", generation: 0, failure: { kind: "expired", message: "gone" }, replayGap: null },
+      status: { sessionId: "backend-a", state: "expired", generation: 0,
+        failure: { kind: "expired", message: "Remote target exited" }, replayGap: null },
     });
 
     expect(next.sessions["session-a"].lifecycle).toBe("exited");
+    expect(next.sessions["session-a"].backendSessionId).toBe("standby:session-a");
     expect(next.activityBySessionId?.["session-a"]?.state).toBe("done");
-    expect(resolveActivityIndicator(selectWorktreeActivitySummaries(next)[worktree.path])).not.toBe("working");
+    const summary = selectWorktreeActivitySummaries(next)[worktree.path];
+    expect(resolveActivityIndicator(summary)).not.toBe("working");
   });
 
   it.each([
     ["legacyLost", null],
     ["expired", null],
-    ["expired", { kind: "transport", message: "retries exhausted" }],
-  ] as const)("keeps live remote work when %s does not confirm process loss (failure %j)", (lostState, failure) => {
-    // Retry exhaustion and legacy loss leave process ownership uncertain: only an expired
-    // target failure is a confirmed process exit.
+    ["expired", { kind: "transport", message: "unreachable" }],
+  ] as const)("keeps live remote work for status %s with failure %j", (lostState, failure) => {
+    // Retry exhaustion and a legacy direct SSH session say the target cannot be reattached, not
+    // that its process exited. Only an `expired` target failure is a daemon-confirmed exit.
     const next = workspaceReducer(remoteState(), {
       type: "SESSION_REMOTE_STATUS",
       status: { sessionId: "backend-a", state: lostState, generation: 0, failure, replayGap: null },
     });
 
     expect(next.sessions["session-a"].lifecycle).toBe("working");
+    expect(next.sessions["session-a"].remoteConnectionState).toBe(lostState);
     expect(next.activityBySessionId?.["session-a"]?.state).toBe("working");
   });
 

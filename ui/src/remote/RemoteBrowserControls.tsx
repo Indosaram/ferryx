@@ -8,7 +8,8 @@
  */
 
 import React, { useState } from "react";
-import type { RemoteInputRefusal } from "./RemoteBrowser";
+import { buildRemoteInputRefusal, type RemoteInputRefusal } from "./RemoteBrowser";
+import type { BrowserErrorDetails } from "./browserProtocol";
 import type { RemoteDriverState } from "./useRemoteBrowserDriver";
 
 export const FORBIDDEN_APP_CHROME_KEYS = new Set([
@@ -62,6 +63,17 @@ export interface RemoteBrowserControlsProps {
   className?: string;
 }
 
+/** Refusal for a rejected fill/key command: keeps the server's structured `details` when present. */
+function commandFailureRefusal(err: unknown, inputClass: "fill" | "key"): RemoteInputRefusal {
+  const details = (err as { details?: BrowserErrorDetails })?.details;
+  const base = buildRemoteInputRefusal(err);
+  return {
+    ...base,
+    code: details?.code || (err as { code?: string })?.code || "COMMAND_FAILED",
+    inputClass: details ? base.inputClass : inputClass,
+  };
+}
+
 export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
   url = "",
   driverState,
@@ -94,9 +106,10 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
   const [localRefusal, setLocalRefusal] = useState<RemoteInputRefusal | null>(null);
   const activeRefusal = propRefusal ?? localRefusal;
 
-  // Sync incoming url
+  // Sync incoming url, but never overwrite a URL the user is in the middle of typing
+  const urlEditedRef = React.useRef(false);
   React.useEffect(() => {
-    setInputUrl(url);
+    if (!urlEditedRef.current) setInputUrl(url);
   }, [url]);
 
   const isDriving = driverState === "driving";
@@ -104,6 +117,7 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
   const handleNavigateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isDriving || !inputUrl.trim() || !onNavigate) return;
+    urlEditedRef.current = false;
     onNavigate(inputUrl.trim());
   };
 
@@ -139,17 +153,13 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
       const res: unknown = onFill(trimmedRef, fillValue);
       if (res && typeof (res as Promise<unknown>).catch === "function") {
         (res as Promise<unknown>).catch((err: unknown) => {
-          const reason = err instanceof Error ? err.message : String(err);
-          const code = (err as { code?: string })?.code || "REFUSED";
-          const refusal: RemoteInputRefusal = { code, reason, inputClass: "fill" };
+          const refusal = commandFailureRefusal(err, "fill");
           setLocalRefusal(refusal);
           onRefusal?.(refusal);
         });
       }
     } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      const code = (err as { code?: string })?.code || "REFUSED";
-      const refusal: RemoteInputRefusal = { code, reason, inputClass: "fill" };
+      const refusal = commandFailureRefusal(err, "fill");
       setLocalRefusal(refusal);
       onRefusal?.(refusal);
     }
@@ -188,17 +198,13 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
       const res: unknown = onKeypress(trimmed);
       if (res && typeof (res as Promise<unknown>).catch === "function") {
         (res as Promise<unknown>).catch((err: unknown) => {
-          const reason = err instanceof Error ? err.message : String(err);
-          const code = (err as { code?: string })?.code || "KEY_NOT_ALLOWED";
-          const refusal: RemoteInputRefusal = { code, reason, inputClass: "key" };
+          const refusal = commandFailureRefusal(err, "key");
           setLocalRefusal(refusal);
           onRefusal?.(refusal);
         });
       }
     } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      const code = (err as { code?: string })?.code || "KEY_NOT_ALLOWED";
-      const refusal: RemoteInputRefusal = { code, reason, inputClass: "key" };
+      const refusal = commandFailureRefusal(err, "key");
       setLocalRefusal(refusal);
       onRefusal?.(refusal);
     }
@@ -301,7 +307,10 @@ export const RemoteBrowserControls: React.FC<RemoteBrowserControlsProps> = ({
             type="text"
             data-testid="remote-browser-url-input"
             value={inputUrl}
-            onChange={(e) => setInputUrl(e.target.value)}
+            onChange={(e) => {
+              urlEditedRef.current = true;
+              setInputUrl(e.target.value);
+            }}
             disabled={!isDriving}
             aria-label="Page URL"
             placeholder={isDriving ? "https://example.com" : "Claim control to navigate"}
