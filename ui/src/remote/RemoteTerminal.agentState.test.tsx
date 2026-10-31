@@ -73,6 +73,36 @@ describe("remote terminal agent state bridge", () => {
     vi.restoreAllMocks();
   });
 
+  it("acknowledges only after an attached frame matches the requested session and epoch", async () => {
+    const connected = Promise.withResolvers<MockWebSocket>();
+    await act(async () => {
+      render(<RemoteTerminal
+        sessionId="s-ack"
+        token="tunnel-device-token"
+        isAccountSession
+        daemonEpoch="101"
+        createWebSocket={(path) => {
+          const socket = new MockWebSocket(path);
+          connected.resolve(socket);
+          return socket;
+        }}
+      />);
+    });
+    const socket = await connected.promise;
+    const frame = (sessionId: string, daemonEpoch: string) => ({
+      data: JSON.stringify({ type: "attached", generation: "9", target: { sessionId, daemonEpoch } }),
+    });
+    await act(async () => {
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.(frame("other", "101"));
+      socket.onmessage?.(frame("s-ack", "100"));
+    });
+    const acknowledgement = JSON.stringify({ type: "acknowledgeAgentOutcome", generation: "9" });
+    expect(socket.send).not.toHaveBeenCalledWith(acknowledgement);
+    await act(async () => { socket.onmessage?.(frame("s-ack", "101")); });
+    expect(socket.send).toHaveBeenCalledWith(acknowledgement);
+  });
+
   it("forwards non-grid string frames to the agent-state listener and keeps grid frames out of it", async () => {
     const frames: string[] = [];
     render(

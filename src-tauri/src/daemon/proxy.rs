@@ -912,6 +912,24 @@ impl SessionRouter {
 }
 
 impl RemoteSessionBackend for SessionRouter {
+    fn acknowledge_agent_outcome<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.validate_ssh_workspace(id).await?;
+            if self.is_local_session(id) {
+                return self.terminal_service.acknowledge_agent_outcome(id).await;
+            }
+            let peer = self.find_legacy_peer_for_session(id).ok_or("Session unavailable")?;
+            match peer.send_request(&DaemonRequest::AcknowledgeAgentOutcome {
+                session_id: id.into(),
+            }).await? {
+                DaemonResponse::AcknowledgeAgentOutcomeOk => Ok(()),
+                _ => Err("Outcome acknowledgement rejected".into()),
+            }
+        })
+    }
     fn recovery<'a>(
         &'a self,
         id: &'a str,
