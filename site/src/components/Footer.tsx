@@ -62,12 +62,6 @@ export function Footer({ basePath, locale }: { readonly basePath: string; readon
             {locale.footer.compare}
           </a>
           <a
-            href="https://status.ferryx.dev/"
-            className="hover:text-ink transition-colors"
-          >
-            {locale.footer.status}
-          </a>
-          <a
             href={`${basePath}privacy/`}
             className="text-ink-soft hover:text-ink transition-colors whitespace-nowrap"
           >

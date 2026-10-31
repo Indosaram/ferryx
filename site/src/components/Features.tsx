@@ -19,7 +19,7 @@ export function Features({ locale, basePath }: { locale: LandingLocale; basePath
           <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-ink-faint mb-3">
             {locale.features.eyebrow}
           </p>
-          <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink">
+          <h2 className="text-[clamp(2rem,4vw,3rem)] font-medium tracking-[-0.035em] leading-[1.05] text-ink text-balance">
             {locale.features.title}
           </h2>
           <p className="mt-4 text-[15px] leading-relaxed text-ink-soft">
