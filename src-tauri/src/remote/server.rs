@@ -2780,6 +2780,15 @@ async fn handle_machine_terminal_socket(
             {
                 return;
             }
+            // A paired client reads untagged error frames as failures of the stream,
+            // so the rejection of a fire-and-forget acknowledgement names its operation.
+            let acknowledgement = matches!(
+                &message,
+                Message::Text(text) if matches!(
+                    serde_json::from_str::<MachineTerminalControl>(text),
+                    Ok(MachineTerminalControl::AcknowledgeAgentOutcome { .. })
+                )
+            );
             let operation = async {
                 match message {
                     Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
@@ -2898,9 +2907,11 @@ async fn handle_machine_terminal_socket(
             })
             .await;
             if let Err(code) = result {
-                let Ok(control) = machine_control(machine_control_message(
-                    serde_json::json!({"type":"error","code":code}),
-                )) else {
+                let mut frame = serde_json::json!({"type":"error","code":code});
+                if acknowledgement {
+                    frame["op"] = serde_json::Value::from("acknowledgeAgentOutcome");
+                }
+                let Ok(control) = machine_control(machine_control_message(frame)) else {
                     return;
                 };
                 if controls.try_send(control).is_err() {

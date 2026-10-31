@@ -2063,6 +2063,49 @@ mod tests {
         server.await.unwrap();
     }
     #[tokio::test]
+    async fn paired_unrelated_owner_error_after_acknowledgement_still_fails_the_stream() {
+        let root = tempfile::tempdir().unwrap();
+        let (arrived, mut arrivals) = mpsc::channel(4);
+        let (_, service, descriptor, shutdown, server) = start_mock_relay_controlled(&root, false, false, Some(arrived)).await;
+        let runtime = Arc::new(Runtime::new(Some(root.path().join("descriptors.json"))));
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let (id, _) = runtime.get_or_rearm(descriptor, hub.clone(), service).unwrap();
+        let mut output = hub.subscribe_with_sequence(&id, None).unwrap().receiver;
+        let socket = tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await.unwrap().unwrap();
+        socket.commands.send(FixtureCommand::Attach).await.unwrap();
+        socket.commands.send(FixtureCommand::Output(11)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap().unwrap();
+        runtime.acknowledge_agent_outcome(&id).unwrap().await.unwrap();
+        let mut events = runtime.status_events.subscribe();
+        // A write failure inside the acknowledgement's reply window is not its rejection.
+        socket.commands.send(FixtureCommand::Frame(serde_json::json!({"type":"error","code":"CONTROL_OVERFLOW"}))).await.unwrap();
+        let status = published_status(&mut events, &id, "blocked").await;
+        assert_eq!(status.1, None);
+        assert_eq!(status.3.as_deref(), Some("PAIRED_HOST_INVALID_RESPONSE"));
+        runtime.detach(&id).await.unwrap();
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn paired_acknowledgement_consumes_only_its_own_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, service, descriptor, shutdown, server) = start_mock_relay(&root, false, false).await;
+        let mut proxy = Proxy::new(descriptor, Arc::new(TerminalOutputHub::new(32))).unwrap();
+        proxy.reattach(&MachineClient::new(), &service).await.unwrap();
+        proxy.acknowledge_agent_outcome(Epoch(7)).await.unwrap();
+        let tagged_other = serde_json::json!({"type":"error","code":"INVALID_CONTROL_OR_GENERATION","op":"resize"});
+        assert!(!proxy.consumes_ack_rejection(&tagged_other), "a tagged error answering another control");
+        let untagged_other = serde_json::json!({"type":"error","code":"STALE_GENERATION"});
+        assert!(!proxy.consumes_ack_rejection(&untagged_other), "an untagged error outside the legacy rejection codes");
+        let tagged_ack = serde_json::json!({"type":"error","code":"Session unavailable","op":"acknowledgeAgentOutcome"});
+        assert!(proxy.consumes_ack_rejection(&tagged_ack));
+        let legacy = serde_json::json!({"type":"error","code":"INVALID_CONTROL_OR_GENERATION"});
+        assert!(!proxy.consumes_ack_rejection(&legacy), "the tagged rejection already answered the only acknowledgement");
+        proxy.detach().await.unwrap();
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+    }
+    #[tokio::test]
     async fn paired_acknowledgement_reserves_exactly_one_rejection() {
         let root = tempfile::tempdir().unwrap();
         let (_, service, descriptor, shutdown, server) = start_mock_relay(&root, false, false).await;

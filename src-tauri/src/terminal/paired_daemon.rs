@@ -23,10 +23,23 @@ type Result<T> = std::result::Result<T, ClientError>;
 /// Bound on one relay->direct upgrade. Input queued in the owner mailbox while
 /// it runs must still be answered well inside the 30s operation deadline.
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long an owner rejection may trail an outcome acknowledgement. The owner
-/// answers a successful acknowledgement with nothing and a rejected one with an
-/// uncorrelated error frame, so an error inside this window is that rejection.
+/// How long an untagged owner rejection may trail an outcome acknowledgement. The
+/// owner answers a successful acknowledgement with nothing; an owner that predates
+/// operation-tagged error frames answers a rejected one with an uncorrelated error
+/// frame, so a legacy rejection code inside this window is that rejection.
 const ACK_REPLY_WINDOW: Duration = Duration::from_secs(30);
+/// The `op` an owner puts on the error frame answering an outcome acknowledgement.
+const ACK_OP: &str = "acknowledgeAgentOutcome";
+/// Codes an owner without operation-tagged error frames answers a rejected
+/// acknowledgement with: an unknown or stale control, no program status mirror, or
+/// a legacy peer that lost or refused the session. No write, resize or signal
+/// failure of such an owner carries one of the last three.
+const LEGACY_ACK_REJECTIONS: [&str; 4] = [
+    "INVALID_CONTROL_OR_GENERATION",
+    "Session has no program status mirror",
+    "Session unavailable",
+    "Outcome acknowledgement rejected",
+];
 fn error(code: &str) -> ClientError {
     ClientError::local(code)
 }
@@ -457,9 +470,9 @@ impl Proxy {
     }
     /// Fire-and-forget: Ok means the frame was sent, not that the owner applied it.
     /// The wire carries no request id and the owner answers success with nothing,
-    /// so a rejection (any error shape, including older owners'
-    /// INVALID_CONTROL_OR_GENERATION) is consumed in `receive` and never tears
-    /// down the stream.
+    /// so its rejection (tagged `op: acknowledgeAgentOutcome`, or an older owner's
+    /// untagged legacy code) is consumed in `receive` and never tears down the
+    /// stream; any other owner error still fails it.
     pub async fn acknowledge_agent_outcome(&mut self, generation: Epoch) -> Result<()> {
         self.send(generation, Message::Text(serde_json::json!({
             "type": "acknowledgeAgentOutcome",
@@ -475,6 +488,21 @@ impl Proxy {
             self.pending_acks.pop_front();
         }
         self.pending_acks.pop_front().is_some()
+    }
+    /// Whether an owner error frame is the rejection of an outcome acknowledgement.
+    /// A tagged frame names the operation it answers; an untagged one comes from an
+    /// older owner and counts only with a legacy rejection code while an
+    /// acknowledgement is still outstanding.
+    pub(crate) fn consumes_ack_rejection(&mut self, frame: &serde_json::Value) -> bool {
+        if let Some(op) = frame.get("op") {
+            let answers_ack = op.as_str() == Some(ACK_OP);
+            if answers_ack {
+                self.take_pending_ack();
+            }
+            return answers_ack;
+        }
+        frame["code"].as_str().is_some_and(|code| LEGACY_ACK_REJECTIONS.contains(&code))
+            && self.take_pending_ack()
     }
     pub async fn interrupt(&mut self, generation: Epoch) -> Result<()> {
         self.interrupt_with_intent(generation, None).await
@@ -584,10 +612,10 @@ impl Proxy {
                     self.controller = None;
                     self.transport = None;
                 } else if value["type"].as_str() == Some("error") {
-                    if self.take_pending_ack() {
+                    if self.consumes_ack_rejection(&value) {
                         tracing::warn!(
                             session_id = %self.id,
-                            code = value["code"].as_str().or_else(|| value["error"]["code"].as_str()).unwrap_or("unknown"),
+                            code = value["code"].as_str().unwrap_or("unknown"),
                             "paired owner rejected an outcome acknowledgement",
                         );
                         return Ok(None);
