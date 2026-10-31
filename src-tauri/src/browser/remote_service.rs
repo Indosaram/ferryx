@@ -76,7 +76,7 @@ pub struct ViewerInfo {
     pub viewer_instance_id: String,
     pub stream_id: u32,
     pub unacked_seq: Option<u32>,
-    pub pending_frame: Option<Vec<u8>>,
+    pub pending_frame: Option<(u32, Vec<u8>)>,
     pub joined_at: Instant,
     pub paused: bool,
     pub stalled: bool,
@@ -463,6 +463,7 @@ impl BrowserRemoteService {
                 if let Some(handle) = self.producer_handles.lock().remove(browser_id) {
                     handle.abort();
                 }
+                self.frame_broadcaster.lock().remove(browser_id);
             }
         }
 
@@ -511,7 +512,7 @@ impl BrowserRemoteService {
             let mut broadcasters = self.frame_broadcaster.lock();
             broadcasters
                 .entry(browser_id.clone())
-                .or_insert_with(|| tokio::sync::broadcast::channel(32).0)
+                .or_insert_with(|| tokio::sync::broadcast::channel(4).0)
                 .clone()
         };
 
@@ -820,7 +821,7 @@ impl BrowserRemoteService {
             } else {
                 // Viewer is busy with an in-flight unacknowledged frame.
                 // Replace pending_frame with the latest frame only (drop older pending frames).
-                viewer.pending_frame = Some(frame_bytes.clone());
+                viewer.pending_frame = Some((seq, frame_bytes.clone()));
             }
         }
 
@@ -842,8 +843,8 @@ impl BrowserRemoteService {
         if viewer.unacked_seq == Some(seq) {
             viewer.unacked_seq = None;
             // Pop the pending latest frame if one was queued
-            if let Some(pending) = viewer.pending_frame.take() {
-                // Set pending seq placeholder (represented as 0 or next seq in caller)
+            if let Some((pending_seq, pending)) = viewer.pending_frame.take() {
+                viewer.unacked_seq = Some(pending_seq);
                 return Some(pending);
             }
         }
@@ -1155,10 +1156,32 @@ mod tests {
         let next_frame = service.acknowledge_frame(&b1, &sub1, 1);
         assert_eq!(next_frame, Some(frame3));
 
+        let frame4 = vec![10, 11, 12];
+        assert!(service.admit_frame(&b1, 4, frame4.clone()).unwrap().is_empty());
+        assert_eq!(service.acknowledge_frame(&b1, &sub1, 1), None);
+        assert_eq!(service.acknowledge_frame(&b1, &sub1, 3), Some(frame4));
+
         // 5. Oversized frame (> 2MiB) is permanently dropped
         let huge_frame = vec![0u8; MAX_FRAME_PAYLOAD_BYTES + 1];
         let admitted_huge = service.admit_frame(&b1, 4, huge_frame).unwrap();
         assert!(admitted_huge.is_empty());
+    }
+
+    #[test]
+    fn last_unsubscribe_closes_frame_channel_and_resubscribe_gets_a_new_channel() {
+        let (service, browser_id) = create_test_service();
+        let first = service.subscribe(&browser_id, "dev1", "v1").unwrap();
+        let second = service.subscribe(&browser_id, "dev2", "v2").unwrap();
+        let mut frames = service.subscribe_frames(&browser_id);
+        assert!(service.unsubscribe(&browser_id, &first));
+        assert!(matches!(frames.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+        assert!(service.unsubscribe(&browser_id, &second));
+        assert!(matches!(frames.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Closed)));
+        let third = service.subscribe(&browser_id, "dev1", "v3").unwrap();
+        let mut replacement = service.subscribe_frames(&browser_id);
+        service.frame_broadcaster.lock().get(&browser_id).unwrap().send(vec![7]).unwrap();
+        assert_eq!(replacement.try_recv().unwrap(), vec![7]);
+        assert!(service.unsubscribe(&browser_id, &third));
     }
 
     #[tokio::test]
