@@ -933,28 +933,55 @@ impl TerminalOutputHub {
         enabled
     }
 
-    /// The session was seen: drops its `done`/`error` program status. `None` when the session
-    /// did not opt in, else its summary afterwards for the caller to publish.
+    /// The session was seen: drops its `done`/`error` program status and publishes the summary
+    /// afterwards. `None` when the session did not opt in, else that summary.
     pub fn acknowledge_program_outcome(
         &self,
         session_id: &str,
     ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
-        let session_hub = self.sessions.read().get(session_id).cloned()?;
-        let hub = session_hub.read();
-        let summary = hub.screen.as_ref()?.lock().acknowledge_program_status();
-        summary
+        self.update_program_status(session_id, |screen| screen.acknowledge_program_status())
     }
 
-    /// The session's foreground program exited: drops its transient program status. `None`
-    /// when the session did not opt in, else its summary afterwards for the caller to publish.
+    /// The session's foreground program exited: drops its transient program status and
+    /// publishes the summary afterwards. `None` when the session did not opt in, else that
+    /// summary.
     pub fn program_exited(
         &self,
         session_id: &str,
     ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
+        self.update_program_status(session_id, |screen| screen.program_status_exited())
+    }
+
+    /// Runs a record update under the screen lock and, when the summary changed, publishes the
+    /// revisioned result after every lock is released, through the same path as live feeds.
+    fn update_program_status(
+        &self,
+        session_id: &str,
+        update: impl FnOnce(
+            &mut super::screen_mirror::ScreenMirror,
+        ) -> Option<(bool, super::program_status_ingest::ProgramStatusChange)>,
+    ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
         let session_hub = self.sessions.read().get(session_id).cloned()?;
-        let hub = session_hub.read();
-        let summary = hub.screen.as_ref()?.lock().program_status_exited();
-        summary
+        let (changed, change) = {
+            let hub = session_hub.read();
+            let mut screen = hub.screen.as_ref()?.lock();
+            update(&mut screen)
+        }?;
+        if changed {
+            self.publish_program_status(session_id, &change);
+        }
+        Some(change.summary)
+    }
+
+    fn publish_program_status(
+        &self,
+        session_id: &str,
+        change: &super::program_status_ingest::ProgramStatusChange,
+    ) {
+        let publisher = self.program_status_publisher.read().clone();
+        if let Some(publisher) = publisher {
+            publisher.publish(session_id, change);
+        }
     }
 
     /// Records how a session's process ended. `None` is an unknown status, not a success.
@@ -1136,11 +1163,8 @@ impl TerminalOutputHub {
         }
         drop(hub);
         let ingest = ingest.unwrap_or_default();
-        if let Some(summary) = ingest.summary {
-            let publisher = self.program_status_publisher.read().clone();
-            if let Some(publisher) = publisher {
-                publisher.publish(session_id, summary.as_ref());
-            }
+        if let Some(change) = ingest.summary.as_ref() {
+            self.publish_program_status(session_id, change);
         }
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::terminal::qa_liveness::observe_published_output(

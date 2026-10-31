@@ -60,22 +60,30 @@ impl ProcessTransition {
 /// shell owns the foreground and is not that group, the reporting program is gone.
 #[derive(Default)]
 pub(crate) struct ProtocolReporters {
-    groups: parking_lot::Mutex<HashMap<String, u32>>,
+    /// Per session: the revision of the newest summary change seen, and the reporter's group
+    /// when that change was transient and its group known.
+    groups: parking_lot::Mutex<HashMap<String, (u64, Option<u32>)>>,
 }
 
 impl ProtocolReporters {
     /// A session's summary changed. A transient summary remembers the foreground `group` it was
     /// reported from; anything else, or an unknown group, forgets the session.
-    pub(crate) fn reported(&self, session_id: &str, transient: bool, group: Option<u32>) {
+    ///
+    /// Changes are published outside the mirror lock and may arrive out of order; one whose
+    /// `revision` is not newer than the last applied is ignored, so a stale clear cannot erase
+    /// the group of a newer transient report (nor a stale report revive a cleared one).
+    pub(crate) fn reported(
+        &self,
+        session_id: &str,
+        revision: u64,
+        transient: bool,
+        group: Option<u32>,
+    ) {
         let mut groups = self.groups.lock();
-        match group.filter(|_| transient) {
-            Some(group) => {
-                groups.insert(session_id.to_string(), group);
-            }
-            None => {
-                groups.remove(session_id);
-            }
+        if groups.get(session_id).is_some_and(|(newest, _)| *newest >= revision) {
+            return;
         }
+        groups.insert(session_id.to_string(), (revision, group.filter(|_| transient)));
     }
 
     /// Whether `current`, observed while `group` owned the foreground, is the shell taking the
@@ -95,10 +103,12 @@ impl ProtocolReporters {
             return false;
         };
         let mut groups = self.groups.lock();
-        if groups.get(session_id).is_some_and(|reporter| *reporter != group)
-            && live_group() == Some(group)
-        {
-            groups.remove(session_id);
+        let Some((_, reporter)) = groups.get_mut(session_id) else {
+            return false;
+        };
+        if reporter.is_some_and(|reporter| reporter != group) && live_group() == Some(group) {
+            // Keep the revision: an older change still in flight must not re-install the group.
+            *reporter = None;
             return true;
         }
         false
@@ -963,7 +973,7 @@ mod tests {
     #[test]
     fn the_shell_regaining_the_foreground_from_a_reporter_releases_once() {
         let reporters = ProtocolReporters::default();
-        reporters.reported("s", true, Some(200));
+        reporters.reported("s", 1, true, Some(200));
         let shell = || Some(100);
         assert!(reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
         assert!(
@@ -979,7 +989,7 @@ mod tests {
     #[test]
     fn a_reporter_still_in_the_foreground_keeps_its_records() {
         let reporters = ProtocolReporters::default();
-        reporters.reported("s", true, Some(200));
+        reporters.reported("s", 1, true, Some(200));
         let live = || Some(200);
         assert!(!reporters.foreground_returned("s", Some(Foreground::Other), Some(200), live));
         assert!(!reporters.foreground_returned(
@@ -1006,18 +1016,41 @@ mod tests {
         let reporters = ProtocolReporters::default();
         let shell = || Some(100);
         // Reported from the shell's own group (a builtin): its next prompt is not an exit.
-        reporters.reported("s", true, Some(100));
+        reporters.reported("s", 1, true, Some(100));
         assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
         // done/error (or a clear) stay until acknowledged, so there is nothing to release.
-        reporters.reported("s", true, Some(200));
-        reporters.reported("s", false, Some(200));
+        reporters.reported("s", 2, true, Some(200));
+        reporters.reported("s", 3, false, Some(200));
         assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
         // An unknown reporter group is no evidence either.
-        reporters.reported("s", true, None);
+        reporters.reported("s", 4, true, None);
         assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
-        reporters.reported("gone", true, Some(200));
+        reporters.reported("gone", 5, true, Some(200));
         reporters.retain(|id| id != "gone");
         assert!(!reporters.foreground_returned("gone", Some(Foreground::Shell), Some(100), shell));
+    }
+
+    /// Finding 3: reporter bookkeeping receives changes outside the mirror lock. A stale clear
+    /// arriving after a newer transient report must not erase the reporter's group, and a stale
+    /// report must not revive a group a release already consumed.
+    #[test]
+    fn reporter_groups_keep_the_newest_change_when_published_out_of_order() {
+        let reporters = ProtocolReporters::default();
+        let shell = || Some(100);
+        reporters.reported("s", 7, true, Some(200));
+        reporters.reported("s", 6, false, None);
+        assert!(
+            reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell),
+            "the newer transient report's group survived the stale clear"
+        );
+        reporters.reported("s", 7, true, Some(200));
+        reporters.reported("s", 5, true, Some(300));
+        assert!(
+            !reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell),
+            "a release is not re-armed by a change it already superseded"
+        );
+        reporters.reported("s", 8, true, Some(300));
+        assert!(reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
     }
 
     /// The observer tick captures the process listing once and classifies every live session
