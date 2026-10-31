@@ -43,6 +43,9 @@ jobs:
       - name: full lib suite
         shell: bash
         run: |
+          # GitHub runs bash steps with -e; a failed cargo test would end the step before its
+          # exit code and failure list reach gate.log. Record every exit code instead.
+          set +e
           mkdir -p out
           git rev-parse HEAD | tee out/revision.log
           git config --global user.email ci@ferryx.dev; git config --global user.name ci
