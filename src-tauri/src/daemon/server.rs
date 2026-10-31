@@ -5048,10 +5048,15 @@ impl DaemonServer {
                 // Each session's newest OSC 7501 revision, read before the listing is requested:
                 // a report applied by then was written by a process that already existed, so a
                 // listing without any such process proves it gone. A report applied later is
-                // never released by this listing.
+                // never released by this listing. The mirror's own revision also covers records
+                // that changed no summary and so never reached the reporters.
                 let requested_revisions: HashMap<String, u64> = sessions
                     .iter()
-                    .map(|(id, _)| (id.clone(), server.protocol_reporters.newest(id)))
+                    .map(|(id, _)| {
+                        let mirror =
+                            server.terminal_service.output_hub().program_status_revision(id);
+                        (id.clone(), server.protocol_reporters.newest(id).max(mirror))
+                    })
                     .collect();
                 let capture = Arc::clone(&capture);
                 let observations = crate::ipc::run_blocking(move || {
@@ -5119,10 +5124,10 @@ impl DaemonServer {
                                     // Released edge. The shell owning the foreground again from
                                     // a group other than the reporter's ends it, and so does a
                                     // listing requested after the report that shows the shell
-                                    // alone: that covers a reporter gone before its bytes were
-                                    // parsed (it reads as the shell's group) and ConPTY, which
-                                    // has no group at all.
-                                    let reporter_gone =
+                                    // alone, for a report not attributed to the shell's own
+                                    // group: that covers ConPTY, which has no group at all.
+                                    // `Some` when the pending report is proven gone.
+                                    let released =
                                         server.protocol_reporters.foreground_returned(
                                             &id,
                                             observation,
@@ -5136,16 +5141,26 @@ impl DaemonServer {
                                             },
                                         );
                                     if server.terminal_service.get_session(&id).is_some() {
+                                        // The mirror drops only records applied before this
+                                        // listing was requested (or the released report): one
+                                        // parsed since may belong to a program it never saw.
+                                        let through = requested_revisions
+                                            .get(&id)
+                                            .copied()
+                                            .unwrap_or(0)
+                                            .max(released.unwrap_or(0));
                                         match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
                                             server.agent_states.release_foreground(&id);
                                             server.session_service.release_provider_claim(&id);
-                                            server.program_exited(&id);
+                                            server.program_exited(&id, through);
                                         }
                                         Some(crate::terminal::foreground::AgentProcessEdge::Observed) => {
                                             server.agent_states.observe_foreground_agent(&id);
                                         }
-                                        None if reporter_gone => server.program_exited(&id),
+                                        None if released.is_some() => {
+                                            server.program_exited(&id, through)
+                                        }
                                         None => {}
                                     }
                                     }
@@ -8801,10 +8816,13 @@ impl DaemonServer {
         }
     }
 
-    /// The session's foreground agent left: drops its transient OSC 7501 records; the output hub
-    /// publishes the summary afterwards, as for an acknowledgement.
-    fn program_exited(&self, session_id: &str) {
-        self.terminal_service.output_hub().program_exited(session_id);
+    /// The session's foreground agent left, as proven by evidence gathered while `through` was
+    /// its newest OSC 7501 revision: drops the transient records applied by then, under the
+    /// mirror lock; the output hub publishes the summary afterwards, as for an acknowledgement.
+    fn program_exited(&self, session_id: &str, through: u64) {
+        self.terminal_service
+            .output_hub()
+            .program_exited(session_id, through);
     }
 
     /// A paired session id is handled by this daemon's own paired runtime unless an older
