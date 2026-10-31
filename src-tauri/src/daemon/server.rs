@@ -12898,8 +12898,10 @@ mod tests {
         write_file.write_all(test_message).expect("write to pipe");
         drop(write_file); // Close writer so reader hits EOF
 
-        // 5. Spawn /bin/sh to read from inherited read_fd
-        let output = std::process::Command::new("/bin/sh")
+        // 5. Spawn a shell to read from inherited read_fd. Not /bin/sh: dash (Ubuntu's sh)
+        // only parses single-digit fds in `<&N`, and under a parallel test run the pipe is
+        // routinely allocated at fd 10 or above. bash accepts any fd number.
+        let output = std::process::Command::new("/bin/bash")
             .arg("-c")
             .arg(format!("read -r line <&{}; echo \"$line\"", read_fd))
             .output()
