@@ -894,7 +894,10 @@ export function RemoteTerminal({
     // An outcome is only acknowledged while the user can see it; a hidden tab keeps
     // the latest one pending and acknowledges it when it becomes visible again.
     let outcomeAckPending = false;
-    const acknowledgeOutcome = (socket: WebSocketLike, generation: string | null) => {
+    const acknowledgeOutcome = (
+      socket: Pick<WebSocketLike, "send">,
+      generation: string | null,
+    ) => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") {
         outcomeAckPending = true;
         return;
