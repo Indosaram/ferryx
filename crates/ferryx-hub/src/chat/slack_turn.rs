@@ -621,6 +621,40 @@ impl TurnStatus {
     }
 }
 
+/// The sink for replies of runs the engine starts after a turn (a background task's completion
+/// wake): each goes where the turn's reply went, after the turn itself replied. The task ends
+/// when the engine is closed.
+fn follow_ups(pool: &SqlitePool, turn: &SessionTurn) -> tokio::sync::mpsc::UnboundedSender<String> {
+    let (sender, mut replies) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let pool = pool.clone();
+    let turn = turn.clone();
+    super::slack::spawn_carrying_test_api(async move {
+        while let Some(text) = replies.recv().await {
+            let (text, _claims) = super::report_claims::strip_reply(&text);
+            if text.trim().is_empty() {
+                continue;
+            }
+            // The session lock orders it after the reply of the turn that started the work.
+            let lock = session_lock(&turn.key.storage_key());
+            let _turn = lock.lock().await;
+            emit(&pool, &turn, &text).await;
+            if turn.reply_channel.is_some() {
+                if let Err(error) = super::transcript::record(
+                    &pool,
+                    &turn.key.storage_key(),
+                    "assistant",
+                    &text,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "background reply was not stored");
+                }
+            }
+        }
+    });
+    sender
+}
+
 /// Runs one message through the session's omo thread, as omo-gateway's multiplexer did: the
 /// user message and the final reply land in the session transcript, the reply goes to the
 /// session's Slack thread (or the dashboard), and the engine thread id is kept for resume.
@@ -660,6 +694,7 @@ pub async fn run_session_turn(
         toolsets: state.enabled_toolsets.clone(),
         text: turn.text.clone(),
         pin_model: turn.background,
+        followups: Some(follow_ups(pool, &turn)),
     };
     // omo: cron deliveries mirrored into this session ride on the next turn as context,
     // consumed only when that turn succeeds.

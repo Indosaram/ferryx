@@ -104,6 +104,7 @@ impl crate::lanes::kibitzer::ModelTurn for RpcModel {
                 toolsets: (!toolsets.is_empty()).then(|| toolsets.to_vec()),
                 text: prompt.to_owned(),
                 pin_model: true,
+                followups: None,
             };
             super::omo_client::run_turn(&config, &request, None)
                 .await
