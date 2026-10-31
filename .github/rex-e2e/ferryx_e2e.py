@@ -481,6 +481,10 @@ def scenario_release(log):
         log.check(left is not None, "state-leaves-working-after-exit", describe(left or {}))
         last = stream.states()[-1] if stream.states() else {}
         log.check(last.get("state") != "working", "final-state-not-working", describe(last))
+        if left is None or last.get("state") == "working":
+            # Every agentState frame since the exit step, to tell a missing release from a late one.
+            for frame in stream.states(start):
+                log.info("after-exit frame " + describe(frame))
         stream.close()
     finally:
         d.shutdown()
