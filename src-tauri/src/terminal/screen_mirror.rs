@@ -19,6 +19,8 @@ use tokio::sync::Notify;
 use crate::native_terminal::{
     CompressionScheduler, CompressionStep, NativeTerminal, NativeTerminalError, TerminalEngine,
 };
+use crate::terminal::program_status::{ProgramStatusRecords, ProgramStatusSummary};
+use crate::terminal::program_status_ingest::{apply_event, ProgramStatusIngest};
 
 /// Rows of history the mirror keeps above the screen. Bounds both memory and the size of the
 /// reconstruction that a full attach and a handover carry.
@@ -41,6 +43,11 @@ pub struct ScreenMirror {
     /// Signalled on activity and on drop, so a compression driver can wait without a timer
     /// until there is something to compress, and notice when the mirror is gone.
     activity: Arc<Notify>,
+    /// OSC 7501 records, present only once [`Self::enable_program_status`] opted this mirror in.
+    /// The parser's sink fills it during `feed`, under the mirror's own mutex.
+    program_status: Option<Arc<parking_lot::Mutex<ProgramStatusRecords>>>,
+    /// The summary last handed out by [`Self::take_program_status`], to report only changes.
+    published_summary: Option<ProgramStatusSummary>,
 }
 
 /// A mirror's screen in transferable form: the size it was taken at and the VT bytes that
@@ -159,13 +166,38 @@ impl ScreenMirror {
             terminal,
             compression: CompressionScheduler::default(),
             activity: Arc::new(Notify::new()),
+            program_status: None,
+            published_summary: None,
         })
     }
 
+    /// Built from a seed. The seed is replayed before any opt-in, so it never produces program
+    /// status reports or query replies.
     pub fn from_seed(seed: &ScreenSeed) -> Option<Self> {
         let mut mirror = Self::new(seed.cols, seed.rows)?;
-        mirror.feed(&seed.bytes);
+        mirror.feed_replay(&seed.bytes);
         Some(mirror)
+    }
+
+    /// Makes this mirror the session's OSC 7501 consumer and support query replier. Only for
+    /// sessions this daemon answers for. Every other PTY write stays suppressed. Returns false
+    /// when the parser refused the callbacks.
+    pub fn enable_program_status(&mut self) -> bool {
+        if self.program_status.is_some() {
+            return true;
+        }
+        let records = Arc::new(parking_lot::Mutex::new(ProgramStatusRecords::new()));
+        let sink_records = Arc::clone(&records);
+        if let Err(error) = self
+            .terminal
+            .enable_program_status(move |event| apply_event(&mut sink_records.lock(), event))
+        {
+            tracing::warn!(%error, "screen mirror program status unavailable");
+            return false;
+        }
+        self.terminal.set_program_status_reply_capture(true);
+        self.program_status = Some(records);
+        true
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -173,6 +205,56 @@ impl ScreenMirror {
             tracing::warn!(%error, "screen mirror feed failed");
         }
         self.mark_activity();
+    }
+
+    /// Feeds bytes that already reached the program before (seed, retained history, a gap seam):
+    /// no program status report is ingested and no query reply is kept.
+    pub fn feed_replay(&mut self, bytes: &[u8]) {
+        self.terminal.set_program_status_muted(true);
+        self.terminal.set_program_status_reply_capture(false);
+        self.feed(bytes);
+        self.terminal.set_program_status_muted(false);
+        self.terminal
+            .set_program_status_reply_capture(self.program_status.is_some());
+    }
+
+    /// Drains the query replies kept since the last call and reports the summary when it changed.
+    pub fn take_program_status(&mut self) -> ProgramStatusIngest {
+        let replies = self.terminal.take_program_status_replies();
+        let summary = self.program_status_summary_change(|_| {});
+        ProgramStatusIngest { replies, summary }
+    }
+
+    /// The user saw the session: drops `done`/`error` records. `None` when not opted in, else
+    /// the summary afterwards.
+    pub fn acknowledge_program_status(&mut self) -> Option<Option<ProgramStatusSummary>> {
+        self.program_status.as_ref()?;
+        self.program_status_summary_change(ProgramStatusRecords::acknowledge);
+        Some(self.published_summary.clone())
+    }
+
+    /// The foreground program exited: drops `working`/`blocked`/`idle` records. `None` when not
+    /// opted in, else the summary afterwards.
+    pub fn program_status_exited(&mut self) -> Option<Option<ProgramStatusSummary>> {
+        self.program_status.as_ref()?;
+        self.program_status_summary_change(ProgramStatusRecords::program_exited);
+        Some(self.published_summary.clone())
+    }
+
+    fn program_status_summary_change(
+        &mut self,
+        update: impl FnOnce(&mut ProgramStatusRecords),
+    ) -> Option<Option<ProgramStatusSummary>> {
+        let summary = {
+            let mut records = self.program_status.as_ref()?.lock();
+            update(&mut records);
+            records.summary()
+        };
+        if summary == self.published_summary {
+            return None;
+        }
+        self.published_summary = summary.clone();
+        Some(summary)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {

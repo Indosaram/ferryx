@@ -69,6 +69,8 @@ pub fn create_native_terminal(
         cols: AtomicU16::new(cols),
         program_status_sink: parking_lot::Mutex::new(None),
         program_status_muted: AtomicBool::new(false),
+        program_status_reply_capture: AtomicBool::new(false),
+        program_status_replies: parking_lot::Mutex::new(Vec::new()),
     });
     let userdata_ptr = (&*context) as *const TerminalContext as *const c_void;
 

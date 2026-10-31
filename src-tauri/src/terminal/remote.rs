@@ -644,6 +644,8 @@ impl RemoteRuntime {
         let id = d.backend_session_id.clone();
         self.hub.register_session(&id);
         self.hub.record_initial_size(&id, d.cols, d.rows);
+        // The remote helper keeps no screen mirror, so this daemon answers the OSC 7501 query.
+        self.hub.enable_program_status(&id);
         let details = RemoteSessionDetails {
             descriptor: d,
             state: RemoteConnectionState::Reconnecting,
@@ -900,7 +902,15 @@ impl RemoteRuntime {
         size: Option<(u16, u16)>,
     ) -> Result<RemoteOperation, RemoteFailure> {
         let e = self.entry(id)?;
-
+        Self::enqueue(&e, generation, bytes, size)
+    }
+    /// Admits one write or resize on `e` for `generation`; the queue worker dispatches it.
+    fn enqueue(
+        e: &Entry,
+        generation: u64,
+        bytes: Option<Vec<u8>>,
+        size: Option<(u16, u16)>,
+    ) -> Result<RemoteOperation, RemoteFailure> {
         {
             let mut s = e.state.lock();
             if let Err(error) = check_connected(&s, generation) {
@@ -1164,6 +1174,7 @@ impl RemoteRuntime {
             self.hub.register_session(&id);
             self.hub.record_initial_size(&id, d.cols, d.rows);
         }
+        self.hub.enable_program_status(&id);
         let details = RemoteSessionDetails {
             descriptor: d,
             state: RemoteConnectionState::Connected,
@@ -1247,6 +1258,27 @@ fn check_connected(s: &Session, generation: u64) -> Result<(), RemoteFailure> {
     }
     Ok(())
 }
+/// Writes OSC 7501 support query replies to the remote target through the entry's input queue
+/// at `generation`, in a spawned task: the read loop never waits for the write. Call without the
+/// entry's state lock held.
+fn spawn_program_status_replies(e: &Entry, generation: u64, replies: Vec<Vec<u8>>) {
+    for reply in replies {
+        match RemoteRuntime::enqueue(e, generation, Some(reply), None) {
+            Ok(pending) => {
+                tokio::spawn(async move {
+                    if let Err(error) = pending.await {
+                        tracing::debug!(%error, "program status query reply not written");
+                    }
+                });
+            }
+            Err(error) => {
+                tracing::debug!(%error, "program status query reply not admitted");
+                return;
+            }
+        }
+    }
+}
+
 fn fail(s: &mut Session, failure: RemoteFailure) {
     if s.details.state == RemoteConnectionState::Expired {
         return;
@@ -1484,9 +1516,14 @@ async fn run(
                             .unwrap_or(read.cursor),
                     });
                 }
+                let mut replies = Vec::new();
                 for chunk in read.chunks {
                     if chunk.cursor > cursor {
-                        hub.publish(&d.backend_session_id, chunk.bytes);
+                        if let Some((_chunk, chunk_replies)) =
+                            hub.publish_with_replies(&d.backend_session_id, chunk.bytes, None)
+                        {
+                            replies.extend(chunk_replies);
+                        }
                     }
                 }
                 s.details.descriptor.remote_cursor = read.cursor;
@@ -1503,6 +1540,8 @@ async fn run(
                     }
                 }
                 Entry::notify(&s);
+                drop(s);
+                spawn_program_status_replies(&e, generation, replies);
                 if read.exited {
                     return Err(BridgeError::RemoteTargetExpired);
                 }
@@ -1657,9 +1696,14 @@ async fn run_live(
                     .unwrap_or(read.cursor),
             });
         }
+        let mut replies = Vec::new();
         for chunk in read.chunks {
             if chunk.cursor > cursor {
-                hub.publish(&d.backend_session_id, chunk.bytes);
+                if let Some((_chunk, chunk_replies)) =
+                    hub.publish_with_replies(&d.backend_session_id, chunk.bytes, None)
+                {
+                    replies.extend(chunk_replies);
+                }
             }
         }
         s.details.descriptor.remote_cursor = read.cursor;
@@ -1681,6 +1725,8 @@ async fn run_live(
             fail(&mut s, failure);
             return;
         }
+        drop(s);
+        spawn_program_status_replies(&e, generation, replies);
     }
     // Imported transports need the same recovery owner as newly dialed ones.
     // Do not wait for the control gate: a failed write may still hold it.
@@ -2347,6 +2393,110 @@ mod tests {
             }
         }
     }
+    /// Records the bytes written to the remote target so a test can await them.
+    struct WriteCapturingTransport {
+        reads: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<ReadResult, BridgeError>>>,
+        written: mpsc::UnboundedSender<Vec<u8>>,
+    }
+
+    impl Transport for WriteCapturingTransport {
+        fn describe<'a>(&'a self, t: &'a TargetRef) -> Rpc<'a, DescribeResult> {
+            Box::pin(async move {
+                Ok(DescribeResult {
+                    target: t.clone(),
+                    pid: RemotePid(11111),
+                    cwd: "/project".into(),
+                    cols: 80,
+                    rows: 24,
+                    cursor: RemoteCursor(0),
+                    exited: false,
+                })
+            })
+        }
+
+        fn read<'a>(
+            &'a self,
+            _: &'a TargetRef,
+            _: RemoteCursor,
+            _: RemoteCursor,
+        ) -> Rpc<'a, ReadResult> {
+            Box::pin(async move { self.reads.lock().await.recv().await.expect("channel retained") })
+        }
+
+        fn write<'a>(&'a self, _: &'a TargetRef, bytes: &'a [u8]) -> Rpc<'a, ()> {
+            let _ = self.written.send(bytes.to_vec());
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn resize<'a>(&'a self, _: &'a TargetRef, _: u16, _: u16) -> Rpc<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn stop<'a>(&'a self, _: &'a TargetRef) -> Rpc<'a, ()> {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    /// An SSH bridge session answers the OSC 7501 query itself: the helper keeps no mirror.
+    #[tokio::test]
+    async fn program_status_ssh_query_reply_is_written_to_the_remote_target() {
+        let hub = Arc::new(TerminalOutputHub::default());
+        let runtime = RemoteRuntime::with_connector(
+            hub.clone(),
+            Arc::new(NonConnectingDialer { calls: AtomicUsize::new(0) }),
+        );
+        let (_unused_tx, unused_rx) = mpsc::unbounded_channel();
+        let placeholder = Arc::new(TestTransport {
+            reads: tokio::sync::Mutex::new(unused_rx),
+            describes: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
+            resizes: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+            bridge_client: None,
+        });
+        runtime.insert(sample_descriptor("ssh-query", 0), Some(placeholder)).expect("insert");
+        let exported = runtime.export_for_transfer("ssh-query").await.expect("export");
+        let target = exported.descriptor.target.clone();
+
+        let successor = RemoteRuntime::with_connector(
+            hub.clone(),
+            Arc::new(NonConnectingDialer { calls: AtomicUsize::new(0) }),
+        );
+        let (reads_tx, reads_rx) = mpsc::unbounded_channel();
+        let (written_tx, mut written_rx) = mpsc::unbounded_channel();
+        let transport = Arc::new(WriteCapturingTransport {
+            reads: tokio::sync::Mutex::new(reads_rx),
+            written: written_tx,
+        });
+        successor.import_transferred(exported, Some(transport)).expect("live import");
+
+        reads_tx
+            .send(Ok(ReadResult {
+                target,
+                pid: RemotePid(11111),
+                cwd: "/proj".into(),
+                cursor: RemoteCursor(1),
+                after_sequence: 0,
+                gap: false,
+                exited: false,
+                chunks: vec![ReadChunk {
+                    cursor: RemoteCursor(1),
+                    sequence: 1,
+                    data_base64: String::new(),
+                    bytes: b"\x1b]7501;?\x1b\\".to_vec(),
+                }],
+                agent_state: None,
+            }))
+            .unwrap();
+
+        let written = tokio::time::timeout(Duration::from_secs(2), written_rx.recv())
+            .await
+            .expect("reply written within the bound")
+            .expect("transport retained");
+        assert!(written.starts_with(b"\x1b]7501;?:states="), "{written:?}");
+        assert!(written_rx.try_recv().is_err(), "exactly one reply");
+    }
+
     #[tokio::test]
     async fn test_remote_runtime_poisoned_bridge_export_rejected() {
         let hub = Arc::new(TerminalOutputHub::default());

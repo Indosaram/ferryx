@@ -249,6 +249,20 @@ impl NativeTerminal {
             .store(muted, Ordering::Release);
     }
 
+    /// While PTY writes are suppressed, keeps OSC 7501 support query replies for
+    /// [`Self::take_program_status_replies`] instead of dropping them. Every other write stays
+    /// suppressed, so an engine that is not the client can answer this one query alone.
+    pub fn set_program_status_reply_capture(&self, capture: bool) {
+        self.context
+            .program_status_reply_capture
+            .store(capture, Ordering::Release);
+    }
+
+    /// Drains the OSC 7501 support query replies kept since the last call, oldest first.
+    pub fn take_program_status_replies(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut *self.context.program_status_replies.lock())
+    }
+
     /// Sends the unsolicited DEC 2031 color scheme report for `appearance` when the running
     /// program enabled mode 2031, through the same PTY write path VT query replies use.
     ///

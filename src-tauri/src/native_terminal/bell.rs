@@ -10,6 +10,9 @@ use super::sys::ffi::ghostty_color_scheme_report_encode;
 use super::sys::types::GhosttyTerminal;
 use crate::terminal::TerminalAppearance;
 
+/// Start of the OSC 7501 support query reply (`OSC 7501 ; ? : states=...`).
+pub(crate) const PROGRAM_STATUS_REPLY_PREFIX: &[u8] = b"\x1b]7501;?";
+
 #[cfg(test)]
 #[path = "color_scheme_tests.rs"]
 mod color_scheme_tests;
@@ -37,6 +40,10 @@ pub struct TerminalContext {
     pub program_status_sink: Mutex<Option<super::program_status::ProgramStatusSink>>,
     /// When set, the program status callbacks drop every event (seed or gap replay).
     pub program_status_muted: AtomicBool,
+    /// While PTY writes are suppressed, still keep OSC 7501 support query replies, in
+    /// `program_status_replies`, for the owner to write itself. Every other write stays dropped.
+    pub program_status_reply_capture: AtomicBool,
+    pub program_status_replies: Mutex<Vec<Vec<u8>>>,
 }
 
 #[repr(C)]
@@ -132,6 +139,12 @@ pub unsafe extern "C" fn terminal_write_pty_callback(
 /// recovery) or the bounded fallback buffer is full or contended.
 pub(crate) fn queue_pty_write(ctx: &TerminalContext, bytes: Vec<u8>) -> bool {
     if ctx.pty_writes_suppressed.load(Ordering::Acquire) {
+        if ctx.program_status_reply_capture.load(Ordering::Acquire)
+            && bytes.starts_with(PROGRAM_STATUS_REPLY_PREFIX)
+        {
+            ctx.program_status_replies.lock().push(bytes);
+            return true;
+        }
         return false;
     }
     let generation = *ctx.remote_generation.lock();

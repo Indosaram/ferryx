@@ -858,6 +858,12 @@ pub enum DaemonRequest {
     ResetAgentState {
         session_id: String,
     },
+    /// The user saw the session (a desktop pane gained focus, a phone opened it): drop its
+    /// OSC 7501 `done`/`error` outcome. A daemon older than this request answers it as malformed.
+    #[serde(rename_all = "camelCase")]
+    AcknowledgeAgentOutcome {
+        session_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     Attach {
         session_id: String,
@@ -1380,6 +1386,7 @@ pub enum DaemonResponse {
         provider_session_id: Option<String>,
     },
     ResetAgentStateOk,
+    AcknowledgeAgentOutcomeOk,
     #[serde(rename_all = "camelCase")]
     AgentControlOk {
         result: serde_json::Value,

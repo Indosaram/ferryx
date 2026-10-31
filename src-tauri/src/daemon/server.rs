@@ -3821,6 +3821,13 @@ impl DaemonServer {
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
+        // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
+        let program_status_publisher: Arc<
+            dyn crate::terminal::program_status_ingest::ProgramStatusPublisher,
+        > = session_service.agent_state_hub();
+        terminal_service
+            .output_hub()
+            .set_program_status_publisher(program_status_publisher);
         #[cfg(test)]
         let remote_state = Arc::new(RemoteGatewayState::new_with_paths_and_service(
             Arc::clone(&session_router) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
@@ -4891,6 +4898,7 @@ impl DaemonServer {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
                                             server.agent_states.release_foreground(&id);
                                             server.session_service.release_provider_claim(&id);
+                                            server.program_exited(&id);
                                         }
                                         Some(crate::terminal::foreground::AgentProcessEdge::Observed) => {
                                             server.agent_states.observe_foreground_agent(&id);
@@ -6646,6 +6654,10 @@ impl DaemonServer {
                     } else {
                         daemon_session_not_found(&session_id, "daemon_discover_agent")
                     }
+                }
+                Ok(DaemonRequest::AcknowledgeAgentOutcome { session_id }) => {
+                    self.acknowledge_agent_outcome(&session_id);
+                    DaemonResponse::AcknowledgeAgentOutcomeOk
                 }
                 Ok(DaemonRequest::ResetAgentState { session_id }) => {
                     if self.session_router.is_local_session(&session_id) || self.agent_states.current(&session_id).is_some() {
@@ -8490,6 +8502,23 @@ impl DaemonServer {
                 tracing::warn!(%session_id, %error, "Could not drop the transferred session entry");
             }
             self.session_service.session_metadata.write().remove(&session_id);
+        }
+    }
+
+    /// The user saw the session: drops its OSC 7501 `done`/`error` records and republishes the
+    /// summary. A session without program status (paired, unknown) is left alone.
+    fn acknowledge_agent_outcome(&self, session_id: &str) {
+        let hub = self.terminal_service.output_hub();
+        if let Some(summary) = hub.acknowledge_program_outcome(session_id) {
+            self.agent_states.publish_protocol(session_id, summary.as_ref());
+        }
+    }
+
+    /// The session's foreground agent left: drops its transient OSC 7501 records and republishes.
+    fn program_exited(&self, session_id: &str) {
+        let hub = self.terminal_service.output_hub();
+        if let Some(summary) = hub.program_exited(session_id) {
+            self.agent_states.publish_protocol(session_id, summary.as_ref());
         }
     }
 
