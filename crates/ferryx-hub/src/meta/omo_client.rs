@@ -798,7 +798,7 @@ pub async fn run_turn(
     // before the reply is posted, so the session's next turn always finds it.
     if let (Ok(outcome), Some(followups)) = (&result, request.followups.as_ref()) {
         let holder = hold(
-            engine,
+            Box::new(engine),
             config.clone(),
             register_held(&outcome.thread_id),
             followups.clone(),
@@ -954,7 +954,7 @@ async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle
 }
 
 /// A turn that wants a held engine: the holder answers between follow-up runs.
-type Handover = oneshot::Sender<Engine>;
+type Handover = oneshot::Sender<Box<Engine>>;
 type HeldEntry = (String, UnboundedSender<Handover>);
 fn held() -> &'static Mutex<HashMap<String, HeldEntry>> {
     static HELD: OnceLock<Mutex<HashMap<String, HeldEntry>>> = OnceLock::new();
@@ -984,7 +984,7 @@ async fn take_held(thread: Option<&str>) -> Option<Engine> {
     let (reply, engine) = oneshot::channel();
     sender.send(reply).ok()?;
     // A holder that ended first drops the request; the turn then starts a fresh engine.
-    engine.await.ok()
+    engine.await.ok().map(|engine| *engine)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1021,14 +1021,13 @@ fn register_held(thread: &str) -> HeldSlot {
 }
 impl HeldSlot {
     /// Gives the engine to a waiting turn; hands it back when that turn is gone.
-    fn hand_over(&self, reply: Handover, engine: Engine) -> std::result::Result<(), Engine> {
+    fn hand_over(&self, reply: Handover, engine: Box<Engine>) -> std::result::Result<(), Box<Engine>> {
         unregister_held(&self.guard.thread, &self.guard.id);
-        reply.send(engine).map_err(|engine| {
+        reply.send(engine).inspect_err(|_| {
             held().lock().expect("mhc held registry").insert(
                 self.guard.thread.clone(),
                 (self.guard.id.clone(), self.sender.clone()),
             );
-            engine
         })
     }
 }
@@ -1038,7 +1037,7 @@ impl HeldSlot {
 /// the engine over, and `background_max` bounds the whole hold. A session that waits on
 /// nothing closes its engine as before.
 async fn hold(
-    mut engine: Engine,
+    mut engine: Box<Engine>,
     config: OmoClientConfig,
     mut slot: HeldSlot,
     followups: UnboundedSender<String>,
@@ -1126,7 +1125,7 @@ async fn hold(
         }
         HoldEnd::Settled | HoldEnd::Failed => {}
     }
-    close(engine, end == HoldEnd::Settled).await;
+    close(*engine, end == HoldEnd::Settled).await;
     // Only now does a turn that asked for this engine hear there is none and start its own,
     // so two engines never run the same session file.
     drop(slot);
