@@ -756,10 +756,26 @@ pub fn install_skill_into(target: &HookFileTarget) -> std::io::Result<bool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_file_name(".SKILL.md.ferryx.tmp");
-    std::fs::write(&tmp, SKILL_SOURCE)?;
-    std::fs::rename(&tmp, path)?;
+    write_skill_file(path)?;
     Ok(true)
+}
+
+/// Writes [`SKILL_SOURCE`] at `path` through a temporary file of its own, created exclusively
+/// under a random name beside it. A file or link someone else left at a guessable name is never
+/// written through or deleted, and the temporary file is removed again if the rename fails.
+fn write_skill_file(path: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".SKILL.md.ferryx.").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o644));
+    }
+    let mut tmp = builder.tempfile_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    tmp.write_all(SKILL_SOURCE.as_bytes())?;
+    tmp.persist(path)?;
+    Ok(())
 }
 
 /// Deletes the skill file for `target` when it is a managed Ferryx skill, and its `ferryx`
@@ -1410,6 +1426,41 @@ mod tests {
         assert!(!skill.parent().unwrap().exists(), "the emptied ferryx directory goes too");
         assert!(skill.parent().unwrap().parent().unwrap().is_dir(), "the skills directory stays");
         assert!(!remove_skill_from(&target).unwrap(), "a second removal finds nothing");
+    }
+
+    /// A link someone left at the old fixed temp name is neither written through nor removed.
+    #[cfg(unix)]
+    #[test]
+    fn skill_install_never_writes_through_a_planted_temp_link() {
+        let home = temp_home();
+        let target = target(home.path(), "claude");
+        let skill = target.skill.clone().unwrap();
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        let victim = home.path().join("victim.txt");
+        std::fs::write(&victim, "keep\n").unwrap();
+        let planted = skill.with_file_name(".SKILL.md.ferryx.tmp");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        assert!(install_skill_into(&target).unwrap());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert!(std::fs::symlink_metadata(&planted).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&skill).unwrap().file_type().is_file());
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), SKILL_SOURCE);
+        assert_eq!(std::fs::read_dir(skill.parent().unwrap()).unwrap().count(), 2, "no temp file is left");
+    }
+
+    /// A rename that fails takes its temporary file with it and touches nothing else.
+    #[test]
+    fn a_failed_skill_rename_leaves_no_temp_file() {
+        let home = temp_home();
+        let dir = home.path().join("ferryx");
+        let blocker = dir.join("SKILL.md");
+        std::fs::create_dir_all(&blocker).unwrap();
+        std::fs::write(blocker.join("keep.txt"), "keep\n").unwrap();
+        assert!(write_skill_file(&blocker).is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("SKILL.md")]);
+        assert_eq!(std::fs::read_to_string(blocker.join("keep.txt")).unwrap(), "keep\n");
     }
 
     #[test]
