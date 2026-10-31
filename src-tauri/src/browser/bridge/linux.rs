@@ -181,7 +181,7 @@ pub(crate) fn gdk_key_id(keyval: u32) -> KeyId {
         0x30..=0x39 => return KeyId::Digit((keyval - 0x30) as u8),
         _ => {}
     }
-    if key == k::comma || key == k::less {
+    if key == k::comma {
         KeyId::Comma
     } else if key == k::equal || key == k::plus {
         KeyId::Equal
@@ -221,18 +221,28 @@ pub(crate) fn guest_key_action(keyval: u32, state: gdk::ModifierType) -> Option<
     chord_to_action(gdk_chord(keyval, state), KeyPlatform::Linux)
 }
 
-/// The keyval of this key on the first layout group with no modifiers, so Ctrl+W still means W
-/// under a non-Latin active layout (the event keyval is then Cyrillic, Hangul, ...).
+fn layout_shortcut_keyval(base: u32, shifted: Option<u32>) -> u32 {
+    // AZERTY puts digits on the shifted level of the same top-row keys.
+    shifted
+        .filter(|keyval| matches!(gdk_key_id(*keyval), KeyId::Digit(_)))
+        .unwrap_or(base)
+}
+
+/// Resolve the first layout group, including its shifted top-row digits.
 fn base_layout_keyval(event: &gdk::EventKey) -> Option<u32> {
     let display = gdk::Display::default()?;
     let keymap = gdk::Keymap::for_display(&display)?;
-    keymap
+    let hardware_keycode = u32::from(event.hardware_keycode());
+    let (base, ..) = keymap
         .translate_keyboard_state(
-            u32::from(event.hardware_keycode()),
+            hardware_keycode,
             gdk::ModifierType::empty(),
             0,
-        )
-        .map(|(keyval, ..)| keyval)
+        )?;
+    let shifted = keymap
+        .translate_keyboard_state(hardware_keycode, gdk::ModifierType::SHIFT_MASK, 0)
+        .map(|(keyval, ..)| keyval);
+    Some(layout_shortcut_keyval(base, shifted))
 }
 
 /// Native key source (design 3.0): GTK key-press-event on the guest WebView. Page script cannot
@@ -264,10 +274,9 @@ fn install_key_source<R: tauri::Runtime>(
             return glib::Propagation::Proceed;
         }
         let state = event.state();
-        let mut action = guest_key_action(*event.keyval(), state);
-        if action.is_none() && gdk_key_id(*event.keyval()) == KeyId::Other {
-            action = base_layout_keyval(event).and_then(|keyval| guest_key_action(keyval, state));
-        }
+        let action = base_layout_keyval(event)
+            .and_then(|keyval| guest_key_action(keyval, state))
+            .or_else(|| guest_key_action(*event.keyval(), state));
         let Some(action) = action else {
             return glib::Propagation::Proceed;
         };
@@ -311,6 +320,24 @@ mod tests {
     }
 
     #[test]
+    fn azerty_digit_level_reaches_tab_and_workspace_shortcuts() {
+        for (base, digit, tab, workspace) in [
+            (*k::ampersand, *k::_1, "tab-select-1", "workspace-select-1"),
+            (*k::eacute, *k::_2, "tab-select-2", "workspace-select-2"),
+            (*k::minus, *k::_6, "tab-select-6", "workspace-select-6"),
+        ] {
+            let keyval = layout_shortcut_keyval(base, Some(digit));
+            assert_eq!(guest_key_action(keyval, M::CONTROL_MASK), Some(tab));
+            assert_eq!(guest_key_action(keyval, M::MOD1_MASK), Some(workspace));
+            assert_eq!(guest_key_action(keyval, M::empty()), None);
+        }
+        assert_eq!(layout_shortcut_keyval(*k::minus, Some(*k::underscore)), *k::minus);
+        assert_eq!(layout_shortcut_keyval(*k::w, Some(*k::W)), *k::w);
+        assert_eq!(layout_shortcut_keyval(*k::less, Some(*k::greater)), *k::less);
+        assert_eq!(layout_shortcut_keyval(*k::w, None), *k::w);
+    }
+
+    #[test]
     fn modifier_state_maps_to_chord_flags_without_meta_alias() {
         let chord = gdk_chord(*k::w, M::CONTROL_MASK | M::SHIFT_MASK);
         assert!(chord.ctrl && chord.shift && !chord.alt && !chord.meta);
@@ -343,6 +370,9 @@ mod tests {
         assert_eq!(guest_key_action(*k::w, M::SUPER_MASK), None);
         assert_eq!(guest_key_action(*k::r, ctrl), None);
         assert_eq!(guest_key_action(*k::Cyrillic_tse, ctrl), None);
+        // An ISO layout has a separate less-than key; it must not open settings.
+        assert_eq!(guest_key_action(*k::less, ctrl), None);
+        assert_eq!(guest_key_action(*k::comma, ctrl), Some("settings-toggle"));
     }
 
     #[derive(Default)]
