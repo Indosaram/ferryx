@@ -430,7 +430,7 @@ async fn abort_cancelled(id: &str, part_path: Option<&Path>) -> BrowserError {
         remove_part_file(part).await;
     }
     DOWNLOAD_REGISTRY.set_cancelled(id);
-    BrowserError::DownloadFailed("download cancelled".into())
+    BrowserError::DownloadCancelled
 }
 
 /// Ends a download as failed: removes the temp file and records the error.
@@ -1143,7 +1143,7 @@ mod tests {
             .expect("download task join");
         assert_eq!(
             result,
-            Err(BrowserError::DownloadFailed("download cancelled".into()))
+            Err(BrowserError::DownloadCancelled)
         );
         assert_eq!(get_download(id).unwrap().status, DownloadStatus::Cancelled);
         assert!(!dest.exists(), "cancelled download must not create the destination");

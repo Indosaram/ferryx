@@ -382,7 +382,8 @@ export function BrowserPane({
       setDownloadStatus("Saved");
       setDownloadNeedsConfirmation(false);
     } catch (error) {
-      setDownloadStatus(extractBrowserErrorCode(error));
+      const code = extractBrowserErrorCode(error);
+      setDownloadStatus(code === "BROWSER_DOWNLOAD_CANCELLED" ? "Cancelled" : code);
     } finally {
       // The registry only gains a record (completed or failed) once this call settles.
       if (saveAttempted) setDownloadsRefreshToken((current) => current + 1);

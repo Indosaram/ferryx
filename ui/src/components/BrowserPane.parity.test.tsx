@@ -207,6 +207,23 @@ describe("BrowserPane parity affordances", () => {
     expect(browserMocks.downloadBrowserUrlWithSession).not.toHaveBeenCalled();
   });
 
+  it("shows a user-cancelled save as Cancelled, not as a download failure", async () => {
+    browserMocks.downloadBrowserUrlWithSession.mockRejectedValueOnce({
+      code: "BROWSER_DOWNLOAD_CANCELLED",
+      message: "Browser download failed: download cancelled",
+    });
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save as…" }));
+
+    const prompt = screen.getByTestId("browser-download-prompt");
+    await waitFor(() => expect(prompt).toHaveTextContent("Cancelled"));
+    expect(prompt).not.toHaveTextContent("BROWSER_DOWNLOAD_FAILED");
+    expect(prompt).not.toHaveTextContent("BROWSER_DOWNLOAD_CANCELLED");
+  });
+
   it("surfaces a rejected open-in-system-browser as a pane alert", async () => {
     browserMocks.openExternalUrl.mockRejectedValueOnce({ code: "OPEN_EXTERNAL_FAILED", message: "no handler" });
     render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);

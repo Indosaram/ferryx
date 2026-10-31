@@ -524,6 +524,9 @@ impl From<crate::browser::BrowserError> for IpcError {
             }
             crate::browser::BrowserError::HistoryFailed(_) => IpcErrorCode::BrowserHistoryFailed,
             crate::browser::BrowserError::FindFailed(_) => IpcErrorCode::BrowserFindFailed,
+            crate::browser::BrowserError::DownloadCancelled => {
+                IpcErrorCode::BrowserDownloadCancelled
+            }
             crate::browser::BrowserError::DownloadFailed(_) => IpcErrorCode::BrowserDownloadFailed,
             crate::browser::BrowserError::CookieImport(_) => {
                 IpcErrorCode::BrowserCookieImportFailed
@@ -683,6 +686,21 @@ mod tests {
 
         let not_found_browser = IpcError::from(BrowserError::NotFound("b-1".into()));
         assert_eq!(not_found_browser.code, IpcErrorCode::BrowserNotFound);
+    }
+
+    #[test]
+    fn test_browser_download_cancel_maps_to_cancelled_not_failed() {
+        use crate::browser::BrowserError;
+
+        let cancelled = IpcError::from(BrowserError::DownloadCancelled);
+        assert_eq!(cancelled.code, IpcErrorCode::BrowserDownloadCancelled);
+        assert_eq!(
+            serde_json::to_string(&cancelled.code).unwrap(),
+            "\"BROWSER_DOWNLOAD_CANCELLED\""
+        );
+
+        let failed = IpcError::from(BrowserError::DownloadFailed("HTTP 500".into()));
+        assert_eq!(failed.code, IpcErrorCode::BrowserDownloadFailed);
     }
 
     #[test]
