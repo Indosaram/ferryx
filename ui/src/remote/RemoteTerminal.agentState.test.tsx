@@ -79,14 +79,15 @@ describe("remote terminal agent state bridge", () => {
     });
     const socket = createdSockets[0];
     expect(socket).toBeDefined();
+    const presentation = JSON.stringify({ type: "grid", rows: 20, cols: 80, cursor: hiddenCursor, lines: [] });
     await act(async () => { socket.onopen?.(new Event("open")); });
     expect(socket.send).not.toHaveBeenCalled();
-    await act(async () => { socket.onmessage?.({ data: gridFrame(20, 80) }); });
+    await act(async () => { socket.onmessage?.({ data: presentation }); });
     const acknowledgement = JSON.stringify({ type: "acknowledgeAgentOutcome" });
     expect(socket.send.mock.calls).toEqual([[acknowledgement]]);
     await act(async () => {
       socket.onopen?.(new Event("open"));
-      socket.onmessage?.({ data: gridFrame(20, 80) });
+      socket.onmessage?.({ data: presentation });
     });
     expect(socket.send.mock.calls).toEqual([[acknowledgement]]);
   });
