@@ -1994,9 +1994,28 @@ impl DaemonSessionService {
     ) -> Result<String, SpawnError> {
         let RemoteSpawnTarget { project, host } = target;
         let SpawnOptions { worktree, cwd, cols, rows, .. } = options;
+        let provider_claim = fingerprint.provider_claim.clone();
+        if let Some(claim) = &provider_claim {
+            if let Some(existing_session_id) = self.provider_session_claims.lock().get(claim).cloned() {
+                return Err(SpawnError::AgentSessionConflict {
+                    agent_type: claim.agent_type.clone(),
+                    provider_key: claim.provider_key,
+                    provider_id: claim.provider_id.clone(),
+                    existing_session_id,
+                });
+            }
+        }
+        let resume = match &fingerprint.startup {
+            Some(TerminalStartup::AgentResume { agent_type, provider_session }) => Some(
+                crate::terminal::shell::resolve_agent_resume_plan(agent_type, provider_session)
+                    .map_err(|error| SpawnError::InvalidAgentResume(error.to_string()))?,
+            ),
+            _ => None,
+        };
         let environment = crate::ssh::runtime::detect_for(&host, project.platform)
             .await
             .map_err(SpawnError::Structured)?;
+        let resume = resume.map(|plan| crate::terminal::shell::remote_agent_resume_plan(plan, &environment));
         if project
             .platform
             .unwrap_or(crate::ssh::runtime::RemotePlatform::Posix)
@@ -2036,7 +2055,12 @@ impl DaemonSessionService {
             } else {
                 Some(relative)
             },
-            agent_identity: None,
+            agent_identity: match &fingerprint.startup {
+                Some(TerminalStartup::AgentResume { agent_type, provider_session }) => Some(
+                    serde_json::json!({"agentType": agent_type, "providerSession": provider_session}),
+                ),
+                _ => None,
+            },
         };
         // Persist the immutable request before any potentially ambiguous remote spawn.
         use sha2::{Digest, Sha256};
@@ -2066,6 +2090,8 @@ impl DaemonSessionService {
                 crate::ssh::bridge::SpawnParams {
                     cols: Some(cols),
                     rows: Some(rows),
+                    program: resume.as_ref().map(|plan| plan.program.clone()),
+                    args: resume.map(|plan| plan.args),
                     // The user's opt-out must stop forwarding on real remote panes too.
                     agent_integration: Some(
                         self.terminal_service.pty_manager().agent_integration_enabled(),
@@ -2085,10 +2111,13 @@ impl DaemonSessionService {
                 workspace_id: project.workspace_id.clone(),
                 worktree,
                 cwd: PathBuf::from(root),
-                provider_claim: None,
+                provider_claim: provider_claim.clone(),
                 spawn_fingerprint: fingerprint,
             },
         );
+        if let Some(claim) = provider_claim {
+            self.provider_session_claims.lock().insert(claim, id.clone());
+        }
         self.session_router.register_workspace(
             &id,
             &project.workspace_id,
@@ -2224,13 +2253,13 @@ impl DaemonSessionService {
             crate::ssh::projects::is_remote(workspace_id),
             startup.as_ref(),
         ) {
-            (true, Some(TerminalStartup::RemoteSsh { host_store_path })) => {
+            (true, Some(TerminalStartup::RemoteSsh { .. } | TerminalStartup::AgentResume { .. })) => {
                 if shell.is_some() {
                     return Err(SpawnError::Other(
                         "Local shell overrides are unsupported for SSH sessions".into(),
                     ));
                 }
-                if host_store_path != &self.ssh_store_path {
+                if matches!(startup.as_ref(), Some(TerminalStartup::RemoteSsh { host_store_path }) if host_store_path != &self.ssh_store_path) {
                     return Err(SpawnError::Other(
                         "SSH inventory path is not daemon-configured".into(),
                     ));
@@ -3105,7 +3134,9 @@ impl DaemonSessionService {
 
     pub(super) fn session_is_live(&self, session_id: &str) -> bool {
         if let Some(details) = self.terminal_service.remote().details(session_id) {
-            return details.state != crate::terminal::remote::RemoteConnectionState::Expired;
+            return details.state != crate::terminal::remote::RemoteConnectionState::Expired
+                || details.failure.as_ref().is_some_and(|failure|
+                    failure.kind == crate::terminal::remote::RemoteFailureKind::Transport);
         }
         self.terminal_service
             .get_session(session_id)

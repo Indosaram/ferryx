@@ -12,6 +12,7 @@ import {
   isSessionAutoResumeHeld,
   isSessionSleeping,
   isStandbyBackendSessionId,
+  REMOTE_SESSION_GONE_REASON,
   registerSessionSnapshot,
   resumeRegisteredSession,
   setSessionActive,
@@ -133,7 +134,12 @@ export function TerminalPane({
   const splitIntent = localSplitIntent(session);
   const splitPending = Boolean(splitIntent && session.reconnectLifecycle !== "idle" && session.reconnectLifecycle !== "failed");
 
-  const isSshSession = isRemoteWorkspaceId(session.workspaceId);
+  // An SSH pane whose backend is confirmed gone sits on a standby backend like a lazily restored
+  // local pane: it takes the local presentation and is resumed (agent) or reopened (shell) on the
+  // same remote host. Only a pane that still owns a remote target uses the SSH reattach overlay.
+  const isSshSession = isRemoteWorkspaceId(session.workspaceId) && !isStandbyBackendSessionId(session.backendSessionId);
+  const isRemoteGone = session.backendUnavailableReason === REMOTE_SESSION_GONE_REASON &&
+    isStandbyBackendSessionId(session.backendSessionId);
   const isSpawning = session.reconnectLifecycle === "spawning" || session.reconnectLifecycle === "validating";
   const remoteState = session.remoteConnectionState;
   const recoveryState = session.recoveryState;
@@ -299,8 +305,9 @@ export function TerminalPane({
   useEffect(() => {
     // Lazy restore: only the pane the user is looking at may start its shell. A hidden tab
     // stays asleep until it becomes active, so restoring a workspace spawns nothing unseen.
-    if (!active || splitIntent || !isExited || isPending || isRecoveryBlocked || isRecoveryExited || isSshSession || !isSessionSleeping(session.id) || isSessionAutoResumeHeld(session.id)) return;
-    const key = `${session.id}:${session.backendSessionId ?? "none"}:${session.reconnectLifecycle ?? "idle"}`;
+    const confirmedAgentExit = isAgentSession && isRecoveryExited && session.backendSessionId === null;
+    if (!active || splitIntent || !isExited || isPending || isRecoveryBlocked || (isRecoveryExited && !confirmedAgentExit) || isSshSession || !(isSessionSleeping(session.id) || isRemoteGone || confirmedAgentExit) || isSessionAutoResumeHeld(session.id)) return;
+    const key = `${session.id}:${session.backendSessionId ?? "none"}`;
     if (autoResumeKeyRef.current === key) return;
     if (isAgentSession) {
       if (!affordance.canReconnect || !onReconnect) return;
@@ -321,7 +328,7 @@ export function TerminalPane({
       .then(() => setSessionSleeping(session.id, false))
       .catch((error) => setReplacementError(toIpcError(error).message))
       .finally(() => setPendingLocal(false));
-  }, [active, affordance.canReconnect, isAgentSession, isExited, isPending, isRecoveryBlocked, isRecoveryExited, isSshSession, onOpenNewShell, onReconnect, session.backendSessionId, session.id, session.reconnectLifecycle]);
+  }, [active, affordance.canReconnect, isAgentSession, isExited, isPending, isRecoveryBlocked, isRecoveryExited, isRemoteGone, isSshSession, onOpenNewShell, onReconnect, session.backendSessionId, session.id, session.reconnectLifecycle]);
 
   // If the native paired proxy session has not been established or expired,
   // do not mount local path/PTY tooling or offer SSH/agent respawn.

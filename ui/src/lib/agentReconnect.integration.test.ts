@@ -29,6 +29,40 @@ function coldAgent(): TerminalSession {
 }
 
 describe("agent reconnect cross-layer contracts", () => {
+  it.each(["ws", "ssh:host:project", "daemon:host:project"])("retains pane layout and provider identity when recovering %s", async (workspaceId) => {
+    clearAgentReconnectInflightForTests();
+    const session = { ...coldAgent(), workspaceId, backendSessionId: "standby:local-agent" };
+    let state: WorkspaceState = {
+      workspaceId, worktrees: [], activeWorktreePath: "/repo",
+      sessions: { [session.id]: session },
+      layout: { tabs: [{ id: "tab", sessionId: session.id, label: "Agent" }],
+        activeTabId: "tab", primaryTabId: "tab", secondaryTabId: null, split: "none",
+        layoutsByTabId: { tab: { root: { type: "leaf", leafId: "original-leaf" },
+          activeLeafId: "original-leaf", expandedLeafId: null,
+          sessionIdsByLeafId: { "original-leaf": session.id } } } },
+      unreadTabIds: {}, unreadWorktreePaths: {},
+    };
+    const layout = state.layout;
+    await reconnectAgentSession(session.id, {
+      getSessions: () => state.sessions,
+      dispatch: (action) => { state = workspaceReducer(state, action); },
+      spawn: async () => ({ sessionId: "new-backend", daemonEpoch: "new",
+        session: { sessionId: "new-backend", workspaceId, cwd: "/repo", worktree: null,
+          cols: 80, rows: 24, running: true } }),
+      attach: async () => undefined,
+    });
+    expect(state.layout).toBe(layout);
+    expect(state.sessions[session.id]).toMatchObject({
+      id: session.id, workspaceId, backendSessionId: "new-backend", agentType: "claude",
+      providerSession: session.providerSession, lifecycle: "running",
+    });
+    const saved = serializeWorkspaceState(workspaceId, "/repo", state, null);
+    expect(saved.workspaces[workspaceId]?.terminalSessions[session.id]).toMatchObject({
+      localSessionId: session.id, cwd: "/repo", providerSession: session.providerSession,
+    });
+    expect(state.layout.layoutsByTabId.tab.sessionIdsByLeafId).toEqual({ "original-leaf": session.id });
+  });
+
   it.each([undefined, "mhc"] as const)("preserves launcher %s through restore, reconnect and persistence", async (launcher) => {
     const providerSession = {
       key: "session_id",
