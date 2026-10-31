@@ -77,14 +77,30 @@ pub(crate) struct Observation {
 ///   it is still running.
 ///
 /// The second covers ConPTY, which has no process group at all. A lone shell is no evidence
-/// against the shell itself, so it never releases a report published while the shell's own group
-/// held the foreground: that is a builtin or a sourced function (a `read` prompt that reported
-/// `blocked`), indistinguishable from a reporter that exited before its bytes were parsed, and
-/// both stay until a prompt start, a clear or a newer report. Neither path ever releases on
-/// elapsed time or on unknown ownership.
+/// against the shell itself, so it does not release a report published while the shell's own
+/// group held the foreground (or whose group could not be read) on its own: that may be a builtin
+/// or a sourced function (a `read` prompt that reported `blocked`). A reporter that exited before
+/// its bytes were parsed is attributed to the shell's group the same way; what tells it apart is
+/// the foreground the observer sampled last ([`Self::sampled`], every observer tick) before the
+/// report. When that sample was a group other than the report's own and other than the shell's
+/// (learned from the observer's Shell observations), a child held the terminal and has handed it
+/// back since: the report is taken to be that child's, and a later lone-shell listing (which
+/// proves every child and every other foreground-group member gone) releases it. Each report also
+/// counts as a sample of its own group, so only the first report after the hand-back carries it.
+///
+/// The trade-off: a report the shell writes right after a sampled child exited, with no tick in
+/// between (`child; printf ...` inside one sampling interval), is released by the next lone-shell
+/// listing although its writer is alive. A report from the shell with no other group sampled
+/// since the previous sample or report is never released this way, nor is one before the shell's
+/// group has been learned. A reporter that lived shorter than one tick and was never sampled
+/// stays, as do the shell's own reports, until a prompt start, a clear or a newer report.
+/// Neither path ever releases on elapsed time or on unknown ownership.
 #[derive(Default)]
 pub(crate) struct ProtocolReporters {
     reports: parking_lot::Mutex<HashMap<String, Report>>,
+    /// Per session, the foreground groups the observer has seen. Locked after `reports` when
+    /// both are held.
+    groups: parking_lot::Mutex<HashMap<String, SeenGroups>>,
 }
 
 /// One session's newest applied summary change.
@@ -94,9 +110,33 @@ struct Report {
     pending: bool,
     /// The foreground group the transient change was reported from, when known (Unix only).
     group: Option<u32>,
+    /// The last foreground sampled before the report was a group other than the report's and
+    /// the shell's: the report most likely came from that child, which has handed back since.
+    departed: bool,
+}
+
+/// One session's foreground group evidence (Unix only).
+#[derive(Default)]
+struct SeenGroups {
+    /// The newest known foreground group, from an observer sample or a report.
+    last: Option<u32>,
+    /// The group the shell owned the foreground from when last observed as Shell.
+    shell: Option<u32>,
 }
 
 impl ProtocolReporters {
+    /// The observer sampled the session's foreground `group`. Unknown (`None`) keeps the last
+    /// known group.
+    pub(crate) fn sampled(&self, session_id: &str, group: Option<u32>) {
+        if let Some(group) = group {
+            self.groups
+                .lock()
+                .entry(session_id.to_string())
+                .or_default()
+                .last = Some(group);
+        }
+    }
+
     /// A session's summary changed. A transient summary stays pending until its program is seen
     /// gone and remembers the foreground `group` it was reported from; anything else (`done`,
     /// `error`, a clear) leaves nothing to release.
@@ -118,12 +158,22 @@ impl ProtocolReporters {
         {
             return;
         }
+        let mut groups = self.groups.lock();
+        let seen = groups.entry(session_id.to_string()).or_default();
+        let departed = match (seen.last, seen.shell) {
+            (Some(last), Some(shell)) => transient && Some(last) != group && last != shell,
+            _ => false,
+        };
+        if group.is_some() {
+            seen.last = group;
+        }
         reports.insert(
             session_id.to_string(),
             Report {
                 revision,
                 pending: transient,
                 group: group.filter(|_| transient),
+                departed,
             },
         );
     }
@@ -164,12 +214,21 @@ impl ProtocolReporters {
         if current != Some(Foreground::Shell) {
             return None;
         }
+        if let Some(group) = group {
+            self.groups
+                .lock()
+                .entry(session_id.to_string())
+                .or_default()
+                .shell = Some(group);
+        }
         let mut reports = self.reports.lock();
         let report = reports.get_mut(session_id).filter(|report| report.pending)?;
         let left_group = group.is_some_and(|group| report.group.is_some_and(|from| from != group));
         // Whether the report's writer can be told apart from the shell: with process groups only
-        // a report from another group can; ConPTY has no group to attribute it by.
+        // a report from another group, or one that followed a child's hand-back, can; ConPTY has
+        // no group to attribute it by.
         let not_the_shell = match (report.group, group) {
+            _ if report.departed => true,
             (Some(from), Some(now)) => from != now,
             (None, Some(_)) => false,
             (_, None) => true,
@@ -182,6 +241,7 @@ impl ProtocolReporters {
             // Keep the revision: an older change still in flight must not re-install the group.
             report.pending = false;
             report.group = None;
+            report.departed = false;
             return Some(alone_through.map_or(report.revision, |newest| {
                 newest.max(report.revision)
             }));
@@ -192,6 +252,7 @@ impl ProtocolReporters {
     /// Keeps only the sessions `live` accepts.
     pub(crate) fn retain(&self, live: impl Fn(&str) -> bool) {
         self.reports.lock().retain(|id, _| live(id));
+        self.groups.lock().retain(|id, _| live(id));
     }
 }
 
@@ -1529,6 +1590,68 @@ mod tests {
         let reporters = ProtocolReporters::default();
         reporters.reported("s", 1, true, Some(100));
         assert!(!shell_back(&reporters, Some(100), Some(1), Some(200)));
+    }
+
+    /// A short-lived reporter that exits before its bytes are parsed is attributed to the
+    /// shell's group. The observer sampled its group before the report, so once a listing
+    /// requested after the report shows the shell alone, the child is proven gone.
+    #[test]
+    fn a_report_attributed_to_the_shell_after_its_child_exited_is_released_by_a_lone_shell() {
+        let reporters = ProtocolReporters::default();
+        reporters.sampled("s", Some(100));
+        assert!(!shell_back(&reporters, Some(100), None, Some(100)), "nothing pending yet");
+        // The child's group held the foreground; it reported and exited before the parse.
+        reporters.sampled("s", Some(200));
+        reporters.reported("s", 1, true, Some(100));
+        assert!(
+            !shell_back(&reporters, Some(100), None, Some(100)),
+            "the shell's prompt alone is no evidence"
+        );
+        assert!(
+            !shell_back(&reporters, Some(100), Some(1), Some(200)),
+            "a program that took the foreground since blocks the release"
+        );
+        assert_eq!(
+            reporters.foreground_returned(
+                "s",
+                Some(Foreground::Shell),
+                Some(100),
+                Some(reporters.newest("s")),
+                || Some(100),
+            ),
+            Some(1)
+        );
+        assert!(!shell_back(&reporters, Some(100), Some(1), Some(100)), "one release per report");
+        // An unreadable group at publish after a child's hand-back is the child's too.
+        reporters.sampled("s", Some(300));
+        reporters.reported("s", 2, true, None);
+        assert!(shell_back(&reporters, Some(100), Some(2), Some(100)));
+    }
+
+    /// A shell builtin (or a sourced `read` prompt) reports with no other group sampled since
+    /// the previous sample: the shell that wrote it is alive, so a lone shell never releases it.
+    #[test]
+    fn a_shell_builtin_report_without_an_intervening_child_is_not_released() {
+        let reporters = ProtocolReporters::default();
+        reporters.sampled("s", Some(100));
+        assert!(!shell_back(&reporters, Some(100), None, Some(100)));
+        reporters.reported("s", 1, true, Some(100));
+        assert!(!shell_back(&reporters, Some(100), Some(reporters.newest("s")), Some(100)));
+        // A child ran and was sampled, then handed back and was sampled gone before the report.
+        reporters.sampled("s", Some(200));
+        reporters.sampled("s", Some(100));
+        reporters.reported("s", 2, true, Some(100));
+        assert!(!shell_back(&reporters, Some(100), Some(2), Some(100)));
+        reporters.reported("s", 3, true, None);
+        assert!(
+            !shell_back(&reporters, Some(100), Some(3), Some(100)),
+            "an unreadable group with the shell sampled last is still the shell's"
+        );
+        // Before the shell's group is known, a foreign sample proves nothing.
+        let reporters = ProtocolReporters::default();
+        reporters.sampled("s", Some(200));
+        reporters.reported("s", 1, true, Some(100));
+        assert!(!shell_back(&reporters, Some(100), Some(1), Some(100)));
     }
 
     /// The observer tick captures the process listing once and classifies every live session

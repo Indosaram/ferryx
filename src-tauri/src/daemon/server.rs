@@ -5033,6 +5033,11 @@ impl DaemonServer {
                     .iter()
                     .map(|(id, session)| (id.clone(), foreground_marker(session)))
                     .collect();
+                // Every tick's group, listing or not: a child group sampled before an OSC 7501
+                // report attributed to the shell's group marks that report as the child's.
+                for (id, marker) in &markers {
+                    server.protocol_reporters.sampled(id, *marker);
+                }
                 let now = tokio::time::Instant::now();
                 let probe_due = probes
                     .values()
