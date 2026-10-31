@@ -1114,9 +1114,6 @@ export function RemoteTerminal({
           if (disposed || sequence !== dialSequence || socketRef.current !== socket) return;
           wheelRemainderRowsRef.current = 0;
           onSocketLifecycle?.(socketRequest.sessionId, "open");
-          if (!isAccountSession && !createLocalSocket) {
-            socket.send(JSON.stringify({ type: "acknowledgeAgentOutcome" }));
-          }
           if (isTerminalReadyRef.current) {
             flushOutboundBuffer();
           }
@@ -1330,6 +1327,9 @@ export function RemoteTerminal({
             isTerminalReadyRef.current = true;
             backoffAttempt = 0;
             setConnected(true);
+            if (!createLocalSocket) {
+              socket.send(JSON.stringify({ type: "acknowledgeAgentOutcome" }));
+            }
             flushOutboundBuffer();
           }
           setGrid((current) => applyGridFrame(current, frame));
