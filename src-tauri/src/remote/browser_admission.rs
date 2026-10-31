@@ -352,6 +352,7 @@ impl TokenBucket {
 
 pub struct DeviceRateLimiter {
     commands: Mutex<TokenBucket>,
+    viewer_controls: Mutex<TokenBucket>,
     claims: Mutex<TokenBucket>,
     evals: Mutex<TokenBucket>,
 }
@@ -360,6 +361,11 @@ impl DeviceRateLimiter {
     pub fn new(now: Instant) -> Self {
         Self {
             commands: Mutex::new(TokenBucket::new(
+                COMMAND_RATE_LIMIT_PER_SEC,
+                COMMAND_BURST_MAX,
+                now,
+            )),
+            viewer_controls: Mutex::new(TokenBucket::new(
                 COMMAND_RATE_LIMIT_PER_SEC,
                 COMMAND_BURST_MAX,
                 now,
@@ -379,6 +385,10 @@ impl DeviceRateLimiter {
 
     pub fn check_command(&self, now: Instant) -> bool {
         self.commands.lock().try_consume(1.0, now)
+    }
+
+    pub fn check_viewer_control(&self, now: Instant) -> bool {
+        self.viewer_controls.lock().try_consume(1.0, now)
     }
 
     pub fn check_claim(&self, now: Instant) -> bool {

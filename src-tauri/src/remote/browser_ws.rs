@@ -993,6 +993,23 @@ impl BrowserWsSession {
     ) -> Result<(), String> {
         let limiter = admission.get_device_limiter(&self.device_id, now);
 
+        if matches!(
+            &msg,
+            ClientMessage::BrowserPause { .. } | ClientMessage::BrowserResume { .. }
+        ) && !limiter.check_viewer_control(now)
+        {
+            let _ = out_tx
+                .send(browser_error(
+                    None,
+                    "BROWSER_RATE_LIMITED",
+                    "Viewer control rate limit exceeded",
+                    true,
+                    Some(250),
+                ))
+                .await;
+            return Ok(());
+        }
+
         match msg {
             ClientMessage::BrowserSubscribe {
                 request_id,
@@ -1195,6 +1212,7 @@ impl BrowserWsSession {
                 }
 
                 // Authoritative document generation refresh on heartbeat (R5-7):
+                let mut changed_state = None;
                 if let Some(ref mut ident) = self.negotiated_identity {
                     let scope = crate::remote::browser_backend::DesktopScope {
                         workspace_id: "".into(),
@@ -1209,7 +1227,10 @@ impl BrowserWsSession {
                         return Ok(());
                     };
                     if let Ok(state) = st_res {
-                        ident.document_generation = state.document_generation;
+                        if ident.document_generation != state.document_generation {
+                            ident.document_generation = state.document_generation.clone();
+                            changed_state = Some(state);
+                        }
                     }
                 }
 
@@ -1217,6 +1238,22 @@ impl BrowserWsSession {
                 if !self.is_scope_valid() {
                     self.cancel_token.cancel();
                     return Ok(());
+                }
+
+                // Publish the new fence before the pong so the client can use it.
+                if let Some(state) = changed_state {
+                    let _ = out_tx
+                        .send(ServerMessage::BrowserState {
+                            browser_id: state.browser_id,
+                            url: state.url,
+                            title: state.title,
+                            document_generation: state.document_generation,
+                            viewport_revision: state.viewport_revision,
+                            loading: state.loading,
+                            paused: state.paused,
+                            pause_reason: state.pause_reason,
+                        })
+                        .await;
                 }
 
                 let resp = ServerMessage::BrowserPong {
@@ -5775,6 +5812,7 @@ mod hardening_tests {
     /// Backend whose failures and hangs are scripted per test.
     #[derive(Default)]
     pub(super) struct ScriptedBackend {
+        pub state: Option<BrowserRemoteState>,
         pub claim_err: Option<RemoteBrowserError>,
         /// Error returned by every backend claim after the first one succeeded.
         pub reclaim_err: Option<RemoteBrowserError>,
@@ -5786,6 +5824,7 @@ mod hardening_tests {
         pub release_calls: AtomicUsize,
         pub unsubscribe_calls: AtomicUsize,
         pub exec_calls: AtomicUsize,
+        pub exec_started: tokio::sync::Notify,
     }
 
     impl RemoteBrowserBackend for ScriptedBackend {
@@ -5806,7 +5845,11 @@ mod hardening_tests {
             _browser_id: &'a str,
             _scope: &'a DesktopScope,
         ) -> BoxFuture<'a, Result<BrowserRemoteState, RemoteBrowserError>> {
-            Box::pin(async move { Err(RemoteBrowserError::NotFound("b1".into())) })
+            Box::pin(async move {
+                self.state
+                    .clone()
+                    .ok_or_else(|| RemoteBrowserError::NotFound("b1".into()))
+            })
         }
         fn execute_command(
             &self,
@@ -5814,6 +5857,7 @@ mod hardening_tests {
         ) -> BoxFuture<'_, Result<BrowserCommandResult, RemoteBrowserError>> {
             self.exec_calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
+                self.exec_started.notify_one();
                 if self.exec_hangs {
                     std::future::pending::<()>().await;
                 }
@@ -6426,13 +6470,16 @@ mod hardening_tests {
         subscribe_and_claim(&mut session, &backend, &admission).await;
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(16);
         let hung = command_msg(&session, "5", "getState", None);
+        let started = scripted.exec_started.notified();
+        tokio::pin!(started);
+        started.as_mut().enable();
         session
             .dispatch_client_message(hung, &backend, &admission, &out_tx, Instant::now())
             .await
             .unwrap();
-        // Current-thread runtime: one yield runs the spawned task up to its hung backend call,
-        // so the guard exists before the abort. The assert makes a scheduling change fail loudly.
-        tokio::task::yield_now().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), started)
+            .await
+            .expect("command did not enter the backend");
         assert_eq!(scripted.exec_calls.load(Ordering::SeqCst), 1);
         let handles: Vec<_> = session.tracked_tasks.lock().drain(..).collect();
         assert_eq!(handles.len(), 1);
@@ -6595,7 +6642,8 @@ mod hardening_tests {
 
     #[tokio::test]
     async fn non_numeric_request_seq_is_rejected_as_invalid() {
-        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(ScriptedBackend::default());
+        let scripted = Arc::new(ScriptedBackend::default());
+        let backend: Arc<dyn RemoteBrowserBackend> = scripted.clone();
         let admission = AdmissionController::new();
         let mut session = new_session("c-nn", "d-nn", "b-nn");
         subscribe_and_claim(&mut session, &backend, &admission).await;
@@ -6608,12 +6656,90 @@ mod hardening_tests {
         )
         .await;
         match resp {
-            Some(ServerMessage::BrowserError { code, message, .. }) => {
+            Some(ServerMessage::BrowserError { code, retryable, .. }) => {
                 assert_eq!(code, "BROWSER_INVALID_REQUEST");
-                assert!(message.contains("requestSeq"));
+                assert!(!retryable);
+                assert_eq!(scripted.exec_calls.load(Ordering::SeqCst), 0);
             }
             other => panic!("expected BrowserError, got {other:?}"),
         }
+    }
+    #[tokio::test]
+    async fn heartbeat_publishes_changed_generation_before_pong() {
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(ScriptedBackend {
+            state: Some(BrowserRemoteState {
+                browser_id: "b-generation".into(),
+                browser_instance_id: Some("bi1".into()),
+                url: Some("https://example.com/next".into()),
+                title: Some("Next".into()),
+                document_generation: "2".into(),
+                viewport_revision: "3".into(),
+                loading: false,
+                paused: false,
+                pause_reason: None,
+            }),
+            ..Default::default()
+        });
+        let admission = AdmissionController::new();
+        let mut session = new_session("c-generation", "d-generation", "b-generation");
+        subscribe_and_claim(&mut session, &backend, &admission).await;
+        let heartbeat = ClientMessage::BrowserHeartbeat {
+            request_id: Some("hb-generation".into()),
+            lease_epoch: session.lease_epoch.map(|epoch| epoch.to_string()),
+            subscription_id: session.subscription_id.clone(),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        session
+            .dispatch_client_message(heartbeat, &backend, &admission, &tx, Instant::now())
+            .await
+            .unwrap();
+        drop(tx);
+        match rx.recv().await {
+            Some(ServerMessage::BrowserState { document_generation, viewport_revision, .. }) => {
+                assert_eq!(document_generation, "2");
+                assert_eq!(viewport_revision, "3");
+            }
+            other => panic!("expected the updated document fence, got {other:?}"),
+        }
+        assert!(matches!(rx.recv().await, Some(ServerMessage::BrowserPong { .. })));
+        let mut command = command_msg(&session, "1", "getState", None);
+        if let ClientMessage::BrowserCommand { document_generation, .. } = &mut command {
+            *document_generation = "2".into();
+        }
+        let result = send(&mut session, &backend, &admission, command).await;
+        assert!(matches!(result, Some(ServerMessage::BrowserResult { .. })));
+        session.teardown(&admission);
+    }
+    #[tokio::test]
+    async fn pause_resume_share_a_budget_separate_from_commands() {
+        let backend: Arc<dyn RemoteBrowserBackend> = Arc::new(ScriptedBackend::default());
+        let admission = AdmissionController::new();
+        let mut session = new_session("c-pause-limit", "d-pause-limit", "b-pause-limit");
+        send(&mut session, &backend, &admission, subscribe_msg()).await;
+        let now = Instant::now();
+        for index in 0..40 {
+            let message = if index % 2 == 0 {
+                ClientMessage::BrowserPause {
+                    browser_id: session.browser_id.clone(),
+                    stream_id: session.stream_id,
+                }
+            } else {
+                ClientMessage::BrowserResume {
+                    browser_id: session.browser_id.clone(),
+                    stream_id: session.stream_id,
+                }
+            };
+            assert!(send_at(&mut session, &backend, &admission, message, now).await.is_none());
+        }
+        let pause = ClientMessage::BrowserPause {
+            browser_id: session.browser_id.clone(),
+            stream_id: session.stream_id,
+        };
+        let response = send_at(&mut session, &backend, &admission, pause, now).await;
+        assert_eq!(error_code(response), ("BROWSER_RATE_LIMITED".into(), true));
+        assert_eq!(session.state, WsConnectionState::Streaming);
+        assert!(admission.get_device_limiter("d-pause-limit", now).check_command(now));
+        session.teardown(&admission);
     }
     // END hardening_tests
 }
