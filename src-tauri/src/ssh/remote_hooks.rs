@@ -12,7 +12,9 @@
 //!
 //! The Ferryx agent skill (`SKILL_FILES`) rides the same read-compare-write path: it is written
 //! where the agent's config directory exists, and only a skill whose frontmatter still says
-//! `ferryx-managed: true` is replaced or deleted.
+//! `ferryx-managed: true` is replaced or deleted. As in the local install, a link (or Windows
+//! reparse point) under the skill's name is never read, written through or deleted, and removing
+//! the skill also takes its `ferryx` directory when nothing else is left in it.
 
 use super::helper_setup::{self, HelperProbeState};
 use super::operations::RemoteRemovalReport;
@@ -88,7 +90,8 @@ pub(super) fn hook_files(platform: RemotePlatform) -> Vec<RemoteHookFile> {
 pub(super) enum Found {
     /// The agent is not installed on the host: nothing is written.
     NoDir,
-    /// A directory or a dangling link under the file's name: never ours to touch.
+    /// A directory or a dangling link under the file's name, or any link under the skill's name:
+    /// never ours to touch.
     NotFile,
     Absent,
     File(Vec<u8>),
@@ -145,23 +148,38 @@ fn windows_locate(file: &RemoteHookFile) -> String {
 
 /// Prints `nodir`, `notfile`, `absent`, or `file` followed by the file's bytes.
 pub(super) fn read_script(platform: RemotePlatform, file: &RemoteHookFile) -> String {
+    let skill = file.kind == Kind::Skill;
     match platform {
-        RemotePlatform::Posix => format!(
-            "{} if [ ! -d \"$d\" ]; then printf 'nodir\\n'; \
-             elif [ -d \"$f\" ] || {{ [ -L \"$f\" ] && [ ! -e \"$f\" ]; }}; then printf 'notfile\\n'; \
-             elif [ ! -e \"$f\" ]; then printf 'absent\\n'; \
-             else printf 'file\\n'; cat \"$f\"; fi",
-            posix_locate(file)
-        ),
-        RemotePlatform::Windows => format!(
-            "{} $o=[Console]::OpenStandardOutput(); \
-             if (![IO.Directory]::Exists($d)) {{ $h='nodir' }} \
-             else {{ $i=Get-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; \
-                 if (!$i) {{ $h='absent' }} elseif ($i.PSIsContainer) {{ $h='notfile' }} else {{ $h='file' }} }}; \
-             $b=[Text.Encoding]::ASCII.GetBytes($h+\"`n\"); $o.Write($b,0,$b.Length); \
-             if ($h -eq 'file') {{ $b=[IO.File]::ReadAllBytes($f); $o.Write($b,0,$b.Length) }}; $o.Flush()",
-            windows_locate(file)
-        ),
+        RemotePlatform::Posix => {
+            let not_file = if skill {
+                "[ -d \"$f\" ] || [ -L \"$f\" ]"
+            } else {
+                "[ -d \"$f\" ] || { [ -L \"$f\" ] && [ ! -e \"$f\" ]; }"
+            };
+            format!(
+                "{} if [ ! -d \"$d\" ]; then printf 'nodir\\n'; \
+                 elif {not_file}; then printf 'notfile\\n'; \
+                 elif [ ! -e \"$f\" ]; then printf 'absent\\n'; \
+                 else printf 'file\\n'; cat \"$f\"; fi",
+                posix_locate(file)
+            )
+        }
+        RemotePlatform::Windows => {
+            let not_file = if skill {
+                "$i.PSIsContainer -or (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)"
+            } else {
+                "$i.PSIsContainer"
+            };
+            format!(
+                "{} $o=[Console]::OpenStandardOutput(); \
+                 if (![IO.Directory]::Exists($d)) {{ $h='nodir' }} \
+                 else {{ $i=Get-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue; \
+                     if (!$i) {{ $h='absent' }} elseif ({not_file}) {{ $h='notfile' }} else {{ $h='file' }} }}; \
+                 $b=[Text.Encoding]::ASCII.GetBytes($h+\"`n\"); $o.Write($b,0,$b.Length); \
+                 if ($h -eq 'file') {{ $b=[IO.File]::ReadAllBytes($f); $o.Write($b,0,$b.Length) }}; $o.Flush()",
+                windows_locate(file)
+            )
+        }
     }
 }
 
@@ -181,7 +199,10 @@ pub(super) enum Change {
 
 /// stdin carries the expected bytes followed by the new ones. The script prints one of `nodir`,
 /// `changed`, `written` or `removed`. `changed` means the file no longer matches what was read, so
-/// it is left alone. A symlinked file is written through at its target, as the local install does.
+/// it is left alone. A symlinked hook file is written through at its target, as the local install
+/// does. The skill is only ever replaced as a regular file, through a temporary file the script
+/// creates exclusively: a link under its name counts as `changed`, and a removal also deletes its
+/// `ferryx` directory once that is empty.
 pub(super) fn write_script(
     platform: RemotePlatform,
     file: &RemoteHookFile,
@@ -196,18 +217,30 @@ pub(super) fn write_script(
         Change::Write { bytes, .. } => bytes.len(),
         Change::Delete => 0,
     };
+    let skill = file.kind == Kind::Skill;
     match platform {
         RemotePlatform::Posix => {
             let check = match expect {
                 Expect::Absent => {
                     "if [ -e \"$f\" ] || [ -L \"$f\" ]; then printf 'changed\\n'; exit 0; fi;"
                 }
+                Expect::Bytes(_) if skill => {
+                    "if [ -L \"$f\" ] || [ ! -f \"$f\" ] || ! cmp -s \"$f\" \"$old\"; then printf 'changed\\n'; exit 0; fi;"
+                }
                 Expect::Bytes(_) => {
                     "if [ ! -f \"$f\" ] || ! cmp -s \"$f\" \"$old\"; then printf 'changed\\n'; exit 0; fi;"
                 }
             };
             let act = match change {
+                // `rmdir` fails, and is meant to, while the directory still holds anything else.
+                Change::Delete if skill => {
+                    "rm -f \"$f\"; rmdir \"$(dirname \"$f\")\" 2>/dev/null || :; printf 'removed\\n'".to_string()
+                }
                 Change::Delete => "rm -f \"$f\"; printf 'removed\\n'".to_string(),
+                Change::Write { .. } if skill => "mkdir -p \"$(dirname \"$f\")\"; \
+                     tmp=$(mktemp \"$f.ferryx.tmp.XXXXXX\"); cat \"$new\" > \"$tmp\"; chmod 644 \"$tmp\"; \
+                     mv -f \"$tmp\" \"$f\"; tmp=; printf 'written\\n'"
+                    .to_string(),
                 Change::Write { executable, .. } => format!(
                     "mkdir -p \"$(dirname \"$f\")\"; \
                      if [ -L \"$f\" ]; then cat \"$new\" > \"$f\"; \
@@ -233,12 +266,33 @@ pub(super) fn write_script(
         RemotePlatform::Windows => {
             let check = match expect {
                 Expect::Absent => "$i",
+                Expect::Bytes(_) if skill => {
+                    "(!$i -or $i.PSIsContainer -or (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or ([Convert]::ToBase64String([IO.File]::ReadAllBytes($f)) -ne [Convert]::ToBase64String($old)))"
+                }
                 Expect::Bytes(_) => {
                     "(!$i -or $i.PSIsContainer -or ([Convert]::ToBase64String([IO.File]::ReadAllBytes($f)) -ne [Convert]::ToBase64String($old)))"
                 }
             };
             let act = match change {
+                Change::Delete if skill => {
+                    // Deleting a non-empty directory fails, and is meant to: anything else in it
+                    // stays. As in the local removal, that failure is not an error.
+                    "[IO.File]::Delete($f); \
+                     $p=Get-Item -LiteralPath (Split-Path -Parent $f) -Force -ErrorAction SilentlyContinue; \
+                     if ($p -and (($p.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) { \
+                         try { [IO.Directory]::Delete($p.FullName) } catch {} }; \
+                     $s='removed'"
+                }
                 Change::Delete => "[IO.File]::Delete($f); $s='removed'",
+                Change::Write { .. } if skill => {
+                    "[void][IO.Directory]::CreateDirectory((Split-Path -Parent $f)); \
+                     $t=$f+'.ferryx.tmp.'+[guid]::NewGuid().ToString('N'); \
+                     $w=[IO.File]::Open($t,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None); \
+                     try { try { $w.Write($new,0,$new.Length) } finally { $w.Dispose() }; \
+                         Move-Item -LiteralPath $t -Destination $f -Force } \
+                     catch { [IO.File]::Delete($t); throw }; \
+                     $s='written'"
+                }
                 Change::Write { .. } => {
                     "[void][IO.Directory]::CreateDirectory((Split-Path -Parent $f)); \
                      if ($i -and $i.LinkType) { [IO.File]::WriteAllBytes($f,$new) } \
