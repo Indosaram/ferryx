@@ -3874,11 +3874,17 @@ where
     Ok(OpenFileCliCommand { path, line, col })
 }
 
-pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+/// `send_browser_cli_request` reads the reply under `tokio::time::timeout`, so timers are required.
+fn browser_cli_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_io()
+        .enable_time()
         .build()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
+    let runtime = browser_cli_runtime()?;
     let request = BrowserCliRequest::OpenFile {
         path: command.path,
         line: command.line,
@@ -3898,10 +3904,7 @@ pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
 }
 
 pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|error| error.to_string())?;
+    let runtime = browser_cli_runtime()?;
     let cwd = std::env::current_dir()
         .map_err(|error| format!("failed to read current directory: {error}"))?;
     let home = cli_home_dir();
@@ -4271,6 +4274,15 @@ mod tests {
             .chain(extra.iter())
             .map(|arg| arg.to_string())
             .collect()
+    }
+
+    #[test]
+    fn browser_cli_runtime_supports_the_request_timeout() {
+        let runtime = browser_cli_runtime().expect("runtime");
+        let result = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async { 7 }).await
+        });
+        assert_eq!(result.expect("ready future must not time out"), 7);
     }
 
     #[test]
