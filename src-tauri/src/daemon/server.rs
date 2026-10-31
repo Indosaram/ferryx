@@ -12912,22 +12912,50 @@ mod tests {
         write_file.write_all(test_message).expect("write to pipe");
         drop(write_file); // Close writer so reader hits EOF
 
-        // 5. Spawn a shell to read from inherited read_fd. Not /bin/sh: dash (Ubuntu's sh)
-        // only parses single-digit fds in `<&N`, and under a parallel test run the pipe is
-        // routinely allocated at fd 10 or above. bash accepts any fd number.
-        let output = std::process::Command::new("/bin/bash")
-            .arg("-c")
-            .arg(format!("read -r line <&{}; echo \"$line\"", read_fd))
-            .output()
-            .expect("spawn helper process with inherited fd");
+        // 5. Read the inherited read_fd in an exec'd child through /dev/fd/N, which Linux and
+        // macOS both resolve to the child's own descriptor N. No shell fd syntax is involved:
+        // dash (Ubuntu's sh) only parses single-digit fds in `<&N`, and under a parallel test
+        // run the pipe is routinely allocated at fd 10 or above. One line, not EOF: a child
+        // another test forks meanwhile may hold an inherited copy of the write end open.
+        let read_inherited = |fd: i32| {
+            std::process::Command::new("head")
+                .args(["-n", "1"])
+                .arg(format!("/dev/fd/{fd}"))
+                .output()
+                .expect("spawn helper process")
+        };
+        let output = read_inherited(read_fd);
 
         unsafe {
             libc::close(read_fd);
         }
 
-        assert!(output.status.success());
+        assert!(output.status.success(), "{output:?}");
         let stdout_str = String::from_utf8_lossy(&output.stdout);
         assert_eq!(stdout_str.trim(), "ferryx-inherited-fd-payload");
+
+        // 6. Control: the same probe must not see a descriptor that keeps FD_CLOEXEC, so the
+        // success above is owed to clear_cloexec and not to the probe.
+        let mut control_fds = [0i32; 2];
+        let ret = unsafe { libc::pipe(control_fds.as_mut_ptr()) };
+        assert_eq!(ret, 0);
+        let [control_read, control_write] = control_fds;
+        let set_cloexec_ret =
+            unsafe { libc::fcntl(control_read, libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_eq!(set_cloexec_ret, 0);
+        let mut control_file = unsafe { std::fs::File::from_raw_fd(control_write) };
+        control_file
+            .write_all(b"ferryx-cloexec-control-payload\n")
+            .expect("write to control pipe");
+        drop(control_file);
+        let control = read_inherited(control_read);
+        unsafe {
+            libc::close(control_read);
+        }
+        assert!(
+            !String::from_utf8_lossy(&control.stdout).contains("ferryx-cloexec-control-payload"),
+            "a close-on-exec descriptor must not survive exec: {control:?}"
+        );
     }
 
     #[tokio::test]
