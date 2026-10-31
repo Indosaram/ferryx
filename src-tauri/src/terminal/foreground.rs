@@ -183,6 +183,16 @@ impl ProtocolReporters {
         );
     }
 
+    /// A feed applied a transient record under `revision` from the foreground `group`, whether
+    /// or not it changed the summary. A record that changed no summary (a repeated report, or
+    /// one hidden behind the root record) never reaches [`Self::reported`], yet an exit decision
+    /// gathered before it was applied keeps it; it stays pending under its own revision so a
+    /// later observation that proves its program gone releases it. Delivered before the same
+    /// feed's summary change, which carries the same revision and is then ignored.
+    pub(crate) fn transient_applied(&self, session_id: &str, revision: u64, group: Option<u32>) {
+        self.reported(session_id, revision, true, group);
+    }
+
     /// The revision of the session's newest applied change, 0 before any. The observer reads it
     /// before it requests a process listing and hands it back with that listing's evidence.
     pub(crate) fn newest(&self, session_id: &str) -> u64 {
@@ -1854,6 +1864,27 @@ mod tests {
         reporters.sampled("s", Some(200));
         reporters.reported("s", 1, true, Some(100));
         assert!(!shell_back(&reporters, Some(100), Some(1), Some(100)));
+    }
+
+    /// A transient record that changed no summary re-arms the released entry under its own
+    /// revision, so a later listing releases it; one requested before it still does not, and the
+    /// summary change of the same feed (same revision) changes nothing.
+    #[test]
+    fn a_transient_record_that_changed_no_summary_stays_pending() {
+        let reporters = ProtocolReporters::default();
+        reporters.reported("s", 1, true, None);
+        assert!(shell_back(&reporters, None, Some(1), None));
+        reporters.transient_applied("s", 2, None);
+        assert!(!shell_back(&reporters, None, Some(1), None), "requested before revision 2");
+        assert!(shell_back(&reporters, None, Some(2), None));
+        assert!(!shell_back(&reporters, None, Some(2), None), "released once");
+        // The feed's own summary change arrives after it and is ignored; a stale one too.
+        reporters.transient_applied("s", 3, Some(200));
+        reporters.reported("s", 3, false, None);
+        reporters.transient_applied("s", 2, None);
+        assert_eq!(reporters.newest("s"), 3);
+        assert!(!shell_back(&reporters, Some(200), None, Some(200)), "still its group");
+        assert!(shell_back(&reporters, Some(100), None, Some(100)), "the group left");
     }
 
     /// The observer tick captures the process listing once and classifies every live session

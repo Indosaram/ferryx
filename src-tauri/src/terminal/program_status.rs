@@ -119,10 +119,17 @@ impl ProgramStatusRecords {
 
     /// Stamps every record applied since the last stamp with `revision`, the summary revision
     /// the caller took for them while it holds the lock that orders this store's changes.
-    pub fn stamp(&mut self, revision: u64) {
+    /// Returns whether one of them is a `working`, `blocked` or `idle` record: its program must
+    /// be seen gone before it is released, even when it did not change the summary.
+    pub fn stamp(&mut self, revision: u64) -> bool {
+        let mut transient = false;
         for record in self.records.values_mut() {
-            record.revision = record.revision.or(Some(revision));
+            if record.revision.is_none() {
+                record.revision = Some(revision);
+                transient |= !matches!(record.state, ProgramState::Done | ProgramState::Error);
+            }
         }
+        transient
     }
 
     /// A new shell prompt started (OSC 133 `A`): drop `working`, `blocked` and `idle` records.
@@ -438,6 +445,21 @@ mod tests {
         records.program_exited(3);
         assert!(records.record("late").is_some());
         assert!(records.record("unstamped").is_none());
+    }
+
+    /// Only a transient record applied since the previous stamp is reported, once.
+    #[test]
+    fn stamp_reports_newly_applied_transient_records_once() {
+        let mut records = ProgramStatusRecords::new();
+        assert!(!records.stamp(1), "nothing applied");
+        records.apply(report("d", ProgramState::Done));
+        assert!(!records.stamp(2), "an outcome needs no release");
+        records.apply(report("w", ProgramState::Working));
+        assert!(records.stamp(3));
+        assert!(!records.stamp(4), "already stamped");
+        records.apply(report("i", ProgramState::Idle));
+        records.apply(report("e", ProgramState::Error));
+        assert!(records.stamp(5));
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub struct ProgramStatusIngest {
     pub replies: Vec<Vec<u8>>,
     /// `Some` when the session's summary changed.
     pub summary: Option<ProgramStatusChange>,
+    /// The revision a `working`, `blocked` or `idle` record applied by this feed was stamped
+    /// with, whether or not it changed the summary.
+    pub transient_applied: Option<u64>,
 }
 
 /// One change of a session's program status summary.
@@ -50,6 +53,12 @@ pub(crate) fn next_revision() -> u64 {
 /// arrive out of order: the implementation must drop a change older than one it already applied.
 pub(crate) trait ProgramStatusPublisher: Send + Sync {
     fn publish(&self, session_id: &str, change: &ProgramStatusChange);
+
+    /// A feed applied a transient record under `revision`, delivered before that feed's summary
+    /// change, if any. A record that did not change the summary (a repeated report, or one
+    /// hidden behind the root record) still has a program that must be seen gone before an exit
+    /// may release it, so its revision must reach whoever decides that.
+    fn transient_applied(&self, _session_id: &str, _revision: u64) {}
 }
 
 impl ProgramStatusPublisher for crate::daemon::agent_state::AgentStateHub {
@@ -344,6 +353,74 @@ mod tests {
         let newest = recorder.0.lock().last().expect("blocked published").revision;
         assert!(newest > bound);
         assert_eq!(hub.program_exited("s", newest).expect("opted in"), None);
+    }
+
+    /// A repeated report changes no summary, so it is never published, yet it re-stamps its
+    /// record. When it lands while an exit listing is in flight, that exit keeps the record; the
+    /// reporter entry must stay pending under the repeat's revision so the next listing that
+    /// proves its program gone releases it. A report applied after that listing was requested
+    /// is still never released by it.
+    #[test]
+    fn program_status_exit_keeps_a_repeated_report_pending_until_a_later_listing() {
+        use crate::terminal::foreground::{Foreground, ProtocolReporters};
+
+        /// The daemon's relay, minus the agent state hub: ConPTY, so there is no group.
+        struct Relay(Arc<ProtocolReporters>);
+        impl ProgramStatusPublisher for Relay {
+            fn publish(&self, session_id: &str, change: &ProgramStatusChange) {
+                let transient = change.summary.as_ref().is_some_and(|summary| {
+                    matches!(
+                        summary.state,
+                        ProgramState::Working | ProgramState::Blocked | ProgramState::Idle
+                    )
+                });
+                self.0.reported(session_id, change.revision, transient, None);
+            }
+            fn transient_applied(&self, session_id: &str, revision: u64) {
+                self.0.transient_applied(session_id, revision, None);
+            }
+        }
+        let hub = TerminalOutputHub::new(64 * 1024);
+        let reporters = Arc::new(ProtocolReporters::default());
+        let publisher: Arc<dyn ProgramStatusPublisher> = Arc::new(Relay(Arc::clone(&reporters)));
+        hub.set_program_status_publisher(publisher);
+        hub.register_session("s");
+        assert!(hub.enable_program_status("s"));
+        // The bound an observer tick reads before it requests its listing.
+        let requested = || reporters.newest("s").max(hub.program_status_revision("s"));
+        // A tick whose listing shows the shell alone and no Released edge: as in `server.rs`,
+        // records are dropped only when the pending report is released.
+        let lone_shell = |requested: u64| {
+            let released = reporters.foreground_returned(
+                "s",
+                Some(Foreground::Shell),
+                None,
+                Some(requested),
+                || None,
+            )?;
+            hub.program_exited("s", requested.max(released))
+        };
+
+        replies(&hub, WORKING_REPORT);
+        let bound = requested();
+        // The agent's listing is in flight; it repeats its report, changing no summary.
+        replies(&hub, WORKING_REPORT);
+        // That listing ends in the agent's Released edge, which drops what its bound covers.
+        let shell = Some(Foreground::Shell);
+        let released = reporters.foreground_returned("s", shell, None, Some(bound), || None);
+        let kept = hub
+            .program_exited("s", bound.max(released.unwrap_or(0)))
+            .expect("opted in")
+            .expect("the repeat was applied after the listing was requested");
+        assert_eq!(kept.state, ProgramState::Working);
+
+        // The next listing is in flight when a newer repeat lands: it must not release it.
+        let bound = requested();
+        replies(&hub, WORKING_REPORT);
+        assert_eq!(lone_shell(bound), None, "a report newer than the listing stays pending");
+
+        // A listing requested after the newest report proves its program gone and releases it.
+        assert_eq!(lone_shell(requested()), Some(None));
     }
 
     #[test]

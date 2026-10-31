@@ -2105,6 +2105,16 @@ struct ProgramStatusRelay {
     terminal_service: std::sync::Weak<TerminalService>,
 }
 
+impl ProgramStatusRelay {
+    /// The foreground process group of the session now, when known.
+    fn foreground_group(&self, session_id: &str) -> Option<u32> {
+        self.terminal_service
+            .upgrade()
+            .and_then(|terminal| terminal.get_session(session_id))
+            .and_then(|session| foreground_marker(&session))
+    }
+}
+
 impl crate::terminal::program_status_ingest::ProgramStatusPublisher for ProgramStatusRelay {
     fn publish(
         &self,
@@ -2118,15 +2128,16 @@ impl crate::terminal::program_status_ingest::ProgramStatusPublisher for ProgramS
                 ProgramState::Working | ProgramState::Blocked | ProgramState::Idle
             )
         });
-        let group = self
-            .terminal_service
-            .upgrade()
-            .and_then(|terminal| terminal.get_session(session_id))
-            .and_then(|session| foreground_marker(&session));
+        let group = self.foreground_group(session_id);
         self.reporters
             .reported(session_id, change.revision, transient, group);
         self.states
             .publish_protocol(session_id, change.revision, change.summary.as_ref());
+    }
+
+    fn transient_applied(&self, session_id: &str, revision: u64) {
+        let group = self.foreground_group(session_id);
+        self.reporters.transient_applied(session_id, revision, group);
     }
 }
 

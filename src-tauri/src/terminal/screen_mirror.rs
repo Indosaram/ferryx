@@ -227,11 +227,17 @@ impl ScreenMirror {
     /// Drains the query replies kept since the last call and reports the summary when it changed.
     pub fn take_program_status(&mut self) -> ProgramStatusIngest {
         let replies = self.terminal.take_program_status_replies();
-        let summary = self
-            .update_program_status(|_| {})
-            .filter(|(changed, _)| *changed)
-            .map(|(_, change)| change);
-        ProgramStatusIngest { replies, summary }
+        match self.update_program_status_stamped(|_| {}) {
+            Some((changed, transient, change)) => ProgramStatusIngest {
+                replies,
+                transient_applied: transient.then_some(change.revision),
+                summary: changed.then_some(change),
+            },
+            None => ProgramStatusIngest {
+                replies,
+                ..ProgramStatusIngest::default()
+            },
+        }
     }
 
     /// The user saw the session: drops `done`/`error` records. `None` when not opted in, else
@@ -262,17 +268,26 @@ impl ScreenMirror {
         &mut self,
         update: impl FnOnce(&mut ProgramStatusRecords),
     ) -> Option<(bool, ProgramStatusChange)> {
+        self.update_program_status_stamped(update)
+            .map(|(changed, _, change)| (changed, change))
+    }
+
+    /// [`Self::update_program_status`], also returning whether a transient record was stamped.
+    fn update_program_status_stamped(
+        &mut self,
+        update: impl FnOnce(&mut ProgramStatusRecords),
+    ) -> Option<(bool, bool, ProgramStatusChange)> {
         let revision = next_revision();
-        let summary = {
+        let (transient, summary) = {
             let mut records = self.program_status.as_ref()?.lock();
             update(&mut records);
-            records.stamp(revision);
-            records.summary()
+            let transient = records.stamp(revision);
+            (transient, records.summary())
         };
         self.program_status_revision = revision;
         let changed = summary != self.published_summary;
         self.published_summary = summary.clone();
-        Some((changed, ProgramStatusChange { revision, summary }))
+        Some((changed, transient, ProgramStatusChange { revision, summary }))
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {

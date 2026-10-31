@@ -1191,6 +1191,12 @@ impl TerminalOutputHub {
         }
         drop(hub);
         let ingest = ingest.unwrap_or_default();
+        if let Some(revision) = ingest.transient_applied {
+            let publisher = self.program_status_publisher.read().clone();
+            if let Some(publisher) = publisher {
+                publisher.transient_applied(session_id, revision);
+            }
+        }
         if let Some(change) = ingest.summary.as_ref() {
             self.publish_program_status(session_id, change);
         }
