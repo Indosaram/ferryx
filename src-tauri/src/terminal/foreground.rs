@@ -820,14 +820,13 @@ mod platform {
         };
         let mut lineages = LINEAGES.lock();
         lineages.retain(|(pid, _)| snapshot.processes.iter().any(|p| p.pid == *pid));
-        let index = match lineages.iter().position(|(pid, _)| *pid == shell) {
-            Some(index) => index,
-            None => {
-                lineages.push((shell, Lineage::default()));
-                lineages.len() - 1
-            }
+        let mut own = match lineages.iter().position(|(pid, _)| *pid == shell) {
+            Some(index) => lineages.swap_remove(index).1,
+            None => Lineage::default(),
         };
-        Ok(classify(&snapshot.processes, shell, &mut lineages[index].1))
+        let observed = classify(&snapshot.processes, shell, &mut own, &lineages);
+        lineages.push((shell, own));
+        Ok(observed)
     }
 
     /// Whether two creation times may name the same process: unknown matches anything.
@@ -841,6 +840,14 @@ mod platform {
     /// What earlier listings showed of one pane's shell tree. The process table is the whole
     /// logon session's, so without it an orphan from anywhere (a launcher-style app started in
     /// another pane) would keep every ConPTY shell accompanied.
+    ///
+    /// Limit: attribution needs a listing to have shown the process, or the parent that
+    /// created it, inside some shell's tree. A launcher that starts its app and exits between
+    /// two listings (the idle refresh is 2s on Windows) leaves an orphan no listing ever tied to
+    /// a pane. Every pane whose shell started before it must keep counting it as company for
+    /// as long as it lives: it may be the writer of that pane's pending report, and nothing
+    /// in `Win32_Process` tells which console it holds. Such a report is then released only by a
+    /// prompt start, a clear or a newer report.
     #[derive(Default)]
     struct Lineage {
         /// The creation time of the shell this memory belongs to; a different one is a new shell
@@ -853,49 +860,81 @@ mod platform {
 
     #[derive(Default)]
     struct History {
-        /// What earlier listings attributed to the pane, with creation times: the shell's
-        /// descendants and every possible orphan counted as its company. Kept while the process
-        /// is listed or a listed process still names it as its parent, so an orphan of a
-        /// remembered middle process, or one counted once, stays attributed to the pane.
+        /// The shell's descendants earlier listings showed, with their creation times: positive
+        /// evidence the process came from this pane.
         seen: HashMap<u32, Option<i64>>,
+        /// Possible orphans counted as company without such evidence (no history yet, or born
+        /// and orphaned between listings). They keep counting while no other pane's listing
+        /// shows them as its own descendant.
+        adopted: HashMap<u32, Option<i64>>,
         /// Every process of the previous listing whose creation time was known. A process not
         /// in it may have been born and orphaned between listings, so no listing could have
         /// attributed it.
         listed: HashMap<u32, i64>,
     }
 
+    /// Whether `entries` holds `process` itself, or the parent that may have created it.
+    fn holds(entries: &HashMap<u32, Option<i64>>, process: &Process) -> bool {
+        let itself = entries
+            .get(&process.pid)
+            .is_some_and(|&created| may_match(created, process.created));
+        let parent = entries.get(&process.parent).is_some_and(|&parent| {
+            match (parent, process.created) {
+                (Some(parent), Some(own)) => parent <= own,
+                _ => true,
+            }
+        });
+        itself || parent
+    }
+
     impl Lineage {
-        /// Whether `process`, a possible orphan, may have come from this pane: no history yet,
-        /// the previous listing did not show it, or an earlier listing attributed it or its
-        /// parent to the pane. Unknown creation times count as possible.
-        fn may_own(&self, process: &Process) -> bool {
-            let Some(history) = &self.history else {
-                return true;
+        /// Whether an earlier listing showed `process` itself, with the same known creation
+        /// time, as a descendant of this pane's shell: then no other pane's shell created it.
+        fn descended(&self, process: &Process) -> bool {
+            let (Some(history), Some(own)) = (&self.history, process.created) else {
+                return false;
             };
+            history.seen.get(&process.pid) == Some(&Some(own))
+        }
+
+        /// Whether the shell tree this memory belongs to may contain the shell `pid` created
+        /// at `created`.
+        fn contains_shell(&self, pid: u32, created: Option<i64>) -> bool {
+            self.history.as_ref().is_some_and(|history| {
+                history
+                    .seen
+                    .get(&pid)
+                    .is_some_and(|&seen| may_match(seen, created))
+            })
+        }
+
+        /// Whether `process`, a possible orphan, may have come from this pane: an earlier
+        /// listing showed it or its parent in the shell's tree, or, unless another pane's
+        /// listing showed it as that pane's descendant (`elsewhere`), no history yet, the
+        /// previous listing did not show it, or it was counted before. Unknown creation times
+        /// count as possible.
+        fn may_own(&self, process: &Process, elsewhere: bool) -> bool {
+            let Some(history) = &self.history else {
+                return !elsewhere;
+            };
+            if holds(&history.seen, process) {
+                return true;
+            }
             let unattributable = process
                 .created
                 .is_none_or(|own| history.listed.get(&process.pid) != Some(&own));
-            let seen = history
-                .seen
-                .get(&process.pid)
-                .is_some_and(|&created| may_match(created, process.created));
-            let born_of_seen = history.seen.get(&process.parent).is_some_and(|&parent| {
-                match (parent, process.created) {
-                    (Some(parent), Some(own)) => parent <= own,
-                    _ => true,
-                }
-            });
-            unattributable || seen || born_of_seen
+            !elsewhere && (unattributable || holds(&history.adopted, process))
         }
 
         /// Remembers this listing's descendants of the shell, the `orphans` it counted as
-        /// company and the listing itself.
+        /// company without such evidence, those other panes own (`elsewhere`) and the listing.
         fn record(
             &mut self,
             processes: &[Process],
             shell: u32,
             descendants: &[u32],
             orphans: &[&Process],
+            elsewhere: &[&Process],
         ) {
             let history = self.history.get_or_insert_with(History::default);
             for p in processes {
@@ -904,13 +943,20 @@ mod platform {
                 }
             }
             for p in orphans {
-                history.seen.insert(p.pid, p.created);
+                if !holds(&history.seen, p) {
+                    history.adopted.insert(p.pid, p.created);
+                }
             }
-            history.seen.retain(|pid, created| {
+            for p in elsewhere {
+                history.adopted.remove(&p.pid);
+            }
+            let live = |pid: &u32, created: &mut Option<i64>| {
                 processes.iter().any(|p| {
                     (p.pid == *pid && may_match(p.created, *created)) || p.parent == *pid
                 })
-            });
+            };
+            history.seen.retain(live);
+            history.adopted.retain(live);
             history.listed = processes
                 .iter()
                 .filter_map(|p| p.created.map(|created| (p.pid, created)))
@@ -945,11 +991,13 @@ mod platform {
         same_session && after_shell && orphaned
     }
 
-    /// Classifies the pane whose shell is `shell` against the whole process table.
+    /// Classifies the pane whose shell is `shell` against the whole process table, with the
+    /// memory of its own earlier listings and those of the `others` panes (keyed by shell pid).
     fn classify(
         processes: &[Process],
         shell: u32,
         lineage: &mut Lineage,
+        others: &[(u32, Lineage)],
     ) -> Option<Observation> {
         // A complete descendant snapshot supplies positive child-exit evidence;
         // shell-with-no-descendants is the conservative fallback.
@@ -985,17 +1033,38 @@ mod platform {
         // The shell with no descendant at all owns the foreground. It is alone only when no
         // process could be a descendant whose middle process exited (ConPTY keeps such a
         // grandchild attached to the pane, so it can still write there) and this pane's
-        // history may own (see [`Lineage`]).
+        // history may own (see [`Lineage`]). A process another pane's listing showed as its
+        // descendant came from that pane's shell, unless one shell runs inside the other.
         let in_front = descendants.len() == 1;
-        let orphans: Vec<&Process> = processes
+        let unrelated: Vec<&(u32, Lineage)> = others
             .iter()
-            .filter(|p| {
-                !descendants.contains(&p.pid)
-                    && maybe_orphaned_descendant(processes, shell_row, p)
-                    && lineage.may_own(p)
+            .filter(|(pid, other)| {
+                *pid != shell
+                    && processes.iter().any(|p| {
+                        p.pid == *pid
+                            && p.created.is_some()
+                            && p.created == other.shell_created
+                            && is_shell(&p.name)
+                    })
+                    && !other.contains_shell(shell, shell_row.created)
+                    && !lineage.contains_shell(*pid, other.shell_created)
             })
             .collect();
-        lineage.record(processes, shell, &descendants, &orphans);
+        let mut orphans = Vec::new();
+        let mut elsewhere = Vec::new();
+        let candidates = processes.iter().filter(|p| {
+            !descendants.contains(&p.pid) && maybe_orphaned_descendant(processes, shell_row, p)
+        });
+        for p in candidates {
+            let owned = unrelated.iter().any(|(_, other)| other.descended(p));
+            if owned {
+                elsewhere.push(p);
+            }
+            if lineage.may_own(p, owned) {
+                orphans.push(p);
+            }
+        }
+        lineage.record(processes, shell, &descendants, &orphans, &elsewhere);
         if let Some((pid, agent)) = agent {
             return Some(Observation {
                 foreground: Foreground::Agent { pid, agent },
@@ -1035,7 +1104,7 @@ mod platform {
 
         /// A pane's first listing: no history to attribute anything by.
         fn first(processes: &[Process], shell: u32) -> Option<Observation> {
-            classify(processes, shell, &mut Lineage::default())
+            classify(processes, shell, &mut Lineage::default(), &[])
         }
 
         fn shell(alone: bool) -> Option<Observation> {
@@ -1116,7 +1185,7 @@ mod platform {
                 row(400, 150, "cmd.exe"),
                 row(500, 400, "Code.exe"),
             ];
-            assert_eq!(classify(&before, 100, &mut lineage), shell(true));
+            assert_eq!(classify(&before, 100, &mut lineage, &[]), shell(true));
             // The cli exited: the editor is an orphan created after shell 100.
             let after = [
                 row(30, 20, "explorer.exe"),
@@ -1124,10 +1193,58 @@ mod platform {
                 row(150, 30, "pwsh.exe"),
                 row(500, 400, "Code.exe"),
             ];
-            assert_eq!(classify(&after, 100, &mut lineage), shell(true));
-            assert_eq!(classify(&after, 100, &mut lineage), shell(true));
+            assert_eq!(classify(&after, 100, &mut lineage, &[]), shell(true));
+            assert_eq!(classify(&after, 100, &mut lineage, &[]), shell(true));
             // Without history the same listing stays conservative.
             assert_eq!(first(&after, 100), shell(false));
+        }
+
+        /// Review LOW-3: a pane's first listing must not adopt for good an orphan another pane's
+        /// listing showed as its own descendant. A pane opened after `code .` ran in another
+        /// pane and its cli exited sees the editor as an orphan created after its shell.
+        #[test]
+        fn a_first_listing_leaves_another_panes_orphan_to_that_pane() {
+            // Shell 150 ran the cli (400) that started the editor (500); shell 600 (this pane)
+            // starts after the editor, which the cli then leaves orphaned.
+            let mut other = Lineage::default();
+            let launched = [
+                row(30, 20, "explorer.exe"),
+                row(150, 30, "pwsh.exe"),
+                row(400, 150, "cmd.exe"),
+                row(500, 400, "Code.exe"),
+            ];
+            classify(&launched, 150, &mut other, &[]);
+            let orphaned = [
+                row(30, 20, "explorer.exe"),
+                row(150, 30, "pwsh.exe"),
+                at(500, 400, "Code.exe", 500),
+                at(600, 30, "pwsh.exe", 450),
+            ];
+            // The pane that ran it keeps it as company.
+            assert_eq!(classify(&orphaned, 150, &mut other, &[]), shell(false));
+            let others = [(150, other)];
+            let mut lineage = Lineage::default();
+            assert_eq!(classify(&orphaned, 600, &mut lineage, &others), shell(true));
+            assert_eq!(classify(&orphaned, 600, &mut lineage, &others), shell(true));
+            // An orphan no pane can attribute is still adopted and kept, listing after listing.
+            let mut unknown = orphaned.to_vec();
+            unknown.push(at(700, 650, "reporter.exe", 700));
+            let mut lineage = Lineage::default();
+            assert_eq!(classify(&unknown, 600, &mut lineage, &others), shell(false));
+            assert_eq!(classify(&unknown, 600, &mut lineage, &others), shell(false));
+            // A shell nested in the other pane's tree shares its descendants: no release.
+            let mut nesting = Lineage::default();
+            let mut running = launched.to_vec();
+            running.push(at(600, 150, "pwsh.exe", 450));
+            classify(&running, 150, &mut nesting, &[]);
+            let mut nested = orphaned.to_vec();
+            nested[3].parent = 150;
+            classify(&nested, 150, &mut nesting, &[]);
+            let others = [(150, nesting)];
+            assert_eq!(
+                classify(&nested, 600, &mut Lineage::default(), &others),
+                shell(false)
+            );
         }
 
         /// The pane's own orphans still count: one an earlier listing showed in the shell's
@@ -1146,33 +1263,33 @@ mod platform {
             let mut lineage = Lineage::default();
             let busy = with(&[row(200, 100, "cmd.exe"), row(300, 200, "reporter.exe")]);
             assert_eq!(
-                classify(&busy, 100, &mut lineage),
+                classify(&busy, 100, &mut lineage, &[]),
                 Some(Observation {
                     foreground: Foreground::Other,
                     shell_alone: false,
                 })
             );
             let orphaned = with(&[row(300, 200, "reporter.exe")]);
-            assert_eq!(classify(&orphaned, 100, &mut lineage), shell(false));
-            assert_eq!(classify(&orphaned, 100, &mut lineage), shell(false));
-            assert_eq!(classify(&base, 100, &mut lineage), shell(true));
+            assert_eq!(classify(&orphaned, 100, &mut lineage, &[]), shell(false));
+            assert_eq!(classify(&orphaned, 100, &mut lineage, &[]), shell(false));
+            assert_eq!(classify(&base, 100, &mut lineage, &[]), shell(true));
 
             // Born and orphaned between listings: no listing could attribute it elsewhere.
             let mut lineage = Lineage::default();
-            assert_eq!(classify(&base, 100, &mut lineage), shell(true));
+            assert_eq!(classify(&base, 100, &mut lineage, &[]), shell(true));
             let newborn = with(&[row(310, 290, "reporter.exe")]);
-            assert_eq!(classify(&newborn, 100, &mut lineage), shell(false));
-            assert_eq!(classify(&newborn, 100, &mut lineage), shell(false));
+            assert_eq!(classify(&newborn, 100, &mut lineage, &[]), shell(false));
+            assert_eq!(classify(&newborn, 100, &mut lineage, &[]), shell(false));
 
             // An unknown creation time proves nothing, listing after listing.
             let mut lineage = Lineage::default();
-            assert_eq!(classify(&base, 100, &mut lineage), shell(true));
+            assert_eq!(classify(&base, 100, &mut lineage, &[]), shell(true));
             let unknown = with(&[Process {
                 created: None,
                 ..row(320, 290, "reporter.exe")
             }]);
-            assert_eq!(classify(&unknown, 100, &mut lineage), shell(false));
-            assert_eq!(classify(&unknown, 100, &mut lineage), shell(false));
+            assert_eq!(classify(&unknown, 100, &mut lineage, &[]), shell(false));
+            assert_eq!(classify(&unknown, 100, &mut lineage, &[]), shell(false));
         }
     }
 }
