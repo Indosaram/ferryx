@@ -6932,7 +6932,14 @@ impl DaemonServer {
                         self.session_router.as_ref(), &session_id,
                     ).await {
                         Ok(()) => DaemonResponse::AcknowledgeAgentOutcomeOk,
-                        Err(message) => daemon_error(message),
+                        Err(crate::remote::backend::OutcomeAckError::UnknownSession) => {
+                            daemon_session_not_found(&session_id, "daemon_acknowledge_outcome")
+                        }
+                        Err(error) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().to_string()),
+                            details: None,
+                        },
                     }
                 }
                 Ok(DaemonRequest::ResetAgentState { session_id }) => {

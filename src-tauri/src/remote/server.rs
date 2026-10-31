@@ -2809,6 +2809,7 @@ async fn handle_machine_terminal_socket(
                             }) if supplied.0 == generation => {
                                 state.session_backend
                                     .acknowledge_agent_outcome(&target.session_id).await
+                                    .map_err(|error| error.to_string())
                             }
                             Ok(MachineTerminalControl::Resize {
                                 generation: supplied,
@@ -7037,50 +7038,85 @@ async fn reference_chat_acknowledge_outcome(
     }
     match state.session_backend.acknowledge_agent_outcome(&session_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(message) => {
-            let (status, code) = acknowledge_outcome_failure_status(&message);
-            machine_error_with_details(status, code, &message, serde_json::Map::new())
+        Err(error) => {
+            let (status, code) = acknowledge_outcome_failure_status(&error);
+            machine_error_with_details(status, code, &error.to_string(), serde_json::Map::new())
         }
     }
 }
 
 /// Not found only when the backend no longer knows the session; an owner that
 /// cannot be reached or did not answer in time is an upstream failure.
-fn acknowledge_outcome_failure_status(message: &str) -> (StatusCode, &'static str) {
-    if message.contains("TIMEOUT") || message.contains("PAIRED_UNCERTAIN_SEND") {
-        (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT")
-    } else if message.contains("PAIRED_PROXY_MISSING")
-        || message.contains("Session unavailable")
-        || message.contains("not found")
-    {
-        (StatusCode::NOT_FOUND, "NOT_FOUND")
-    } else if message.contains("unsupported") || message.contains("no program status mirror") {
-        (StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED")
-    } else {
-        (StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE")
+fn acknowledge_outcome_failure_status(
+    error: &crate::remote::backend::OutcomeAckError,
+) -> (StatusCode, &'static str) {
+    use crate::remote::backend::OutcomeAckError;
+    match error {
+        OutcomeAckError::Uncertain(_) => (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+        OutcomeAckError::UnknownSession => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+        OutcomeAckError::Unsupported | OutcomeAckError::NoMirror => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED")
+        }
+        OutcomeAckError::Unreachable(_) | OutcomeAckError::Rejected(_) => {
+            (StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE")
+        }
     }
 }
 
 #[cfg(test)]
 mod acknowledge_outcome_status_tests {
     use super::*;
+    use crate::remote::backend::OutcomeAckError;
 
     #[test]
     fn acknowledgement_failures_map_to_accurate_statuses() {
-        for (message, status, code) in [
-            ("General error: PAIRED_PROXY_MISSING", StatusCode::NOT_FOUND, "NOT_FOUND"),
-            ("Session unavailable", StatusCode::NOT_FOUND, "NOT_FOUND"),
-            ("Session 's' not found", StatusCode::NOT_FOUND, "NOT_FOUND"),
-            ("Disconnected: PAIRED_NOT_SENT", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
-            ("Disconnected: PAIRED_PROXY_UNAVAILABLE", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
-            ("Disconnected: HOST_UNAVAILABLE", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
-            ("Disconnected: PAIRED_UNCERTAIN_SEND", StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
-            ("Disconnected: TIMEOUT", StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
-            ("Outcome acknowledgement unsupported", StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
-            ("Session has no program status mirror", StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+        for (error, status, code) in [
+            (OutcomeAckError::UnknownSession, StatusCode::NOT_FOUND, "NOT_FOUND"),
+            (OutcomeAckError::from_daemon_code(Some("SESSION_NOT_FOUND"), "Session 's' not found".into()), StatusCode::NOT_FOUND, "NOT_FOUND"),
+            (OutcomeAckError::paired("PAIRED_NOT_SENT".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::paired("PAIRED_PROXY_UNAVAILABLE".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::paired("HOST_UNAVAILABLE".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::paired("PAIRED_UNCERTAIN_SEND".into()), StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            (OutcomeAckError::paired("TIMEOUT".into()), StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            (OutcomeAckError::Unsupported, StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            (OutcomeAckError::NoMirror, StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            // Classification follows the structured kind, never the message text.
+            (OutcomeAckError::Unreachable("SSH workspace path not found".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::from_daemon_code(None, "Session 's' not found".into()), StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            (OutcomeAckError::from_daemon_code(Some("OUTCOME_ACK_NO_MIRROR"), "x".into()), StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            (OutcomeAckError::from_daemon_code(Some("OUTCOME_ACK_UNCERTAIN"), "TIMEOUT".into()), StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
         ] {
-            assert_eq!(acknowledge_outcome_failure_status(message), (status, code), "{message}");
+            assert_eq!(acknowledge_outcome_failure_status(&error), (status, code), "{error:?}");
         }
+    }
+
+    #[test]
+    fn daemon_codes_round_trip_every_failure_kind() {
+        for error in [
+            OutcomeAckError::UnknownSession,
+            OutcomeAckError::NoMirror,
+            OutcomeAckError::Unsupported,
+            OutcomeAckError::Unreachable("HOST_UNAVAILABLE".into()),
+            OutcomeAckError::Uncertain("TIMEOUT".into()),
+        ] {
+            let message = match &error {
+                OutcomeAckError::Unreachable(detail) | OutcomeAckError::Uncertain(detail) => detail.clone(),
+                _ => error.to_string(),
+            };
+            assert_eq!(OutcomeAckError::from_daemon_code(Some(error.code()), message), error);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_vanished_or_unmirrored_session_is_classified_by_the_hub() {
+        let service = crate::terminal::TerminalService::default();
+        let hub = service.output_hub();
+        hub.register_session("plain");
+        let unmirrored = RemoteSessionBackend::acknowledge_agent_outcome(&service, "plain").await;
+        assert_eq!(unmirrored, Err(OutcomeAckError::NoMirror));
+        let vanished = RemoteSessionBackend::acknowledge_agent_outcome(&service, "gone").await;
+        assert_eq!(vanished, Err(OutcomeAckError::UnknownSession));
+        assert_eq!(acknowledge_outcome_failure_status(&vanished.unwrap_err()).0, StatusCode::NOT_FOUND);
     }
 }
 

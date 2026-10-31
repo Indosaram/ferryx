@@ -11,6 +11,62 @@ pub struct RemoteRecoveryStatus {
 
 pub type RecoveryStream = BoxStream<'static, RemoteRecoveryStatus>;
 
+/// Why an outcome acknowledgement failed, classified where the failure is known
+/// so callers never interpret backend messages.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OutcomeAckError {
+    /// No backend knows the session, including one that vanished mid-request.
+    #[error("Session not found")]
+    UnknownSession,
+    /// The session exists but never opted in to program status.
+    #[error("Session has no program status mirror")]
+    NoMirror,
+    #[error("Outcome acknowledgement unsupported")]
+    Unsupported,
+    /// The acknowledgement was never handed to the owning host.
+    #[error("Outcome acknowledgement did not reach the owner: {0}")]
+    Unreachable(String),
+    /// The acknowledgement may or may not have reached the owning host.
+    #[error("Outcome acknowledgement may not have reached the owner: {0}")]
+    Uncertain(String),
+    /// The owning backend answered and refused it.
+    #[error("Outcome acknowledgement rejected: {0}")]
+    Rejected(String),
+}
+
+impl OutcomeAckError {
+    /// The structured code a daemon answers this failure with.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::UnknownSession => "SESSION_NOT_FOUND",
+            Self::NoMirror => "OUTCOME_ACK_NO_MIRROR",
+            Self::Unsupported => "OUTCOME_ACK_UNSUPPORTED",
+            Self::Unreachable(_) => "OUTCOME_ACK_UNREACHABLE",
+            Self::Uncertain(_) => "OUTCOME_ACK_UNCERTAIN",
+            Self::Rejected(_) => "OUTCOME_ACK_REJECTED",
+        }
+    }
+    /// Rebuilds a failure from a daemon's structured error code. A daemon that
+    /// answers without a known code refused the acknowledgement.
+    pub(crate) fn from_daemon_code(code: Option<&str>, message: String) -> Self {
+        match code {
+            Some("SESSION_NOT_FOUND") => Self::UnknownSession,
+            Some("OUTCOME_ACK_NO_MIRROR") => Self::NoMirror,
+            Some("OUTCOME_ACK_UNSUPPORTED") => Self::Unsupported,
+            Some("OUTCOME_ACK_UNREACHABLE") => Self::Unreachable(message),
+            Some("OUTCOME_ACK_UNCERTAIN") => Self::Uncertain(message),
+            _ => Self::Rejected(message),
+        }
+    }
+    /// Classifies the failure code of a paired actor operation.
+    pub(crate) fn paired(code: String) -> Self {
+        match code.as_str() {
+            "TIMEOUT" | "PAIRED_UNCERTAIN_SEND" => Self::Uncertain(code),
+            _ => Self::Unreachable(code),
+        }
+    }
+}
+
 pub(crate) fn recovery_stream(
     rx: tokio::sync::watch::Receiver<crate::terminal::remote::RemoteSessionDetails>,
 ) -> RecoveryStream {
@@ -61,8 +117,8 @@ pub trait RemoteSessionBackend: Send + Sync {
     fn acknowledge_agent_outcome<'a>(
         &'a self,
         _session_id: &'a str,
-    ) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async { Err("Outcome acknowledgement unsupported".into()) })
+    ) -> BoxFuture<'a, Result<(), OutcomeAckError>> {
+        Box::pin(async { Err(OutcomeAckError::Unsupported) })
     }
     /// None identifies a local PTY. Errors must never downgrade SSH to local input.
     fn recovery<'a>(
@@ -140,7 +196,7 @@ impl RemoteSessionBackend for crate::daemon::session_service::DaemonSessionServi
     fn acknowledge_agent_outcome<'a>(
         &'a self,
         session_id: &'a str,
-    ) -> BoxFuture<'a, Result<(), String>> {
+    ) -> BoxFuture<'a, Result<(), OutcomeAckError>> {
         self.router().acknowledge_agent_outcome(session_id)
     }
     fn recovery<'a>(
@@ -242,20 +298,24 @@ impl RemoteSessionBackend for TerminalService {
     fn acknowledge_agent_outcome<'a>(
         &'a self,
         session_id: &'a str,
-    ) -> BoxFuture<'a, Result<(), String>> {
+    ) -> BoxFuture<'a, Result<(), OutcomeAckError>> {
         Box::pin(async move {
             if crate::terminal::paired_runtime::Runtime::owns(session_id) {
                 // Paired: Ok means the acknowledgement was sent to the owner. The
                 // owner wire has no correlation id, so its rejection is consumed
                 // by the proxy and never reaches (or tears down) this caller.
-                return self.paired().acknowledge_agent_outcome(session_id)
-                    .map_err(|error| error.to_string())?
-                    .await.map_err(|error| error.to_string());
+                // The operation is refused only when no actor owns the session.
+                let operation = self.paired().acknowledge_agent_outcome(session_id)
+                    .map_err(|_| OutcomeAckError::UnknownSession)?;
+                return operation.await.map_err(|failure| OutcomeAckError::paired(failure.message));
             }
-            self.output_hub()
-                .acknowledge_program_outcome(session_id)
-                .ok_or_else(|| "Session has no program status mirror".to_string())?;
-            Ok(())
+            let hub = self.output_hub();
+            match hub.acknowledge_program_outcome(session_id) {
+                Some(_) => Ok(()),
+                // Checked after the attempt, so a session that vanished meanwhile is unknown.
+                None if !hub.has_session(session_id) => Err(OutcomeAckError::UnknownSession),
+                None => Err(OutcomeAckError::NoMirror),
+            }
         })
     }
     fn recovery<'a>(
