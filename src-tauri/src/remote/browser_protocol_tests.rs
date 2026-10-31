@@ -484,3 +484,22 @@ fn test_golden_byte_roundtrip() {
     assert_eq!(decoded_frame.metadata.image_height, 1);
     assert_eq!(decoded_frame.image_bytes, png_bytes);
 }
+
+/// P4: a zero stream id and an empty instance id each report their own error, not a
+/// misleading `NonFiniteNumeric` / `InvalidDecimalString`.
+#[test]
+fn test_p4_zero_stream_id_and_empty_instance_id_have_their_own_errors() {
+    let mut zero_stream = valid_test_metadata();
+    zero_stream.stream_id = 0;
+    assert_eq!(
+        validate_metadata(&zero_stream).unwrap_err(),
+        ProtocolCodecError::ZeroStreamId
+    );
+
+    let mut empty_instance = valid_test_metadata();
+    empty_instance.browser_instance_id = String::new();
+    assert_eq!(
+        validate_metadata(&empty_instance).unwrap_err(),
+        ProtocolCodecError::EmptyField("browser_instance_id")
+    );
+}

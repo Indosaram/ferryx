@@ -301,3 +301,67 @@ fn test_boundary_payload_limits_constants() {
     assert_eq!(MAX_FILL_BYTES, 16 * 1024);
     assert_eq!(MAX_EVAL_RESULT_BYTES, 64 * 1024);
 }
+
+/// S1: the dedup cache keeps the newest results. Past the entry cap the oldest entry is
+/// evicted, so a retry of a recent sequence still gets its cached result.
+#[test]
+fn test_s1_dedup_cache_evicts_oldest_and_keeps_newest() {
+    let dedup = RequestDeduplicator::new();
+    let t0 = Instant::now();
+    let total = (DEDUP_CACHE_MAX_ENTRIES as u64) + 4;
+    for seq in 1..=total {
+        let now = t0 + Duration::from_millis(seq);
+        assert_eq!(dedup.check_or_record(seq, now).unwrap(), None);
+        dedup.record_result(seq, format!("res{seq}").into_bytes(), now);
+    }
+    let now = t0 + Duration::from_millis(total + 1);
+    assert_eq!(
+        dedup.check_or_record(total, now).unwrap(),
+        Some(format!("res{total}").into_bytes()),
+        "the newest result must be cached"
+    );
+    assert!(
+        matches!(dedup.check_or_record(1, now), Err(SecurityError::OutcomeUnknown)),
+        "the oldest entry is the one evicted"
+    );
+}
+
+/// S1: a retry of a sequence that is still running is reported as in flight, not as an
+/// expired outcome; once it finishes without a result it becomes an unknown outcome.
+#[test]
+fn test_s1_dedup_tracks_in_flight_sequences() {
+    let dedup = RequestDeduplicator::new();
+    let now = Instant::now();
+    assert_eq!(dedup.check_or_record(1, now).unwrap(), None);
+    assert!(matches!(
+        dedup.check_or_record(1, now),
+        Err(SecurityError::RequestInFlight)
+    ));
+    dedup.record_result(1, b"done".to_vec(), now);
+    assert_eq!(dedup.check_or_record(1, now).unwrap(), Some(b"done".to_vec()));
+
+    assert_eq!(dedup.check_or_record(2, now).unwrap(), None);
+    dedup.finish(2);
+    assert!(matches!(
+        dedup.check_or_record(2, now),
+        Err(SecurityError::OutcomeUnknown)
+    ));
+}
+
+/// S4: a path with spaces is redacted whole, and a URL token ends at `,` / `;` so a path
+/// that follows it is still redacted.
+#[test]
+fn test_s4_spaced_paths_and_url_terminators() {
+    assert_eq!(
+        sanitize_public_string("Saved /Users/a/My Project/k.pem done"),
+        "Saved [redacted-path] done"
+    );
+    assert_eq!(
+        sanitize_public_string("see http://x/a,/Users/a/k"),
+        "see http://x/a,[redacted-path]"
+    );
+    assert_eq!(
+        sanitize_public_string("see http://x/a;/etc/passwd"),
+        "see http://x/a;[redacted-path]"
+    );
+}

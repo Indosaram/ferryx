@@ -106,6 +106,10 @@ pub enum ProtocolCodecError {
     ImagePixelsExceeded { pixels: u64 },
     #[error("Invalid decimal string for {0}: must be unsigned 64-bit integer")]
     InvalidDecimalString(&'static str),
+    #[error("Stream id must be non-zero")]
+    ZeroStreamId,
+    #[error("Required metadata field is empty: {0}")]
+    EmptyField(&'static str),
     #[error("Geometry source must be 'wkSnapshot', got '{0}'")]
     InvalidGeometrySource(String),
     #[error("Invalid image header: {0}")]
@@ -253,12 +257,10 @@ pub fn validate_metadata(meta: &BrowserFrameMetadata) -> Result<(), ProtocolCode
         return Err(ProtocolCodecError::ImagePixelsExceeded { pixels });
     }
     if meta.stream_id == 0 {
-        return Err(ProtocolCodecError::NonFiniteNumeric("stream_id"));
+        return Err(ProtocolCodecError::ZeroStreamId);
     }
     if meta.browser_instance_id.is_empty() {
-        return Err(ProtocolCodecError::InvalidDecimalString(
-            "browser_instance_id",
-        ));
+        return Err(ProtocolCodecError::EmptyField("browser_instance_id"));
     }
     if !is_decimal_u64_string(&meta.browser_service_epoch) {
         return Err(ProtocolCodecError::InvalidDecimalString(
