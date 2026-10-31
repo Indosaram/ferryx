@@ -3098,6 +3098,9 @@ async fn handle_terminal_socket(
                         }
                         match ctrl {
                             ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Err(error) = session_backend
                                     .acknowledge_agent_outcome(&session_id_clone).await
                                 {
@@ -3635,6 +3638,9 @@ async fn handle_terminal_grid_socket(
                         }
                         match ctrl {
                             ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Err(error) = session_backend
                                     .acknowledge_agent_outcome(&session_id_clone).await
                                 {
@@ -7004,15 +7010,65 @@ async fn reference_chat_acknowledge_outcome(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    if let Err(response) = reference_chat_read_context(&state, &headers, &session_id, &query, false).await {
-        return response.into();
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await {
+        Ok(read) => read,
+        Err(response) => return response.into(),
+    };
+    if read.device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot acknowledge an agent outcome",
+        );
     }
     if let Err(response) = authenticate_machine_request(&state, &headers) {
         return *response;
     }
     match state.session_backend.acknowledge_agent_outcome(&session_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(message) => reference_chat_error(ScopeErrorCode::NotFound, message),
+        Err(message) => {
+            let (status, code) = acknowledge_outcome_failure_status(&message);
+            machine_error_with_details(status, code, &message, serde_json::Map::new())
+        }
+    }
+}
+
+/// Not found only when the backend no longer knows the session; an owner that
+/// cannot be reached or did not answer in time is an upstream failure.
+fn acknowledge_outcome_failure_status(message: &str) -> (StatusCode, &'static str) {
+    if message.contains("TIMEOUT") || message.contains("PAIRED_UNCERTAIN_SEND") {
+        (StatusCode::GATEWAY_TIMEOUT, "TIMEOUT")
+    } else if message.contains("PAIRED_PROXY_MISSING")
+        || message.contains("Session unavailable")
+        || message.contains("not found")
+    {
+        (StatusCode::NOT_FOUND, "NOT_FOUND")
+    } else if message.contains("unsupported") || message.contains("no program status mirror") {
+        (StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED")
+    } else {
+        (StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE")
+    }
+}
+
+#[cfg(test)]
+mod acknowledge_outcome_status_tests {
+    use super::*;
+
+    #[test]
+    fn acknowledgement_failures_map_to_accurate_statuses() {
+        for (message, status, code) in [
+            ("General error: PAIRED_PROXY_MISSING", StatusCode::NOT_FOUND, "NOT_FOUND"),
+            ("Session unavailable", StatusCode::NOT_FOUND, "NOT_FOUND"),
+            ("Session 's' not found", StatusCode::NOT_FOUND, "NOT_FOUND"),
+            ("Disconnected: PAIRED_NOT_SENT", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            ("Disconnected: PAIRED_PROXY_UNAVAILABLE", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            ("Disconnected: HOST_UNAVAILABLE", StatusCode::BAD_GATEWAY, "HOST_UNAVAILABLE"),
+            ("Disconnected: PAIRED_UNCERTAIN_SEND", StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            ("Disconnected: TIMEOUT", StatusCode::GATEWAY_TIMEOUT, "TIMEOUT"),
+            ("Outcome acknowledgement unsupported", StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+            ("Session has no program status mirror", StatusCode::UNPROCESSABLE_ENTITY, "UNSUPPORTED"),
+        ] {
+            assert_eq!(acknowledge_outcome_failure_status(message), (status, code), "{message}");
+        }
     }
 }
 

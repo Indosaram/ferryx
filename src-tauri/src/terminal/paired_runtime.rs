@@ -2033,6 +2033,48 @@ mod tests {
         shutdown.send(()).unwrap();
         server.await.unwrap();
     }
+    #[tokio::test]
+    async fn paired_outcome_acknowledgement_rejection_keeps_the_stream_alive() {
+        let root = tempfile::tempdir().unwrap();
+        let (arrived, mut arrivals) = mpsc::channel(4);
+        let (_, service, descriptor, shutdown, server) = start_mock_relay_controlled(&root, false, false, Some(arrived)).await;
+        let runtime = Arc::new(Runtime::new(Some(root.path().join("descriptors.json"))));
+        let hub = Arc::new(TerminalOutputHub::new(32));
+        let (id, _) = runtime.get_or_rearm(descriptor, hub.clone(), service).unwrap();
+        let mut output = hub.subscribe_with_sequence(&id, None).unwrap().receiver;
+        let mut socket = tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await.unwrap().unwrap();
+        socket.commands.send(FixtureCommand::Attach).await.unwrap();
+        socket.commands.send(FixtureCommand::Output(11)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap().unwrap();
+        // Flat shape from the current owner and from pre-change owners alike.
+        for code in ["INVALID_CONTROL_OR_GENERATION", "Session has no program status mirror"] {
+            runtime.acknowledge_agent_outcome(&id).unwrap().await.unwrap();
+            socket.commands.send(FixtureCommand::Frame(serde_json::json!({"type":"error","code":code}))).await.unwrap();
+        }
+        // Output after the rejections proves the receive loop consumed them in order.
+        socket.commands.send(FixtureCommand::Output(12)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap().unwrap();
+        let status = actor_barrier(&runtime, &id).await;
+        assert_eq!(status.0, "proxy_attached");
+        assert_eq!(status.3, None);
+        assert!(arrivals.try_recv().is_err(), "a rejected acknowledgement must not force a reattach");
+        runtime.detach(&id).await.unwrap();
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn paired_acknowledgement_reserves_exactly_one_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, service, descriptor, shutdown, server) = start_mock_relay(&root, false, false).await;
+        let mut proxy = Proxy::new(descriptor, Arc::new(TerminalOutputHub::new(32))).unwrap();
+        proxy.reattach(&MachineClient::new(), &service).await.unwrap();
+        proxy.acknowledge_agent_outcome(Epoch(7)).await.unwrap();
+        assert!(proxy.take_pending_ack());
+        assert!(!proxy.take_pending_ack(), "an unsolicited owner error must still fail the stream");
+        proxy.detach().await.unwrap();
+        shutdown.send(()).unwrap();
+        server.await.unwrap();
+    }
     #[tokio::test(start_paused = true)]
     async fn recovery_consistency_paired_closed_authority_watch_disables_ready_branch() {
         let (sender, receiver) = tokio::sync::watch::channel((0, String::new()));
