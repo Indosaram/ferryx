@@ -2006,6 +2006,9 @@ async fn post_discord_target(channel: &str, text: &str) -> Result<bool> {
 }
 
 pub async fn remember_delivery(pool: &SqlitePool, job_id: &str, error: Option<&str>) -> Result<()> {
+    if error.is_none() && job_id == crate::inbox::DIGEST_JOB_ID {
+        crate::cron_remediate::acknowledge_digest(pool).await?;
+    }
     let payload_json: Option<String> =
         sqlx::query_scalar("SELECT payload_json FROM scheduled_jobs WHERE id = ?")
             .bind(job_id)
