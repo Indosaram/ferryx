@@ -352,6 +352,9 @@ const RemoteBrowserView: React.FC<RemoteBrowserProps & { session: UseRemoteBrows
     const failed = framesByUrlRef.current.get(boundUrl);
     framesByUrlRef.current.delete(boundUrl);
     if (!failed) return;
+    if (displayedFrameRef.current && failed.seq > displayedFrameRef.current.seq) {
+      setDisplayedFrame(null);
+    }
     if (confirmPresented) {
       confirmPresented(failed.metadata.streamId, failed.seq);
     } else if (sendAck) {

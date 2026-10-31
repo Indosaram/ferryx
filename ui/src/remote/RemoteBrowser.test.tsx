@@ -634,6 +634,7 @@ describe("useRemoteBrowser", () => {
     return (
       <div>
         <div data-testid="status">{state.status}</div>
+        <div data-testid="subscriptionId">{state.subscriptionId ?? "none"}</div>
         <div data-testid="streamId">{state.frame?.metadata.streamId ?? "none"}</div>
         <div data-testid="seq">{state.frame?.seq ?? "none"}</div>
         <div data-testid="imageUrl">{state.imageUrl ?? "none"}</div>
@@ -670,6 +671,7 @@ describe("useRemoteBrowser", () => {
     await establishStreaming(ws);
 
     expect(screen.getByTestId("status").textContent).toBe("streaming");
+    expect(screen.getByTestId("subscriptionId").textContent).toBe("sub-1");
 
     // When frame arrives, image URL is created. Frame ACK is NOT sent yet (presentation-gated ACK)
     const frame = makeTestFrame(1, 1);
@@ -1202,6 +1204,16 @@ describe("RemoteBrowser component", () => {
     const revokedListener = vi.fn();
     client.onDriverRevoked(revokedListener);
 
+    let commandError: unknown;
+    const command = client.sendCommand({
+      browserId: "b1",
+      leaseEpoch: "epoch-100",
+      browserInstanceId: "bi1",
+      desktopEpoch: "1",
+      documentGeneration: "1",
+      command: "getState",
+    }).catch((error: unknown) => { commandError = error; });
+
     // Server sends browserDriverRevoked
     await act(async () => {
       ws.onmessage?.({
@@ -1223,6 +1235,9 @@ describe("RemoteBrowser component", () => {
     expect(client.driverState).toBe("viewing");
     expect(capturedDriver.driverState).toBe("revoked");
     expect(capturedDriver.leaseEpoch).toBeNull();
+    expect(commandError).toMatchObject({ code: "BROWSER_FORBIDDEN", retryable: false });
+    await command;
+    client.close();
   });
 
   it("strictly derives point click metadata from displayedFrame committed via img onLoad (R8)", async () => {

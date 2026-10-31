@@ -67,8 +67,11 @@ export const RemoteBrowserWorkspace: React.FC<RemoteBrowserWorkspaceProps> = ({
     frame?.metadata.browserInstanceId ?? hello?.browserInstanceId ?? null;
   const desktopEpoch =
     frame?.metadata.desktopEpoch ?? hello?.desktopEpoch ?? null;
-  const documentGeneration =
-    frame?.metadata.documentGeneration ?? browserState?.documentGeneration ?? "1";
+  const frameGeneration = frame?.metadata.documentGeneration;
+  const stateGeneration = browserState?.documentGeneration;
+  const documentGeneration = frameGeneration && stateGeneration
+    ? (BigInt(frameGeneration) > BigInt(stateGeneration) ? frameGeneration : stateGeneration)
+    : frameGeneration ?? stateGeneration ?? "1";
   const viewportRevision = frame?.metadata.viewportRevision;
 
   // Track snapshotId and mapRevision (reconciled to decimal string)

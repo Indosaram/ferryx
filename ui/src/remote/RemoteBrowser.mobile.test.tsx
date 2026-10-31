@@ -1324,6 +1324,58 @@ describe("RemoteBrowser - Mobile Viewport & Touch Interaction (Phase 7B)", () =>
       expect(acks.map((a) => a.seq)).toContain(7);
     });
 
+    it("does not click the old frame after acknowledging a newer undecodable frame", async () => {
+      const ws = await mountDriving("b-mobile", "1");
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(1, 1, 640, 400)).buffer });
+      });
+      fireEvent.load(screen.getByAltText("Remote browser stream"));
+      const viewport = screen.getByTestId("remote-browser-viewport");
+      vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({
+        left: 0, top: 0, right: 640, bottom: 400, width: 640, height: 400, x: 0, y: 0, toJSON: () => ({}),
+      });
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame(makeTestFrame(2, 1, 640, 400)).buffer });
+      });
+      fireEvent.error(screen.getByAltText("Remote browser stream"));
+      await act(async () => {
+        fireEvent.click(viewport, { clientX: 320, clientY: 200 });
+      });
+      expect(sentCommands(ws, "click")).toHaveLength(0);
+    });
+
+    it.each([
+      ["1", "2", "2"],
+      ["3", "2", "3"],
+    ])("uses the latest generation from frame %s and state %s", async (frameGeneration, stateGeneration, expected) => {
+      render(<RemoteBrowserWorkspace baseUrl="http://localhost:8080" browserId="b-mobile" deviceToken="token-generation" onBack={vi.fn()} />);
+      const ws = await waitForSocket(0);
+      await establishStreaming(ws);
+      const frame = makeTestFrame(1);
+      await act(async () => {
+        ws.onmessage?.({ data: encodeFrame({
+          ...frame,
+          metadata: { ...frame.metadata, documentGeneration: frameGeneration },
+        }).buffer });
+        ws.onmessage?.({ data: JSON.stringify({
+          type: "browserState", browserId: "b-mobile",
+          documentGeneration: stateGeneration, viewportRevision: "1",
+          loading: false, paused: false,
+        }) });
+        ws.onmessage?.({ data: JSON.stringify({
+          type: "browserDriverChanged", leaseEpoch: "1", isDriver: true,
+        }) });
+      });
+      fireEvent.click(screen.getByTestId("remote-browser-ime-toggle-btn"));
+      fireEvent.change(screen.getByTestId("remote-browser-ime-text-input"), { target: { value: "next page" } });
+      await act(async () => {
+        fireEvent.submit(screen.getByTestId("remote-browser-ime-bar"));
+      });
+      const fills = sentCommands(ws, "fill");
+      expect(fills).toHaveLength(1);
+      expect(fills[0].documentGeneration).toBe(expected);
+    });
+
     // RED mutation: in RemoteBrowserWorkspace restore `?? "bi1"` on browserInstanceId -> a fill goes out.
     it("F11: without a known browser identity no command is sent with invented ids", async () => {
       render(

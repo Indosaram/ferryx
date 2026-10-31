@@ -305,6 +305,16 @@ export class BrowserClient {
         }
         case "browserDriverRevoked": {
           this.currentDriverState = "viewing";
+          const error = Object.assign(new Error(msg.reason ?? "Driver lease revoked"), {
+            code: "BROWSER_FORBIDDEN",
+            retryable: false,
+          });
+          for (const [requestId, pending] of this.pendingRequests) {
+            if (pending.expectedTypes.includes("browserResult")) {
+              this.writerQueue = this.writerQueue.filter((entry) => entry.id !== requestId);
+              this.rejectPending(requestId, error);
+            }
+          }
           for (const listener of this.driverRevokedListeners) {
             listener(msg);
           }
