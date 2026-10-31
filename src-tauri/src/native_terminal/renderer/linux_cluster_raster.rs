@@ -56,6 +56,11 @@ unsafe extern "C" {
     fn cairo_set_source_rgba(cr: *mut c_void, r: f64, g: f64, b: f64, a: f64);
     fn cairo_move_to(cr: *mut c_void, x: f64, y: f64);
     fn cairo_scale(cr: *mut c_void, sx: f64, sy: f64);
+    fn cairo_font_options_create() -> *mut c_void;
+    fn cairo_font_options_destroy(options: *mut c_void);
+    fn cairo_font_options_status(options: *mut c_void) -> c_int;
+    fn cairo_font_options_set_antialias(options: *mut c_void, antialias: c_int);
+    fn cairo_set_font_options(cr: *mut c_void, options: *const c_void);
 }
 #[link(name = "gobject-2.0")]
 unsafe extern "C" {
@@ -141,6 +146,21 @@ pub fn rasterize(
         if draw.cr.is_null() || cairo_status(draw.cr) != 0 {
             return None;
         }
+        // The atlas wants grayscale coverage. Without an explicit choice cairo-ft merges the
+        // system fontconfig defaults, and distributions that enable sub-pixel rendering (Ubuntu
+        // ships 10-sub-pixel-rgb.conf) produce per-channel coverage whose colored fringes would
+        // make every text cluster read as color artwork. Color bitmap strikes are unaffected.
+        let options = cairo_font_options_create();
+        if options.is_null() || cairo_font_options_status(options) != 0 {
+            if !options.is_null() {
+                cairo_font_options_destroy(options);
+            }
+            return None;
+        }
+        // CAIRO_ANTIALIAS_GRAY. The context copies the options, read by the layout below.
+        cairo_font_options_set_antialias(options, 2);
+        cairo_set_font_options(draw.cr, options);
+        cairo_font_options_destroy(options);
         draw.layout = pango_cairo_create_layout(draw.cr);
         draw.desc = pango_font_description_new();
         if draw.layout.is_null() || draw.desc.is_null() {
