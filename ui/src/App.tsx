@@ -146,7 +146,7 @@ import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
-import { isStandbyBackendSessionId, setSessionRebindHandler } from "./lib/sessionLifecycle";
+import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
 import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
@@ -1373,8 +1373,9 @@ function WorkspaceApp({
       const deadSessions = Object.values(restoredState.sessions).filter(
         (session) =>
           (session.backendSessionId === null || isStandbyBackendSessionId(session.backendSessionId)) &&
-          !isRemoteWorkspaceId(session.workspaceId) &&
-          !isPairedWorkspaceId(session.workspaceId),
+          ((!isRemoteWorkspaceId(session.workspaceId) && !isPairedWorkspaceId(session.workspaceId)) ||
+            // A remote pane whose backend was confirmed gone resumes its agent like a local one.
+            session.backendUnavailableReason === REMOTE_SESSION_GONE_REASON),
       );
 
       const shellRecoverySessionIds: string[] = [];
@@ -1390,7 +1391,8 @@ function WorkspaceApp({
         );
         if (!isAgent) {
           // Only eagerly spawn fallback shells for null backendSessionIds, not standby sessions
-          if (!recoveredFromHmr && session.backendSessionId === null && !hasRetainedRecoveryProvenance) {
+          if (!recoveredFromHmr && session.backendSessionId === null && !hasRetainedRecoveryProvenance &&
+              !isRemoteWorkspaceId(session.workspaceId) && !isPairedWorkspaceId(session.workspaceId)) {
             shellRecoverySessionIds.push(session.id);
           }
         } else {
@@ -1504,6 +1506,7 @@ function WorkspaceApp({
               cwd: result.session.cwd ?? localSession.cwd,
               daemonEpoch: result.daemonEpoch,
               incarnation: result.session.incarnation ?? null,
+              clearAgent: false,
             });
             await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
           },
@@ -1821,7 +1824,16 @@ function WorkspaceApp({
             // Exact codes from paired_daemon::Proxy::recovery_failed, not transport error prose.
             const reason = status.failure.message;
             switch (reason) {
-              case "SESSION_EXPIRED": case "CONTROL_CONFLICT": case "STALE_GENERATION":
+              case "SESSION_EXPIRED": {
+                // The owning host says this exact target (descriptor tuple checked above) expired:
+                // the backend is gone, so the pane recovers like a local one instead of blocking.
+                if (admissionIdentity && (admissionIdentity.backendSessionId !== captured.backendSessionId ||
+                    admissionIdentity.daemonEpoch !== captured.daemonEpoch || admissionIdentity.incarnation !== captured.incarnation)) return;
+                dispatchWorkspaceAction({ type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
+                settle({ kind: "exited" });
+                return;
+              }
+              case "CONTROL_CONFLICT": case "STALE_GENERATION":
               case "PAIRED_HOST_STALE_GENERATION": case "PAIRED_HOST_UNAUTHORIZED":
               case "UNAUTHORIZED": case "PERMISSION_DENIED": case "PAIRED_HOST_WRONG_MACHINE":
               case "PAIRED_HOST_INVALID_RESPONSE": case "PAIRED_HOST_MIGRATION_PENDING": case "UNSUPPORTED_PROTOCOL": {
@@ -1907,6 +1919,9 @@ function WorkspaceApp({
           if (outcome.blocked || outcome.staleTuple) {
             settle({ kind: "blocked", reason: "identity_conflict" });
           } else if (outcome.affirmativeExit) {
+            // retry_owned matched the exact (backend, epoch, incarnation) tuple before reporting
+            // exit: the remote process is gone. Recover the pane on the same host.
+            dispatchWorkspaceAction({ type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
             settle({ kind: "exited" });
           } else if (outcome.admitted) {
             admissionIdentity = outcome.actorIdentity ?? null;
@@ -2009,7 +2024,6 @@ function WorkspaceApp({
     const pending = pendingAgentAutoResume;
     setPendingAgentAutoResume(null);
     if (pending.workspaceId !== activeProject.workspaceId) return;
-    if (activeProject.target?.kind === "ssh") return;
 
     activeAutoResumeCancelRef.current?.();
     activeAutoResumeCancelRef.current = scheduleAgentAutoResume({

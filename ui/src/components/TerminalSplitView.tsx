@@ -37,6 +37,7 @@ import type {
 import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import { computeTerminalTabDisplay, type TerminalTabDisplay } from "../state/tabDisplay";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
+import { isStandbyBackendSessionId } from "../lib/sessionLifecycle";
 import { formatPaneDebugInfo } from "../lib/paneDebugInfo";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { createFileTabMenuHandlers } from "../lib/fileTabPaths";
@@ -1376,11 +1377,18 @@ const PaneLeafView = React.memo(function PaneLeafView({
                 activity?.isAgent ||
                 activity?.agentType
               );
-              const onReconnect = session && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId))
+              // A remote pane that still owns its target reattaches it; one whose backend is
+              // gone (standby) recovers like a local pane: resume the agent or open a new shell.
+              const remoteTargetOwned = Boolean(session && session.backendSessionId !== null &&
+                !isStandbyBackendSessionId(session.backendSessionId));
+              const isRemotePane = Boolean(session && (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)));
+              const onReconnect = isRemotePane && remoteTargetOwned
                 ? (onReconnectSshSession ?? onReconnectAgentSession)
                 : isAgent
                   ? onReconnectAgentSession
-                  : (onReconnectLocalSession ?? onOpenNewShell);
+                  : isRemotePane
+                    ? onOpenNewShell
+                    : (onReconnectLocalSession ?? onOpenNewShell);
               return (
                 <TerminalPane
                   session={session}

@@ -49,6 +49,10 @@ export type ShellReplacementOptions = {
   clearAgent?: boolean;
 };
 
+function hasConfirmedGoneBackend(session: TerminalSession): boolean {
+  return isStandbyBackendSessionId(session.backendSessionId);
+}
+
 export function replaceExitedShellSession(
   localSessionId: string,
   dependencies: ShellReplacementDependencies,
@@ -64,7 +68,11 @@ export function replaceExitedShellSession(
       const shouldBlockAgent = Boolean(initial?.agentType && !options?.clearAgent);
       const isPaired = isPairedWorkspaceId(initial?.workspaceId);
       const pairedStartup = isPaired && initial ? resolvePairedStartup(initial.workspaceId) : null;
-      if (!initial || !hasReplaceableBackend(initial) || shouldBlockAgent || isRemoteWorkspaceId(initial.workspaceId) || (isPaired && !pairedStartup)) {
+      // An SSH pane is replaceable only once its backend is confirmed gone (standby/null): a live
+      // or merely disconnected SSH target is reattached, never replaced. The daemon resolves the
+      // SSH workspace to its remote host, so the new shell starts there, never locally.
+      const isSsh = isRemoteWorkspaceId(initial?.workspaceId);
+      if (!initial || !hasReplaceableBackend(initial) || shouldBlockAgent || (isSsh && !hasConfirmedGoneBackend(initial)) || (isPaired && !pairedStartup)) {
         throw invalidReplacement("Terminal session cannot be replaced with a new shell");
       }
       spawned = await (dependencies.spawn ?? spawnTerminalDetailed)({
@@ -77,7 +85,7 @@ export function replaceExitedShellSession(
       const requireCurrent = (): TerminalSession => {
         const current = dependencies.getSessions()[localSessionId];
         const shouldBlockCurrentAgent = Boolean(current?.agentType && !options?.clearAgent);
-        if (!current || !hasReplaceableBackend(current) || shouldBlockCurrentAgent || isRemoteWorkspaceId(current.workspaceId) || current.workspaceId !== initial.workspaceId) {
+        if (!current || !hasReplaceableBackend(current) || shouldBlockCurrentAgent || (isSsh && !hasConfirmedGoneBackend(current)) || current.workspaceId !== initial.workspaceId) {
           throw invalidReplacement("Terminal session changed while opening a new shell");
         }
         return current;

@@ -930,6 +930,23 @@ pub(crate) fn infer_worktree_slug(
     })
 }
 
+fn paired_resume_startup(startup: Option<&TerminalStartup>) -> crate::remote::machine_protocol::Startup {
+    match startup {
+        Some(TerminalStartup::AgentResume { agent_type, provider_session }) => {
+            // The owning daemon resolves its provider store by ID and proves cwd there; never
+            // send a desktop-side transcript path as authority for a remote file.
+            let mut provider_session = provider_session.clone();
+            if crate::terminal::resume_cwd::machine_spawn_admits_agent(agent_type) {
+                provider_session.transcript_path = None;
+            }
+            crate::remote::machine_protocol::Startup::AgentResume {
+                agent_type: agent_type.clone(), provider_session,
+            }
+        }
+        _ => crate::remote::machine_protocol::Startup::Shell,
+    }
+}
+
 pub(crate) fn resolve_paired_spawn_target(
     remote_workspace_id: &str,
     effective_repo_root: &std::path::Path,
@@ -4287,7 +4304,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
     let is_paired_workspace = request.workspace_id.starts_with("daemon:")
         || matches!(request.startup, Some(TerminalStartup::PairedDaemon { .. }));
     let spawn_result = if is_remote_workspace {
-        if request.startup.is_some() {
+        if request.startup.is_some() && !matches!(request.startup, Some(TerminalStartup::AgentResume { .. })) {
             return Err(crate::ssh::projects::unsupported());
         }
         let host_store_path = super::ssh::get_ssh_store_path(&app)?;
@@ -4299,7 +4316,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         daemon_client
             .spawn_terminal_with_startup(request
                     .client_request_id
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()), request.workspace_id, crate::daemon::session_service::SpawnOptions { worktree: request.worktree.clone(), cwd: request.cwd.clone().map(|p| p.to_string_lossy().to_string()), cols, rows, shell: None }, Some(TerminalStartup::RemoteSsh { host_store_path }), None)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()), request.workspace_id, crate::daemon::session_service::SpawnOptions { worktree: request.worktree.clone(), cwd: request.cwd.clone().map(|p| p.to_string_lossy().to_string()), cols, rows, shell: None }, request.startup.or(Some(TerminalStartup::RemoteSsh { host_store_path })), None)
             .await?
     } else if is_paired_workspace {
         if matches!(request.startup, Some(TerminalStartup::RemoteSsh { .. })) {
@@ -4518,6 +4535,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             (data.remote_workspace_id, None, None)
                         }
                         Ok(other) => {
+                            if matches!(request.startup, Some(TerminalStartup::AgentResume { .. })) {
+                                return Err(IpcError::internal("Remote resume workspace registration returned an unexpected response"));
+                            }
                             tracing::warn!(
                                 path = %cwd_path.display(),
                                 response = ?other,
@@ -4526,6 +4546,9 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
                             (remote_workspace_id.clone(), None, None)
                         }
                         Err(e) => {
+                            if matches!(request.startup, Some(TerminalStartup::AgentResume { .. })) {
+                                return Err(map_client_error(&e, Some(&host_id), Some(host.generation)));
+                            }
                             tracing::warn!(
                                 path = %cwd_path.display(),
                                 error = %e.code,
@@ -4580,7 +4603,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
             rows,
             inherit_from_session_id: resolved_inherit.clone(),
             cwd_relative: initial_cwd_relative,
-            startup: crate::remote::machine_protocol::Startup::Shell,
+            startup: paired_resume_startup(request.startup.as_ref()),
         };
 
         let mut active_request_id = client_request_id.clone();
@@ -5674,6 +5697,23 @@ pub(crate) fn map_client_error(
 mod tests {
     use super::*;
     use crate::ipc::IpcErrorCode;
+
+    #[test]
+    fn paired_resume_preserves_conversation_and_launcher_but_uses_host_store() {
+        let startup = TerminalStartup::AgentResume {
+            agent_type: "omo".into(),
+            provider_session: serde_json::from_value(serde_json::json!({
+                "key": "session_id", "id": "conversation-original", "launcher": "mhc",
+                "transcriptPath": "/desktop/session.jsonl"
+            })).unwrap(),
+        };
+        let crate::remote::machine_protocol::Startup::AgentResume { provider_session, .. } = paired_resume_startup(Some(&startup)) else {
+            panic!("agent startup must not become a shell");
+        };
+        assert_eq!(provider_session.id, "conversation-original");
+        assert_eq!(provider_session.launcher, Some(crate::daemon::protocol::AgentLauncher::Mhc));
+        assert!(provider_session.transcript_path.is_none());
+    }
 
     #[test]
     fn pane_liveness_pump_generation_stale_teardown_preserves_new_binding() {

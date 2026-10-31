@@ -343,11 +343,9 @@ pub(crate) struct TransportQaOwnerEvent {
 }
 /// Transport outages are retried with a bounded backoff (250 ms doubling up to
 /// 2^MAX_BACKOFF_SHIFT, i.e. 32 s) until the host answers, the user closes the session, a
-/// non-transport failure ends it, or MAX_RECONNECT_ATTEMPTS consecutive redials fail (about an
-/// hour of continuous outage). An exhausted session settles as ended (`Expired` with a transport
-/// failure naming the cause) instead of dialing an unreachable host forever.
+/// non-transport failure pauses recovery. Transport failures never prove process death, so
+/// even a long outage retains the target and continues dialing at the capped interval.
 const MAX_BACKOFF_SHIFT: u32 = 7;
-pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = 120;
 impl RemoteRuntime {
     pub fn new(hub: Arc<TerminalOutputHub>) -> Self {
         Self::with_connector(hub, Arc::new(SshConnector))
@@ -1528,18 +1526,6 @@ async fn run(
                 .unwrap_or_else(|| RemoteFailure::from_bridge(&error));
             fail(&mut s, failure.clone());
             if failure.kind != RemoteFailureKind::Transport {
-                return;
-            }
-            if attempts >= MAX_RECONNECT_ATTEMPTS {
-                s.details.state = RemoteConnectionState::Expired;
-                s.details.failure = Some(RemoteFailure::new(
-                    RemoteFailureKind::Transport,
-                    format!(
-                        "Remote host unreachable after {attempts} reconnect attempts; the session ended ({})",
-                        failure.message
-                    ),
-                ));
-                Entry::notify(&s);
                 return;
             }
             attempts = attempts.saturating_add(1);
