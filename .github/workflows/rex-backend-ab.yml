@@ -1,0 +1,63 @@
+name: rex-backend-ab
+on:
+  push:
+    branches: ['ci/rexab-backend']
+jobs:
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: ['a3beca3fe8606252df0a4feb7b6b38e968308a00', 'b78755c30bb880f2a19954ffb4a119742898d3f0']
+        attempt: [1, 2]
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision }}
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev jq openssh-server fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu-core
+          sudo mkdir -p /run/sshd
+          sudo ip link add rex-overlay type dummy
+          sudo ip addr add 100.64.1.2/32 dev rex-overlay
+          sudo ip link set rex-overlay up
+          mkdir -p "$HOME/.local/share/fonts"
+          curl --fail --location https://raw.githubusercontent.com/romkatv/powerlevel10k-media/master/MesloLGS%20NF%20Regular.ttf --output "$HOME/.local/share/fonts/MesloLGS-NF-Regular.ttf"
+          fc-cache -f
+      - uses: dtolnay/rust-toolchain@stable
+      - name: full lib suite
+        shell: bash
+        run: |
+          mkdir -p out
+          git rev-parse HEAD | tee out/revision.log
+          git config --global user.email ci@ferryx.dev; git config --global user.name ci
+          bun install --cwd ui --frozen-lockfile > out/setup-install.log 2>&1; echo "SETUP_EXIT install $?" | tee out/gate.log
+          bun run --cwd ui build > out/setup-ui.log 2>&1; echo "SETUP_EXIT ui $?" | tee -a out/gate.log
+          cargo build --manifest-path remote-helper/Cargo.toml > out/setup-helper.log 2>&1; echo "SETUP_EXIT helper $?" | tee -a out/gate.log
+          cd src-tauri
+          cargo test --lib > ../out/full-lib.log 2>&1
+          e=$?
+          echo "FULL_LIB_EXIT $e" | tee -a ../out/gate.log
+          grep -E '^test result' ../out/full-lib.log | tee -a ../out/gate.log
+          awk '/^failures:$/{n++} n==2' ../out/full-lib.log | grep -E '^    ' | tee -a ../out/gate.log
+          exit $e
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rex-backend-${{ matrix.revision }}-${{ matrix.attempt }}
+          path: out
