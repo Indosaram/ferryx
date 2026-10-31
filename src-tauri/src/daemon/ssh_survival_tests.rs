@@ -502,6 +502,54 @@ async fn ssh_daemon_restart_restores_identity_without_local_pty() {
     assert!(serving.await.unwrap_err().is_cancelled());
 }
 
+/// A full attach to a remote session is a gap only when its history really lost output: marking
+/// every full replay gapped left each reader behind a peer daemon (agent control after a
+/// handover) unable to read any SSH pane's screen, so chat input to it was always refused.
+#[tokio::test]
+async fn ssh_full_attach_reports_a_gap_only_for_lost_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(serde_json::json!({
+        "backendSessionId":"full-attach-pane", "target":{"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"full-attach-target"},
+        "config":{"host":{"id":"host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:abcd","projectPath":"/project","worktree":null,"agentIdentity":null},
+        "clientRequestId":"full-attach-request","remoteCursor":"0","cols":80,"rows":24
+    })).unwrap();
+    server.terminal_service.remote().restore(descriptor).unwrap();
+    let server = Arc::new(server);
+    let hub = server.terminal_service.output_hub();
+    hub.publish("full-attach-pane", b"prompt> ".to_vec());
+
+    let attach_gap = |after: &'static str| {
+        let server = Arc::clone(&server);
+        async move {
+            let (client, stream) = tokio::io::duplex(32 * 1024);
+            let serving = tokio::spawn(server.handle_client(stream));
+            let (read, mut write) = tokio::io::split(client);
+            let mut lines = BufReader::new(read).lines();
+            let request = format!("{{\"type\":\"attach\",\"sessionId\":\"full-attach-pane\",\"afterSequence\":{after}}}\n");
+            write.write_all(request.as_bytes()).await.unwrap();
+            let line = tokio::time::timeout(Duration::from_secs(3), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            serving.abort();
+            match serde_json::from_str::<DaemonResponse>(&line).unwrap() {
+                DaemonResponse::AttachOk { gap, .. } => gap,
+                other => panic!("unexpected attach response: {other:?}"),
+            }
+        }
+    };
+
+    assert_eq!(attach_gap("null").await, None, "a whole history replayed in full is not a gap");
+    assert!(attach_gap("1").await.is_some(), "a delta request answered with a full replay is a gap");
+    hub.publish_gap("full-attach-pane").unwrap();
+    hub.publish("full-attach-pane", b"after the gap".to_vec());
+    assert!(attach_gap("null").await.is_some(), "history that lost output is a gap");
+    hub.publish("full-attach-pane", b"\x1b[2J\x1b[Hrepainted".to_vec());
+    assert_eq!(attach_gap("null").await, None, "a full-screen repaint makes the history whole again");
+}
+
 #[tokio::test]
 async fn ssh_reconnect_safety_gap_precedes_recovered_output() {
     let hub = Arc::new(TerminalOutputHub::default());
