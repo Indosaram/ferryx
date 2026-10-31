@@ -28,9 +28,15 @@ export type FilePreviewPaneProps = {
   line: number | null;
   col: number | null;
   workspaceId: string | null;
+  /**
+   * Whether the pane is currently shown. Hidden (inactive or restored) tabs neither
+   * read the file nor poll for disk changes until they are shown. Defaults to true.
+   */
+  visible?: boolean;
 };
 
 export function FilePreviewPane(props: FilePreviewPaneProps) {
+  const visible = props.visible ?? true;
   const request: FilePreviewOpenRequest = {
     path: props.path,
     backendSessionId: props.backendSessionId,
@@ -56,23 +62,29 @@ export function FilePreviewPane(props: FilePreviewPaneProps) {
     () => null,
   );
   useEffect(() => {
+    // A hidden tab must not read its file: open lazily the first time it is shown.
+    if (!visible) return;
     if (getFilePreview(props.previewId)) return;
     retainFilePreview(props.previewId, source, request);
-  }, [props.previewId, props.path, props.backendSessionId, props.line, props.col, props.workspaceId]);
+  }, [visible, props.previewId, props.path, props.backendSessionId, props.line, props.col, props.workspaceId]);
   if (!controller) {
     return <div data-testid="file-preview-pane-missing" className="h-full w-full" />;
   }
-  return <FilePreviewPaneBody previewId={props.previewId} path={props.path} controller={controller} />;
+  return (
+    <FilePreviewPaneBody previewId={props.previewId} path={props.path} controller={controller} visible={visible} />
+  );
 }
 
 function FilePreviewPaneBody({
   previewId,
   path,
   controller,
+  visible,
 }: {
   previewId: string;
   path: string;
   controller: FilePreviewController;
+  visible: boolean;
 }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   const [sourceMode, setSourceMode] = useState(false);
@@ -84,6 +96,7 @@ function FilePreviewPaneBody({
   const menuRef = useRef<HTMLDivElement | null>(null);
   const openWithTriggerRef = useRef<HTMLButtonElement | null>(null);
   const openWithMenuRef = useRef<HTMLDivElement | null>(null);
+  const hiddenWhileReadyRef = useRef(false);
 
   useEffect(() => {
     setHasDiskChange(false);
@@ -91,6 +104,11 @@ function FilePreviewPaneBody({
 
   useEffect(() => {
     if (state.status !== "ready") return;
+    // Only the shown tab listens for focus/visibility, so N open tabs cost one check per focus.
+    if (!visible) {
+      hiddenWhileReadyRef.current = true;
+      return;
+    }
     const handle = state.payload.handle;
 
     const onCheckChange = () => {
@@ -117,11 +135,17 @@ function FilePreviewPaneBody({
     window.addEventListener("focus", onCheckChange);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
+    // The file may have changed while this tab was hidden: check once on reveal.
+    if (hiddenWhileReadyRef.current) {
+      hiddenWhileReadyRef.current = false;
+      onCheckChange();
+    }
+
     return () => {
       window.removeEventListener("focus", onCheckChange);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [state.status === "ready" ? state.payload.handle : null, controller]);
+  }, [state.status === "ready" ? state.payload.handle : null, controller, visible]);
 
   const filePath =
     state.status === "ready"

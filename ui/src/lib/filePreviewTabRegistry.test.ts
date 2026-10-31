@@ -77,4 +77,37 @@ describe("filePreviewTabRegistry", () => {
     registry.retainFilePreview("preview-1", source, relative);
     expect(open).toHaveBeenCalledTimes(1);
   });
+
+  it("re-reads a re-fetched remote file even though its cache path and request key are unchanged", async () => {
+    const registry = await import("./filePreviewTabRegistry");
+    status = "ready";
+    const remoteSource = { ...source, workspaceId: "ssh:host-1" };
+    const cached = { ...request, path: "/cache/remote-files/abc/readme.md" };
+    registry.retainFilePreview("preview-1", remoteSource, registry.previewRequestForSource(remoteSource, cached));
+    open.mockClear();
+    registry.retainFilePreview("preview-1", remoteSource, registry.previewRequestForSource(remoteSource, cached));
+    expect(open).toHaveBeenCalledTimes(1);
+    // The one-shot flag never reaches the controller (and so never a stored request).
+    expect(open.mock.lastCall as unknown[] | undefined).toEqual([remoteSource, cached]);
+  });
+
+  it("marks only SSH and paired-host previews for refresh", async () => {
+    const registry = await import("./filePreviewTabRegistry");
+    expect(registry.previewRequestForSource({ ...source, workspaceId: "ssh:a" }, request).refresh).toBe(true);
+    expect(registry.previewRequestForSource({ ...source, workspaceId: "daemon:h:p" }, request).refresh).toBe(true);
+    expect(registry.previewRequestForSource(source, request)).toBe(request);
+    expect(registry.previewRequestForSource({ ...source, workspaceId: "ws-local" }, request)).toBe(request);
+  });
+
+  it("keeps reusing a live local preview, and a refetch landing at a new path still reopens", async () => {
+    const registry = await import("./filePreviewTabRegistry");
+    status = "ready";
+    registry.retainFilePreview("preview-1", source, registry.previewRequestForSource(source, request));
+    open.mockClear();
+    registry.retainFilePreview("preview-1", source, registry.previewRequestForSource(source, request));
+    expect(open).not.toHaveBeenCalled();
+    // Windows fallback: the locked copy forces the refetch into a fresh sibling path.
+    registry.retainFilePreview("preview-1", source, { ...request, path: "/repo/fresh/readme.md" });
+    expect(open).toHaveBeenCalledTimes(1);
+  });
 });

@@ -1,5 +1,20 @@
 import type { FilePreviewErrorReason } from "./filePreviewTypes";
 
+/**
+ * User copy for a preview refusal that is not a file-level reason (those are the frozen
+ * `FilePreviewErrorReason`s): the preview service itself is missing. Reads the raw
+ * `details.reason` of the rejected IPC call; returns null for anything else.
+ */
+export function previewServiceFailureHeadline(error: unknown): string | null {
+  const details = (error as { details?: { reason?: unknown } | null } | null)?.details;
+  switch (details?.reason) {
+    case "previewServiceUnavailable":
+      return "File previews are unavailable because the preview service could not start. Restart Ferryx to try again.";
+    default:
+      return null;
+  }
+}
+
 /** Machine reason to user copy. Branching is on the reason, never on backend prose. */
 export function failureHeadline(reason: FilePreviewErrorReason | null): string {
   switch (reason) {

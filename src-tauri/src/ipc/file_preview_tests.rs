@@ -2023,4 +2023,12 @@ fn a_path_swapped_after_resolution_is_refused() {
     );
 }
 
+#[test]
+fn missing_preview_service_is_a_typed_refusal_not_a_panic() {
+    let error = require_preview_service::<u8>(None).unwrap_err();
+    assert_eq!(error.code, crate::ipc::error::IpcErrorCode::Unsupported);
+    assert_eq!(error.details.as_ref().unwrap()["reason"], "previewServiceUnavailable");
+    assert_eq!(require_preview_service(Some(7)).unwrap(), 7);
+}
+
 

@@ -28,6 +28,56 @@ fn invalid_remote_path(message: impl Into<String>) -> IpcError {
         .with_details(serde_json::json!({ "reason": "invalidRemotePath" }))
 }
 
+/// True when `input` names its remote file without a base directory: home-relative
+/// (`~`, `~/...`, and on Windows `~\...`) or absolute. On Windows the rooted-but-not-
+/// absolute forms (`\foo`, `C:foo`) also count, so [`windows_remote_target_path`]
+/// refuses them as invalid paths rather than as a missing cwd.
+fn remote_input_needs_no_base(input: &str, windows: bool) -> bool {
+    if input == "~" || input.starts_with("~/") {
+        return true;
+    }
+    if !windows {
+        return input.starts_with('/');
+    }
+    input.starts_with("~\\")
+        || input.starts_with(['\\', '/'])
+        || input.as_bytes().get(1) == Some(&b':')
+}
+
+/// Picks the directory a relative remote token resolves against: the terminal's live
+/// cwd, never a guess. Absolute and home-relative inputs need no base (`""`). A relative
+/// input without a valid cwd (POSIX: absolute; Windows: [`RemotePlatform::validate_path`])
+/// is refused with `remoteCwdUnknown`, because falling back to the project root could
+/// fetch a different file that happens to share the name.
+///
+/// [`RemotePlatform::validate_path`]: crate::ssh::runtime::RemotePlatform::validate_path
+pub(crate) fn remote_fetch_base<'a>(
+    input: &str,
+    cwd: Option<&'a str>,
+    windows: bool,
+) -> Result<&'a str, IpcError> {
+    if remote_input_needs_no_base(input, windows) {
+        return Ok("");
+    }
+    let valid = |c: &str| {
+        if windows {
+            crate::ssh::runtime::RemotePlatform::Windows
+                .validate_path(c)
+                .is_ok()
+        } else {
+            c.starts_with('/')
+        }
+    };
+    match cwd {
+        Some(c) if valid(c) => Ok(c),
+        _ => Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            "The remote terminal's current directory is unknown, so a relative path cannot be resolved",
+        )
+        .with_details(serde_json::json!({ "reason": "remoteCwdUnknown" }))),
+    }
+}
+
 /// The read command reaches the remote LOGIN shell, which may be fish: there a
 /// backslash escapes even inside single quotes, so a path holding one could end
 /// the quoting [`crate::ssh::direct::quote_posix`] applies and run as code.
@@ -559,18 +609,9 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
     .await?;
 
     let windows = project.platform == Some(crate::ssh::runtime::RemotePlatform::Windows);
+    let base = remote_fetch_base(&path, cwd.as_deref(), windows)?;
 
     let (remote_path, command, max_wire_bytes) = if windows {
-        let base = match cwd.as_deref() {
-            Some(c)
-                if crate::ssh::runtime::RemotePlatform::Windows
-                    .validate_path(c)
-                    .is_ok() =>
-            {
-                c
-            }
-            _ => &project.repo_root,
-        };
         let remote_path = windows_remote_target_path(&path, base)?;
         // powershell.exe ships with every supported Windows release and runs
         // regardless of the host's OpenSSH DefaultShell (cmd, powershell or pwsh).
@@ -578,10 +619,6 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
             .command(&windows_remote_read_script(&remote_path));
         (remote_path, command, windows_remote_wire_limit())
     } else {
-        let base = match cwd.as_deref() {
-            Some(c) if c.starts_with('/') => c,
-            _ => &project.repo_root,
-        };
         let remote_path = remote_target_path(&path, base)?;
         let command = remote_read_command(&remote_path);
         (
@@ -644,6 +681,42 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_remote_tokens_without_a_live_cwd_are_refused_not_anchored_on_the_repo() {
+        let reason = |e: IpcError| e.details.unwrap()["reason"].as_str().unwrap().to_string();
+        // POSIX: a relative token needs an absolute cwd.
+        for cwd in [None, Some(""), Some("relative/dir")] {
+            let err = remote_fetch_base("src/lib.rs", cwd, false).unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::InvalidRequest, "{cwd:?}");
+            assert_eq!(reason(err), "remoteCwdUnknown", "{cwd:?}");
+        }
+        assert_eq!(remote_fetch_base("src/lib.rs", Some("/srv/app"), false).unwrap(), "/srv/app");
+        // Absolute and home-relative inputs never need a cwd.
+        for input in ["/etc/hosts", "~", "~/notes.md"] {
+            assert_eq!(remote_fetch_base(input, None, false).unwrap(), "", "{input}");
+        }
+
+        // Windows: the cwd must be a valid absolute Windows path.
+        for cwd in [None, Some("/home/u"), Some("repo")] {
+            let err = remote_fetch_base(r"src\lib.rs", cwd, true).unwrap_err();
+            assert_eq!(reason(err), "remoteCwdUnknown", "{cwd:?}");
+        }
+        assert_eq!(
+            remote_fetch_base(r"src\lib.rs", Some(r"C:\repo"), true).unwrap(),
+            r"C:\repo"
+        );
+        for input in [r"C:\x.txt", r"\\srv\share\x", "~", r"~\x", "~/x"] {
+            assert_eq!(remote_fetch_base(input, None, true).unwrap(), "", "{input}");
+        }
+        // Rooted-but-relative Windows forms reach the target parser, which refuses them
+        // as invalid paths, not as a missing cwd.
+        for input in [r"\rooted", "C:drive-relative"] {
+            let base = remote_fetch_base(input, None, true).unwrap();
+            let err = windows_remote_target_path(input, base).unwrap_err();
+            assert_eq!(reason(err), "invalidRemotePath", "{input}");
+        }
+    }
 
     #[test]
     fn test_remote_target_path_absolute_passthrough() {

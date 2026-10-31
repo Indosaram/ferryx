@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   BrowserTab,
+  FileTab,
   LayoutState,
   TabPaneLayout,
   TerminalSession,
@@ -57,8 +58,8 @@ vi.mock("./BrowserPane", () => ({
 }));
 
 vi.mock("./FilePreviewPane", () => ({
-  FilePreviewPane: ({ path }: { path: string }) => (
-    <div data-testid="file-preview-pane" data-path={path} />
+  FilePreviewPane: ({ path, visible }: { path: string; visible?: boolean }) => (
+    <div data-testid="file-preview-pane" data-path={path} data-visible={String(visible)} />
   ),
 }));
 
@@ -330,5 +331,50 @@ describe("TerminalSplitView mixed terminal and browser pane layout", () => {
     // File leaf: no Copy Debug Info
     const fileToolbar = within(paneLeaves[2]).getByTestId("pane-toolbar");
     expect(within(fileToolbar).queryByRole("button", { name: "Copy Debug Info" })).not.toBeInTheDocument();
+  });
+
+  it("marks only the active file tab's preview pane visible", () => {
+    const fileTab = (id: string, path: string): FileTab => ({
+      kind: "file",
+      id,
+      label: path.split("/").pop() ?? path,
+      path,
+      backendSessionId: "backend-1",
+      line: null,
+      col: null,
+      workspaceId: null,
+      previewId: id,
+    });
+    const first = fileTab("tab-file-a", "/repo/a.md");
+    const second = fileTab("tab-file-b", "/repo/b.md");
+    const layout = (activeTabId: string): LayoutState => ({
+      tabs: [first, second],
+      activeTabId,
+      tabGroups: {
+        "group-default": { id: "group-default", tabIds: [first.id, second.id], activeTabId },
+      },
+      tabGroupLayout: { type: "group", groupId: "group-default" },
+      focusedGroupId: "group-default",
+      layoutsByTabId: {},
+    });
+    const visibilityByPath = () =>
+      Object.fromEntries(
+        screen
+          .getAllByTestId("file-preview-pane")
+          .map((element): [string, string] => [
+            element.getAttribute("data-path") ?? "",
+            element.getAttribute("data-visible") ?? "",
+          ]),
+      );
+
+    const { rerender } = render(
+      <TerminalSplitView layout={layout(first.id)} sessions={{}} onNavigateBrowserTab={vi.fn()} onReloadBrowserTab={vi.fn()} />,
+    );
+    expect(visibilityByPath()).toEqual({ "/repo/a.md": "true", "/repo/b.md": "false" });
+
+    rerender(
+      <TerminalSplitView layout={layout(second.id)} sessions={{}} onNavigateBrowserTab={vi.fn()} onReloadBrowserTab={vi.fn()} />,
+    );
+    expect(visibilityByPath()).toEqual({ "/repo/a.md": "false", "/repo/b.md": "true" });
   });
 });
