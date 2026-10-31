@@ -447,6 +447,12 @@ impl Proxy {
         self.desired_geometry = Some((cols, rows));
         Ok(())
     }
+    pub async fn acknowledge_agent_outcome(&mut self, generation: Epoch) -> Result<()> {
+        self.send(generation, Message::Text(serde_json::json!({
+            "type": "acknowledgeAgentOutcome",
+            "generation": generation,
+        }).to_string().into())).await
+    }
     pub async fn interrupt(&mut self, generation: Epoch) -> Result<()> {
         self.interrupt_with_intent(generation, None).await
     }
