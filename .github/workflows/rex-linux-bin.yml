@@ -55,6 +55,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p e2e-logs
+          ./out/ferryx-cli api list > e2e-logs/api-list.json; echo "API_LIST_EXIT $?" | tee e2e-logs/api.out
+          echo "API_LIST_LEN $(jq '.commands|length' e2e-logs/api-list.json)" | tee -a e2e-logs/api.out
+          ./out/ferryx-cli api describe agents > e2e-logs/api-describe-agents.json; echo "API_DESCRIBE_EXIT $?" | tee -a e2e-logs/api.out
           E2E_LOG_DIR=$PWD/e2e-logs bash out/rex-e2e/run-all.sh 2>&1 | tee e2e-logs/run-all.out
           echo "RUN_ALL_EXIT ${PIPESTATUS[0]}" | tee -a e2e-logs/run-all.out
       - if: always()
