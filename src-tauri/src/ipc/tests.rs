@@ -1308,7 +1308,8 @@ async fn remote_terminal_spawn_forwards_worktree_and_cwd_to_daemon() {
 }
 
 #[tokio::test]
-async fn remote_terminal_spawn_rejects_explicit_startup() {
+async fn remote_terminal_spawn_admits_only_agent_resume_as_explicit_startup() {
+    use crate::daemon::protocol::{AgentProviderSession, AgentProviderSessionKey, TerminalStartup};
     use crate::ipc::terminal::cmd_terminal_spawn;
 
     let app = tauri::test::mock_builder()
@@ -1319,7 +1320,7 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("mock app");
 
-    let request = SpawnTerminalRequest {
+    let request = |startup: TerminalStartup| SpawnTerminalRequest {
         workspace_id: "ssh:0123456789abcdef".into(),
         worktree: None,
         cwd: None,
@@ -1332,27 +1333,59 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
         remaining_ms: None,
         session_id: None,
         shell: None,
-        startup: Some(crate::daemon::protocol::TerminalStartup::AgentResume {
-            agent_type: "claude".into(),
-            provider_session: crate::daemon::protocol::AgentProviderSession {
-                launcher: None,
-                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
-                id: "sess-1".into(),
-                transcript_path: None,
-            },
-        }),
+        startup: Some(startup),
     };
 
+    // A fresh agent launch or a paired-daemon target never runs through a direct SSH project.
+    for refused in [
+        TerminalStartup::AgentLaunch {
+            command: "claude".into(),
+            args: Vec::new(),
+        },
+        TerminalStartup::PairedDaemon {
+            host_id: "host".into(),
+            remote_workspace_id: "remote-ws".into(),
+        },
+    ] {
+        let err = cmd_terminal_spawn(
+            app.handle().clone(),
+            app.state::<Arc<DaemonClient>>(),
+            app.state::<WorkspaceRegistry>(),
+            request(refused.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.code,
+            IpcErrorCode::Unsupported,
+            "{refused:?} must stay refused"
+        );
+    }
+
+    // Resuming the pane's own agent conversation is admitted: it passes the startup gate and
+    // fails only later, at the registry lookup, because this fixture registers no SSH project.
+    let resume = TerminalStartup::AgentResume {
+        agent_type: "claude".into(),
+        provider_session: AgentProviderSession {
+            launcher: None,
+            key: AgentProviderSessionKey::SessionId,
+            id: "sess-1".into(),
+            transcript_path: None,
+        },
+    };
     let err = cmd_terminal_spawn(
         app.handle().clone(),
         app.state::<Arc<DaemonClient>>(),
         app.state::<WorkspaceRegistry>(),
-        request,
+        request(resume),
     )
     .await
     .unwrap_err();
-
-    assert_eq!(err.code, IpcErrorCode::Unsupported);
+    assert_ne!(
+        err.code,
+        IpcErrorCode::Unsupported,
+        "an SSH agent resume must not be refused"
+    );
 }
 
 #[test]
