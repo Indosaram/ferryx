@@ -110,4 +110,11 @@ describe("FilePreviewCsv", () => {
     expect(screen.queryByTestId("file-preview-csv-raw")).toBeNull();
     expect(toggleBtn.textContent).toBe("Raw");
   });
+
+  it("keeps both the table and raw views text-selectable", () => {
+    render(<FilePreviewCsv text={"a,b\n1,2"} displayName="t.csv" />);
+    expect(screen.getByTestId("file-preview-csv")).toHaveClass("selectable");
+    fireEvent.click(screen.getByTestId("file-preview-csv-raw-toggle"));
+    expect(screen.getByTestId("file-preview-csv-raw")).toHaveClass("selectable");
+  });
 });

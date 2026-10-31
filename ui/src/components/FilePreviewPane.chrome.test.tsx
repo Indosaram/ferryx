@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FilePreviewPane } from "./FilePreviewPane";
@@ -153,6 +153,29 @@ describe("FilePreviewPane chrome", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  it("reopens the preview when the change poll reports an expired handle", async () => {
+    reload.mockClear();
+    currentState = readyState;
+    mockCheckChanged.mockReset();
+    const expired = Promise.reject({ code: "INVALID_ARGUMENT", message: "gone", details: { reason: "ExpiredHandle" } });
+    expired.catch(() => undefined);
+    mockCheckChanged.mockReturnValue(expired);
+
+    render(
+      <FilePreviewPane
+        previewId="preview-1"
+        path="a.txt"
+        backendSessionId="back-1"
+        line={null}
+        col={null}
+        workspaceId={null}
+      />,
+    );
+
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+  });
+
   it("does not show banner when checkFilePreviewChanged resolves false", async () => {
     currentState = readyState;
     mockCheckChanged.mockReset();
@@ -178,5 +201,27 @@ describe("FilePreviewPane chrome", () => {
     await changePromise;
 
     expect(screen.queryByTestId("file-preview-changed-banner")).toBeNull();
+  });
+
+  it("keeps a stable hook order when the controller goes from closed to ready", () => {
+    currentState = { status: "closed" };
+    render(
+      <FilePreviewPane
+        previewId="preview-1"
+        path="a.txt"
+        backendSessionId="back-1"
+        line={null}
+        col={null}
+        workspaceId={null}
+      />,
+    );
+    expect(screen.getByTestId("file-preview-pane-pending")).toBeInTheDocument();
+
+    act(() => {
+      currentState = readyState;
+      for (const listener of [...listeners]) listener();
+    });
+
+    expect(screen.getByTestId("file-preview-path")).toHaveTextContent("/repo/a.txt");
   });
 });

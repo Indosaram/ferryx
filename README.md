@@ -56,8 +56,8 @@ Every layer is engineered for minimal latency and autonomous agent collaboration
 
 ### Native Ghostty & wgpu engine
 
-Desktop terminal panes render through native libghostty and a GPU-accelerated wgpu
-pipeline, giving crisp font rasterization and low-latency throughput.
+Desktop terminal panes parse output with libghostty-vt and render through Ferryx's own
+GPU-accelerated wgpu pipeline, giving crisp font rasterization and low-latency throughput.
 
 - libghostty terminal core
 - wgpu GPU pipeline
@@ -108,9 +108,13 @@ machine enrollment, and the separate desktop account and gateway settings.
 - Native terminal split-panes and remote Git worktrees run directly on the machine
 
 ```bash
-# 1. One-line install ferryx-cli on the remote machine (Linux x64, macOS)
+# 1. One-line install on the remote machine (Linux x64, macOS). After installing ferryx-cli it
+#    runs `ferryx-cli up`, which prints an approval link for your account and installs a
+#    service that keeps the daemon running. Pass --no-up to install the binary only:
+#    curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --no-up
 curl -fsSL https://relay.ferryx.dev/install.sh | bash
 
+# Manual path (after --no-up, or when no terminal was attached during install):
 # 2. Start the headless PTY daemon in a dedicated service or terminal;
 #    use a second terminal for step 3 while this foreground process runs.
 ferryx-cli --daemon
@@ -118,14 +122,15 @@ ferryx-cli --daemon
 # 3. Link machine to your account via email magic link (no open ports or GUI PIN copying needed)
 ferryx-cli account login --email you@example.com --origin https://your-account-service.example
 # Open the authorization link in your email; the command waits for approval.
-# --origin may be omitted when FERRYX_ACCOUNT_ORIGIN is configured.
+# --origin may be omitted when FERRYX_ACCOUNT_ORIGIN is set or an account origin was saved earlier.
 ```
 
 ### Zero Electron overhead
 
 Tauri v2 with the platform's native WebKit or WebView2 engine, paired with a headless
 Rust PTY daemon. The core runs on macOS, Windows, and Linux; selected OS integrations
-such as launchd, Dock badges, color emoji, and vibrancy remain macOS-first.
+such as Dock badges and the transparent native-surface window remain macOS-first, and
+Windows renders emoji without color.
 
 - Tauri v2 shell
 - Headless Rust PTY daemon
@@ -154,7 +159,7 @@ Ferryx is probably not for you yet if you:
 
 - use a single agent vendor. `claude --worktree` or Codex's built-in worktrees already isolate that vendor's sessions, with less to install;
 - need SSO, centrally managed accounts, or a cloud-hosted service. Ferryx does not offer them today;
-- need prebuilt Linux or Windows ARM64 binaries, or run on a host without a GPU adapter. Those are not supported yet.
+- need prebuilt Linux or Windows ARM64 binaries. Those are not supported yet. (Hosts without a GPU adapter fall back to a slower DOM terminal renderer starting with the next release.)
 
 ## Performance
 
@@ -168,7 +173,7 @@ Reproduce the render figure:
 
 ```bash
 cargo run --manifest-path src-tauri/Cargo.toml \
-  --bin native_terminal_renderer_poc -- \
+  --example native_terminal_renderer_poc -- \
   --headless --output bench/terminal/evidence/native-wgpu-phase2-latest.png
 ```
 
@@ -227,9 +232,8 @@ unmeasured performance claims:
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) 1.1+
-- [Rust](https://www.rust-lang.org/) stable (at least 1.82)
-- [Node.js](https://nodejs.org/) 20+
+- [Bun](https://bun.sh/) 1.4+
+- [Rust](https://www.rust-lang.org/) stable (at least 1.89)
 - [Zig](https://ziglang.org/download/) 0.17.0 (required for the pinned Ghostty build)
 - [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
 
@@ -266,7 +270,7 @@ The command is idempotent: it skips a download that is already present and verif
 `--target <triple>` fetches for another platform, and `--target universal-apple-darwin` fetches
 both macOS slices. Release builds run it automatically: `cargo tauri build` calls it from
 `beforeBuildCommand`. A dev build works without it. The hub then uses `FERRYX_HUB_MHC_BIN`
-when set, else `mhc` from your PATH.
+when set, else an mhc bundled next to the running executable, else `mhc` from your PATH.
 
 ### Run the desktop app
 
@@ -328,9 +332,10 @@ Questions and ideas are welcome in [Discord](https://discord.gg/Z2hBkQEHUG).
 
 ## License
 
-This project is source-available under the [Ferryx License](LICENSE). It is free for personal use, education, open-source work, non-profits, and companies with fewer than 50 people and less than USD 5M in annual revenue. Larger companies need a Team subscription to use Ferryx for work, after a transition period that ends 90 days after the Team plan opens. Self-hosted relays stay free for everyone. Releases published before this change remain under the Sustainable Use License (SUL-1.0) they shipped with. The [license FAQ](https://ferryx.dev/docs/license/) lists common allowed and disallowed cases with the clauses that govern them. Contributions require signing the [CLA](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
+This project is source-available under the [Ferryx License](LICENSE). It is free for personal use, education at an accredited school or university, open-source work that a larger company does not pay for, non-profits, and companies that, counted together with their affiliates, have fewer than 50 employees and contractors and less than USD 5M in annual revenue. Larger companies need a Team (or higher) subscription for each person who uses Ferryx for work, after a transition period that ends 90 days after the Team plan opens. Anyone may run a self-hosted relay (`ferryx-relay`) free of charge; the desktop app, CLI, and mobile and web clients still follow the company-size rule. Releases published before the move to the Ferryx License remain under the Sustainable Use License (SUL-1.0) they shipped with. The [license FAQ](https://ferryx.dev/docs/license/) lists common allowed and disallowed cases with the clauses that govern them. Contributions require signing the [CLA](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Code Signing Policy
 
 - **Maintainer**: [@Indosaram](https://github.com/Indosaram)
+- **Signing**: the macOS DMG is signed and notarized. On Windows, the Microsoft Store signs the package it publishes; the GitHub `.exe` installer and the Linux AppImage and `.deb` are not code-signed, so verify them against the release's `SHA256SUMS.txt`.
 - **Privacy**: Ferryx stores workspace data locally. Remote access, embedded websites, external coding agents, and update services can exchange data over the network. See the [Ferryx Privacy Policy](https://ferryx.dev/privacy/) for data handling and deletion choices.
