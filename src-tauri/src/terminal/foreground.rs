@@ -89,9 +89,13 @@ pub(crate) struct Observation {
 /// proves every child and every other foreground-group member gone) releases it. Each report also
 /// counts as a sample of its own group, so only the first report after the hand-back carries it.
 ///
-/// The trade-off: a report the shell writes right after a sampled child exited, with no tick in
-/// between (`child; printf ...` inside one sampling interval), is released by the next lone-shell
-/// listing although its writer is alive. A report from the shell with no other group sampled
+/// The trade-off: a report the shell itself writes after a sampled child exited, before the next
+/// tick samples the shell's group again, is released by the next lone-shell listing although its
+/// writer is alive. An interactive `child; printf ...` (a function or alias that runs a sampled
+/// child and then reports `blocked` before a `read`) almost always lands there, so its transient
+/// status is cleared while the shell waits; done and error records are never dropped this way,
+/// and a script's own lines report from the script's group, not the shell's. A report from the
+/// shell with no other group sampled
 /// since the previous sample or report is never released this way, nor is one before the shell's
 /// group has been learned. A reporter that lived shorter than one tick and was never sampled
 /// stays, as do the shell's own reports, until a prompt start, a clear or a newer report.
