@@ -35,13 +35,15 @@ jobs:
           # Same invocation as the Linux release packager (scripts/lib/release-platforms.mjs:635).
           # `ferryx-cli --daemon` is the headless daemon: bin/cli.rs LaunchMode::Daemon ->
           # run_daemon_headless (cli.rs:4011 parse_launch_mode, cli.rs:4093).
-          cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli
+          # Debug profile: main's committed helper manifest is stale (sourceFingerprint 9318f3e0 vs
+          # current 49306dd5, pre-existing on origin/main), and build.rs enforces it only in release.
+          cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli
           # Hook reporter for scenario `claude` run 2. ferryx-cli has no `agent-hook` dispatch
           # (src-tauri/src/bin/cli.rs; only main.rs:13 of the desktop `ferryx` bin has it), the
           # remote helper does (src-tauri/src/ferryx_scope/ssh/process.rs:954).
           cargo build --manifest-path remote-helper/Cargo.toml --release
           mkdir -p out
-          cp src-tauri/target/release/ferryx-cli remote-helper/target/release/ferryx-remote-helper out/
+          cp src-tauri/target/debug/ferryx-cli remote-helper/target/release/ferryx-remote-helper out/
           cp -R .github/rex-e2e out/rex-e2e
           git rev-parse HEAD > out/SOURCE_COMMIT
           ./out/ferryx-cli --version | tee out/VERSION
