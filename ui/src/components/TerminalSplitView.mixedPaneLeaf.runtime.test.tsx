@@ -231,6 +231,14 @@ describe("TerminalSplitView mixed terminal and browser pane layout", () => {
     const browserToolbar = within(paneLeaves[1]).getByTestId("pane-toolbar");
     expect(within(termToolbar).getByRole("button", { name: "Copy Debug Info" })).toBeInTheDocument();
     expect(within(browserToolbar).queryByRole("button", { name: "Copy Debug Info" })).not.toBeInTheDocument();
+
+    // 7. Revealing the hover pane toolbar must not cover the browser's own navigation toolbar.
+    fireEvent.mouseMove(paneLeaves[1], { clientY: 0 });
+    expect(browserToolbar).toHaveClass("pointer-events-auto", "h-5");
+    const browserContent = within(paneLeaves[1]).getByTestId("pane-content");
+    expect(browserContent).toContainElement(browserPane);
+    expect(browserContent).toHaveClass("pt-5");
+    expect(within(paneLeaves[0]).getByTestId("pane-content")).not.toHaveClass("pt-5");
   });
 
   it("shows Copy Debug Info button only for terminal content, omitting it on browser and file panes", () => {

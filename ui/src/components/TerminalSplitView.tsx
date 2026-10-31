@@ -1369,7 +1369,11 @@ const PaneLeafView = React.memo(function PaneLeafView({
       </div>
 
       {supervision ? <SupervisorPaneBarView state={supervision} now={supervisorNow} onTakeOver={focusPaneInput} /> : null}
-      <div className="h-full w-full min-h-0 flex-1 overflow-hidden">
+      {/* Browser panes keep their own toolbar at the top; clear the h-5 hover overlay off it. */}
+      <div
+        className={`h-full w-full min-h-0 flex-1 overflow-hidden ${content.kind === "browser" ? "pt-5" : ""}`}
+        data-testid="pane-content"
+      >
         {(() => {
           switch (content.kind) {
             case "terminal": {
