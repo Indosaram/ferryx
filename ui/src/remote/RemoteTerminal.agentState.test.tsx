@@ -186,6 +186,43 @@ describe("remote terminal agent state bridge", () => {
     expect(screen.getByTestId("remote-terminal-grid")).toBeDefined();
   });
 
+  it.each([true, false])("defers outcome acknowledgement while hidden and sends the latest on return (machine=%s)", async (machine) => {
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    try {
+      await act(async () => {
+        render(<RemoteTerminal sessionId="s-ack" token="token" isAccountSession={machine} daemonEpoch="101" createWebSocket={fakeCreateWebSocket} />);
+      });
+      const socket = createdSockets[0];
+      await act(async () => {
+        socket.onmessage?.({ data: JSON.stringify(machine
+          ? { type: "attached", generation: "9", target: { sessionId: "s-ack", daemonEpoch: "101" } }
+          : { type: "grid", rows: 20, cols: 80, cursor: hiddenCursor, lines: [] }) });
+      });
+      const acknowledgement = JSON.stringify({ type: "acknowledgeAgentOutcome", ...(machine ? { generation: "9" } : {}) });
+      expect(socket.send).toHaveBeenCalledWith(acknowledgement);
+      socket.send.mockClear();
+      visibility = "hidden";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      const outcome = (value: string) => ({
+        data: JSON.stringify({ type: "agent_state", state: "idle", stateSource: "protocol", outcome: value,
+          target: { sessionId: "s-ack", daemonEpoch: "101" } }),
+      });
+      await act(async () => {
+        socket.onmessage?.(outcome("done"));
+        socket.onmessage?.(outcome("error"));
+      });
+      expect(socket.send).not.toHaveBeenCalledWith(acknowledgement);
+      visibility = "visible";
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(socket.send.mock.calls.filter(([sent]) => sent === acknowledgement)).toHaveLength(1);
+      await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(socket.send.mock.calls.filter(([sent]) => sent === acknowledgement)).toHaveLength(1);
+    } finally {
+      Reflect.deleteProperty(document, "visibilityState");
+    }
+  });
+
   it("passes unrelated control frames through without throwing and ignores binary frames", async () => {
     const frames: string[] = [];
     render(
