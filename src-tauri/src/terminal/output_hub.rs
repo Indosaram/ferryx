@@ -942,14 +942,29 @@ impl TerminalOutputHub {
         self.update_program_status(session_id, |screen| screen.acknowledge_program_status())
     }
 
-    /// The session's foreground program exited: drops its transient program status and
-    /// publishes the summary afterwards. `None` when the session did not opt in, else that
+    /// The session's foreground program exited, as proven by evidence gathered while `through`
+    /// was its newest published revision: drops the transient program status applied by then
+    /// and publishes the summary afterwards. `None` when the session did not opt in, else that
     /// summary.
     pub fn program_exited(
         &self,
         session_id: &str,
+        through: u64,
     ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
-        self.update_program_status(session_id, |screen| screen.program_status_exited())
+        self.update_program_status(session_id, |screen| screen.program_status_exited(through))
+    }
+
+    /// The revision of the session's newest program status update, 0 before any or when the
+    /// session has no mirror. Read before a process listing is requested, it bounds the records
+    /// that listing's evidence covers.
+    pub fn program_status_revision(&self, session_id: &str) -> u64 {
+        let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
+            return 0;
+        };
+        let hub = session_hub.read();
+        hub.screen
+            .as_ref()
+            .map_or(0, |screen| screen.lock().program_status_revision())
     }
 
     /// Runs a record update under the screen lock and, when the summary changed, publishes the
