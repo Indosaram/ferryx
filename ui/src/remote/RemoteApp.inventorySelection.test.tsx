@@ -566,7 +566,7 @@ describe("RemoteApp machine inventory selection", () => {
     expect(screen.queryByTestId(expectedState === "working" ? "send-button" : "stop-button")).toBeNull();
     expect(harness.sessionsQueryCount()).toBe(queries);
     const acknowledgement = `/api/v1/reference-chat/${SID_SECOND}/acknowledge-outcome?ownerId=r25-owner&epoch=${EPOCH}&backendSessionId=${SID_SECOND}&registryId=`;
-    expect(harness.postPaths()).toEqual([...posts, acknowledgement]);
+    expect(harness.postPaths()).toEqual([...posts, acknowledgement, acknowledgement]);
     expect(reads.some((path) => path.includes("/prompt"))).toBe(true);
   });
 

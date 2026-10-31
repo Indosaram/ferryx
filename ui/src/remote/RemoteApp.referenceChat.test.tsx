@@ -1354,6 +1354,41 @@ describe("reference chat lane review fixes", () => {
     vi.unstubAllGlobals();
   });
 
+  it("acknowledges the current chat again after a pushed screen refresh without reopening it", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const firstRead = deferred<void>();
+    let nextAcknowledgement: ReturnType<typeof deferred<HarnessCall>> | null = null;
+    let promptRead = false;
+    installLane((call) => {
+      if (call.url.includes("/prompt")) {
+        promptRead = true;
+        return jsonResponse({ prompt: null, screenRevision: "ready", cols: 80, rows: 24 });
+      }
+      if (call.url.includes("/acknowledge-outcome") && call.method === "POST") {
+        if (promptRead) firstRead.resolve();
+        nextAcknowledgement?.resolve(call);
+        return new Response(null, { status: 204 });
+      }
+      return undefined;
+    });
+    await act(async () => { render(<RemoteApp />); });
+    await firstRead.promise;
+    nextAcknowledgement = deferred<HarnessCall>();
+    const eventSockets = StubWebSocket.instances.filter((socket) => socket.url.includes("/events"));
+    expect(eventSockets.length).toBeGreaterThan(0);
+    await act(async () => {
+      for (const socket of eventSockets) {
+        socket.onmessage?.({ data: JSON.stringify({ type: "agentPromptChanged", sessionId: SESSION_ID,
+          promptId: null, screenRevision: "completed" }) } as MessageEvent);
+      }
+    });
+    const acknowledged = await nextAcknowledgement.promise;
+    const url = new URL(acknowledged.url, "http://harness.invalid");
+    expect(url.pathname).toBe(`/api/v1/reference-chat/${SESSION_ID}/acknowledge-outcome`);
+    expect(url.searchParams.get("epoch")).toBe(DAEMON_EPOCH);
+    expect(url.searchParams.get("ownerId")).toBe(REFERENCE_OWNER_ID);
+  });
+
   it("ui-prompt-push-1: a pushed agentPromptChanged with no prompt closes the card without waiting for the poll", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     let current: Record<string, unknown> = promptBody("A", false);
