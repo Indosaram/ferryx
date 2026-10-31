@@ -43,5 +43,30 @@ cargo test --lib 2>&1 | tee "$logs/full-lib.log"
 e=$?
 echo "FULL_LIB_EXIT $e"
 if [ "$e" -ne 0 ]; then status=1; fi
+# Preserve baseline evidence for the unresolved renderer and PTY assertions on the
+# same runner. A passing isolated rerun is not proof of a full-suite flake.
+if [ "$e" -ne 0 ]; then
+  baseline="$(dirname "$1")/ferryx-wt/rex-baseline-20261031"
+  git -C "$1" worktree add --detach "$baseline" a3beca3f
+  baseline_setup=$?
+  if [ "$baseline_setup" -eq 0 ]; then
+    git -C "$baseline" submodule update --init --recursive &&
+      bun install --cwd "$baseline/ui" --frozen-lockfile &&
+      bun run --cwd "$baseline/ui" build
+    baseline_setup=$?
+    echo "BASELINE_SETUP_EXIT $baseline_setup"
+    if [ "$baseline_setup" -eq 0 ]; then
+      for f in native_terminal::renderer::font_manager native_terminal::renderer::linux_cluster_raster a_wedged_pty_does_not_block_the_async_runtime_thread; do
+        CARGO_TARGET_DIR="$1/src-tauri/target" cargo test --manifest-path "$baseline/src-tauri/Cargo.toml" --lib "$f" 2>&1 | tee "$logs/baseline-${f//::/-}.log"
+        echo "BASELINE_TEST_EXIT $f $?"
+      done
+    fi
+    git -C "$1" worktree remove --force "$baseline"
+    git -C "$1" worktree prune
+    git -C "$1" worktree list
+  else
+    echo "BASELINE_WORKTREE_EXIT $baseline_setup"
+  fi
+fi
 echo GATE-DONE
 exit "$status"
