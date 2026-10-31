@@ -808,11 +808,12 @@ async fn outcome_acknowledgement_clears_only_the_authenticated_current_target() 
         &reference_files::reference_host_id(),
         &[],
     );
-    for foreign in [foreign_host, foreign_owner, foreign_session] {
+    // A foreign owner is refused as a foreign incarnation (410), like every other route.
+    for (foreign, expected) in [(foreign_host, 403), (foreign_owner, 410), (foreign_session, 403)] {
         let (status, body) = fixture.server
             .request("POST", &format!("{path}?{foreign}"), Some(&fixture.control), None)
             .await;
-        assert_eq!(status, 403, "{body}");
+        assert_eq!(status, expected, "{body}");
         assert_eq!(states.current(&fixture.session_id).unwrap().outcome, Some(AgentOutcome::Done));
     }
     let (status, body) = fixture.server.request("POST", &format!("{path}?{query}"), Some(&fixture.control), None).await;
