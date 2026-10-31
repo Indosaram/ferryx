@@ -616,6 +616,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::ResetAgentState { .. }
+            | DaemonRequest::AcknowledgeAgentOutcome { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
@@ -669,6 +670,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::DescribeSession { .. } => "describeSession",
         DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
         DaemonRequest::ResetAgentState { .. } => "resetAgentState",
+        DaemonRequest::AcknowledgeAgentOutcome { .. } => "acknowledgeAgentOutcome",
         DaemonRequest::Attach { .. } => "attach",
         DaemonRequest::SaveSession { .. } => "saveSession",
         DaemonRequest::LoadSession => "loadSession",
@@ -3932,6 +3934,22 @@ impl DaemonClient {
             DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
             _ => Err(IpcError::internal(
                 "Unexpected daemon reset agent state response",
+            )),
+        }
+    }
+
+    /// Drops the session's OSC 7501 `done`/`error` outcome once the user has seen it.
+    pub async fn acknowledge_agent_outcome(&self, session_id: &str) -> Result<(), IpcError> {
+        match self
+            .send_request(DaemonRequest::AcknowledgeAgentOutcome {
+                session_id: session_id.to_string(),
+            })
+            .await?
+        {
+            DaemonResponse::AcknowledgeAgentOutcomeOk => Ok(()),
+            DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
+            _ => Err(IpcError::internal(
+                "Unexpected daemon acknowledge agent outcome response",
             )),
         }
     }

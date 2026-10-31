@@ -875,6 +875,9 @@ pub struct TerminalOutputHub {
     exits: Arc<parking_lot::Mutex<HashMap<String, ExitStatusSlot>>>,
     capacity: usize,
     retention: retained_history::RetentionBudget,
+    /// Receives program status summary changes; installed by the daemon at startup.
+    program_status_publisher:
+        Arc<RwLock<Option<Arc<dyn super::program_status_ingest::ProgramStatusPublisher>>>>,
 }
 
 impl Default for TerminalOutputHub {
@@ -903,7 +906,55 @@ impl TerminalOutputHub {
             exits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             capacity,
             retention,
+            program_status_publisher: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Installs where program status summary changes of opted-in sessions are published.
+    pub(crate) fn set_program_status_publisher(
+        &self,
+        publisher: Arc<dyn super::program_status_ingest::ProgramStatusPublisher>,
+    ) {
+        *self.program_status_publisher.write() = Some(publisher);
+    }
+
+    /// Makes the session's screen mirror its OSC 7501 consumer and support query replier. Only
+    /// for sessions this daemon answers for: local PTYs and SSH bridge sessions, never a paired
+    /// proxy. Returns false when the session or its mirror is missing or the parser refused.
+    pub fn enable_program_status(&self, session_id: &str) -> bool {
+        let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
+            return false;
+        };
+        let hub = session_hub.read();
+        let Some(screen) = hub.screen.as_ref() else {
+            return false;
+        };
+        let enabled = screen.lock().enable_program_status();
+        enabled
+    }
+
+    /// The session was seen: drops its `done`/`error` program status. `None` when the session
+    /// did not opt in, else its summary afterwards for the caller to publish.
+    pub fn acknowledge_program_outcome(
+        &self,
+        session_id: &str,
+    ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let hub = session_hub.read();
+        let summary = hub.screen.as_ref()?.lock().acknowledge_program_status();
+        summary
+    }
+
+    /// The session's foreground program exited: drops its transient program status. `None`
+    /// when the session did not opt in, else its summary afterwards for the caller to publish.
+    pub fn program_exited(
+        &self,
+        session_id: &str,
+    ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let hub = session_hub.read();
+        let summary = hub.screen.as_ref()?.lock().program_status_exited();
+        summary
     }
 
     /// Records how a session's process ended. `None` is an unknown status, not a success.
@@ -1012,7 +1063,7 @@ impl TerminalOutputHub {
             }
         }
         if let Some(screen) = hub.screen.as_ref() {
-            screen.lock().feed(GAP_SEAM);
+            screen.lock().feed_replay(GAP_SEAM);
         }
         hub.replay_gap = Some(gap.clone());
         hub.history_incomplete = true;
@@ -1028,12 +1079,28 @@ impl TerminalOutputHub {
         Some(boundary)
     }
 
+    /// Publishes a chunk for a caller that does not write the session's input. Any OSC 7501 query
+    /// reply the chunk produced is dropped; output pumps of sessions that opted into program
+    /// status use [`Self::publish_with_replies`].
     pub fn publish_with_read_timestamp(
         &self,
         session_id: &str,
         chunk_bytes: Vec<u8>,
         metrics_read_unix_micros: Option<u64>,
     ) -> Option<OutputChunk> {
+        self.publish_with_replies(session_id, chunk_bytes, metrics_read_unix_micros)
+            .map(|(chunk, _replies)| chunk)
+    }
+
+    /// Publishes a chunk and returns the OSC 7501 support query replies it produced, for the
+    /// caller to write to the session's input. Returned after every hub and screen lock is
+    /// released; a program status summary change is published the same way.
+    pub fn publish_with_replies(
+        &self,
+        session_id: &str,
+        chunk_bytes: Vec<u8>,
+        metrics_read_unix_micros: Option<u64>,
+    ) -> Option<(OutputChunk, Vec<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -1043,9 +1110,11 @@ impl TerminalOutputHub {
         let chunk = hub
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
-        if let Some(screen) = hub.screen.as_ref() {
-            screen.lock().feed(&chunk.bytes);
-        }
+        let ingest = hub.screen.as_ref().map(|screen| {
+            let mut screen = screen.lock();
+            screen.feed(&chunk.bytes);
+            screen.take_program_status()
+        });
         hub.replay_gap = None;
         if hub.history_incomplete && resets_whole_screen(&chunk.bytes) {
             hub.history_incomplete = false;
@@ -1066,6 +1135,13 @@ impl TerminalOutputHub {
             let _ = hub.raw_sender.send(chunk.bytes.to_vec());
         }
         drop(hub);
+        let ingest = ingest.unwrap_or_default();
+        if let Some(summary) = ingest.summary {
+            let publisher = self.program_status_publisher.read().clone();
+            if let Some(publisher) = publisher {
+                publisher.publish(session_id, summary.as_ref());
+            }
+        }
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::terminal::qa_liveness::observe_published_output(
             session_id,
@@ -1073,7 +1149,7 @@ impl TerminalOutputHub {
             Arc::clone(&chunk.bytes),
         );
 
-        Some(chunk)
+        Some((chunk, ingest.replies))
     }
 
     pub fn record_initial_size(&self, session_id: &str, cols: u16, rows: u16) {
@@ -1380,7 +1456,7 @@ impl TerminalOutputHub {
                     .map(|point| (point.cols, point.rows))
                     .unwrap_or((80, 24));
                 super::screen_mirror::ScreenMirror::new(cols, rows).map(|mut mirror| {
-                    mirror.feed(&buffer.retained.replay());
+                    mirror.feed_replay(&buffer.retained.replay());
                     mirror
                 })
             }
