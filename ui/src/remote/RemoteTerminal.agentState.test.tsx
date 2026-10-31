@@ -73,8 +73,27 @@ describe("remote terminal agent state bridge", () => {
     vi.restoreAllMocks();
   });
 
+  it("acknowledges a legacy outcome once after presentation is ready, not merely socket open", async () => {
+    await act(async () => {
+      render(<RemoteTerminal sessionId="s-ack" token="token" createWebSocket={fakeCreateWebSocket} />);
+    });
+    const socket = createdSockets[0];
+    expect(socket).toBeDefined();
+    await act(async () => { socket.onopen?.(new Event("open")); });
+    expect(socket.send).not.toHaveBeenCalled();
+    await act(async () => { socket.onmessage?.({ data: gridFrame(20, 80) }); });
+    const acknowledgement = JSON.stringify({ type: "acknowledgeAgentOutcome" });
+    expect(socket.send.mock.calls).toEqual([[acknowledgement]]);
+    await act(async () => {
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.({ data: gridFrame(20, 80) });
+    });
+    expect(socket.send.mock.calls).toEqual([[acknowledgement]]);
+  });
+
   it("acknowledges only after an attached frame matches the requested session and epoch", async () => {
-    const connected = Promise.withResolvers<MockWebSocket>();
+    let resolveConnected!: (socket: MockWebSocket) => void;
+    const connected = new Promise<MockWebSocket>((resolve) => { resolveConnected = resolve; });
     await act(async () => {
       render(<RemoteTerminal
         sessionId="s-ack"
@@ -83,12 +102,12 @@ describe("remote terminal agent state bridge", () => {
         daemonEpoch="101"
         createWebSocket={(path) => {
           const socket = new MockWebSocket(path);
-          connected.resolve(socket);
+          resolveConnected(socket);
           return socket;
         }}
       />);
     });
-    const socket = await connected.promise;
+    const socket = await connected;
     const frame = (sessionId: string, daemonEpoch: string) => ({
       data: JSON.stringify({ type: "attached", generation: "9", target: { sessionId, daemonEpoch } }),
     });
