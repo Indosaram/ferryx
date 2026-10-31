@@ -34,7 +34,7 @@ jobs:
         run: |
           mkdir -p out
           cp .github/rex-flake.sh /tmp/rex-flake.sh
-          if [ "${{ matrix.rev }}" = base ]; then git checkout -q fa2601d0 && git submodule update --init --recursive -q; fi
+          if [ "${{ matrix.rev }}" = base ]; then git checkout -q a3beca3f && git submodule update --init --recursive -q; fi
           git log --oneline -1 | tee out/rev.txt
           bash /tmp/rex-flake.sh "$PWD" "${{ matrix.rev }}" 2>&1 | tee out/gate.log
       - if: always()
