@@ -1354,7 +1354,7 @@ export function NativeTerminalPane({
   // mark is cleared by the store marking the completion seen on the same focus.
   const activityOutcome = activity?.outcome;
   useEffect(() => {
-    if (!active || !visible || !targetSessionId || !activityOutcome || !isTauri()) return;
+    if (!active || !visible || !targetSessionId || !isTauri()) return;
     acknowledgeAgentOutcome(targetSessionId).catch((error: unknown) => {
       console.warn("Could not acknowledge the agent outcome", { sessionId: targetSessionId, error });
     });
