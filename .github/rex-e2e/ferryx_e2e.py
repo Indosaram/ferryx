@@ -555,7 +555,10 @@ def claude_ready(log):
 def claude_turn(log, d, sid, settings, run, want):
     """One Claude turn under the user's real HOME (credentials stay where they are)."""
     stream = Stream(d.socket, sid)
-    extra = f" --settings {settings}" if settings else ""
+    # The turn must stop at a permission prompt (state blocked/permission). Claude Code 2.1.316
+    # starts new sessions in "auto mode", which approves the write without asking, so pin the
+    # mode that asks.
+    extra = " --permission-mode manual" + (f" --settings {settings}" if settings else "")
     prompt = "Create a file named x.txt in the current directory containing exactly: hi"
     trusted = {"step": 0}
 
