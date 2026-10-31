@@ -5,7 +5,11 @@
 //! answers there). Reports land in the mirror's [`ProgramStatusRecords`]; the support query reply
 //! is captured by the mirror and handed back to the output pump, which writes it to the session's
 //! input outside every hub lock. Summary changes go to the agent state hub through
-//! [`ProgramStatusPublisher`], also after the locks are released.
+//! [`ProgramStatusPublisher`], also after the locks are released. Because of that, two changes can
+//! reach the publisher in either order; each carries a [`ProgramStatusChange::revision`] taken
+//! under the mirror's lock so the publisher keeps only the newest.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::native_terminal::{
     ProgramStatusEvent, ProgramStatusKind, ProgramStatusReport as NativeReport, ProgramStatusState,
@@ -19,19 +23,38 @@ use crate::terminal::program_status::{
 pub struct ProgramStatusIngest {
     /// OSC 7501 support query replies to write to the session's input, oldest first.
     pub replies: Vec<Vec<u8>>,
-    /// `Some` when the session's summary changed; the inner `None` means no record is left.
-    pub summary: Option<Option<ProgramStatusSummary>>,
+    /// `Some` when the session's summary changed.
+    pub summary: Option<ProgramStatusChange>,
+}
+
+/// One change of a session's program status summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramStatusChange {
+    /// Increases with every change of every mirror in this process, so a later change of a
+    /// session (even from a mirror that replaced the first one) always carries a larger value.
+    pub revision: u64,
+    /// `None` means no record is left.
+    pub summary: Option<ProgramStatusSummary>,
+}
+
+/// Source of [`ProgramStatusChange::revision`]. Taken while the mirror's lock is held, so the
+/// order of one session's revisions is the order its changes happened in.
+static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_revision() -> u64 {
+    NEXT_REVISION.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Receives a session's program status summary whenever it changes. Installed once at daemon
-/// startup; called without any output hub or screen lock held.
+/// startup; called without any output hub or screen lock held, so calls for one session may
+/// arrive out of order: the implementation must drop a change older than one it already applied.
 pub(crate) trait ProgramStatusPublisher: Send + Sync {
-    fn publish(&self, session_id: &str, summary: Option<&ProgramStatusSummary>);
+    fn publish(&self, session_id: &str, change: &ProgramStatusChange);
 }
 
 impl ProgramStatusPublisher for crate::daemon::agent_state::AgentStateHub {
-    fn publish(&self, session_id: &str, summary: Option<&ProgramStatusSummary>) {
-        self.publish_protocol(session_id, summary);
+    fn publish(&self, session_id: &str, change: &ProgramStatusChange) {
+        self.publish_protocol(session_id, change.revision, change.summary.as_ref());
     }
 }
 
@@ -86,7 +109,7 @@ mod tests {
     use crate::terminal::program_status::ProgramState;
     use crate::terminal::screen_mirror::{ScreenMirror, ScreenSeed};
 
-    use super::ProgramStatusPublisher;
+    use super::{ProgramStatusChange, ProgramStatusPublisher};
 
     const QUERY: &[u8] = b"\x1b]7501;?\x1b\\";
     const QUERY_REPLY: &[u8] = b"\x1b]7501;?:states=idle,working,done,blocked,error\
@@ -148,7 +171,11 @@ mod tests {
 
         // The replay left the mirror live: the next real report is ingested.
         mirror.feed(WORKING_REPORT);
-        let summary = mirror.take_program_status().summary.flatten().expect("live report");
+        let summary = mirror
+            .take_program_status()
+            .summary
+            .and_then(|change| change.summary)
+            .expect("live report");
         assert_eq!(summary.state, ProgramState::Working);
     }
 
@@ -169,7 +196,9 @@ mod tests {
         replies(&hub, PROMPT_START);
         let state = states.current("s").expect("published");
         assert_eq!(state.state, "idle");
-        assert_eq!(state.origin, AgentStateOrigin::Protocol);
+        // No record is left: the program claims nothing, so screen inference is re-armed.
+        assert_eq!(state.origin, AgentStateOrigin::ProcessObserved);
+        assert!(!state.origin.claims_activity());
     }
 
     /// A paired proxy hub (and any session that did not opt in) never answers the query.
@@ -203,10 +232,8 @@ mod tests {
         let done = states.current("s").expect("published");
         assert_eq!((done.state.as_str(), done.outcome), ("idle", Some(AgentOutcome::Done)));
 
-        // What the daemon's acknowledgeAgentOutcome handler does.
-        let summary = hub.acknowledge_program_outcome("s").expect("opted in");
-        assert_eq!(summary, None);
-        states.publish_protocol("s", summary.as_ref());
+        // What the daemon's acknowledgeAgentOutcome handler does; the hub publishes itself.
+        assert_eq!(hub.acknowledge_program_outcome("s").expect("opted in"), None);
         assert_eq!(states.current("s").expect("published").outcome, None);
     }
 
@@ -214,11 +241,72 @@ mod tests {
     fn program_status_release_prunes_working() {
         let (hub, states) = answering_hub();
         replies(&hub, WORKING_REPORT);
-        // What the foreground release edge does.
-        let summary = hub.program_exited("s").expect("opted in");
-        assert_eq!(summary, None);
-        states.publish_protocol("s", summary.as_ref());
-        assert_eq!(states.current("s").expect("published").state, "idle");
+        // What the foreground release edge does; the hub publishes itself.
+        assert_eq!(hub.program_exited("s").expect("opted in"), None);
+        let state = states.current("s").expect("published");
+        assert_eq!(state.state, "idle");
+        assert!(!state.origin.claims_activity());
+    }
+
+    /// Finding 3: two summary changes are numbered under the mirror's lock but published after
+    /// it is released, so they can reach the publisher reversed. The older one must not win:
+    /// the mirror deduplicates against its newest summary and would never re-report it.
+    #[test]
+    fn program_status_changes_published_out_of_order_keep_the_newest() {
+        let mut mirror = ScreenMirror::new(80, 24).unwrap();
+        assert!(mirror.enable_program_status());
+        mirror.feed(WORKING_REPORT);
+        let working = mirror.take_program_status().summary.expect("working change");
+        mirror.feed(PROMPT_START);
+        let cleared = mirror.take_program_status().summary.expect("cleared change");
+        assert!(cleared.revision > working.revision);
+        assert_eq!(cleared.summary, None);
+
+        let states = AgentStateHub::default();
+        // The pump that took `working` is preempted; the one that took `cleared` publishes first.
+        states.publish("s", &cleared);
+        assert!(states.current("s").is_none(), "nothing the protocol installed to release");
+        // The stale working change arriving last is dropped instead of pinning `working`.
+        states.publish("s", &working);
+        assert!(states.current("s").is_none());
+
+        // In order, the same two changes report working, then release it.
+        let ordered = AgentStateHub::default();
+        ordered.publish("s", &working);
+        assert_eq!(ordered.current("s").expect("working").state, "working");
+        ordered.publish("s", &cleared);
+        let released = ordered.current("s").expect("released");
+        assert_eq!(released.state, "idle");
+        assert!(!released.origin.claims_activity());
+    }
+
+    /// Acknowledge and exit go through the hub's publisher with a revision taken under the
+    /// mirror lock, the same path as live feeds, so they are ordered with them.
+    #[test]
+    fn program_status_lifecycle_updates_are_revisioned_through_the_publisher() {
+        #[derive(Default)]
+        struct Recorder(parking_lot::Mutex<Vec<ProgramStatusChange>>);
+        impl ProgramStatusPublisher for Recorder {
+            fn publish(&self, _session_id: &str, change: &ProgramStatusChange) {
+                self.0.lock().push(change.clone());
+            }
+        }
+        let hub = TerminalOutputHub::new(64 * 1024);
+        let recorder = Arc::new(Recorder::default());
+        let publisher: Arc<dyn ProgramStatusPublisher> = recorder.clone();
+        hub.set_program_status_publisher(publisher);
+        hub.register_session("s");
+        assert!(hub.enable_program_status("s"));
+        replies(&hub, DONE_REPORT);
+        assert!(hub.program_exited("s").expect("opted in").is_some(), "done survives exit");
+        assert_eq!(hub.acknowledge_program_outcome("s").expect("opted in"), None);
+        assert_eq!(hub.acknowledge_program_outcome("s").expect("opted in"), None);
+        let changes = recorder.0.lock().clone();
+        // The exit and the second acknowledgement changed nothing and publish nothing.
+        assert_eq!(changes.len(), 2);
+        assert!(changes[0].revision < changes[1].revision);
+        assert_eq!(changes[0].summary.as_ref().map(|s| s.state), Some(ProgramState::Done));
+        assert_eq!(changes[1].summary, None);
     }
 
     #[test]
