@@ -3297,30 +3297,35 @@ export const RemoteHostConnection: React.FC<{
     if (activeTunnelMachineId && effectiveSessionId) acknowledgeOutcome(activeTunnelMachineId, effectiveSessionId);
   }, [acknowledgeOutcome, activeTunnelMachineId, effectiveSessionId]);
 
-  useEffect(() => {
-    const target = chatTargetRef.current;
-    if (viewMode !== "chat" || !target || !token) return;
-    const controller = new AbortController();
+  const acknowledgeChatOutcome = useCallback(async (target: ReferenceTargetRef, signal: AbortSignal) => {
+    if (!token || signal.aborted) return;
     const sessionId = target.target.backendSessionId;
     const query = referenceChatReadQuery(target, "");
     const path = `/api/v1/reference-chat/${encodeURIComponent(sessionId)}/acknowledge-outcome?${query}`;
     const init = {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
+      signal,
     };
     const request = activeTunnelConnection
       ? activeTunnelConnection.transport.fetchLike(path, init)
       : remoteFetch(transportBaseUrl, path, init);
-    void request.then((response) => {
+    await request.then((response) => {
       if (response.status < 200 || response.status >= 300) {
         throw new Error(`Outcome acknowledgement failed: ${response.status}`);
       }
     }).catch((error: unknown) => {
-      if (!controller.signal.aborted) console.warn("Could not acknowledge the agent outcome", { sessionId, error });
+      if (!signal.aborted) console.warn("Could not acknowledge the agent outcome", { sessionId, error });
     });
+  }, [activeTunnelConnection, token, transportBaseUrl]);
+
+  useEffect(() => {
+    const target = chatTargetRef.current;
+    if (viewMode !== "chat" || !target) return;
+    const controller = new AbortController();
+    void acknowledgeChatOutcome(target, controller.signal);
     return () => controller.abort();
-  }, [activeTunnelConnection, chatTargetKey, token, transportBaseUrl, viewMode]);
+  }, [acknowledgeChatOutcome, chatTargetKey, viewMode]);
 
   useEffect(() => {
     // The identity belongs to the host that answered it: a new token or transport has none yet.
@@ -3800,7 +3805,7 @@ export const RemoteHostConnection: React.FC<{
           return;
         }
         const body: unknown = await response.json();
-        if (pushedDuringRead) return;
+        if (cancelled || pushedDuringRead) return;
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
         const revision = prompt === null ? null : parseChatScreenRevision(body);
@@ -3823,6 +3828,9 @@ export const RemoteHostConnection: React.FC<{
           const next = prev.filter((warning) => warning !== CHAT_HELD_WARNING);
           return next.length === prev.length ? prev : next;
         });
+        // This existing read is the visible chat's observation of the live pane. A new
+        // outcome may arrive without a prompt-change push or a view transition.
+        await acknowledgeChatOutcome(target, controller.signal);
       } catch {
         /* a transient prompt read keeps the card the user is looking at */
       } finally {
@@ -3857,7 +3865,7 @@ export const RemoteHostConnection: React.FC<{
       clearInterval(timer);
       chatPromptPushRef.current = null;
     };
-  }, [chatAgentIsNative, chatAgentType, chatPromptRefresh, chatTargetKey, effectiveSessionId, token, transportBaseUrl, viewMode]);
+  }, [acknowledgeChatOutcome, chatAgentIsNative, chatAgentType, chatPromptRefresh, chatTargetKey, effectiveSessionId, token, transportBaseUrl, viewMode]);
 
   /** One older page, on an explicit request only: nothing fetches backwards on its own. */
   const loadChatOlderPage = useCallback(async () => {
