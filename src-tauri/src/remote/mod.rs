@@ -74,6 +74,11 @@ mod filesystem_tests;
 #[cfg(test)]
 mod workspace_api_tests;
 
+// Calls the real /api/v1/workspace/state, so it runs on every target.
+#[cfg(test)]
+#[path = "session_attention_privacy_tests.rs"]
+mod session_attention_privacy_tests;
+
 #[cfg(all(test, unix))]
 #[path = "dag_paired_tests.rs"]
 mod dag_paired_tests;
@@ -103,3 +108,25 @@ mod browser_security_tests;
 
 #[cfg(test)]
 mod browser_lifecycle_tests;
+
+/// A test WebSocket handshake callback that only inspects the request and accepts it.
+#[cfg(test)]
+pub(crate) struct InspectHandshake<F>(pub F);
+
+#[cfg(test)]
+impl<F> tokio_tungstenite::tungstenite::handshake::server::Callback for InspectHandshake<F>
+where
+    F: FnOnce(&tokio_tungstenite::tungstenite::handshake::server::Request),
+{
+    fn on_request(
+        self,
+        request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> Result<
+        tokio_tungstenite::tungstenite::handshake::server::Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
+        (self.0)(request);
+        Ok(response)
+    }
+}

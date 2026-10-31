@@ -288,34 +288,6 @@ async fn ensure_daemon_proxies_file_read(daemon: &DaemonClient) -> Result<(), Ip
     .with_details(serde_json::json!({ "reason": "daemonNeedsRestart" })))
 }
 
-fn write_cache_file(target: PathBuf, bytes: Vec<u8>) -> Result<(), IpcError> {
-    let io = |message: String| IpcError::new(IpcErrorCode::IoError, message);
-    let parent = target
-        .parent()
-        .ok_or_else(|| io("Missing parent directory for cache file".into()))?;
-    std::fs::create_dir_all(parent).map_err(|e| io(format!("Failed to create cache directory: {e}")))?;
-    let temp = target.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, &target)
-    })();
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&temp);
-        return Err(io(format!("Failed to write cached remote file: {error}")));
-    }
-    crate::ipc::remote_file::mark_downloaded(&target);
-    Ok(())
-}
 
 /// Fetches `path` from the paired host behind `workspace_id` into the remote-files cache.
 /// `session_id` must already be the HOST-side session id. Returns (local, remote, length).
@@ -373,10 +345,10 @@ pub async fn fetch_paired_file(
         crate::ipc::remote_file::REMOTE_FILE_MAX_BYTES,
     )
     .await?;
-    let local = crate::ipc::remote_file::remote_cache_path(cache_root, workspace_id, &remote_path);
+    let target = crate::ipc::remote_file::remote_cache_path(cache_root, workspace_id, &remote_path);
     let length = bytes.len() as u64;
-    let target = local.clone();
-    run_blocking(move || write_cache_file(target, bytes)).await?;
+    let local =
+        run_blocking(move || crate::ipc::remote_file::write_cache_file(&target, &bytes)).await?;
     Ok((local, remote_path, length))
 }
 

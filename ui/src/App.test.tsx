@@ -60,7 +60,7 @@ const native = {
   createWorktree: vi.fn(),
   getWorktreeStatus: vi.fn(),
   getInitialProject: vi.fn().mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" }),
-  listProjectBranches: vi.fn(),
+  listProjectRefs: vi.fn(),
   listWorktrees: vi.fn().mockResolvedValue([]),
   registerProject: vi.fn(),
   syncDesktopLocalProjects: vi.fn().mockResolvedValue(undefined),
@@ -200,6 +200,7 @@ vi.mock("./lib/tauri", () => ({
   discoverDagWatchRoots: vi.fn(() => Promise.resolve([])),
   getTerminalPreferences: () => Promise.resolve({}),
   getAccountEnrollmentStatus: vi.fn(async () => ({ enrolled: false, accountOrigin: null, enrolledAt: null })),
+  listRemoteDevices: vi.fn(async () => []),
   // cc88ddc2 adds account enrollment to the lazily loaded welcome wizard.
   enrollThisMachine: vi.fn(async () => ({ enrolled: true, accountOrigin: "https://account.test", enrolledAt: 1 })),
   createWorktree: native.createWorktree,
@@ -213,7 +214,7 @@ vi.mock("./lib/tauri", () => ({
   getCliLauncherStatus: native.getCliLauncherStatus,
   getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" as const })),
   installCliLauncher: native.installCliLauncher,
-  listProjectBranches: native.listProjectBranches,
+  listProjectRefs: native.listProjectRefs,
   listWorktrees: native.listWorktrees,
   registerProject: native.registerProject,
   syncDesktopLocalProjects: native.syncDesktopLocalProjects,
@@ -307,6 +308,7 @@ vi.mock("./components/Sidebar", () => ({
     onDeleteWorktree,
     onToggle,
     onOpenSettings,
+    onOpenHistory,
     projects = [],
     worktrees = [],
     inactiveProjectWorktrees: _inactiveProjectWorktrees,
@@ -322,6 +324,7 @@ vi.mock("./components/Sidebar", () => ({
     onDeleteWorktree?: (worktree: { path: string }) => void;
     onToggle?: () => void;
     onOpenSettings?: () => void;
+    onOpenHistory?: (project: { workspaceId: string }) => void;
     projects?: Array<{ workspaceId: string; gitRoot?: string | null }>;
     worktrees?: Array<{ path: string }>;
     inactiveProjectWorktrees?: Record<string, Array<{ path: string }>>;
@@ -355,6 +358,9 @@ vi.mock("./components/Sidebar", () => ({
               ) : null}
               <button type="button" onClick={() => onRemoveProject?.(project)}>
                 Remove project {project.workspaceId}
+              </button>
+              <button type="button" onClick={() => onOpenHistory?.(project)}>
+                Agent history {project.workspaceId}
               </button>
               {project.workspaceId === activeProjectId
                 ? worktrees.map((worktree) => (
@@ -451,6 +457,24 @@ vi.mock("./components/WorktreeDeleteDialog", () => ({
   ),
 }));
 
+vi.mock("./components/AgentHistoryDialog", () => ({
+  AgentHistoryDialog: ({ onResume }: any) => (
+    <button
+      type="button"
+      onClick={() =>
+        void onResume({
+          entryKey: "claude:hist-1",
+          provider: "claude",
+          providerSession: { key: "session_id", id: "hist-1" },
+          cwd: "/repo/main",
+        })
+      }
+    >
+      Resume history entry
+    </button>
+  ),
+}));
+
 const toastMocks = vi.hoisted(() => ({ error: vi.fn() }));
 vi.mock("./components/ui/sonner", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./components/ui/sonner")>()),
@@ -516,7 +540,7 @@ describe("App project workspace flow", () => {
     native.getWorktreeStatus.mockReset();
     native.getInitialProject.mockReset();
     native.getInitialProject.mockResolvedValue({ workspaceId: "orca-lite", repoRoot: "/repo/orca-lite" });
-    native.listProjectBranches.mockReset();
+    native.listProjectRefs.mockReset();
     native.listWorktrees.mockReset();
     native.listWorktrees.mockResolvedValue([]);
     native.registerProject.mockReset();
@@ -1695,9 +1719,9 @@ describe("App project workspace flow", () => {
 
   it("opens a registered project's real branch-dropdown worktree flow", async () => {
     const registration = Promise.resolve({ workspaceId: "rorca", repoRoot: "/repos/rorca" });
-    const branches = Promise.resolve([{ name: "main", isCurrent: true }]);
+    const branches = Promise.resolve({ branches: [{ name: "main", isCurrent: true }], tags: [] });
     native.registerProject.mockReturnValue(registration);
-    native.listProjectBranches.mockReturnValue(branches);
+    native.listProjectRefs.mockReturnValue(branches);
 
     await act(async () => { render(<App />); });
 
@@ -1718,8 +1742,8 @@ describe("App project workspace flow", () => {
     });
 
     expect(screen.getByRole("form", { name: "Add Worktree" })).toBeInTheDocument();
-    expect(native.listProjectBranches).toHaveBeenCalledWith("rorca");
-    expect(screen.getByRole("combobox", { name: "Base branch" })).toBeInTheDocument();
+    expect(native.listProjectRefs).toHaveBeenCalledWith("rorca");
+    expect(screen.getByRole("combobox", { name: "Base ref" })).toBeInTheDocument();
   });
 
   it("opens worktree creation for the clicked non-active project", async () => {
@@ -1733,14 +1757,14 @@ describe("App project workspace flow", () => {
       workspaceId,
       repoRoot: `/repos/${workspaceId}`,
     }));
-    native.listProjectBranches.mockResolvedValue([{ name: "beta-main", isCurrent: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "beta-main", isCurrent: true }], tags: [] });
 
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Add worktree to beta" }));
 
     expect(await screen.findByRole("heading", { name: "Add Worktree · beta" })).toBeInTheDocument();
-    await waitFor(() => expect(native.listProjectBranches).toHaveBeenCalledWith("beta"));
+    await waitFor(() => expect(native.listProjectRefs).toHaveBeenCalledWith("beta"));
   });
 
   it("switches to the non-active project before opening its created worktree", async () => {
@@ -1755,7 +1779,7 @@ describe("App project workspace flow", () => {
       workspaceId,
       repoRoot: `/repos/${workspaceId}`,
     }));
-    native.listProjectBranches.mockResolvedValue([{ name: "beta-main", isCurrent: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "beta-main", isCurrent: true }], tags: [] });
     native.createWorktree.mockResolvedValue(betaWorktree);
     workspace.refreshWorktrees.mockImplementation(() => {
       if (!workspace.storeState.worktrees.some((worktree: { path: string }) => worktree.path === betaWorktree.path)) {
@@ -1785,6 +1809,186 @@ describe("App project workspace flow", () => {
         (worktree: { path: string }) => worktree.path !== betaWorktree.path,
       );
     }
+  });
+
+  it("starts the agent chosen for a worktree created in a non-active project after the switch", async () => {
+    const projects = [
+      { workspaceId: "alpha", repoRoot: "/repos/alpha" },
+      { workspaceId: "beta", repoRoot: "/repos/beta" },
+    ];
+    const betaWorktree = {
+      path: "/repos/beta/.orca-worktrees/beta/agent-beta",
+      head: "abc1234",
+      branch: "refs/heads/orca/beta/agent-beta",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+    }));
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "beta-main", isCurrent: true }], tags: [] });
+    native.createWorktree.mockResolvedValue(betaWorktree);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-beta-agent",
+      daemonEpoch: "epoch-beta",
+      session: { cwd: req.cwd, incarnation: "inc-beta" },
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to beta" }));
+    await screen.findByRole("heading", { name: "Add Worktree · beta" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Worktree slug" }), { target: { value: "agent-beta" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: "claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+
+    expect(await screen.findByText("Active project beta")).toBeInTheDocument();
+    await waitFor(() => expect(workspace.openTab).toHaveBeenCalledWith(betaWorktree, "Claude", expect.anything()));
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "beta",
+        worktree: { wsId: "beta", slug: "agent-beta" },
+        cwd: betaWorktree.path,
+        startup: { kind: "agentLaunch", command: "claude", args: [] },
+      }),
+    );
+    expect(workspace.openTab).toHaveBeenCalledWith(betaWorktree, "Claude", {
+      sessionId: "spawn-beta-agent",
+      daemonEpoch: "epoch-beta",
+      incarnation: "inc-beta",
+    });
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("creates try-ferryx from the setup wizard and starts the default agent through the Add Worktree path", async () => {
+    const projects = [{ workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" }];
+    const created = {
+      workspaceId: "alpha",
+      path: "/repos/alpha/.orca-worktrees/alpha/try-ferryx",
+      head: "abc1234",
+      branch: "refs/heads/orca/alpha/try-ferryx",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+      gitRoot: `/repos/${workspaceId}`,
+    }));
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.createWorktree.mockResolvedValue(created);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-try-agent",
+      daemonEpoch: "epoch-try",
+      session: { cwd: req.cwd, incarnation: "inc-try" },
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    act(() => {
+      window.dispatchEvent(new Event("ferryx:open-onboarding"));
+    });
+    await screen.findByRole("dialog", { name: "Welcome to Ferryx" }, { timeout: 8000 });
+    while (!screen.queryByTestId("onboarding-try-create")) {
+      fireEvent.click(screen.getByTestId("onboarding-next"));
+    }
+    expect(native.createWorktree).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("onboarding-try-create"));
+
+    await waitFor(() => expect(workspace.openTab).toHaveBeenCalledWith(created, "Claude", expect.anything()));
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "alpha",
+      worktree: { wsId: "alpha", slug: "try-ferryx" },
+      baseRef: "HEAD",
+    });
+    expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(created);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: created.path,
+        startup: { kind: "agentLaunch", command: "claude", args: [] },
+      }),
+    );
+    expect(workspace.openTab).toHaveBeenCalledWith(created, "Claude", {
+      sessionId: "spawn-try-agent",
+      daemonEpoch: "epoch-try",
+      incarnation: "inc-try",
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Welcome to Ferryx" })).toBeNull());
+  }, 15000);
+
+  it("starts the agent chosen in Add Worktree in the new worktree, not the active one", async () => {
+    const projects = [{ workspaceId: "alpha", repoRoot: "/repos/alpha" }];
+    const created = {
+      workspaceId: "alpha",
+      path: "/repos/alpha/.orca-worktrees/alpha/agent-wt",
+      head: "abc1234",
+      branch: "refs/heads/orca/alpha/agent-wt",
+      bare: false,
+      detached: false,
+      locked: null,
+      prunable: null,
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "alpha");
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockImplementation(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      repoRoot: `/repos/${workspaceId}`,
+    }));
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "main", isCurrent: true }], tags: ["v1.0"] });
+    native.createWorktree.mockResolvedValue(created);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-new-worktree-agent",
+      daemonEpoch: "epoch-wt",
+      session: { cwd: req.cwd, incarnation: "inc-wt" },
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Add worktree to alpha" }));
+    await screen.findByRole("heading", { name: "Add Worktree · alpha" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Base ref" })).toHaveValue("main"));
+    fireEvent.change(screen.getByRole("textbox", { name: "Worktree slug" }), { target: { value: "agent-wt" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Base ref" }), { target: { value: "v1.0" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: "claude" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+
+    await waitFor(() => expect(workspace.openTab).toHaveBeenCalledWith(created, "Claude", expect.anything()));
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "alpha",
+      worktree: { wsId: "alpha", slug: "agent-wt" },
+      baseRef: "v1.0",
+    });
+    expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(created);
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "alpha",
+        worktree: { wsId: "alpha", slug: "agent-wt" },
+        cwd: created.path,
+        startup: { kind: "agentLaunch", command: "claude", args: [] },
+      }),
+    );
+    expect(native.spawnTerminalDetailed).not.toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo/main" }));
+    expect(workspace.openTab).toHaveBeenCalledWith(created, "Claude", {
+      sessionId: "spawn-new-worktree-agent",
+      daemonEpoch: "epoch-wt",
+      incarnation: "inc-wt",
+    });
   });
 
   it("switches the active project when selecting a project row in the nested tree", async () => {
@@ -2916,13 +3120,17 @@ describe("App project workspace flow", () => {
     workspace.storeState.layout = prevLayout;
   });
 
-  it("detects agents on mount and launches agent via spawnTerminal and writeTerminal", async () => {
+  it("detects agents on mount and launches the agent as the spawned pane's startup command", async () => {
     native.isTauriRuntime.mockReturnValue(true);
     native.detectAgents.mockResolvedValue([
       { name: "claude", available: true },
       { name: "codex", available: false },
     ]);
-    native.spawnTerminal.mockResolvedValue("spawn-claude-session");
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-claude-session",
+      daemonEpoch: "epoch-claude",
+      session: { cwd: req.cwd, incarnation: "inc-claude" },
+    }));
 
     render(<App />);
 
@@ -2932,28 +3140,174 @@ describe("App project workspace flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
 
     await waitFor(() => {
-      expect(native.spawnTerminal).toHaveBeenCalledWith(
+      expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
         expect.objectContaining({
           workspaceId: "orca-lite",
           cwd: "/repo/main",
+          startup: { kind: "agentLaunch", command: "claude", args: [] },
         }),
       );
     });
 
+    // The tab must carry the daemon epoch and incarnation, or its native attach has no
+    // durable identity and the pane stays blank.
     await waitFor(() => {
       expect(workspace.openTab).toHaveBeenCalledWith(
         expect.objectContaining({ path: "/repo/main" }),
         "Claude",
-        "spawn-claude-session",
+        { sessionId: "spawn-claude-session", daemonEpoch: "epoch-claude", incarnation: "inc-claude" },
       );
     });
 
-    await waitFor(() => {
-      expect(native.writeTerminal).toHaveBeenCalledWith({
-        sessionId: "spawn-claude-session",
-        data: "claude\r",
-      });
+    // Typing the command raced shell startup on Windows; the agent must never be typed in.
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the spawned agent backend when its tab is discarded", async () => {
+    const { closeTerminal } = await import("./lib/tauri");
+    vi.mocked(closeTerminal).mockClear();
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-discarded-agent",
+      daemonEpoch: "epoch-discarded",
+      session: { cwd: req.cwd, incarnation: "inc-discarded" },
+    }));
+    workspace.openTab.mockResolvedValue(null);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() => expect(closeTerminal).toHaveBeenCalledWith("spawn-discarded-agent"));
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("keeps a quoted agent argument as one argv entry", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    saveAgentSettings({
+      version: 1,
+      defaultAgentId: null,
+      overrides: { claude: { args: `--append-system-prompt "a b" --name 'c d'` } },
+      custom: [],
     });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() =>
+      expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startup: {
+            kind: "agentLaunch",
+            command: "claude",
+            args: ["--append-system-prompt", "a b", "--name", "c d"],
+          },
+        }),
+      ),
+    );
+  });
+
+  it.each([
+    {
+      command: "C:\\Program Files\\X\\agent.exe",
+      args: `--name "c d"`,
+      argv: ["--name", "c d"],
+    },
+    { command: "/opt/my tools/claude", args: "", argv: [] },
+    {
+      command: "C:\\Users\\me\\bin\\claude.exe",
+      args: `--config C:\\Users\\me\\cfg.toml`,
+      argv: ["--config", "C:\\Users\\me\\cfg.toml"],
+    },
+  ])("launches $command verbatim as argv[0] and splits only its args", async ({ command, args, argv }) => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: command, available: true }]);
+    saveAgentSettings({ version: 1, defaultAgentId: null, overrides: {}, custom: [{ name: "mine", command, args }] });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch mine" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch mine" }));
+
+    await waitFor(() =>
+      expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+        expect.objectContaining({ startup: { kind: "agentLaunch", command, args: argv } }),
+      ),
+    );
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("types the agent into a plain shell only when the backend refuses the launch as UNSUPPORTED", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => {
+      if (req.startup) throw { code: "UNSUPPORTED", message: "older daemon", details: {} };
+      return { sessionId: "spawn-fallback", daemonEpoch: "epoch-fb", session: { cwd: req.cwd, incarnation: "inc-fb" } };
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() =>
+      expect(native.writeTerminal).toHaveBeenCalledWith({ sessionId: "spawn-fallback", data: "claude\r" }),
+    );
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(2);
+    expect(native.spawnTerminalDetailed.mock.calls[1][0]).not.toHaveProperty("startup");
+  });
+
+  it("does not fall back to typed input when the launch is refused with another code", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.spawnTerminalDetailed.mockImplementation(async () => {
+      // The message even names the startup kind; only the structured code may decide.
+      throw { code: "AGENT_RESUME_INVALID", message: "Malformed request: unknown variant `agentLaunch`", details: {} };
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch claude" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Launch claude" }));
+
+    await waitFor(() =>
+      expect(workspace.reportRuntimeError).toHaveBeenCalledWith(expect.objectContaining({ code: "AGENT_RESUME_INVALID" })),
+    );
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+    expect(workspace.openTab).not.toHaveBeenCalled();
+  });
+
+  it("resumes an agent history entry into a tab that carries the daemon epoch and incarnation", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-history-resume",
+      daemonEpoch: "epoch-history",
+      session: { cwd: req.cwd, incarnation: "inc-history" },
+    }));
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Agent history orca-lite" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Resume history entry" }));
+
+    await waitFor(() =>
+      expect(workspace.openTab).toHaveBeenCalledWith(
+        expect.objectContaining({ path: "/repo/main" }),
+        "Claude",
+        { sessionId: "spawn-history-resume", daemonEpoch: "epoch-history", incarnation: "inc-history" },
+      ),
+    );
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startup: expect.objectContaining({
+          kind: "agentResume",
+          agentType: "claude",
+          providerSession: { key: "session_id", id: "hist-1" },
+        }),
+      }),
+    );
   });
 
   it("surfaces the stored defaultAgentId first with a Default label in the New Tab agent list", async () => {
@@ -4046,6 +4400,9 @@ describe("App project workspace flow", () => {
           { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "feature", state: null },
           { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "bugfix", state: null },
           { workspaceId: "orca-lite", worktreeSlug: null, worktreeLabel: "docs", state: null },
+        ],
+        sessionAttention: [
+          { backendSessionId: "pty-1", workspaceId: "orca-lite", worktreeSlug: null, agentType: "claude", state: "waiting" },
         ],
         worktreeSlug: null,
         worktreeLabel: "main",

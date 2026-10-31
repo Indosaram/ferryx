@@ -4,15 +4,18 @@ mod machine_gateway;
 // Server side of the frozen control-v1 channel (todo 15).
 #[path = "control_server.rs"]
 mod control_server;
+#[cfg(any(unix, test))]
 use super::handover::HandoverManager;
 use super::session_service::*;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 use crate::daemon::protocol::AgentProviderSessionKey;
 use crate::daemon::protocol::{
     AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
-    DaemonResponse, DaemonSessionDetails, DaemonStreamMessage, HistorySegmentWire,
+    DaemonResponse, DaemonStreamMessage, HistorySegmentWire,
     DAEMON_PROTOCOL_VERSION,
 };
+#[cfg(any(unix, test))]
+use crate::daemon::protocol::DaemonSessionDetails;
 use crate::remote::auth::DevicePermission;
 use crate::remote::server::{start_remote_server, RemoteServerHandle};
 use crate::remote::state::{
@@ -45,6 +48,7 @@ use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
+#[cfg(any(unix, test))]
 async fn rollback_transferred_readers<R, A, D>(
     relinquish: R,
     abort: impl FnOnce() -> A,
@@ -73,6 +77,7 @@ where
 /// client-request ownership a transferred session keeps, and installing it is what makes this
 /// daemon an authoritative owner *before* it takes the PTY master. A record that disagrees with the
 /// predecessor's declaration, or is missing, refuses the session so the predecessor keeps it.
+#[cfg(any(unix, test))]
 fn adopt_transferred_ownership(
     metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
     session_id: &str,
@@ -108,6 +113,7 @@ fn adopt_transferred_ownership(
 /// retirement): the adopted sessions are relinquished first, then the predecessor is told to
 /// abort. The abort is what resumes the readers it paused for the export; without it the
 /// predecessor keeps serving every session with its output frozen.
+#[cfg(any(unix, test))]
 async fn release_after_unconfirmed_commit<R, A>(
     relinquish: R,
     abort: impl FnOnce() -> A,
@@ -129,6 +135,7 @@ where
 
 /// Drops the ownership records a successor installed for sessions it handed back to the
 /// predecessor: a relinquished session must not leave this daemon claiming its workspace.
+#[cfg(any(unix, test))]
 fn release_adopted_ownership(
     metadata: &RwLock<HashMap<String, StoredSessionMeta>>,
     session_ids: &[String],
@@ -136,6 +143,127 @@ fn release_adopted_ownership(
     let mut records = metadata.write();
     for session_id in session_ids {
         records.remove(session_id);
+    }
+}
+
+/// Whether `observation` shows another prompt occurrence (or none) than the last one seen for its
+/// session. Bounded by forgetting everything past [PROMPT_MOVED_SESSIONS] sessions: a forgotten
+/// session only costs one spare push.
+fn prompt_moved(
+    shown: &mut HashMap<String, Option<String>>,
+    observation: &crate::agent_control::events::AgentObservation,
+) -> bool {
+    if shown.get(&observation.session_id) == Some(&observation.prompt_id) {
+        return false;
+    }
+    if shown.len() >= PROMPT_MOVED_SESSIONS && !shown.contains_key(&observation.session_id) {
+        shown.clear();
+    }
+    shown.insert(observation.session_id.clone(), observation.prompt_id.clone());
+    true
+}
+
+const PROMPT_MOVED_SESSIONS: usize = 256;
+
+/// The desktop event for one `agentPromptChanged` frame. A frame that is not a JSON object is
+/// logged and skipped: relaying it as a null payload would tell no row anything.
+fn prompt_changed_event(frame: &str) -> Option<DaemonRemoteEvent> {
+    match serde_json::from_str::<serde_json::Value>(frame) {
+        Ok(payload) if payload.is_object() => Some(DaemonRemoteEvent {
+            event: crate::agent_control::events::AGENT_PROMPT_CHANGED_FRAME.to_string(),
+            payload,
+        }),
+        Ok(_) => {
+            tracing::warn!(frame, "agentPromptChanged frame is not an object; not relayed");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "agentPromptChanged frame is not JSON; not relayed");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_changed_event_tests {
+    use super::*;
+
+    #[test]
+    fn a_malformed_prompt_frame_is_not_relayed_as_null() {
+        assert!(prompt_changed_event("{not json").is_none());
+        assert!(prompt_changed_event("null").is_none());
+        assert!(prompt_changed_event("").is_none());
+    }
+
+    #[test]
+    fn a_filter_frame_is_relayed_with_its_session() {
+        let observation = crate::agent_control::events::AgentObservation {
+            sequence: 1,
+            session_id: "s-1".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: Some("p-1".into()),
+            kind: None,
+            screen_revision: Some("r-1".into()),
+        };
+        let frame = crate::agent_control::events::PromptChangeFilter::default()
+            .frame(&observation)
+            .expect("a first reading sends a frame");
+        let event = prompt_changed_event(&frame).expect("a filter frame is relayed");
+        assert_eq!(event.event, "agentPromptChanged");
+        assert_eq!(event.payload["sessionId"], "s-1");
+        assert_eq!(event.payload["promptId"], "p-1");
+    }
+
+    /// The daemon relays an agent-bus prompt change to its desktop subscribers.
+    #[tokio::test]
+    async fn a_published_prompt_change_reaches_the_desktop_event_stream() {
+        let server = DaemonServer::new();
+        let mut desktop = server.remote_event_tx.subscribe();
+        server.remote_state.agent_events.publish(crate::agent_control::events::ObservationDraft {
+            session_id: "relay-pane".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: Some("relay-prompt".into()),
+            kind: None,
+            screen_revision: Some("relay-rev".into()),
+            workspace_id: None,
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match desktop.recv().await {
+                    Ok(event) if event.event == "agentPromptChanged" => return event,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => panic!("the desktop stream closed"),
+                }
+            }
+        })
+        .await
+        .expect("agentPromptChanged reaches the desktop stream");
+        assert_eq!(event.payload["sessionId"], "relay-pane");
+        assert_eq!(event.payload["promptId"], "relay-prompt");
+    }
+
+    #[test]
+    fn a_repaint_under_the_same_prompt_is_not_a_prompt_change() {
+        let observation = |prompt: Option<&str>, revision: &str| crate::agent_control::events::AgentObservation {
+            sequence: 1,
+            session_id: "s".into(),
+            state: crate::agent_control::AgentControlState::Blocked,
+            state_source: crate::agent_control::AgentStateSource::Screen,
+            tier: crate::agent_control::AgentTier::Screen,
+            prompt_id: prompt.map(str::to_string),
+            kind: None,
+            screen_revision: Some(revision.into()),
+        };
+        let mut shown = HashMap::new();
+        assert!(prompt_moved(&mut shown, &observation(Some("p"), "r1")), "a first prompt is news");
+        assert!(!prompt_moved(&mut shown, &observation(Some("p"), "r2")), "a repaint is not");
+        assert!(prompt_moved(&mut shown, &observation(Some("p~1"), "r2")), "a new occurrence is");
+        assert!(prompt_moved(&mut shown, &observation(None, "r3")), "the card leaving is");
+        assert!(!prompt_moved(&mut shown, &observation(None, "r4")), "a repaint with no card is not");
     }
 }
 
@@ -1256,12 +1384,6 @@ impl DaemonLockFile {
         std::mem::forget(self);
         file
     }
-
-    /// Constructs a `DaemonLockFile` from an already-locked file handle received
-    /// during handover transfer.
-    pub(crate) fn from_locked_file(file: File) -> Self {
-        Self { file }
-    }
 }
 
 #[cfg(windows)]
@@ -1307,10 +1429,6 @@ impl DaemonLockFile {
         std::mem::forget(self);
         file
     }
-
-    pub(crate) fn from_locked_file(file: File) -> Self {
-        Self { _file: file }
-    }
 }
 
 #[derive(Debug)]
@@ -1330,6 +1448,7 @@ impl DaemonLockFiles {
     }
 
     /// Adopts pre-locked files received via handover descriptor transfer.
+    #[cfg(unix)]
     pub(crate) fn from_locked_files(persistent: Option<File>, legacy: File) -> Self {
         Self {
             _persistent: persistent.map(DaemonLockFile::from_locked_file),
@@ -1405,7 +1524,7 @@ fn lock_file_with_optional_wait_internal<F: FnMut()>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn acquire_daemon_locks(
     persistent_path: Option<&Path>,
     legacy_path: &Path,
@@ -1720,15 +1839,12 @@ fn translate_herdr_report(line: &str) -> Option<AgentStateReport> {
     })
 }
 
-/// The reply line a herdr client reads, and discards, after each request it sends. Any `pane.*`
-/// request is answered, including ones Ferryx does not translate, so the client never waits out
-/// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
-#[cfg(any(unix, test))]
 /// A supervisor worker report on the agent-state socket:
 /// `{"type":"supervisorReport","sessionId":…,"eventId":…,"body":…}`. The session id is the
 /// reporting pane's own (`FERRYX_SESSION_ID`), the same trust an `agentState` line has on this
 /// owner-only socket; the hub accepts it only for the open goal bound to that session.
 /// (`sessionId`, `eventId`, `body`), or `None` for any other line.
+#[cfg(unix)]
 fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1743,6 +1859,10 @@ fn supervisor_report_line(line: &str) -> Option<(String, String, String)> {
     (wire.kind == "supervisorReport").then_some((wire.session_id, wire.event_id, wire.body))
 }
 
+/// The reply line a herdr client reads, and discards, after each request it sends. Any `pane.*`
+/// request is answered, including ones Ferryx does not translate, so the client never waits out
+/// its timeout. Lines without a `method` are Ferryx's own reports, which expect no reply.
+#[cfg(any(unix, test))]
 fn herdr_response_line(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if !value.get("method")?.as_str()?.starts_with("pane.") {
@@ -1975,6 +2095,39 @@ fn foreground_marker(session: &crate::terminal::session::PtySession) -> Option<u
     }
 }
 
+/// Publishes OSC 7501 summaries as Protocol states and remembers, per session, which foreground
+/// process group reported the last transient one, so the foreground observer can release it when
+/// the shell takes the terminal back (see [`crate::terminal::foreground::ProtocolReporters`]).
+struct ProgramStatusRelay {
+    states: Arc<AgentStateHub>,
+    reporters: Arc<crate::terminal::foreground::ProtocolReporters>,
+    /// Weak: the terminal service's output hub owns this relay.
+    terminal_service: std::sync::Weak<TerminalService>,
+}
+
+impl crate::terminal::program_status_ingest::ProgramStatusPublisher for ProgramStatusRelay {
+    fn publish(
+        &self,
+        session_id: &str,
+        summary: Option<&crate::terminal::program_status::ProgramStatusSummary>,
+    ) {
+        use crate::terminal::program_status::ProgramState;
+        let transient = summary.is_some_and(|summary| {
+            matches!(
+                summary.state,
+                ProgramState::Working | ProgramState::Blocked | ProgramState::Idle
+            )
+        });
+        let group = self
+            .terminal_service
+            .upgrade()
+            .and_then(|terminal| terminal.get_session(session_id))
+            .and_then(|session| foreground_marker(&session));
+        self.reporters.reported(session_id, transient, group);
+        self.states.publish_protocol(session_id, summary);
+    }
+}
+
 /// The observer's probe bookkeeping for one pane's current agent process.
 struct MachineIdentityProbe {
     agent_pid: u32,
@@ -2119,6 +2272,8 @@ pub struct DaemonServer {
     /// Test-only pane child pids counted alongside the live sessions' (`supervisor_peer`).
     #[cfg(test)]
     pub(crate) test_pane_pids: Mutex<std::collections::HashSet<u32>>,
+    /// Which foreground process group reported each session's transient OSC 7501 records.
+    protocol_reporters: Arc<crate::terminal::foreground::ProtocolReporters>,
 }
 
 #[cfg(test)]
@@ -3600,6 +3755,7 @@ fn request_session_id(request: &DaemonRequest) -> Option<&str> {
 /// shortfall is not a warning: committing retires the predecessor, and each undelivered session
 /// dies with the PTY master fd it still owned. Aborting instead leaves the predecessor serving all
 /// of them, which is always the survivable outcome.
+#[cfg(unix)]
 pub(crate) fn handover_delivery_verdict(offered: usize, accepted: usize) -> Result<(), String> {
     if accepted >= offered {
         return Ok(());
@@ -3633,6 +3789,7 @@ async fn refresh_cors_saved_host_origins(
 ///
 /// `owned == 0` means the peer is an older daemon that does not send the field; fall back to
 /// the delivery-only check rather than aborting every handover with such a predecessor.
+#[cfg(unix)]
 pub(crate) fn handover_delivery_verdict_owned(
     owned: usize,
     offered: usize,
@@ -3652,6 +3809,7 @@ pub(crate) fn handover_delivery_verdict_owned(
 /// Sessions the predecessor listed but did not export, whose durable remote snapshot lets the
 /// successor restore them after commit. An older predecessor counts these in `owned` even
 /// though only local PTYs travel over the handover socket.
+#[cfg(unix)]
 pub(crate) fn handover_restorable_unexported(
     listed: &[String],
     exported: &std::collections::HashSet<String>,
@@ -3671,6 +3829,7 @@ pub(crate) fn handover_restorable_unexported(
 /// `owned` although only local PTYs travel; those that the successor restores from the durable
 /// snapshot are not casualties. A newer predecessor already reports local PTYs only, so nothing
 /// is credited, and crediting it anyway would zero `owned` and disable the owned check.
+#[cfg(unix)]
 pub(crate) fn handover_effective_owned(
     owned: usize,
     listed_unique: usize,
@@ -3681,6 +3840,13 @@ pub(crate) fn handover_effective_owned(
     } else {
         owned
     }
+}
+
+/// The session output a stream pump forwards: its id, live broadcast and backing hub.
+pub(crate) struct SequencedStream {
+    pub(crate) session_id: String,
+    pub(crate) rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
+    pub(crate) hub: Arc<TerminalOutputHub>,
 }
 
 impl DaemonServer {
@@ -3822,9 +3988,15 @@ impl DaemonServer {
             test_shell_command: parking_lot::Mutex::new(None),
         });
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
+        let protocol_reporters =
+            Arc::new(crate::terminal::foreground::ProtocolReporters::default());
         let program_status_publisher: Arc<
             dyn crate::terminal::program_status_ingest::ProgramStatusPublisher,
-        > = session_service.agent_state_hub();
+        > = Arc::new(ProgramStatusRelay {
+            states: session_service.agent_state_hub(),
+            reporters: Arc::clone(&protocol_reporters),
+            terminal_service: Arc::downgrade(&terminal_service),
+        });
         terminal_service
             .output_hub()
             .set_program_status_publisher(program_status_publisher);
@@ -3865,6 +4037,7 @@ impl DaemonServer {
             Arc::clone(&session_service.workspace_service.machine_events),
         );
         session_service.install_agent_watch(Arc::clone(&remote_state.agent_observers));
+        remote_state.start_push_dispatch();
 
         let (binary_path, binary_mtime_ms) = resolve_binary_identity();
         remote_state
@@ -3881,6 +4054,35 @@ impl DaemonServer {
                 payload,
             });
         }));
+
+        // A prompt card that appears, moves or goes away (answered on the phone, say) reaches the
+        // desktop Inbox as `agentPromptChanged`, so its rows re-read the prompt without waiting
+        // for the pane's activity to flip.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let mut observations = remote_state.agent_events.subscribe();
+            let prompt_tx = remote_event_tx.clone();
+            runtime.spawn(async move {
+                let mut filter = crate::agent_control::events::PromptChangeFilter::default();
+                let mut shown = std::collections::HashMap::<String, Option<String>>::new();
+                loop {
+                    match observations.recv().await {
+                        Ok(observation) => {
+                            // The desktop re-reads a row's prompt on a push, so a repaint that keeps
+                            // the same prompt occurrence sends none.
+                            if !prompt_moved(&mut shown, &observation) {
+                                continue;
+                            }
+                            let Some(frame) = filter.frame(&observation) else { continue };
+                            if let Some(event) = prompt_changed_event(&frame) {
+                                let _ = prompt_tx.send(event);
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
 
         // P14: inventory transitions that originate inside the daemon-owned
         // PairedHostService (not just renderer-driven pair/migrate/forget)
@@ -3970,11 +4172,12 @@ impl DaemonServer {
             close_park: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_pane_pids: Mutex::new(std::collections::HashSet::new()),
+            protocol_reporters,
         }
     }
 
     /// Parks every later Close handler after its response flush (see close_park).
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_close_park_for_test(
         &self,
         park: Arc<(tokio::sync::Notify, tokio::sync::Notify)>,
@@ -4810,6 +5013,9 @@ impl DaemonServer {
                     .collect();
                 transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
                 probes.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
+                server
+                    .protocol_reporters
+                    .retain(|id| sessions.iter().any(|(live, _)| live == id));
                 while let Ok((id, agent_pid, finished)) = probe_done.try_recv() {
                     if let Some(probe) = probes.get_mut(&id).filter(|p| p.agent_pid == agent_pid) {
                         probe.in_flight = false;
@@ -4893,6 +5099,23 @@ impl DaemonServer {
                                         }
                                         None => {}
                                     }
+                                    // A program that reported a transient OSC 7501 state may
+                                    // never have been sampled as an agent (it lived shorter
+                                    // than a tick, or is no agent at all), so it has no
+                                    // Released edge. The shell owning the foreground again,
+                                    // from a group other than the reporter's, ends it too.
+                                    let reporter_gone =
+                                        server.protocol_reporters.foreground_returned(
+                                            &id,
+                                            observation,
+                                            sampled_markers.get(&id).copied().flatten(),
+                                            || {
+                                                server
+                                                    .terminal_service
+                                                    .get_session(&id)
+                                                    .and_then(|session| foreground_marker(&session))
+                                            },
+                                        );
                                     if server.terminal_service.get_session(&id).is_some() {
                                         match edge {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Released) => {
@@ -4903,6 +5126,7 @@ impl DaemonServer {
                                         Some(crate::terminal::foreground::AgentProcessEdge::Observed) => {
                                             server.agent_states.observe_foreground_agent(&id);
                                         }
+                                        None if reporter_gone => server.program_exited(&id),
                                         None => {}
                                     }
                                     }
@@ -6191,6 +6415,20 @@ impl DaemonServer {
                         Err(error) => daemon_error(format!("Resource sampling failed: {error}")),
                     }
                 }
+                Ok(DaemonRequest::AgentPromptGet { session_id, registry_id }) => {
+                    match crate::remote::server::agent_control_service::prompt_get(&self.remote_state, &session_id, registry_id).await {
+                        Ok(prompt) => DaemonResponse::AgentPromptGetOk { prompt },
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
+                Ok(DaemonRequest::AgentPromptAnswer { session_id, prompt_id, screen_revision, answer, registry_id }) => {
+                    match crate::remote::server::agent_control_service::prompt_answer(
+                        &self.remote_state, session_id, prompt_id, screen_revision, answer, registry_id,
+                    ).await {
+                        Ok(receipt) => DaemonResponse::AgentPromptAnswerOk { receipt },
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
@@ -6974,9 +7212,7 @@ impl DaemonServer {
                                 let _ = write_half.flush().await;
 
                                 self.pump_session_stream(
-                                    session_id,
-                                    attachment.receiver,
-                                    hub,
+                                    SequencedStream { session_id, rx: attachment.receiver, hub },
                                     write_half,
                                     Some(agent_subscription),
                                     Some(&mut reader),
@@ -7067,6 +7303,10 @@ impl DaemonServer {
                             })
                             .await
                             .unwrap_or_default(),
+                            token_configured: crate::remote::server::machine_token_configured(),
+                            pairing_window: Some(
+                                self.remote_state.auth_manager.pairing_window_status(),
+                            ),
                         },
                     }
                 }
@@ -7369,6 +7609,8 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
@@ -7670,6 +7912,35 @@ impl DaemonServer {
                         Err(err) => daemon_error(format!("Failed to persist revocation: {err}"),),
                     }
                 }
+                Ok(DaemonRequest::RemoteSetDevicePermission { device_id, permission }) => {
+                    let auth = Arc::clone(&self.remote_state.auth_manager);
+                    match crate::ipc::run_blocking(move || {
+                        Ok(auth.set_device_permission(&device_id, permission))
+                    })
+                    .await
+                    {
+                        Ok(Ok(device)) => DaemonResponse::RemoteSetDevicePermissionOk { device },
+                        Ok(Err(err)) => {
+                            let code = match err {
+                                crate::remote::auth::PermissionChangeError::NotFound => "NOT_FOUND",
+                                crate::remote::auth::PermissionChangeError::MachineRequiresControl => {
+                                    "INVALID_ARGUMENT"
+                                }
+                                crate::remote::auth::PermissionChangeError::Auth(_) => "IO_ERROR",
+                            };
+                            DaemonResponse::Error {
+                                message: err.to_string(),
+                                code: Some(code.to_string()),
+                                details: None,
+                            }
+                        }
+                        Err(err) => DaemonResponse::Error {
+                            message: err.to_string(),
+                            code: Some("INTERNAL_ERROR".into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::RemoteSetActiveSelection { selection, ssh_store_path }) => {
                     if let Some(path) = ssh_store_path {
                         *self.remote_state.ssh_store_path.write() = Some(path);
@@ -7680,6 +7951,10 @@ impl DaemonServer {
                 Ok(DaemonRequest::RemoteGetActiveSelection) => {
                     let selection = self.remote_state.active_selection.read().clone();
                     DaemonResponse::RemoteGetActiveSelectionOk { selection }
+                }
+                Ok(DaemonRequest::RemoteSetWindowFocused { focused }) => {
+                    self.remote_state.set_desktop_window_focused(focused);
+                    DaemonResponse::RemoteSetWindowFocusedOk
                 }
                 Ok(DaemonRequest::SubscribeRemoteEvents) => {
                     let mut events = self.remote_event_tx.subscribe();
@@ -7764,8 +8039,8 @@ impl DaemonServer {
                         }
                     }
                 }
+                #[cfg(unix)]
                 Ok(DaemonRequest::TransferSessions { handover_socket_path }) => {
-                    #[cfg(unix)]
                     {
                         crate::daemon::handover_request::note_transfer_started();
                         if let Err(e) = self.persist_remote_sessions_at(self.remote_sessions_path.clone()).await {
@@ -7921,13 +8196,11 @@ impl DaemonServer {
                             }
                         }
                     }
-                    #[cfg(not(unix))]
-                    {
-                        DaemonResponse::HandoverRejected {
-                            reason: "Session transfer unsupported on non-Unix".to_string(),
-                        }
-                    }
                 }
+                #[cfg(not(unix))]
+                Ok(DaemonRequest::TransferSessions { .. }) => DaemonResponse::HandoverRejected {
+                    reason: "Session transfer unsupported on non-Unix".to_string(),
+                },
                 Ok(DaemonRequest::CommitHandover { .. }) => {
                     let manager = Arc::clone(&self.handover_manager);
                     let service = Arc::clone(&self.terminal_service);
@@ -8588,13 +8861,19 @@ impl DaemonServer {
                         .unwrap_or(0),
                 )
             });
-            remaining
-                .fetch_update(
+            let mut left = remaining.load(std::sync::atomic::Ordering::SeqCst);
+            loop {
+                let Some(next) = left.checked_sub(1) else { break false };
+                match remaining.compare_exchange_weak(
+                    left,
+                    next,
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
-                    |left| left.checked_sub(1),
-                )
-                .is_ok()
+                ) {
+                    Ok(_) => break true,
+                    Err(current) => left = current,
+                }
+            }
         }
         #[cfg(not(feature = "local-split-qa"))]
         {
@@ -8922,9 +9201,7 @@ impl DaemonServer {
     {
         let exit_status = hub.exit_status(&session_id);
         Self::pump_sequenced_stream_with_agent_state(
-            session_id,
-            rx,
-            hub,
+            SequencedStream { session_id, rx, hub },
             writer,
             None,
             None::<tokio::io::Empty>,
@@ -8936,9 +9213,7 @@ impl DaemonServer {
 
     async fn pump_session_stream<W, R>(
         &self,
-        session_id: String,
-        rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
-        hub: Arc<TerminalOutputHub>,
+        stream: SequencedStream,
         writer: W,
         agent_rx: Option<AgentStateSubscription>,
         client_reader: Option<R>,
@@ -8947,6 +9222,7 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        let SequencedStream { session_id, rx, hub } = stream;
         // Captured before streaming: the PTY leaves the registry as soon as it exits, which is
         // exactly when the exit frame that must carry this incarnation is written.
         let incarnation = self
@@ -8960,7 +9236,8 @@ impl DaemonServer {
             if descriptor.target.daemon_epoch.0.to_string() != initial.daemon_epoch { return; }
             let (input, output) = tokio::io::duplex(64 * 1024);
             let pump = Self::pump_sequenced_stream_with_agent_state(
-                session_id.clone(), rx, hub, output, agent_rx, client_reader, incarnation, exit_status,
+                SequencedStream { session_id: session_id.clone(), rx, hub },
+                output, agent_rx, client_reader, incarnation, exit_status,
             );
             tokio::pin!(pump);
             let mut lines = BufReader::new(input).lines();
@@ -9026,9 +9303,7 @@ impl DaemonServer {
         }
         let Ok(mut updates) = self.terminal_service.remote().subscribe(&session_id) else {
             Self::pump_sequenced_stream_with_agent_state(
-                session_id,
-                rx,
-                hub,
+                SequencedStream { session_id, rx, hub },
                 writer,
                 agent_rx,
                 client_reader,
@@ -9040,9 +9315,7 @@ impl DaemonServer {
         };
         let (input, output) = tokio::io::duplex(64 * 1024);
         let pump = Self::pump_sequenced_stream_with_agent_state(
-            session_id.clone(),
-            rx,
-            hub,
+            SequencedStream { session_id: session_id.clone(), rx, hub },
             output,
             agent_rx,
             client_reader,
@@ -9086,9 +9359,7 @@ impl DaemonServer {
     }
 
     pub(crate) async fn pump_sequenced_stream_with_agent_state<W, R>(
-        session_id: String,
-        mut rx: broadcast::Receiver<crate::terminal::output_hub::OutputChunk>,
-        hub: Arc<TerminalOutputHub>,
+        stream: SequencedStream,
         writer: W,
         mut agent_state_rx: Option<AgentStateSubscription>,
         mut client_reader: Option<R>,
@@ -9098,6 +9369,7 @@ impl DaemonServer {
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
         R: tokio::io::AsyncRead + Unpin + Send,
     {
+        let SequencedStream { session_id, mut rx, hub } = stream;
         let mut writer = BufWriter::new(writer);
         if let Some(snapshot) = agent_state_rx
             .as_ref()
@@ -9403,6 +9675,118 @@ mod ssh_survival_tests;
 mod remote_ssh_tests;
 
 #[cfg(all(test, unix))]
+mod protocol_release_tests {
+    use super::*;
+
+    /// Collects the pane's output until `marker` appears; a protocol handshake, not a delay.
+    async fn output_until(output: &mut broadcast::Receiver<Vec<u8>>, marker: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut seen = Vec::new();
+            loop {
+                match output.recv().await {
+                    Ok(chunk) => seen.extend(chunk),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("PTY closed before {marker}")
+                    }
+                }
+                if String::from_utf8_lossy(&seen).contains(marker) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("pane marker");
+    }
+
+    /// Live E2E `release` (plan rex-learnings-20261030, R12): a program reports `working` over
+    /// OSC 7501 and exits without the observer ever sampling it as an agent. The shell taking
+    /// the foreground back must still drop the report instead of pinning the pane to working.
+    #[tokio::test]
+    async fn shell_regaining_the_foreground_releases_an_unsampled_reporter() {
+        let (directory, script) = crate::ipc::run_blocking(|| {
+            let directory = tempfile::tempdir().unwrap();
+            // Not an agent name: ProcessTransition can never see this program as an Agent,
+            // exactly like a reporter that exits within one observation tick.
+            let script = directory.path().join("reporter");
+            std::fs::write(
+                &script,
+                "printf '\\033]7501;state=working:app=e2e\\033\\\\'\nread answer\n",
+            )
+            .unwrap();
+            Ok((directory, script))
+        })
+        .await
+        .unwrap();
+        let server = Arc::new(DaemonServer::new());
+        let mut command = portable_pty::CommandBuilder::new("/bin/bash");
+        command.args(["--noprofile", "--norc", "-i"]);
+        let (id, _lifecycle) = server
+            .terminal_service
+            .spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                crate::terminal::pty::ResolvedSpawnContext {
+                    root: directory.path().to_owned(),
+                    cwd: directory.path().to_owned(),
+                    managed_workspace_id: None,
+                },
+            )
+            .unwrap();
+        let (_history, mut output) = server
+            .terminal_service
+            .output_hub()
+            .observe_for_test(&id)
+            .unwrap();
+        let mut states = server.agent_states.subscribe(&id);
+        // The quotes keep the echoed command line from containing the marker itself.
+        server
+            .terminal_service
+            .write_input(&id, b"stty -echo; PS1='SHELL_''READY>'\n")
+            .unwrap();
+        output_until(&mut output, "SHELL_READY>").await;
+        server
+            .terminal_service
+            .write_input(&id, format!("/bin/sh '{}'\n", script.display()).as_bytes())
+            .unwrap();
+        // The report is published while the reporter blocks in `read`, in front of its pane.
+        let reported = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let update = states.receiver.recv().await.unwrap();
+                if update.state.origin == crate::daemon::protocol::AgentStateOrigin::Protocol {
+                    return update.state;
+                }
+            }
+        })
+        .await
+        .expect("protocol report");
+        assert_eq!(reported.state, "working");
+        server.terminal_service.write_input(&id, b"done\n").unwrap();
+        output_until(&mut output, "SHELL_READY>").await;
+
+        server.spawn_foreground_observer();
+        let released = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let update = states.receiver.recv().await.unwrap();
+                if update.state.state != "working" {
+                    return update.state;
+                }
+            }
+        })
+        .await
+        .expect("the shell owning the foreground again must release the report");
+        assert_eq!(released.state, "idle");
+        assert_eq!(released.origin, crate::daemon::protocol::AgentStateOrigin::Protocol);
+
+        server.terminal_service.write_input(&id, b"exit\n").unwrap();
+        server.terminal_service.close_session(&id).await.unwrap();
+        drop(directory);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod idle_cost_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9588,7 +9972,7 @@ mod live_relay_apply_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn remote_spawn_relative_path(repo_root: &str, root: &str) -> String {
     let norm_repo = repo_root.replace('\\', "/");
     let norm_root = root.replace('\\', "/");
@@ -10110,9 +10494,7 @@ mod tests {
         let hub = Arc::new(TerminalOutputHub::default());
 
         let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            "exiting-session".to_string(),
-            rx,
-            hub,
+            SequencedStream { session_id: "exiting-session".to_string(), rx, hub },
             server_side,
             None,
             None::<tokio::io::Empty>,
@@ -10149,7 +10531,7 @@ mod tests {
         hub.record_exit("delayed-exit", Some(9));
         let (client, server_side) = tokio::io::duplex(4096);
         let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            "delayed-exit".to_string(), rx, hub, server_side, None,
+            SequencedStream { session_id: "delayed-exit".to_string(), rx, hub }, server_side, None,
             None::<tokio::io::Empty>, Some("original-incarnation".to_string()), Some(status),
         ));
         let mut reader = BufReader::new(client);
@@ -11699,9 +12081,7 @@ mod tests {
         let agent_rx = server.agent_states.subscribe(&session_id);
 
         let pump = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            session_id.clone(),
-            rx,
-            hub,
+            SequencedStream { session_id: session_id.clone(), rx, hub },
             client,
             Some(agent_rx),
             None::<tokio::io::Empty>,
@@ -12638,9 +13018,7 @@ mod tests {
         let session_id = "test-idle-session".to_string();
 
         let pump_handle = tokio::spawn(DaemonServer::pump_sequenced_stream_with_agent_state(
-            session_id,
-            rx,
-            hub,
+            SequencedStream { session_id, rx, hub },
             server_write_side,
             None,
             Some(server_read_side),
@@ -13657,9 +14035,7 @@ mod instance_lock_deadline_tests {
         let pump_task = tokio::spawn(async move {
             pump_server
                 .pump_session_stream::<_, tokio::io::Empty>(
-                    pump_session_id,
-                    rx,
-                    hub,
+                    SequencedStream { session_id: pump_session_id, rx, hub },
                     server_writer,
                     None,
                     None,

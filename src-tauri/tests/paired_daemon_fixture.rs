@@ -11,6 +11,18 @@ fn equal_raw_ids_keep_host_output_separate() {
     assert_eq!(fixture.output("relay/b", "session-1"), b"B");
 }
 
+#[test]
+fn roots_live_inside_the_owned_directory_and_are_cleaned() {
+    let fixture = PairedDaemonFixture::new().unwrap();
+    let owner = fixture.directory.path().to_owned();
+    for path in [&fixture.runtime, &fixture.data, &fixture.root] {
+        assert!(path.starts_with(&owner), "{} escapes {}", path.display(), owner.display());
+        assert!(path.is_dir(), "{} was not created", path.display());
+    }
+    fixture.directory.close().unwrap();
+    assert!(!owner.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn socket_data_and_project_roots_are_private_and_cleaned() {

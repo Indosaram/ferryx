@@ -1371,7 +1371,9 @@ mod tests {
             assert_eq!(target.skill, expected, "{}", target.agent);
         }
         assert!(is_ferryx_skill(SKILL_SOURCE), "the shipped skill carries the marker");
-        assert!(SKILL_SOURCE.starts_with("---\nname: ferryx\n"));
+        let mut lines = SKILL_SOURCE.lines().map(str::trim_end);
+        assert_eq!(lines.next(), Some("---"));
+        assert_eq!(lines.next(), Some("name: ferryx"));
     }
 
     #[test]
@@ -1417,7 +1419,11 @@ mod tests {
         std::fs::create_dir_all(&target.agent_dir).unwrap();
         let skill = target.skill.clone().unwrap();
         std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
-        let mine = SKILL_SOURCE.replace("ferryx-managed: true\n", "");
+        let mine: String = SKILL_SOURCE
+            .lines()
+            .filter(|line| line.trim() != "ferryx-managed: true")
+            .map(|line| format!("{line}\n"))
+            .collect();
         assert!(!is_ferryx_skill(&mine));
         std::fs::write(&skill, &mine).unwrap();
 

@@ -845,10 +845,7 @@ fn pi_skill_invocation(text: &str) -> Option<PiSkillInvocation> {
             break;
         }
         remainder = remainder[2..].to_string();
-        pending = match instruction.captures(&remainder) {
-            Some(found) => Some(skill_captures(&found)),
-            None => return None,
-        };
+        pending = Some(skill_captures(&instruction.captures(&remainder)?));
     }
     if !skills.is_empty() {
         if remainder.is_empty() {

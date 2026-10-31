@@ -87,4 +87,11 @@ describe("parseDelimited", () => {
       ["val\t1", "val2"],
     ]);
   });
+
+  it("treats a quote inside an unquoted field as a literal character", () => {
+    expect(parseDelimited('5" pipe,10\nnext,row', ",")).toEqual([
+      ['5" pipe', "10"],
+      ["next", "row"],
+    ]);
+  });
 });

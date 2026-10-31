@@ -52,13 +52,11 @@ export type FilePreviewDeps = {
 /**
  * Something the modal must tell the user about that is not a request failure.
  *
- * `child-document-unsupported` records the one contract gap task 2 found: the
- * frozen backend surface has `cmd_file_preview_open_child`, which returns a
- * media `FilePreviewChildAsset` only, and `cmd_file_preview_open`, which takes a
- * free path plus a backend session. Neither can open a Markdown-relative
- * DOCUMENT under the parent handle's canonical boundary. Escalating such a link
- * through `cmd_file_preview_open` would resolve it outside that boundary, so the
- * request is refused and reported instead of silently widening file authority.
+ * A Markdown document link the user clicks is resolved against the open file's
+ * canonical path and opened as a new read-only preview tab through the same
+ * admission as a terminal file link (so it may leave the document directory,
+ * e.g. `../README.md`). `child-document-unsupported` is reported only when the
+ * payload carries no resolved path to anchor the link on.
  */
 export type FilePreviewNotice = {
   readonly kind: "child-document-unsupported";

@@ -124,6 +124,7 @@ pub(crate) const COMMIT_DRAIN_DEADLINE: std::time::Duration = std::time::Duratio
 /// How a candidate resolves its CommitHandover exchange: a confirmed reply, or (when the reply
 /// was lost or failed) the predecessor's durable decision record, is the only proof of
 /// ownership.
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitResolution {
     /// The predecessor's decision is Retired: this candidate is the owner and serves.
@@ -132,6 +133,7 @@ pub(crate) enum CommitResolution {
     Abort,
 }
 
+#[cfg(any(unix, test))]
 pub(crate) fn resolve_commit(
     reply_confirmed: bool,
     recorded: Option<super::handover_transaction::HandoverState>,
@@ -159,9 +161,10 @@ pub(crate) enum CommitFault {
 #[cfg(test)]
 mod upgrade_action_tests {
     use super::{
-        idle_upgrade_enabled, is_v5_ownership_transfer_enabled, successor_lock_wait, upgrade_action,
-        UpgradeAction,
+        idle_upgrade_enabled, successor_lock_wait, upgrade_action, UpgradeAction,
     };
+    #[cfg(unix)]
+    use super::is_v5_ownership_transfer_enabled;
 
     #[test]
     fn platform_without_session_transfer_must_refuse_while_sessions_are_live() {
@@ -205,9 +208,11 @@ mod upgrade_action_tests {
 
     /// Serializes every test that mutates `FERRYX_HANDOVER_V5`; the process environment is
     /// global, so parallel mutation would make the gate unobservable.
+    #[cfg(unix)]
     static V5_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Restores the previous flag value on drop, including while unwinding from a panic.
+    #[cfg(unix)]
     struct V5EnvGuard {
         /// Held while this guard owns the lock; `None` when the caller already holds it (see
         /// `set_locked`), which keeps the guard usable inside a fully serialized test body.
@@ -215,6 +220,7 @@ mod upgrade_action_tests {
         previous: Option<std::ffi::OsString>,
     }
 
+    #[cfg(unix)]
     impl V5EnvGuard {
         fn set(value: Option<&str>) -> Self {
             let serialized = V5_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -243,6 +249,7 @@ mod upgrade_action_tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for V5EnvGuard {
         fn drop(&mut self) {
             match self.previous.take() {
@@ -613,7 +620,9 @@ pub(crate) struct RetirementGuard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthorityListenerRole {
     Canonical,
+    #[cfg(unix)]
     Control,
+    #[cfg(unix)]
     AgentState,
 }
 
@@ -621,7 +630,9 @@ impl AuthorityListenerRole {
     fn index(self) -> usize {
         match self {
             Self::Canonical => 0,
+            #[cfg(unix)]
             Self::Control => 1,
+            #[cfg(unix)]
             Self::AgentState => 2,
         }
     }
@@ -1061,7 +1072,7 @@ pub struct HandoverManager {
     #[cfg(test)]
     committing_hook: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     /// Test seam: replaces only the OS job start of a RequestUpgrade candidate start.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     candidate_starter: Mutex<Option<Arc<dyn crate::daemon::handover_request::CandidateStarter + Send + Sync>>>,
     retirement_action: RwLock<Arc<dyn Fn() + Send + Sync>>,
     /// Terminal service recorded when the control channel entered Retiring, so a dropping
@@ -1181,7 +1192,7 @@ impl HandoverManager {
             transferred_locals: Mutex::new(std::collections::HashSet::new()),
             #[cfg(test)]
             committing_hook: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             candidate_starter: Mutex::new(None),
             retirement_action: RwLock::new(Arc::new(|| std::process::exit(0))),
             retiring_terminals: Mutex::new(None),
@@ -1314,6 +1325,7 @@ impl HandoverManager {
     }
 
     /// Records a local session exported over the handover socket.
+    #[cfg(unix)]
     pub(crate) fn note_transferred_local(&self, session_id: &str) {
         self.transferred_locals.lock().insert(session_id.to_owned());
     }
@@ -1354,7 +1366,7 @@ impl HandoverManager {
 
     /// Test hook: RequestUpgrade starts its candidate through this starter instead of the OS
     /// supervisor; the request write, its authorization and the admission lock stay real.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_candidate_starter(
         &self,
         starter: Arc<dyn crate::daemon::handover_request::CandidateStarter + Send + Sync>,
@@ -1362,7 +1374,7 @@ impl HandoverManager {
         *self.candidate_starter.lock() = Some(starter);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn candidate_starter(
         &self,
     ) -> Option<Arc<dyn crate::daemon::handover_request::CandidateStarter + Send + Sync>> {

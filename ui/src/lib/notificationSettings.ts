@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import type { PhoneFinishedMode } from "./pushSubscription";
 import { getMigratedItem, NOTIFICATION_SETTINGS_STORAGE_KEY } from "./storageKeys";
 
 export interface NotificationSettings {
@@ -10,7 +11,13 @@ export interface NotificationSettings {
   customSoundId: "system" | "none" | "custom" | string;
   customSoundPath: string | null;
   customSoundVolume: number;
+  /** Phone alert when an agent needs input. */
+  phoneNeedsInput: boolean;
+  /** Phone alert when an agent finishes a turn: never, after long turns, or every turn. */
+  phoneFinishedMode: PhoneFinishedMode;
 }
+
+const PHONE_FINISHED_MODES: readonly PhoneFinishedMode[] = ["off", "longTurns", "everyTurn"];
 
 export { NOTIFICATION_SETTINGS_STORAGE_KEY };
 export const NOTIFICATION_SETTINGS_EVENT = "ferryx:notifications:settings-changed";
@@ -23,6 +30,8 @@ export const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   customSoundId: "system",
   customSoundPath: null,
   customSoundVolume: 0.8,
+  phoneNeedsInput: true,
+  phoneFinishedMode: "longTurns",
 };
 
 export function loadNotificationSettings(): NotificationSettings {
@@ -42,6 +51,8 @@ export function loadNotificationSettings(): NotificationSettings {
       customSoundId: typeof parsed.customSoundId === "string" ? parsed.customSoundId : DEFAULT_NOTIFICATION_SETTINGS.customSoundId,
       customSoundPath: typeof parsed.customSoundPath === "string" ? parsed.customSoundPath : null,
       customSoundVolume: typeof parsed.customSoundVolume === "number" ? Math.max(0, Math.min(1, parsed.customSoundVolume)) : DEFAULT_NOTIFICATION_SETTINGS.customSoundVolume,
+      phoneNeedsInput: typeof parsed.phoneNeedsInput === "boolean" ? parsed.phoneNeedsInput : DEFAULT_NOTIFICATION_SETTINGS.phoneNeedsInput,
+      phoneFinishedMode: PHONE_FINISHED_MODES.includes(parsed.phoneFinishedMode) ? parsed.phoneFinishedMode : DEFAULT_NOTIFICATION_SETTINGS.phoneFinishedMode,
     };
   } catch {
     return { ...DEFAULT_NOTIFICATION_SETTINGS };

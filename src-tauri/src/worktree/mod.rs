@@ -1,3 +1,4 @@
+pub mod changes;
 pub mod disk;
 pub mod git;
 pub mod manager;
@@ -367,6 +368,26 @@ prunable reason gitdir gone
         assert!(!path.exists());
         let branches = git::run_git(manager.repo_root(), &["branch", "--list"]).unwrap();
         assert!(!branches.contains("ferryx/ws-branch/task-del"));
+    }
+
+    #[test]
+    fn leftover_branch_is_reported_as_branch_already_exists() {
+        let (_temp, manager) = setup_test_repo();
+        let branch = manager.branch_name_for("ws", "kept").unwrap();
+        git::run_git(manager.repo_root(), &["branch", &branch]).unwrap();
+        let target = path_for(&manager, "kept");
+        let err = manager
+            .create_worktree(CreateWorktreeOptions::new("ws", "kept", &target))
+            .unwrap_err();
+        assert!(
+            matches!(&err, WorktreeError::BranchAlreadyExists { branch: b } if *b == branch),
+            "{err:?}"
+        );
+        assert!(!target.exists());
+        assert_eq!(
+            crate::ipc::error::IpcError::from(err).code,
+            crate::ipc::error::IpcErrorCode::WorktreeAlreadyExists
+        );
     }
 
     #[test]

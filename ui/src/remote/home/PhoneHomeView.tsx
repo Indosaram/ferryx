@@ -6,7 +6,8 @@ import type { ReactNode } from "react";
 
 import { InboxHome } from "./InboxHome";
 import { MobileHomeTabBar } from "./MobileHomeTabBar";
-import type { InboxRow } from "./phoneHomeModel";
+import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
+import type { AttentionPrompts } from "../../features/ferryx/attention/attentionPrompts";
 import { SupervisorHome, type SupervisorHomeProps } from "./SupervisorHome";
 import type { PhoneDestination } from "./usePhoneNavigation";
 
@@ -14,21 +15,26 @@ export type PhoneHomeViewProps = {
   readonly destination: PhoneDestination;
   readonly onSelectTab: (destination: PhoneDestination) => void;
   readonly supervisor: SupervisorHomeProps;
-  readonly inbox: { readonly rows: readonly InboxRow[]; readonly loading: boolean; readonly onOpen: (row: InboxRow) => void };
+  readonly inbox: {
+    readonly rows: readonly AttentionRow[];
+    readonly prompts?: AttentionPrompts;
+    readonly loading: boolean;
+    readonly onOpen: (row: AttentionRow) => void;
+  };
   readonly worktrees: ReactNode;
   /** The session already open on this phone; tapping it returns to the Session screen. */
   readonly resume: { readonly title: string; readonly subtitle: string; readonly onOpen: () => void } | null;
 };
 
 export function PhoneHomeView({ destination, onSelectTab, supervisor, inbox, worktrees, resume }: PhoneHomeViewProps) {
-  const waiting = inbox.rows.filter((row) => row.kind !== "done").length;
+  const waiting = inbox.rows.filter((row) => row.state === "needs-you").length;
   return (
     <div data-testid="mobile-home" data-destination={destination} className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen pt-safe-header">
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         {destination === "supervisor" ? (
           <SupervisorHome {...supervisor} />
         ) : destination === "inbox" ? (
-          <InboxHome rows={inbox.rows} now={supervisor.now} loading={inbox.loading} onOpen={inbox.onOpen} />
+          <InboxHome rows={inbox.rows} prompts={inbox.prompts} now={supervisor.now} loading={inbox.loading} onOpen={inbox.onOpen} />
         ) : (
           worktrees
         )}

@@ -284,8 +284,9 @@ async fn local_pty_create_4_journal_commit_failure_tears_down_the_spawned_sessio
         std::fs::remove_dir(&journal_path).unwrap();
         std::fs::rename(&backup, &journal_path).unwrap();
     }
-    let status = match &response {
-        Ok(response) | Err(response) => response.status(),
+    let status = match response {
+        Ok(response) => response.status(),
+        Err(refusal) => axum::response::Response::from(refusal).status(),
     };
     assert!(failed_write.load(Ordering::SeqCst), "the commit write failure was injected");
     assert!(!status.is_success(), "a spawn whose journal commit failed reported {status}");

@@ -505,7 +505,7 @@ fn handshake_error_for_response(message: String, code: Option<&str>) -> IpcError
 
 #[derive(Debug)]
 struct RequestAttemptError {
-    error: IpcError,
+    error: Box<IpcError>,
     may_have_been_delivered: bool,
     /// The peer closed before any reply byte arrived. Delivery is still ambiguous:
     /// the request may have executed before the connection or acknowledgment was lost.
@@ -515,7 +515,7 @@ struct RequestAttemptError {
 impl RequestAttemptError {
     fn not_delivered(error: IpcError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             may_have_been_delivered: false,
             peer_closed_before_reply: false,
         }
@@ -523,7 +523,7 @@ impl RequestAttemptError {
 
     fn ambiguous(error: IpcError) -> Self {
         Self {
-            error,
+            error: Box::new(error),
             may_have_been_delivered: true,
             peer_closed_before_reply: false,
         }
@@ -557,7 +557,7 @@ impl RequestAttemptError {
         if report_ambiguous && self.may_have_been_delivered {
             ambiguous_delivery_error(req, &self.error)
         } else {
-            self.error
+            *self.error
         }
     }
 }
@@ -599,6 +599,25 @@ fn write_response(resp: DaemonResponse) -> Result<(), IpcError> {
     }
 }
 
+/// A daemon that serves the prompt requests types every failure, so an untyped error is a daemon
+/// that predates them.
+fn agent_prompt_failure(response: DaemonResponse) -> IpcError {
+    match response {
+        DaemonResponse::Error { message, code: Some(code), details } => {
+            let mut error = IpcError::new(IpcErrorCode::from_code_str(&code), message);
+            if details.is_some() {
+                error.details = details;
+            }
+            error
+        }
+        DaemonResponse::Error { .. } => IpcError::new(
+            IpcErrorCode::DaemonUpgradeRequired,
+            "The running Ferryx daemon predates agent prompt answers; they work after the daemon restarts",
+        ),
+        _ => IpcError::internal("Unexpected daemon agent prompt response"),
+    }
+}
+
 fn request_is_retry_safe(req: &DaemonRequest) -> bool {
     matches!(
         req,
@@ -613,12 +632,14 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::DescribeLiveSessions
             | DaemonRequest::SpawnOperationStatus { .. }
             | DaemonRequest::ResourceUsage
+            | DaemonRequest::AgentPromptGet { .. }
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::ResetAgentState { .. }
             | DaemonRequest::AcknowledgeAgentOutcome { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
+            | DaemonRequest::RemoteSetWindowFocused { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
             | DaemonRequest::RetryPairedSession { .. }
             | DaemonRequest::PairedRecoveryOutcome { .. }
@@ -678,6 +699,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteGetStatus => "remoteGetStatus",
         DaemonRequest::GetCapabilities => "getCapabilities",
         DaemonRequest::ResourceUsage => "resourceUsage",
+        DaemonRequest::AgentPromptGet { .. } => "agentPromptGet",
+        DaemonRequest::AgentPromptAnswer { .. } => "agentPromptAnswer",
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedHostReachabilityList => "pairedHostReachabilityList",
         DaemonRequest::PairedHostRouteList => "pairedHostRouteList",
@@ -735,8 +758,10 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteCreatePairingCode { .. } => "remoteCreatePairingCode",
         DaemonRequest::RemoteListDevices => "remoteListDevices",
         DaemonRequest::RemoteRevokeDevice { .. } => "remoteRevokeDevice",
+        DaemonRequest::RemoteSetDevicePermission { .. } => "remoteSetDevicePermission",
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
+        DaemonRequest::RemoteSetWindowFocused { .. } => "remoteSetWindowFocused",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::UpgradeBinary { .. } => "upgradeBinary",
         DaemonRequest::PrepareHandover => "prepareHandover",
@@ -2449,7 +2474,7 @@ impl DaemonClient {
         let result = match self
             .paired_host_request(DaemonRequest::PairedHostOperation { request })
             .await
-            .map_err(&transport_error)?
+            .map_err(transport_error)?
         {
             DaemonResponse::PairedHostOperationOk { response } => Ok(response),
             DaemonResponse::PairedHostOperationError { error } => Err(error),
@@ -4457,6 +4482,16 @@ impl DaemonClient {
         )
     }
 
+    /// Whether the daemon spawns `TerminalStartup::AgentLaunch`. An older daemon answers that
+    /// startup with an untyped malformed-request error, so callers gate on this instead.
+    pub async fn supports_agent_launch(&self) -> bool {
+        matches!(
+            self.send_request(DaemonRequest::GetCapabilities).await,
+            Ok(DaemonResponse::CapabilitiesOk { capabilities })
+                if capabilities.iter().any(|c| c == crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY)
+        )
+    }
+
     /// Opens a cancellable paste on a local session and returns its id for `PasteWrite` chunks.
     /// Same local-control gate as `write_terminal`.
     pub async fn begin_paste(&self, session_id: &str) -> Result<String, IpcError> {
@@ -4865,6 +4900,40 @@ impl DaemonClient {
         }
     }
 
+    /// The prompt an agent pane is asking now, or `None` when its screen holds none.
+    pub async fn agent_prompt_get(
+        &self,
+        session_id: String,
+        registry_id: Option<String>,
+    ) -> Result<Option<crate::daemon::protocol::AgentPromptView>, IpcError> {
+        match self.send_request(DaemonRequest::AgentPromptGet { session_id, registry_id }).await? {
+            DaemonResponse::AgentPromptGetOk { prompt } => Ok(prompt),
+            other => Err(agent_prompt_failure(other)),
+        }
+    }
+
+    /// Answer the prompt `agent_prompt_get` returned. Never retried: an answer may have typed keys.
+    pub async fn agent_prompt_answer(
+        &self,
+        session_id: String,
+        prompt_id: String,
+        screen_revision: String,
+        answer: crate::daemon::protocol::AgentPromptAnswerInput,
+        registry_id: Option<String>,
+    ) -> Result<crate::scoped_contracts::DeliveryReceipt, IpcError> {
+        let request = DaemonRequest::AgentPromptAnswer {
+            session_id,
+            prompt_id,
+            screen_revision,
+            answer,
+            registry_id,
+        };
+        match self.send_request(request).await? {
+            DaemonResponse::AgentPromptAnswerOk { receipt } => Ok(receipt),
+            other => Err(agent_prompt_failure(other)),
+        }
+    }
+
     pub async fn ping(&self) -> Result<(), IpcError> {
         let resp = self.send_request(DaemonRequest::Ping).await?;
         match resp {
@@ -4966,6 +5035,34 @@ impl DaemonClient {
         }
     }
 
+    /// Owner role change. Never retried: the daemon's answer is the only record of the outcome.
+    pub async fn remote_set_device_permission(
+        &self,
+        device_id: &str,
+        permission: DevicePermission,
+    ) -> Result<DeviceInfo, IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::RemoteSetDevicePermission {
+                device_id: device_id.to_string(),
+                permission,
+            })
+            .await?;
+        match resp {
+            DaemonResponse::RemoteSetDevicePermissionOk { device } => Ok(device),
+            DaemonResponse::Error { message, code: Some(code), .. } => {
+                Err(IpcError::new(IpcErrorCode::from_code_str(&code), message))
+            }
+            DaemonResponse::Error { .. } => Err(IpcError::new(
+                IpcErrorCode::DaemonUpgradeRequired,
+                "The running Ferryx daemon predates device role changes; they work after the daemon restarts",
+            )),
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
     pub async fn remote_revoke_device(&self, device_id: &str) -> Result<(), IpcError> {
         let resp = self
             .send_request(DaemonRequest::RemoteRevokeDevice {
@@ -5007,6 +5104,22 @@ impl DaemonClient {
             DaemonResponse::RemoteSetActiveSelectionOk => Ok(()),
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn remote_set_window_focused(&self, focused: bool) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::RemoteSetWindowFocused { focused })
+            .await?;
+        match resp {
+            DaemonResponse::RemoteSetWindowFocusedOk => Ok(()),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::DaemonUpgradeRequired, message))
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -7460,6 +7573,7 @@ mod tests {
                 tab_id: None,
                 terminal_tabs: Vec::new(),
                 attention_inventory: Vec::new(),
+                session_attention: Vec::new(),
             }),
         };
         assert!(request_is_retry_safe(&req));

@@ -127,7 +127,11 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         {
             let identity = reference_chat_identity(state, &target, Some(agent)).await;
             let session = reference_chat_prompt_session(state, &identity).await;
-            reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow())
+            reference_prompts::reference_prompt_occurrence(
+                session_id,
+                reference_prompts::detect_reference_prompt_in_session(agent, &snapshot.text, &session.borrow()),
+                &snapshot.revision,
+            )
         }
         _ => None,
     };
@@ -551,6 +555,183 @@ pub(crate) async fn send_text(
     joined(transaction.await)
 }
 
+/// The pane's agent for a prompt read or answer: the one the caller names, else the one agent
+/// control identifies from the provider report or the screen.
+async fn prompt_agent(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    registry_id: Option<String>,
+) -> Result<Option<String>, ScopeError> {
+    if let Some(named) = registry_id.map(|id| id.trim().to_string()).filter(|id| !id.is_empty()) {
+        return Ok(Some(named));
+    }
+    Ok(registry_agent(&observe(state, session_id).await?))
+}
+
+/// The desktop's view of one detected card. The "type your own answer" row is not an option:
+/// it is answered with free text. A multi-select card has no view: the shared answer path
+/// refuses it, and the phone drops it too, so both Inboxes leave it to the pane.
+fn prompt_view(
+    prompt: &reference_types::ReferencePrompt,
+    screen_revision: String,
+) -> Option<crate::daemon::protocol::AgentPromptView> {
+    use crate::daemon::protocol::{AgentPromptView, AgentPromptViewKind, AgentPromptViewOption};
+    if prompt.multi_select {
+        return None;
+    }
+    let options: Vec<AgentPromptViewOption> = prompt
+        .options
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index as u32) != prompt.custom_option_index)
+        .map(|(index, option)| AgentPromptViewOption {
+            key: index.to_string(),
+            label: option.label.clone(),
+        })
+        .collect();
+    let kind = match prompt.kind {
+        reference_types::ReferencePromptKind::Approval | reference_types::ReferencePromptKind::Plan => {
+            AgentPromptViewKind::Approval
+        }
+        _ if options.is_empty() => AgentPromptViewKind::FreeText,
+        _ => AgentPromptViewKind::Choice,
+    };
+    let question = if prompt.question.trim().is_empty() { prompt.title.clone() } else { prompt.question.clone() };
+    // The remote chat's rule, for an option pick: the desktop asks the same confirm it does.
+    let needs_confirmation = prompt.needs_confirmation(&reference_types::ReferencePromptAnswer {
+        option_index: Some(0),
+        ..Default::default()
+    });
+    Some(AgentPromptView {
+        prompt_id: prompt.id.clone(),
+        screen_revision,
+        question,
+        options,
+        kind,
+        needs_confirmation,
+    })
+}
+
+/// `AgentPromptGet`: the card the pane's screen holds now, through the same detectors the
+/// reference-chat prompt route runs. A screen that cannot be read whole is refused rather than
+/// reported as holding no prompt.
+pub(crate) async fn prompt_get(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    registry_id: Option<String>,
+) -> Result<Option<crate::daemon::protocol::AgentPromptView>, ScopeError> {
+    live(state, session_id).await?;
+    let agent = prompt_agent(state, session_id, registry_id).await?;
+    let target = control_target(state, session_id);
+    let snapshot = reference_chat_snapshot_screen(state, &target).await?;
+    if !snapshot.is_answerable() {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::RequestConflict,
+            "the pane's screen could not be reconstructed, so no card may be answered from it",
+        ));
+    }
+    let Some(agent) = agent.filter(|agent| reference_prompts::ReferencePromptFamily::of_agent(agent).is_some())
+    else {
+        return Ok(None);
+    };
+    let identity = reference_chat_identity(state, &target, Some(&agent)).await;
+    let session = reference_chat_prompt_session_for_screen(state, &identity, &agent, &snapshot.text).await;
+    let prompt = reference_prompts::detect_reference_prompt_in_session(&agent, &snapshot.text, &session.borrow());
+    let prompt = reference_prompts::reference_prompt_occurrence(session_id, prompt, &snapshot.revision);
+    Ok(prompt.and_then(|prompt| prompt_view(&prompt, snapshot.revision)))
+}
+
+/// The reference answer an `AgentPromptAnswerInput` names, after the daemon boundary's length
+/// cap on free text. Both or neither shape set is passed
+/// on as such, so the shared answer path refuses it exactly as it refuses the phone's.
+fn reference_answer(
+    input: crate::daemon::protocol::AgentPromptAnswerInput,
+) -> Result<reference_types::ReferencePromptAnswer, ScopeError> {
+    // The same bound an HTTP agent-control body has: longer text is refused before anything is
+    // read or typed.
+    if input.text.as_ref().is_some_and(|text| text.len() > policy::AGENT_CONTROL_HTTP_BODY_MAX) {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::InvalidRequest,
+            "the answer text is longer than an answer may carry; nothing was typed",
+        ));
+    }
+    let option_index = match input.key {
+        Some(key) => Some(key.trim().parse::<u32>().map_err(|_| {
+            reference_chat_scope(ScopeErrorCode::InvalidRequest, "the answer key is not an option of this prompt")
+        })?),
+        None => None,
+    };
+    Ok(reference_types::ReferencePromptAnswer {
+        option_index,
+        option_indices: None,
+        custom_text: input.text,
+    })
+}
+
+/// `AgentPromptAnswer`: the person at the desktop answers the card they were shown. The answer
+/// runs through the shared answer path inside the pane's one input queue, so a changed screen,
+/// a replaced card or a replayed answer is refused with nothing typed, as on the phone.
+pub(crate) async fn prompt_answer(
+    state: &Arc<RemoteGatewayState>,
+    session_id: String,
+    prompt_id: String,
+    screen_revision: String,
+    answer: crate::daemon::protocol::AgentPromptAnswerInput,
+    registry_id: Option<String>,
+) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
+    let answer = reference_answer(answer)?;
+    live(state, &session_id).await?;
+    let Some(agent) = prompt_agent(state, &session_id, registry_id).await? else {
+        return Err(reference_chat_scope(
+            ScopeErrorCode::Unsupported,
+            "no prompt reader knows the agent in this pane, so a prompt cannot be answered",
+        ));
+    };
+    let target = control_target(state, &session_id);
+    let request_id = format!("agent-prompt-{}", uuid::Uuid::new_v4());
+    let state = Arc::clone(state);
+    // Owned by its own task, like every answer: a caller that disconnects must not leave a menu
+    // moved but unconfirmed.
+    let transaction = tokio::spawn(async move {
+        let identity = reference_chat_identity(&state, &target, Some(&agent)).await;
+        let prompt_session = reference_chat_prompt_session(&state, &identity).await;
+        let payload = reference_types::ReferencePromptAnswerPayload { prompt_id, screen_revision, answer };
+        // The owner socket's uid check on connect is the authorization.
+        let authorize = owner_authorized();
+        let alive = || true;
+        let request = reference_prompts::ReferenceAnswerRequest {
+            target: &target,
+            request_id: &request_id,
+            payload: &payload,
+            session: prompt_session.borrow(),
+            agent: agent.as_str(),
+            authorize: &*authorize,
+            alive: &alive,
+        };
+        let runtime = reference_chat_runtime();
+        let step = reference_prompts::ReferenceQueueStep::new(&runtime.input);
+        let screen = ReferenceGatewayScreenReader { backend: Arc::clone(&state.session_backend) };
+        let writer = reference_input::ReferenceSessionWriter::new(
+            state.session_backend.as_ref(),
+            &state.agent_events,
+            &request_id,
+        );
+        let clock = reference_input::SystemReferenceClock;
+        runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
+    });
+    match transaction.await {
+        Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => Ok(receipt),
+        Ok(reference_input::ReferenceInputOutcome::NotTyped { error }) => Err(error),
+        Ok(reference_input::ReferenceInputOutcome::OutcomeUnknown { message, .. }) => {
+            Err(reference_chat_scope(ScopeErrorCode::OperationOutcomeUnknown, message))
+        }
+        Err(error) => Err(reference_chat_scope(
+            ScopeErrorCode::OperationOutcomeUnknown,
+            format!("the input transaction did not finish; its outcome is unknown: {error}"),
+        )),
+    }
+}
+
 struct ForwardFailure {
     code: String,
     message: String,
@@ -962,6 +1143,24 @@ mod tests {
     use crate::remote::backend::RemoteSessionBackend as _;
     use crate::remote::reference_chat::types::ReferencePromptAnswer;
 
+    #[test]
+    fn a_multi_select_card_has_no_desktop_view_and_a_single_choice_card_does() {
+        let multi = reference_prompts::detect_reference_prompt(
+            "claude",
+            include_str!("reference_chat/fixtures/claude/prompt/question-tabs-multiselect.screen"),
+        )
+        .expect("the multi-select fixture is a card");
+        assert!(multi.multi_select);
+        assert!(prompt_view(&multi, "rev".into()).is_none());
+
+        let single = reference_prompts::detect_reference_prompt(
+            "claude",
+            include_str!("reference_chat/fixtures/claude/prompt/question.screen"),
+        )
+        .expect("the question fixture is a card");
+        assert!(!single.multi_select);
+        assert!(prompt_view(&single, "rev".into()).is_some());
+    }
     #[test]
     fn a_remote_receipt_carries_the_paired_host_id_and_other_results_do_not() {
         let mut receipt = serde_json::json!({
@@ -1430,5 +1629,192 @@ mod tests {
                 "{session_id} typed the approval"
             );
         }
+    }
+
+    const CODEX_MENU: &str = include_str!("reference_chat/fixtures/codex/menu.txt");
+
+    async fn desktop_prompt(
+        state: &Arc<RemoteGatewayState>,
+        session_id: &str,
+    ) -> crate::daemon::protocol::AgentPromptView {
+        prompt_get(state, session_id, Some("codex".into()))
+            .await
+            .expect("the screen is readable")
+            .expect("the menu is a prompt")
+    }
+
+    fn pick(key: &str) -> crate::daemon::protocol::AgentPromptAnswerInput {
+        crate::daemon::protocol::AgentPromptAnswerInput { key: Some(key.into()), text: None }
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_get_reads_a_three_option_menu_as_a_choice() {
+        let session_id = "agent-prompt-get-menu";
+        let (backend, state) = pane(session_id, CODEX_MENU);
+
+        let prompt = desktop_prompt(&state, session_id).await;
+
+        assert_eq!(prompt.kind, crate::daemon::protocol::AgentPromptViewKind::Choice);
+        let keys: Vec<&str> = prompt.options.iter().map(|option| option.key.as_str()).collect();
+        assert_eq!(keys, vec!["0", "1", "2"]);
+        assert!(!prompt.prompt_id.is_empty() && !prompt.screen_revision.is_empty());
+        let wire = serde_json::to_value(&prompt).expect("wire");
+        assert_eq!(wire["kind"], "choice", "{wire}");
+        // The update menu is a Menu card: picking an option is confirmed first, as on the phone.
+        assert!(prompt.needs_confirmation);
+        assert_eq!(wire["needsConfirmation"], true, "{wire}");
+        assert_eq!(wire["options"].as_array().map(Vec::len), Some(3), "{wire}");
+        assert!(wire["promptId"].is_string() && wire["screenRevision"].is_string(), "{wire}");
+        assert!(backend.writes.lock().expect("writes").is_empty(), "a read types nothing");
+
+        let (_shell, idle) = pane("agent-prompt-get-shell", "$ ");
+        assert_eq!(prompt_get(&idle, "agent-prompt-get-shell", None).await.expect("readable"), None);
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_with_a_stale_revision_is_refused_and_types_nothing() {
+        let session_id = "agent-prompt-answer-stale";
+        let (backend, state) = pane(session_id, CODEX_MENU);
+        let prompt = desktop_prompt(&state, session_id).await;
+
+        let error = prompt_answer(
+            &state,
+            session_id.into(),
+            prompt.prompt_id,
+            "not-the-current-revision".into(),
+            pick("2"),
+            Some("codex".into()),
+        )
+        .await
+        .expect_err("a stale revision is refused");
+
+        assert_eq!(error.code, ScopeErrorCode::RequestConflict, "{}", error.message);
+        match error_response(error) {
+            crate::daemon::protocol::DaemonResponse::Error { code, .. } => {
+                assert_eq!(code.as_deref(), Some("REQUEST_CONFLICT"));
+            }
+            other => panic!("a refusal is an error response: {other:?}"),
+        }
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "a refused answer typed nothing");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_with_the_current_revision_writes_the_option_key() {
+        let session_id = "agent-prompt-answer-current";
+        let (backend, state) = pane(session_id, CODEX_MENU);
+        let prompt = desktop_prompt(&state, session_id).await;
+
+        let receipt = prompt_answer(
+            &state,
+            session_id.into(),
+            prompt.prompt_id,
+            prompt.screen_revision,
+            pick("2"),
+            Some("codex".into()),
+        )
+        .await
+        .expect("the answer is typed");
+
+        assert_eq!(receipt.target.backend_session_id, session_id);
+        // The cursor starts on row 1, so the third option is two rows down, then Enter.
+        assert_eq!(
+            backend.writes.lock().expect("writes").clone(),
+            vec![b"\x1b[B".to_vec(), b"\x1b[B".to_vec(), b"\r".to_vec()]
+        );
+    }
+
+    const CLAUDE_QUESTION: &str = include_str!("reference_chat/fixtures/claude/prompt/question.screen");
+
+    /// Answer the claude question card, which takes typed text on its "Type something." row,
+    /// with `text`. Each call is its own pane, so the single-use ledger never decides it.
+    async fn answer_claude_question_with(
+        session_id: &str,
+        text: String,
+    ) -> (Arc<FixedPane>, Result<crate::scoped_contracts::DeliveryReceipt, ScopeError>) {
+        let (backend, state) = pane(session_id, CLAUDE_QUESTION);
+        let prompt = prompt_get(&state, session_id, Some("claude".into()))
+            .await
+            .expect("the screen is readable")
+            .expect("the question is a prompt");
+        let result = prompt_answer(
+            &state,
+            session_id.into(),
+            prompt.prompt_id,
+            prompt.screen_revision,
+            crate::daemon::protocol::AgentPromptAnswerInput { key: None, text: Some(text) },
+            Some("claude".into()),
+        )
+        .await;
+        (backend, result)
+    }
+
+    fn assert_refused_untyped(
+        backend: &FixedPane,
+        result: Result<crate::scoped_contracts::DeliveryReceipt, ScopeError>,
+    ) {
+        let error = result.expect_err("text over the cap is refused");
+        assert_eq!(error.code, ScopeErrorCode::InvalidRequest, "{}", error.message);
+        assert_eq!(backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "a refused answer typed nothing");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_text_at_the_cap_is_typed() {
+        let text = "a".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX);
+        let (backend, result) = answer_claude_question_with("agent-prompt-answer-at-cap", text.clone()).await;
+
+        result.expect("text of exactly the cap is accepted");
+        let writes = backend.writes.lock().expect("writes").clone();
+        assert!(writes.iter().any(|write| write == text.as_bytes()), "the whole text was typed");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_text_over_the_cap_is_refused_and_types_nothing() {
+        let text = "a".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX + 1);
+        let (backend, result) = answer_claude_question_with("agent-prompt-answer-over-cap", text).await;
+
+        assert_refused_untyped(&backend, result);
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_answer_multibyte_text_over_the_byte_cap_is_refused() {
+        // Three bytes a character: over the cap in bytes, well under it in characters.
+        let text = "\u{AC00}".repeat(policy::AGENT_CONTROL_HTTP_BODY_MAX / 3 + 1);
+        assert!(text.len() > policy::AGENT_CONTROL_HTTP_BODY_MAX);
+        assert!(text.chars().count() < policy::AGENT_CONTROL_HTTP_BODY_MAX);
+        let (backend, result) = answer_claude_question_with("agent-prompt-answer-multibyte", text).await;
+
+        assert_refused_untyped(&backend, result);
+    }
+
+    #[test]
+    fn agent_prompt_requests_travel_in_camel_case() {
+        let request = crate::daemon::protocol::DaemonRequest::AgentPromptAnswer {
+            session_id: "s".into(),
+            prompt_id: "p".into(),
+            screen_revision: "r".into(),
+            answer: pick("1"),
+            registry_id: None,
+        };
+        let wire = serde_json::to_value(&request).expect("wire");
+        assert_eq!(wire["type"], "agentPromptAnswer", "{wire}");
+        assert_eq!(wire["screenRevision"], "r", "{wire}");
+        assert_eq!(wire["answer"]["key"], "1", "{wire}");
+        let get: crate::daemon::protocol::DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type": "agentPromptGet", "sessionId": "s"}))
+                .expect("a get without a registry id parses");
+        assert!(matches!(get, crate::daemon::protocol::DaemonRequest::AgentPromptGet { registry_id: None, .. }));
+        let view = crate::daemon::protocol::AgentPromptView {
+            prompt_id: "p".into(),
+            screen_revision: "r".into(),
+            question: "q".into(),
+            options: Vec::new(),
+            kind: crate::daemon::protocol::AgentPromptViewKind::FreeText,
+            needs_confirmation: false,
+        };
+        let wire = serde_json::to_value(&view).expect("wire");
+        assert_eq!(wire["needsConfirmation"], false, "{wire}");
+        assert_eq!(wire["kind"], "freeText", "{wire}");
     }
 }

@@ -9,7 +9,21 @@ import {
   type ResolvedAgent,
 } from "../../lib/agentsSettings";
 import { AgentsCliStep, type AgentsCliStepProps } from "./AgentsCliStep";
+import { getAgentInstallCommand } from "./agentInstallCommands";
 import { WelcomeWizard } from "./WelcomeWizard";
+
+const clipboardMock = vi.hoisted(() => ({
+  copyTextToClipboard: vi.fn(async (_text: string) => true),
+}));
+vi.mock("../../lib/clipboard", () => clipboardMock);
+
+const platformMock = vi.hoisted(() => ({
+  current: "macos" as "macos" | "linux" | "windows" | "unknown",
+}));
+vi.mock("../../lib/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/platform")>()),
+  getHostPlatform: () => platformMock.current,
+}));
 
 const EMPTY_TITLE = "No coding agents found on your PATH.";
 const EMPTY_DESCRIPTION =
@@ -26,6 +40,8 @@ function renderStep(overrides: Partial<AgentsCliStepProps> = {}) {
 describe("AgentsCliStep", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    platformMock.current = "macos";
+    clipboardMock.copyTextToClipboard.mockClear();
   });
 
   afterEach(() => {
@@ -301,6 +317,70 @@ describe("AgentsCliStep", () => {
       screen.getByTestId("onboarding-add-custom-agent"),
     );
     expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  it("shows the install command with Copy for an unavailable agent", async () => {
+    renderStep({ agents: [agent("claude", false), agent("codex", true)] });
+
+    const command = getAgentInstallCommand("claude", "macos");
+    expect(command).not.toBeNull();
+    expect(screen.getByTestId("onboarding-agent-install-command-claude")).toHaveTextContent(
+      command as string,
+    );
+    expect(screen.queryByTestId("onboarding-agent-install-codex")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("onboarding-agent-install-copy-claude"));
+    });
+    expect(clipboardMock.copyTextToClipboard).toHaveBeenCalledWith(command);
+  });
+
+  it("shows the Windows install command where it differs", () => {
+    platformMock.current = "windows";
+    renderStep({ agents: [agent("claude", false)] });
+
+    const windowsCommand = getAgentInstallCommand("claude", "windows");
+    expect(windowsCommand).not.toBe(getAgentInstallCommand("claude", "macos"));
+    expect(screen.getByTestId("onboarding-agent-install-command-claude")).toHaveTextContent(
+      windowsCommand as string,
+    );
+  });
+
+  it("has native Windows commands for cursor-agent and aider", () => {
+    expect(getAgentInstallCommand("cursor-agent", "windows")).not.toBeNull();
+    expect(getAgentInstallCommand("aider", "windows")).not.toBeNull();
+    expect(getAgentInstallCommand("aider", "windows")).not.toBe(
+      getAgentInstallCommand("aider", "macos"),
+    );
+  });
+
+  it("re-runs detection on Check again and moves the agent once it is available", () => {
+    const { rerender } = renderStep({
+      agents: [agent("claude", false), agent("codex", true)],
+    });
+    const listener = vi.fn();
+    window.addEventListener(AGENTS_SETTINGS_CHANGED_EVENT, listener);
+
+    try {
+      fireEvent.click(screen.getByTestId("onboarding-agent-check-again"));
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(AGENTS_SETTINGS_CHANGED_EVENT, listener);
+    }
+
+    expect(screen.queryByTestId("onboarding-agent-claude")).toBeNull();
+    rerender(<AgentsCliStep agents={[agent("claude", true), agent("codex", true)]} />);
+
+    expect(screen.getByTestId("onboarding-agent-claude")).toBeDefined();
+    expect(screen.queryByTestId("onboarding-agent-install-claude")).toBeNull();
+    expect(screen.queryByTestId("onboarding-agent-install-help")).toBeNull();
+  });
+
+  it("renders no install section when every agent is available", () => {
+    renderStep({ agents: [agent("claude", true), agent("codex", true)] });
+
+    expect(screen.queryByTestId("onboarding-agent-install-help")).toBeNull();
+    expect(clipboardMock.copyTextToClipboard).not.toHaveBeenCalled();
   });
 
   it("returns focus to the add button when the form is cancelled", () => {

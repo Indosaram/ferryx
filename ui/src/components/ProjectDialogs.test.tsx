@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const native = vi.hoisted(() => ({
   isTauriRuntime: vi.fn(),
   registerProject: vi.fn(),
-  listProjectBranches: vi.fn(),
+  listProjectRefs: vi.fn(),
   createWorktree: vi.fn(),
   previewGitHubIssue: vi.fn(),
 }));
@@ -109,7 +109,7 @@ afterEach(cleanup);
 beforeEach(() => {
   native.isTauriRuntime.mockReset();
   native.registerProject.mockReset();
-  native.listProjectBranches.mockReset();
+  native.listProjectRefs.mockReset();
   native.createWorktree.mockReset();
   native.previewGitHubIssue.mockReset();
   dialog.open.mockReset();
@@ -1176,7 +1176,7 @@ describe("AddProjectDialog Remote flow", () => {
 
 describe("AddWorktreeDialog flow", () => {
   it("is a modal dialog whose Close/Cancel/Escape are blocked while creating, so onClose runs exactly once", async () => {
-    native.listProjectBranches.mockResolvedValue([{ name: "main", isCurrent: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "main", isCurrent: true }], tags: [] });
     const create = deferred<unknown>();
     native.createWorktree.mockReturnValue(create.promise);
     const onClose = vi.fn();
@@ -1202,10 +1202,10 @@ describe("AddWorktreeDialog flow", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("loads local branches and uses a real branch dropdown for Add Worktree", async () => {
+  it("loads local branches and tags as suggestions for the typed base ref", async () => {
     const branchesDef = deferred<unknown>();
     const createDef = deferred<unknown>();
-    native.listProjectBranches.mockReturnValue(branchesDef.promise);
+    native.listProjectRefs.mockReturnValue(branchesDef.promise);
     native.createWorktree.mockReturnValue(createDef.promise);
     const onCreated = vi.fn();
 
@@ -1217,19 +1217,24 @@ describe("AddWorktreeDialog flow", () => {
       />,
     );
 
-    expect(native.listProjectBranches).toHaveBeenCalledWith("orca-lite");
+    expect(native.listProjectRefs).toHaveBeenCalledWith("orca-lite");
 
     await act(async () => {
-      branchesDef.resolve([
-        { name: "develop", isCurrent: false },
-        { name: "main", isCurrent: true },
-      ]);
+      branchesDef.resolve({
+        branches: [
+          { name: "develop", isCurrent: false },
+          { name: "main", isCurrent: true },
+        ],
+        tags: ["v1.0"],
+      });
     });
 
-    const branch = screen.getByRole("combobox", { name: "Base branch" });
-    expect(branch.tagName).toBe("SELECT");
-    expect(screen.getByRole("option", { name: "main (current)" })).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Base branch" })).not.toBeInTheDocument();
+    const branch = screen.getByRole("combobox", { name: "Base ref" });
+    expect(branch).toHaveValue("main");
+    const suggestions = Array.from(
+      document.querySelectorAll<HTMLOptionElement>(`#${branch.getAttribute("list")} option`),
+    ).map((option) => option.value);
+    expect(suggestions).toEqual(["develop", "main", "v1.0"]);
 
     fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "feature-ui" } });
     fireEvent.change(branch, { target: { value: "develop" } });
@@ -1248,7 +1253,7 @@ describe("AddWorktreeDialog flow", () => {
   });
 
   it("explains that a plain folder project has no branches instead of leaving a dead dialog", () => {
-    native.listProjectBranches.mockResolvedValue([]);
+    native.listProjectRefs.mockResolvedValue({ branches: [], tags: [] });
 
     render(
       <AddWorktreeDialog
@@ -1263,7 +1268,7 @@ describe("AddWorktreeDialog flow", () => {
     expect(screen.getByRole("button", { name: "Close Add Worktree" })).toBeInTheDocument();
   });
 
-  it("renders slug-only in remote mode and calls createRemoteWorktree without invoking listProjectBranches", async () => {
+  it("renders slug-only in remote mode and calls createRemoteWorktree without listing local refs", async () => {
     remote.createRemoteWorktree.mockResolvedValue({
       path: "/srv/repo/.orca-worktrees/wt-feat-remote",
       head: "abc1234",
@@ -1288,9 +1293,10 @@ describe("AddWorktreeDialog flow", () => {
       />,
     );
 
-    expect(native.listProjectBranches).not.toHaveBeenCalled();
+    expect(native.listProjectRefs).not.toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: "Add Worktree · Dev Server" })).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "Base branch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Base ref" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Agent" })).not.toBeInTheDocument();
 
     const slugInput = screen.getByLabelText("Worktree slug");
     expect(slugInput).toBeInTheDocument();
@@ -1318,6 +1324,91 @@ describe("AddWorktreeDialog flow", () => {
       }),
     );
     expect(onClose).toHaveBeenCalledOnce();
+  });
+});
+
+describe("AddWorktreeDialog agent and typed ref", () => {
+  const project: RegisteredProject = { workspaceId: "orca-lite", repoRoot: "/repo/orca-lite", gitRoot: "/repo/orca-lite" };
+  const agents = [{ name: "claude" }, { name: "codex" }];
+  const created = {
+    workspaceId: "orca-lite",
+    path: "/repo/.orca-worktrees/orca-lite/release-fix",
+    head: "abc1234",
+    branch: "refs/heads/orca/orca-lite/release-fix",
+    bare: false,
+    detached: false,
+    locked: null,
+    prunable: null,
+  };
+
+  beforeEach(() => {
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "main", isCurrent: true }], tags: ["v1.0"] });
+    native.createWorktree.mockResolvedValue(created);
+  });
+
+  it("creates from a typed tag and hands the chosen agent to onCreated", async () => {
+    const onCreated = vi.fn();
+    await act(async () => {
+      render(<AddWorktreeDialog project={project} onClose={vi.fn()} onCreated={onCreated} agents={agents} />);
+    });
+
+    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("");
+    fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "release-fix" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Base ref" }), { target: { value: "v1.0" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: "claude" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+    });
+
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "orca-lite",
+      worktree: { wsId: "orca-lite", slug: "release-fix" },
+      baseRef: "v1.0",
+    });
+    expect(onCreated).toHaveBeenCalledWith(created, { agentId: "claude" });
+  });
+
+  it("preselects the default agent and creates from HEAD when the ref is cleared", async () => {
+    const onCreated = vi.fn();
+    await act(async () => {
+      render(
+        <AddWorktreeDialog project={project} onClose={vi.fn()} onCreated={onCreated} agents={agents} defaultAgentId="codex" />,
+      );
+    });
+
+    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveValue("codex");
+    fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "release-fix" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Base ref" }), { target: { value: "  " } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Agent" }), { target: { value: "" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+    });
+
+    expect(native.createWorktree).toHaveBeenCalledWith({
+      workspaceId: "orca-lite",
+      worktree: { wsId: "orca-lite", slug: "release-fix" },
+      baseRef: null,
+    });
+    expect(onCreated).toHaveBeenCalledWith(created);
+  });
+
+  it("shows the backend ref error and keeps the dialog open", async () => {
+    native.createWorktree.mockRejectedValue({ code: "GIT_COMMAND_FAILED", message: "Unknown ref does-not-exist" });
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await act(async () => {
+      render(<AddWorktreeDialog project={project} onClose={onClose} onCreated={onCreated} agents={agents} />);
+    });
+
+    fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "release-fix" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Base ref" }), { target: { value: "does-not-exist" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create Worktree" }));
+    });
+
+    expect(screen.getByText("Unknown ref does-not-exist")).toBeInTheDocument();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
@@ -1356,10 +1447,13 @@ describe("AddWorktreeDialog GitHub issue intake", () => {
     onCreated?: (worktree: unknown) => void | Promise<void>;
     onClose?: () => void;
   } = {}) {
-    native.listProjectBranches.mockResolvedValue([
-      { name: "develop", isCurrent: false },
-      { name: "main", isCurrent: true },
-    ]);
+    native.listProjectRefs.mockResolvedValue({
+      branches: [
+        { name: "develop", isCurrent: false },
+        { name: "main", isCurrent: true },
+      ],
+      tags: [],
+    });
     render(
       <AddWorktreeDialog
         project={issueProject}
@@ -1400,7 +1494,7 @@ describe("AddWorktreeDialog GitHub issue intake", () => {
   });
 
   it("loads the issue on Enter without submitting an existing worktree slug", async () => {
-    native.listProjectBranches.mockResolvedValue([{ name: "main", isCurrent: true }]);
+    native.listProjectRefs.mockResolvedValue({ branches: [{ name: "main", isCurrent: true }], tags: [] });
     native.previewGitHubIssue.mockResolvedValue(preview);
     const onCreated = vi.fn();
     const onClose = vi.fn();
@@ -1440,7 +1534,7 @@ describe("AddWorktreeDialog GitHub issue intake", () => {
     await renderWithLoadedIssue();
 
     fireEvent.change(screen.getByLabelText("Worktree slug"), { target: { value: "custom-slug" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "Base branch" }), { target: { value: "develop" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Base ref" }), { target: { value: "develop" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Create Worktree from Issue #12" }));
     });

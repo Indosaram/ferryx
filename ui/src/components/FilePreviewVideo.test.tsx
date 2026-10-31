@@ -102,14 +102,13 @@ describe("FilePreviewVideo", () => {
     expect(onExternalOpen).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces a decode failure as a recoverable UnsupportedFormat error", () => {
+  it("hands a decode failure to the controller as UnsupportedFormat without a local error view", () => {
     const onFailure = vi.fn();
-    const onReload = vi.fn();
     render(
       <FilePreviewVideo
         payload={videoPayload()}
         generation={1}
-        onReload={onReload}
+        onReload={vi.fn()}
         onExternalOpen={vi.fn()}
         onFailure={onFailure}
       />,
@@ -123,13 +122,10 @@ describe("FilePreviewVideo", () => {
     const failure = onFailure.mock.calls[0][0] as FilePreviewFailure;
     expect(failure.reason).toBe("UnsupportedFormat");
     expect(failure.details?.reason).toBe("UnsupportedFormat");
-
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent(/clip\.webm/);
-    // Recoverable: the element stays mounted and retry is offered in place.
-    expect(videoElement()).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
-    expect(onReload).toHaveBeenCalledTimes(1);
+    expect(failure.message).toMatch(/clip\.webm/);
+    // The controller's failure screen owns recovery; no dead in-renderer copy.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: /try again/i })).toBeNull();
   });
 
   it("reports an unsupported source as UnsupportedFormat and a network error without inventing a reason", () => {
@@ -206,7 +202,7 @@ describe("FilePreviewVideo", () => {
     expect(media.load).toHaveBeenCalledTimes(1);
   });
 
-  it("tears down the replaced element, mounts a fresh one and drops the stale failure", () => {
+  it("tears down the replaced element and mounts a fresh one", () => {
     const onFailure = vi.fn();
     const first = videoPayload();
     const props = {
@@ -220,7 +216,7 @@ describe("FilePreviewVideo", () => {
     const firstVideo = videoElement();
     setMediaError(firstVideo, MEDIA_ERR_DECODE);
     fireEvent.error(firstVideo);
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(onFailure).toHaveBeenCalledTimes(1);
 
     const second = videoPayload({
       handle: "handle-2",
@@ -236,7 +232,6 @@ describe("FilePreviewVideo", () => {
     expect(firstVideo.isConnected).toBe(false);
     expect(media.pause).toHaveBeenCalledTimes(1);
     expect(media.load).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("alert")).toBeNull();
     expect(onFailure).toHaveBeenCalledTimes(1);
   });
 
@@ -264,7 +259,6 @@ describe("FilePreviewVideo", () => {
     fireEvent.error(firstVideo);
 
     expect(onFailure).not.toHaveBeenCalled();
-    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("reports a payload with no media URL instead of rendering an empty player", () => {
@@ -282,6 +276,5 @@ describe("FilePreviewVideo", () => {
     expect(screen.queryByTestId("file-preview-video-element")).toBeNull();
     expect(onFailure).toHaveBeenCalledTimes(1);
     expect((onFailure.mock.calls[0][0] as FilePreviewFailure).reason).toBe("UnsupportedFormat");
-    expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 });

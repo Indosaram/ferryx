@@ -7,12 +7,16 @@ async fn service_less_legacy_body_and_git_are_bounded() {
     service_less_fixture(false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn followthrough_service_less_readiness_failure_cleanup() {
     service_less_fixture(true).await;
 }
 
 async fn service_less_fixture(inject_readiness_failure: bool) {
+    // Injection needs the unix post-checkout hook below; no other platform can arm it.
+    #[cfg(not(unix))]
+    assert!(!inject_readiness_failure, "readiness failure injection requires the unix hook");
     let (root, state, token) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo"); std::fs::create_dir(&repo).unwrap();
@@ -27,6 +31,7 @@ async fn service_less_fixture(inject_readiness_failure: bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
+    #[cfg(unix)]
     let auth = state.auth_manager.clone();
     let gateway = tokio::spawn(async move { axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap(); });
     let result = std::panic::AssertUnwindSafe(async {

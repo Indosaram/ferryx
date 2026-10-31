@@ -23,11 +23,21 @@ const scenario = new URLSearchParams(window.location.search).get("scenario") ?? 
 
 (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
   invoke: async (cmd: string) => {
-    if (cmd === "cmd_project_branches") {
-      return [
-        { name: "develop", isCurrent: false },
-        { name: "main", isCurrent: true },
-      ];
+    if (cmd === "cmd_project_refs") {
+      return {
+        branches: [
+          { name: "develop", isCurrent: false },
+          { name: "main", isCurrent: true },
+        ],
+        tags: ["v1"],
+      };
+    }
+    if (cmd === "cmd_worktree_create" && scenario === "badref") {
+      // The IpcError validate_base_ref yields for an unknown ref (WorktreeError::GitError).
+      throw {
+        code: "GIT_ERROR",
+        message: "Git command failed (git rev-parse --verify --quiet does-not-exist^{commit}):  (exit code: Some(1))",
+      };
     }
     if (cmd === "cmd_github_issue_preview") {
       if (scenario === "intake-error") {
@@ -55,8 +65,40 @@ if (scenario === "clipboard-failure") {
   Object.defineProperty(document, "execCommand", { configurable: true, value: () => false });
 }
 
+const setField = (selector: string, value: string, prototype: typeof HTMLInputElement | typeof HTMLSelectElement) => {
+  const field = document.querySelector<HTMLInputElement | HTMLSelectElement>(selector);
+  if (!field) return;
+  Object.getOwnPropertyDescriptor(prototype.prototype, "value")?.set?.call(field, value);
+  field.dispatchEvent(new Event(field instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }));
+};
+
 function Harness() {
   useEffect(() => {
+    if (scenario === "agent" || scenario === "badref") {
+      // The Base ref input stays disabled until the refs load; fill the form once it is enabled.
+      const fill = () => {
+        const baseRef = document.querySelector<HTMLInputElement>('[aria-label="Base ref"]');
+        if (!baseRef || baseRef.disabled) return false;
+        setField('[aria-label="Worktree slug"]', "release-fix", HTMLInputElement);
+        setField('[aria-label="Base ref"]', scenario === "agent" ? "v1" : "does-not-exist", HTMLInputElement);
+        setField('[aria-label="Agent"]', "claude", HTMLSelectElement);
+        if (scenario === "badref") {
+          // React commits the typed values before the click is handled on the next frame.
+          window.requestAnimationFrame(() =>
+            Array.from(document.querySelectorAll("button"))
+              .find((button) => button.textContent === "Create Worktree")
+              ?.click(),
+          );
+        }
+        return true;
+      };
+      if (fill()) return;
+      const observer = new MutationObserver(() => {
+        if (fill()) observer.disconnect();
+      });
+      observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["disabled"] });
+      return () => observer.disconnect();
+    }
     const input = document.querySelector<HTMLInputElement>('[aria-label="GitHub issue"]');
     if (!input) return;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -76,6 +118,7 @@ function Harness() {
       project={{ workspaceId: "ferryx", repoRoot: "/repo/ferryx", gitRoot: "/repo/ferryx" }}
       onClose={() => {}}
       onCreated={() => {}}
+      agents={[{ name: "claude" }, { name: "codex" }]}
     />
   );
 }

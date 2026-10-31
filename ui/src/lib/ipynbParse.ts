@@ -32,7 +32,8 @@ function normalizeSource(source: unknown): string {
 }
 
 function parseStreamOutput(raw: Record<string, unknown>): NotebookOutput | null {
-  const text = normalizeSource(raw.text);
+  // Stream output carries the kernel's raw terminal colors; the preview is plain text.
+  const text = stripAnsi(normalizeSource(raw.text));
   return {
     kind: "text",
     text,
@@ -172,7 +173,15 @@ export function parseNotebook(text: string): ParsedNotebook | null {
   }
 
   const obj = parsed as Record<string, unknown>;
-  if (!Array.isArray(obj.cells)) {
+  // nbformat v3 nests cells under worksheets[0].cells.
+  let rawCells: unknown = obj.cells;
+  if (!Array.isArray(rawCells) && Array.isArray(obj.worksheets)) {
+    const sheet: unknown = obj.worksheets[0];
+    if (sheet && typeof sheet === "object" && !Array.isArray(sheet)) {
+      rawCells = (sheet as Record<string, unknown>).cells;
+    }
+  }
+  if (!Array.isArray(rawCells)) {
     return null;
   }
 
@@ -193,7 +202,7 @@ export function parseNotebook(text: string): ParsedNotebook | null {
   }
 
   const cells: NotebookCell[] = [];
-  for (const rawCell of obj.cells) {
+  for (const rawCell of rawCells) {
     const cell = parseCell(rawCell);
     if (cell) {
       cells.push(cell);

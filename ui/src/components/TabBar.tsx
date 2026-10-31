@@ -293,7 +293,7 @@ export function TabBar({
     const hasTabsToRight = index >= 0 && index < tabs.length - 1;
     const hasTabsToLeft = index > 0;
     const hasOtherTabs = tabs.length > 1;
-    const canSplitTerminal = tab.kind !== "browser" && tab.kind !== "file";
+    const canSplitTerminal = isTerminalTab(tab);
     const items: NativeMenuEntry[] = [];
     const actions: Record<string, () => void> = {};
     if (tab.kind === "browser" && onDuplicateBrowser) {
@@ -405,7 +405,7 @@ export function TabBar({
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
       actions["reset-agent-state"] = () => onResetAgentState(tab.id);
     }
-    if (tab.kind !== "browser" && tab.kind !== "file") {
+    if (isTerminalTab(tab)) {
       const lifecycleSessionId = sessionIdForLifecycle?.(tab) ?? tab.sessionId;
       items.push({ kind: "separator" });
       items.push({ kind: "item", id: "restart-session", label: "Restart Session" });
@@ -489,7 +489,7 @@ export function TabBar({
         <div className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
-            const sleeping = tab.kind !== "browser" && tab.kind !== "file" && sleepingSessionIds.has(tab.sessionId);
+            const sleeping = isTerminalTab(tab) && sleepingSessionIds.has(tab.sessionId);
             const fileTitle = tab.kind === "file" && filePathsForTab ? filePathsForTab(tab).absolute : undefined;
             return (
               <SortableTab

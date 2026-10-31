@@ -2,7 +2,7 @@
 use ferryx_lib::daemon::client::DaemonClient;
 use ferryx_lib::daemon::server::DaemonServer;
 use ferryx_lib::ipc::{
-    cmd_project_branches, cmd_project_initial, cmd_project_register, derive_workspace_id,
+    cmd_project_initial, cmd_project_refs, cmd_project_register, derive_workspace_id,
     initial_project, initial_project_from_path, IpcErrorCode, ProjectBranchesRequest, RegisterProjectRequest,
     LEGACY_DEFAULT_WORKSPACE_ID,
 };
@@ -256,14 +256,15 @@ async fn project_registration_returns_canonical_root_and_lists_local_branches() 
     assert!(registration_json.get("repoRoot").is_some());
     assert!(registration_json.get("workspace_id").is_none());
 
-    let branches = cmd_project_branches(
+    let branches = cmd_project_refs(
         registry_state,
         ProjectBranchesRequest {
             workspace_id: "project-a".into(),
         },
     )
     .await
-    .expect("list local branches");
+    .expect("list local branches")
+    .branches;
 
     let names = branches
         .iter()
@@ -399,7 +400,7 @@ async fn legacy_default_workspace_id_is_never_registered_and_never_resolves() {
     assert_ne!(initial.workspace_id, LEGACY_DEFAULT_WORKSPACE_ID);
 
     // The canonical ID a migrating client adopts is immediately usable.
-    cmd_project_branches(
+    cmd_project_refs(
         registry_state.clone(),
         ProjectBranchesRequest {
             workspace_id: initial.workspace_id.clone(),
@@ -408,7 +409,7 @@ async fn legacy_default_workspace_id_is_never_registered_and_never_resolves() {
     .await
     .expect("canonical branch listing");
 
-    let error = cmd_project_branches(
+    let error = cmd_project_refs(
         registry_state.clone(),
         ProjectBranchesRequest {
             workspace_id: LEGACY_DEFAULT_WORKSPACE_ID.into(),
@@ -625,17 +626,18 @@ async fn project_registration_accepts_non_git_roots_and_rejects_unregistered_bra
 
     // Plain workspaces have no branches; the dialog must receive an empty list
     // instead of a raw git failure.
-    let branches = cmd_project_branches(
+    let branches = cmd_project_refs(
         registry_state.clone(),
         ProjectBranchesRequest {
             workspace_id: "plain-project".into(),
         },
     )
     .await
-    .expect("plain workspaces report zero branches");
+    .expect("plain workspaces report zero branches")
+    .branches;
     assert!(branches.is_empty());
 
-    let error = cmd_project_branches(
+    let error = cmd_project_refs(
         registry_state,
         ProjectBranchesRequest {
             workspace_id: "missing-project".into(),

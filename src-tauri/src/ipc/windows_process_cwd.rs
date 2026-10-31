@@ -119,7 +119,7 @@ pub(super) fn process_cwd(pid: u32) -> Option<PathBuf> {
     let mut bytes = vec![0u8; length];
     process.read(buffer, &mut bytes)?;
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .collect();
     Some(PathBuf::from(std::ffi::OsString::from_wide(&units)))
