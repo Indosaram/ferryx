@@ -113,6 +113,23 @@ describe("file preview tabs", () => {
     expect(result.current.state.layout.tabs.filter((tab) => tab.kind === "file")).toHaveLength(1);
   });
 
+  it("reuses remote identity across immutable cache copies and keeps different hosts separate", () => {
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    const request = {
+      path: "/cache/one/readme.md", backendSessionId: "back-1", line: null, col: null,
+      remote: { workspaceId: "ssh:host-a", path: "/srv/readme.md", sessionId: null },
+    };
+    let firstId = "";
+    act(() => { firstId = result.current.openFilePreviewTab(source, request); });
+    let refreshedId = "";
+    act(() => { refreshedId = result.current.openFilePreviewTab(source, { ...request, path: "/cache/two/readme.md" }); });
+    expect(refreshedId).toBe(firstId);
+    expect(result.current.state.layout.tabs.find((tab) => tab.id === firstId)).toMatchObject({ path: "/cache/two/readme.md", remote: request.remote });
+    let otherHostId = "";
+    act(() => { otherHostId = result.current.openFilePreviewTab(source, { ...request, remote: { ...request.remote, workspaceId: "ssh:host-b" } }); });
+    expect(otherHostId).not.toBe(firstId);
+  });
+
 
   it("keeps previews parked in another workspace when a tab closes here", async () => {
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));

@@ -55,6 +55,16 @@ function renderedLineNumbers(): number[] {
 }
 
 describe("FilePreviewText windowed source view", () => {
+  it("allows wrapping without mounting the entire large document", () => {
+    render(<FilePreviewText {...propsOf({ payload: payloadOf({ text: numberedText(5_000) }) })} />);
+    const toggle = screen.getByRole("button", { name: "Toggle word wrap" });
+    expect(toggle).toBeEnabled();
+    const previous = toggle.getAttribute("aria-pressed");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).not.toBe(previous);
+    expect(renderedLineNumbers().length).toBeLessThan(200);
+  });
+
   it("renders far fewer line rows than a 50,000-line document has", () => {
     render(<FilePreviewText {...propsOf({ payload: payloadOf({ text: numberedText(50_000) }) })} />);
 

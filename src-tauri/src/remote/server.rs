@@ -4847,8 +4847,7 @@ async fn ensure_file_read_session_is_host_local(
 
 /// Where a relative file-read path anchors. The session's live shell cwd wins: it is
 /// what the terminal printed relative to, while the request cwd is only the desktop's
-/// stored spawn directory. Without a live cwd an explicit request cwd stays
-/// authoritative (`None` here), then the session's worktree.
+/// stored spawn directory. Neither that stale directory nor the worktree is a fallback.
 async fn file_read_session_base(
     backend: &dyn crate::remote::backend::RemoteSessionBackend,
     req: &super::machine_protocol::FileReadRequest,
@@ -4863,16 +4862,7 @@ async fn file_read_session_base(
     if let Some(live) = backend.live_cwd(id).await.filter(|p| p.is_absolute()) {
         return Ok(Some(live));
     }
-    if req.cwd.is_some() {
-        return Ok(None);
-    }
-    backend
-        .describe_session(id)
-        .await
-        .ok()
-        .and_then(|details| details.worktree_path)
-        .map(Some)
-        .ok_or_else(|| machine_error(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND").into())
+    Err(machine_error(StatusCode::BAD_REQUEST, "REMOTE_CWD_UNKNOWN").into())
 }
 
 /// A live shell cwd replaces the desktop-supplied cwd, which is only the session's
@@ -5039,12 +5029,23 @@ mod file_read_session_base_tests {
     }
 
     #[tokio::test]
-    async fn relative_path_falls_back_to_worktree_without_live_cwd() {
+    async fn relative_path_refuses_worktree_and_stale_supplied_cwd_without_live_cwd() {
         let backend = LiveCwdBackend { worktree: PathBuf::from("/wt"), live: None };
-        let base = file_read_session_base(&backend, &req("shot.png", None)).await.ok().flatten();
-        assert_eq!(base, Some(PathBuf::from("/wt")));
-        let explicit = file_read_session_base(&backend, &req("shot.png", Some("/other"))).await.ok().flatten();
-        assert_eq!(explicit, None, "without a live cwd the explicit request cwd stays authoritative");
+        for cwd in [None, Some("/other")] {
+            let refusal = match file_read_session_base(&backend, &req("shot.png", cwd)).await {
+                Err(refusal) => refusal,
+                Ok(_) => panic!("unknown live cwd must not use a fallback"),
+            };
+            let response = refusal.into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "REMOTE_CWD_UNKNOWN");
+        }
+        let absolute = std::env::temp_dir().join("file-preview.txt");
+        for path in [absolute.to_str().unwrap(), "~/file-preview.txt"] {
+            assert!(matches!(file_read_session_base(&backend, &req(path, None)).await, Ok(None)));
+        }
     }
 
     #[tokio::test]

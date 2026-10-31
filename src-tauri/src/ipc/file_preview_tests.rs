@@ -1852,6 +1852,17 @@ async fn an_owner_less_relative_token_never_resolves_against_the_app_cwd() {
 }
 
 #[tokio::test]
+async fn failed_unique_owner_open_removes_the_empty_slot() {
+    let dir = TempDir::new().expect("tempdir");
+    let service = service().await;
+    let mut input = request(dir.path(), "missing.txt");
+    input.owner_id = "refresh-attempt".to_string();
+    let slot = slot_key(&input.window_label, &input.owner_id);
+    assert!(service.open(input).await.is_err());
+    assert!(!service.registry.lock().windows.contains_key(&slot));
+}
+
+#[tokio::test]
 async fn a_stalled_body_never_blocks_a_seek_on_the_same_document() {
     let dir = TempDir::new().expect("tempdir");
     let total = limits::STREAM_CHUNK_BYTES * 256; // 16 MiB: far beyond socket buffers

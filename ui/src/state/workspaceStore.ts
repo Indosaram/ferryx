@@ -718,7 +718,7 @@ export type WorkspaceAction =
     }
   | { type: "UPDATE_BROWSER_TAB"; tabId: string; browserId?: string; updates: Partial<BrowserTab> }
   | { type: "ACTIVATE_TAB"; tabId: string }
-  | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null }
+  | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null; path?: string; remote?: FilePreviewOpenRequest["remote"] }
   | { type: "REORDER_TAB"; tabId: string; targetIndex: number }
   | { type: "RENAME_TAB"; tabId: string; label: string }
   | { type: "SET_TAB_PINNED"; tabId: string; pinned: boolean }
@@ -2342,13 +2342,17 @@ export function useWorkspaceStore({
       // only a relative path depends on the requesting session's cwd.
       const absolute = /^(?:\/|\\\\|[a-zA-Z]:[\\/])/.test(request.path);
       const sameFile = (tab: WorkspaceTab) =>
-        tab.kind === "file" && tab.path === request.path && (absolute || tab.backendSessionId === request.backendSessionId);
+        tab.kind === "file" && (request.remote
+          ? tab.remote?.workspaceId === request.remote.workspaceId && tab.remote.path === request.remote.path
+          : !tab.remote && tab.path === request.path && (absolute || tab.backendSessionId === request.backendSessionId));
       const existing = (targetWorktreePath === snapshot.activeWorktreePath ? snapshot.layout.tabs : []).find(sameFile);
       if (existing && existing.kind === "file") {
         retainFilePreview(existing.previewId, source, request);
         dispatch({
           type: "UPDATE_FILE_TAB",
           tabId: existing.id,
+          path: request.path,
+          remote: request.remote,
           line: request.line,
           col: request.col,
         });
@@ -2364,6 +2368,8 @@ export function useWorkspaceStore({
           dispatch({
             type: "UPDATE_FILE_TAB",
             tabId: parkedTab.id,
+            path: request.path,
+            remote: request.remote,
             line: request.line,
             col: request.col,
           });
@@ -2383,6 +2389,7 @@ export function useWorkspaceStore({
         col: request.col,
         workspaceId: source.workspaceId,
         previewId: tabId,
+        ...(request.remote ? { remote: request.remote } : {}),
       };
       retainFilePreview(tabId, source, request);
       dispatch({ type: "ADD_TAB_WITH_SESSION", tab, targetWorktreePath: targetWorktreePath ?? undefined });

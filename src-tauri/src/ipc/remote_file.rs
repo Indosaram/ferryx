@@ -443,11 +443,8 @@ fn portable_cache_name(sanitized: &str) -> String {
     }
 }
 
-/// Writes one fetched file into the remote-files cache and returns where it
-/// landed. The temp file is quarantined before it becomes visible. When the
-/// previous copy cannot be replaced (Windows refuses while a viewer holds it
-/// open) the fetch is published under a fresh sibling directory instead. Stale
-/// copies and orphaned temp files are pruned first.
+/// Publishes an immutable quarantined copy so concurrent fetches cannot overwrite
+/// bytes owned by another preview. Old copies are pruned by the cache age policy.
 pub(crate) fn write_cache_file(target: &Path, bytes: &[u8]) -> Result<PathBuf, IpcError> {
     let io = |message: String| IpcError::new(IpcErrorCode::IoError, message);
     let parent = target
@@ -482,10 +479,6 @@ pub(crate) fn write_cache_file(target: &Path, bytes: &[u8]) -> Result<PathBuf, I
     }
     mark_downloaded(&temp);
 
-    let replace_error = match std::fs::rename(&temp, target) {
-        Ok(()) => return Ok(target.to_path_buf()),
-        Err(error) => error,
-    };
     let fresh_dir = parent.join(uuid::Uuid::new_v4().simple().to_string());
     let fresh = fresh_dir.join(name);
     match std::fs::create_dir_all(&fresh_dir).and_then(|()| std::fs::rename(&temp, &fresh)) {
@@ -493,7 +486,7 @@ pub(crate) fn write_cache_file(target: &Path, bytes: &[u8]) -> Result<PathBuf, I
         Err(error) => {
             let _ = std::fs::remove_file(&temp);
             Err(io(format!(
-                "Failed to write cached remote file: {replace_error}; {error}"
+                "Failed to write cached remote file: {error}"
             )))
         }
     }
@@ -932,13 +925,14 @@ mod tests {
     }
 
     #[test]
-    fn cache_write_falls_back_to_a_fresh_path_when_the_old_copy_cannot_be_replaced() {
+    fn cache_write_preserves_each_published_copy() {
         let dir = tempfile::tempdir().unwrap();
         let target = remote_cache_path(dir.path(), "ssh:ws", "/srv/run.png");
-        assert_eq!(write_cache_file(&target, b"one").unwrap(), target);
-        assert_eq!(std::fs::read(&target).unwrap(), b"one");
-        assert_eq!(write_cache_file(&target, b"two").unwrap(), target);
-        assert_eq!(std::fs::read(&target).unwrap(), b"two");
+        let first = write_cache_file(&target, b"one").unwrap();
+        let second = write_cache_file(&target, b"two").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        assert_eq!(std::fs::read(&second).unwrap(), b"two");
 
         // A rename onto a non-empty directory fails on every platform, standing
         // in for Windows refusing to replace a file a viewer holds open.
@@ -962,7 +956,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = remote_files_root(dir.path());
         let old = remote_cache_path(dir.path(), "ssh:ws", "/srv/.env");
-        write_cache_file(&old, b"SECRET=1").unwrap();
+        let old = write_cache_file(&old, b"SECRET=1").unwrap();
         let orphan = old.parent().unwrap().join(".abc.tmp");
         std::fs::write(&orphan, b"partial").unwrap();
         let keep = remote_cache_path(dir.path(), "ssh:ws", "/srv/new.txt");
