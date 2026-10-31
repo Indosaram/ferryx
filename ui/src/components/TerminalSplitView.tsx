@@ -1455,6 +1455,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   line={content.line}
                   col={content.col}
                   workspaceId={content.workspaceId}
+                  visible={tabVisible}
                 />
               );
             case "changes":

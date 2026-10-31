@@ -262,6 +262,39 @@ describe("FilePreviewDialog", () => {
     expect(document.activeElement).toBe(last);
   });
 
+  it("skips hidden focusables when wrapping Tab focus", async () => {
+    function RendererWithHiddenTail(_props: FilePreviewTextProps) {
+      return (
+        <div>
+          <button type="button">visible tail</button>
+          <div hidden>
+            <button type="button">hidden by attribute</button>
+          </div>
+          <div style={{ display: "none" }}>
+            <button type="button">hidden by display</button>
+          </div>
+        </div>
+      );
+    }
+    const controller = makeController();
+    render(<FilePreviewDialog controller={controller} renderers={{ text: RendererWithHiddenTail }} />);
+    await openPreview(controller, SOURCE, REQUEST);
+
+    const dialog = screen.getByRole("dialog");
+    const all = Array.from(dialog.querySelectorAll<HTMLElement>("button"));
+    const first = all[0]!;
+    const visibleTail = screen.getByRole("button", { name: "visible tail" });
+    expect(all[all.length - 1]).not.toBe(visibleTail);
+
+    visibleTail.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+
+    first.focus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(visibleTail);
+  });
+
   it("delegates a ready payload to the injected render slot with the live generation", async () => {
     const controller = makeController();
     render(<FilePreviewDialog controller={controller} renderers={{ text: StubTextRenderer }} />);

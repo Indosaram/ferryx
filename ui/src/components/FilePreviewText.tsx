@@ -27,6 +27,7 @@ import {
 } from "../lib/previewMarkdown";
 import { highlightLines, languageForPath } from "../lib/previewHighlight";
 import { extractMarkdownHeadingIndex, type MarkdownHeadingIndex } from "../lib/markdownToc";
+import { useLineWindow } from "../lib/useLineWindow";
 import {
   loadFilePreviewWordWrap,
   loadMarkdownFontSize,
@@ -38,6 +39,17 @@ import {
 
 const NO_MATCHES: readonly PreviewMatch[] = [];
 const EMPTY_HEADING_INDEX: MarkdownHeadingIndex = { headings: [], slugByLine: new Map() };
+
+/**
+ * Source views with more lines than this are windowed: only the visible lines plus
+ * overscan are mounted. Smaller documents keep every line mounted (no behaviour change).
+ */
+export const SOURCE_WINDOW_THRESHOLD = 2000;
+/** Pitch of one unwrapped source line: `text-[12px] leading-5` is a 20px line box. */
+const SOURCE_LINE_HEIGHT = 20;
+
+/** A scroll/selection target that waits until its line is mounted by the window. */
+type PendingReveal = { index: number; attempted: boolean };
 
 /**
  * Scrolls to a heading id inside one rendered document only; a global
@@ -134,27 +146,87 @@ export function FilePreviewText({
     setRequestedMatch(0);
   }, [query, text]);
 
-  // Selecting the active match is how "search" behaves here: it moves the
-  // browser selection over existing text and never rewrites the document.
+  // Large documents mount only the visible lines. Windowing assumes one visual row per
+  // line, so soft wrap is unavailable while it is active (it comes back when printing,
+  // because printing mounts every line).
+  const lineWindow = useLineWindow({
+    count: lines.length,
+    enabled: showSource && lines.length > SOURCE_WINDOW_THRESHOLD,
+    estimatedRowHeight: SOURCE_LINE_HEIGHT,
+  });
+  const windowed = lineWindow.active;
+  const effectiveWordWrap = wordWrap && !windowed;
+  // Only the mounted lines size the content, so give the windowed list the width of the
+  // longest line (gutter w-10 + gap-3 = 3.25rem) to keep horizontal scrolling stable.
+  const windowedMinWidth = useMemo(() => {
+    if (!windowed) return undefined;
+    let longest = 0;
+    for (const line of lines) if (line.length > longest) longest = line.length;
+    return `calc(${longest}ch + 3.25rem)`;
+  }, [lines, windowed]);
+  const { scrollRef: setWindowScroller, scrollToIndex, start: windowStart, end: windowEnd } = lineWindow;
+  const setSourceElement = useCallback(
+    (element: HTMLDivElement | null) => {
+      sourceRef.current = element;
+      setWindowScroller(element);
+    },
+    [setWindowScroller],
+  );
+
+  // Caret and active-match reveals are queued and retried once the window has mounted
+  // their line: an unmounted line is first scrolled to by arithmetic (index * line height).
+  const pendingCaret = useRef<PendingReveal | null>(null);
+  const pendingMatch = useRef<PendingReveal | null>(null);
+
   useEffect(() => {
-    if (!showSource || activeMatch < 0) return;
-    const host = sourceRef.current?.querySelector(`[data-testid="file-preview-match-${activeMatch}"]`);
-    if (!(host instanceof HTMLElement)) return;
-    host.scrollIntoView({ block: "center" });
-    const selection = window.getSelection?.();
-    const node = host.firstChild;
-    if (!selection || !node) return;
-    const range = document.createRange();
-    range.selectNodeContents(host);
-    selection.removeAllRanges();
-    selection.addRange(range);
+    pendingCaret.current = showSource && caret ? { index: caret.line - 1, attempted: false } : null;
+  }, [caret, showSource]);
+
+  useEffect(() => {
+    pendingMatch.current = showSource && activeMatch >= 0 ? { index: activeMatch, attempted: false } : null;
   }, [activeMatch, matches, showSource]);
 
   useEffect(() => {
-    if (!showSource || !caret) return;
-    const line = sourceRef.current?.querySelector(`[data-testid="file-preview-line-${caret.line}"]`);
-    if (line instanceof HTMLElement) line.scrollIntoView({ block: "center" });
-  }, [caret, showSource]);
+    const host = sourceRef.current;
+    if (!host) return;
+
+    const caretReveal = pendingCaret.current;
+    if (caretReveal) {
+      const line = host.querySelector(`[data-testid="file-preview-line-${caretReveal.index + 1}"]`);
+      if (line instanceof HTMLElement) {
+        line.scrollIntoView({ block: "center" });
+        pendingCaret.current = null;
+      } else if (windowed && !caretReveal.attempted) {
+        // Retried when the window moves (or the scroller attaches, which renews scrollToIndex).
+        caretReveal.attempted = scrollToIndex(caretReveal.index);
+      } else {
+        pendingCaret.current = null;
+      }
+    }
+
+    // Selecting the active match is how "search" behaves here: it moves the
+    // browser selection over existing text and never rewrites the document.
+    const matchReveal = pendingMatch.current;
+    if (matchReveal) {
+      const mark = host.querySelector(`[data-testid="file-preview-match-${matchReveal.index}"]`);
+      const match = matches[matchReveal.index];
+      if (mark instanceof HTMLElement) {
+        pendingMatch.current = null;
+        mark.scrollIntoView({ block: "center" });
+        const selection = window.getSelection?.();
+        if (selection && mark.firstChild) {
+          const range = document.createRange();
+          range.selectNodeContents(mark);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      } else if (windowed && match && !matchReveal.attempted) {
+        matchReveal.attempted = scrollToIndex(match.line);
+      } else {
+        pendingMatch.current = null;
+      }
+    }
+  }, [activeMatch, caret, matches, showSource, windowed, windowStart, windowEnd, scrollToIndex]);
 
   useEffect(
     () => () => {
@@ -286,9 +358,10 @@ export function FilePreviewText({
         <div className="ml-auto flex items-center gap-2">
           {showSource ? (
             <ToolbarButton
-              label="Toggle word wrap"
+              label={windowed ? "Word wrap is unavailable for very long files" : "Toggle word wrap"}
               testId="file-preview-wrap-toggle"
-              pressed={wordWrap}
+              pressed={effectiveWordWrap}
+              disabled={windowed}
               onClick={handleWordWrapToggle}
             >
               <WrapText aria-hidden className="size-3.5" />
@@ -341,35 +414,50 @@ export function FilePreviewText({
 
       {showSource ? (
         <div
-          ref={sourceRef}
+          ref={setSourceElement}
           data-testid="file-preview-source"
+          data-windowed={windowed ? "true" : undefined}
           role="document"
           aria-readonly="true"
           aria-label={`${payload.displayName} source`}
           tabIndex={0}
           className="selectable min-h-0 flex-1 overflow-auto px-2 py-2 font-mono text-[12px] leading-5 focus-visible:outline-none"
         >
-          {/* Every line stays mounted (no windowing); memoized lines with stable props keep a
+          {/* Small documents keep every line mounted; large ones mount only the window, with
+              spacers keeping the full scroll height. Memoized lines with stable props keep a
               search keystroke from re-rendering lines whose matches did not change. */}
-          {lines.map((line, index) => {
-            const lineMatches = matchesByLine.get(index) ?? NO_MATCHES;
-            const matchOffset = firstIndexByLine.get(index) ?? -1;
-            const ownsActiveMatch =
-              matchOffset >= 0 && activeMatch >= matchOffset && activeMatch < matchOffset + lineMatches.length;
-            return (
-              <SourceLine
-                key={index}
-                line={line}
-                highlightedHtml={query.trim().length === 0 ? highlightedLines?.[index] : undefined}
-                number={index + 1}
-                caret={caret && caret.line === index + 1 ? caret : null}
-                matches={lineMatches}
-                activeMatch={ownsActiveMatch ? activeMatch : -1}
-                matchOffset={matchOffset}
-                wordWrap={wordWrap}
+          <div ref={lineWindow.listRef} style={windowedMinWidth ? { minWidth: windowedMinWidth } : undefined}>
+            {lineWindow.padTop > 0 ? (
+              <div aria-hidden data-testid="file-preview-window-spacer-top" style={{ height: lineWindow.padTop }} />
+            ) : null}
+            {lines.slice(windowStart, windowEnd).map((line, offset) => {
+              const index = windowStart + offset;
+              const lineMatches = matchesByLine.get(index) ?? NO_MATCHES;
+              const matchOffset = firstIndexByLine.get(index) ?? -1;
+              const ownsActiveMatch =
+                matchOffset >= 0 && activeMatch >= matchOffset && activeMatch < matchOffset + lineMatches.length;
+              return (
+                <SourceLine
+                  key={index}
+                  line={line}
+                  highlightedHtml={highlightedLines?.[index]}
+                  number={index + 1}
+                  caret={caret && caret.line === index + 1 ? caret : null}
+                  matches={lineMatches}
+                  activeMatch={ownsActiveMatch ? activeMatch : -1}
+                  matchOffset={matchOffset}
+                  wordWrap={effectiveWordWrap}
+                />
+              );
+            })}
+            {lineWindow.padBottom > 0 ? (
+              <div
+                aria-hidden
+                data-testid="file-preview-window-spacer-bottom"
+                style={{ height: lineWindow.padBottom }}
               />
-            );
-          })}
+            ) : null}
+          </div>
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -531,6 +619,7 @@ const SourceLine = memo(function SourceLine({
   return (
     <div
       data-testid={`file-preview-line-${number}`}
+      data-line-window-row=""
       data-target={caret ? "true" : undefined}
       className={cn("flex items-start gap-3 rounded-sm", !wordWrap && "min-w-fit", caret && "bg-accent/60")}
     >
@@ -542,6 +631,8 @@ const SourceLine = memo(function SourceLine({
         {number}
       </span>
       {matches.length > 0 ? (
+        // Only lines that contain a match drop the syntax highlight (the marks are spliced
+        // into the literal text); every other line keeps its highlightedHtml and props.
         <span className={contentClass}>
           {renderMatchSegments(line, matches, activeMatch, matchOffset, caret)}
         </span>

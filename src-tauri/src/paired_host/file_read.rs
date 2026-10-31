@@ -189,6 +189,34 @@ fn invalid_response(message: &str) -> IpcError {
         .with_details(serde_json::json!({ "reason": "pairedFileReadInvalidResponse" }))
 }
 
+/// Keeps only a cwd the host can anchor on (absolute on either platform) and refuses a
+/// relative token that has neither such a cwd nor a host session whose live cwd the host
+/// can read: the host would otherwise answer with a misleading invalid-path refusal, and
+/// the UI must be able to say that the terminal's directory is unknown.
+pub(crate) fn admit_paired_cwd(
+    path: &str,
+    cwd: Option<String>,
+    session_id: Option<&str>,
+) -> Result<Option<String>, IpcError> {
+    // The host may run another OS than this desktop, so absolute means absolute on either.
+    let any_absolute = |p: &str| {
+        let b = p.as_bytes();
+        Path::new(p).is_absolute()
+            || p.starts_with('/')
+            || p.starts_with("\\\\")
+            || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+    };
+    let cwd = cwd.filter(|c| any_absolute(c));
+    if cwd.is_none() && session_id.is_none() && !is_home_or_absolute(path) && !any_absolute(path) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            "The paired terminal's current directory is unknown, so a relative path cannot be resolved",
+        )
+        .with_details(serde_json::json!({ "reason": "remoteCwdUnknown" })));
+    }
+    Ok(cwd)
+}
+
 /// Pulls pages from `fetch(offset)` until eof and returns (resolved path, bytes). Every page
 /// must continue at the requested offset with a stable path and size within `max_bytes`.
 pub async fn read_all_chunks<F, Fut>(
@@ -300,6 +328,7 @@ pub async fn fetch_paired_file(
     cwd: Option<String>,
     path: String,
 ) -> Result<(PathBuf, String, u64), IpcError> {
+    let cwd = admit_paired_cwd(&path, cwd, session_id.as_deref())?;
     let host = crate::paired_host::upload::resolve_paired_host(daemon, data_dir, workspace_id).await?;
     ensure_daemon_proxies_file_read(daemon).await?;
     let caps = daemon
@@ -319,7 +348,6 @@ pub async fn fetch_paired_file(
         )
         .with_details(serde_json::json!({ "reason": "pairedHostNeedsUpdate" })));
     }
-    let cwd = cwd.filter(|c| Path::new(c).is_absolute() || c.starts_with('/'));
     let (remote_path, bytes) = read_all_chunks(
         |offset| {
             let request = m::FileReadRequest {
@@ -507,6 +535,34 @@ mod tests {
             offset,
             length,
         }
+    }
+
+    #[test]
+    fn paired_relative_token_without_cwd_or_session_is_refused_as_cwd_unknown() {
+        for cwd in [None, Some("relative/dir".to_string())] {
+            let err = admit_paired_cwd("src/main.rs", cwd.clone(), None).unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::InvalidRequest, "{cwd:?}");
+            assert_eq!(err.details.as_ref().unwrap()["reason"], "remoteCwdUnknown", "{cwd:?}");
+        }
+        // A host session lets the host anchor on its live cwd or worktree.
+        assert_eq!(admit_paired_cwd("src/main.rs", None, Some("host-s1")).unwrap(), None);
+        // An invalid cwd is dropped, never forwarded.
+        assert_eq!(admit_paired_cwd("src/main.rs", Some("rel".into()), Some("host-s1")).unwrap(), None);
+        assert_eq!(
+            admit_paired_cwd("src/main.rs", Some("/repo".into()), None).unwrap(),
+            Some("/repo".to_string())
+        );
+        for path in ["/etc/hosts", "~", "~/a.png"] {
+            assert_eq!(admit_paired_cwd(path, None, None).unwrap(), None, "{path}");
+        }
+        // A Windows host's absolute paths need no cwd either, whatever the desktop OS.
+        for path in [r"C:\logs\run.txt", r"\\srv\share\a.txt"] {
+            assert_eq!(admit_paired_cwd(path, None, None).unwrap(), None, "{path}");
+        }
+        assert_eq!(
+            admit_paired_cwd("a.txt", Some(r"C:\repo".into()), None).unwrap(),
+            Some(r"C:\repo".to_string())
+        );
     }
 
     #[test]
