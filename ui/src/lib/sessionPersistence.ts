@@ -15,7 +15,14 @@ import { getBrowserScroll, type BrowserScrollPosition } from "./browserHistory";
 import { normalizeSessionId, providerSessionKeyForAgent } from "./agentResume";
 import { isAbsoluteTerminalCwd } from "./terminalCwd";
 import type { RecoveryAuthorityEvidence } from "./tauri";
-import { getSessionProcessState, getSessionRecentScrollback, restoreSessionRecentScrollback } from "./sessionLifecycle";
+import {
+  createStandbyBackendSessionId,
+  getSessionProcessState,
+  getSessionRecentScrollback,
+  isStandbyBackendSessionId,
+  REMOTE_SESSION_GONE_REASON,
+  restoreSessionRecentScrollback,
+} from "./sessionLifecycle";
 import {
   createBrowserPaneContent,
   createChangesPaneContent,
@@ -558,6 +565,9 @@ export function deserializeWorkspaceState(
 
     const isSshSession = ws.target?.kind === "ssh" || workspaceId.startsWith("ssh:");
     const isPairedSession = ws.target?.kind === "pairedDaemon";
+    // A remote pane saved after its backend was confirmed gone carries a frontend-only standby id.
+    // It names no remote target, so it restores in the same gone shape instead of a reattach.
+    const isRemoteGone = (isSshSession || isPairedSession) && isStandbyBackendSessionId(persistedBackendSessionId);
     // daemonEpoch is the owning local daemon's start wall-clock (ms). A daemon that started
     // before the host booted cannot have survived the reboot, nor can its PTYs: this is
     // positive exit evidence, unlike inventory absence (INV-1).
@@ -571,7 +581,13 @@ export function deserializeWorkspaceState(
     const persistedLifecycle: TerminalLifecycle = "working";
     let isReconnecting = false;
     let isBlockedConflict = false;
-    if (isPairedSession) {
+    if (isRemoteGone) {
+      backendSessionId = createStandbyBackendSessionId(localSessionId);
+      daemonEpoch = null;
+      lastOutputSequence = null;
+      lifecycle = "exited";
+      processState = "standby";
+    } else if (isPairedSession) {
       // Local inventory is not authority for remote liveness or remote epochs.
       // Retain the proxy binding for exact-target reattach, never create a shell.
       backendSessionId = persistedBackendSessionId;
@@ -748,9 +764,11 @@ export function deserializeWorkspaceState(
             message: "Different incarnation detected for session; recovery blocked",
           }
         : null,
-      backendUnavailableReason: isBlockedConflict ? "identity_conflict" : null,
+      backendUnavailableReason: isBlockedConflict ? "identity_conflict" : isRemoteGone ? REMOTE_SESSION_GONE_REASON : null,
       reconnectRequestId: null,
-      ...(isSshSession || isPairedSession
+      ...(isRemoteGone
+        ? {}
+        : isSshSession || isPairedSession
         ? { remoteConnectionState: persistedBackendSessionId ? "reconnecting" : "legacyLost" }
         : isBlockedConflict
           ? { remoteConnectionState: "disconnected" }

@@ -20,6 +20,7 @@ import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
 import { withTimeout } from "../lib/withTimeout";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "../lib/remoteProject";
+import { createStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON } from "../lib/sessionLifecycle";
 import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
 import { hasValidProjectTarget } from "../lib/projectIdentity";
 import { getCachedSshHosts } from "../lib/sshHosts";
@@ -809,6 +810,8 @@ export type WorkspaceAction =
       live: import("./workspaceRestore").LocalLiveSessionMap | null;
     }
   | { type: "SESSION_REMOTE_STATUS"; status: import("../lib/types").SshRecoveryStatus; daemonEpoch?: string | null }
+  /** The owning daemon confirmed this exact remote backend gone (paired affirmative exit/expiry). */
+  | { type: "REMOTE_SESSION_GONE"; sessionId: string; backendSessionId: string }
   | {
       type: "SET_RECONNECT_LIFECYCLE";
       sessionId: string;
@@ -3687,14 +3690,20 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const lostSessionIds: string[] = [];
       for (const [id, session] of Object.entries(sessions)) {
         if (session.backendSessionId !== action.status.sessionId || !isRemoteWorkspaceId(session.workspaceId)) continue;
-        // `expired` is the daemon confirming the remote process itself exited and `legacyLost` is a
-        // pre-reattach session that can never be restored: both kill the process running in it.
+        // Only an expired target failure confirms process loss. Retry exhaustion also emits an
+        // expired state, but its transport failure leaves process ownership uncertain.
         // `missing` only says the daemon we queried does not know this session, which is transient
         // (a draining predecessor daemon may still own it, or restore has not completed), so it must
         // not be read as process death. `disconnected`/`reconnecting` is only the control channel
         // dropping: in all three cases the remote agent keeps working and its activity must survive.
-        const lost = ["expired", "legacyLost"].includes(action.status.state);
-        if (lost) lostSessionIds.push(id);
+        const lost = action.status.state === "expired" && action.status.failure?.kind === "expired";
+        if (lost) {
+          // Process death is not pane death: like a local pane whose PTY is gone, the pane keeps
+          // its identity and agent on a standby backend and is resumed on the same remote host.
+          lostSessionIds.push(id);
+          sessions[id] = remoteSessionGone(session, action.status.failure);
+          continue;
+        }
         const epochChanged = action.daemonEpoch != null && action.daemonEpoch !== session.daemonEpoch;
         sessions[id] = {
           ...session,
@@ -3708,6 +3717,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         };
       }
       return settleActivityForDeadSessions({ ...state, sessions }, lostSessionIds);
+    }
+    case "REMOTE_SESSION_GONE": {
+      const session = state.sessions[action.sessionId];
+      if (!session || session.backendSessionId !== action.backendSessionId ||
+          (!isPairedWorkspaceId(session.workspaceId) && !isRemoteWorkspaceId(session.workspaceId))) return state;
+      return settleActivityForDeadSessions({ ...state, sessions: {
+        ...state.sessions, [session.id]: remoteSessionGone(session, session.remoteFailure ?? null),
+      } }, [session.id]);
     }
     case "LOCAL_SESSIONS_RECONCILED": {
       let changed = false;
@@ -4449,6 +4466,27 @@ function settleActivityForDeadSessions(state: WorkspaceState, sessionIds: Iterab
     nextState = applySessionActivity(nextState, tabId, sessionId, { ...current, state: "done" });
   }
   return nextState;
+}
+
+/** The local standby shape for a remote pane whose backend is confirmed gone. */
+function remoteSessionGone(session: TerminalSession, failure: TerminalSession["remoteFailure"]): TerminalSession {
+  return {
+    ...session,
+    backendSessionId: createStandbyBackendSessionId(session.id),
+    processState: "standby",
+    lifecycle: "exited",
+    exitCode: null,
+    reconnectLifecycle: "idle",
+    reconnectError: null,
+    reconnectRequestId: null,
+    remoteConnectionState: undefined,
+    remoteGeneration: null,
+    remoteFailure: failure ?? null,
+    remoteReplayGap: null,
+    lastOutputSequence: null,
+    recoveryState: null,
+    backendUnavailableReason: REMOTE_SESSION_GONE_REASON,
+  };
 }
 
 /**

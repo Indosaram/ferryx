@@ -112,6 +112,26 @@ function workspaceState(): WorkspaceState {
 }
 
 describe("sessionPersistence v3 serialization and migration", () => {
+  it.each(["ssh:host:project", `daemon:${"a".repeat(64)}`])("restores confirmed-gone %s panes with their conversation ready to resume", (workspaceId) => {
+    const state = workspaceState();
+    const providerSession = { key: "session_id" as const, id: "saved-conversation", launcher: "mhc" as const };
+    state.sessions["sess-1"] = { ...state.sessions["sess-1"], workspaceId,
+      backendSessionId: "standby:sess-1", lifecycle: "exited", processState: "standby",
+      agentType: "omo", providerSession, backendUnavailableReason: "remote_session_gone" };
+    const project = workspaceId.startsWith("daemon:")
+      ? { target: { kind: "pairedDaemon" as const, hostId: "host" }, remoteWorkspaceId: "project" }
+      : undefined;
+    const saved = serializeWorkspaceState(workspaceId, "/workspace/main", state, null, project);
+    const restored = deserializeWorkspaceState(workspaceId, saved, []);
+    expect(restored?.sessions["sess-1"]).toMatchObject({
+      id: "sess-1", workspaceId, backendSessionId: "standby:sess-1",
+      lifecycle: "exited", processState: "standby", providerSession,
+      cwd: "/workspace/main/packages/api", backendUnavailableReason: "remote_session_gone",
+    });
+    expect(restored?.sessions["sess-1"].remoteConnectionState).toBeUndefined();
+    expect(restored?.layout.layoutsByTabId["tab-1"].sessionIdsByLeafId).toEqual(state.layout.layoutsByTabId["tab-1"].sessionIdsByLeafId);
+  });
+
   it("round trips all seven durable native binding fields", () => {
     const state = workspaceState();
     const attachTuple = {
