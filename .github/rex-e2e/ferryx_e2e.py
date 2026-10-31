@@ -557,12 +557,24 @@ def claude_turn(log, d, sid, settings, run, want):
     stream = Stream(d.socket, sid)
     extra = f" --settings {settings}" if settings else ""
     prompt = "Create a file named x.txt in the current directory containing exactly: hi"
-    trusted = {"done": False}
+    trusted = {"step": 0}
 
     def tick():
-        # Workspace trust dialog: accept the default ("Yes, proceed") once.
-        if not trusted["done"] and b"trust" in bytes(stream.output[-8192:]).lower():
-            trusted["done"] = True
+        # Workspace trust dialog. Claude Code 2.1.316 lists "No, exit" first with the cursor on it
+        # and "Yes, I trust this folder" second; older builds defaulted to "Yes, proceed". Move the
+        # cursor off "No" with one Down (the dialog has two options, so it lands on Yes), and
+        # confirm on the next tick. A partial TUI redraw can leave the old marker in the byte
+        # tail, so the confirm step does not re-read it.
+        tail = re.sub(rb"\x1b\[[0-9;?]*[ -/]*[@-~]", b"", bytes(stream.output[-8192:])).lower()
+        if trusted["step"] >= 2 or (trusted["step"] == 0 and b"trust" not in tail):
+            return
+        # The selection marker (U+276F) last drawn decides; "Yes, I trust this folder" itself
+        # contains "trust", so the marker is located from the end, not after "trust".
+        if trusted["step"] == 0 and re.match(rb"\xe2\x9d\xaf\s*no", tail[tail.rfind(b"\xe2\x9d\xaf"):]):
+            trusted["step"] = 1
+            d.write(sid, b"\x1b[B")
+        else:
+            trusted["step"] = 2
             d.write(sid, b"\r")
 
     start = stream.mark()
