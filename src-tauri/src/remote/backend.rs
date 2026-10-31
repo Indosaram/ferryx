@@ -245,6 +245,9 @@ impl RemoteSessionBackend for TerminalService {
     ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             if crate::terminal::paired_runtime::Runtime::owns(session_id) {
+                // Paired: Ok means the acknowledgement was sent to the owner. The
+                // owner wire has no correlation id, so its rejection is consumed
+                // by the proxy and never reaches (or tears down) this caller.
                 return self.paired().acknowledge_agent_outcome(session_id)
                     .map_err(|error| error.to_string())?
                     .await.map_err(|error| error.to_string());
