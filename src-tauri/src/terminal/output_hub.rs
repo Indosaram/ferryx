@@ -1233,7 +1233,7 @@ impl TerminalOutputHub {
         Some((history, rx))
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) fn observe_for_test(
         &self,
         session_id: &str,
