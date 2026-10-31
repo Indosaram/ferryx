@@ -86,19 +86,32 @@ function exitedState(lifecycle: "exited" | "failed" = "exited"): WorkspaceState 
 }
 
 describe("remote status death clears live agent work", () => {
-  it.each(["expired", "legacyLost"] as const)(
-    "settles the working activity when the daemon reports the remote session %s",
-    (lostState) => {
-      const next = workspaceReducer(remoteState(), {
-        type: "SESSION_REMOTE_STATUS",
-        status: { sessionId: "backend-a", state: lostState, generation: 0, failure: null, replayGap: null },
-      });
+  it("settles the working activity when the daemon confirms the remote session expired", () => {
+    const next = workspaceReducer(remoteState(), {
+      type: "SESSION_REMOTE_STATUS",
+      status: { sessionId: "backend-a", state: "expired", generation: 0, failure: { kind: "expired", message: "gone" }, replayGap: null },
+    });
 
-      expect(next.sessions["session-a"].lifecycle).toBe("exited");
-      expect(next.activityBySessionId?.["session-a"]?.state).toBe("done");
-      expect(resolveActivityIndicator(selectWorktreeActivitySummaries(next)[worktree.path])).not.toBe("working");
-    },
-  );
+    expect(next.sessions["session-a"].lifecycle).toBe("exited");
+    expect(next.activityBySessionId?.["session-a"]?.state).toBe("done");
+    expect(resolveActivityIndicator(selectWorktreeActivitySummaries(next)[worktree.path])).not.toBe("working");
+  });
+
+  it.each([
+    ["legacyLost", null],
+    ["expired", null],
+    ["expired", { kind: "transport", message: "retries exhausted" }],
+  ] as const)("keeps live remote work when %s does not confirm process loss (failure %j)", (lostState, failure) => {
+    // Retry exhaustion and legacy loss leave process ownership uncertain: only an expired
+    // target failure is a confirmed process exit.
+    const next = workspaceReducer(remoteState(), {
+      type: "SESSION_REMOTE_STATUS",
+      status: { sessionId: "backend-a", state: lostState, generation: 0, failure, replayGap: null },
+    });
+
+    expect(next.sessions["session-a"].lifecycle).toBe("working");
+    expect(next.activityBySessionId?.["session-a"]?.state).toBe("working");
+  });
 
   it("keeps live remote work when the queried daemon merely does not know the session", () => {
     // `missing` is not death: a draining predecessor daemon may still own this session, or restore

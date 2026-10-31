@@ -1332,14 +1332,10 @@ async fn remote_terminal_spawn_rejects_explicit_startup() {
         remaining_ms: None,
         session_id: None,
         shell: None,
-        startup: Some(crate::daemon::protocol::TerminalStartup::AgentResume {
-            agent_type: "claude".into(),
-            provider_session: crate::daemon::protocol::AgentProviderSession {
-                launcher: None,
-                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
-                id: "sess-1".into(),
-                transcript_path: None,
-            },
+        // AgentResume is admitted (it resumes on the SSH host); any other explicit startup is not.
+        startup: Some(crate::daemon::protocol::TerminalStartup::AgentLaunch {
+            command: "claude".into(),
+            args: Vec::new(),
         }),
     };
 
