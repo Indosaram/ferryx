@@ -51,3 +51,14 @@ jobs:
           name: rex-linux-bin
           path: out
           if-no-files-found: error
+      - name: e2e
+        shell: bash
+        run: |
+          mkdir -p e2e-logs
+          E2E_LOG_DIR=$PWD/e2e-logs bash out/rex-e2e/run-all.sh 2>&1 | tee e2e-logs/run-all.out
+          echo "RUN_ALL_EXIT ${PIPESTATUS[0]}" | tee -a e2e-logs/run-all.out
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rex-e2e-logs
+          path: e2e-logs
