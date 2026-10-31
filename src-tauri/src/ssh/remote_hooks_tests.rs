@@ -274,6 +274,190 @@ mod posix {
         assert_eq!(std::fs::read_to_string(&codex).unwrap(), mine);
         assert_no_staging_left(home.path());
     }
+
+    fn skill_file(agent: &str) -> RemoteHookFile {
+        hook_files(RemotePlatform::Posix)
+            .into_iter()
+            .find(|f| f.agent == agent && f.kind == Kind::Skill)
+            .unwrap()
+    }
+
+    const OLD_MANAGED: &str = "---\nname: ferryx\nferryx-managed: true\n---\nold\n";
+
+    /// A symlink under the skill's name is never read, written through or deleted, even when its
+    /// target looks like an older managed skill. Hook files keep their write-through behaviour.
+    #[tokio::test]
+    async fn a_symlinked_skill_is_neither_followed_nor_removed() {
+        let home = home();
+        make_all_agent_dirs(home.path());
+        let skill = home.path().join(".claude/skills/ferryx/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        let elsewhere = home.path().join("elsewhere.md");
+        std::fs::write(&elsewhere, OLD_MANAGED).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &skill).unwrap();
+        let dangling = home.path().join(".agents/skills/ferryx/SKILL.md");
+        std::fs::create_dir_all(dangling.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(home.path().join("missing.md"), &dangling).unwrap();
+
+        for agent in ["claude", "codex"] {
+            let read = run(home.path(), Step::Read(read_script(RemotePlatform::Posix, &skill_file(agent)))).await;
+            assert_eq!(parse_found(&read.unwrap()).unwrap(), Found::NotFile, "{agent}");
+        }
+        install(home.path()).await;
+        remove(home.path()).await;
+        assert!(std::fs::symlink_metadata(&skill).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), OLD_MANAGED);
+        assert!(!home.path().join("missing.md").exists());
+    }
+
+    /// A skill swapped for a symlink between the read and the write is left alone, even when the
+    /// link's target holds exactly the bytes that were read.
+    #[tokio::test]
+    async fn a_skill_replaced_by_a_symlink_after_the_read_is_not_written_or_deleted() {
+        let home = home();
+        make_all_agent_dirs(home.path());
+        let file = skill_file("claude");
+        let skill = home.path().join(".claude/skills/ferryx/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        let elsewhere = home.path().join("elsewhere.md");
+        std::fs::write(&elsewhere, OLD_MANAGED).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &skill).unwrap();
+        let found = Found::File(OLD_MANAGED.as_bytes().to_vec());
+        let steps = [
+            install_change(&file, &reporter(), found.clone()).unwrap(),
+            removal_change(&file, found).unwrap().unwrap(),
+        ];
+        for (expect, change) in steps {
+            let output = run(home.path(), write_step(RemotePlatform::Posix, &file, expect, change)).await.unwrap();
+            assert_eq!(write_result(&output).unwrap(), "changed");
+            assert!(std::fs::symlink_metadata(&skill).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), OLD_MANAGED);
+        }
+    }
+
+    /// Removing the skill takes its emptied `ferryx` directory, as the local removal does, and
+    /// keeps the directory whenever anything else is in it.
+    #[tokio::test]
+    async fn skill_removal_takes_only_an_empty_ferryx_directory() {
+        let home = home();
+        make_all_agent_dirs(home.path());
+        install(home.path()).await;
+        let claude = home.path().join(".claude/skills/ferryx");
+        let codex = home.path().join(".agents/skills/ferryx");
+        assert_eq!(std::fs::read_to_string(claude.join("SKILL.md")).unwrap(), SKILL_SOURCE);
+        assert_eq!(std::fs::read_to_string(codex.join("SKILL.md")).unwrap(), SKILL_SOURCE);
+        std::fs::write(codex.join("notes.md"), "mine\n").unwrap();
+
+        remove(home.path()).await;
+        assert!(!claude.exists(), "the emptied ferryx directory goes");
+        assert!(home.path().join(".claude/skills").is_dir(), "the skills directory stays");
+        assert!(!codex.join("SKILL.md").exists());
+        assert_eq!(std::fs::read_to_string(codex.join("notes.md")).unwrap(), "mine\n");
+        assert_no_staging_left(home.path());
+    }
+}
+
+/// The same skill guards, run through Windows PowerShell the way `run_integration_script` and the
+/// read path feed it.
+#[cfg(windows)]
+mod windows_host {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    fn run(home: &Path, step: Step) -> Vec<u8> {
+        let (script, bytes) = match step {
+            Step::Read(script) => (script, Vec::new()),
+            Step::Write(script, bytes) => (script, bytes),
+        };
+        let input = format!(
+            "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; \
+             try {{ $bytes=[Convert]::FromBase64String('{}'); $homeRoot={}; {script} }} \
+             catch {{ [Console]::Error.Write($_.Exception.Message); exit 1 }}\n",
+            STANDARD.encode(&bytes),
+            powershell_data(&home.to_string_lossy()),
+        );
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{script}\n{}", String::from_utf8_lossy(&output.stderr));
+        output.stdout
+    }
+
+    fn skill_file() -> RemoteHookFile {
+        hook_files(RemotePlatform::Windows)
+            .into_iter()
+            .find(|f| f.agent == "claude" && f.kind == Kind::Skill)
+            .unwrap()
+    }
+
+    fn found(home: &Path, file: &RemoteHookFile) -> Found {
+        parse_found(&run(home, Step::Read(read_script(RemotePlatform::Windows, file)))).unwrap()
+    }
+
+    fn write(home: &Path, file: &RemoteHookFile, expect: Expect, change: Change) -> &'static str {
+        write_result(&run(home, write_step(RemotePlatform::Windows, file, expect, change))).unwrap()
+    }
+
+    #[test]
+    fn the_windows_skill_is_installed_removed_and_its_empty_directory_goes() {
+        let home = tempfile::Builder::new().prefix("ferryx-remote-hooks-").tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        let file = skill_file();
+        let dir = home.path().join(".claude").join("skills").join("ferryx");
+        let skill = dir.join("SKILL.md");
+
+        assert_eq!(found(home.path(), &file), Found::Absent);
+        let (expect, change) = install_change(&file, &windows_reporter(), Found::Absent).unwrap();
+        assert_eq!(write(home.path(), &file, expect, change), "written");
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), SKILL_SOURCE);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp file is left");
+
+        std::fs::write(dir.join("notes.md"), "mine\n").unwrap();
+        let (expect, change) = removal_change(&file, found(home.path(), &file)).unwrap().unwrap();
+        assert_eq!(write(home.path(), &file, expect, change), "removed");
+        assert!(!skill.exists());
+        assert_eq!(std::fs::read_to_string(dir.join("notes.md")).unwrap(), "mine\n");
+
+        std::fs::remove_file(dir.join("notes.md")).unwrap();
+        let (expect, change) = install_change(&file, &windows_reporter(), Found::Absent).unwrap();
+        assert_eq!(write(home.path(), &file, expect, change), "written");
+        let (expect, change) = removal_change(&file, found(home.path(), &file)).unwrap().unwrap();
+        assert_eq!(write(home.path(), &file, expect, change), "removed");
+        assert!(!dir.exists(), "the emptied ferryx directory goes");
+        assert!(home.path().join(".claude").join("skills").is_dir());
+    }
+
+    #[test]
+    fn a_windows_skill_link_is_neither_read_written_nor_removed() {
+        let home = tempfile::Builder::new().prefix("ferryx-remote-hooks-").tempdir().unwrap();
+        let file = skill_file();
+        let skill = home.path().join(".claude").join("skills").join("ferryx").join("SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        let elsewhere = home.path().join("elsewhere.md");
+        let old = "---\nname: ferryx\nferryx-managed: true\n---\nold\n";
+        std::fs::write(&elsewhere, old).unwrap();
+        std::os::windows::fs::symlink_file(&elsewhere, &skill)
+            .expect("file symlink fixture requires Windows Developer Mode or symlink privilege");
+
+        assert_eq!(found(home.path(), &file), Found::NotFile);
+        let bytes = Found::File(old.as_bytes().to_vec());
+        let (expect, change) = install_change(&file, &windows_reporter(), bytes.clone()).unwrap();
+        assert_eq!(write(home.path(), &file, expect, change), "changed");
+        let (expect, change) = removal_change(&file, bytes).unwrap().unwrap();
+        assert_eq!(write(home.path(), &file, expect, change), "changed");
+        assert!(std::fs::symlink_metadata(&skill).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), old);
+    }
 }
 
 #[test]
