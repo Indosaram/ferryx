@@ -91,6 +91,7 @@ import {
   readLinkLine,
   isLikelyRemoteFilePath,
   openRemoteFileToken,
+  remoteFetchCwd,
   remoteFileFetchErrorMessage,
   isSessionMouseTrackingEnabled,
   setSessionMouseTracking,
@@ -1108,7 +1109,7 @@ export function NativeTerminalPane({
               try {
                 const opened = await openRemoteFileToken(token, {
                   workspaceId: session.workspaceId,
-                  cwd: session.cwd || session.worktreePath || null,
+                  cwd: remoteFetchCwd(session),
                   sessionId: targetSessionId,
                   shiftKey: actionShiftKey,
                   openLocal: (localToken) => openTerminalToken(localToken, tokenOptions),

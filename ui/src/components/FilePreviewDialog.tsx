@@ -44,9 +44,27 @@ export type FilePreviewDialogProps = {
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/**
+ * Whether `element` can actually take keyboard focus: not inside a `hidden`, `inert`
+ * or `aria-hidden` subtree (up to `root`) and not removed by computed display/visibility.
+ * Uses attributes and computed style rather than layout boxes so it also holds in jsdom.
+ */
+function isFocusableVisible(element: HTMLElement, root: HTMLElement): boolean {
+  if (!element.isConnected) return false;
+  const view = element.ownerDocument.defaultView;
+  const elementStyle = view?.getComputedStyle(element);
+  if (elementStyle && (elementStyle.visibility === "hidden" || elementStyle.visibility === "collapse")) return false;
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    if (node.hidden || node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true") return false;
+    if (view?.getComputedStyle(node).display === "none") return false;
+    if (node === root) break;
+  }
+  return true;
+}
+
 function focusableWithin(root: HTMLElement): readonly HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (element) => element.offsetParent !== null || element.isConnected,
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) =>
+    isFocusableVisible(element, root),
   );
 }
 

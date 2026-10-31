@@ -170,6 +170,15 @@ type RemoteFetchResult = { localPath: string; remotePath: string; byteLength: nu
  * repeated clicks while it runs share it instead of starting parallel downloads. */
 const inFlightRemoteFetches = new Map<string, Promise<RemoteFetchResult>>();
 
+/**
+ * The base a remote file link resolves against: the session's live cwd only. The worktree
+ * root is never substituted, because a relative token would then silently name a different
+ * file; without a cwd the backend refuses with `remoteCwdUnknown` instead.
+ */
+export function remoteFetchCwd(session: { readonly cwd?: string | null } | null | undefined): string | null {
+  return session?.cwd || null;
+}
+
 /** User copy for a failed remote fetch, keyed on the backend's machine reason. */
 export function remoteFileFetchErrorMessage(error: unknown): string | null {
   const details = (error as { details?: { reason?: unknown; maxBytes?: unknown } | null } | null)?.details ?? {};
@@ -182,6 +191,8 @@ export function remoteFileFetchErrorMessage(error: unknown): string | null {
         : "The remote file is too large to open.";
     case "invalidRemotePath":
       return "This link does not name a valid path on the remote host.";
+    case "remoteCwdUnknown":
+      return "The remote terminal's current directory is unknown, so this relative path cannot be opened. Use an absolute path.";
     case "remoteFileNotLaunchable":
       return "Files from a remote host only open in the preview or an editor, not with the system opener.";
     default:

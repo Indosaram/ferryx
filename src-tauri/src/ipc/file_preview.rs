@@ -2063,7 +2063,7 @@ pub async fn cmd_file_preview_open<R: tauri::Runtime>(
     line: Option<u32>,
     col: Option<u32>,
 ) -> Result<FilePreviewPayload, IpcError> {
-    let service = webview.state::<Arc<FilePreviewService>>();
+    let service = managed_preview_service(&webview)?;
     let daemon_client = webview.state::<Arc<crate::daemon::DaemonClient>>();
     let window_label = webview.label().to_string();
     ensure_trusted_window(&window_label)?;
@@ -2133,11 +2133,10 @@ async fn admitted_session_cwd<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn cmd_file_preview_open_child<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
-    service: tauri::State<'_, Arc<FilePreviewService>>,
     parent_handle: String,
     relative_path: String,
 ) -> Result<FilePreviewChildAsset, IpcError> {
-    service
+    managed_preview_service(&webview)?
         .open_child_image(webview.label(), &parent_handle, &relative_path)
         .await
 }
@@ -2151,13 +2150,39 @@ pub async fn cmd_file_preview_open_child<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn cmd_file_preview_open_child_document<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
-    service: tauri::State<'_, Arc<FilePreviewService>>,
     parent_handle: String,
     relative_path: String,
 ) -> Result<FilePreviewPayload, IpcError> {
-    service
+    managed_preview_service(&webview)?
         .open_child_document(webview.label(), &parent_handle, &relative_path)
         .await
+}
+
+/// Refusal reported by every preview command when the capability service did not
+/// start (its loopback listener could not bind), so the app runs without previews.
+pub(crate) fn preview_service_unavailable() -> IpcError {
+    IpcError::new(
+        IpcErrorCode::Unsupported,
+        "File previews are unavailable because the preview service could not start. Restart Ferryx to try again.",
+    )
+    .with_details(json!({ "reason": "previewServiceUnavailable" }))
+}
+
+/// The managed preview service, or [`preview_service_unavailable`] when it is absent.
+fn require_preview_service<T>(service: Option<T>) -> Result<T, IpcError> {
+    service.ok_or_else(preview_service_unavailable)
+}
+
+/// Looks the service up with `try_state`: a plain `state()` panics when it was never
+/// managed, which is the case after a failed start.
+fn managed_preview_service<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+) -> Result<Arc<FilePreviewService>, IpcError> {
+    require_preview_service(
+        webview
+            .try_state::<Arc<FilePreviewService>>()
+            .map(|service| Arc::clone(service.inner())),
+    )
 }
 
 /// Pure helper evaluating whether file metadata on disk has changed since open.
@@ -2178,10 +2203,12 @@ pub fn file_changed_since(path: &Path, byte_length: u64, modified: Option<System
 #[tauri::command]
 pub async fn cmd_file_preview_close<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
-    service: tauri::State<'_, Arc<FilePreviewService>>,
     handle: String,
 ) -> Result<(), IpcError> {
-    service.close(webview.label(), &handle);
+    // Without a service no capability was ever issued, so there is nothing to revoke.
+    if let Some(service) = webview.try_state::<Arc<FilePreviewService>>() {
+        service.close(webview.label(), &handle);
+    }
     Ok(())
 }
 
@@ -2221,10 +2248,11 @@ pub async fn cmd_file_preview_resolve<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn cmd_file_preview_changed<R: tauri::Runtime>(
     webview: tauri::Webview<R>,
-    service: tauri::State<'_, Arc<FilePreviewService>>,
     handle: String,
 ) -> Result<bool, IpcError> {
-    service.changed(webview.label(), &handle).await
+    managed_preview_service(&webview)?
+        .changed(webview.label(), &handle)
+        .await
 }
 
 #[cfg(test)]

@@ -102,6 +102,13 @@ export type FilePreviewOpenRequest = {
   readonly backendSessionId: string;
   readonly line: number | null;
   readonly col: number | null;
+  /**
+   * Re-read the file even when a live preview already shows this exact request. Set for
+   * files just fetched from an SSH or paired host: the local cache path never changes, so
+   * only this flag tells the registry the bytes behind it did. Transient: it is not part of
+   * the request identity, never sent to the backend, and never stored in a saved layout.
+   */
+  readonly refresh?: boolean;
 };
 
 /** `cmd_file_preview_open_child` arguments: a Markdown-relative asset under the parent boundary. */

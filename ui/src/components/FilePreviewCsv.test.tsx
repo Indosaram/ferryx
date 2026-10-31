@@ -82,8 +82,10 @@ describe("FilePreviewCsv", () => {
     expect(truncationMessage).toBeDefined();
     expect(truncationMessage.textContent).toBe("Showing 5000 of 5001 rows");
 
-    const renderedRows = screen.getByTestId("file-preview-csv").querySelectorAll("tbody tr");
-    expect(renderedRows).toHaveLength(5000);
+    // The 5000 displayed rows are windowed: only the visible slice is mounted.
+    const renderedRows = screen.getByTestId("file-preview-csv").querySelectorAll("tbody tr[data-line-window-row]");
+    expect(renderedRows.length).toBeGreaterThan(0);
+    expect(renderedRows.length).toBeLessThan(200);
   });
 
   it("toggles between table view and raw text view", () => {
@@ -116,5 +118,58 @@ describe("FilePreviewCsv", () => {
     expect(screen.getByTestId("file-preview-csv")).toHaveClass("selectable");
     fireEvent.click(screen.getByTestId("file-preview-csv-raw-toggle"));
     expect(screen.getByTestId("file-preview-csv-raw")).toHaveClass("selectable");
+  });
+
+  it("renders a bounded number of rows for a 5,000-row CSV and keeps the header", () => {
+    const csv = ["id,value", ...Array.from({ length: 5000 }, (_, i) => `${i + 1},val${i + 1}`)].join("\n");
+    render(<FilePreviewCsv text={csv} displayName="big.csv" />);
+
+    const table = screen.getByTestId("file-preview-csv");
+    expect(table).toHaveAttribute("data-windowed", "true");
+    expect(table.querySelectorAll("thead th")).toHaveLength(3);
+    expect(table.querySelectorAll("tr").length).toBeLessThan(200);
+    const rows = table.querySelectorAll("tbody tr[data-line-window-row]");
+    expect(rows[0].querySelectorAll("td")[0].textContent).toBe("1");
+    expect(screen.queryByTestId("file-preview-csv-spacer-top")).toBeNull();
+    const bottom = screen.getByTestId("file-preview-csv-spacer-bottom");
+    expect(parseFloat(bottom.style.height)).toBeGreaterThan(0);
+  });
+
+  it("moves the table window when the table scrolls", () => {
+    const csv = ["id,value", ...Array.from({ length: 5000 }, (_, i) => `${i + 1},val${i + 1}`)].join("\n");
+    render(<FilePreviewCsv text={csv} displayName="big.csv" />);
+    const table = screen.getByTestId("file-preview-csv");
+    const scroller = table.parentElement!.parentElement!;
+
+    scroller.scrollTop = 4000 * 33;
+    fireEvent.scroll(scroller);
+
+    const rows = table.querySelectorAll("tbody tr[data-line-window-row]");
+    expect(rows.length).toBeLessThan(200);
+    const numbers = Array.from(rows, (row) => Number(row.querySelector("td")!.textContent));
+    expect(numbers).toContain(4001);
+    expect(numbers).not.toContain(1);
+    expect(screen.getByTestId("file-preview-csv-spacer-top")).toBeInTheDocument();
+  });
+
+  it("windows the raw view of a large CSV instead of one huge pre", () => {
+    const csv = ["id,value", ...Array.from({ length: 5000 }, (_, i) => `${i + 1},val${i + 1}`)].join("\n");
+    render(<FilePreviewCsv text={csv} displayName="big.csv" />);
+    fireEvent.click(screen.getByTestId("file-preview-csv-raw-toggle"));
+
+    const raw = screen.getByTestId("file-preview-csv-raw");
+    expect(raw).toHaveAttribute("data-windowed", "true");
+    expect(raw).toHaveClass("selectable");
+    const lines = raw.querySelectorAll("[data-line-window-row]");
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.length).toBeLessThan(200);
+    expect(screen.getByTestId("file-preview-csv-raw-line-1")).toHaveTextContent("id,value");
+    expect(raw.textContent!.length).toBeLessThan(csv.length / 10);
+
+    const scroller = raw.parentElement!;
+    scroller.scrollTop = 4500 * 20;
+    fireEvent.scroll(scroller);
+    expect(screen.getByTestId("file-preview-csv-raw-line-4501")).toHaveTextContent("4500,val4500");
+    expect(screen.queryByTestId("file-preview-csv-raw-line-1")).toBeNull();
   });
 });

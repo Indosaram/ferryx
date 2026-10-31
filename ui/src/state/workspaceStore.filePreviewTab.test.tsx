@@ -168,7 +168,7 @@ describe("file preview tabs", () => {
     expect(releaseFilePreview).toHaveBeenCalledWith(tabId);
   });
 
-  it("disambiguates duplicate basenames across file tabs", () => {
+  it("stores the basename for duplicate file tabs and leaves disambiguation to render time", () => {
     const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
 
     let firstId = "";
@@ -196,8 +196,8 @@ describe("file preview tabs", () => {
 
     tab1 = result.current.state.layout.tabs.find((item) => item.id === firstId);
     const tab2 = result.current.state.layout.tabs.find((item) => item.id === secondId);
-    expect(tab1?.label).toBe("src/index.ts");
-    expect(tab2?.label).toBe("ui/index.ts");
+    expect(tab1?.label).toBe("index.ts");
+    expect(tab2?.label).toBe("index.ts");
   });
 
   it("reuses an existing file tab when it lives in a parked worktree layout", () => {
