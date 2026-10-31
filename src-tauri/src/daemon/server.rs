@@ -7094,7 +7094,14 @@ impl DaemonServer {
                             .attach_remote_with_sequence_ranges(&session_id, if is_remote { None } else { after_sequence })
                         {
                             Ok((mut attachment, history_ranges, remote_generation)) => {
-                                if is_remote {
+                                // A remote session always replays its whole retained history, so a
+                                // caller that asked for a delta is told it got a full replay. A caller
+                                // that asked for the full history got exactly that: it is marked
+                                // gapped only when the history really lost output, or every reader
+                                // behind a peer daemon would see a remote screen as never whole.
+                                if is_remote
+                                    && (after_sequence.is_some() || attachment.snapshot.history_incomplete)
+                                {
                                     attachment.snapshot.gap = Some(crate::terminal::output_hub::ReplayGap {
                                         requested_after_sequence: after_sequence.unwrap_or(0),
                                         available_from_sequence: attachment.snapshot.history_start_sequence.unwrap_or(1),
