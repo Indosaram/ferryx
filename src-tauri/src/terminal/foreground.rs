@@ -51,23 +51,49 @@ impl ProcessTransition {
     }
 }
 
-/// The foreground process group that was in front when each session last reported a transient
-/// OSC 7501 record (`working`, `blocked` or `idle`).
+/// One session's classification against a tick's process listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Observation {
+    pub(crate) foreground: Foreground,
+    /// The shell owns the foreground and the listing shows no other process of the pane: no
+    /// child of the shell and, on Unix, no other member of the foreground group. Any program
+    /// other than the shell that wrote to the pane before the listing was taken has exited.
+    pub(crate) shell_alone: bool,
+}
+
+/// Per session, whether the newest OSC 7501 summary change is a transient record (`working`,
+/// `blocked` or `idle`) whose program has not been seen gone yet, and the foreground process
+/// group it was reported from.
 ///
 /// [`ProcessTransition`] releases only after it has sampled an agent, and a reporting program can
 /// live shorter than one observation tick, or be no agent at all. Its records then outlive it and
-/// pin the pane to its last report. The group it reported from is the evidence instead: once the
-/// shell owns the foreground and is not that group, the reporting program is gone.
+/// pin the pane to its last report. Two kinds of positive process evidence end a report instead:
+///
+/// - the shell owns the foreground from a group other than the one the report came from;
+/// - a process listing requested after the report was applied shows the shell alone
+///   ([`Observation::shell_alone`]), so no program that could have written it is still running.
+///
+/// The second covers what the first cannot: a reporter that exited before its bytes were parsed
+/// (its report then reads as coming from the shell's own group), and ConPTY, which has no
+/// process group at all. Neither path ever releases on elapsed time or on unknown ownership.
 #[derive(Default)]
 pub(crate) struct ProtocolReporters {
-    /// Per session: the revision of the newest summary change seen, and the reporter's group
-    /// when that change was transient and its group known.
-    groups: parking_lot::Mutex<HashMap<String, (u64, Option<u32>)>>,
+    reports: parking_lot::Mutex<HashMap<String, Report>>,
+}
+
+/// One session's newest applied summary change.
+struct Report {
+    revision: u64,
+    /// The change was transient and no release has consumed it yet.
+    pending: bool,
+    /// The foreground group the transient change was reported from, when known (Unix only).
+    group: Option<u32>,
 }
 
 impl ProtocolReporters {
-    /// A session's summary changed. A transient summary remembers the foreground `group` it was
-    /// reported from; anything else, or an unknown group, forgets the session.
+    /// A session's summary changed. A transient summary stays pending until its program is seen
+    /// gone and remembers the foreground `group` it was reported from; anything else (`done`,
+    /// `error`, a clear) leaves nothing to release.
     ///
     /// Changes are published outside the mirror lock and may arrive out of order; one whose
     /// `revision` is not newer than the last applied is ignored, so a stale clear cannot erase
@@ -79,36 +105,66 @@ impl ProtocolReporters {
         transient: bool,
         group: Option<u32>,
     ) {
-        let mut groups = self.groups.lock();
-        if groups.get(session_id).is_some_and(|(newest, _)| *newest >= revision) {
+        let mut reports = self.reports.lock();
+        if reports
+            .get(session_id)
+            .is_some_and(|report| report.revision >= revision)
+        {
             return;
         }
-        groups.insert(session_id.to_string(), (revision, group.filter(|_| transient)));
+        reports.insert(
+            session_id.to_string(),
+            Report {
+                revision,
+                pending: transient,
+                group: group.filter(|_| transient),
+            },
+        );
     }
 
-    /// Whether `current`, observed while `group` owned the foreground, is the shell taking the
-    /// foreground back from the process that reported. True once per report.
+    /// The revision of the session's newest applied change, 0 before any. The observer reads it
+    /// before it requests a process listing and hands it back with that listing's evidence.
+    pub(crate) fn newest(&self, session_id: &str) -> u64 {
+        self.reports
+            .lock()
+            .get(session_id)
+            .map_or(0, |report| report.revision)
+    }
+
+    /// Whether `current`, observed while `group` owned the foreground, proves the program behind
+    /// the pending report gone. True once per report.
+    ///
+    /// `alone_after` is `Some(newest)` when the same listing showed the shell alone and was
+    /// requested while `newest` (see [`Self::newest`]) was the session's newest revision. Only a
+    /// report applied by then was written by a process that existed before the listing, so only
+    /// such a report is released by it; a report applied later may come from a program the
+    /// listing never saw.
     ///
     /// `live_group` re-reads the foreground group under the same lock a report takes: a program
     /// that started and reported after `current` was observed owns the foreground now, so its
-    /// fresh report is never mistaken for one the shell already took back.
+    /// fresh report is never mistaken for one the shell already took back. ConPTY has no group,
+    /// so there both sides are `None` and the revision bound is the guard.
     pub(crate) fn foreground_returned(
         &self,
         session_id: &str,
         current: Option<Foreground>,
         group: Option<u32>,
+        alone_after: Option<u64>,
         live_group: impl FnOnce() -> Option<u32>,
     ) -> bool {
-        let (Some(Foreground::Shell), Some(group)) = (current, group) else {
+        if current != Some(Foreground::Shell) {
+            return false;
+        }
+        let mut reports = self.reports.lock();
+        let Some(report) = reports.get_mut(session_id).filter(|report| report.pending) else {
             return false;
         };
-        let mut groups = self.groups.lock();
-        let Some((_, reporter)) = groups.get_mut(session_id) else {
-            return false;
-        };
-        if reporter.is_some_and(|reporter| reporter != group) && live_group() == Some(group) {
+        let left_group = group.is_some_and(|group| report.group.is_some_and(|from| from != group));
+        let shell_alone = alone_after.is_some_and(|newest| report.revision <= newest);
+        if (left_group || shell_alone) && live_group() == group {
             // Keep the revision: an older change still in flight must not re-install the group.
-            *reporter = None;
+            report.pending = false;
+            report.group = None;
             return true;
         }
         false
@@ -116,7 +172,7 @@ impl ProtocolReporters {
 
     /// Keeps only the sessions `live` accepts.
     pub(crate) fn retain(&self, live: impl Fn(&str) -> bool) {
-        self.groups.lock().retain(|id, _| live(id));
+        self.reports.lock().retain(|id, _| live(id));
     }
 }
 
@@ -354,7 +410,7 @@ fn is_shell(command: &str) -> bool {
 /// sample is one `powershell.exe` + `Get-CimInstance` enumeration costing hundreds of
 /// milliseconds. The daemon observes every live session once per tick, so a per-session
 /// sample multiplies that cost by the pane count: capture once, then hand the same snapshot
-/// to every [`inspect_with_snapshot`] call in the tick.
+/// to every [`observe_with_snapshot`] call in the tick.
 pub(crate) struct ProcessSnapshot {
     /// On Unix this is one `ps` listing; each session filters it by its own foreground
     /// process group instead of forking `ps` per session.
@@ -384,12 +440,20 @@ pub(crate) fn inspect(session: &PtySession) -> std::io::Result<Option<Foreground
     inspect_with_snapshot(session, &capture_process_snapshot()?)
 }
 
-/// Observe one session against a process listing already captured for this tick.
+#[cfg(all(test, unix))]
 pub(crate) fn inspect_with_snapshot(
     session: &PtySession,
     snapshot: &ProcessSnapshot,
 ) -> std::io::Result<Option<Foreground>> {
-    platform::inspect_with_snapshot(session, snapshot)
+    Ok(observe_with_snapshot(session, snapshot)?.map(|observed| observed.foreground))
+}
+
+/// Observe one session against a process listing already captured for this tick.
+pub(crate) fn observe_with_snapshot(
+    session: &PtySession,
+    snapshot: &ProcessSnapshot,
+) -> std::io::Result<Option<Observation>> {
+    platform::observe_with_snapshot(session, snapshot)
 }
 
 #[cfg(unix)]
@@ -430,26 +494,41 @@ mod platform {
             .collect())
     }
 
-    pub(super) fn inspect_with_snapshot(
+    pub(super) fn observe_with_snapshot(
         session: &PtySession,
         // The tick's shared listing, filtered by this session's own foreground process group.
         snapshot: &ProcessSnapshot,
-    ) -> std::io::Result<Option<Foreground>> {
+    ) -> std::io::Result<Option<Observation>> {
         let Some(shell) = session.pid() else {
             return Ok(None);
         };
         let Some(group) = session.foreground_process_group()? else {
             return Ok(None);
         };
+        let observed = classify(&snapshot.processes, shell, group);
+        // Ownership can change while this session is classified. A mixed snapshot is
+        // unknown, not an Other edge that would erase the observed agent.
+        if session.foreground_process_group()? != Some(group) {
+            return Ok(None);
+        }
+        Ok(observed)
+    }
+
+    /// Classifies the pane whose shell is `shell` and whose foreground group is `group`.
+    fn classify(processes: &[Process], shell: u32, group: u32) -> Option<Observation> {
         let mut shell_foreground = false;
         // The foreground group always has a member; a shared listing taken before the group
         // formed has none, and that mixed snapshot is unknown rather than an Other edge.
         let mut group_listed = false;
+        // Any row besides the shell that is its child or shares the foreground group. A row
+        // whose pid did not parse counts too: unreadable is not absent.
+        let mut accompanied = false;
         let mut agent = None;
-        for process in &snapshot.processes {
+        for process in processes {
             let (pid, parent, pgid, command) =
                 (process.pid, process.parent, process.pgid, process.command.as_str());
             group_listed |= pgid == Some(group);
+            accompanied |= pid != Some(shell) && (parent == Some(shell) || pgid == Some(group));
             // A suspended/background agent is still alive: do not call shell ownership exit.
             if pgid == Some(group) || parent == Some(shell) {
                 if let Some(name) = agent_identity(command) {
@@ -461,22 +540,79 @@ mod platform {
                 shell_foreground = true;
             }
         }
-        // Ownership can change while this session is classified. A mixed snapshot is
-        // unknown, not an Other edge that would erase the observed agent.
-        if session.foreground_process_group()? != Some(group) {
-            return Ok(None);
-        }
         if let Some((pid, name)) = agent {
-            return Ok(pid.map(|pid| Foreground::Agent { pid, agent: name }));
+            return pid.map(|pid| Observation {
+                foreground: Foreground::Agent { pid, agent: name },
+                shell_alone: false,
+            });
         }
         if !group_listed {
-            return Ok(None);
+            return None;
         }
-        Ok(Some(if shell_foreground {
-            Foreground::Shell
+        Some(if shell_foreground {
+            Observation {
+                foreground: Foreground::Shell,
+                shell_alone: !accompanied,
+            }
         } else {
-            Foreground::Other
-        }))
+            Observation {
+                foreground: Foreground::Other,
+                shell_alone: false,
+            }
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn row(pid: u32, parent: u32, pgid: u32, command: &str) -> Process {
+            Process {
+                pid: Some(pid),
+                parent: Some(parent),
+                pgid: Some(pgid),
+                command: command.to_string(),
+            }
+        }
+
+        #[test]
+        fn the_shell_is_alone_only_without_a_child_or_a_foreground_companion() {
+            let shell = |alone| {
+                Some(Observation {
+                    foreground: Foreground::Shell,
+                    shell_alone: alone,
+                })
+            };
+            let prompt = [row(1, 0, 1, "launchd"), row(100, 1, 100, "-bash")];
+            assert_eq!(classify(&prompt, 100, 100), shell(true));
+            // A background job (its own group) is a live child: whatever reported may be it.
+            let job = [row(100, 1, 100, "-bash"), row(300, 100, 300, "sleep 300")];
+            assert_eq!(classify(&job, 100, 100), shell(false));
+            // A child that has not taken its own group yet, or a zombie not reaped yet.
+            let forked = [row(100, 1, 100, "-bash"), row(301, 100, 100, "bash")];
+            assert_eq!(classify(&forked, 100, 100), shell(false));
+            // A row whose pid did not parse is not evidence of absence.
+            let unreadable = [
+                row(100, 1, 100, "-bash"),
+                Process {
+                    pid: None,
+                    parent: Some(100),
+                    pgid: Some(302),
+                    command: String::new(),
+                },
+            ];
+            assert_eq!(classify(&unreadable, 100, 100), shell(false));
+            // Another program in front is never alone, and a listing without the group is unknown.
+            let other = [row(100, 1, 100, "-bash"), row(400, 100, 400, "vim")];
+            assert_eq!(
+                classify(&other, 100, 400),
+                Some(Observation {
+                    foreground: Foreground::Other,
+                    shell_alone: false,
+                })
+            );
+            assert_eq!(classify(&prompt, 100, 500), None);
+        }
     }
 }
 
@@ -508,26 +644,30 @@ mod platform {
         serde_json::from_slice(&output.stdout).map_err(std::io::Error::other)
     }
 
-    pub(super) fn inspect_with_snapshot(
+    pub(super) fn observe_with_snapshot(
         session: &PtySession,
         snapshot: &ProcessSnapshot,
-    ) -> std::io::Result<Option<Foreground>> {
+    ) -> std::io::Result<Option<Observation>> {
         let Some(shell) = session.pid() else {
             return Ok(None);
         };
+        Ok(classify(&snapshot.processes, shell))
+    }
+
+    /// Classifies the pane whose shell is `shell` against the whole process table.
+    fn classify(processes: &[Process], shell: u32) -> Option<Observation> {
         // A complete descendant snapshot supplies positive child-exit evidence;
         // shell-with-no-descendants is the conservative fallback.
-        if !snapshot
-            .processes
+        if !processes
             .iter()
             .any(|p| p.pid == shell && is_shell(&p.name))
         {
-            return Ok(None);
+            return None;
         }
         let mut descendants = vec![shell];
         loop {
             let before = descendants.len();
-            for p in &snapshot.processes {
+            for p in processes {
                 if descendants.contains(&p.parent) && !descendants.contains(&p.pid) {
                     descendants.push(p.pid);
                 }
@@ -536,34 +676,83 @@ mod platform {
                 break;
             }
         }
-        for p in &snapshot.processes {
+        for p in processes {
             if p.pid == shell || !descendants.contains(&p.pid) {
                 continue;
             }
             if let Some(name) =
                 agent_identity(&p.name).or_else(|| p.command.as_deref().and_then(agent_identity))
             {
-                return Ok(Some(Foreground::Agent {
-                    pid: p.pid,
-                    agent: name,
-                }));
+                return Some(Observation {
+                    foreground: Foreground::Agent {
+                        pid: p.pid,
+                        agent: name,
+                    },
+                    shell_alone: false,
+                });
             }
         }
-        Ok(Some(if descendants.len() == 1 {
-            Foreground::Shell
-        } else {
-            Foreground::Other
-        }))
+        // The shell with no descendant at all is both the Shell foreground and the shell alone.
+        let alone = descendants.len() == 1;
+        Some(Observation {
+            foreground: if alone {
+                Foreground::Shell
+            } else {
+                Foreground::Other
+            },
+            shell_alone: alone,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn row(pid: u32, parent: u32, name: &str) -> Process {
+            Process {
+                pid,
+                parent,
+                name: name.to_string(),
+                command: None,
+            }
+        }
+
+        #[test]
+        fn a_conpty_shell_is_alone_only_without_any_descendant() {
+            let prompt = [row(4, 0, "System"), row(100, 50, "pwsh.exe")];
+            assert_eq!(
+                classify(&prompt, 100),
+                Some(Observation {
+                    foreground: Foreground::Shell,
+                    shell_alone: true,
+                })
+            );
+            // A grandchild whose parent is still listed keeps the shell accompanied.
+            let busy = [
+                row(100, 50, "pwsh.exe"),
+                row(200, 100, "cmd.exe"),
+                row(300, 200, "reporter.exe"),
+            ];
+            assert_eq!(
+                classify(&busy, 100),
+                Some(Observation {
+                    foreground: Foreground::Other,
+                    shell_alone: false,
+                })
+            );
+            // No shell row is unknown, never a lone shell.
+            assert_eq!(classify(&[row(200, 100, "reporter.exe")], 100), None);
+        }
     }
 }
 
 #[cfg(not(any(unix, windows)))]
 mod platform {
     use super::*;
-    pub(super) fn inspect_with_snapshot(
+    pub(super) fn observe_with_snapshot(
         _: &PtySession,
         _: &ProcessSnapshot,
-    ) -> std::io::Result<Option<Foreground>> {
+    ) -> std::io::Result<Option<Observation>> {
         Ok(None)
     }
 }
@@ -970,18 +1159,33 @@ mod tests {
         assert_eq!(observer.observe(Some(Foreground::Shell)), None);
     }
 
+    /// [`ProtocolReporters::foreground_returned`] for a Shell observation of session `s`.
+    fn shell_back(
+        reporters: &ProtocolReporters,
+        group: Option<u32>,
+        alone_after: Option<u64>,
+        live: Option<u32>,
+    ) -> bool {
+        reporters.foreground_returned("s", Some(Foreground::Shell), group, alone_after, || live)
+    }
+
     #[test]
     fn the_shell_regaining_the_foreground_from_a_reporter_releases_once() {
         let reporters = ProtocolReporters::default();
         reporters.reported("s", 1, true, Some(200));
-        let shell = || Some(100);
-        assert!(reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        assert!(shell_back(&reporters, Some(100), None, Some(100)));
         assert!(
-            !reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell),
+            !shell_back(&reporters, Some(100), Some(1), Some(100)),
             "one release per report"
         );
         assert!(
-            !reporters.foreground_returned("other", Some(Foreground::Shell), Some(100), shell),
+            !reporters.foreground_returned(
+                "other",
+                Some(Foreground::Shell),
+                Some(100),
+                Some(1),
+                || Some(100)
+            ),
             "a session that never reported has nothing to release"
         );
     }
@@ -991,22 +1195,29 @@ mod tests {
         let reporters = ProtocolReporters::default();
         reporters.reported("s", 1, true, Some(200));
         let live = || Some(200);
-        assert!(!reporters.foreground_returned("s", Some(Foreground::Other), Some(200), live));
+        assert!(!reporters.foreground_returned(
+            "s",
+            Some(Foreground::Other),
+            Some(200),
+            None,
+            live
+        ));
         assert!(!reporters.foreground_returned(
             "s",
             Some(Foreground::Agent { pid: 200, agent: "claude" }),
             Some(200),
+            None,
             live
         ));
         assert!(
-            !reporters.foreground_returned("s", None, Some(100), live),
+            !reporters.foreground_returned("s", None, Some(100), Some(1), live),
             "unknown is no evidence"
         );
-        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), None, live));
+        assert!(!shell_back(&reporters, None, None, Some(200)));
         // The shell was observed, but the reporter took the foreground again since: not gone.
-        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), live));
+        assert!(!shell_back(&reporters, Some(100), Some(1), Some(200)));
         assert!(
-            reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), || Some(100)),
+            shell_back(&reporters, Some(100), None, Some(100)),
             "none of the above consumed the pending release"
         );
     }
@@ -1014,20 +1225,26 @@ mod tests {
     #[test]
     fn a_report_from_the_shell_itself_or_a_settled_record_is_not_released() {
         let reporters = ProtocolReporters::default();
-        let shell = || Some(100);
-        // Reported from the shell's own group (a builtin): its next prompt is not an exit.
+        // Reported from the shell's own group (a builtin, or a reporter already gone when its
+        // bytes were parsed): the prompt alone is not an exit while the shell is accompanied.
         reporters.reported("s", 1, true, Some(100));
-        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        assert!(!shell_back(&reporters, Some(100), None, Some(100)));
         // done/error (or a clear) stay until acknowledged, so there is nothing to release.
         reporters.reported("s", 2, true, Some(200));
         reporters.reported("s", 3, false, Some(200));
-        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
-        // An unknown reporter group is no evidence either.
+        assert!(!shell_back(&reporters, Some(100), Some(3), Some(100)));
+        // An unknown reporter group is no group evidence either.
         reporters.reported("s", 4, true, None);
-        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        assert!(!shell_back(&reporters, Some(100), None, Some(100)));
         reporters.reported("gone", 5, true, Some(200));
         reporters.retain(|id| id != "gone");
-        assert!(!reporters.foreground_returned("gone", Some(Foreground::Shell), Some(100), shell));
+        assert!(!reporters.foreground_returned(
+            "gone",
+            Some(Foreground::Shell),
+            Some(100),
+            Some(5),
+            || Some(100)
+        ));
     }
 
     /// Finding 3: reporter bookkeeping receives changes outside the mirror lock. A stale clear
@@ -1036,21 +1253,105 @@ mod tests {
     #[test]
     fn reporter_groups_keep_the_newest_change_when_published_out_of_order() {
         let reporters = ProtocolReporters::default();
-        let shell = || Some(100);
         reporters.reported("s", 7, true, Some(200));
         reporters.reported("s", 6, false, None);
         assert!(
-            reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell),
+            shell_back(&reporters, Some(100), None, Some(100)),
             "the newer transient report's group survived the stale clear"
         );
         reporters.reported("s", 7, true, Some(200));
         reporters.reported("s", 5, true, Some(300));
         assert!(
-            !reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell),
+            !shell_back(&reporters, Some(100), Some(7), Some(100)),
             "a release is not re-armed by a change it already superseded"
         );
         reporters.reported("s", 8, true, Some(300));
-        assert!(reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        assert!(shell_back(&reporters, Some(100), None, Some(100)));
+    }
+
+    /// A reporter that exited before its bytes were parsed is published while the shell already
+    /// holds the foreground, so its group is the shell's own and the group edge never fires. A
+    /// listing requested after that report, showing the shell alone, is the exit evidence.
+    #[test]
+    fn a_reporter_gone_before_its_report_was_parsed_is_released_by_a_lone_shell() {
+        let reporters = ProtocolReporters::default();
+        reporters.reported("s", 3, true, Some(100));
+        let requested = reporters.newest("s");
+        assert_eq!(requested, 3);
+        assert!(
+            !shell_back(&reporters, Some(100), None, Some(100)),
+            "the shell in front with a child left is no exit evidence"
+        );
+        assert!(
+            !reporters.foreground_returned(
+                "s",
+                Some(Foreground::Other),
+                Some(100),
+                Some(requested),
+                || Some(100)
+            ),
+            "only a Shell observation carries the shell-alone evidence"
+        );
+        assert!(
+            !reporters.foreground_returned("s", None, Some(100), Some(requested), || Some(100)),
+            "unknown ownership is never an exit"
+        );
+        assert!(shell_back(&reporters, Some(100), Some(requested), Some(100)));
+        assert!(
+            !shell_back(&reporters, Some(100), Some(requested), Some(100)),
+            "one release per report"
+        );
+        // done/error is sticky: a lone shell never drops a settled record.
+        reporters.reported("s", 4, false, Some(100));
+        assert!(!shell_back(&reporters, Some(100), Some(4), Some(100)));
+    }
+
+    /// ConPTY has no process group, so the report carries none and neither does the observation.
+    /// The shell with no descendant in a listing requested after the report still ends it.
+    #[test]
+    fn a_windows_reporter_without_a_group_is_released_by_a_lone_shell() {
+        let reporters = ProtocolReporters::default();
+        reporters.reported("s", 1, true, None);
+        assert!(
+            !shell_back(&reporters, None, None, None),
+            "no group and no shell-alone listing is no evidence"
+        );
+        assert!(
+            !reporters.foreground_returned("s", Some(Foreground::Other), None, Some(1), || None),
+            "a descendant still running keeps the report"
+        );
+        let requested = reporters.newest("s");
+        assert!(shell_back(&reporters, None, Some(requested), None));
+        // The next report is pending again, and only a listing requested after it releases it.
+        reporters.reported("s", 2, true, None);
+        assert!(!shell_back(&reporters, None, Some(requested), None));
+        assert!(shell_back(&reporters, None, Some(reporters.newest("s")), None));
+    }
+
+    /// The listing is taken off the observer's lock. A program that starts, reports and is
+    /// published after the listing was requested is not in that listing, so the stale lone-shell
+    /// evidence must not release its fresh report, with or without a group to compare.
+    #[test]
+    fn a_stale_lone_shell_listing_never_releases_a_report_published_after_it() {
+        for group in [Some(100), None] {
+            let reporters = ProtocolReporters::default();
+            reporters.reported("s", 1, true, group);
+            let requested = reporters.newest("s");
+            // The listing is in flight; a new program reports in the meantime.
+            reporters.reported("s", 2, true, group);
+            assert!(
+                !shell_back(&reporters, group, Some(requested), group),
+                "{group:?}: a listing requested before revision 2 cannot prove its program gone"
+            );
+            // A stale change arriving late changes nothing either.
+            reporters.reported("s", 1, true, group);
+            assert!(!shell_back(&reporters, group, Some(requested), group));
+            assert!(shell_back(&reporters, group, Some(reporters.newest("s")), group));
+        }
+        // With a group, a reporter that took the foreground after the listing also blocks it.
+        let reporters = ProtocolReporters::default();
+        reporters.reported("s", 1, true, Some(100));
+        assert!(!shell_back(&reporters, Some(100), Some(1), Some(200)));
     }
 
     /// The observer tick captures the process listing once and classifies every live session
