@@ -146,24 +146,22 @@ export function FilePreviewText({
     setRequestedMatch(0);
   }, [query, text]);
 
-  // Large documents mount only the visible lines. Windowing assumes one visual row per
-  // line, so soft wrap is unavailable while it is active (it comes back when printing,
-  // because printing mounts every line).
   const lineWindow = useLineWindow({
     count: lines.length,
     enabled: showSource && lines.length > SOURCE_WINDOW_THRESHOLD,
     estimatedRowHeight: SOURCE_LINE_HEIGHT,
+    contentKey: `${wordWrap}:${text}`,
   });
   const windowed = lineWindow.active;
-  const effectiveWordWrap = wordWrap && !windowed;
+  const effectiveWordWrap = wordWrap;
   // Only the mounted lines size the content, so give the windowed list the width of the
   // longest line (gutter w-10 + gap-3 = 3.25rem) to keep horizontal scrolling stable.
   const windowedMinWidth = useMemo(() => {
-    if (!windowed) return undefined;
+    if (!windowed || wordWrap) return undefined;
     let longest = 0;
     for (const line of lines) if (line.length > longest) longest = line.length;
     return `calc(${longest}ch + 3.25rem)`;
-  }, [lines, windowed]);
+  }, [lines, windowed, wordWrap]);
   const { scrollRef: setWindowScroller, scrollToIndex, start: windowStart, end: windowEnd } = lineWindow;
   const setSourceElement = useCallback(
     (element: HTMLDivElement | null) => {
@@ -358,10 +356,9 @@ export function FilePreviewText({
         <div className="ml-auto flex items-center gap-2">
           {showSource ? (
             <ToolbarButton
-              label={windowed ? "Word wrap is unavailable for very long files" : "Toggle word wrap"}
+              label="Toggle word wrap"
               testId="file-preview-wrap-toggle"
               pressed={effectiveWordWrap}
-              disabled={windowed}
               onClick={handleWordWrapToggle}
             >
               <WrapText aria-hidden className="size-3.5" />

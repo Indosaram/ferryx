@@ -8,6 +8,20 @@ function tab(id: string, sessionId: string): TerminalTab {
   return { id, label: id, sessionId };
 }
 
+it("stores file rename intent separately and carries it into a pane", () => {
+  const file: FileTab = {
+    kind: "file", id: "file", label: "index.ts", path: "/repo/src/index.ts",
+    backendSessionId: "backend", line: null, col: null, workspaceId: null, previewId: "preview",
+  };
+  const initial = createLayoutState([file], file.id);
+  const renamed = layoutReducer(initial, { type: "RENAME_TAB", tabId: file.id, label: "src/index.ts" });
+  expect(renamed.tabs[0]).toMatchObject({ label: "index.ts", customLabel: "src/index.ts" });
+  expect(defaultContentForTab(renamed.tabs[0])).toMatchObject({ customLabel: "src/index.ts" });
+  const cleared = layoutReducer(renamed, { type: "RENAME_TAB", tabId: file.id, label: "" });
+  expect(cleared.tabs[0]).not.toHaveProperty("customLabel");
+  expect(cleared.tabs[0].label).toBe("index.ts");
+});
+
 describe("divider run equalization", () => {
   it("gives five nested horizontal tab groups equal widths from any divider", () => {
     const groups: TabGroupLayoutNode = {
@@ -77,6 +91,32 @@ describe("divider run equalization", () => {
 });
 
 describe("file preview tabs", () => {
+  it("updates only matching preview identities in a mixed file split", () => {
+    const file: FileTab = {
+      kind: "file", id: "file", label: "a.txt", path: "/cache/a.txt",
+      backendSessionId: "backend", line: 1, col: null, workspaceId: null, previewId: "preview-a",
+    };
+    const other = defaultContentForTab({ ...file, id: "other", path: "/cache/b.txt", previewId: "preview-b" });
+    const initial = createLayoutState([file], file.id);
+    initial.layoutsByTabId.file = {
+      ...initial.layoutsByTabId.file,
+      root: {
+        type: "split", direction: "horizontal", ratio: 0.5,
+        first: { type: "leaf", leafId: "leaf-init" }, second: { type: "leaf", leafId: "other" },
+      },
+      contentsByLeafId: { "leaf-init": defaultContentForTab(file), other },
+      sessionIdsByLeafId: { "leaf-init": "", other: "" },
+    };
+    const updated = layoutReducer(initial, {
+      type: "UPDATE_FILE_TAB", tabId: "file", path: "/cache/new-a.txt", line: 9, col: 2,
+      remote: { workspaceId: "ssh:host", path: "/srv/a.txt", sessionId: null },
+    });
+    expect(updated.layoutsByTabId.file.contentsByLeafId?.["leaf-init"]).toMatchObject({
+      previewId: "preview-a", path: "/cache/new-a.txt", line: 9, col: 2,
+    });
+    expect(updated.layoutsByTabId.file.contentsByLeafId?.other).toEqual(other);
+  });
+
   it("returns to the previously active tab after closing a newly opened file tab", () => {
     const fileTab: FileTab = {
       kind: "file", id: "file", label: "readme.md", path: "/repo/readme.md",

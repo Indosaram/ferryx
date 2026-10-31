@@ -22,6 +22,7 @@ import { listOpenWithApps, openWithApp, printCurrentWebview, type OpenWithApps }
 import "../styles/filePreviewPrint.css";
 
 export type FilePreviewPaneProps = {
+  remote?: FilePreviewOpenRequest["remote"];
   previewId: string;
   path: string;
   backendSessionId: string;
@@ -38,6 +39,7 @@ export type FilePreviewPaneProps = {
 export function FilePreviewPane(props: FilePreviewPaneProps) {
   const visible = props.visible ?? true;
   const request: FilePreviewOpenRequest = {
+    ...(props.remote ? { remote: props.remote } : {}),
     path: props.path,
     backendSessionId: props.backendSessionId,
     line: props.line,
@@ -66,7 +68,7 @@ export function FilePreviewPane(props: FilePreviewPaneProps) {
     if (!visible) return;
     if (getFilePreview(props.previewId)) return;
     retainFilePreview(props.previewId, source, request);
-  }, [visible, props.previewId, props.path, props.backendSessionId, props.line, props.col, props.workspaceId]);
+  }, [visible, props.previewId, props.path, props.backendSessionId, props.line, props.col, props.workspaceId, props.remote]);
   if (!controller) {
     return <div data-testid="file-preview-pane-missing" className="h-full w-full" />;
   }
@@ -97,6 +99,7 @@ function FilePreviewPaneBody({
   const openWithTriggerRef = useRef<HTMLButtonElement | null>(null);
   const openWithMenuRef = useRef<HTMLDivElement | null>(null);
   const hiddenWhileReadyRef = useRef(false);
+  const paneRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setHasDiskChange(false);
@@ -245,8 +248,10 @@ function FilePreviewPaneBody({
   }, [controller]);
 
   const handleExportPdf = useCallback(async () => {
+    const root = paneRef.current?.querySelector<HTMLElement>("[data-file-preview-print-root]");
+    if (!root) return;
     try {
-      await printCurrentWebview();
+      await printCurrentWebview(root);
     } catch (error) {
       toast.error(extractIpcErrorMessage(error, "Could not print preview."));
     }
@@ -271,7 +276,7 @@ function FilePreviewPaneBody({
   };
 
   return (
-    <div data-testid="file-preview-pane" data-preview-id={previewId} className="flex h-full min-h-0 w-full flex-col bg-background">
+    <div ref={paneRef} data-testid="file-preview-pane" data-preview-id={previewId} className="flex h-full min-h-0 w-full flex-col bg-background">
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-border px-2">
         <span
           data-testid="file-preview-path"
@@ -401,6 +406,12 @@ function FilePreviewPaneBody({
             Reload
           </button>
         </div>
+      )}
+      {state.status === "ready" && state.refreshing && (
+        <p role="status" className="px-3 py-1 text-[12px] text-muted-foreground">Refreshing remote file...</p>
+      )}
+      {state.status === "ready" && state.refreshFailure && (
+        <p role="alert" className="selectable px-3 py-2 text-[12px] text-foreground">{state.refreshFailure.message}</p>
       )}
       <div className="min-h-0 flex-1 overflow-hidden">
         {state.status === "failed" ? (

@@ -780,7 +780,20 @@ impl FilePreviewService {
         let epoch = self.begin_main_open(&slot);
         let opened =
             crate::ipc::run_blocking(move || open_blocking(&path, cwd.as_deref(), line, col))
-                .await?;
+                .await;
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                let mut registry = self.registry.lock();
+                if registry.windows.get(&slot).is_some_and(|owner| {
+                    owner.epoch == epoch && owner.main.is_none()
+                        && owner.children.is_empty() && owner.pending_children == 0
+                }) {
+                    registry.windows.remove(&slot);
+                }
+                return Err(error);
+            }
+        };
         self.register_main(&slot, opened, epoch)
     }
 

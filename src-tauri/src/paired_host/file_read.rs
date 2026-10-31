@@ -285,12 +285,17 @@ fn client_error(error: ClientError) -> IpcError {
         )
         .with_details(serde_json::json!({ "reason": "pairedHostNeedsUpdate", "httpStatus": 403 }));
     }
-    let code = IpcErrorCode::from_code_str(&error.code);
+    let code = if error.code == "REMOTE_CWD_UNKNOWN" {
+        IpcErrorCode::InvalidRequest
+    } else {
+        IpcErrorCode::from_code_str(&error.code)
+    };
     let reason = match error.code.as_str() {
         "NOT_FOUND" => "remoteFileMissing",
         "PAYLOAD_TOO_LARGE" => "remoteFileTooLarge",
         "UNSUPPORTED_PATH" => "remoteFileNotRegular",
         "INVALID_PATH" => "invalidRemotePath",
+        "REMOTE_CWD_UNKNOWN" => "remoteCwdUnknown",
         _ => "pairedFileReadFailed",
     };
     IpcError::new(code, format!("Paired host file read failed: {}", error.code))
@@ -412,6 +417,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_host_cwd_preserves_the_typed_refusal() {
+        let error = client_error(ClientError::local("REMOTE_CWD_UNKNOWN"));
+        assert_eq!(error.code, IpcErrorCode::InvalidRequest);
+        assert_eq!(error.details.unwrap()["reason"], "remoteCwdUnknown");
+    }
 
     #[tokio::test]
     async fn relayed_session_ids_fail_closed_instead_of_dropping_the_session() {

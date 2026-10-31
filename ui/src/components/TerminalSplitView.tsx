@@ -1450,6 +1450,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
               return (
                 <FilePreviewPane
                   previewId={content.previewId}
+                  remote={content.remote}
                   path={content.path}
                   backendSessionId={content.backendSessionId}
                   line={content.line}

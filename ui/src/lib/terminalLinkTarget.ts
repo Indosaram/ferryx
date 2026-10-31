@@ -234,5 +234,7 @@ export async function openRemoteFileToken(
   return opts.openLocal({
     ...token,
     path: fetched.localPath,
+    freshRemoteSnapshot: true,
+    remote: { workspaceId: opts.workspaceId, path: fetched.remotePath, sessionId: opts.sessionId ?? null },
   });
 }

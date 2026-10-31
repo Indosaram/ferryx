@@ -8,6 +8,31 @@ afterEach(() => {
 });
 
 describe("FilePreviewCsv", () => {
+  it("opens the complete multiline value from a keyboard-focusable cell", () => {
+    const show = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    const close = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "close");
+    Object.defineProperties(HTMLDialogElement.prototype, {
+      showModal: { configurable: true, value(this: HTMLDialogElement) { this.open = true; } },
+      close: { configurable: true, value(this: HTMLDialogElement) { this.open = false; this.dispatchEvent(new Event("close")); } },
+    });
+    try {
+    render(<FilePreviewCsv text={'value\n"first\nlast"'} displayName="multiline.csv" />);
+    const cell = screen.getByRole("button", { name: "View row 1, column 1" });
+    cell.focus();
+    expect(cell).toHaveFocus();
+    fireEvent.click(cell);
+    const dialog = screen.getByRole("dialog", { name: "Cell contents" });
+    expect(dialog.querySelector("pre")?.textContent).toBe("first\nlast");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    } finally {
+      if (show) Object.defineProperty(HTMLDialogElement.prototype, "showModal", show);
+      else Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+      if (close) Object.defineProperty(HTMLDialogElement.prototype, "close", close);
+      else Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
+    }
+  });
+
   it("renders header row as th elements and body rows with row numbers", () => {
     const csv = "Name,Age,Role\nAlice,30,Engineer\nBob,25,Designer";
     render(<FilePreviewCsv text={csv} displayName="users.csv" />);
