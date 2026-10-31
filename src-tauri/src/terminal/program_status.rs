@@ -72,6 +72,9 @@ struct Record {
     message: Option<String>,
     progress: Option<u8>,
     updated: u64,
+    /// The summary revision the mirror took, under its lock, for the change that applied this
+    /// record (see [`ProgramStatusRecords::stamp`]); `None` until then.
+    revision: Option<u64>,
 }
 
 /// The record set of one terminal.
@@ -109,8 +112,17 @@ impl ProgramStatusRecords {
                 .filter(|value| progress_allowed && (0..=100).contains(value))
                 .and_then(|value| u8::try_from(value).ok()),
             updated: self.clock,
+            revision: None,
         };
         self.records.insert(report.id, record);
+    }
+
+    /// Stamps every record applied since the last stamp with `revision`, the summary revision
+    /// the caller took for them while it holds the lock that orders this store's changes.
+    pub fn stamp(&mut self, revision: u64) {
+        for record in self.records.values_mut() {
+            record.revision = record.revision.or(Some(revision));
+        }
     }
 
     /// A new shell prompt started (OSC 133 `A`): drop `working`, `blocked` and `idle` records.
@@ -118,9 +130,15 @@ impl ProgramStatusRecords {
         self.drop_transient();
     }
 
-    /// The program attached to the terminal exited: same pruning as a new prompt.
-    pub fn program_exited(&mut self) {
-        self.drop_transient();
+    /// The program attached to the terminal exited, as proven by evidence gathered while
+    /// `through` was the newest published revision: drops the `working`, `blocked` and `idle`
+    /// records stamped at or before it. A record stamped later (or not stamped yet) was applied
+    /// after that evidence was gathered and may belong to a program that is still running.
+    pub fn program_exited(&mut self, through: u64) {
+        self.records.retain(|_, record| {
+            matches!(record.state, ProgramState::Done | ProgramState::Error)
+                || record.revision.is_none_or(|revision| revision > through)
+        });
     }
 
     /// The user has seen the terminal (for example it was focused): drop `done` and `error`.
@@ -385,8 +403,9 @@ mod tests {
         records.apply(report("i", ProgramState::Idle));
         records.apply(report("d", ProgramState::Done));
         records.apply(report("e", ProgramState::Error));
+        records.stamp(1);
 
-        records.program_exited();
+        records.program_exited(1);
 
         assert!(records.record("w").is_none());
         assert!(records.record("b").is_none());
@@ -394,6 +413,31 @@ mod tests {
         assert!(records.record("d").is_some());
         assert!(records.record("e").is_some());
         assert_eq!(records.len(), 2);
+    }
+
+    /// The exit evidence was gathered while revision 1 was the newest: a record applied after
+    /// it (stamped 2, or not stamped yet) may come from a program that evidence never saw.
+    #[test]
+    fn program_exit_keeps_records_applied_after_its_evidence() {
+        let mut records = ProgramStatusRecords::new();
+        records.apply(report("old", ProgramState::Working));
+        records.stamp(1);
+        records.apply(report("late", ProgramState::Blocked));
+        records.stamp(2);
+        records.apply(report("unstamped", ProgramState::Working));
+
+        records.program_exited(1);
+
+        assert!(records.record("old").is_none());
+        assert!(records.record("late").is_some());
+        assert!(records.record("unstamped").is_some());
+        // A replaced record is a new application with a new stamp.
+        records.stamp(3);
+        records.apply(report("late", ProgramState::Working));
+        records.stamp(4);
+        records.program_exited(3);
+        assert!(records.record("late").is_some());
+        assert!(records.record("unstamped").is_none());
     }
 
     #[test]

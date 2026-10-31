@@ -242,7 +242,7 @@ mod tests {
         let (hub, states) = answering_hub();
         replies(&hub, WORKING_REPORT);
         // What the foreground release edge does; the hub publishes itself.
-        assert_eq!(hub.program_exited("s").expect("opted in"), None);
+        assert_eq!(hub.program_exited("s", u64::MAX).expect("opted in"), None);
         let state = states.current("s").expect("published");
         assert_eq!(state.state, "idle");
         assert!(!state.origin.claims_activity());
@@ -298,7 +298,10 @@ mod tests {
         hub.register_session("s");
         assert!(hub.enable_program_status("s"));
         replies(&hub, DONE_REPORT);
-        assert!(hub.program_exited("s").expect("opted in").is_some(), "done survives exit");
+        assert!(
+            hub.program_exited("s", u64::MAX).expect("opted in").is_some(),
+            "done survives exit"
+        );
         assert_eq!(hub.acknowledge_program_outcome("s").expect("opted in"), None);
         assert_eq!(hub.acknowledge_program_outcome("s").expect("opted in"), None);
         let changes = recorder.0.lock().clone();
@@ -307,6 +310,40 @@ mod tests {
         assert!(changes[0].revision < changes[1].revision);
         assert_eq!(changes[0].summary.as_ref().map(|s| s.state), Some(ProgramState::Done));
         assert_eq!(changes[1].summary, None);
+    }
+
+    /// The exit decision is bound to the newest revision read before its process listing was
+    /// requested. A report parsed after that, even one that did not change the summary and so
+    /// never reached the reporters, may come from a program the listing never saw: the mirror
+    /// release drops only the records applied by the bound, under the mirror lock.
+    #[test]
+    fn program_status_exit_keeps_a_report_applied_after_its_bound() {
+        #[derive(Default)]
+        struct Recorder(parking_lot::Mutex<Vec<ProgramStatusChange>>);
+        impl ProgramStatusPublisher for Recorder {
+            fn publish(&self, _session_id: &str, change: &ProgramStatusChange) {
+                self.0.lock().push(change.clone());
+            }
+        }
+        let hub = TerminalOutputHub::new(64 * 1024);
+        let recorder = Arc::new(Recorder::default());
+        let publisher: Arc<dyn ProgramStatusPublisher> = recorder.clone();
+        hub.set_program_status_publisher(publisher);
+        hub.register_session("s");
+        assert!(hub.enable_program_status("s"));
+        replies(&hub, WORKING_REPORT);
+        let bound = recorder.0.lock().last().expect("working published").revision;
+        // The root record still wins the summary, so this report publishes nothing.
+        replies(&hub, b"\x1b]7501;state=working:id=late:app=make\x1b\\");
+        assert_eq!(recorder.0.lock().len(), 1);
+
+        let left = hub.program_exited("s", bound).expect("opted in").expect("late kept");
+        assert_eq!(left.state, ProgramState::Working);
+        assert_eq!(left.app.as_deref(), Some("make"));
+        // Evidence gathered after the late report releases it too.
+        let newest = recorder.0.lock().last().expect("blocked published").revision;
+        assert!(newest > bound);
+        assert_eq!(hub.program_exited("s", newest).expect("opted in"), None);
     }
 
     #[test]

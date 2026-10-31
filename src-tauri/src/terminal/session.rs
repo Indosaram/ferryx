@@ -1124,9 +1124,9 @@ impl PtySession {
         self.master.lock().as_ref().and_then(|m| m.as_raw_fd())
     }
 
-    /// The slave tty device this session's master serves, if known. Test-only: production code
-    /// reads the master's tty name where it needs it.
-    #[cfg(all(unix, test))]
+    /// The slave tty device this session's master serves, if known. The foreground observer
+    /// matches it against each process's controlling terminal.
+    #[cfg(unix)]
     pub(crate) fn slave_tty_name(&self) -> Option<PathBuf> {
         self.master.lock().as_ref().and_then(|m| m.tty_name())
     }
