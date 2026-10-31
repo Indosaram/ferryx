@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import dagRunSampleJson from "../state/__fixtures__/dagRunSample.json";
@@ -65,6 +65,42 @@ function createExitedSession(overrides: Partial<TerminalSession> = {}): Terminal
 }
 
 describe("TerminalPane native routing contract", () => {
+  it("automatically resumes a local conversation after confirmed process loss", () => {
+    const session = createExitedSession({ recoveryState: { phase: "exited", reason: "absent" } });
+    const onReconnect = vi.fn(async () => undefined);
+    render(<TerminalPane session={session} active={true} onReconnect={onReconnect} />);
+    expect(onReconnect).toHaveBeenCalledOnce();
+  });
+
+  it.each(["ssh:host:project", "daemon:host:project"])("automatically resumes a confirmed-gone conversation in %s", (workspaceId) => {
+    const session = createExitedSession({ workspaceId, backendSessionId: "standby:session-exited",
+      backendUnavailableReason: "remote_session_gone" });
+    const onReconnect = vi.fn(async () => undefined);
+    render(<TerminalPane session={session} active={true} onReconnect={onReconnect} />);
+    expect(onReconnect).toHaveBeenCalledOnce();
+  });
+
+  it("does not automatically respawn again when a resume fails", async () => {
+    const session = createExitedSession({ recoveryState: { phase: "exited", reason: "absent" } });
+    let reject!: (reason: Error) => void;
+    const pending = new Promise<void>((_, fail) => { reject = fail; });
+    const onReconnect = vi.fn(() => pending);
+    const { rerender } = render(<TerminalPane session={session} active={true} onReconnect={onReconnect} />);
+    expect(onReconnect).toHaveBeenCalledOnce();
+    await act(async () => { reject(new Error("Agent executable unavailable")); });
+    rerender(<TerminalPane session={{ ...session, reconnectLifecycle: "failed" }} active={true} onReconnect={onReconnect} />);
+    expect(onReconnect).toHaveBeenCalledOnce();
+  });
+
+  it("does not resume a hidden or unconfirmed conversation", () => {
+    const onReconnect = vi.fn(async () => undefined);
+    const session = createExitedSession({ recoveryState: { phase: "recovering", reason: "unreachable" } });
+    const { rerender } = render(<TerminalPane session={session} active={true} onReconnect={onReconnect} />);
+    expect(onReconnect).not.toHaveBeenCalled();
+    rerender(<TerminalPane session={{ ...session, recoveryState: { phase: "exited", reason: "absent" } }} active={false} onReconnect={onReconnect} />);
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     dagStore.reset();
     resetSessionLifecycleForTests();

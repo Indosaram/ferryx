@@ -1,0 +1,55 @@
+name: rex-windows-rust
+on:
+  push:
+    branches: ['ci/rexwin-rust']
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Windows Rust gates
+        shell: bash
+        run: |
+          mkdir -p out
+          git rev-parse HEAD | tee out/revision.log
+          git config --global user.name ci; git config --global user.email ci@ferryx.dev; git config --global init.defaultBranch main
+          status=0
+          gate() {
+            name="$1"; shift
+            "$@" > "out/$name.log" 2>&1
+            code=$?
+            echo "${name}_EXIT $code" | tee -a out/gate.log
+            if [ "$code" -ne 0 ]; then status=1; fi
+          }
+          gate INSTALL bun install --cwd ui --frozen-lockfile
+          gate UI_BUILD bun run --cwd ui build
+          gate CLIPPY cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          gate FOREGROUND cargo test --manifest-path src-tauri/Cargo.toml --lib -- terminal::foreground --test-threads=1
+          gate PROTOCOL_RELEASE cargo test --manifest-path src-tauri/Cargo.toml --lib -- daemon::server::protocol_release_tests --test-threads=1
+          gate PROGRAM_STATUS cargo test --manifest-path src-tauri/Cargo.toml --lib -- terminal::program_status --test-threads=1
+          gate HOOK_INSTALL cargo test --manifest-path src-tauri/Cargo.toml --lib -- daemon::agent_hook_install --test-threads=1
+          gate API_CATALOG cargo test --manifest-path src-tauri/Cargo.toml --lib -- cli::api_catalog --test-threads=1
+          grep -h -E '^test result|^test .*(FAILED|ok)$' out/FOREGROUND.log | tail -20 | tee -a out/gate.log
+          exit $status
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rex-windows-rust
+          path: out

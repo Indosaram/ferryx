@@ -1,5 +1,4 @@
-import { isPairedWorkspaceId } from "./remoteProject";
-import { getAgentReconnectAffordance } from "./agentResumeAffordance";
+import { extractNormalizedProviderSession, getAgentReconnectAffordance } from "./agentResumeAffordance";
 import { safeRandomUUID } from "./uuid";
 import { switchDebug } from "./switchDebug";
 import { closeTerminal, spawnTerminalDetailed, toIpcError } from "./tauri";
@@ -8,7 +7,7 @@ import type { StructuredIpcError, TerminalSession } from "./types";
 
 type ReconnectAction =
   | { type: "SET_RECONNECT_LIFECYCLE"; sessionId: string; lifecycle: "validating" | "spawning" | "binding" | "failed"; error?: StructuredIpcError | null; requestId?: string | null }
-  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null; incarnation?: string | null };
+  | { type: "REBIND_SESSION_BACKEND"; sessionId: string; backendSessionId: string; cwd?: string; daemonEpoch?: string | null; incarnation?: string | null; clearAgent?: boolean };
 
 export type AgentReconnectDependencies = {
   getSessions: () => Readonly<Record<string, TerminalSession>>;
@@ -85,9 +84,9 @@ export function reconnectAgentSession(
     };
     try {
       if (!initial) throw invalidReconnect("Terminal session no longer exists");
-      if (isPairedWorkspaceId(initial.workspaceId)) throw {
-        code: "UNSUPPORTED_CAPABILITY", message: "Paired terminal recovery requires native remote terminal support. No local agent was started.",
-      };
+      // Local, SSH and paired panes share this path. The spawn request carries the pane's own
+      // workspace, so the backend starts the resumed agent on the host that owns that workspace
+      // (the remote host for SSH and paired panes), never on this machine.
       dependencies.dispatch({ type: "SET_RECONNECT_LIFECYCLE", sessionId: localSessionId, lifecycle: "validating" });
       const affordance = getAgentReconnectAffordance(initial, dependencies.getSessions());
       if (!affordance.canReconnect || !affordance.agentType || !affordance.providerSession) {
@@ -117,11 +116,18 @@ export function reconnectAgentSession(
       spawned = await runStage("spawn", rawSpawn, () => { spawnAbandoned = true; });
       const requireCurrentIdentity = (): TerminalSession => {
         const current = dependencies.getSessions()[localSessionId];
+        const currentProviderSession = current ? extractNormalizedProviderSession(current) : null;
         if (
           !current
           || current.workspaceId !== initial.workspaceId
-          || current.providerSession?.key !== providerSession.key
-          || current.providerSession.id !== providerSession.id
+          || current.backendSessionId !== initial.backendSessionId
+          || current.incarnation !== initial.incarnation
+          || current.cwd !== initial.cwd
+          || current.agentType !== initial.agentType
+          || currentProviderSession?.key !== providerSession.key
+          || currentProviderSession.id !== providerSession.id
+          || currentProviderSession.launcher !== providerSession.launcher
+          || currentProviderSession.transcriptPath !== providerSession.transcriptPath
         ) {
           throw invalidReconnect("Terminal session changed while reconnecting");
         }
@@ -140,6 +146,8 @@ export function reconnectAgentSession(
         cwd: spawned.session.cwd ?? current.cwd,
         daemonEpoch: spawned.daemonEpoch,
         incarnation: spawned.session.incarnation ?? null,
+        // The resumed agent is the same conversation: a remote backend change must keep it.
+        clearAgent: false,
       });
       return spawned;
     } catch (error) {

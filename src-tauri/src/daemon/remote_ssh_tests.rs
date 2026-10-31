@@ -598,6 +598,31 @@ async fn exercise_child(root: &Path) {
             retained = Some(id);
         }
     }
+    let resume_startup = TerminalStartup::AgentResume {
+        agent_type: "ferryx-test-agent".into(),
+        provider_session: serde_json::from_value(serde_json::json!({
+            "key": "session_id", "id": "remote-conversation-original"
+        })).unwrap(),
+    };
+    let resumed = daemon.handle_spawn(
+        "agent-resume", &response.workspace_id,
+        crate::daemon::session_service::SpawnOptions {
+            worktree: None, cwd: Some(response.repo_root.clone()), cols: 80, rows: 24, shell: None,
+        }, Some(resume_startup.clone()),
+    ).await.expect("agent resumes on SSH host");
+    wait_remote_connected(&daemon, &resumed).await;
+    assert!(daemon.terminal_service.get_session(&resumed).is_none());
+    let details = daemon.terminal_service.remote().details(&resumed).unwrap();
+    assert_eq!(details.descriptor.config.agent_identity.as_ref().unwrap()["providerSession"]["id"], "remote-conversation-original");
+    let duplicate = daemon.handle_spawn(
+        "agent-resume-duplicate", &response.workspace_id,
+        crate::daemon::session_service::SpawnOptions {
+            worktree: None, cwd: Some(response.repo_root.clone()), cols: 80, rows: 24, shell: None,
+        }, Some(resume_startup),
+    ).await;
+    assert!(matches!(duplicate, Err(crate::daemon::session_service::SpawnError::AgentSessionConflict { .. })));
+    daemon.handle_close(&resumed).await.unwrap();
+
     let wt_dir = Path::new(&response.repo_root)
         .join(".ferryx-worktrees")
         .join("agent")

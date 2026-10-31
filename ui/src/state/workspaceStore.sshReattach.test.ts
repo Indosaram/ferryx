@@ -115,6 +115,21 @@ describe("SSH same-process reattachment", () => {
       remoteGeneration: 7,
       remoteFailure: { kind: "network", message: "Remote terminal control connection timed out" },
     });
+
+    const exhausted = workspaceReducer(state, {
+      type: "SESSION_REMOTE_STATUS",
+      status: { sessionId: "active-backend", state: "expired", generation: 7,
+        failure: { kind: "transport", message: "unreachable" }, replayGap: null },
+    });
+    expect(exhausted.sessions.pane.backendSessionId).toBe("active-backend");
+
+    const gone = workspaceReducer(state, {
+      type: "SESSION_REMOTE_STATUS",
+      status: { sessionId: "active-backend", state: "expired", generation: 7,
+        failure: { kind: "expired", message: "target exited" }, replayGap: null },
+    });
+    expect(gone.sessions.pane.backendSessionId).toBe("standby:pane");
+    expect(gone.layout).toBe(state.layout);
   });
 
   it("ignores stale SESSION_BACKEND_UNAVAILABLE with backendSessionId: null when session is already bound", () => {

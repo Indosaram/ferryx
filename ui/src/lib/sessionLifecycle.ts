@@ -16,6 +16,12 @@ export type SessionLifecycleAction = "resume" | "restart" | "hibernate";
 
 export const STANDBY_BACKEND_PREFIX = "standby:";
 /**
+ * `backendUnavailableReason` of a remote pane whose backend the owning daemon confirmed gone.
+ * The pane keeps its identity and agent on a standby backend, exactly like a lazily restored local
+ * pane, and resumes (agent) or reopens (shell) on the same remote host when it is next shown.
+ */
+export const REMOTE_SESSION_GONE_REASON = "remote_session_gone";
+/**
  * Per-session cap on the scrollback carried in the persisted session state.
  *
  * This text is only used to redisplay recent output when a suspended session is reopened, but it

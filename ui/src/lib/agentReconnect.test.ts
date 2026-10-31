@@ -17,6 +17,33 @@ function result() {
 describe("reconnectAgentSession", () => {
   beforeEach(clearAgentReconnectInflightForTests);
 
+  it.each(["ws", "ssh:host:project", "daemon:host:project"])("resumes the same conversation in %s without changing pane identity", async (workspaceId) => {
+    const session = { ...coldSession(), workspaceId };
+    const spawn = vi.fn(async () => result());
+    const dispatch = vi.fn();
+    await reconnectAgentSession(session.id, {
+      getSessions: () => ({ [session.id]: session }), dispatch, spawn,
+      attach: vi.fn(async () => undefined),
+    });
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId, cwd: session.cwd,
+      startup: { kind: "agentResume", agentType: session.agentType, providerSession: session.providerSession },
+    }));
+    expect(dispatch).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: "REBIND_SESSION_BACKEND", sessionId: session.id, clearAgent: false,
+    }));
+  });
+
+  it("resumes a legacy conversation reference without discarding the new backend", async () => {
+    const session = { ...coldSession(), providerSession: null, agentSessionId: "provider-1" };
+    const close = vi.fn(async () => undefined);
+    await expect(reconnectAgentSession(session.id, {
+      getSessions: () => ({ [session.id]: session }), dispatch: vi.fn(),
+      spawn: vi.fn(async () => result()), attach: vi.fn(async () => undefined), close,
+    })).resolves.toMatchObject({ sessionId: "backend-new" });
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("spawns, attaches, and commits the same local session transactionally", async () => {
     const session = coldSession(); const actions: unknown[] = [];
     const spawn = vi.fn(async () => result()); const attach = vi.fn(async () => undefined); const persist = vi.fn(async () => undefined);
@@ -81,6 +108,24 @@ describe("reconnectAgentSession", () => {
     expect(close).toHaveBeenCalledWith("backend-new");
     expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND" }));
     expect(dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ lifecycle: "failed" }));
+  });
+
+  it("does not overwrite a backend rebound while resume is pending", async () => {
+    let session = coldSession();
+    let resolve!: (value: ReturnType<typeof result>) => void;
+    const spawn = vi.fn(() => new Promise<ReturnType<typeof result>>((done) => { resolve = done; }));
+    const attach = vi.fn(async () => undefined);
+    const close = vi.fn(async () => undefined);
+    const dispatch = vi.fn();
+    const pending = reconnectAgentSession(session.id, {
+      getSessions: () => ({ [session.id]: session }), dispatch, spawn, attach, close,
+    });
+    session = { ...session, backendSessionId: "already-rebound" };
+    resolve(result());
+    await expect(pending).rejects.toMatchObject({ code: "AGENT_RESUME_INVALID" });
+    expect(attach).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith("backend-new");
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND" }));
   });
 
   it("closes a late spawn and never attaches after the local session leaves the workspace", async () => {
