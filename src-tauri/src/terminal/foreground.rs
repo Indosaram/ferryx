@@ -841,13 +841,14 @@ mod platform {
     /// logon session's, so without it an orphan from anywhere (a launcher-style app started in
     /// another pane) would keep every ConPTY shell accompanied.
     ///
-    /// Limit: attribution needs a listing to have shown the process, or the parent that
-    /// created it, inside some shell's tree. A launcher that starts its app and exits between
-    /// two listings (the idle refresh is 2s on Windows) leaves an orphan no listing ever tied to
-    /// a pane. Every pane whose shell started before it must keep counting it as company for
-    /// as long as it lives: it may be the writer of that pane's pending report, and nothing
-    /// in `Win32_Process` tells which console it holds. Such a report is then released only by a
-    /// prompt start, a clear or a newer report.
+    /// Limit: a pane stops counting another pane's orphan only when a listing showed that
+    /// process itself inside the other pane's shell tree (a parent seen there is not enough:
+    /// parent pids are reused). A launcher that starts its app and exits between two listings
+    /// (the idle refresh is 2s on Windows) leaves an orphan no listing ever tied to a pane, even
+    /// when the launcher itself was listed. Every pane whose shell started before it must keep
+    /// counting it as company for as long as it lives: it may be the writer of that pane's
+    /// pending report, and nothing in `Win32_Process` tells which console it holds. Such a
+    /// report is then released only by a prompt start, a clear or a newer report.
     #[derive(Default)]
     struct Lineage {
         /// The creation time of the shell this memory belongs to; a different one is a new shell
@@ -867,6 +868,10 @@ mod platform {
         /// and orphaned between listings). They keep counting while no other pane's listing
         /// shows them as its own descendant.
         adopted: HashMap<u32, Option<i64>>,
+        /// The subset of `seen` linked to the shell by parent links whose creation times are
+        /// known and ordered (parent no later than child), so a reused parent pid cannot have
+        /// made the link. Only these prove to another pane that a process is not its own.
+        proven: HashMap<u32, i64>,
         /// Every process of the previous listing whose creation time was known. A process not
         /// in it may have been born and orphaned between listings, so no listing could have
         /// attributed it.
@@ -889,12 +894,13 @@ mod platform {
 
     impl Lineage {
         /// Whether an earlier listing showed `process` itself, with the same known creation
-        /// time, as a descendant of this pane's shell: then no other pane's shell created it.
+        /// time, as a descendant of this pane's shell through creation-ordered parent links:
+        /// then no other pane's shell created it.
         fn descended(&self, process: &Process) -> bool {
             let (Some(history), Some(own)) = (&self.history, process.created) else {
                 return false;
             };
-            history.seen.get(&process.pid) == Some(&Some(own))
+            history.proven.get(&process.pid) == Some(&own)
         }
 
         /// Whether the shell tree this memory belongs to may contain the shell `pid` created
@@ -942,6 +948,37 @@ mod platform {
                     history.seen.insert(p.pid, p.created);
                 }
             }
+            let mut ordered = vec![shell];
+            loop {
+                let before = ordered.len();
+                for p in processes {
+                    if ordered.contains(&p.pid) {
+                        continue;
+                    }
+                    let linked = processes.iter().any(|parent| {
+                        parent.pid == p.parent
+                            && ordered.contains(&parent.pid)
+                            && matches!(
+                                (parent.created, p.created),
+                                (Some(parent), Some(own)) if parent <= own
+                            )
+                    });
+                    if linked {
+                        ordered.push(p.pid);
+                    }
+                }
+                if ordered.len() == before {
+                    break;
+                }
+            }
+            for p in processes {
+                if p.pid == shell || !ordered.contains(&p.pid) {
+                    continue;
+                }
+                if let Some(created) = p.created {
+                    history.proven.insert(p.pid, created);
+                }
+            }
             for p in orphans {
                 if !holds(&history.seen, p) {
                     history.adopted.insert(p.pid, p.created);
@@ -957,6 +994,11 @@ mod platform {
             };
             history.seen.retain(live);
             history.adopted.retain(live);
+            history.proven.retain(|pid, created| {
+                processes
+                    .iter()
+                    .any(|p| p.pid == *pid && p.created == Some(*created))
+            });
             history.listed = processes
                 .iter()
                 .filter_map(|p| p.created.map(|created| (p.pid, created)))
@@ -1245,6 +1287,28 @@ mod platform {
                 classify(&nested, 600, &mut Lineage::default(), &others),
                 shell(false)
             );
+        }
+
+        /// Review LOW-A: a parent link whose parent was created after its child is a reused
+        /// pid, not descent. Another pane's walk that went through one proves nothing, so this
+        /// pane keeps the orphan as company instead of releasing a report its writer may own.
+        #[test]
+        fn a_reused_parent_pid_in_another_pane_proves_nothing() {
+            // The reporter (800) lost its parent; its parent pid now names a process (900)
+            // created later inside shell 150's tree.
+            let rows = [
+                row(30, 20, "explorer.exe"),
+                row(150, 30, "pwsh.exe"),
+                at(600, 30, "pwsh.exe", 450),
+                row(900, 150, "node.exe"),
+                row(800, 900, "reporter.exe"),
+            ];
+            let mut other = Lineage::default();
+            classify(&rows, 150, &mut other, &[]);
+            let others = [(150, other)];
+            let mut lineage = Lineage::default();
+            assert_eq!(classify(&rows, 600, &mut lineage, &others), shell(false));
+            assert_eq!(classify(&rows, 600, &mut lineage, &others), shell(false));
         }
 
         /// The pane's own orphans still count: one an earlier listing showed in the shell's
