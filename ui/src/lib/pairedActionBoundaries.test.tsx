@@ -59,11 +59,27 @@ it("paired shell recovery cannot spawn a local replacement", async () => {
   await expect(replaceExitedShellSession(session.id, { getSessions: () => ({ pane: session }), dispatch: vi.fn(), spawn })).rejects.toBeTruthy();
   expect(spawn).not.toHaveBeenCalled();
 });
-it("paired agent recovery cannot validate or spawn through local provider APIs", async () => {
-  const spawn = vi.fn();
-  const agent = { ...session, agentType: "claude", providerSession: { key: "session_id" as const, id: "remote-provider" } };
-  await expect(reconnectAgentSession(agent.id, { getSessions: () => ({ pane: agent }), dispatch: vi.fn(), spawn, attach: vi.fn() })).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
-  expect(spawn).not.toHaveBeenCalled();
+it("paired agent recovery resumes on the paired host, not via local provider APIs", async () => {
+  const backend = { sessionId: "backend-new", workspaceId: session.workspaceId, worktree: null,
+    cwd: session.cwd, cols: 80, rows: 24, running: true };
+  const spawned = { sessionId: "backend-new", daemonEpoch: "42", session: backend };
+  const spawn = vi.fn(async () => spawned);
+  const dispatch = vi.fn();
+  const providerSession = { key: "session_id" as const, id: "remote-provider" };
+  const agent = { ...session, agentType: "claude", providerSession };
+  await reconnectAgentSession(agent.id, {
+    getSessions: () => ({ pane: agent }), dispatch, spawn, attach: vi.fn(async () => undefined),
+  });
+  // The spawn names the paired workspace, so the backend starts the resume on the paired host.
+  expect(spawn).toHaveBeenCalledOnce();
+  expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+    workspaceId: session.workspaceId, cwd: session.cwd,
+    startup: { kind: "agentResume", agentType: "claude", providerSession },
+  }));
+  expect(native.invoke).not.toHaveBeenCalledWith("cmd_terminal_spawn", expect.anything());
+  expect(dispatch).toHaveBeenLastCalledWith(expect.objectContaining({
+    type: "REBIND_SESSION_BACKEND", sessionId: agent.id, clearAgent: false,
+  }));
 });
 it("paired recovery never mounts local terminal or DAG tooling while proxy support is absent", () => {
   render(<TerminalPane session={session} active onReconnect={vi.fn()} onOpenNewShell={vi.fn()} />);
