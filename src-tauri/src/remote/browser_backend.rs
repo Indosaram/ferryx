@@ -146,6 +146,7 @@ pub(crate) fn typed_ipc_error(
 }
 
 /// Default bound on each GUI round-trip step (handshake reply, response frame).
+#[cfg(unix)]
 const DEFAULT_IPC_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Longest handshake reply line accepted from the GUI.
@@ -544,6 +545,9 @@ fn local_ipc_availability(
 pub struct LocalIpcBrowserBackend {
     socket_path: String,
     local_credential: Option<String>,
+    /// Bounds each unix-socket GUI round-trip step. Off unix the transport is the
+    /// `Unavailable` stub, which never reads from the GUI.
+    #[cfg(unix)]
     io_timeout: std::time::Duration,
     frame_senders:
         Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>,
@@ -568,6 +572,7 @@ impl LocalIpcBrowserBackend {
         Self {
             socket_path,
             local_credential,
+            #[cfg(unix)]
             io_timeout: DEFAULT_IPC_IO_TIMEOUT,
             frame_senders: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             active_subscriptions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -575,6 +580,7 @@ impl LocalIpcBrowserBackend {
     }
 
     /// Overrides the bound on each GUI round-trip step (handshake reply, response frame).
+    #[cfg(unix)]
     pub fn with_io_timeout(mut self, io_timeout: std::time::Duration) -> Self {
         self.io_timeout = io_timeout;
         self
