@@ -2042,7 +2042,7 @@ mod tests {
         let hub = Arc::new(TerminalOutputHub::new(32));
         let (id, _) = runtime.get_or_rearm(descriptor, hub.clone(), service).unwrap();
         let mut output = hub.subscribe_with_sequence(&id, None).unwrap().receiver;
-        let mut socket = tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await.unwrap().unwrap();
+        let socket = tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await.unwrap().unwrap();
         socket.commands.send(FixtureCommand::Attach).await.unwrap();
         socket.commands.send(FixtureCommand::Output(11)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap().unwrap();
