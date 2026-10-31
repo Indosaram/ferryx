@@ -6896,8 +6896,12 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::AcknowledgeAgentOutcome { session_id }) => {
-                    self.acknowledge_agent_outcome(&session_id);
-                    DaemonResponse::AcknowledgeAgentOutcomeOk
+                    match crate::remote::backend::RemoteSessionBackend::acknowledge_agent_outcome(
+                        self.session_router.as_ref(), &session_id,
+                    ).await {
+                        Ok(()) => DaemonResponse::AcknowledgeAgentOutcomeOk,
+                        Err(message) => daemon_error(message),
+                    }
                 }
                 Ok(DaemonRequest::ResetAgentState { session_id }) => {
                     if self.session_router.is_local_session(&session_id) || self.agent_states.current(&session_id).is_some() {
@@ -8778,15 +8782,6 @@ impl DaemonServer {
             }
             self.session_service.session_metadata.write().remove(&session_id);
         }
-    }
-
-    /// The user saw the session: drops its OSC 7501 `done`/`error` records. The output hub
-    /// publishes the summary afterwards through the program status publisher, ordered with live
-    /// feeds. A session without program status (paired, unknown) is left alone.
-    fn acknowledge_agent_outcome(&self, session_id: &str) {
-        self.terminal_service
-            .output_hub()
-            .acknowledge_program_outcome(session_id);
     }
 
     /// The session's foreground agent left: drops its transient OSC 7501 records; the output hub

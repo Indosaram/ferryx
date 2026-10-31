@@ -244,6 +244,11 @@ impl RemoteSessionBackend for TerminalService {
         session_id: &'a str,
     ) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
+            if crate::terminal::paired_runtime::Runtime::owns(session_id) {
+                return self.paired().acknowledge_agent_outcome(session_id)
+                    .map_err(|error| error.to_string())?
+                    .await.map_err(|error| error.to_string());
+            }
             self.output_hub()
                 .acknowledge_program_outcome(session_id)
                 .ok_or_else(|| "Session has no program status mirror".to_string())?;
