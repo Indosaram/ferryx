@@ -4,6 +4,7 @@ use crate::ipc::{IpcError, IpcErrorCode};
 use crate::terminal::shell::ShellCommandPlan;
 use std::process::Stdio;
 use std::time::Duration;
+#[cfg(not(windows))]
 use tokio::io::AsyncReadExt;
 
 #[cfg(windows)]
@@ -399,6 +400,7 @@ pub fn bridge_plan(
     }
 }
 
+#[cfg(not(windows))]
 pub(crate) fn spawn_child(
     plan: &ShellCommandPlan,
     stdin: Stdio,
@@ -541,7 +543,7 @@ async fn collect_finite_output(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn collect_output(
     child: tokio::process::Child,
     deadline: Duration,
@@ -550,6 +552,7 @@ async fn collect_output(
     collect_pipe_output(child, deadline, max_bytes).await
 }
 
+#[cfg(not(windows))]
 async fn collect_pipe_output(
     mut child: tokio::process::Child,
     deadline: Duration,
@@ -718,7 +721,7 @@ async fn collect_windows_output(
     match result {
         Ok(Ok((status, stderr, stdout))) => {
             if status.success() { return Ok(stdout); }
-            return Err(ssh_status_error(status, &stderr));
+            Err(ssh_status_error(status, &stderr))
         }
         Err(_) => {
             child.kill().await.map_err(|error| IpcError::new(IpcErrorCode::IoError, format!("Failed to terminate SSH probe: {error}")))?;

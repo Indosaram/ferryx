@@ -187,4 +187,14 @@ describe("ipynbParse", () => {
     const withAnsi = "\u001b[31mRed\u001b[0m and \u001b[1;32mGreen\u001b[0m";
     expect(stripAnsi(withAnsi)).toBe("Red and Green");
   });
+
+  it("reads nbformat v3 cells from worksheets[0]", () => {
+    const notebook = JSON.stringify({
+      nbformat: 3,
+      worksheets: [{ cells: [{ cell_type: "markdown", source: ["# v3"] }] }],
+    });
+    const parsed = parseNotebook(notebook);
+    expect(parsed?.cells).toHaveLength(1);
+    expect(parsed?.cells[0].source).toBe("# v3");
+  });
 });

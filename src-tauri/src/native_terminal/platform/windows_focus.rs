@@ -26,14 +26,14 @@ const HC_ACTION: i32 = 0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-struct POINT {
+struct Point {
     x: i32,
     y: i32,
 }
 
 #[repr(C)]
-struct MSLLHOOKSTRUCT {
-    pt: POINT,
+struct MsllHookStruct {
+    pt: Point,
     mouse_data: u32,
     flags: u32,
     time: u32,
@@ -50,7 +50,7 @@ unsafe extern "system" {
     ) -> Hhook;
     fn CallNextHookEx(hhk: Hhook, n_code: i32, wparam: usize, lparam: isize) -> isize;
     fn UnhookWindowsHookEx(hhk: Hhook) -> i32;
-    fn ScreenToClient(hwnd: Hwnd, lp_point: *mut POINT) -> i32;
+    fn ScreenToClient(hwnd: Hwnd, lp_point: *mut Point) -> i32;
     fn GetDpiForWindow(hwnd: Hwnd) -> u32;
     fn FindWindowExW(
         parent: Hwnd,
@@ -101,7 +101,7 @@ unsafe extern "system" fn enum_child_find_chrome_widget(hwnd: Hwnd, lparam: isiz
     if len > 0 {
         let target_len = CHROME_WIDGET_CLASS.len() - 1;
         if len as usize == target_len
-            && &class_buf[..target_len] == &CHROME_WIDGET_CLASS[..target_len]
+            && class_buf[..target_len] == CHROME_WIDGET_CLASS[..target_len]
         {
             *result = Some(hwnd);
             return 0;
@@ -155,7 +155,7 @@ static FOCUS_GATE: crate::native_terminal::focus_gesture::PressReleaseFocusGate 
 unsafe extern "system" fn mouse_ll_hook_proc(n_code: i32, wparam: usize, lparam: isize) -> isize {
     let is_press = wparam == WM_LBUTTONDOWN as usize;
     if n_code >= HC_ACTION && (is_press || wparam == WM_LBUTTONUP as usize) && lparam != 0 {
-        let hook_struct = &*(lparam as *const MSLLHOOKSTRUCT);
+        let hook_struct = &*(lparam as *const MsllHookStruct);
         let mut pt = hook_struct.pt;
 
         if let Ok(guard) = MONITOR_STATE.lock() {

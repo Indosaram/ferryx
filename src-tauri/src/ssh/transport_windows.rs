@@ -42,7 +42,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandl
 use std::os::windows::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
+use std::process::{ChildStderr, ChildStdin, ExitStatus};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -81,9 +81,8 @@ const STILL_ACTIVE: u32 = 259;
 const WAIT_OBJECT_0: u32 = 0;
 /// `INFINITE`: wait without a deadline.
 const INFINITE: u32 = 0xFFFF_FFFF;
-/// `STD_INPUT_HANDLE` / `STD_OUTPUT_HANDLE` / `STD_ERROR_HANDLE` (`GetStdHandle` kinds).
+/// `STD_INPUT_HANDLE` / `STD_ERROR_HANDLE` (`GetStdHandle` kinds).
 const STD_INPUT_HANDLE: u32 = -10i32 as u32;
-const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
 const STD_ERROR_HANDLE: u32 = -12i32 as u32;
 /// The bit bucket opened for [`ChildStdio::Null`].
 const NUL_DEVICE: &str = r"\\.\NUL";
@@ -216,6 +215,7 @@ extern "system" {
     fn GetExitCodeProcess(process: HANDLE, code: *mut u32) -> i32;
     fn GetProcessId(process: HANDLE) -> u32;
     fn IsProcessInJob(process: HANDLE, job: HANDLE, result: *mut i32) -> i32;
+    #[cfg(test)]
     fn GetStdHandle(kind: u32) -> HANDLE;
     fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
     fn GetWindowsDirectoryW(buffer: *mut u16, size: u32) -> u32;
@@ -450,8 +450,7 @@ impl TransportOwner {
             // SAFETY: both handles are fresh and owned here, so both are closed on this path.
             drop(unsafe { OwnedHandle::from_raw_handle(process_handle as RawHandle) });
             drop(unsafe { OwnedHandle::from_raw_handle(thread_handle as RawHandle) });
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "child was not created inside the transport job",
             ));
         }
@@ -651,8 +650,7 @@ impl TransportChild {
     /// count, which is one for a child that has not run yet.
     fn resume(&mut self) -> io::Result<u32> {
         let Some(thread) = self.thread.take() else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "child primary thread is already resumed and released",
             ));
         };

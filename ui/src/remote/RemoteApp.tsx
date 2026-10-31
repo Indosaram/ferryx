@@ -13,7 +13,7 @@ import {
   getRemoteAuthToken,
   setRemoteAuthToken,
 } from "../lib/remoteClient";
-import { remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
+import { remoteHostKey, remoteHostStore, selectActiveHost } from "../state/remoteHostStore";
 import { MobileHostDrawer } from "./MobileHostDrawer";
 import {
   contextName,
@@ -23,6 +23,7 @@ import {
   RemoteWorkspaceMirror,
   useRemoteDesktopSidebar,
   type RemoteContextOption,
+  type RemoteTerminalItem,
   type RemoteTerminalTabInfo,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
@@ -30,6 +31,12 @@ import { BUILD_STAMP } from "../lib/buildStamp";
 import { MobileTopBar, type MobileTopBarActivityState } from "./chat/MobileTopBar";
 import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
+import { MobileSheet } from "./chat/MobileSheet";
+import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
+import type { PushRequest } from "../lib/pushSubscription";
+import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import { remoteInboxEntries, useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
+import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { capRetainedMessages } from "./agentConversation";
 import {
   ReferenceHistoryFetchError,
@@ -99,6 +106,7 @@ import {
 
 import { AccountLoginPage } from "./AccountLoginPage";
 import { ApprovePage, isApproveRoute } from "./ApprovePage";
+import { isPairRoute, PairingPage } from "./PairingPage";
 import {
   useAccountWorktrees,
   type AccountWorktreeOption,
@@ -312,6 +320,23 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+/** The events socket's push that a session's prompt card may have changed (answered elsewhere). */
+type AgentPromptChange = { sessionId: string; promptId: string | null };
+
+function parseAgentPromptChange(raw: string): AgentPromptChange | null {
+  let message: unknown;
+  try {
+    message = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const event = record(message);
+  if (event?.type !== "agentPromptChanged") return null;
+  const sessionId = optionalString(event.sessionId);
+  if (!sessionId) return null;
+  return { sessionId, promptId: optionalString(event.promptId) };
 }
 
 function parseActiveSelectionEvent(raw: unknown): RemoteActiveSelectionChange | null {
@@ -662,6 +687,8 @@ const CHAT_NO_READER_WARNING =
 
 const CHAT_RETENTION_WARNING = "Older messages are hidden to keep the phone view responsive.";
 const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in the message box.";
+const CHAT_VIEW_ONLY_WARNING =
+  "View-only access: this device cannot type into a pane. That message was not delivered. It is back in the message box.";
 const CHAT_OUTCOME_UNKNOWN_WARNING =
   "That message may have reached the session, but the host did not confirm it. It is back in the message box and will not be sent again on its own.";
 const CHAT_STOP_REFUSED_WARNING =
@@ -1076,9 +1103,43 @@ export const RemoteApp: React.FC = () => {
   const [viewMode, setViewMode] = useState<"chat" | "terminal" | "browser">("chat");
   // Hooks stay above every early return. The /approve route is fixed for the page's lifetime.
   const [approveRoute] = useState(() => isApproveRoute(window.location.pathname));
+  // The /pair route is the desktop QR target: a phone exchanges a desktop pairing code there.
+  const [pairRoute, setPairRoute] = useState(() => isPairRoute(window.location.pathname));
   if (approveRoute) {
     // The approval link points at the account origin itself, not at a saved host.
     return <ApprovePage relayUrl={window.location.origin} />;
+  }
+  if (pairRoute) {
+    const origin = window.location.origin;
+    // The desktop marks a relay link; a relay reaches the machine only under /host/<machineId>.
+    const viaRelay = new URLSearchParams(window.location.search).get("relay") === "1";
+    return (
+      <PairingPage
+        transportUrl={origin}
+        onPaired={(token, metadata) => {
+          const machineId = optionalString(metadata?.machineId);
+          const displayName = optionalString(metadata?.displayName);
+          if (viaRelay && machineId && displayName) {
+            remoteHostStore.upsertHost({
+              machineId,
+              displayName,
+              relayOrigin: origin,
+              deviceToken: token,
+              lastSeenAt: Date.now(),
+              directHints: [],
+            });
+            remoteHostStore.setActiveHost(remoteHostKey(origin, machineId));
+          } else {
+            // A direct gateway serves its API at the page origin: the same-origin connection reads this slot.
+            remoteHostStore.setActiveHost(null);
+            setRemoteAuthToken(token, `local:${origin}`);
+          }
+          // Leave the pairing route so a reload opens the paired host, not a fresh code form.
+          window.history.replaceState(null, "", "/");
+          setPairRoute(false);
+        }}
+      />
+    );
   }
   const bypassSavedHost = magicLinkOverridden;
   const host = bypassSavedHost ? null : selectActiveHost(state);
@@ -1189,6 +1250,8 @@ export const RemoteHostConnection: React.FC<{
   }), [hostId]);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const modelRef = useRef(model);
+  /** The session the phone opened on its own from the Inbox, kept over desktop refreshes. */
+  const localSessionRef = useRef<{ workspaceId: string; tabId: string; terminal: RemoteTerminalItem } | null>(null);
   const modelMachineIdRef = useRef<string | null>(null);
   // Set by every user-driven selection that names a session or tab: the read-only
   // desktop-context sync must never replace an independently chosen session.
@@ -1198,6 +1261,7 @@ export const RemoteHostConnection: React.FC<{
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [phoneAlertsOpen, setPhoneAlertsOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
   const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
@@ -1251,6 +1315,12 @@ export const RemoteHostConnection: React.FC<{
   const chatPromptIdRef = useRef<string | null>(null);
   const chatPromptRevisionRef = useRef<string | null>(null);
   const chatPromptGenerationRef = useRef(0);
+  /** Set by the prompt lane: a pushed `agentPromptChanged` frame for a session re-reads its card. */
+  const chatPromptPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
+  /** The phone Inbox's handlers for the same push, and for a reconnected events socket. */
+  const inboxPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
+  const inboxRefreshRef = useRef<(() => void) | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -1994,8 +2064,18 @@ export const RemoteHostConnection: React.FC<{
     const refreshVersion = workspaceRefreshVersionRef.current;
     const next = await loadWorkspace();
     if (!next || workspaceRefreshVersionRef.current !== refreshVersion) return null;
-    setModel(next);
-    return next;
+    // A session the phone opened on its own (from the Inbox) stays on screen while it is listed:
+    // a desktop refresh updates the mirror around it, never takes it back.
+    const local = localSessionRef.current;
+    const localTab = local && next.context.workspaceId === local.workspaceId
+      ? next.context.terminalTabs?.find((tab) => tab.id === local.tabId && tab.sessionId === local.terminal.sessionId)
+      : undefined;
+    if (local && !localTab) localSessionRef.current = null;
+    const shown = localTab && local
+      ? { ...next, context: { ...next.context, activeTabId: local.tabId, activeTerminal: local.terminal } }
+      : next;
+    setModel(shown);
+    return shown;
   }, [loadWorkspace]);
 
   /* An inventory boundary can arrive in bursts (a busy watched tree republishes several
@@ -2179,6 +2259,15 @@ export const RemoteHostConnection: React.FC<{
         ? new TextDecoder().decode(raw)
         : String(raw ?? "");
 
+      const promptChange = parseAgentPromptChange(text);
+      if (promptChange) {
+        chatPromptPushRef.current?.(promptChange);
+        inboxPushRef.current?.(promptChange);
+        if (activeTunnelConnection) supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
+        else supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
+        return;
+      }
+
       if (activeTunnelConnection) {
         supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
         const inventoryEvent = parseInventoryEvent(activeTunnelConnection.machine.machineId, text);
@@ -2269,6 +2358,8 @@ export const RemoteHostConnection: React.FC<{
         if (disposed || socket !== current) return;
         attempt = 0;
         workspaceRefreshVersionRef.current += 1;
+        // Pushes missed while the socket was down: every Inbox row reads its card again.
+        inboxRefreshRef.current?.();
         const pendingSelection = pendingSelectionRef.current;
         if (pendingSelection) void confirmSelection(pendingSelection);
         else void refreshWorkspace();
@@ -2347,6 +2438,7 @@ export const RemoteHostConnection: React.FC<{
     // A user selection naming a session (or an explicit tab) is an independent choice:
     // the read-only desktop-context sync must never replace it afterwards.
     independentSessionRef.current = Boolean(requestedOption.sessionId || requestedOption.tabId);
+    localSessionRef.current = null;
     if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
@@ -2987,6 +3079,94 @@ export const RemoteHostConnection: React.FC<{
   }, [chatDaemonEpoch, chatGateway, chatProviderSession, effectiveSessionId]);
   const chatTargetKey = chatReferenceTarget === null ? null : referenceTargetKey(chatReferenceTarget);
 
+  /* The phone's Inbox reads and answers each waiting session's card through the same prompt
+     routes, bound to that session's own target. Nothing here selects a pane on the desktop. */
+  const inboxTargetFor = useCallback(
+    (sessionId: string): ReferenceTargetRef | null => {
+      const ownerId = chatGateway?.referenceOwnerId ?? null;
+      const epoch =
+        chatGateway?.daemonEpoch ?? sessionEpochs[sessionId] ?? sessionEpochsRef.current.get(sessionId) ?? null;
+      if (!ownerId || !epoch) return null;
+      return {
+        target: {
+          hostId: chatGateway?.referenceHostId ?? REFERENCE_CHAT_DEFAULT_HOST_ID,
+          ownerId,
+          epoch,
+          backendSessionId: sessionId,
+        },
+      };
+    },
+    [chatGateway, sessionEpochs],
+  );
+  const inboxTransport = useMemo<RemoteInboxTransport>(
+    () => ({
+      read: async (sessionId, registryId) => {
+        const target = inboxTargetFor(sessionId);
+        if (!target || !token) return null;
+        const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, registryId)}`;
+        const response = await remoteFetch(transportBaseUrl, path, { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) throw new ReferencePromptRefused(await readChatErrorCode(response), "prompt read failed");
+        const body: unknown = await response.json();
+        const prompt = parseChatPrompt(body);
+        return { prompt, screenRevision: prompt === null ? null : parseChatScreenRevision(body) };
+      },
+      answer: async (sessionId, registryId, payload) => {
+        const target = inboxTargetFor(sessionId);
+        if (!target || !token) return { ok: false, code: "UNAUTHORIZED", message: CHAT_NO_SESSION_WARNING };
+        const outcome = await postChatMutation(transportBaseUrl, sessionId, token, "answer", {
+          requestId: newChatRequestId(),
+          target: target.target,
+          registryId,
+          params: payload,
+        });
+        return outcome.ok ? { ok: true } : { ok: false, code: outcome.code, message: outcome.message };
+      },
+    }),
+    [inboxTargetFor, token, transportBaseUrl],
+  );
+  /* One Inbox for the whole host: every waiting or finished session of every worktree, project
+     and (account mode) machine, not only the desktop's active selection. The phone home and the
+     session sheet both render these rows. */
+  const accountInboxRows: InboxRow[] = isAccountMode
+    ? buildInboxRows({
+        options: accountDiscovery.accountOptions,
+        inventories: accountDiscovery.sessionInventories,
+        lanes: phoneSupervisor.lanes,
+      })
+    : [];
+  const inboxEntries = remoteInboxEntries({
+    model: effectiveModel,
+    machineId: activeMachineId,
+    accountRows: accountInboxRows,
+  });
+  const remoteInbox = useRemoteInbox({ entries: inboxEntries, transport: inboxTransport });
+  inboxPushRef.current = remoteInbox.push;
+  /* Opening an Inbox row moves only this phone's own view to that session, the way the read-only
+     desktop follow applies a session: no /workspace/select, so the desktop's focus never moves.
+     The pick counts as the user's own, so the desktop follow does not take it back. */
+  const showSessionLocally = useCallback((tab: RemoteTerminalTabInfo) => {
+    const sessionId = tab.sessionId;
+    const workspaceId = modelRef.current.context.workspaceId;
+    if (!sessionId || !workspaceId) return;
+    independentSessionRef.current = true;
+    const active: RemoteTerminalItem = {
+      sessionId,
+      running: true,
+      title: tab.label,
+      workspaceId,
+      worktreeLabel: tab.worktreeLabel ?? modelRef.current.context.worktreeLabel ?? null,
+      ...(tab.daemonEpoch !== null && tab.daemonEpoch !== undefined ? { daemonEpoch: tab.daemonEpoch } : {}),
+    };
+    localSessionRef.current = { workspaceId, tabId: tab.id, terminal: active };
+    const apply = (prev: RemoteWorkspaceModel): RemoteWorkspaceModel =>
+      prev.context.workspaceId !== workspaceId
+        ? prev
+        : { ...prev, context: { ...prev.context, activeTabId: tab.id, activeTerminal: active } };
+    modelRef.current = apply(modelRef.current);
+    setModel(apply);
+  }, []);
+  inboxRefreshRef.current = remoteInbox.refreshAll;
+
   // Read through refs so a poll closure never runs against a pane it was not started for.
   const chatTargetRef = useRef<ReferenceTargetRef | null>(null);
   chatTargetRef.current = chatReferenceTarget;
@@ -3572,12 +3752,15 @@ export const RemoteHostConnection: React.FC<{
     }
     let cancelled = false;
     let fetching = false;
+    // A push that lands while a read is in flight: that read's answer may predate it.
+    let pushedDuringRead = false;
     const controller = new AbortController();
 
     const readPrompt = async () => {
       if (cancelled || fetching) return;
       if (typeof document !== "undefined" && document.hidden) return;
       fetching = true;
+      pushedDuringRead = false;
       try {
         const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, chatAgentType)}`;
         const response = await remoteFetch(transportBaseUrl, path, {
@@ -3595,6 +3778,7 @@ export const RemoteHostConnection: React.FC<{
           return;
         }
         const body: unknown = await response.json();
+        if (pushedDuringRead) return;
         const prompt = parseChatPrompt(body);
         const promptId = prompt?.id ?? null;
         const revision = prompt === null ? null : parseChatScreenRevision(body);
@@ -3621,6 +3805,7 @@ export const RemoteHostConnection: React.FC<{
         /* a transient prompt read keeps the card the user is looking at */
       } finally {
         fetching = false;
+        if (pushedDuringRead && !cancelled) void readPrompt();
       }
     };
 
@@ -3628,10 +3813,27 @@ export const RemoteHostConnection: React.FC<{
     const timer = setInterval(() => {
       void readPrompt();
     }, 3000);
+    // A card answered on another device closes here at once: the push drops a card the frame
+    // says is gone, then the read confirms the screen. The 3s poll stays as the fallback.
+    chatPromptPushRef.current = (change) => {
+      if (cancelled || change.sessionId !== sessionId) return;
+      if (chatPromptIdRef.current !== null && change.promptId !== chatPromptIdRef.current) {
+        chatPromptGenerationRef.current += 1;
+        chatPromptIdRef.current = null;
+        chatPromptRevisionRef.current = null;
+        setChatTypedAnswer(null);
+        setChatPromptError(null);
+        setChatPrompt(null);
+        setChatScreenRevision(null);
+      }
+      if (fetching) pushedDuringRead = true;
+      else void readPrompt();
+    };
     return () => {
       cancelled = true;
       controller.abort();
       clearInterval(timer);
+      chatPromptPushRef.current = null;
     };
   }, [chatAgentIsNative, chatAgentType, chatPromptRefresh, chatTargetKey, effectiveSessionId, token, transportBaseUrl, viewMode]);
 
@@ -3818,7 +4020,10 @@ export const RemoteHostConnection: React.FC<{
           setChatStagedFiles((prev) => prev.filter((entry) => !mentioned(entry)));
           setChatWarnings((prev) =>
             prev.filter(
-              (warning) => warning !== CHAT_SEND_FAILED_WARNING && warning !== CHAT_OUTCOME_UNKNOWN_WARNING,
+              (warning) =>
+                warning !== CHAT_SEND_FAILED_WARNING &&
+                warning !== CHAT_OUTCOME_UNKNOWN_WARNING &&
+                warning !== CHAT_VIEW_ONLY_WARNING,
             ),
           );
         }
@@ -3848,11 +4053,14 @@ export const RemoteHostConnection: React.FC<{
         return false;
       }
       // A refusal or an uncertain outcome removes the unconfirmed echo and restores the draft.
-      setChatComposerNotice(
-        referenceIsOutcomeUnknown(outcome.code)
-          ? CHAT_OUTCOME_UNKNOWN_WARNING
-          : CHAT_SEND_FAILED_WARNING,
-      );
+      // FORBIDDEN is the host's role refusal, whatever the pane runs, so it names the View role.
+      const refusal =
+        outcome.code === "FORBIDDEN"
+          ? CHAT_VIEW_ONLY_WARNING
+          : referenceIsOutcomeUnknown(outcome.code)
+            ? CHAT_OUTCOME_UNKNOWN_WARNING
+            : CHAT_SEND_FAILED_WARNING;
+      setChatComposerNotice(refusal);
       setChatMessages((prev) => prev.filter((message) => message.id !== pending.id));
       if (heldId === undefined) {
         const current = referenceDrafts.read(target).text;
@@ -3864,12 +4072,7 @@ export const RemoteHostConnection: React.FC<{
       } else {
         endHeldSend();
       }
-      setChatWarnings((prev) =>
-        withChatWarning(
-          prev,
-          referenceIsOutcomeUnknown(outcome.code) ? CHAT_OUTCOME_UNKNOWN_WARNING : CHAT_SEND_FAILED_WARNING,
-        ),
-      );
+      setChatWarnings((prev) => withChatWarning(prev, refusal));
       return false;
     },
     [chatMutationBody, chatTargetIsCurrent, releaseStagedChatFiles],
@@ -4329,6 +4532,63 @@ export const RemoteHostConnection: React.FC<{
     }
   }, [model.context.workspaceId, token, transportBaseUrl, selectContext]);
 
+  /* Phone alerts speak to the paired gateway with this device's bearer. */
+  const phonePushRequest = useCallback<PushRequest>((path, init = {}) => {
+    if (!token) return Promise.reject(new Error("This device is not paired."));
+    return remoteFetch(transportBaseUrl, path, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${token}` },
+    });
+  }, [token, transportBaseUrl]);
+
+  /* A tapped phone alert names a backend session: the service worker focuses this window and
+     posts it, or opens `/#session=<id>`. It is opened once the session appears in the model. */
+  const [alertSessionId, setAlertSessionId] = useState<string | null>(() => {
+    const match = /^#session=([^&]+)$/.exec(window.location.hash);
+    if (!match) return null;
+    window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    const worker = navigator.serviceWorker;
+    if (!worker) return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; sessionId?: unknown } | null;
+      if (data?.type === "ferryx:open-session" && typeof data.sessionId === "string" && data.sessionId) {
+        setAlertSessionId(data.sessionId);
+      }
+    };
+    worker.addEventListener("message", onMessage);
+    return () => worker.removeEventListener("message", onMessage);
+  }, []);
+  useEffect(() => {
+    if (!alertSessionId || !token || pending) return;
+    const workspaceId = model.context.workspaceId;
+    if (model.context.activeTerminal?.sessionId === alertSessionId) {
+      setAlertSessionId(null);
+      return;
+    }
+    const tab = model.context.terminalTabs?.find((row) => row.sessionId === alertSessionId);
+    const option = model.options.find((row) => row.sessionId === alertSessionId && !row.unavailable);
+    const target: RemoteContextOption | null = option
+      ?? (tab && workspaceId
+        ? {
+            workspaceId: tab.workspaceId ?? workspaceId,
+            worktreeSlug: tab.worktreeSlug ?? model.context.worktreeSlug,
+            worktreeLabel: tab.worktreeLabel ?? model.context.worktreeLabel,
+            tabId: tab.id,
+            sessionId: alertSessionId,
+          }
+        : null);
+    if (!target) return;
+    setAlertSessionId(null);
+    void selectContext(target);
+  }, [alertSessionId, token, pending, model, selectContext]);
+
   if ((!token && !accountSessionToken) || magicLinkActive) {
     return (
       <AccountLoginPage
@@ -4594,13 +4854,31 @@ export const RemoteHostConnection: React.FC<{
       .filter((option) => option.sessionId && option.inventoryActivityState === "waiting")
       .map((option) => `${option.machineId}\u0000${option.sessionId}`),
   );
-  const phoneInboxRows: InboxRow[] = phoneHome
-    ? buildInboxRows({
-        options: accountDiscovery.accountOptions,
-        inventories: accountDiscovery.sessionInventories,
-        lanes: phoneSupervisor.lanes,
-      })
-    : [];
+  /* Opening an Inbox row never moves the desktop's focus: a pane already mirrored is shown on this
+     phone only, and any other account session opens through the read-only account selection. */
+  const openInboxRow = (row: AttentionRow): boolean => {
+    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
+    if (!entry) return false;
+    const tab = entry.tabId ? terminalTabs.find((candidate) => candidate.id === entry.tabId) : undefined;
+    if (tab) {
+      showSessionLocally(tab);
+      if (phoneHome) phoneNav.openSession();
+      return true;
+    }
+    const option = entry.machineId
+      ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId)
+      : null;
+    if (!option) {
+      toast.error("This session can't be opened from here right now", {
+        description: entry.machineId
+          ? "Its computer is offline or has not listed it yet."
+          : "Answer it here, or pick its worktree to open it.",
+      });
+      return false;
+    }
+    openPhoneSession(option);
+    return true;
+  };
   const activeSupervisorSnapshot = phoneHome && activeMachineId
     ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
     : null;
@@ -4678,9 +4956,12 @@ export const RemoteHostConnection: React.FC<{
             },
           }}
           inbox={{
-            rows: phoneInboxRows,
+            rows: remoteInbox.rows,
+            prompts: remoteInbox.prompts,
             loading: accountInventoryLoading,
-            onOpen: (row) => openPhoneSession(row.option),
+            onOpen: (row) => {
+              openInboxRow(row);
+            },
           }}
           worktrees={phoneWorktrees}
           resume={
@@ -4801,6 +5082,7 @@ export const RemoteHostConnection: React.FC<{
           viewMode={viewMode as "chat" | "terminal"}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
+          inbox={model.context.workspaceId ? { count: remoteInbox.needsYou, open: inboxOpen, onOpen: () => setInboxOpen(true) } : undefined}
           switcherOpen={switcherOpen}
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
@@ -5135,6 +5417,23 @@ export const RemoteHostConnection: React.FC<{
         }}
       />
 
+      <MobileSheet
+        open={inboxOpen}
+        onOpenChange={setInboxOpen}
+        title="Inbox"
+        ariaLabel="Inbox"
+        testId="mobile-inbox-sheet"
+      >
+        <AttentionInbox
+          compact
+          rows={remoteInbox.rows}
+          prompts={remoteInbox.prompts}
+          onOpen={(row) => {
+            if (openInboxRow(row)) setInboxOpen(false);
+          }}
+        />
+      </MobileSheet>
+
       <MobileOverflowSheet
         open={menuOpen}
         onOpenChange={setMenuOpen}
@@ -5153,6 +5452,7 @@ export const RemoteHostConnection: React.FC<{
           void createWorktree();
         }}
         onOpenMachines={isAccountMode ? undefined : () => setHostDrawerOpen(true)}
+        onOpenPhoneAlerts={token ? () => setPhoneAlertsOpen(true) : undefined}
         onSignOut={isAccountMode ? handleSignOut : undefined}
         connectionLabel={
           accountPreselection
@@ -5164,6 +5464,20 @@ export const RemoteHostConnection: React.FC<{
         buildStamp={BUILD_STAMP}
         disabled={pending !== null || !model.context.workspaceId}
       />
+
+      {token ? (
+        <MobileSheet
+          open={phoneAlertsOpen}
+          onOpenChange={setPhoneAlertsOpen}
+          title="Phone alerts"
+          ariaLabel="Phone alerts"
+          testId="phone-alerts-sheet"
+        >
+          <div className="px-2 pb-3">
+            <PhoneAlertsSettings request={phonePushRequest} />
+          </div>
+        </MobileSheet>
+      ) : null}
 
       {isAccountMode ? (
         <AccountSheet

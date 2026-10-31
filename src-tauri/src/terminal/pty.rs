@@ -3128,22 +3128,31 @@ mod tests {
     /// thread ended - so a session closed while paused could pass stage 1 on the release alone, with
     /// the reader still running. The release is now its own signal, and only the reader's own end sets
     /// that flag.
+    ///
+    /// The reader is held in its output send while the flag is read, because that is the one place
+    /// the release cannot reach. A reader waiting in `poll` is woken by the release on purpose (the
+    /// relinquish of a silent shell depends on it), meets the release at the top of its loop and
+    /// genuinely ends - setting the flag as its own last act, correctly. An earlier version of this
+    /// test left the reader in that `poll` and read the flag right after `close_io`, so it raced that
+    /// legitimate end and failed whenever the woken reader was scheduled first.
     #[tokio::test]
     async fn a_pause_release_is_not_readable_as_the_readers_end() {
         let manager = PtyManager::new();
         let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.args(["-c", "sleep 30"]);
-        let (session_id, _rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+        cmd.args(["-c", "exec yes"]);
+        let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
         let session = manager.get_session(&session_id).expect("session registered");
 
-        // The reader issues its first read before anything pauses it. `sleep 30` writes nothing, so
-        // that read stays blocked and the reader can reach neither its pause point nor its own end:
-        // the flag asserted below can only have been set by the release.
+        // `yes` fills the output channel and nothing receives from it, so the reader ends up blocked
+        // in its send with the next chunk in hand. Only a receive frees a slot, so once the channel is
+        // full and the reader is in its send it stays there until this test drains the channel: it
+        // can reach neither its pause point nor its own end, and the flag asserted below can only have
+        // been set by the release.
         let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
-        while session.reader_phase() != "before-read" {
+        while !(rx.len() == rx.max_capacity() && session.reader_phase() == "before-send") {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the reader never issued its first read"
+                "the reader never blocked in its send on a full output channel"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -3157,9 +3166,17 @@ mod tests {
             !session.is_reader_finished(),
             "the pause release was reported as the reader's end while the reader was still running"
         );
+        assert_eq!(
+            session.reader_phase(),
+            "before-send",
+            "the reader must still be held in its send when the flag is read"
+        );
 
         // The session still closes, and the reader really ends there: the release did not strand it.
+        // Draining the channel lets the held send complete; the reader then meets the release at the
+        // top of its loop and ends, dropping its output sender.
         drop(export);
+        let drained = tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let close = tokio::time::timeout(LOAD_TOLERANT_BOUND, manager.close_session(&session_id))
             .await
             .expect("close must be bounded");
@@ -3168,6 +3185,11 @@ mod tests {
         assert!(
             session.is_reader_finished(),
             "the close must end the reader the release had unblocked"
+        );
+        let ended = tokio::time::timeout(LOAD_TOLERANT_BOUND, drained).await;
+        assert!(
+            matches!(ended, Ok(Ok(()))),
+            "the reader's output sender outlived the close"
         );
     }
 

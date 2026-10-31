@@ -1153,49 +1153,41 @@ pub mod headless {
                         }
                     }
                 }
-                b'h' => {
-                    if is_private {
-                        for param in &params {
-                            match *param {
-                                25 => self.cursor_visible = true,
-                                47 | 1049 => {
-                                    if !self.alt_screen_active {
-                                        self.primary_cursor = (self.cursor_x, self.cursor_y);
-                                        self.alt_grid =
-                                            vec![
-                                                vec![HeadlessCell::default(); self.cols as usize];
-                                                self.rows as usize
-                                            ];
-                                        self.alt_cursor = (0, 0);
-                                        self.cursor_x = 0;
-                                        self.cursor_y = 0;
-                                        self.scroll_top = 0;
-                                        self.scroll_bottom = self.rows.saturating_sub(1);
-                                        self.alt_screen_active = true;
-                                    }
-                                }
-                                _ => {}
+                b'h' if is_private => {
+                    for param in &params {
+                        match *param {
+                            25 => self.cursor_visible = true,
+                            47 | 1049 if !self.alt_screen_active => {
+                                self.primary_cursor = (self.cursor_x, self.cursor_y);
+                                self.alt_grid =
+                                    vec![
+                                        vec![HeadlessCell::default(); self.cols as usize];
+                                        self.rows as usize
+                                    ];
+                                self.alt_cursor = (0, 0);
+                                self.cursor_x = 0;
+                                self.cursor_y = 0;
+                                self.scroll_top = 0;
+                                self.scroll_bottom = self.rows.saturating_sub(1);
+                                self.alt_screen_active = true;
                             }
+                            _ => {}
                         }
                     }
                 }
-                b'l' => {
-                    if is_private {
-                        for param in &params {
-                            match *param {
-                                25 => self.cursor_visible = false,
-                                47 | 1049 => {
-                                    if self.alt_screen_active {
-                                        self.alt_cursor = (self.cursor_x, self.cursor_y);
-                                        self.cursor_x = self.primary_cursor.0;
-                                        self.cursor_y = self.primary_cursor.1;
-                                        self.scroll_top = 0;
-                                        self.scroll_bottom = self.rows.saturating_sub(1);
-                                        self.alt_screen_active = false;
-                                    }
-                                }
-                                _ => {}
+                b'l' if is_private => {
+                    for param in &params {
+                        match *param {
+                            25 => self.cursor_visible = false,
+                            47 | 1049 if self.alt_screen_active => {
+                                self.alt_cursor = (self.cursor_x, self.cursor_y);
+                                self.cursor_x = self.primary_cursor.0;
+                                self.cursor_y = self.primary_cursor.1;
+                                self.scroll_top = 0;
+                                self.scroll_bottom = self.rows.saturating_sub(1);
+                                self.alt_screen_active = false;
                             }
+                            _ => {}
                         }
                     }
                 }

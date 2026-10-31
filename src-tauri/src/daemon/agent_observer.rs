@@ -181,6 +181,14 @@ fn publish_if_changed(
 ) {
     let mut draft = classify_screen(provider, screen.cols, screen.rows, &screen.text, quiet_elapsed);
     draft.session_id = session_id.to_string();
+    // The observer sees every screen change, so it is what notices a card leave and come back:
+    // an identical re-ask after an answer is a new occurrence id, and the push fires for it.
+    draft.prompt_id = crate::remote::reference_chat::prompts::note_reference_prompt_occurrence(
+        session_id,
+        draft.prompt_id.as_deref(),
+        draft.screen_revision.as_deref().unwrap_or_default(),
+        crate::remote::reference_chat::prompts::ReferencePromptReader::ScreenOnly,
+    );
     draft.workspace_id = workspace_of.and_then(|lookup| lookup(session_id));
     let changed = match bus.latest(session_id) {
         Some(previous) => !previous.same_reading(&draft),

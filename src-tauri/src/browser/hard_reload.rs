@@ -101,6 +101,7 @@ fn reload_bypassing_cache<R: tauri::Runtime>(_webview: &tauri::Webview<R>) -> Re
 }
 
 #[cfg(feature = "desktop")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn webview_unreachable(error: tauri::Error) -> IpcError {
     IpcError::new(
         IpcErrorCode::InternalError,

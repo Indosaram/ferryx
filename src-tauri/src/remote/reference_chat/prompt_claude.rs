@@ -974,7 +974,7 @@ fn parse_claude_confirm(screen: &str) -> Option<ClaudePrompt> {
         return None;
     }
     // the panel above the rows: its first line names it, a sentence ending in "?" asks
-    let mut top = start as i64 - 1;
+    let mut top = start - 1;
     while top >= 0
         && !is_divider(&clean_line(&lines[top as usize]))
         && (start - top) <= REFERENCE_CLAUDE_CONFIRM_PANEL_WINDOW as i64
@@ -1554,7 +1554,7 @@ fn list_names(rows: &[ListRow]) -> Option<Vec<(String, Option<String>)>> {
     // the column most rows share; a tie goes to the column read first, as upstream's stable
     // sort((left, right) => right[1] - left[1]) keeps it
     let mut ordered = counts;
-    ordered.sort_by(|left, right| right.1.cmp(&left.1));
+    ordered.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     let shared = ordered
         .first()
         .filter(|(_, count)| *count >= 2)

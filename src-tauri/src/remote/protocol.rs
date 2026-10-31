@@ -213,11 +213,26 @@ pub struct RemoteWorktreeAttention {
     pub state: Option<String>,
 }
 
+/// One desktop session that waits on the user or finished unseen, in any project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSessionAttention {
+    pub backend_session_id: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub worktree_slug: Option<String>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteActiveDesktopSelection {
     #[serde(default)]
     pub attention_inventory: Vec<RemoteWorktreeAttention>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_attention: Vec<RemoteSessionAttention>,
     #[serde(default)]
     pub workspace_id: Option<String>,
     #[serde(default)]
@@ -307,6 +322,9 @@ pub struct RemoteWorkspaceState {
     pub active_workspace_id: String,
     pub worktrees: Vec<RemoteWorktreeInfo>,
     pub sessions: Vec<RemoteTerminalSession>,
+    /// Every waiting or unseen-done desktop session across all projects.
+    #[serde(default)]
+    pub session_attention: Vec<RemoteSessionAttention>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -482,6 +500,50 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<T>(&encoded).unwrap(), value);
         assert_eq!(serde_json::from_value::<T>(expected).unwrap(), value);
+    }
+
+    #[test]
+    fn workspace_state_carries_session_attention_and_reads_legacy_payloads() {
+        use serde_json::json;
+        let state = RemoteWorkspaceState {
+            projects: Vec::new(),
+            active_context: RemoteActiveDesktopSelection::default(),
+            daemon_epoch: None,
+            active_workspace_id: "ws-a".into(),
+            worktrees: Vec::new(),
+            sessions: Vec::new(),
+            session_attention: vec![RemoteSessionAttention {
+                backend_session_id: "pty-1".into(),
+                workspace_id: "ws-b".into(),
+                worktree_slug: Some("feat".into()),
+                state: "waiting".into(),
+                agent_type: Some("claude".into()),
+            }],
+        };
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            value["sessionAttention"],
+            json!([{
+                "backendSessionId": "pty-1",
+                "workspaceId": "ws-b",
+                "worktreeSlug": "feat",
+                "state": "waiting",
+                "agentType": "claude"
+            }])
+        );
+        assert!(value["activeContext"].get("sessionAttention").is_none());
+        let legacy: RemoteWorkspaceState = serde_json::from_value(json!({
+            "projects": [], "activeContext": {}, "activeWorkspaceId": "ws-a",
+            "worktrees": [], "sessions": []
+        }))
+        .unwrap();
+        assert!(legacy.session_attention.is_empty());
+        let selection: RemoteActiveDesktopSelection = serde_json::from_value(json!({
+            "sessionAttention": [{ "backendSessionId": "pty-2", "workspaceId": "ws-c", "state": "done" }]
+        }))
+        .unwrap();
+        assert_eq!(selection.session_attention[0].worktree_slug, None);
+        assert_eq!(selection.session_attention[0].agent_type, None);
     }
 
     #[test]

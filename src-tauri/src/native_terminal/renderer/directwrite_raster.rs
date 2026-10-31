@@ -47,7 +47,7 @@ struct BitmapInfo {
 
 #[repr(C)]
 #[allow(non_snake_case, dead_code)]
-struct LOGFONTW {
+struct LogFontW {
     lfHeight: i32,
     lfWidth: i32,
     lfEscapement: i32,
@@ -102,8 +102,8 @@ unsafe extern "system" {
     fn GetFontData(hdc: Hdc, table: u32, offset: u32, buffer: *mut c_void, size: u32) -> u32;
     fn EnumFontFamiliesExW(
         hdc: Hdc,
-        lpLogfont: *const LOGFONTW,
-        lpProc: unsafe extern "system" fn(*const LOGFONTW, *const c_void, u32, isize) -> i32,
+        lpLogfont: *const LogFontW,
+        lpProc: unsafe extern "system" fn(*const LogFontW, *const c_void, u32, isize) -> i32,
         lParam: isize,
         dwFlags: u32,
     ) -> i32;
@@ -155,7 +155,7 @@ fn candidate_families<'a>(family_stack: &'a str) -> impl Iterator<Item = &'a str
 
 /// Callback for `EnumFontFamiliesExW` existence check: sets the boolean flag and stops enumeration.
 unsafe extern "system" fn enum_font_fam_ex_proc(
-    _lpelfe: *const LOGFONTW,
+    _lpelfe: *const LogFontW,
     _lpntme: *const c_void,
     _font_type: u32,
     l_param: isize,
@@ -175,7 +175,7 @@ unsafe fn family_exists(dc: Hdc, face: &[u16]) -> bool {
     if face.len() > 32 {
         return false;
     }
-    let mut logfont = LOGFONTW {
+    let mut logfont = LogFontW {
         lfHeight: 0,
         lfWidth: 0,
         lfEscapement: 0,
@@ -334,7 +334,7 @@ unsafe fn select_covering_font(
                 glyph_indices.as_mut_ptr(),
                 GGI_MARK_NONEXISTING_GLYPHS,
             );
-            ret != GDI_ERROR && !glyph_indices.iter().any(|&gi| gi == 0xFFFF)
+            ret != GDI_ERROR && !glyph_indices.contains(&0xFFFF)
         };
 
         if !all_covered {
@@ -392,16 +392,29 @@ pub(crate) fn family_installed(family: &str) -> bool {
     }
 }
 
+/// The font and cell a glyph is rasterized for by [`rasterize_to_alpha_buffer`].
+pub struct AlphaGlyphRequest<'a> {
+    pub family: &'a str,
+    pub width: u32,
+    pub height: u32,
+    pub font_size: f32,
+    pub bold: bool,
+    pub italic: bool,
+}
+
 pub fn rasterize_to_alpha_buffer(
-    family: &str,
+    request: &AlphaGlyphRequest<'_>,
     text: &str,
     buffer: &mut [u8],
-    width: u32,
-    height: u32,
-    font_size: f32,
-    bold: bool,
-    italic: bool,
 ) -> bool {
+    let &AlphaGlyphRequest {
+        family,
+        width,
+        height,
+        font_size,
+        bold,
+        italic,
+    } = request;
     if width == 0 || height == 0 || buffer.len() < (width * height) as usize {
         return false;
     }
@@ -542,7 +555,18 @@ mod tests {
 
         let mut buf = vec![0u8; 32 * 32];
         let inked =
-            rasterize_to_alpha_buffer("monospace", "\u{1F600}", &mut buf, 32, 32, 20.0, false, false);
+            rasterize_to_alpha_buffer(
+                &AlphaGlyphRequest {
+                    family: "monospace",
+                    width: 32,
+                    height: 32,
+                    font_size: 20.0,
+                    bold: false,
+                    italic: false,
+                },
+                "\u{1F600}",
+                &mut buf,
+            );
         assert!(inked, "U+1F600 must rasterize ink through the GDI path");
         assert!(buf.iter().any(|&b| b > 0));
     }
@@ -569,28 +593,32 @@ mod tests {
     fn test_rasterize_korean_with_fallback() {
         let mut buf = vec![0u8; 16 * 16];
         let inked = rasterize_to_alpha_buffer(
-            "monospace",
+            &AlphaGlyphRequest {
+                family: "monospace",
+                width: 16,
+                height: 16,
+                font_size: 14.0,
+                bold: false,
+                italic: false,
+            },
             "가",
             &mut buf,
-            16,
-            16,
-            14.0,
-            false,
-            false,
         );
         assert!(inked);
         assert!(buf.iter().any(|&b| b > 0));
 
         let mut blank_buf = vec![0u8; 16 * 16];
         let blank_inked = rasterize_to_alpha_buffer(
-            "monospace",
+            &AlphaGlyphRequest {
+                family: "monospace",
+                width: 16,
+                height: 16,
+                font_size: 14.0,
+                bold: false,
+                italic: false,
+            },
             "\u{10fffd}",
             &mut blank_buf,
-            16,
-            16,
-            14.0,
-            false,
-            false,
         );
         assert!(!blank_inked);
         assert!(blank_buf.iter().all(|&b| b == 0));

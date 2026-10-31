@@ -2,6 +2,29 @@ import React, { useState } from "react";
 import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { suggestDeviceName } from "./deviceIdentity";
 
+/** Path of the phone pairing entry; the desktop's QR code opens it. */
+export const PAIR_ROUTE_PATH = "/pair";
+
+export function isPairRoute(pathname: string): boolean {
+  return pathname.replace(/\/+$/, "") === PAIR_ROUTE_PATH;
+}
+
+/** The structured fields of a refused pair exchange: the machine `code` and `details.remainingAttempts`. */
+async function pairingFailure(res: Response): Promise<{ code: string | null; remainingAttempts: number | null }> {
+  try {
+    const body: unknown = await res.json();
+    const row = body && typeof body === "object" ? (body as { code?: unknown; details?: unknown }) : {};
+    const details = row.details;
+    const value = details && typeof details === "object" ? (details as { remainingAttempts?: unknown }).remainingAttempts : undefined;
+    return {
+      code: typeof row.code === "string" ? row.code : null,
+      remainingAttempts: typeof value === "number" && Number.isFinite(value) ? value : null,
+    };
+  } catch {
+    return { code: null, remainingAttempts: null };
+  }
+}
+
 type PairingPageProps = {
   onPaired: (token: string, metadata?: { machineId?: unknown; displayName?: unknown }) => void;
   transportUrl?: string;
@@ -33,6 +56,17 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       });
 
       if (!res.ok) {
+        const failure = await pairingFailure(res);
+        if (res.status === 429 || failure.code === "pairing_rate_limited") {
+          throw new Error("Too many attempts. Wait a moment, then request a new code in Ferryx Desktop.");
+        }
+        if (failure.code === "PIN_EXPIRED") {
+          throw new Error("Code expired. Ask for a new code in Ferryx Desktop settings.");
+        }
+        const remaining = failure.remainingAttempts;
+        if (failure.code === "INVALID_PIN" && remaining !== null) {
+          throw new Error(`Wrong code. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} left.`);
+        }
         throw new Error(`Pairing failed (${res.status})`);
       }
 
@@ -50,7 +84,7 @@ export const PairingPage: React.FC<PairingPageProps> = ({ onPaired, transportUrl
       <div className="w-full max-w-sm bg-card border border-border rounded-lg p-6 shadow-xl">
         <h2 className="text-xl font-bold text-foreground mb-2">Pair Device</h2>
         <p className="text-xs text-muted-foreground mb-6">
-          Enter the 6-digit PIN from your Ferryx Desktop settings (valid for 1 minute).
+          Enter the 6-digit code shown in Ferryx Desktop settings.
         </p>
 
         {error && (
