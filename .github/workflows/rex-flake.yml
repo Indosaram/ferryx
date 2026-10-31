@@ -1,0 +1,44 @@
+name: rex-flake
+on:
+  push:
+    branches: ['ci/rex-flake*']
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        rev: [base, cand]
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev jq
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ab
+        shell: bash
+        run: |
+          mkdir -p out
+          cp .github/rex-flake.sh /tmp/rex-flake.sh
+          if [ "${{ matrix.rev }}" = base ]; then git checkout -q 1b2fe78e && git submodule update --init --recursive -q; fi
+          git log --oneline -1 | tee out/rev.txt
+          bash /tmp/rex-flake.sh "$PWD" "${{ matrix.rev }}" 2>&1 | tee out/gate.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rex-flake-${{ matrix.rev }}
+          path: out
