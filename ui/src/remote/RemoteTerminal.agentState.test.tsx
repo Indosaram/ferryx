@@ -123,9 +123,9 @@ describe("remote terminal agent state bridge", () => {
     expect(socket.send).toHaveBeenCalledWith(acknowledgement);
   });
 
-  it("acknowledges new outcomes on the ready machine socket only for its current target", async () => {
+  it.each([true, false])("acknowledges new outcomes only for its current ready target (machine=%s)", async (machine) => {
     await act(async () => {
-      render(<RemoteTerminal sessionId="s-ack" token="token" isAccountSession daemonEpoch="101" createWebSocket={fakeCreateWebSocket} />);
+      render(<RemoteTerminal sessionId="s-ack" token="token" isAccountSession={machine} daemonEpoch="101" createWebSocket={fakeCreateWebSocket} />);
     });
     const socket = createdSockets[0];
     const outcome = (sessionId: string, daemonEpoch: string, value: string | null = "done") => ({
@@ -135,8 +135,9 @@ describe("remote terminal agent state bridge", () => {
     await act(async () => { socket.onmessage?.(outcome("s-ack", "101")); });
     expect(socket.send).not.toHaveBeenCalled();
     await act(async () => {
-      socket.onmessage?.({ data: JSON.stringify({ type: "attached", generation: "9",
-        target: { sessionId: "s-ack", daemonEpoch: "101" } }) });
+      socket.onmessage?.({ data: JSON.stringify(machine
+        ? { type: "attached", generation: "9", target: { sessionId: "s-ack", daemonEpoch: "101" } }
+        : { type: "grid", rows: 20, cols: 80, cursor: hiddenCursor, lines: [] }) });
     });
     socket.send.mockClear();
     await act(async () => {
@@ -146,7 +147,9 @@ describe("remote terminal agent state bridge", () => {
     });
     expect(socket.send).not.toHaveBeenCalled();
     await act(async () => { socket.onmessage?.(outcome("s-ack", "101", "error")); });
-    expect(socket.send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome", generation: "9" })]]);
+    expect(socket.send.mock.calls).toEqual([[JSON.stringify({
+      type: "acknowledgeAgentOutcome", ...(machine ? { generation: "9" } : {}),
+    })]]);
   });
 
   it("forwards non-grid string frames to the agent-state listener and keeps grid frames out of it", async () => {
