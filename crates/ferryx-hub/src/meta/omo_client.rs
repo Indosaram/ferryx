@@ -17,6 +17,22 @@ pub const APPROVAL_DENIAL_TURN_LIMIT: u32 = 5;
 const DENIAL_REASON: &str =
     "denied by gateway policy - do not retry this tool; ask the user for the information instead";
 pub const TURN_START_ACK_WINDOW: Duration = Duration::from_secs(30);
+/// How long a turn the engine aborted on its own (a stream rule remediation) may take to start
+/// its continuation after it settles, before the hub ends the turn with what it has.
+pub const SYSTEM_ABORT_CONTINUE_WINDOW: Duration = Duration::from_secs(60);
+/// mhc's prompt rejection while a compaction owns admission; the prompt was not taken.
+const COMPACTION_IN_PROGRESS: &str = "while compaction is in progress";
+/// Prompt resubmissions after a compaction rejection, per turn.
+const MAX_COMPACTION_RESUBMITS: u32 = 8;
+/// How long a compaction-rejected prompt waits for `compaction_end` before it is resubmitted.
+const COMPACTION_RESUBMIT_AFTER: Duration = Duration::from_secs(15);
+/// mhc's manual-continue shortcut: resumes the session's most recent intent without a visible
+/// user message.
+pub const CONTINUE_PROMPT: &str = ".";
+/// Continue prompts the hub sends when an aborted run was not continued by the engine, per turn.
+const MAX_CONTINUES: u32 = 2;
+/// The models an opus 5.5 turn falls back to, in order.
+pub const OPUS_FALLBACK_MODELS: &[&str] = &["mahoquot/gpt-6-astra", "mahoquot/gemini-4-argon-high"];
 /// How long a successful turn's engine gets to exit on its own after stdin closes. A SIGKILL
 /// right after a good turn makes mhc record the session as interrupted on the next resume.
 const GRACEFUL_EXIT_WINDOW: Duration = Duration::from_secs(5);
@@ -46,6 +62,7 @@ pub struct OmoClientConfig {
     pub connect_timeout: Duration,
     pub workspace: Option<protocol::Workspace>,
     pub ack_window: Duration,
+    pub continue_window: Duration,
 }
 impl Default for OmoClientConfig {
     fn default() -> Self {
@@ -61,6 +78,7 @@ impl OmoClientConfig {
             connect_timeout: Duration::from_secs(15),
             workspace: None,
             ack_window: TURN_START_ACK_WINDOW,
+            continue_window: SYSTEM_ABORT_CONTINUE_WINDOW,
         }
     }
     pub fn with_env_timeouts(mut self) -> Self {
@@ -204,20 +222,53 @@ pub fn is_model_switch_rejection(result: &Result<TurnOutcome>) -> bool {
     })
 }
 
-/// The model a failed turn is retried on: the hub's background model.
-pub fn fallback_model() -> String {
-    crate::model_policy::background_model()
+/// The models a failed turn on `primary` is retried on, in order: astra then argon for opus
+/// 5.5, the hub's background model for every other model. Never `primary` itself.
+pub fn fallback_models(primary: &str) -> Vec<String> {
+    let chain = if primary.rsplit('/').next() == Some("claude-opus-5-5") {
+        OPUS_FALLBACK_MODELS
+            .iter()
+            .map(|model| (*model).to_owned())
+            .collect()
+    } else {
+        vec![crate::model_policy::background_model()]
+    };
+    chain.into_iter().filter(|model| model != primary).collect()
+}
+
+/// How a failed turn is retried on a fallback model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackRetry {
+    /// Nothing ran: the same request runs again.
+    Resend,
+    /// Work already ran in the session: the fallback model continues it.
+    Continue,
 }
 
 /// omo-gateway's `fallback_eligible`: a turn that failed before any side effect, by producing
-/// nothing at all or by a quota/overload/model rejection, runs once more on the fallback model.
-pub fn fallback_eligible(result: &Result<TurnOutcome>) -> bool {
+/// nothing at all or by a quota/overload/model rejection, runs again on the fallback model; a
+/// quota/overload failure after side effects continues the session on the fallback model.
+pub fn fallback_retry(result: &Result<TurnOutcome>) -> Option<FallbackRetry> {
     match result {
         Ok(outcome) => {
-            outcome.text.is_empty() && outcome.tool_calls == 0 && outcome.messages_delivered == 0
+            (outcome.text.is_empty() && outcome.tool_calls == 0 && outcome.messages_delivered == 0)
+                .then_some(FallbackRetry::Resend)
         }
-        Err(error) => error.to_string().contains("mhc fallback eligible:"),
+        Err(error) => {
+            let error = error.to_string();
+            if error.contains("mhc fallback eligible:") {
+                Some(FallbackRetry::Resend)
+            } else if error.contains("mhc fallback continue:") {
+                Some(FallbackRetry::Continue)
+            } else {
+                None
+            }
+        }
     }
+}
+
+pub fn fallback_eligible(result: &Result<TurnOutcome>) -> bool {
+    fallback_retry(result).is_some()
 }
 
 /// omo-gateway's owner-facing Korean line for a failed turn; the raw error stays in the logs.
@@ -230,7 +281,13 @@ pub fn owner_failure_text(error: &str) -> String {
 
 fn owner_failure_reason(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
-    if [
+    if lower.contains(COMPACTION_IN_PROGRESS) {
+        "대화 기록을 압축하는 중이라 메시지를 넣지 못했어요"
+    } else if lower.contains("prompt acknowledgement") {
+        "엔진이 메시지를 받았는지 확인하지 못했어요"
+    } else if lower.contains("operation was aborted") {
+        "엔진이 응답 생성을 중단했어요"
+    } else if [
         "no output within",
         "turn interrupted",
         "timeout waiting for turn/start",
@@ -241,7 +298,7 @@ fn owner_failure_reason(error: &str) -> &'static str {
         "모델이 응답하지 않았어요"
     } else if lower.contains("timed out waiting for the turn to finish") {
         "작업이 턴 시간 제한을 넘겨 중단됐어요"
-    } else if ["quota", "429", "rate limit"]
+    } else if ["quota", "429", "rate limit", "rate-limit", "retry delay"]
         .iter()
         .any(|needle| lower.contains(needle))
     {
@@ -553,13 +610,12 @@ fn message_text(message: &Value) -> String {
     filter_reasoning(&raw)
 }
 fn message_error(message: &Value) -> Option<String> {
-    if message["role"] == "assistant"
-        && matches!(message["stopReason"].as_str(), Some("error" | "aborted"))
-    {
+    // An aborted message is not a failure by itself: agent_end says who aborted it.
+    if message["role"] == "assistant" && message["stopReason"] == "error" {
         Some(
             message["errorMessage"]
                 .as_str()
-                .unwrap_or("mhc turn interrupted")
+                .unwrap_or("mhc turn failed")
                 .to_owned(),
         )
     } else {
@@ -575,6 +631,8 @@ fn failure(error: String, side_effects: bool) -> HubError {
         "quota",
         "no available accounts",
         "rate limit",
+        "rate-limit",
+        "retry delay",
         "model not found",
         "unknown model",
         "unsupported model",
@@ -584,6 +642,8 @@ fn failure(error: String, side_effects: bool) -> HubError {
     .any(|s| lower.contains(s));
     HubError::message(if !side_effects && transient {
         format!("mhc fallback eligible: {error}")
+    } else if transient {
+        format!("mhc fallback continue: {error}")
     } else {
         format!("mhc turn failed: {error}")
     })
@@ -810,11 +870,22 @@ async fn run_owned(
     }
     let mut prompt = protocol::command("3", "prompt");
     prompt["message"] = json!(request.text);
-    rpc.send(prompt).await?;
+    rpc.send(prompt.clone()).await?;
     let mut acked = false;
     let mut started = false;
-    let ack_until = tokio::time::Instant::now() + config.ack_window;
+    let mut ack_until = tokio::time::Instant::now() + config.ack_window;
     let mut idle_until = tokio::time::Instant::now() + config.idle_timeout;
+    // A compaction rejected the prompt: resubmit once it ends (or after a bounded wait).
+    let mut compaction_resubmits = 0u32;
+    let mut awaiting_compaction: Option<tokio::time::Instant> = None;
+    let mut compaction_ended = false;
+    // A run the engine started by itself before admitting the prompt (a resumed session's
+    // notification turn); the prompt waits behind it.
+    let mut engine_busy = false;
+    // The run was aborted by the engine, not the owner: wait for its own continuation, then ask
+    // for one with the continue prompt.
+    let mut continue_until: Option<tokio::time::Instant> = None;
+    let mut continues = 0u32;
     let mut pending = String::new();
     let mut delivered = 0;
     let mut tools = 0;
@@ -823,13 +894,34 @@ async fn run_owned(
     let mut steer_id = 100u64;
     let mut pending_steers: HashMap<String, oneshot::Sender<bool>> = HashMap::new();
     loop {
-        let until = if acked || started {
-            idle_until
-        } else {
-            ack_until.min(idle_until)
+        let until = match (continue_until, awaiting_compaction) {
+            (Some(deadline), _) | (None, Some(deadline)) => deadline.min(idle_until),
+            (None, None) if acked || started || engine_busy => idle_until,
+            (None, None) => ack_until.min(idle_until),
         };
         let f = tokio::select! {
-            f = tokio::time::timeout_at(until,rpc.read()) => f.map_err(|_|HubError::message(if acked || started { "mhc no output within idle timeout" } else { TURN_START_ACK_TIMEOUT }))??,
+            f = tokio::time::timeout_at(until,rpc.read()) => match f {
+                Ok(f) => f?,
+                Err(_) if awaiting_compaction.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) => {
+                    awaiting_compaction = None;
+                    rpc.send(prompt.clone()).await?;
+                    ack_until = tokio::time::Instant::now() + config.ack_window;
+                    continue;
+                }
+                Err(_) if continue_until.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) => {
+                    if continues >= MAX_CONTINUES {
+                        return Err(HubError::message("mhc turn interrupted"));
+                    }
+                    // The engine left the aborted run as it was: resume it like the owner's "계속".
+                    continues += 1;
+                    // Later resubmits (a compaction rejection) send the continue prompt too.
+                    prompt["message"] = json!(CONTINUE_PROMPT);
+                    rpc.send(prompt.clone()).await?;
+                    continue_until = Some(tokio::time::Instant::now() + config.continue_window);
+                    continue;
+                }
+                Err(_) => return Err(HubError::message(if acked || started || engine_busy { "mhc no output within idle timeout" } else { TURN_START_ACK_TIMEOUT })),
+            },
             Some(g) = guidance.recv() => {
                 steer_id += 1;
                 let id = steer_id.to_string();
@@ -849,8 +941,22 @@ async fn run_owned(
             }
             if f["id"] == "3" {
                 if f["success"] != true {
+                    let error = f["error"].as_str().unwrap_or("prompt rejected").to_owned();
+                    if error.contains(COMPACTION_IN_PROGRESS)
+                        && compaction_resubmits < MAX_COMPACTION_RESUBMITS
+                    {
+                        compaction_resubmits += 1;
+                        if compaction_ended {
+                            compaction_ended = false;
+                            rpc.send(prompt.clone()).await?;
+                        } else {
+                            awaiting_compaction =
+                                Some(tokio::time::Instant::now() + COMPACTION_RESUBMIT_AFTER);
+                        }
+                        continue;
+                    }
                     return Err(failure(
-                        f["error"].as_str().unwrap_or("prompt rejected").to_owned(),
+                        error,
                         tools > 0 || delivered > 0 || !pending.is_empty(),
                     ));
                 }
@@ -859,8 +965,33 @@ async fn run_owned(
             continue;
         }
         rpc.ui(&f, cwd).await?;
+        if f["type"] == "compaction_end" {
+            if awaiting_compaction.take().is_some() {
+                rpc.send(prompt.clone()).await?;
+                ack_until = tokio::time::Instant::now() + config.ack_window;
+            } else {
+                compaction_ended = true;
+            }
+            continue;
+        }
+        // Events before the prompt is accepted belong to a run the engine started by itself;
+        // the prompt is admitted once that run settles, so the ack wait restarts then.
+        if !acked {
+            match f["type"].as_str() {
+                Some("agent_start") => engine_busy = true,
+                Some("agent_settled") => {
+                    engine_busy = false;
+                    ack_until = tokio::time::Instant::now() + config.ack_window;
+                }
+                _ => {}
+            }
+            continue;
+        }
         match f["type"].as_str().unwrap_or("") {
-            "agent_start" => started = true,
+            "agent_start" => {
+                started = true;
+                continue_until = None;
+            }
             "message_end" if started => {
                 let message = &f["message"];
                 if let Some(error) = message_error(message) {
@@ -869,7 +1000,7 @@ async fn run_owned(
                         tools > 0 || delivered > 0 || !pending.is_empty(),
                     ));
                 }
-                if message["role"] != "assistant" {
+                if message["role"] != "assistant" || message["stopReason"] == "aborted" {
                     continue;
                 }
                 let identity = message
@@ -901,6 +1032,12 @@ async fn run_owned(
                     continue;
                 }
                 if f["aborted"] == true {
+                    if f["abortSource"] != "user" {
+                        // The engine aborted its own run (a stream rule remediation or a
+                        // provider abort); it usually continues by itself.
+                        continue_until = Some(tokio::time::Instant::now() + config.continue_window);
+                        continue;
+                    }
                     return Err(HubError::message("mhc turn interrupted"));
                 }
                 if f["willRetry"] == true {
@@ -1000,6 +1137,7 @@ root = pathlib.Path(__file__).parent
 session = root / 'session.jsonl'
 log = root / 'commands.jsonl'
 scenario = ''
+prompts = 0
 def emit(v):
     print(json.dumps(v),flush=True)
 def event(kind, **kw):
@@ -1025,8 +1163,27 @@ for line in sys.stdin:
     elif kind in ['set_auto_retry','set_model','set_thinking_level']:
         emit(dict(type='response',id=c['id'],command=kind,success=False,error='persists global settings'))
     elif kind=='prompt':
+        prompts+=1
+        if c['message']=='.':
+            # The hub's continue prompt after an aborted run the engine did not resume.
+            assert scenario=='sysabort-stuck'
+            answer(c)
+            event('agent_start')
+            message('continued','m-continue')
+            event('agent_end',messages=[],willRetry=False)
+            continue
         scenario=c['message']
         if scenario=='exit': sys.exit(17)
+        if scenario=='compaction' and prompts==1:
+            emit(dict(type='response',id=c['id'],command='prompt',success=False,error='Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.'))
+            event('compaction_end',reason='manual',aborted=False,willRetry=False)
+            continue
+        if scenario=='busy':
+            # A resumed session first runs a notification turn of its own.
+            event('agent_start')
+            message('own run','m-own')
+            event('agent_end',messages=[],willRetry=False)
+            event('agent_settled')
         answer(c)
         event('agent_start')
         event('extension_ui_request',id='status',method='setStatus',statusKey='test')
@@ -1038,6 +1195,17 @@ for line in sys.stdin:
             event('agent_end',messages=[],willRetry=False)
         elif scenario=='503':
             message('', 'err',stopReason='error',errorMessage='HTTP 503 overloaded')
+        elif scenario=='ratelimit-after-tools':
+            event('tool_execution_start',toolCallId='tool-1',toolName='read',args={})
+            message('', 'err',stopReason='error',errorMessage='Server requested 165s retry delay (max: 60s). every account is temporarily rate-limited')
+        elif scenario in ['sysabort','sysabort-stuck']:
+            message('partial','m-aborted',stopReason='aborted',errorMessage='This operation was aborted')
+            event('agent_end',messages=[],willRetry=False,aborted=True,abortSource='system')
+            event('agent_settled')
+            if scenario=='sysabort':
+                event('agent_start')
+                message('continued','m-continue')
+                event('agent_end',messages=[],willRetry=False)
         elif scenario=='approval':
             event('extension_ui_request',id='approve',method='confirm',title='Run command',message='ls')
         elif scenario=='owner-deny':
@@ -1339,10 +1507,12 @@ for line in sys.stdin:
                 .count(),
             2
         );
-        assert!(!fallback_eligible(&Err(failure(
-            "503 overloaded".into(),
-            true
-        ))));
+        // After side effects the fallback model continues the session; the prompt is not
+        // run again.
+        assert_eq!(
+            fallback_retry(&Err(failure("503 overloaded".into(), true))),
+            Some(FallbackRetry::Continue)
+        );
     }
     #[tokio::test]
     async fn retry_boundary_does_not_complete_the_turn() {
@@ -1359,6 +1529,72 @@ for line in sys.stdin:
                 .count(),
             1
         );
+    }
+    fn prompts(script: &Script) -> Vec<String> {
+        script
+            .commands()
+            .iter()
+            .filter(|c| c["type"] == "prompt")
+            .map(|c| c["message"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    #[tokio::test]
+    async fn a_compaction_rejected_prompt_is_resubmitted_after_compaction_ends() {
+        let script = Script::new();
+        assert_eq!(
+            script.run("compaction", None, None).await.unwrap().text,
+            "final"
+        );
+        assert_eq!(prompts(&script), vec!["compaction", "compaction"]);
+    }
+    #[tokio::test]
+    async fn a_run_the_engine_started_itself_does_not_answer_the_prompt() {
+        let script = Script::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let outcome = script.run("busy", None, Some(tx)).await.unwrap();
+        assert_eq!(outcome.text, "final");
+        assert_eq!(outcome.messages_delivered, 1);
+        assert_eq!(rx.try_recv().unwrap(), "interim");
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+    #[tokio::test]
+    async fn an_engine_aborted_run_waits_for_its_own_continuation() {
+        let script = Script::new();
+        let outcome = script.run("sysabort", None, None).await.unwrap();
+        assert_eq!(outcome.text, "continued");
+        assert_eq!(prompts(&script), vec!["sysabort"]);
+    }
+    #[tokio::test]
+    async fn an_engine_aborted_run_left_idle_is_continued_by_the_hub() {
+        let mut script = Script::new();
+        // The engine never resumes this run; the window is the behavior under test.
+        script.config.continue_window = Duration::from_millis(200);
+        let outcome = script.run("sysabort-stuck", None, None).await.unwrap();
+        assert_eq!(outcome.text, "continued");
+        assert_eq!(prompts(&script), vec!["sysabort-stuck", CONTINUE_PROMPT]);
+    }
+    #[tokio::test]
+    async fn a_rate_limit_after_tools_continues_on_the_fallback_model() {
+        let script = Script::new();
+        let result = script.run("ratelimit-after-tools", None, None).await;
+        assert_eq!(fallback_retry(&result), Some(FallbackRetry::Continue));
+        let result = script.run("503", None, None).await;
+        assert_eq!(fallback_retry(&result), Some(FallbackRetry::Resend));
+    }
+    #[test]
+    fn opus_falls_back_to_astra_then_argon() {
+        assert_eq!(
+            fallback_models("mahoquot/claude-opus-5-5"),
+            vec!["mahoquot/gpt-6-astra", "mahoquot/gemini-4-argon-high"]
+        );
+        assert_eq!(
+            fallback_models("mahoquot/gpt-6-astra"),
+            vec![crate::model_policy::background_model()]
+        );
+        assert!(fallback_models(&crate::model_policy::background_model()).is_empty());
     }
     #[tokio::test]
     async fn buffered_success_survives_immediate_process_exit() {

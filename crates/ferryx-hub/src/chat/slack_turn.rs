@@ -731,27 +731,40 @@ pub async fn run_session_turn(
     // Boxed: the RPC turn plus the approval wrapper is a large future, and an unboxed
     // copy on each await level overflowed a 2 MiB worker stack in debug builds.
     let run = Box::pin(async {
-        let first = omo_client::run_turn_recovering(&omo, &request, Some(progress.clone())).await;
-        // omo-gateway retries a side-effect-free failure once on the fallback model.
-        let fallback = omo_client::fallback_model();
-        if !omo_client::fallback_eligible(&first)
-            || request
-                .model
-                .as_deref()
-                .is_none_or(|model| model == fallback)
-        {
-            return first;
-        }
-        tracing::warn!(session = %storage_key, model = %fallback, error = ?first.as_ref().err().map(ToString::to_string), "retrying turn failure with fallback model");
-        let retry = omo_client::TurnRequest {
-            thread_id: match &first {
-                Ok(outcome) => Some(outcome.thread_id.clone()),
-                Err(_) => request.thread_id.clone(),
-            },
-            model: Some(fallback),
-            ..request.clone()
+        // Owned here so the relay ends when the turn's last sender drops.
+        let progress = progress;
+        let mut result =
+            omo_client::run_turn_recovering(&omo, &request, Some(progress.clone())).await;
+        let Some(primary) = request.model.clone() else {
+            return result;
         };
-        omo_client::run_turn(&omo, &retry, Some(progress)).await
+        // omo-gateway retries a quota/overload failure on the fallback models, in order.
+        for fallback in omo_client::fallback_models(&primary) {
+            let Some(retry_kind) = omo_client::fallback_retry(&result) else {
+                break;
+            };
+            tracing::warn!(session = %storage_key, model = %fallback, error = ?result.as_ref().err().map(ToString::to_string), "retrying turn failure with fallback model");
+            // A resend runs the request again where it started; a continue resumes the session
+            // the failed run worked in.
+            let thread_id = match (&result, retry_kind) {
+                (Ok(outcome), _) => Some(outcome.thread_id.clone()),
+                (Err(_), omo_client::FallbackRetry::Resend) => request.thread_id.clone(),
+                (Err(_), omo_client::FallbackRetry::Continue) => super::turns::ids(&storage_key)
+                    .map(|(thread, _)| thread)
+                    .or_else(|| request.thread_id.clone()),
+            };
+            let retry = omo_client::TurnRequest {
+                thread_id,
+                model: Some(fallback),
+                text: match retry_kind {
+                    omo_client::FallbackRetry::Resend => request.text.clone(),
+                    omo_client::FallbackRetry::Continue => omo_client::CONTINUE_PROMPT.to_owned(),
+                },
+                ..request.clone()
+            };
+            result = omo_client::run_turn(&omo, &retry, Some(progress.clone())).await;
+        }
+        result
     });
     let result = match &turn.reply_channel {
         // omo's approval cards: a request full access would not allow is asked in the thread.

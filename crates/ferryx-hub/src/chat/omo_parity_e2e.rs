@@ -800,6 +800,32 @@ async fn provider_503_runs_exactly_one_luna_fallback() {
     assert_eq!(models, vec!["mahoquot/gpt-6-astra", "mahoquot/gpt-6-luna"]);
 }
 
+#[tokio::test]
+async fn an_opus_quota_failure_falls_back_to_astra_then_argon() {
+    let (binary, log) = serve(script(&["__provider503__"], false)).await;
+    let mut config = config(binary);
+    config.default_model = Some("mahoquot/claude-opus-5-5".into());
+    let pool = crate::storage::memory().await.unwrap();
+    let mut turn = slack_turn("hello");
+    turn.reply_channel = None;
+    let result = run_session_turn(&config, &pool, turn).await.unwrap();
+    assert_eq!(result, "recovered");
+    let frames = log.frames.lock().unwrap();
+    let models: Vec<_> = frames
+        .iter()
+        .filter(|f| f["type"] == "fixture_launch")
+        .map(|f| f["model"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        models,
+        vec![
+            "mahoquot/claude-opus-5-5",
+            "mahoquot/gpt-6-astra",
+            "mahoquot/gemini-4-argon-high"
+        ]
+    );
+}
+
 /// A supervisor conversation whose turn runs until the test releases it.
 struct GatedConversation {
     release: std::sync::Arc<tokio::sync::Notify>,
