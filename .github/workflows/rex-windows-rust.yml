@@ -27,6 +27,9 @@ jobs:
       - name: Windows Rust gates
         shell: bash
         run: |
+          # Git Bash's MSYS perl cannot configure vendored OpenSSL; use the runner's Strawberry Perl.
+          export PATH="/c/Strawberry/perl/bin:$PATH"
+          set +e
           mkdir -p out
           git rev-parse HEAD | tee out/revision.log
           git config --global user.name ci; git config --global user.email ci@ferryx.dev; git config --global init.defaultBranch main
