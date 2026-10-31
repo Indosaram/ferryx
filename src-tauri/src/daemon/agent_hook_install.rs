@@ -1463,6 +1463,43 @@ mod tests {
         assert_eq!(std::fs::read_to_string(blocker.join("keep.txt")).unwrap(), "keep\n");
     }
 
+    /// A Windows link under the skill's name - a file symlink or a directory symlink, both
+    /// reparse points - is never written through, replaced or deleted, by install or removal.
+    #[cfg(windows)]
+    #[test]
+    fn a_reparse_point_under_the_skill_name_survives_install_and_removal() {
+        for directory in [false, true] {
+            let home = temp_home();
+            let target = target(home.path(), "claude");
+            std::fs::create_dir_all(&target.agent_dir).unwrap();
+            let skill = target.skill.clone().unwrap();
+            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+            let outside = home.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            let victim = outside.join("SKILL.md");
+            // An outdated managed skill elsewhere: following the link would replace or delete it.
+            let victim_before =
+                SKILL_SOURCE.replace("ferryx-managed: true", "ferryx-managed: true\nold: 1");
+            assert!(is_ferryx_skill(&victim_before));
+            std::fs::write(&victim, &victim_before).unwrap();
+            if directory {
+                std::os::windows::fs::symlink_dir(&outside, &skill)
+                    .expect("directory symlink fixture requires symlink privilege");
+            } else {
+                std::os::windows::fs::symlink_file(&victim, &skill)
+                    .expect("file symlink fixture requires symlink privilege");
+            }
+            assert!(std::fs::symlink_metadata(&skill).unwrap().file_type().is_symlink());
+
+            assert!(!install_skill_into(&target).unwrap(), "directory={directory}");
+            assert!(!remove_skill_from(&target).unwrap(), "directory={directory}");
+
+            assert!(std::fs::symlink_metadata(&skill).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), victim_before);
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1, "directory={directory}");
+        }
+    }
+
     #[test]
     fn skill_edited_by_the_user_survives_install_and_removal() {
         let home = temp_home();
