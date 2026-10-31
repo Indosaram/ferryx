@@ -719,6 +719,32 @@ where
     }
 }
 
+pub fn remote_agent_resume_plan(
+    agent: ShellCommandPlan,
+    environment: &crate::ssh::runtime::RemoteEnvironment,
+) -> ShellCommandPlan {
+    use crate::ssh::runtime::RemotePlatform;
+    match environment.platform {
+        RemotePlatform::Posix => {
+            // Resolve the login shell on the remote machine, not on the desktop. Agent arguments
+            // remain positional parameters even when they contain whitespace or shell syntax.
+            let mut args = vec![
+                "-lc".into(),
+                r#"trap : INT QUIT; "$@"; trap - INT QUIT; exec "${SHELL:-/bin/sh}" -l"#.into(),
+                "ferryx-resume".into(), agent.program,
+            ];
+            args.extend(agent.args);
+            ShellCommandPlan { program: "/bin/sh".into(), args }
+        }
+        RemotePlatform::Windows => wrap_agent_with_return_shell(
+            agent,
+            ShellCommandPlan { program: environment.executor.program().into(), args: Vec::new() },
+            TargetPlatform::Windows,
+            |_| true,
+        ),
+    }
+}
+
 pub fn resolve_shell_command(preference: Option<&str>) -> CommandBuilder {
     let plan = resolve_shell_command_pure(preference, TargetPlatform::CURRENT, is_on_path, |var| {
         std::env::var(var).ok()
@@ -733,6 +759,37 @@ pub fn resolve_shell_command(preference: Option<&str>) -> CommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_resume_keeps_agent_arguments_out_of_shell_source() {
+        use crate::ssh::runtime::{RemoteEnvironment, RemoteExecutor, RemotePlatform};
+        let environment = RemoteEnvironment {
+            platform: RemotePlatform::Posix, executor: RemoteExecutor::Sh,
+            version: String::new(), home: "/remote".into(), temp: "/tmp".into(), git: true,
+        };
+        let argument = "conversation with spaces; $(false)";
+        let plan = remote_agent_resume_plan(ShellCommandPlan {
+            program: "mhc".into(), args: vec!["--session".into(), argument.into()],
+        }, &environment);
+        assert_eq!(plan.program, "/bin/sh");
+        assert_eq!(&plan.args[3..], &["mhc", "--session", argument]);
+        assert!(!plan.args[1].contains(argument));
+    }
+
+    #[test]
+    fn remote_resume_windows_uses_remote_powershell_and_returns_to_prompt() {
+        use crate::ssh::runtime::{RemoteEnvironment, RemoteExecutor, RemotePlatform};
+        let environment = RemoteEnvironment {
+            platform: RemotePlatform::Windows, executor: RemoteExecutor::Powershell,
+            version: String::new(), home: "C:/Users/test".into(), temp: "C:/Temp".into(), git: true,
+        };
+        let plan = remote_agent_resume_plan(ShellCommandPlan {
+            program: "mhc".into(), args: vec!["--session".into(), "a'b".into()],
+        }, &environment);
+        assert_eq!(plan.program, "powershell.exe");
+        assert!(plan.args.iter().any(|arg| arg == "-NoExit"));
+        assert_eq!(plan.args.last().unwrap(), "& 'mhc' '--session' 'a''b'");
+    }
 
     #[test]
     fn preparation_ordinary_shell_inherited_path_and_arguments() {

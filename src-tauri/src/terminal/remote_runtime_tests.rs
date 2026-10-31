@@ -584,28 +584,30 @@ fn ssh_reconnect_backoff_is_bounded() {
 }
 
 #[tokio::test]
-async fn ssh_reconnect_unreachable_target_exhausts_budget_and_settles() {
+async fn ssh_reconnect_long_outage_retains_target_and_recovers_without_respawn() {
     let (runtime, hub, dialer, tx) = fixture();
     runtime.restore(descriptor()).unwrap();
     let mut rx = runtime.subscribe("local-stable").unwrap();
     state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
     tx.send(Err(BridgeError::ConnectionClosed)).unwrap();
-    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+    let target = runtime.details("local-stable").unwrap().descriptor.target;
+    for attempt in 1..=121 {
         state(&mut rx, |d| d.state == RemoteConnectionState::Reconnecting && d.attempts == attempt).await;
         assert!(runtime.keeps_predecessor_alive("local-stable"));
         *dialer.failure.lock() = Some(BridgeError::ConnectionClosed);
         dialer.clock.add_permits(1);
     }
-    let ended = state(&mut rx, |d| d.state == RemoteConnectionState::Expired).await;
+    state(&mut rx, |d| d.state == RemoteConnectionState::Reconnecting && d.attempts == 122).await;
     assert!(runtime.keeps_predecessor_alive("local-stable"));
-    assert_eq!(ended.attempts, MAX_RECONNECT_ATTEMPTS);
-    assert!(ended.failure.unwrap().message.contains("reconnect attempts"));
-    assert!(runtime.retry("local-stable").is_err());
-    assert!(runtime.settle_ended("local-stable"));
-    assert!(!runtime.keeps_predecessor_alive("local-stable"));
-    assert!(!runtime.contains("local-stable"));
-    assert!(!hub.has_session("local-stable"));
+    assert!(!runtime.settle_ended("local-stable"));
+    *dialer.failure.lock() = None;
+    dialer.clock.add_permits(1);
+    let recovered = state(&mut rx, |d| d.state == RemoteConnectionState::Connected).await;
+    assert_eq!(recovered.descriptor.target, target);
+    assert!(runtime.contains("local-stable"));
+    assert!(hub.has_session("local-stable"));
     assert_eq!(dialer.fake.stops.load(Ordering::SeqCst), 0);
+    runtime.close("local-stable").await.unwrap();
 }
 
 #[tokio::test]
