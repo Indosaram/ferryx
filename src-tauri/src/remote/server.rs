@@ -3098,6 +3098,9 @@ async fn handle_terminal_socket(
                         }
                         match ctrl {
                             ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Err(error) = session_backend
                                     .acknowledge_agent_outcome(&session_id_clone).await
                                 {
@@ -3635,6 +3638,9 @@ async fn handle_terminal_grid_socket(
                         }
                         match ctrl {
                             ClientControlMessage::AcknowledgeAgentOutcome => {
+                                if !can_control {
+                                    continue;
+                                }
                                 if let Err(error) = session_backend
                                     .acknowledge_agent_outcome(&session_id_clone).await
                                 {
@@ -7004,8 +7010,15 @@ async fn reference_chat_acknowledge_outcome(
         Ok(query) => query,
         Err(response) => return *response,
     };
-    if let Err(response) = reference_chat_read_context(&state, &headers, &session_id, &query, false).await {
-        return response.into();
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, false).await {
+        Ok(read) => read,
+        Err(response) => return response.into(),
+    };
+    if read.device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot acknowledge an agent outcome",
+        );
     }
     if let Err(response) = authenticate_machine_request(&state, &headers) {
         return *response;
