@@ -1104,11 +1104,20 @@ pub async fn digest_section(
     Ok(Some(lines.join("\n")))
 }
 
+/// Called once the digest reached the owner (omo `report::acknowledge_digest`): outcomes the
+/// latest succeeded digest run could have included are marked delivered so the next digest does
+/// not repeat them. Outcomes queued after that run started stay for the next one.
 pub async fn acknowledge_digest(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("UPDATE cron_remediation_outcomes SET delivered_at = ? WHERE delivered_at IS NULL")
-        .bind(now_rfc3339())
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE cron_remediation_outcomes SET delivered_at = ?
+          WHERE delivered_at IS NULL
+            AND julianday(created_at) <= (SELECT MAX(julianday(started_at)) FROM cron_runs
+                                           WHERE job_id = ? AND status = 'succeeded')",
+    )
+    .bind(now_rfc3339())
+    .bind(crate::inbox::DIGEST_JOB_ID)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
