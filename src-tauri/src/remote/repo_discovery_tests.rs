@@ -105,24 +105,26 @@ fn branch_and_linked_worktree_come_from_head_files() {
     let fixture = fixture();
     let root = std::fs::canonicalize(fixture.path()).unwrap();
     let result = run(&root, 2, false, CAPS);
+    // Discovery reports paths without the Windows verbatim prefix that canonicalize adds.
+    let plain = |path: &Path| crate::worktree::strip_verbatim_prefix(path.to_str().unwrap());
     let row = |name: &str| {
         result
             .repos
             .iter()
-            .find(|repo| Path::new(&repo.repo_root) == root.join(name))
+            .find(|repo| repo.repo_root == plain(&root.join(name)))
             .unwrap_or_else(|| panic!("{name} listed"))
     };
     let alpha = row("alpha");
     assert_eq!(alpha.branch.as_deref(), Some("main"));
     assert!(!alpha.is_linked_worktree);
-    let common = std::fs::canonicalize(root.join("alpha").join(".git")).unwrap();
-    assert_eq!(alpha.git_common_dir.as_deref(), common.to_str());
+    let common = plain(&std::fs::canonicalize(root.join("alpha").join(".git")).unwrap());
+    assert_eq!(alpha.git_common_dir.as_deref(), Some(common.as_str()));
     let beta = row("group/beta");
     assert_eq!(beta.branch, None, "detached HEAD carries no branch");
     let wt = row("wt");
     assert!(wt.is_linked_worktree);
     assert_eq!(wt.branch.as_deref(), Some("feature/x"));
-    assert_eq!(wt.git_common_dir.as_deref(), common.to_str());
+    assert_eq!(wt.git_common_dir.as_deref(), Some(common.as_str()));
     assert!(result.repos.iter().all(|r| r.registered_workspace_id.is_none()));
 }
 

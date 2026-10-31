@@ -2,7 +2,12 @@ use crate::daemon::{
     protocol::{DaemonRequest, DaemonResponse},
     DaemonClient,
 };
-use crate::ipc::{run_blocking, IpcError};
+use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+use crate::worktree::changes::{GitChangeError, GitDiffScope};
+#[cfg(feature = "desktop")]
+use crate::worktree::changes::{
+    git_changes_status, git_commit, git_diff, git_push, git_stage, git_unstage, GitPushResult,
+};
 use crate::worktree::{
     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
     WorktreeIdentity,
@@ -61,7 +66,8 @@ pub enum WorktreeChangeKind {
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeChangedPayload {
     pub workspace_id: String,
-    pub worktree: WorktreeIdentity,
+    /// `None` for a checkout addressed by path (the main checkout or an unmanaged worktree).
+    pub worktree: Option<WorktreeIdentity>,
     pub kind: WorktreeChangeKind,
 }
 
@@ -70,6 +76,16 @@ pub(crate) fn emit_worktree_changed<R: Runtime>(
     app: &AppHandle<R>,
     workspace_id: String,
     worktree: WorktreeIdentity,
+    kind: WorktreeChangeKind,
+) -> Result<(), IpcError> {
+    emit_change_payload(app, workspace_id, Some(worktree), kind)
+}
+
+#[cfg(feature = "desktop")]
+fn emit_change_payload<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: String,
+    worktree: Option<WorktreeIdentity>,
     kind: WorktreeChangeKind,
 ) -> Result<(), IpcError> {
     app.emit(
@@ -423,6 +439,263 @@ pub async fn cmd_worktree_status<R: Runtime>(
     Ok(status)
 }
 
+/// Status for the Changes panel: a managed worktree goes through `cmd_worktree_status` (dirty
+/// tracking and events); a checkout addressed by path only reads `git status`.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_changes_status<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreePushRequest,
+) -> Result<DirtyState, IpcError> {
+    let WorktreePushRequest { workspace_id, worktree, worktree_path } = request;
+    if let (Some(identity), None) = (&worktree, &worktree_path) {
+        // Keep the sidebar's dirty tracking and its events for managed worktrees.
+        let request = WorktreeStatusRequest { workspace_id: workspace_id.clone(), worktree: identity.clone() };
+        cmd_worktree_status(app, registry.clone(), request).await?;
+    }
+    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, git_changes_status).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeDiffRequest {
+    pub workspace_id: String,
+    /// A managed worktree. When absent, `worktree_path` addresses the checkout instead.
+    #[serde(default)]
+    pub worktree: Option<WorktreeIdentity>,
+    #[serde(default)]
+    pub worktree_path: Option<std::path::PathBuf>,
+    pub scope: GitDiffScope,
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreePathsRequest {
+    pub workspace_id: String,
+    /// A managed worktree. When absent, `worktree_path` addresses the checkout instead.
+    #[serde(default)]
+    pub worktree: Option<WorktreeIdentity>,
+    #[serde(default)]
+    pub worktree_path: Option<std::path::PathBuf>,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreeCommitRequest {
+    pub workspace_id: String,
+    /// A managed worktree. When absent, `worktree_path` addresses the checkout instead.
+    #[serde(default)]
+    pub worktree: Option<WorktreeIdentity>,
+    #[serde(default)]
+    pub worktree_path: Option<std::path::PathBuf>,
+    pub message: String,
+}
+
+/// Status or push target: a managed worktree, or any checkout inside the project root by path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorktreePushRequest {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub worktree: Option<WorktreeIdentity>,
+    #[serde(default)]
+    pub worktree_path: Option<std::path::PathBuf>,
+}
+
+impl From<GitChangeError> for IpcError {
+    fn from(error: GitChangeError) -> Self {
+        let message = error.to_string();
+        match error {
+            GitChangeError::NothingToCommit => Self::new(IpcErrorCode::GitNothingToCommit, message),
+            GitChangeError::PushRejected { stderr } => {
+                Self::new(IpcErrorCode::GitPushRejected, message)
+                    .with_details(serde_json::json!({ "stderr": stderr }))
+            }
+            GitChangeError::NoRemote => Self::new(IpcErrorCode::GitNoRemote, message),
+            GitChangeError::EmptyMessage => Self::new(IpcErrorCode::InvalidArgument, message)
+                .with_details(serde_json::json!({ "reason": "empty_message" })),
+            GitChangeError::DetachedHead => Self::new(IpcErrorCode::InvalidArgument, message)
+                .with_details(serde_json::json!({ "reason": "detached_head" })),
+            GitChangeError::InvalidCommit { sha } => {
+                Self::new(IpcErrorCode::InvalidArgument, message)
+                    .with_details(serde_json::json!({ "reason": "invalid_commit", "sha": sha }))
+            }
+            GitChangeError::Worktree(error) => error.into(),
+        }
+    }
+}
+
+/// Emits worktree_changed after a Git operation that already succeeded. A failed emit only
+/// delays the UI refresh, so it is logged and never turned into an error for the caller.
+#[cfg(feature = "desktop")]
+fn notify_worktree_changed<R: Runtime>(
+    app: &AppHandle<R>,
+    workspace_id: String,
+    worktree: Option<WorktreeIdentity>,
+    kind: WorktreeChangeKind,
+) {
+    // Callers run this only after the jailed resolve and the Git operation succeeded, so a
+    // path outside the project root never reaches it. Path targets carry no identity.
+    if let Err(error) = emit_change_payload(app, workspace_id, worktree, kind) {
+        tracing::warn!(?error, ?kind, "worktree_changed emit failed after a successful git operation");
+    }
+}
+
+/// Resolves a managed worktree to its jailed canonical path and runs `work` there on a
+/// blocking thread.
+#[cfg(feature = "desktop")]
+async fn with_worktree_path<T: Send + 'static>(
+    registry: WorkspaceRegistry,
+    workspace_id: String,
+    identity: Option<WorktreeIdentity>,
+    worktree_path: Option<std::path::PathBuf>,
+    work: impl FnOnce(&std::path::Path) -> Result<T, GitChangeError> + Send + 'static,
+) -> Result<T, IpcError> {
+    run_blocking(move || {
+        let path = match (identity, worktree_path) {
+            (Some(identity), None) => {
+                let (manager, worktree) = registry
+                    .resolve_worktree(&workspace_id, &identity)
+                    .map_err(IpcError::from)?;
+                manager
+                    .canonical_allowed_path(&worktree.path)
+                    .map_err(IpcError::from)?
+            }
+            (None, Some(path)) => registry
+                .resolve_checkout_path(&workspace_id, &path)
+                .map_err(IpcError::from)?,
+            _ => {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    "Pass exactly one of worktree or worktreePath",
+                ))
+            }
+        };
+        work(&path).map_err(IpcError::from)
+    })
+    .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_diff(
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeDiffRequest,
+) -> Result<String, IpcError> {
+    let WorktreeDiffRequest { workspace_id, worktree, worktree_path, scope, file } = request;
+    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, move |path| {
+        git_diff(path, &scope, file.as_deref())
+    })
+    .await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_stage<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreePathsRequest,
+) -> Result<(), IpcError> {
+    let WorktreePathsRequest { workspace_id, worktree, worktree_path, paths } = request;
+    let event = (workspace_id.clone(), worktree.clone());
+    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, move |path| {
+        git_stage(path, &paths)
+    })
+    .await?;
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged);
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_unstage<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreePathsRequest,
+) -> Result<(), IpcError> {
+    let WorktreePathsRequest { workspace_id, worktree, worktree_path, paths } = request;
+    let event = (workspace_id.clone(), worktree.clone());
+    with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, move |path| {
+        git_unstage(path, &paths)
+    })
+    .await?;
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::DirtyChanged);
+    Ok(())
+}
+
+/// Commits the staged changes and returns the new commit sha.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_commit<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreeCommitRequest,
+) -> Result<String, IpcError> {
+    let WorktreeCommitRequest { workspace_id, worktree, worktree_path, message } = request;
+    let event = (workspace_id.clone(), worktree.clone());
+    let sha = with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, move |path| {
+        git_commit(path, &message)
+    })
+    .await?;
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::Updated);
+    Ok(sha)
+}
+
+/// Pushes the worktree branch to its upstream (or `origin` with `-u`). Never forces.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_worktree_push<R: Runtime>(
+    app: AppHandle<R>,
+    registry: State<'_, WorkspaceRegistry>,
+    request: WorktreePushRequest,
+) -> Result<GitPushResult, IpcError> {
+    let WorktreePushRequest { workspace_id, worktree, worktree_path } = request;
+    let event = (workspace_id.clone(), worktree.clone());
+    let result =
+        with_worktree_path((*registry).clone(), workspace_id, worktree, worktree_path, git_push).await?;
+    notify_worktree_changed(&app, event.0, event.1, WorktreeChangeKind::Updated);
+    Ok(result)
+}
+
+#[cfg(test)]
+mod git_change_error_tests {
+    use super::*;
+
+    #[test]
+    fn git_change_errors_map_to_structured_codes() {
+        let code = |error: GitChangeError| serde_json::to_value(IpcError::from(error).code).unwrap();
+        assert_eq!(code(GitChangeError::NothingToCommit), "GIT_NOTHING_TO_COMMIT");
+        assert_eq!(code(GitChangeError::NoRemote), "GIT_NO_REMOTE");
+        let rejected = IpcError::from(GitChangeError::PushRejected { stderr: "! [rejected]".into() });
+        assert_eq!(serde_json::to_value(&rejected.code).unwrap(), "GIT_PUSH_REJECTED");
+        assert_eq!(rejected.details.unwrap()["stderr"], "! [rejected]");
+        assert_eq!(code(GitChangeError::EmptyMessage), "INVALID_ARGUMENT");
+        let outside = GitChangeError::Worktree(crate::worktree::WorktreeError::InvalidPath {
+            path: "../x".into(),
+            reason: "parent traversal".into(),
+        });
+        assert_eq!(code(outside), "INVALID_PATH");
+        for wire in ["GIT_NOTHING_TO_COMMIT", "GIT_PUSH_REJECTED", "GIT_NO_REMOTE"] {
+            assert_eq!(serde_json::to_value(IpcErrorCode::from_code_str(wire)).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn diff_scope_wire_shape() {
+        let scope: GitDiffScope =
+            serde_json::from_value(serde_json::json!({ "kind": "commit", "sha": "abc1234" })).unwrap();
+        assert_eq!(scope, GitDiffScope::Commit { sha: "abc1234".into() });
+        let staged: GitDiffScope = serde_json::from_value(serde_json::json!({ "kind": "staged" })).unwrap();
+        assert_eq!(staged, GitDiffScope::Staged);
+        let working: GitDiffScope =
+            serde_json::from_value(serde_json::json!({ "kind": "workingTree" })).unwrap();
+        assert_eq!(working, GitDiffScope::WorkingTree);
+    }
+}
+
 #[cfg(all(test, unix))]
 mod deletion_repair_tests {
     use super::*;
@@ -702,5 +975,200 @@ mod deletion_repair_tests {
         let (cached, _) = scans.begin("repair", false);
         assert!(cached.rows.is_empty(), "reopen must not return deleted row");
         stop_deletion_daemon(stop, daemon).await;
+    }
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod change_event_tests {
+    use super::*;
+    use crate::worktree::{run_git, CreateWorktreeOptions};
+    use tauri::Listener;
+
+    #[tokio::test]
+    async fn stage_unstage_and_push_emit_worktree_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        run_git(&repo, &["config", "user.name", "Event fixture"]).unwrap();
+        run_git(&repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        run_git(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+        run_git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        run_git(dir.path(), &["init", "-q", "--bare", "remote.git"]).unwrap();
+        let bare = dir.path().join("remote.git");
+        run_git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]).unwrap();
+        let registry = WorkspaceRegistry::new();
+        registry.register("events", &repo).unwrap();
+        let manager = registry.manager("events").unwrap();
+        let identity = WorktreeIdentity { ws_id: "events".into(), slug: "wt".into() };
+        let path = manager.worktree_path_for("events", "wt").unwrap();
+        let wt = manager
+            .create_worktree(CreateWorktreeOptions::new("events", "wt", path))
+            .unwrap();
+        std::fs::write(wt.path.join("a.txt"), b"a").unwrap();
+
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+            let payload: WorktreeChangedPayload = serde_json::from_str(event.payload()).unwrap();
+            tx.send(payload).unwrap();
+        });
+        let mut next = || {
+            rx.try_recv().expect("command must emit worktree_changed before returning")
+        };
+        let paths = WorktreePathsRequest {
+            workspace_id: "events".into(),
+            worktree: Some(identity.clone()),
+            worktree_path: None,
+            paths: vec!["a.txt".into()],
+        };
+
+        cmd_worktree_stage(app.handle().clone(), app.state(), paths.clone()).await.unwrap();
+        let staged = next();
+        assert_eq!(staged.kind, WorktreeChangeKind::DirtyChanged);
+        assert_eq!(staged.workspace_id, "events");
+        assert_eq!(staged.worktree, Some(identity.clone()));
+
+        cmd_worktree_unstage(app.handle().clone(), app.state(), paths.clone()).await.unwrap();
+        assert_eq!(next().kind, WorktreeChangeKind::DirtyChanged);
+
+        cmd_worktree_stage(app.handle().clone(), app.state(), paths).await.unwrap();
+        next();
+        cmd_worktree_commit(
+            app.handle().clone(),
+            app.state(),
+            WorktreeCommitRequest {
+                workspace_id: "events".into(),
+                worktree: Some(identity.clone()),
+                worktree_path: None,
+                message: "a".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(next().kind, WorktreeChangeKind::Updated);
+
+        cmd_worktree_push(
+            app.handle().clone(),
+            app.state(),
+            WorktreePushRequest {
+                workspace_id: "events".into(),
+                worktree: Some(identity),
+                worktree_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(next().kind, WorktreeChangeKind::Updated);
+    }
+
+    #[tokio::test]
+    async fn the_main_checkout_is_addressed_by_path_inside_the_jail() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]).unwrap();
+        run_git(&repo, &["config", "user.name", "Path fixture"]).unwrap();
+        run_git(&repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
+        run_git(&repo, &["config", "commit.gpgsign", "false"]).unwrap();
+        std::fs::write(repo.join("main.txt"), b"one\n").unwrap();
+        run_git(&repo, &["add", "main.txt"]).unwrap();
+        run_git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
+        // A worktree Git records outside the project root stays out of reach.
+        let outside = dir.path().join("outside");
+        run_git(&repo, &["worktree", "add", "-q", "--detach", outside.to_str().unwrap()]).unwrap();
+        // An unmanaged worktree inside the root, not created through naming.rs, is reachable.
+        let unmanaged = repo.join("hand-made");
+        run_git(&repo, &["worktree", "add", "-q", "--detach", unmanaged.to_str().unwrap()]).unwrap();
+        let registry = WorkspaceRegistry::new();
+        registry.register("paths", &repo).unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(registry)
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(WORKTREE_CHANGED_EVENT, move |event: tauri::Event| {
+            let payload: WorktreeChangedPayload = serde_json::from_str(event.payload()).unwrap();
+            tx.send(payload).unwrap();
+        });
+
+        std::fs::write(repo.join("main.txt"), b"one\ntwo\n").unwrap();
+        let by_path = |path: &std::path::Path| WorktreePathsRequest {
+            workspace_id: "paths".into(),
+            worktree: None,
+            worktree_path: Some(path.to_path_buf()),
+            paths: vec!["main.txt".into()],
+        };
+        cmd_worktree_stage(app.handle().clone(), app.state(), by_path(&repo)).await.unwrap();
+        let staged_event = rx.try_recv().expect("a path-addressed stage emits worktree_changed");
+        assert_eq!(staged_event.kind, WorktreeChangeKind::DirtyChanged);
+        assert_eq!(staged_event.worktree, None);
+        let staged = cmd_worktree_diff(
+            app.state(),
+            WorktreeDiffRequest {
+                workspace_id: "paths".into(),
+                worktree: None,
+                worktree_path: Some(repo.clone()),
+                scope: GitDiffScope::Staged,
+                file: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(staged.contains("+two"), "{staged}");
+        let sha = cmd_worktree_commit(
+            app.handle().clone(),
+            app.state(),
+            WorktreeCommitRequest {
+                workspace_id: "paths".into(),
+                worktree: None,
+                worktree_path: Some(repo.clone()),
+                message: "main".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(run_git(&repo, &["rev-parse", "HEAD"]).unwrap().trim(), sha);
+        let committed = rx.try_recv().expect("a path-addressed commit emits worktree_changed");
+        assert_eq!(committed.workspace_id, "paths");
+        assert_eq!(committed.worktree, None);
+        assert_eq!(committed.kind, WorktreeChangeKind::Updated);
+
+        std::fs::write(unmanaged.join("main.txt"), b"changed\n").unwrap();
+        cmd_worktree_stage(app.handle().clone(), app.state(), by_path(&unmanaged)).await.unwrap();
+        assert!(!run_git(&unmanaged, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+        rx.try_recv().expect("an unmanaged worktree stage emits worktree_changed");
+
+        // Outside the jail, a directory that is not a checkout, and an escaping file path.
+        let refused = cmd_worktree_stage(app.handle().clone(), app.state(), by_path(&outside)).await;
+        assert!(refused.is_err(), "{refused:?}");
+        std::fs::create_dir(repo.join("plain")).unwrap();
+        let not_checkout =
+            cmd_worktree_stage(app.handle().clone(), app.state(), by_path(&repo.join("plain"))).await;
+        assert!(not_checkout.is_err(), "{not_checkout:?}");
+        let mut escape = by_path(&repo);
+        escape.paths = vec!["../outside/x".into()];
+        assert!(cmd_worktree_stage(app.handle().clone(), app.state(), escape).await.is_err());
+        std::fs::write(repo.join("main.txt"), b"three\n").unwrap();
+        let status = cmd_worktree_changes_status(
+            app.handle().clone(),
+            app.state(),
+            WorktreePushRequest {
+                workspace_id: "paths".into(),
+                worktree: None,
+                worktree_path: Some(repo.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(status.files.iter().any(|file| file.path == "main.txt"), "{status:?}");
+        let mut both = by_path(&repo);
+        both.worktree = Some(WorktreeIdentity { ws_id: "paths".into(), slug: "x".into() });
+        assert!(cmd_worktree_stage(app.handle().clone(), app.state(), both).await.is_err());
+        // Nothing outside the jail, nor any refused request, emitted an event.
+        assert!(rx.try_recv().is_err(), "refused targets must not emit worktree_changed");
     }
 }

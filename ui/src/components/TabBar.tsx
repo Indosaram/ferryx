@@ -13,6 +13,7 @@ import {
   useBrowserSettings,
 } from "../lib/browserSettings";
 import { copyTextToClipboard } from "../lib/clipboard";
+import { disambiguateFileTabLabels } from "../lib/fileTabLabels";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
 import {
   requestSessionLifecycleAction,
@@ -78,6 +79,38 @@ const WINDOWS_SHELL_OPTIONS = [
   { id: "new-terminal:wsl", shell: "wsl", label: "WSL" },
 ] as const;
 
+/**
+ * True when `label` is a label this app generates for `path` (the basename or a
+ * trailing path suffix from disambiguation), as opposed to a user rename.
+ */
+function isGeneratedFileTabLabel(label: string, path: string): boolean {
+  if (label === path) return true;
+  const segments = path.split(/[/\\]/).filter((segment) => segment.length > 0);
+  for (let count = 1; count <= segments.length; count++) {
+    if (segments.slice(segments.length - count).join("/") === label) return true;
+  }
+  return false;
+}
+
+/**
+ * Display labels for file tabs, derived from the file tabs currently in this strip so a
+ * closed duplicate drops its sibling's disambiguation. User-renamed labels are kept.
+ */
+export function computeFileTabLabels(tabs: readonly WorkspaceTab[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  const generated: FileTab[] = [];
+  for (const tab of tabs) {
+    if (tab.kind !== "file") continue;
+    if (isGeneratedFileTabLabel(tab.label, tab.path)) generated.push(tab);
+    else result[tab.id] = tab.label;
+  }
+  const labels = disambiguateFileTabLabels(generated.map((tab) => tab.path));
+  generated.forEach((tab, index) => {
+    result[tab.id] = labels[index]!;
+  });
+  return result;
+}
+
 export function TabBar({
   groupId = "group-default",
   tabs,
@@ -118,6 +151,7 @@ export function TabBar({
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const renameCancelledRef = useRef(false);
+  const fileTabLabelById = useMemo(() => computeFileTabLabels(tabs), [tabs]);
   const addButtonRef = useRef<HTMLDivElement>(null);
   const menuUnlistenRef = useRef<(() => void) | null>(null);
   const [hostPlatform, setHostPlatform] = useState<string | null>(null);
@@ -282,9 +316,9 @@ export function TabBar({
     renameCancelledRef.current = false;
     setRenamingTabId(tab.id);
     setRenameValue(
-      (isTerminalTab(tab) && tab.customLabel) || tabDisplayById?.[tab.id]?.text || tab.label,
+      (isTerminalTab(tab) && tab.customLabel) || tabDisplayById?.[tab.id]?.text || fileTabLabelById[tab.id] || tab.label,
     );
-  }, [onRenameTab, tabDisplayById]);
+  }, [onRenameTab, tabDisplayById, fileTabLabelById]);
 
   const handleContextMenu = useCallback((event: React.MouseEvent, tab: WorkspaceTab) => {
     event.preventDefault();
@@ -293,7 +327,7 @@ export function TabBar({
     const hasTabsToRight = index >= 0 && index < tabs.length - 1;
     const hasTabsToLeft = index > 0;
     const hasOtherTabs = tabs.length > 1;
-    const canSplitTerminal = tab.kind !== "browser" && tab.kind !== "file";
+    const canSplitTerminal = isTerminalTab(tab);
     const items: NativeMenuEntry[] = [];
     const actions: Record<string, () => void> = {};
     if (tab.kind === "browser" && onDuplicateBrowser) {
@@ -405,7 +439,7 @@ export function TabBar({
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", icon: "refresh" });
       actions["reset-agent-state"] = () => onResetAgentState(tab.id);
     }
-    if (tab.kind !== "browser" && tab.kind !== "file") {
+    if (isTerminalTab(tab)) {
       const lifecycleSessionId = sessionIdForLifecycle?.(tab) ?? tab.sessionId;
       items.push({ kind: "separator" });
       items.push({ kind: "item", id: "restart-session", label: "Restart Session" });
@@ -489,7 +523,7 @@ export function TabBar({
         <div className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
-            const sleeping = tab.kind !== "browser" && tab.kind !== "file" && sleepingSessionIds.has(tab.sessionId);
+            const sleeping = isTerminalTab(tab) && sleepingSessionIds.has(tab.sessionId);
             const fileTitle = tab.kind === "file" && filePathsForTab ? filePathsForTab(tab).absolute : undefined;
             return (
               <SortableTab
@@ -502,7 +536,7 @@ export function TabBar({
                 sleeping={sleeping}
                 activity={activityByTabId?.[tab.id]}
                 supervisorActing={Boolean(supervisorActingTabIds?.[tab.id])}
-                displayText={tabDisplayById?.[tab.id]?.text}
+                displayText={tabDisplayById?.[tab.id]?.text ?? fileTabLabelById[tab.id]}
                 displayTooltip={tabDisplayById?.[tab.id]?.tooltip}
                 fileTitle={fileTitle}
                 isRenaming={renamingTabId === tab.id}

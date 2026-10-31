@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::ssh::runtime::{RemoteEnvironment, RemoteExecutor, RemotePlatform};
 use crate::ssh::{SshAuthMethod, SshHost, SshHostSource};
 use std::io::BufRead;
@@ -50,6 +51,7 @@ fn sample_host(id: &str) -> SshHost {
     }
 }
 
+#[cfg(unix)]
 fn sample_env() -> RemoteEnvironment {
     RemoteEnvironment {
         platform: RemotePlatform::Posix,
@@ -688,6 +690,7 @@ async fn ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping() {
     // Part B: Cancelled in-flight request then drop reaps child process
     let mut conn_cancel = fixture.spawn_bridge_connection();
     let _ = conn_cancel.handshake().await.expect("handshake");
+    #[cfg(unix)]
     let child_pid = conn_cancel.child_id().expect("child PID must be known");
 
     // Start an in-flight request and cancel it mid-flight by dropping the future
@@ -736,6 +739,7 @@ async fn ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping() {
     // Part C: Closed-on-EOF then close cleans up idempotently without hanging
     let mut conn_eof = fixture.spawn_bridge_connection();
     let _ = conn_eof.handshake().await.expect("handshake");
+    #[cfg(unix)]
     let eof_pid = conn_eof.child_id().expect("eof child PID");
 
     // Close stdin of the child to trigger EOF on stdout

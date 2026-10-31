@@ -316,7 +316,7 @@ impl Entry {
     fn notify(s: &Session) {
         s.updates.send_replace(s.details.clone());
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn notify_for_test(&self) {
         Self::notify(&self.state.lock());
     }
@@ -733,7 +733,7 @@ impl RemoteRuntime {
             }
         })
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn entry_for_test(&self, id: &str) -> Result<Arc<Entry>, RemoteFailure> {
         self.entry(id)
     }

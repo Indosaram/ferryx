@@ -1,4 +1,4 @@
-import { GitBranch, Search, TerminalSquare, X } from "lucide-react";
+import { GitBranch, GitCompare, Search, TerminalSquare, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { isMacShortcutPlatform, resolvedShortcuts, shortcutLabel } from "../lib/shortcuts";
@@ -12,10 +12,14 @@ export type CommandPaletteProps = {
   tabs: WorkspaceTab[];
   onSelectWorktree: (worktree: Worktree) => void;
   onSelectTab: (tabId: string) => void;
+  /** Present when the active worktree can show its Git changes. */
+  onShowChanges?: () => void;
   onClose: () => void;
 };
 
-export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onClose }: CommandPaletteProps) {
+type PaletteCommand = { id: string; title: string; run: () => void };
+
+export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const isMac = isMacShortcutPlatform();
@@ -26,6 +30,10 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     () => worktrees.filter((worktree) => worktreeSearchText(worktree).includes(normalizedQuery)),
     [normalizedQuery, worktrees],
   );
+  const filteredCommands = useMemo(() => {
+    const commands: PaletteCommand[] = onShowChanges ? [{ id: "show-changes", title: "Show changes", run: onShowChanges }] : [];
+    return commands.filter((command) => command.title.toLowerCase().includes(normalizedQuery));
+  }, [normalizedQuery, onShowChanges]);
   const filteredTabs = useMemo(
     () => tabs.filter((tab) => staticTabLabel(tab).toLowerCase().includes(normalizedQuery)),
     [normalizedQuery, tabs],
@@ -72,6 +80,27 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
         </div>
 
         <div className="max-h-[55vh] overflow-y-auto p-2 scrollbar-sleek">
+          {filteredCommands.length > 0 ? (
+            <section aria-label="Commands" className="mb-2">
+              <h2 className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Commands</h2>
+              {filteredCommands.map((command) => (
+                <button
+                  key={command.id}
+                  type="button"
+                  data-command-id={command.id}
+                  onClick={() => {
+                    command.run();
+                    onClose();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-foreground hover:bg-accent"
+                >
+                  <GitCompare className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 flex-1 truncate">{command.title}</span>
+                </button>
+              ))}
+            </section>
+          ) : null}
+
           {filteredWorktrees.length > 0 ? (
             <section aria-label="Worktrees" className="mb-2">
               <h2 className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Worktrees</h2>
@@ -115,7 +144,7 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
             </section>
           ) : null}
 
-          {filteredWorktrees.length === 0 && filteredTabs.length === 0 ? (
+          {filteredCommands.length === 0 && filteredWorktrees.length === 0 && filteredTabs.length === 0 ? (
             <div className="px-3 py-8 text-center text-xs text-muted-foreground">No matching worktrees or terminal tabs.</div>
           ) : null}
         </div>

@@ -1284,7 +1284,7 @@ describe("sessionAuthority - independent adversarial verification (Task 2)", () 
 
         await act(async () => { void (await hook.result.current.openTab(testWorktree)); });
         const openedTab = hook.result.current.state.layout.tabs[0];
-        if (openedTab.kind === "browser" || openedTab.kind === "file") throw new Error("expected a terminal tab");
+        if (openedTab.kind === "browser" || openedTab.kind === "file" || openedTab.kind === "changes") throw new Error("expected a terminal tab");
         const sessionId = openedTab.sessionId;
 
         act(() => hook.result.current.dispatchWorkspaceAction({
@@ -1388,7 +1388,7 @@ describe("sessionAuthority - independent adversarial verification (Task 2)", () 
 
         await act(async () => { void (await hook.result.current.openTab(testWorktree)); });
         const openedTab = hook.result.current.state.layout.tabs[0];
-        if (openedTab.kind === "browser" || openedTab.kind === "file") throw new Error("expected a terminal tab");
+        if (openedTab.kind === "browser" || openedTab.kind === "file" || openedTab.kind === "changes") throw new Error("expected a terminal tab");
         const sessionId = openedTab.sessionId;
 
         const oldKey = formatRecoveryKey({

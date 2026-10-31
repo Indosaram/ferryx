@@ -1334,6 +1334,7 @@ async fn test_gui_remote_forwarding_and_no_gui_gateway_ownership() {
         app.state(),
         crate::ipc::remote::SetActiveDesktopSelectionRequest {
             attention_inventory: Vec::new(),
+            session_attention: Vec::new(),
             workspace_id: Some("ws-gui".into()),
             worktree_slug: None,
             worktree_label: Some("main".into()),
@@ -3117,6 +3118,7 @@ async fn test_remote_active_selection_safe_tab_descriptors_and_no_path_leakage()
 
     let selection = RemoteActiveDesktopSelection {
         attention_inventory: Vec::new(),
+        session_attention: Vec::new(),
         workspace_id: Some("proj-1".to_string()),
         worktree_slug: Some("feat".to_string()),
         worktree_label: Some("feature-cool".to_string()),
@@ -3240,6 +3242,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         worktree_label: Some("feature-tab".to_string()),
         session_id: None,
         attention_inventory: Vec::new(),
+        session_attention: Vec::new(),
         tab_id: Some("tab-term-selected".to_string()),
         terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
             id: "tab-term-selected".to_string(),
@@ -3364,6 +3367,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         worktree_label: Some("main".to_string()),
         session_id: None,
         attention_inventory: Vec::new(),
+        session_attention: Vec::new(),
         tab_id: Some("tab-primary-2".to_string()),
         terminal_tabs: vec![crate::remote::protocol::RemoteTerminalTabInfo {
             id: "tab-primary-2".to_string(),
@@ -3410,6 +3414,7 @@ async fn test_remote_select_workspace_with_tab_selector_and_primary_worktree() {
         session_id: Some("sess-1".to_string()),
         tab_id: Some("tab-term-selected".to_string()),
         attention_inventory: Vec::new(),
+        session_attention: Vec::new(),
         terminal_tabs: vec![
             crate::remote::protocol::RemoteTerminalTabInfo {
                 id: "tab-term-selected".to_string(),
@@ -3784,6 +3789,7 @@ async fn test_workspace_state_agent_activity_and_worktree_attention_rollup() {
         session_id: Some("sess-active".to_string()),
         tab_id: Some("tab-1".to_string()),
         attention_inventory: Vec::new(),
+        session_attention: Vec::new(),
         terminal_tabs: vec![
             crate::remote::protocol::RemoteTerminalTabInfo {
                 id: "tab-1".to_string(),
@@ -4406,6 +4412,7 @@ async fn test_remote_gateway_legacy_peer_attach_write_output_exit_and_listing() 
         tab_id: Some("tab-1".into()),
         terminal_tabs: Vec::new(),
         attention_inventory: Vec::new(),
+        session_attention: Vec::new(),
     });
 
     // 1. Verify merged session listing / active lookup returns legacy session via HTTP API

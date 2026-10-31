@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import type { FilePreviewFailure, FilePreviewVideoProps } from "../lib/filePreviewTypes";
 
@@ -9,7 +9,8 @@ import type { FilePreviewFailure, FilePreviewVideoProps } from "../lib/filePrevi
  * no codec shim, no Media Source pipeline. The browser engine plays the
  * capability URL directly with its own controls, so a recognised container that
  * the engine cannot decode is a normal, recoverable outcome rather than a crash
- * — it surfaces as `UnsupportedFormat` with reload / external-open in place.
+ * — it surfaces as `UnsupportedFormat` through `onFailure`, and the controller's
+ * failure screen offers reload / external-open.
  *
  * Lifecycle rules:
  * - Nothing is fetched beyond metadata until the user presses play (no autoplay).
@@ -47,9 +48,9 @@ function unsupportedFormatFailure(displayName: string, message: string): FilePre
  * Maps a `MediaError` onto the frozen failure contract.
  *
  * Returns `null` for events the modal must not see: teardown aborts and error
- * events that carry no `MediaError` at all.
+ * events that carry no `MediaError` at all. Shared by the audio renderer.
  */
-function mediaFailure(displayName: string, error: MediaError | null): FilePreviewFailure | null {
+export function mediaFailure(displayName: string, error: MediaError | null): FilePreviewFailure | null {
   if (!error) return null;
   switch (error.code) {
     case MEDIA_ERR_ABORTED:
@@ -100,7 +101,6 @@ export function FilePreviewVideo({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const activeKeyRef = useRef(instanceKey);
   const onFailureRef = useRef(onFailure);
-  const [failure, setFailure] = useState<FilePreviewFailure | null>(null);
 
   useEffect(() => {
     onFailureRef.current = onFailure;
@@ -108,7 +108,6 @@ export function FilePreviewVideo({
 
   useEffect(() => {
     activeKeyRef.current = instanceKey;
-    setFailure(null);
     const media = videoRef.current;
     return () => releaseMedia(media);
   }, [instanceKey]);
@@ -119,7 +118,6 @@ export function FilePreviewVideo({
       displayName,
       `${displayName} has no playable media stream.`,
     );
-    setFailure(missing);
     onFailureRef.current(missing);
   }, [instanceKey, mediaUrl, displayName]);
 
@@ -128,7 +126,6 @@ export function FilePreviewVideo({
       if (activeKeyRef.current !== instanceKey) return;
       const next = mediaFailure(displayName, event.currentTarget.error);
       if (!next) return;
-      setFailure(next);
       onFailure(next);
     },
     [displayName, instanceKey, onFailure],
@@ -182,24 +179,6 @@ export function FilePreviewVideo({
           aria-label={`Video preview of ${displayName}`}
           onError={handleError}
         />
-      ) : null}
-
-      {failure ? (
-        <div
-          role="alert"
-          data-testid="file-preview-video-error"
-          className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-foreground"
-        >
-          <span className="min-w-0">{failure.message}</span>
-          <button
-            type="button"
-            onClick={onReload}
-            data-testid="file-preview-video-retry"
-            className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-accent/50"
-          >
-            Try again
-          </button>
-        </div>
       ) : null}
     </div>
   );

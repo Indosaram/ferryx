@@ -103,7 +103,7 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .expect("created event timeout")
         .expect("created event");
     assert_eq!(created_event.workspace_id, "workspace-a");
-    assert_eq!(created_event.worktree, identity);
+    assert_eq!(created_event.worktree.as_ref(), Some(&identity));
     assert_eq!(created_event.kind, WorktreeChangeKind::Created);
 
     let spawned = cmd_terminal_spawn(
@@ -170,14 +170,14 @@ async fn identity_based_ipc_resolves_registered_worktree_and_emits_mutation_even
         .expect("deleted event timeout")
         .expect("deleted event");
     assert_eq!(deleted_event.kind, WorktreeChangeKind::Deleted);
-    assert_eq!(deleted_event.worktree, identity);
+    assert_eq!(deleted_event.worktree.as_ref(), Some(&identity));
 
     let pruned_event = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv())
         .await
         .expect("pruned event timeout")
         .expect("pruned event");
     assert_eq!(pruned_event.workspace_id, "workspace-a");
-    assert_eq!(pruned_event.worktree, identity);
+    assert_eq!(pruned_event.worktree.as_ref(), Some(&identity));
     assert_eq!(pruned_event.kind, WorktreeChangeKind::Pruned);
 
     server_task.abort();
@@ -334,7 +334,7 @@ async fn worktree_status_emits_dirty_changed_on_clean_to_dirty_transition() {
         .expect("dirtyChanged event timeout")
         .expect("dirtyChanged event");
     assert_eq!(event.workspace_id, "workspace-a");
-    assert_eq!(event.worktree, identity);
+    assert_eq!(event.worktree.as_ref(), Some(&identity));
     assert_eq!(event.kind, WorktreeChangeKind::DirtyChanged);
     assert_eq!(
         serde_json::to_value(event.kind).expect("serialize dirtyChanged kind"),
@@ -415,7 +415,7 @@ async fn worktree_status_emits_dirty_changed_on_dirty_to_clean_transition() {
         .expect("dirtyChanged event timeout")
         .expect("dirtyChanged event");
     assert_eq!(event.workspace_id, "workspace-a");
-    assert_eq!(event.worktree, identity);
+    assert_eq!(event.worktree.as_ref(), Some(&identity));
     assert_eq!(event.kind, WorktreeChangeKind::DirtyChanged);
 }
 

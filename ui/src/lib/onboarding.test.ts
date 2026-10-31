@@ -202,12 +202,14 @@ describe("onboarding exports and constants", () => {
   it("exports expected constants and step order", () => {
     expect(ONBOARDING_VERSION).toBe(1);
     expect(ONBOARDING_STEP_ORDER).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "try",
+      "phone",
+      "account",
     ]);
     expect(OPEN_ONBOARDING_EVENT).toBe("ferryx:open-onboarding");
   });
@@ -659,12 +661,14 @@ describe("wizardSteps", () => {
       accountLinked: true,
     };
     expect(wizardSteps(ctx)).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "try",
+      "phone",
+      "account",
     ]);
   });
 
@@ -691,12 +695,14 @@ describe("wizardSteps", () => {
       accountLinked: true,
     };
     expect(wizardSteps(ctx)).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "try",
+      "phone",
+      "account",
     ]);
   });
 });
@@ -721,12 +727,13 @@ describe("satisfiedOnboardingSteps", () => {
       accountLinked: true,
     };
     expect(satisfiedOnboardingSteps(state, ctx)).toEqual([
-      "account",
       "intro",
       "features",
       "agents",
       "cli",
       "project",
+      "phone",
+      "account",
     ]);
   });
 
@@ -743,7 +750,7 @@ describe("satisfiedOnboardingSteps", () => {
       projectCount: 0,
       accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["account"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["phone", "account"]);
   });
 
   it("reports only cli when its status is unknown and nothing else is done", () => {
@@ -759,7 +766,7 @@ describe("satisfiedOnboardingSteps", () => {
       projectCount: 0,
       accountLinked: true,
     };
-    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["account", "cli"]);
+    expect(satisfiedOnboardingSteps(state, ctx)).toEqual(["cli", "phone", "account"]);
   });
 });
 
@@ -886,11 +893,12 @@ describe("features step", () => {
     };
     expect(pendingOnboardingSteps(upgraded, satisfiedCtx)).toEqual(["features"]);
     expect(satisfiedOnboardingSteps(upgraded, satisfiedCtx)).toEqual([
-      "account",
       "intro",
       "agents",
       "cli",
       "project",
+      "phone",
+      "account",
     ]);
 
     const doneState = markOnboardingStepsCompleted(
@@ -933,6 +941,68 @@ describe("account step", () => {
     const ctx = { permissions: null, agents: null, cli: null, projectCount: 1, accountLinked: false };
     expect(isOnboardingStepSatisfied("account", ctx)).toBe(false);
     expect(isOnboardingStepSatisfied("account", { ...ctx, accountLinked: true })).toBe(true);
-    expect(wizardSteps(ctx)[0]).toBe("account");
+    const steps = wizardSteps(ctx);
+    expect(steps[0]).toBe("intro");
+    expect(steps[steps.length - 1]).toBe("account");
+  });
+});
+
+describe("phone step", () => {
+  const ctx: OnboardingContext = {
+    permissions: macosPermissionsStatus,
+    agents: [{ name: "claude", available: true }],
+    cli: cliInstalled,
+    projectCount: 1,
+    accountLinked: true,
+  };
+
+  it("sits right before the account step", () => {
+    const steps = wizardSteps(ctx);
+    expect(steps.slice(-2)).toEqual(["phone", "account"]);
+  });
+
+  it("is pending only when no device is paired and never forces auto-open", () => {
+    expect(isOnboardingStepSatisfied("phone", { ...ctx, pairedDeviceCount: 0 })).toBe(false);
+    expect(isOnboardingStepSatisfied("phone", { ...ctx, pairedDeviceCount: 1 })).toBe(true);
+    expect(isOnboardingStepSatisfied("phone", { ...ctx, pairedDeviceCount: null })).toBe(true);
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro", "features", "agents", "cli", "project"],
+      dismissed: false,
+    };
+    const unpaired = { ...ctx, pairedDeviceCount: 0 };
+    expect(pendingOnboardingSteps(state, unpaired)).toEqual(["phone"]);
+    expect(shouldAutoOpenOnboarding(state, unpaired)).toBe(false);
+  });
+});
+
+describe("try step", () => {
+  const ctx: OnboardingContext = {
+    permissions: macosPermissionsStatus,
+    agents: [{ name: "claude", available: true }],
+    cli: cliInstalled,
+    projectCount: 1,
+    accountLinked: true,
+    pairedDeviceCount: 1,
+  };
+
+  it("sits between project and phone", () => {
+    const steps = wizardSteps(ctx);
+    const at = steps.indexOf("project");
+    expect(steps.slice(at, at + 3)).toEqual(["project", "try", "phone"]);
+  });
+
+  it("is never pending, never forces auto-open, and is done only once recorded", () => {
+    const state: OnboardingState = {
+      version: 1,
+      completedSteps: ["intro", "features", "agents", "cli", "project"],
+      dismissed: false,
+    };
+    expect(pendingOnboardingSteps(state, ctx)).toEqual([]);
+    expect(shouldAutoOpenOnboarding(state, ctx)).toBe(false);
+    expect(satisfiedOnboardingSteps(state, ctx)).not.toContain("try");
+    expect(
+      satisfiedOnboardingSteps({ ...state, completedSteps: [...state.completedSteps, "try"] }, ctx),
+    ).toContain("try");
   });
 });

@@ -1,7 +1,75 @@
-import ReactMarkdown from "react-markdown";
+import { useMemo } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { openExternalUrl } from "../lib/browserTauri";
 import { parseNotebook, type NotebookCell, type NotebookOutput } from "../lib/ipynbParse";
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Notebook Markdown is file content, not app chrome: links are buttons (never
+ * `<a href>`, which middle click / drag could still navigate the webview with) that
+ * hand http(s) targets to the system browser; anything else is inert text. Images
+ * render only inline data URIs. No typography plugin is installed, so elements get
+ * explicit Tailwind classes instead of relying on `prose`.
+ */
+const NOTEBOOK_MARKDOWN_COMPONENTS: Components = {
+  a: ({ href, children }) => {
+    const target = typeof href === "string" ? href : "";
+    if (!isHttpUrl(target)) {
+      return <span className="text-zinc-400">{children}</span>;
+    }
+    return (
+      <button
+        type="button"
+        data-testid="notebook-link"
+        title={`Open ${target} in your browser`}
+        className="inline text-sky-400 underline underline-offset-2"
+        onClick={() => {
+          void openExternalUrl(target).catch(() => undefined);
+        }}
+      >
+        {children}
+      </button>
+    );
+  },
+  img: ({ src, alt }) => {
+    const source = typeof src === "string" ? src : "";
+    const label = typeof alt === "string" ? alt : "";
+    if (/^data:image\/(png|jpeg|gif|webp);base64,/i.test(source)) {
+      return <img src={source} alt={label} className="max-w-full h-auto rounded" />;
+    }
+    return <span data-testid="notebook-image-blocked" className="text-zinc-500">[image: {label || source}]</span>;
+  },
+  h1: ({ children }) => <h1 className="mb-3 mt-4 text-2xl font-semibold text-zinc-100">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 mt-4 text-xl font-semibold text-zinc-100">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-2 mt-3 text-lg font-semibold text-zinc-100">{children}</h3>,
+  h4: ({ children }) => <h4 className="mb-1 mt-3 text-base font-semibold text-zinc-100">{children}</h4>,
+  h5: ({ children }) => <h5 className="mb-1 mt-2 text-sm font-semibold text-zinc-100">{children}</h5>,
+  h6: ({ children }) => <h6 className="mb-1 mt-2 text-sm font-semibold text-zinc-300">{children}</h6>,
+  p: ({ children }) => <p className="my-2">{children}</p>,
+  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-6">{children}</ul>,
+  ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-6">{children}</ol>,
+  li: ({ children }) => <li className="pl-1">{children}</li>,
+  pre: ({ children }) => (
+    <pre className="my-2 overflow-x-auto rounded bg-zinc-900 p-2 font-mono text-xs text-zinc-200 [&>code]:bg-transparent [&>code]:p-0">
+      {children}
+    </pre>
+  ),
+  code: ({ className, children }) => (
+    <code className={`rounded bg-zinc-800/80 px-1 py-0.5 font-mono text-[0.85em] text-zinc-200${className ? ` ${className}` : ""}`}>
+      {children}
+    </code>
+  ),
+};
 
 function OutputItem({ output }: { output: NotebookOutput }) {
   if (output.kind === "text") {
@@ -43,7 +111,7 @@ function MarkdownCell({ cell }: { cell: NotebookCell }) {
       data-kind="markdown"
       className="prose prose-invert prose-sm max-w-none text-zinc-200 leading-relaxed px-4 py-2"
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={NOTEBOOK_MARKDOWN_COMPONENTS}>
         {cell.source}
       </ReactMarkdown>
     </div>
@@ -94,7 +162,7 @@ function RawCell({ cell }: { cell: NotebookCell }) {
 }
 
 export function FilePreviewNotebook({ text }: { text: string }) {
-  const notebook = parseNotebook(text);
+  const notebook = useMemo(() => parseNotebook(text), [text]);
 
   if (!notebook) {
     return (
@@ -109,7 +177,7 @@ export function FilePreviewNotebook({ text }: { text: string }) {
   return (
     <div
       data-testid="file-preview-notebook"
-      className="w-full h-full overflow-y-auto p-4 space-y-3 bg-zinc-950 text-zinc-100"
+      className="selectable w-full h-full overflow-y-auto p-4 space-y-3 bg-zinc-950 text-zinc-100"
     >
       {notebook.cells.map((cell, idx) => {
         if (cell.kind === "markdown") {

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import type { FilePreviewAudioProps } from "../lib/filePreviewTypes";
+import { mediaFailure } from "./FilePreviewVideo";
 
 export function FilePreviewAudio({
   payload,
@@ -9,8 +10,12 @@ export function FilePreviewAudio({
 }: FilePreviewAudioProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const url = payload.mediaUrl;
+  /** One media element per request: a reload (new generation) or new URL remounts it. */
+  const instanceKey = `${generation}:${url ?? ""}`;
+  const activeKeyRef = useRef(instanceKey);
 
   useEffect(() => {
+    activeKeyRef.current = instanceKey;
     const audio = audioRef.current;
     return () => {
       if (!audio) return;
@@ -18,7 +23,7 @@ export function FilePreviewAudio({
       audio.removeAttribute("src");
       audio.load();
     };
-  }, [generation, url]);
+  }, [instanceKey]);
 
   if (!url) {
     return (
@@ -31,18 +36,18 @@ export function FilePreviewAudio({
   return (
     <div className="flex h-full min-h-0 items-center justify-center p-6" data-testid="file-preview-audio">
       <audio
+        key={instanceKey}
         ref={audioRef}
         data-testid="file-preview-audio-element"
         src={url}
         controls
         preload="metadata"
         className="w-full max-w-xl"
-        onError={() => {
-          onFailure({
-            reason: "UnsupportedFormat",
-            message: `Playback of ${payload.displayName} stopped because the preview stream could not be read.`,
-            details: null,
-          });
+        onError={(event) => {
+          // A late error from a replaced element (teardown abort) must not fail the new preview.
+          if (activeKeyRef.current !== instanceKey) return;
+          const failure = mediaFailure(payload.displayName, event.currentTarget.error);
+          if (failure) onFailure(failure);
         }}
       />
     </div>

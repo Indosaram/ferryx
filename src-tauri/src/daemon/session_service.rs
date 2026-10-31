@@ -211,7 +211,7 @@ pub(super) enum SpawnError {
 }
 
 impl SpawnError {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn contains(&self, needle: &str) -> bool {
         self.to_string().contains(needle)
     }
@@ -3198,7 +3198,7 @@ impl DaemonSessionService {
             .retain(|_, session_id| self.session_is_live(session_id));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn expire_spawn_request_for_test(&self, client_request_id: &str) {
         if let Some(entry) = self
             .spawn_idempotency_cache
@@ -3209,17 +3209,17 @@ impl DaemonSessionService {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn spawn_cache_len_for_test(&self) -> usize {
         self.spawn_idempotency_cache.lock().len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn provider_claim_len_for_test(&self) -> usize {
         self.provider_session_claims.lock().len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn reserve_provider_claim_for_test(
         &self,
         client_request_id: &str,

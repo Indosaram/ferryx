@@ -382,10 +382,13 @@ pub(crate) fn forget_webview(label: &str) {
 
 type Done<T> = Box<dyn FnOnce(T)>;
 
+/// Shared single-use completion for one CDP call.
+type CdpDoneSlot = Rc<RefCell<Option<Done<Result<String, String>>>>>;
+
 /// Calls one CDP method; done gets the result JSON or an error string exactly once.
 fn cdp_call(core: &ICoreWebView2, message: CdpMessage, done: Done<Result<String, String>>) {
     let (method, params) = message;
-    let slot: Rc<RefCell<Option<Done<Result<String, String>>>>> = Rc::new(RefCell::new(Some(done)));
+    let slot: CdpDoneSlot = Rc::new(RefCell::new(Some(done)));
     let handler_slot = Rc::clone(&slot);
     let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
         move |result: windows::core::Result<()>, json: String| {

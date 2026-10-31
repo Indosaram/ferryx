@@ -227,6 +227,25 @@ describe("filePreview controller", () => {
     expect(h.closedHandles()).toEqual(["handle-1"]);
   });
 
+  it("shows restart copy when the preview service is unavailable", async () => {
+    const h = harness();
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === FILE_PREVIEW_COMMANDS.open) {
+        throw { code: "UNSUPPORTED", message: "backend prose", details: { reason: "previewServiceUnavailable" } };
+      }
+      return null;
+    });
+
+    await h.controller.open(SOURCE, REQUEST);
+
+    const state = h.controller.getState();
+    if (state.status !== "failed") throw new Error("expected failed");
+    expect(state.failure.reason).toBeNull();
+    expect(state.failure.message).toBe(
+      "File previews are unavailable because the preview service could not start. Restart Ferryx to try again.",
+    );
+  });
+
   it("surfaces the machine failure reason without parsing prose", async () => {
     const h = harness();
     h.invoke.mockImplementation(async (command: string) => {

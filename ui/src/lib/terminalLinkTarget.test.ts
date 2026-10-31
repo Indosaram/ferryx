@@ -4,6 +4,8 @@ import {
   isSessionMouseTrackingEnabled,
   openRemoteFileToken,
   readLinkLine,
+  remoteFileFetchErrorMessage,
+  remoteFetchCwd,
   setSessionMouseTracking,
   tokenFromHyperlink,
   TERMINAL_FILE_LINK_ACTION_EVENT,
@@ -201,6 +203,47 @@ describe("terminalLinkTarget", () => {
   });
 
   describe("openRemoteFileToken", () => {
+    it("shares one in-flight fetch between repeated clicks on the same link", async () => {
+      const token: TerminalFileToken = { type: "file", path: "/srv/big.bin", raw: "/srv/big.bin" };
+      let finish: (value: unknown) => void = () => {};
+      const fakeInvoke = vi.fn(
+        () => new Promise((resolve) => { finish = resolve; }),
+      );
+      const openLocal = vi.fn(async () => true);
+      const opts = {
+        workspaceId: "ssh:dedupe",
+        cwd: "/srv",
+        shiftKey: false,
+        openLocal,
+        invokeFn: fakeInvoke as unknown as TerminalInvokeFn,
+      };
+      const first = openRemoteFileToken(token, opts);
+      const second = openRemoteFileToken(token, opts);
+      expect(fakeInvoke).toHaveBeenCalledTimes(1);
+      finish({ localPath: "/tmp/cache/big.bin", remotePath: "/srv/big.bin", byteLength: 1 });
+      await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+      expect(openLocal).toHaveBeenCalledTimes(2);
+
+      const third = openRemoteFileToken(token, opts);
+      expect(fakeInvoke).toHaveBeenCalledTimes(2);
+      finish({ localPath: "/tmp/cache/big.bin", remotePath: "/srv/big.bin", byteLength: 1 });
+      await third;
+    });
+
+    it("maps remote fetch reasons to user copy", () => {
+      expect(remoteFetchCwd({ cwd: "/srv/app" })).toBe("/srv/app");
+      // Never the worktree root: a relative token without a live cwd must be refused.
+      expect(remoteFetchCwd({ cwd: "" })).toBeNull();
+      expect(remoteFetchCwd({ cwd: null })).toBeNull();
+      expect(remoteFetchCwd(null)).toBeNull();
+      expect(remoteFileFetchErrorMessage({ details: { reason: "remoteFileTooLarge", maxBytes: 8 * 1024 * 1024 } }))
+        .toBe("Remote files larger than 8 MiB cannot be opened.");
+      expect(remoteFileFetchErrorMessage({ details: { reason: "remoteFileMissing" } })).toMatch(/does not exist/);
+      expect(remoteFileFetchErrorMessage({ details: { reason: "remoteCwdUnknown" } })).toMatch(/current directory is unknown/);
+      expect(remoteFileFetchErrorMessage({ message: "boom" })).toBeNull();
+      expect(remoteFileFetchErrorMessage(null)).toBeNull();
+    });
+
     it("fetches remote file and passes localPath to openLocal and forwards cwd", async () => {
       const token: TerminalFileToken = {
         type: "file",

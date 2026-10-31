@@ -34,6 +34,7 @@ import type {
   TerminalSession,
   WorkspaceTab,
 } from "../lib/types";
+import { isTerminalTab } from "../lib/types";
 import { defaultContentForTab, focusedPaneSessionId, getTabPaneLayout, normalizeLayout, toPaneContent } from "../state/layout";
 import { computeTerminalTabDisplay, type TerminalTabDisplay } from "../state/tabDisplay";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
@@ -52,6 +53,7 @@ import {
 } from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
 import { FilePreviewPane } from "./FilePreviewPane";
+import { ChangesPanel } from "./ChangesPanel";
 import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
@@ -327,7 +329,7 @@ export function TerminalSplitView({
 
   const splitTerminalTab = (tabId: string, direction: PaneDirection) => {
     const tab = normalizedLayout.tabs.find((candidate) => candidate.id === tabId);
-    if (!tab || tab.kind === "browser") return;
+    if (!tab || !isTerminalTab(tab)) return;
     const tabLayout = getTabPaneLayout(normalizedLayout, tab);
     const targetLeafId = tabLayout.activeLeafId ?? firstLeafId(tabLayout.root);
     onSplitPane(tab.id, targetLeafId, direction);
@@ -794,7 +796,7 @@ function TabGroupView({
     const acting = actingSessionIds(supervisor, supervisorNow);
     const ids: Record<string, boolean> = {};
     for (const tab of tabs) {
-      if (tab.kind === "browser" || tab.kind === "file") continue;
+      if (!isTerminalTab(tab)) continue;
       const backend = sessions[tab.sessionId]?.backendSessionId;
       if (backend && acting.has(backend)) ids[tab.id] = true;
     }
@@ -997,7 +999,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
   const { node, tab, tabLayout, sessions, path, browserPanesVisible, dropFeedbackLeafId, onNavigateBrowserTab, onReloadBrowserTab } = props;
   if (node.type === "leaf") {
     const rawContent = tabLayout.contentsByLeafId?.[node.leafId];
-    const defaultSessionId = tab.kind === "browser" || tab.kind === "file" ? "" : tab.sessionId;
+    const defaultSessionId = isTerminalTab(tab) ? tab.sessionId : "";
     const sessionId = tabLayout.sessionIdsByLeafId[node.leafId] ?? defaultSessionId;
     const content = rawContent
       ? toPaneContent(rawContent, sessionId)
@@ -1461,6 +1463,16 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   line={content.line}
                   col={content.col}
                   workspaceId={content.workspaceId}
+                  visible={tabVisible}
+                />
+              );
+            case "changes":
+              return (
+                <ChangesPanel
+                  workspaceId={content.workspaceId}
+                  worktree={content.worktree}
+                  worktreePath={content.worktreePath}
+                  active={tabVisible}
                 />
               );
             case "dag": {

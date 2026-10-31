@@ -724,9 +724,9 @@ fn process_image_path(pid: u32) -> Option<PathBuf> {
     String::from_utf8(buffer).ok().map(PathBuf::from)
 }
 
-/// The same raw kernel32 declarations `ipc::windows_process_cwd` and the PTY suspend path use:
-/// `windows-sys` is pulled with a narrow feature list, so a process API is reached through this
-/// crate's established extern block instead of widening the manifest.
+// The same raw kernel32 declarations `ipc::windows_process_cwd` and the PTY suspend path use:
+// `windows-sys` is pulled with a narrow feature list, so a process API is reached through this
+// crate's established extern block instead of widening the manifest.
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {

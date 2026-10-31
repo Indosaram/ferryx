@@ -12,9 +12,9 @@ import { ExternalLink, RotateCcw, X } from "lucide-react";
 
 import { filePreviewController, type FilePreviewController, type FilePreviewNotice, type FilePreviewState } from "../lib/filePreview";
 import { openPermissionsSystemSettings } from "../lib/tauri";
+import { failureHeadline } from "../lib/filePreviewFailureCopy";
 import type {
   FilePreviewAudioProps,
-  FilePreviewErrorReason,
   FilePreviewImageProps,
   FilePreviewPayload,
   FilePreviewPdfProps,
@@ -44,9 +44,27 @@ export type FilePreviewDialogProps = {
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/**
+ * Whether `element` can actually take keyboard focus: not inside a `hidden`, `inert`
+ * or `aria-hidden` subtree (up to `root`) and not removed by computed display/visibility.
+ * Uses attributes and computed style rather than layout boxes so it also holds in jsdom.
+ */
+function isFocusableVisible(element: HTMLElement, root: HTMLElement): boolean {
+  if (!element.isConnected) return false;
+  const view = element.ownerDocument.defaultView;
+  const elementStyle = view?.getComputedStyle(element);
+  if (elementStyle && (elementStyle.visibility === "hidden" || elementStyle.visibility === "collapse")) return false;
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    if (node.hidden || node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true") return false;
+    if (view?.getComputedStyle(node).display === "none") return false;
+    if (node === root) break;
+  }
+  return true;
+}
+
 function focusableWithin(root: HTMLElement): readonly HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (element) => element.offsetParent !== null || element.isConnected,
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) =>
+    isFocusableVisible(element, root),
   );
 }
 
@@ -112,36 +130,6 @@ function formatBytes(byteLength: number): string {
   if (byteLength < 1024) return `${byteLength} B`;
   if (byteLength < 1024 * 1024) return `${(byteLength / 1024).toFixed(1)} KiB`;
   return `${(byteLength / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-/** Machine reason to user copy. Branching is on the reason, never on backend prose. */
-function failureHeadline(reason: FilePreviewErrorReason | null): string {
-  switch (reason) {
-    case "MissingFile":
-      return "This file no longer exists.";
-    case "PermissionDenied":
-      return "This file cannot be read with the current permissions.";
-    case "NotRegularFile":
-      return "Only regular files can be previewed.";
-    case "RemoteUnsupported":
-      return "Files on remote sessions cannot be previewed on this machine.";
-    case "TooLarge":
-      return "This file is too large to preview.";
-    case "UnsupportedEncoding":
-      return "This file is not valid UTF-8 or BOM UTF-16 text.";
-    case "UnsupportedFormat":
-      return "This format cannot be previewed.";
-    case "FileChanged":
-      return "This file changed on disk. Reload to preview the current contents.";
-    case "ExpiredHandle":
-      return "This preview expired. Reload to request it again.";
-    case null:
-      return "This file could not be previewed.";
-    default: {
-      const unreachable: never = reason;
-      return unreachable;
-    }
-  }
 }
 
 function noticeCopy(notice: FilePreviewNotice): string {

@@ -24,6 +24,8 @@ pub enum AgentResumeError {
     MissingTranscriptPath(String),
     #[error("Invalid transcript path: {0}")]
     InvalidTranscriptPath(String),
+    #[error("Agent launch command is empty")]
+    EmptyLaunchCommand,
 }
 
 fn has_unsafe_control_chars(s: &str) -> bool {
@@ -575,6 +577,15 @@ where
             agent_type,
             provider_session,
         }) => resolve_agent_resume_plan(agent_type, provider_session),
+        Some(TerminalStartup::AgentLaunch { command, args }) => {
+            if command.trim().is_empty() {
+                return Err(AgentResumeError::EmptyLaunchCommand);
+            }
+            Ok(ShellCommandPlan {
+                program: command.trim().to_string(),
+                args: args.clone(),
+            })
+        }
         None => Ok(resolve_shell_command_pure(
             preference,
             platform,
@@ -595,7 +606,7 @@ pub fn resolve_startup_command(
         is_on_path,
         |var| std::env::var(var).ok(),
     )?;
-    if let Some(TerminalStartup::AgentResume { .. }) = startup {
+    if let Some(TerminalStartup::AgentResume { .. } | TerminalStartup::AgentLaunch { .. }) = startup {
         if !plan.program.contains('/') && !plan.program.contains('\\') {
             if let Some(resolved) =
                 crate::ipc::agents::resolve_binary(&plan.program, &legacy_search_paths())
@@ -1553,6 +1564,64 @@ mod tests {
                 .expect("shell startup fallback");
         assert_eq!(plan.program, "/bin/zsh");
         assert_eq!(plan.args, vec!["-l".to_string()]);
+    }
+
+    #[test]
+    fn agent_launch_runs_the_resolved_binary_with_its_args_and_returns_to_a_shell() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let name = if cfg!(windows) { "ferryx-fake-agent.exe" } else { "ferryx-fake-agent" };
+        let binary = dir.path().join(name);
+        std::fs::write(&binary, b"").expect("write fake agent");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake agent");
+        }
+        let startup = TerminalStartup::AgentLaunch {
+            command: "ferryx-fake-agent".to_string(),
+            args: vec!["--model".to_string(), "it's x".to_string()],
+        };
+        let shell = if cfg!(windows) { "powershell.exe" } else { "/bin/sh" };
+        let search = vec![dir.path().to_path_buf()];
+        let command = with_path_discovery(std::sync::Arc::new(move || search.clone()), || {
+            resolve_startup_command(Some(shell), Some(&startup))
+        })
+        .expect("resolve agent launch");
+        let binary = binary.to_string_lossy().to_string();
+        let expected: Vec<String> = if cfg!(windows) {
+            vec![
+                "powershell.exe".to_string(),
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                format!("& '{binary}' '--model' 'it''s x'"),
+            ]
+        } else {
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                POSIX_RETURN_SHELL_SCRIPT.to_string(),
+                "ferryx-agent".to_string(),
+                "/bin/sh".to_string(),
+                String::new(),
+                binary,
+                "--model".to_string(),
+                "it's x".to_string(),
+            ]
+        };
+        let expected: Vec<std::ffi::OsString> = expected.into_iter().map(Into::into).collect();
+        assert_eq!(command.get_argv(), &expected);
+        assert!(matches!(
+            resolve_startup_command_pure(
+                None,
+                Some(&TerminalStartup::AgentLaunch { command: " ".to_string(), args: Vec::new() }),
+                TargetPlatform::CURRENT,
+                |_| true,
+                |_| None,
+            ),
+            Err(AgentResumeError::EmptyLaunchCommand)
+        ));
     }
 
     fn plan(program: &str, args: &[&str]) -> ShellCommandPlan {

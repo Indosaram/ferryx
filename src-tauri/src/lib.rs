@@ -1116,39 +1116,38 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                                 }
                                             });
                                         }
-                                        Ok(crate::native_terminal::TerminalWheelOutcome::ScrollViewport(behavior)) => {
+                                        Ok(crate::native_terminal::TerminalWheelOutcome::ScrollViewport(behavior))
                                             if ipc::native_terminal::scroll_attached_native_terminal(
                                                 &surface_host,
                                                 &session_id,
                                                 behavior,
                                             )
-                                            .is_ok()
-                                            {
-                                                let surface_window = window.clone();
-                                                let state_inner = surface_host.clone();
-                                                let session_id_clone = session_id.clone();
-                                                let bounds =
-                                                    surface_host.session_logical_bounds(&session_id);
-                                                let _ = window.run_on_main_thread(move || {
-                                                    match bounds {
-                                                        Some(logical_bounds) => {
-                                                            let _ = state_inner.render(
-                                                                &surface_window,
-                                                                crate::native_terminal::surface_host::NativeTerminalBoundsRequest {
-                                                                    session_id: session_id_clone,
-                                                                    bounds: logical_bounds,
-                                                                },
-                                                            );
-                                                        }
-                                                        None => {
-                                                            let _ = state_inner.get_receipt(
-                                                                &surface_window,
-                                                                &session_id_clone,
-                                                            );
-                                                        }
+                                            .is_ok() =>
+                                        {
+                                            let surface_window = window.clone();
+                                            let state_inner = surface_host.clone();
+                                            let session_id_clone = session_id.clone();
+                                            let bounds =
+                                                surface_host.session_logical_bounds(&session_id);
+                                            let _ = window.run_on_main_thread(move || {
+                                                match bounds {
+                                                    Some(logical_bounds) => {
+                                                        let _ = state_inner.render(
+                                                            &surface_window,
+                                                            crate::native_terminal::surface_host::NativeTerminalBoundsRequest {
+                                                                session_id: session_id_clone,
+                                                                bounds: logical_bounds,
+                                                            },
+                                                        );
                                                     }
-                                                });
-                                            }
+                                                    None => {
+                                                        let _ = state_inner.get_receipt(
+                                                            &surface_window,
+                                                            &session_id_clone,
+                                                        );
+                                                    }
+                                                }
+                                            });
                                         }
                                         _ => {}
                                     }
@@ -1318,9 +1317,16 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>);
     let in_process_backend_setup = Arc::clone(&in_process_backend);
     let browser_remote_service_setup = Arc::clone(&browser_remote_service);
+    // A failed loopback bind must not take the app down: run without previews, and
+    // the preview commands answer `previewServiceUnavailable` instead.
     let file_preview_service =
-        tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start())
-            .expect("file preview service failed to start");
+        match tauri::async_runtime::block_on(crate::ipc::file_preview::FilePreviewService::start()) {
+            Ok(service) => Some(service),
+            Err(error) => {
+                tracing::error!(%error, "File preview service failed to start; previews are disabled");
+                None
+            }
+        };
     #[cfg(feature = "native-terminal")]
     let native_terminal_surface_host = NativeTerminalSurfaceHostState::default();
     let setup_activations = Arc::clone(&notification_activations);
@@ -1580,8 +1586,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .manage(Arc::clone(&in_process_backend)
             as Arc<dyn crate::remote::browser_backend::RemoteBrowserBackend>)
         .manage(in_process_backend)
-        .manage(file_preview_service)
         .manage(crate::ipc::updater::UpdaterDownloadState::default());
+    let builder = match file_preview_service {
+        Some(service) => builder.manage(service),
+        None => builder,
+    };
 
     #[cfg(desktop)]
     let builder = if crate::ipc::updater::updater_managed_externally() {
@@ -1692,13 +1701,17 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_pairing_create,
         cmd_remote_devices,
         cmd_remote_device_revoke,
+        cmd_remote_device_set_permission,
         cmd_remote_auto_trust_status,
         cmd_remote_set_auto_trust_disabled,
         cmd_remote_set_active_selection,
         cmd_remote_get_active_selection,
+        cmd_remote_set_window_focused,
         cmd_project_initial,
         cmd_boot_trace,
         crate::ipc::system_resources::cmd_system_resources,
+        crate::ipc::agent_prompt::cmd_agent_prompt_get,
+        crate::ipc::agent_prompt::cmd_agent_prompt_answer,
         cmd_project_register,
         cmd_sync_desktop_local_projects,
         cmd_sync_desktop_sidebar,
@@ -1730,7 +1743,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::ssh::cmd_ssh_list_remote_worktrees,
         ipc::ssh::cmd_ssh_create_remote_worktree,
         ipc::ssh::cmd_ssh_delete_remote_worktree,
-        cmd_project_branches,
+        cmd_project_refs,
         ipc::native_menu::cmd_native_terminal_context_menu,
         ipc::native_menu::cmd_native_tab_context_menu,
         ipc::native_menu::cmd_native_new_tab_menu,
@@ -1744,6 +1757,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_worktree_delete_destructive,
         cmd_worktree_delete_preview,
         cmd_worktree_status,
+        cmd_worktree_diff,
+        cmd_worktree_changes_status,
+        cmd_worktree_stage,
+        cmd_worktree_unstage,
+        cmd_worktree_commit,
+        cmd_worktree_push,
         ipc::github_issue::cmd_github_issue_preview,
         cmd_worktree_disk_scan_start,
         cmd_worktree_disk_scan_cancel,
@@ -1858,7 +1877,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::client::DaemonClient;

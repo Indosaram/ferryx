@@ -2,6 +2,8 @@
 pub mod account;
 pub mod agent_history;
 #[cfg(feature = "desktop")]
+pub mod agent_prompt;
+#[cfg(feature = "desktop")]
 pub mod agent_control_settings;
 #[cfg(feature = "desktop")]
 pub mod agent_integration;

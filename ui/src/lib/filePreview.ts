@@ -16,6 +16,7 @@ import { openExternalUrl } from "./browserTauri";
 import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 
 import { loadFileLinkEditor } from "./fileLinkSettings";
+import { previewServiceFailureHeadline } from "./filePreviewFailureCopy";
 import { resolveMarkdownDocumentPath } from "./markdownDocLink";
 import {
   FILE_PREVIEW_COMMANDS,
@@ -52,13 +53,11 @@ export type FilePreviewDeps = {
 /**
  * Something the modal must tell the user about that is not a request failure.
  *
- * `child-document-unsupported` records the one contract gap task 2 found: the
- * frozen backend surface has `cmd_file_preview_open_child`, which returns a
- * media `FilePreviewChildAsset` only, and `cmd_file_preview_open`, which takes a
- * free path plus a backend session. Neither can open a Markdown-relative
- * DOCUMENT under the parent handle's canonical boundary. Escalating such a link
- * through `cmd_file_preview_open` would resolve it outside that boundary, so the
- * request is refused and reported instead of silently widening file authority.
+ * A Markdown document link the user clicks is resolved against the open file's
+ * canonical path and opened as a new read-only preview tab through the same
+ * admission as a terminal file link (so it may leave the document directory,
+ * e.g. `../README.md`). `child-document-unsupported` is reported only when the
+ * payload carries no resolved path to anchor the link on.
  */
 export type FilePreviewNotice = {
   readonly kind: "child-document-unsupported";
@@ -122,11 +121,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function toFilePreviewFailure(error: unknown, fallbackMessage: string): FilePreviewFailure {
   if (error instanceof FilePreviewCapabilityError) return error.failure;
   const reason = filePreviewErrorReason(error);
-  const message = isRecord(error) && typeof error.message === "string" && error.message.length > 0
-    ? error.message
-    : error instanceof Error && error.message.length > 0
+  // A refusal from the preview service itself (not one of the file-level reasons) gets
+  // our own copy, keyed on its machine reason rather than on backend prose.
+  const message = previewServiceFailureHeadline(error)
+    ?? (isRecord(error) && typeof error.message === "string" && error.message.length > 0
       ? error.message
-      : fallbackMessage;
+      : error instanceof Error && error.message.length > 0
+        ? error.message
+        : fallbackMessage);
   const rawDetails = isRecord(error) ? error.details : null;
   const details = isRecord(rawDetails) && isFilePreviewErrorReason(rawDetails.reason)
     ? (rawDetails as unknown as FilePreviewErrorDetails)

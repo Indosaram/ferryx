@@ -90,6 +90,8 @@ import {
   readLinkLine,
   isLikelyRemoteFilePath,
   openRemoteFileToken,
+  remoteFetchCwd,
+  remoteFileFetchErrorMessage,
   isSessionMouseTrackingEnabled,
   setSessionMouseTracking,
   TERMINAL_FILE_LINK_ACTION_EVENT,
@@ -1106,7 +1108,7 @@ export function NativeTerminalPane({
               try {
                 const opened = await openRemoteFileToken(token, {
                   workspaceId: session.workspaceId,
-                  cwd: session.cwd || session.worktreePath || null,
+                  cwd: remoteFetchCwd(session),
                   sessionId: targetSessionId,
                   shiftKey: actionShiftKey,
                   openLocal: (localToken) => openTerminalToken(localToken, tokenOptions),
@@ -1114,7 +1116,7 @@ export function NativeTerminalPane({
                 });
                 if (!opened) toast.error("This file could not be opened in the current client.");
               } catch (error) {
-                toast.error(extractIpcErrorMessage(error, "Could not download the remote file."));
+                toast.error(remoteFileFetchErrorMessage(error) ?? extractIpcErrorMessage(error, "Could not download the remote file."));
               }
               return;
             }

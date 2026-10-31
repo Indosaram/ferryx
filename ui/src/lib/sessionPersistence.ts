@@ -25,8 +25,10 @@ import {
 } from "./sessionLifecycle";
 import {
   createBrowserPaneContent,
+  createChangesPaneContent,
   createDagPaneContent,
   createTerminalPaneContent,
+  isTerminalTab,
   worktreeIdentity,
   type BrowserPaneState,
   type BrowserTab,
@@ -147,6 +149,17 @@ export function serializeWorkspaceState(
         continue;
       }
 
+      if (tab.kind === "changes") {
+        persistedTabs.push({
+          id: tab.id,
+          kind: "changes",
+          label: tab.label,
+          pinned: Boolean(tab.pinned),
+          changes: { workspaceId: tab.workspaceId, worktreePath: tab.worktreePath, worktree: tab.worktree },
+        });
+        continue;
+      }
+
       if (tab.kind === "file") {
         persistedTabs.push({
           id: tab.id,
@@ -218,7 +231,7 @@ export function serializeWorkspaceState(
               runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
-          } else if (content.kind === "file") {
+          } else if (content.kind === "file" || content.kind === "changes") {
             contentsByLeafId[leafId] = content;
             sessionIdsByLeafId[leafId] = "";
           } else {
@@ -847,6 +860,22 @@ export function deserializeWorkspaceState(
         continue;
       }
 
+      if (persistedTab.kind === "changes" || persistedTab.changes) {
+        const changes = persistedTab.changes;
+        if (!changes?.worktreePath || changes.worktree === undefined) continue;
+        if (knownWorktreePaths.size > 0 && !knownWorktreePaths.has(changes.worktreePath)) continue;
+        tabs.push({
+          id: persistedTab.id,
+          kind: "changes",
+          label: persistedTab.label,
+          workspaceId: changes.workspaceId,
+          worktreePath: changes.worktreePath,
+          worktree: changes.worktree,
+          pinned: Boolean(persistedTab.pinned),
+        });
+        continue;
+      }
+
       if (persistedTab.kind === "file" || persistedTab.file) {
         const file = persistedTab.file;
         if (!file?.path) continue;
@@ -920,6 +949,21 @@ export function deserializeWorkspaceState(
           expandedLeafId: null,
           sessionIdsByLeafId: { [leafId]: "" },
           contentsByLeafId: { [leafId]: createBrowserPaneContent(browserState) },
+        };
+        continue;
+      }
+
+      if (persistedTab.kind === "changes" || persistedTab.changes) {
+        const changes = persistedTab.changes;
+        if (!changes?.worktreePath || changes.worktree === undefined) continue;
+        if (knownWorktreePaths.size > 0 && !knownWorktreePaths.has(changes.worktreePath)) continue;
+        const leafId = `leaf-changes:${persistedTab.id}`;
+        layoutsByTabId[persistedTab.id] = {
+          root: createLeafNode(leafId),
+          activeLeafId: leafId,
+          expandedLeafId: null,
+          sessionIdsByLeafId: { [leafId]: "" },
+          contentsByLeafId: { [leafId]: createChangesPaneContent(changes) },
         };
         continue;
       }
@@ -1036,7 +1080,7 @@ export function deserializeWorkspaceState(
               runId: rawDag.runId ?? null,
             });
             sessionIdsByLeafId[leafId] = "";
-          } else if (rawContent.kind === "file") {
+          } else if (rawContent.kind === "file" || rawContent.kind === "changes") {
             contentsByLeafId[leafId] = rawContent;
             sessionIdsByLeafId[leafId] = "";
           } else {
@@ -1106,7 +1150,7 @@ export function deserializeWorkspaceState(
   const referencedSessionIds = new Set<string>();
   for (const layout of allLayouts) {
     for (const tab of layout.tabs) {
-      if (tab.kind === "browser" || tab.kind === "file") continue;
+      if (!isTerminalTab(tab)) continue;
       const tabLayout = layout.layoutsByTabId[tab.id];
       if (tab.sessionId) referencedSessionIds.add(tab.sessionId);
       for (const sessionId of Object.values(tabLayout?.sessionIdsByLeafId ?? {})) {

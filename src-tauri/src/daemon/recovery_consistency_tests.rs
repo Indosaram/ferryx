@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::sync::Arc;
     use crate::daemon::protocol::{
         DaemonResponse, DaemonSessionDetails, RecoveryAuthorityEvidence,
@@ -217,6 +218,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn init_test_git_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let _ = std::process::Command::new("git")

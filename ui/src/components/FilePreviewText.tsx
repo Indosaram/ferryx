@@ -27,6 +27,7 @@ import {
 } from "../lib/previewMarkdown";
 import { highlightLines, languageForPath } from "../lib/previewHighlight";
 import { extractMarkdownHeadingIndex, type MarkdownHeadingIndex } from "../lib/markdownToc";
+import { useLineWindow } from "../lib/useLineWindow";
 import {
   loadFilePreviewWordWrap,
   loadMarkdownFontSize,
@@ -38,6 +39,28 @@ import {
 
 const NO_MATCHES: readonly PreviewMatch[] = [];
 const EMPTY_HEADING_INDEX: MarkdownHeadingIndex = { headings: [], slugByLine: new Map() };
+
+/**
+ * Source views with more lines than this are windowed: only the visible lines plus
+ * overscan are mounted. Smaller documents keep every line mounted (no behaviour change).
+ */
+export const SOURCE_WINDOW_THRESHOLD = 2000;
+/** Pitch of one unwrapped source line: `text-[12px] leading-5` is a 20px line box. */
+const SOURCE_LINE_HEIGHT = 20;
+
+/** A scroll/selection target that waits until its line is mounted by the window. */
+type PendingReveal = { index: number; attempted: boolean };
+
+/**
+ * Scrolls to a heading id inside one rendered document only; a global
+ * `document.getElementById` could land on another preview's heading.
+ */
+function scrollToFragmentIn(host: HTMLElement | null, id: string): void {
+  if (!host || id.length === 0) return;
+  const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
+  const anchor = host.querySelector(`#${escaped}`);
+  if (anchor instanceof HTMLElement) anchor.scrollIntoView({ block: "start" });
+}
 
 /**
  * Read-only text and Markdown renderer for the file-preview modal (plan task 3).
@@ -123,27 +146,87 @@ export function FilePreviewText({
     setRequestedMatch(0);
   }, [query, text]);
 
-  // Selecting the active match is how "search" behaves here: it moves the
-  // browser selection over existing text and never rewrites the document.
+  // Large documents mount only the visible lines. Windowing assumes one visual row per
+  // line, so soft wrap is unavailable while it is active (it comes back when printing,
+  // because printing mounts every line).
+  const lineWindow = useLineWindow({
+    count: lines.length,
+    enabled: showSource && lines.length > SOURCE_WINDOW_THRESHOLD,
+    estimatedRowHeight: SOURCE_LINE_HEIGHT,
+  });
+  const windowed = lineWindow.active;
+  const effectiveWordWrap = wordWrap && !windowed;
+  // Only the mounted lines size the content, so give the windowed list the width of the
+  // longest line (gutter w-10 + gap-3 = 3.25rem) to keep horizontal scrolling stable.
+  const windowedMinWidth = useMemo(() => {
+    if (!windowed) return undefined;
+    let longest = 0;
+    for (const line of lines) if (line.length > longest) longest = line.length;
+    return `calc(${longest}ch + 3.25rem)`;
+  }, [lines, windowed]);
+  const { scrollRef: setWindowScroller, scrollToIndex, start: windowStart, end: windowEnd } = lineWindow;
+  const setSourceElement = useCallback(
+    (element: HTMLDivElement | null) => {
+      sourceRef.current = element;
+      setWindowScroller(element);
+    },
+    [setWindowScroller],
+  );
+
+  // Caret and active-match reveals are queued and retried once the window has mounted
+  // their line: an unmounted line is first scrolled to by arithmetic (index * line height).
+  const pendingCaret = useRef<PendingReveal | null>(null);
+  const pendingMatch = useRef<PendingReveal | null>(null);
+
   useEffect(() => {
-    if (!showSource || activeMatch < 0) return;
-    const host = sourceRef.current?.querySelector(`[data-testid="file-preview-match-${activeMatch}"]`);
-    if (!(host instanceof HTMLElement)) return;
-    host.scrollIntoView({ block: "center" });
-    const selection = window.getSelection?.();
-    const node = host.firstChild;
-    if (!selection || !node) return;
-    const range = document.createRange();
-    range.selectNodeContents(host);
-    selection.removeAllRanges();
-    selection.addRange(range);
+    pendingCaret.current = showSource && caret ? { index: caret.line - 1, attempted: false } : null;
+  }, [caret, showSource]);
+
+  useEffect(() => {
+    pendingMatch.current = showSource && activeMatch >= 0 ? { index: activeMatch, attempted: false } : null;
   }, [activeMatch, matches, showSource]);
 
   useEffect(() => {
-    if (!showSource || !caret) return;
-    const line = sourceRef.current?.querySelector(`[data-testid="file-preview-line-${caret.line}"]`);
-    if (line instanceof HTMLElement) line.scrollIntoView({ block: "center" });
-  }, [caret, showSource]);
+    const host = sourceRef.current;
+    if (!host) return;
+
+    const caretReveal = pendingCaret.current;
+    if (caretReveal) {
+      const line = host.querySelector(`[data-testid="file-preview-line-${caretReveal.index + 1}"]`);
+      if (line instanceof HTMLElement) {
+        line.scrollIntoView({ block: "center" });
+        pendingCaret.current = null;
+      } else if (windowed && !caretReveal.attempted) {
+        // Retried when the window moves (or the scroller attaches, which renews scrollToIndex).
+        caretReveal.attempted = scrollToIndex(caretReveal.index);
+      } else {
+        pendingCaret.current = null;
+      }
+    }
+
+    // Selecting the active match is how "search" behaves here: it moves the
+    // browser selection over existing text and never rewrites the document.
+    const matchReveal = pendingMatch.current;
+    if (matchReveal) {
+      const mark = host.querySelector(`[data-testid="file-preview-match-${matchReveal.index}"]`);
+      const match = matches[matchReveal.index];
+      if (mark instanceof HTMLElement) {
+        pendingMatch.current = null;
+        mark.scrollIntoView({ block: "center" });
+        const selection = window.getSelection?.();
+        if (selection && mark.firstChild) {
+          const range = document.createRange();
+          range.selectNodeContents(mark);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      } else if (windowed && match && !matchReveal.attempted) {
+        matchReveal.attempted = scrollToIndex(match.line);
+      } else {
+        pendingMatch.current = null;
+      }
+    }
+  }, [activeMatch, caret, matches, showSource, windowed, windowStart, windowEnd, scrollToIndex]);
 
   useEffect(
     () => () => {
@@ -181,7 +264,11 @@ export function FilePreviewText({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-foreground" data-testid="file-preview-text">
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-worktree-sidebar-border px-2">
+      <div
+        data-testid="file-preview-text-toolbar"
+        data-print-hide=""
+        className="flex h-9 shrink-0 items-center gap-2 border-b border-worktree-sidebar-border px-2"
+      >
         {showSource ? (
           <div className="flex min-w-0 items-center gap-1">
             <label className="flex h-7 min-w-0 items-center gap-1.5 rounded-md bg-background px-2 focus-within:ring-1 focus-within:ring-ring">
@@ -205,6 +292,7 @@ export function FilePreviewText({
               <>
                 <span
                   data-testid="file-preview-search-status"
+                  aria-live="polite"
                   className="whitespace-nowrap text-[11px] tabular-nums text-muted-foreground"
                 >
                   {matches.length === 0 ? "No matches" : `${activeMatch + 1} of ${matches.length}`}
@@ -270,9 +358,10 @@ export function FilePreviewText({
         <div className="ml-auto flex items-center gap-2">
           {showSource ? (
             <ToolbarButton
-              label="Toggle word wrap"
+              label={windowed ? "Word wrap is unavailable for very long files" : "Toggle word wrap"}
               testId="file-preview-wrap-toggle"
-              pressed={wordWrap}
+              pressed={effectiveWordWrap}
+              disabled={windowed}
               onClick={handleWordWrapToggle}
             >
               <WrapText aria-hidden className="size-3.5" />
@@ -325,41 +414,57 @@ export function FilePreviewText({
 
       {showSource ? (
         <div
-          ref={sourceRef}
+          ref={setSourceElement}
           data-testid="file-preview-source"
+          data-windowed={windowed ? "true" : undefined}
           role="document"
           aria-readonly="true"
           aria-label={`${payload.displayName} source`}
           tabIndex={0}
-          className="min-h-0 flex-1 overflow-auto px-2 py-2 font-mono text-[12px] leading-5 focus-visible:outline-none"
+          className="selectable min-h-0 flex-1 overflow-auto px-2 py-2 font-mono text-[12px] leading-5 focus-visible:outline-none"
         >
-          {/* Every line stays mounted (no windowing); memoized lines with stable props keep a
+          {/* Small documents keep every line mounted; large ones mount only the window, with
+              spacers keeping the full scroll height. Memoized lines with stable props keep a
               search keystroke from re-rendering lines whose matches did not change. */}
-          {lines.map((line, index) => {
-            const lineMatches = matchesByLine.get(index) ?? NO_MATCHES;
-            const matchOffset = firstIndexByLine.get(index) ?? -1;
-            const ownsActiveMatch =
-              matchOffset >= 0 && activeMatch >= matchOffset && activeMatch < matchOffset + lineMatches.length;
-            return (
-              <SourceLine
-                key={index}
-                line={line}
-                highlightedHtml={query.trim().length === 0 ? highlightedLines?.[index] : undefined}
-                number={index + 1}
-                caret={caret && caret.line === index + 1 ? caret : null}
-                matches={lineMatches}
-                activeMatch={ownsActiveMatch ? activeMatch : -1}
-                matchOffset={matchOffset}
-                wordWrap={wordWrap}
+          <div ref={lineWindow.listRef} style={windowedMinWidth ? { minWidth: windowedMinWidth } : undefined}>
+            {lineWindow.padTop > 0 ? (
+              <div aria-hidden data-testid="file-preview-window-spacer-top" style={{ height: lineWindow.padTop }} />
+            ) : null}
+            {lines.slice(windowStart, windowEnd).map((line, offset) => {
+              const index = windowStart + offset;
+              const lineMatches = matchesByLine.get(index) ?? NO_MATCHES;
+              const matchOffset = firstIndexByLine.get(index) ?? -1;
+              const ownsActiveMatch =
+                matchOffset >= 0 && activeMatch >= matchOffset && activeMatch < matchOffset + lineMatches.length;
+              return (
+                <SourceLine
+                  key={index}
+                  line={line}
+                  highlightedHtml={highlightedLines?.[index]}
+                  number={index + 1}
+                  caret={caret && caret.line === index + 1 ? caret : null}
+                  matches={lineMatches}
+                  activeMatch={ownsActiveMatch ? activeMatch : -1}
+                  matchOffset={matchOffset}
+                  wordWrap={effectiveWordWrap}
+                />
+              );
+            })}
+            {lineWindow.padBottom > 0 ? (
+              <div
+                aria-hidden
+                data-testid="file-preview-window-spacer-bottom"
+                style={{ height: lineWindow.padBottom }}
               />
-            );
-          })}
+            ) : null}
+          </div>
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {showToc ? (
             <aside
               data-testid="file-preview-md-toc"
+              data-print-hide=""
               className="w-56 shrink-0 overflow-y-auto border-r border-worktree-sidebar-border p-3 text-[12px]"
             >
               <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -375,7 +480,7 @@ export function FilePreviewText({
                       type="button"
                       data-testid={`file-preview-md-toc-item-${heading.slug}`}
                       onClick={() => {
-                        document.getElementById(heading.slug)?.scrollIntoView({ block: "start" });
+                        scrollToFragmentIn(documentRef.current, heading.slug);
                       }}
                       className={cn(
                         "text-left text-muted-foreground hover:text-foreground hover:underline transition-colors truncate",
@@ -397,7 +502,7 @@ export function FilePreviewText({
             data-testid="file-preview-markdown"
             style={{ fontSize: `${markdownFontSize}px` }}
             className={cn(
-              "min-h-0 flex-1 overflow-auto px-4 py-3 leading-6 [overflow-wrap:anywhere]",
+              "selectable min-h-0 flex-1 overflow-auto px-4 py-3 leading-6 [overflow-wrap:anywhere]",
               markdownWide ? "w-full" : "max-w-[72ch] mx-auto",
             )}
           >
@@ -514,6 +619,7 @@ const SourceLine = memo(function SourceLine({
   return (
     <div
       data-testid={`file-preview-line-${number}`}
+      data-line-window-row=""
       data-target={caret ? "true" : undefined}
       className={cn("flex items-start gap-3 rounded-sm", !wordWrap && "min-w-fit", caret && "bg-accent/60")}
     >
@@ -525,19 +631,15 @@ const SourceLine = memo(function SourceLine({
         {number}
       </span>
       {matches.length > 0 ? (
+        // Only lines that contain a match drop the syntax highlight (the marks are spliced
+        // into the literal text); every other line keeps its highlightedHtml and props.
         <span className={contentClass}>
-          {renderMatchSegments(line, matches, activeMatch, matchOffset)}
+          {renderMatchSegments(line, matches, activeMatch, matchOffset, caret)}
         </span>
       ) : caret ? (
         <span className={contentClass}>
           {line.slice(0, caret.offset)}
-          <span
-            data-testid="file-preview-caret"
-            data-offset={caret.offset}
-            data-column={caret.column}
-            aria-hidden
-            className="inline-block h-4 w-px -translate-y-px align-middle bg-status-working"
-          />
+          <CaretMarker caret={caret} />
           {line.slice(caret.offset)}
         </span>
       ) : highlightedHtml ? (
@@ -555,17 +657,53 @@ const SourceLine = memo(function SourceLine({
   );
 });
 
+function CaretMarker({ caret }: { caret: PreviewCaret }) {
+  return (
+    <span
+      data-testid="file-preview-caret"
+      data-offset={caret.offset}
+      data-column={caret.column}
+      aria-hidden
+      className="inline-block h-4 w-px -translate-y-px align-middle bg-status-working"
+    />
+  );
+}
+
+/** Literal text for [start, end), with the caret marker spliced in when it falls inside. */
+function sliceWithCaret(
+  line: string,
+  start: number,
+  end: number,
+  caret: PreviewCaret | null,
+  includeEnd: boolean,
+): ReactNode {
+  if (!caret || caret.offset < start || caret.offset > end || (caret.offset === end && !includeEnd)) {
+    return line.slice(start, end);
+  }
+  return (
+    <>
+      {line.slice(start, caret.offset)}
+      <CaretMarker caret={caret} />
+      {line.slice(caret.offset, end)}
+    </>
+  );
+}
+
 function renderMatchSegments(
   line: string,
   matches: readonly PreviewMatch[],
   activeMatch: number,
   matchOffset: number,
+  caret: PreviewCaret | null,
 ): ReactNode[] {
   const nodes: ReactNode[] = [];
   let cursor = 0;
   matches.forEach((match, index) => {
-    if (match.start > cursor) nodes.push(line.slice(cursor, match.start));
+    if (match.start > cursor) {
+      nodes.push(<span key={`t${cursor}`}>{sliceWithCaret(line, cursor, match.start, caret, false)}</span>);
+    }
     const flatIndex = matchOffset + index;
+    const isLast = index === matches.length - 1 && match.end >= line.length;
     nodes.push(
       <mark
         key={`m${flatIndex}`}
@@ -577,12 +715,14 @@ function renderMatchSegments(
             : "bg-status-warning/30 text-foreground",
         )}
       >
-        {line.slice(match.start, match.end)}
+        {sliceWithCaret(line, match.start, match.end, caret, isLast)}
       </mark>,
     );
     cursor = match.end;
   });
-  if (cursor < line.length) nodes.push(line.slice(cursor));
+  if (cursor < line.length) {
+    nodes.push(<span key={`t${cursor}`}>{sliceWithCaret(line, cursor, line.length, caret, true)}</span>);
+  }
   return nodes;
 }
 
@@ -603,13 +743,7 @@ function PreviewMarkdownDocument({
   slugByLine,
 }: PreviewMarkdownDocumentProps) {
   const scrollToFragment = useCallback(
-    (id: string) => {
-      const host = containerRef.current;
-      if (!host || id.length === 0) return;
-      const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
-      const anchor = host.querySelector(`#${escaped}`);
-      if (anchor instanceof HTMLElement) anchor.scrollIntoView({ block: "start" });
-    },
+    (id: string) => scrollToFragmentIn(containerRef.current, id),
     [containerRef],
   );
 
@@ -840,8 +974,11 @@ type ImageState =
  */
 function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNodeProps) {
   const classified = useMemo(() => classifyPreviewImage(src), [src]);
-  const budgetExhausted = classified.kind === "local" && (capability?.remainingChildHandles ?? 0) <= 0;
   const [state, setState] = useState<ImageState>({ status: "idle" });
+  // The budget only blocks nodes that never issued a request: once this node is loading or
+  // loaded, the handle it holds counts toward the budget, so hitting 0 must not hide it.
+  const budgetExhausted =
+    classified.kind === "local" && state.status === "idle" && (capability?.remainingChildHandles ?? 0) <= 0;
   // R1: acquire each image at most once per generation. The in-flight request lives in a ref,
   // so a StrictMode effect replay (or a capability identity change) re-subscribes to the same
   // promise instead of opening a second child handle. The capability has no per-handle release;
@@ -856,7 +993,7 @@ function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNode
     if (classified.kind !== "local" || !capability) return;
     let request = requestRef.current;
     if (!request || request.generation !== generation || request.path !== classified.relativePath) {
-      if (budgetExhausted) return;
+      if (capability.remainingChildHandles <= 0) return;
       request = {
         generation,
         path: classified.relativePath,
@@ -880,7 +1017,7 @@ function PreviewImageNode({ src, alt, capability, generation }: PreviewImageNode
     };
     // `generation` is a dependency on purpose: a superseded request must not
     // paint, and a reload must re-acquire its child handle.
-  }, [budgetExhausted, capability, classified, generation]);
+  }, [capability, classified, generation]);
 
   if (classified.kind === "rejected" || budgetExhausted) {
     const label = budgetExhausted

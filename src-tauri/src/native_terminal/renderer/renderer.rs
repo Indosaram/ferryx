@@ -831,7 +831,7 @@ mod tests {
             for i in 0..count {
                 let expected = tile(&batch, (i % 80) * 32, (i / 80) * 32, 32, 32);
                 assert!(
-                    expected.chunks_exact(4).any(|p| p[0] != 0),
+                    expected.as_chunks::<4>().0.iter().any(|p| p[0] != 0),
                     "reference ink {}",
                     start + i
                 );
@@ -878,7 +878,7 @@ mod tests {
             let actual = renderer.render_snapshot(&snapshot, None).unwrap();
             let mut fresh = NativeTerminalRenderer::new(config).unwrap();
             let expected = fresh.render_snapshot(&snapshot, None).unwrap();
-            assert!(expected.pixels.chunks_exact(4).any(|p| p[0] != 0));
+            assert!(expected.pixels.as_chunks::<4>().0.iter().any(|p| p[0] != 0));
             assert_eq!(renderer.atlas.dimension, 1500);
             assert_eq!(actual.pixels, expected.pixels);
             save_frame(
@@ -1165,7 +1165,7 @@ mod tests {
             assert_eq!(tile(&frame, 20, 8, 1, 1), [255, 0, 0, 255]);
             let text_cell = tile(&frame, 8, 0, 8, 16);
             assert_eq!(
-                text_cell.chunks_exact(4).any(|p| p[1] != 0),
+                text_cell.as_chunks::<4>().0.iter().any(|p| p[1] != 0),
                 z < 0,
                 "text z={z}"
             );
@@ -1230,7 +1230,7 @@ mod tests {
             let frame = renderer.render_snapshot(&small, None).unwrap();
             let mut fresh = NativeTerminalRenderer::new(updated).unwrap();
             let reference = fresh.render_snapshot(&small, None).unwrap();
-            assert!(reference.pixels.chunks_exact(4).any(|p| p[0] != 0));
+            assert!(reference.pixels.as_chunks::<4>().0.iter().any(|p| p[0] != 0));
             assert_eq!(frame.pixels, reference.pixels);
             assert_payload(&renderer, "repopulated");
             save_frame(label, &frame);

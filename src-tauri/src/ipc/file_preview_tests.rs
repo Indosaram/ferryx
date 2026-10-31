@@ -1460,6 +1460,40 @@ async fn expired_handles_report_the_machine_reason() {
 }
 
 #[tokio::test]
+async fn change_polls_keep_an_on_screen_preview_leased() {
+    let dir = TempDir::new().expect("tempdir");
+    write_file(dir.path(), "notes.txt", b"hello\n");
+    let service = service().await;
+    let opened = service
+        .open(request(dir.path(), "notes.txt"))
+        .await
+        .expect("text preview");
+    // Text never fetches its capability URL, so only the change poll can renew
+    // the lease. Mark the stamp with a sentinel no real clock reading reaches.
+    let stamp = |service: &FilePreviewService| {
+        service
+            .registry
+            .lock()
+            .handles
+            .get(&opened.handle)
+            .expect("registered")
+            .last_access_ms
+            .load(Ordering::Relaxed)
+    };
+    const UNTOUCHED: u64 = u64::MAX;
+    service
+        .registry
+        .lock()
+        .handles
+        .get(&opened.handle)
+        .expect("registered")
+        .last_access_ms
+        .store(UNTOUCHED, Ordering::Relaxed);
+    assert!(!service.changed(WINDOW, &opened.handle).await.expect("poll"));
+    assert_ne!(stamp(&service), UNTOUCHED, "a change poll must renew the idle lease");
+}
+
+#[tokio::test]
 async fn a_refused_session_resolution_maps_to_remote_unsupported() {
     let refusal = crate::ipc::error::IpcError::new(
         crate::ipc::error::IpcErrorCode::Unsupported,
@@ -1736,6 +1770,265 @@ async fn unknown_extension_reclassifies_image_and_pdf_and_rejects_binary_plist()
         .await
         .expect("open explicit markdown file");
     assert_eq!(payload.kind, FilePreviewKind::Markdown);
+}
+
+// ------------------------------------------------------ review regressions
+
+#[test]
+fn sniffing_trusts_only_strong_magic_numbers() {
+    // inline SVG in source, or text that happens to start with "BM", stays text
+    assert_eq!(sniff_kind(b"export const Icon = () => <svg viewBox=\"0 0 1 1\" />;"), None);
+    let mut bmw = b"BMW owners manual, chapter one........".to_vec();
+    bmw.resize(64, b'.');
+    assert_eq!(sniff_kind(&bmw), None);
+    assert_eq!(sniff_kind(&gif_bytes(4, 4)), Some(FilePreviewKind::Image));
+    assert_eq!(sniff_kind(&jpeg_bytes(4, 4)), Some(FilePreviewKind::Image));
+}
+
+#[test]
+fn caret_column_uses_the_same_newlines_as_the_line_count() {
+    assert_eq!(
+        clamp_target("a\rbbbb\r", Some(2), Some(5)),
+        Some(FilePreviewTarget { line: 2, col: Some(5) })
+    );
+    assert_eq!(
+        clamp_target("x\r\nyy\r\nzzz", Some(3), Some(4)),
+        Some(FilePreviewTarget { line: 3, col: Some(4) })
+    );
+}
+
+#[test]
+fn dev_server_origins_are_trusted_only_by_debug_builds() {
+    assert_eq!(is_allowed_origin("http://localhost:5173"), cfg!(debug_assertions));
+    assert_eq!(is_allowed_origin("http://127.0.0.1:5173"), cfg!(debug_assertions));
+    assert!(is_allowed_origin("tauri://localhost"));
+}
+
+#[test]
+fn not_a_directory_is_a_missing_file_not_a_permission_problem() {
+    let error = std::io::Error::from_raw_os_error(libc::ENOTDIR);
+    assert_eq!(reason_of(&io_failure(&error, Path::new("/tmp/a.txt/x"))), "MissingFile");
+}
+
+#[test]
+fn verbatim_windows_prefixes_are_stripped_from_canonical_paths() {
+    assert_eq!(
+        strip_verbatim_prefix(PathBuf::from(r"\\?\C:\work\doc.md")),
+        PathBuf::from(r"C:\work\doc.md")
+    );
+    assert_eq!(
+        strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\a.md")),
+        PathBuf::from(r"\\server\share\a.md")
+    );
+    assert_eq!(strip_verbatim_prefix(PathBuf::from("/usr/a.md")), PathBuf::from("/usr/a.md"));
+}
+
+#[test]
+fn only_absolute_or_home_rooted_paths_skip_the_session_cwd() {
+    assert!(!needs_session_cwd("/abs/file.txt"));
+    assert!(!needs_session_cwd(" /abs/file.txt"));
+    assert!(!needs_session_cwd("~/notes.md"));
+    assert!(needs_session_cwd("~bob/notes.md"));
+    assert!(needs_session_cwd("rel/notes.md"));
+}
+
+#[tokio::test]
+async fn an_owner_less_relative_token_never_resolves_against_the_app_cwd() {
+    let service = service().await;
+    // cargo runs tests from the crate root, where Cargo.toml exists
+    assert!(Path::new("Cargo.toml").is_file());
+    let error = service
+        .open(FilePreviewOpenRequest {
+            window_label: WINDOW.to_string(),
+            owner_id: String::new(),
+            path: "Cargo.toml".to_string(),
+            cwd: None,
+            line: None,
+            col: None,
+        })
+        .await
+        .expect_err("relative without cwd");
+    assert_eq!(reason_of(&error), "MissingFile");
+}
+
+#[tokio::test]
+async fn a_stalled_body_never_blocks_a_seek_on_the_same_document() {
+    let dir = TempDir::new().expect("tempdir");
+    let total = limits::STREAM_CHUNK_BYTES * 256; // 16 MiB: far beyond socket buffers
+    let bytes = mp4_bytes(total);
+    write_file(dir.path(), "clip.mp4", &bytes);
+    let service = service().await;
+    let url = service
+        .open(request(dir.path(), "clip.mp4"))
+        .await
+        .expect("payload")
+        .media_url
+        .unwrap();
+    let client = http();
+    // a player that buffered enough and stopped reading, connection kept open
+    let stalled = client.get(&url).send().await.expect("first GET");
+    assert_eq!(stalled.status(), reqwest::StatusCode::OK);
+    let seek = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        async { client.get(&url).header("Range", "bytes=1000-1999").send().await?.bytes().await },
+    )
+    .await
+    .expect("a seek must not wait behind the stalled body")
+    .expect("seek body");
+    assert_eq!(seek.as_ref(), &bytes[1000..=1999]);
+    drop(stalled);
+}
+
+#[tokio::test]
+async fn revoking_releases_the_media_slot_of_a_back_pressured_body() {
+    let dir = TempDir::new().expect("tempdir");
+    write_file(dir.path(), "clip.mp4", &mp4_bytes(limits::STREAM_CHUNK_BYTES * 256));
+    let service = service().await;
+    let payload = service.open(request(dir.path(), "clip.mp4")).await.expect("payload");
+    let stalled = http()
+        .get(payload.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("GET");
+    assert_eq!(
+        service.media_gate().available_permits(),
+        limits::MAX_CONCURRENT_MEDIA_REQUESTS - 1,
+        "the unread body holds one slot"
+    );
+    service.close(WINDOW, &payload.handle);
+    assert_eq!(
+        service.media_gate().available_permits(),
+        limits::MAX_CONCURRENT_MEDIA_REQUESTS,
+        "closing must free the slot without waiting for the body to be polled"
+    );
+    drop(stalled);
+}
+
+#[tokio::test]
+async fn streaming_renews_the_idle_lease() {
+    use futures_util::StreamExt;
+
+    let dir = TempDir::new().expect("tempdir");
+    // large enough that the server is back-pressured long before the end
+    write_file(dir.path(), "clip.mp4", &mp4_bytes(limits::STREAM_CHUNK_BYTES * 256));
+    let service = service().await;
+    let payload = service.open(request(dir.path(), "clip.mp4")).await.expect("payload");
+    let response = http()
+        .get(payload.media_url.clone().unwrap())
+        .send()
+        .await
+        .expect("GET");
+    let mut body = response.bytes_stream();
+    body.next().await.expect("first chunk").expect("bytes");
+    const UNTOUCHED: u64 = u64::MAX;
+    let record = Arc::clone(service.registry.lock().handles.get(&payload.handle).expect("registered"));
+    record.last_access_ms.store(UNTOUCHED, Ordering::Relaxed);
+    while let Some(chunk) = body.next().await {
+        chunk.expect("chunk");
+    }
+    assert_ne!(
+        record.last_access_ms.load(Ordering::Relaxed),
+        UNTOUCHED,
+        "every streamed chunk must renew the lease"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_document_takes_its_image_children_with_it() {
+    let dir = TempDir::new().expect("tempdir");
+    write_file(dir.path(), "docs.md", b"# d\n");
+    write_file(dir.path(), "logo.png", &png_bytes(2, 2));
+    let service = service().await;
+    let parent = service.open(request(dir.path(), "docs.md")).await.expect("markdown");
+    let child = service
+        .open_child_image(WINDOW, &parent.handle, "logo.png")
+        .await
+        .expect("child");
+    // only the document went idle; the child was fetched just now
+    service
+        .registry
+        .lock()
+        .handles
+        .get(&parent.handle)
+        .expect("parent")
+        .last_access_ms
+        .store(0, Ordering::Relaxed);
+    let now = HANDLE_TTL.as_millis() as u64 + 1;
+    service
+        .registry
+        .lock()
+        .handles
+        .get(&child.handle)
+        .expect("child")
+        .last_access_ms
+        .store(now, Ordering::Relaxed);
+    service.revoke_expired_at(now);
+    let registry = service.registry.lock();
+    assert!(!registry.handles.contains_key(&parent.handle));
+    assert!(
+        !registry.handles.contains_key(&child.handle),
+        "a child of an expired document must not keep its descriptor"
+    );
+}
+
+#[tokio::test]
+async fn closing_a_tab_drops_its_owner_slot() {
+    let dir = TempDir::new().expect("tempdir");
+    write_file(dir.path(), "a.txt", b"a\n");
+    let service = service().await;
+    let opened = service
+        .open(request_owned(dir.path(), "a.txt", "tab-1"))
+        .await
+        .expect("open");
+    service.close(WINDOW, &opened.handle);
+    assert!(
+        service.registry.lock().windows.is_empty(),
+        "a closed tab must not leave a registry slot behind"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fifo_never_blocks_the_open() {
+    let dir = TempDir::new().expect("tempdir");
+    let fifo = dir.path().join("pipe");
+    let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).expect("cstring");
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo");
+    let file = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || open_read_only(&fifo)),
+    )
+    .await
+    .expect("opening a FIFO must not wait for a writer")
+    .expect("join");
+    assert!(file.is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_swapped_after_resolution_is_refused() {
+    let dir = TempDir::new().expect("tempdir");
+    let resolved = write_file(dir.path(), "img.png", &png_bytes(2, 2));
+    let resolved = std::fs::canonicalize(&resolved).expect("canonical");
+    let outside = write_file(dir.path(), "secret.png", &png_bytes(2, 2));
+    let held = std::fs::File::open(&resolved).expect("open");
+    assert!(descriptor_still_at(&held, &resolved));
+    // swap the checked path for a symlink to another file
+    std::fs::remove_file(&resolved).expect("rm");
+    std::os::unix::fs::symlink(&outside, &resolved).expect("symlink");
+    let reopened = std::fs::File::open(&resolved).expect("open swapped");
+    assert!(
+        !descriptor_still_at(&reopened, &resolved),
+        "a symlink swapped in after resolution must be refused"
+    );
+}
+
+#[test]
+fn missing_preview_service_is_a_typed_refusal_not_a_panic() {
+    let error = require_preview_service::<u8>(None).unwrap_err();
+    assert_eq!(error.code, crate::ipc::error::IpcErrorCode::Unsupported);
+    assert_eq!(error.details.as_ref().unwrap()["reason"], "previewServiceUnavailable");
+    assert_eq!(require_preview_service(Some(7)).unwrap(), 7);
 }
 
 

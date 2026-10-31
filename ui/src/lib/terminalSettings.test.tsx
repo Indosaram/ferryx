@@ -163,7 +163,7 @@ describe("terminal settings", () => {
       fontSize: null,
       macosOptionAsAlt: null,
       shell: null,
-      scrollback: 50_000,
+      scrollback: null,
       scrollbackCompression: null,
     });
 
@@ -174,7 +174,7 @@ describe("terminal settings", () => {
         fontSize: 17,
         macosOptionAsAlt: null,
         shell: null,
-        scrollback: 50_000,
+        scrollback: null,
         scrollbackCompression: null,
       }),
     );
@@ -186,7 +186,7 @@ describe("terminal settings", () => {
         fontSize: 17,
         macosOptionAsAlt: null,
         shell: "pwsh",
-        scrollback: 50_000,
+        scrollback: null,
         scrollbackCompression: null,
       }),
     );
@@ -314,11 +314,36 @@ describe("terminal settings", () => {
     expect(events).toHaveBeenCalledTimes(1);
   });
 
-  it("defaults scrollback to 50,000 lines and keeps a saved 10,000 after the upgrade", () => {
+  it("defaults scrollback to 50,000 lines on a fresh profile", () => {
     expect(DEFAULT_TERMINAL_SETTINGS.scrollback).toBe(50_000);
     expect(loadTerminalSettings().scrollback).toBe(50_000);
-    localStorage.setItem(TERMINAL_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_TERMINAL_SETTINGS, scrollback: 10_000 }));
+  });
+
+  it("moves a legacy blob on the old implicit 10,000-line scrollback to the 50,000 default without a native override", async () => {
+    const legacy = { ...DEFAULT_TERMINAL_SETTINGS, scrollback: 10_000 };
+    localStorage.setItem(TERMINAL_SETTINGS_STORAGE_KEY, JSON.stringify(legacy));
+    expect(loadTerminalSettings().scrollback).toBe(50_000);
+
+    const { result } = renderHook(() => useTerminalSettings());
+    expect(result.current.localSettings.scrollback).toBe(DEFAULT_TERMINAL_SETTINGS.scrollback);
+    await waitFor(() => expect(native.applyTerminalOverrides).toHaveBeenCalled());
+    expect(native.applyTerminalOverrides).toHaveBeenLastCalledWith(expect.objectContaining({ scrollback: null }));
+  });
+
+  it("keeps a legacy blob's non-default scrollback", () => {
+    localStorage.setItem(TERMINAL_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_TERMINAL_SETTINGS, scrollback: 20_000 }));
+    expect(loadTerminalSettings().scrollback).toBe(20_000);
+  });
+
+  it("keeps an explicit 10,000-line scrollback saved under the versioned blob", async () => {
+    saveTerminalSettings({ ...DEFAULT_TERMINAL_SETTINGS, scrollback: 10_000 });
+    expect(JSON.parse(localStorage.getItem(TERMINAL_SETTINGS_STORAGE_KEY)!)).toMatchObject({ scrollback: 10_000, version: 2 });
     expect(loadTerminalSettings().scrollback).toBe(10_000);
+
+    renderHook(() => useTerminalSettings());
+    await waitFor(() =>
+      expect(native.applyTerminalOverrides).toHaveBeenLastCalledWith(expect.objectContaining({ scrollback: 10_000 })),
+    );
   });
 
   it("resolves scrollback compression from the local override, then Ghostty, then on", () => {

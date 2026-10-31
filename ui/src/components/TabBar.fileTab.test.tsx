@@ -295,4 +295,33 @@ describe("TabBar file tabs", () => {
     expect(findEntryRecursively(items, "open-externally")).toBeUndefined();
     expect(findEntryRecursively(items, "reload")).toBeUndefined();
   });
+
+  it("disambiguates duplicate file tab basenames at render time and drops it after a close", () => {
+    const first = createFileTab("file-a", "index.ts", "/a/src/index.ts");
+    const second = createFileTab("file-b", "index.ts", "/b/ui/index.ts");
+    const props = { onActivate: vi.fn(), onClose: vi.fn(), onAdd: vi.fn() };
+
+    const { rerender } = render(<TabBar tabs={[first, second]} activeTabId="file-a" {...props} />);
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      expect.stringContaining("src/index.ts"),
+      expect.stringContaining("ui/index.ts"),
+    ]);
+
+    rerender(<TabBar tabs={[second]} activeTabId="file-b" {...props} />);
+    const [remaining] = screen.getAllByRole("tab");
+    expect(remaining).toHaveTextContent("index.ts");
+    expect(remaining).not.toHaveTextContent("ui/index.ts");
+  });
+
+  it("normalizes a stale persisted disambiguated label but keeps a user rename", () => {
+    const stale = createFileTab("file-a", "src/index.ts", "/a/src/index.ts");
+    const renamed = createFileTab("file-b", "Entry point", "/b/ui/index.ts");
+    const props = { onActivate: vi.fn(), onClose: vi.fn(), onAdd: vi.fn() };
+
+    render(<TabBar tabs={[stale, renamed]} activeTabId="file-a" {...props} />);
+    const [staleTab, renamedTab] = screen.getAllByRole("tab");
+    expect(staleTab).toHaveTextContent("index.ts");
+    expect(staleTab).not.toHaveTextContent("src/index.ts");
+    expect(renamedTab).toHaveTextContent("Entry point");
+  });
 });
