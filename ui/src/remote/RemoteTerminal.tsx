@@ -28,6 +28,7 @@ import { isTauriRuntime } from "../lib/tauri";
 import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
 import { remoteSocketUrl, SocketTicketError } from "./remoteClient";
+import { parseMachineAgentStateFrame } from "./remoteSessionInventory";
 import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
 import { buildAttachSocketUrl, getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import {
@@ -1204,6 +1205,27 @@ export function RemoteTerminal({
           if (!data.startsWith('{"type":"grid')) {
             try {
               const parsed = JSON.parse(data);
+              if (parsed?.type === "agent_state") {
+                const state = parseMachineAgentStateFrame(parsed);
+                const epoch = daemonEpoch == null ? null : String(daemonEpoch).trim();
+                if (
+                  state?.outcome &&
+                  state.sessionId === socketRequest.sessionId &&
+                  (!epoch || state.daemonEpoch === epoch) &&
+                  isTerminalReadyRef.current &&
+                  socket.readyState === 1 &&
+                  !createLocalSocket
+                ) {
+                  const generation = machineGenerationRef.current;
+                  if (!machineTransport || generation !== null) {
+                    socket.send(JSON.stringify({
+                      type: "acknowledgeAgentOutcome",
+                      ...(machineTransport ? { generation } : {}),
+                    }));
+                  }
+                }
+                return;
+              }
               if (parsed?.type === "remoteStatus" && typeof parsed.generation === "string") {
                 generationRef.current = parsed.generation;
                 lastSentGenerationRef.current = null;
@@ -1294,6 +1316,10 @@ export function RemoteTerminal({
                   backoffAttempt = 0;
                   setConnected(true);
                   machineGenerationRef.current = parsed.generation;
+                  socket.send(JSON.stringify({
+                    type: "acknowledgeAgentOutcome",
+                    generation: parsed.generation,
+                  }));
                   lastSentMachineGenerationRef.current = null;
                   flushOutboundBuffer();
                   requestResizeRef.current();
@@ -1323,6 +1349,9 @@ export function RemoteTerminal({
             isTerminalReadyRef.current = true;
             backoffAttempt = 0;
             setConnected(true);
+            if (!createLocalSocket) {
+              socket.send(JSON.stringify({ type: "acknowledgeAgentOutcome" }));
+            }
             flushOutboundBuffer();
           }
           setGrid((current) => applyGridFrame(current, frame));
