@@ -123,6 +123,32 @@ describe("remote terminal agent state bridge", () => {
     expect(socket.send).toHaveBeenCalledWith(acknowledgement);
   });
 
+  it("acknowledges new outcomes on the ready machine socket only for its current target", async () => {
+    await act(async () => {
+      render(<RemoteTerminal sessionId="s-ack" token="token" isAccountSession daemonEpoch="101" createWebSocket={fakeCreateWebSocket} />);
+    });
+    const socket = createdSockets[0];
+    const outcome = (sessionId: string, daemonEpoch: string, value: string | null = "done") => ({
+      data: JSON.stringify({ type: "agent_state", state: "idle", stateSource: "protocol", outcome: value,
+        target: { sessionId, daemonEpoch } }),
+    });
+    await act(async () => { socket.onmessage?.(outcome("s-ack", "101")); });
+    expect(socket.send).not.toHaveBeenCalled();
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ type: "attached", generation: "9",
+        target: { sessionId: "s-ack", daemonEpoch: "101" } }) });
+    });
+    socket.send.mockClear();
+    await act(async () => {
+      socket.onmessage?.(outcome("other", "101"));
+      socket.onmessage?.(outcome("s-ack", "100"));
+      socket.onmessage?.(outcome("s-ack", "101", null));
+    });
+    expect(socket.send).not.toHaveBeenCalled();
+    await act(async () => { socket.onmessage?.(outcome("s-ack", "101", "error")); });
+    expect(socket.send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome", generation: "9" })]]);
+  });
+
   it("forwards non-grid string frames to the agent-state listener and keeps grid frames out of it", async () => {
     const frames: string[] = [];
     render(
