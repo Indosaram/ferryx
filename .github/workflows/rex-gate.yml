@@ -28,6 +28,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev jq openssh-server fonts-noto-cjk fonts-noto-color-emoji fonts-dejavu-core
           sudo mkdir -p /run/sshd
+          sudo ip link add rex-overlay type dummy
+          sudo ip addr add 100.64.1.2/32 dev rex-overlay
+          sudo ip link set rex-overlay up
+          mkdir -p "$HOME/.local/share/fonts"
+          curl --fail --location https://raw.githubusercontent.com/romkatv/powerlevel10k-media/master/MesloLGS%20NF%20Regular.ttf --output "$HOME/.local/share/fonts/MesloLGS-NF-Regular.ttf"
+          fc-cache -f
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
