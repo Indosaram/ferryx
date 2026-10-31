@@ -313,6 +313,16 @@ describe("TabBar file tabs", () => {
     expect(remaining).not.toHaveTextContent("ui/index.ts");
   });
 
+  it("preserves an explicit user label that matches a path suffix", () => {
+    const first = { ...createFileTab("file-a", "index.ts", "/a/src/index.ts"), customLabel: "src/index.ts" };
+    const second = createFileTab("file-b", "index.ts", "/b/ui/index.ts");
+    const props = { onActivate: vi.fn(), onClose: vi.fn(), onAdd: vi.fn() };
+    const { rerender } = render(<TabBar tabs={[first, second]} activeTabId="file-a" {...props} />);
+    expect(screen.getAllByRole("tab")[0]).toHaveTextContent("src/index.ts");
+    rerender(<TabBar tabs={[first]} activeTabId="file-a" {...props} />);
+    expect(screen.getByRole("tab")).toHaveTextContent("src/index.ts");
+  });
+
   it("normalizes a stale persisted disambiguated label but keeps a user rename", () => {
     const stale = createFileTab("file-a", "src/index.ts", "/a/src/index.ts");
     const renamed = createFileTab("file-b", "Entry point", "/b/ui/index.ts");

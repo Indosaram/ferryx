@@ -177,4 +177,49 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
       expect(screen.getByText("EVENT_LISTEN_FAILED")).toBeDefined();
     });
   });
+
+  it("keeps a newer download event over an older list response and drops out-of-order list reads", async () => {
+    const record = (receivedBytes: number, updatedAtMs: number, id = "dl-300"): DownloadRecord => ({
+      id,
+      url: "https://example.com/big.bin",
+      filePath: "/Users/test/Downloads/big.bin",
+      status: "inProgress",
+      totalBytes: 100,
+      receivedBytes,
+      createdAtMs: 1,
+      updatedAtMs,
+    });
+    const pending: Array<(records: DownloadRecord[]) => void> = [];
+    tauriCoreMocks.invoke.mockImplementation((cmd: string) => {
+      if (cmd === "cmd_browser_download_list") {
+        return new Promise<DownloadRecord[]>((resolve) => pending.push(resolve));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { rerender } = render(<BrowserDownloadsShelf refreshToken={0} />);
+    await waitFor(() => expect(updateListener).not.toBeNull());
+    await act(async () => pending[0]([record(10, 10)]));
+    expect(await screen.findByText("10%")).toBeDefined();
+
+    // A live event reports newer progress than the registry list that is about to arrive.
+    await act(async () => updateListener?.(record(90, 90)));
+    expect(screen.getByText("90%")).toBeDefined();
+
+    rerender(<BrowserDownloadsShelf refreshToken={1} />);
+    rerender(<BrowserDownloadsShelf refreshToken={2} />);
+    await waitFor(() => expect(pending).toHaveLength(3));
+
+    // The superseded read settles first; it is no longer current, so nothing in it may apply.
+    // The newest read settles after it with a stale copy of dl-300 that must not beat the event.
+    await act(async () => {
+      pending[1]([record(95, 95), record(0, 95, "dl-302")]);
+      pending[2]([record(50, 50), record(0, 50, "dl-301")]);
+    });
+    expect(await screen.findByTestId("download-row-dl-301")).toBeDefined();
+    expect(screen.queryByTestId("download-row-dl-302")).toBeNull();
+    expect(screen.getByText("90%")).toBeDefined();
+    expect(screen.queryByText("95%")).toBeNull();
+    expect(screen.queryByText("50%")).toBeNull();
+  });
 });

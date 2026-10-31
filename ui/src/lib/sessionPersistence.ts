@@ -165,9 +165,11 @@ export function serializeWorkspaceState(
           id: tab.id,
           kind: "file",
           label: tab.label,
+          ...(tab.customLabel !== undefined ? { customTitle: tab.customLabel } : {}),
           pinned: Boolean(tab.pinned),
           file: {
             path: tab.path,
+            ...(tab.remote ? { remote: tab.remote } : {}),
             backendSessionId: tab.backendSessionId,
             line: tab.line,
             col: tab.col,
@@ -883,7 +885,11 @@ export function deserializeWorkspaceState(
           id: persistedTab.id,
           kind: "file",
           label: persistedTab.label,
+          ...(typeof persistedTab.customTitle === "string" && persistedTab.customTitle.trim()
+            ? { customLabel: persistedTab.customTitle.trim().slice(0, 200) }
+            : {}),
           path: file.path,
+          ...(file.remote ? { remote: file.remote } : {}),
           backendSessionId: file.backendSessionId,
           line: file.line,
           col: file.col,
@@ -981,6 +987,10 @@ export function deserializeWorkspaceState(
             [leafId]: {
               kind: "file",
               path: file.path,
+              ...(file.remote ? { remote: file.remote } : {}),
+              ...(typeof persistedTab.customTitle === "string" && persistedTab.customTitle.trim()
+                ? { customLabel: persistedTab.customTitle.trim().slice(0, 200) }
+                : {}),
               backendSessionId: file.backendSessionId,
               line: file.line,
               col: file.col,

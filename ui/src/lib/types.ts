@@ -425,9 +425,11 @@ export type BrowserTab = {
 };
 
 export type FileTab = {
+  remote?: import("./filePreviewTypes").RemotePreviewOrigin;
   kind: "file";
   id: string;
   label: string;
+  customLabel?: string;
   path: string;
   backendSessionId: string;
   line: number | null;
@@ -580,7 +582,9 @@ export type DagPaneContent = {
 };
 
 export type FilePaneContent = {
+  readonly remote?: import("./filePreviewTypes").RemotePreviewOrigin;
   readonly kind: "file";
+  readonly customLabel?: string;
   readonly path: string;
   readonly backendSessionId: string;
   readonly line: number | null;
@@ -953,6 +957,7 @@ export interface PersistedTab {
     worktree: WorktreeIdentity | null;
   };
   file?: {
+    remote?: import("./filePreviewTypes").RemotePreviewOrigin;
     path: string;
     backendSessionId: string;
     line: number | null;

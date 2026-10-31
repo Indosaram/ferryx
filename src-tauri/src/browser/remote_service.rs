@@ -76,7 +76,7 @@ pub struct ViewerInfo {
     pub viewer_instance_id: String,
     pub stream_id: u32,
     pub unacked_seq: Option<u32>,
-    pub pending_frame: Option<Vec<u8>>,
+    pub pending_frame: Option<(u32, Vec<u8>)>,
     pub joined_at: Instant,
     pub paused: bool,
     pub stalled: bool,
@@ -85,11 +85,62 @@ pub struct ViewerInfo {
 type FrameBroadcasters =
     Arc<parking_lot::Mutex<HashMap<String, tokio::sync::broadcast::Sender<Vec<u8>>>>>;
 
+type SubscribersPerBrowser = Arc<parking_lot::Mutex<HashMap<String, HashMap<String, ViewerInfo>>>>;
+type QuarantinedPermits = Arc<
+    parking_lot::Mutex<
+        HashMap<String, crate::browser::snapshot_source::SnapshotCallbackCoordinator>,
+    >,
+>;
+
+/// The shared maps a capture producer releases when it stops for good.
+#[derive(Clone)]
+struct ProducerStopper {
+    subscribers: SubscribersPerBrowser,
+    producer_active: Arc<parking_lot::Mutex<HashMap<String, bool>>>,
+    producer_handles: Arc<parking_lot::Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+    active_stream_ids: Arc<parking_lot::Mutex<HashMap<String, u32>>>,
+    captures_in_progress: Arc<AtomicUsize>,
+    quarantined_permits: QuarantinedPermits,
+}
+
+impl ProducerStopper {
+    /// Frees the producer's capture slot. Each map is locked on its own and released before
+    /// the next one is taken. subscribe and unsubscribe hold subscribers and then
+    /// producer_active, so holding producer_active here while waiting for subscribers
+    /// deadlocks against them.
+    fn stop(&self, browser_id: &str, drop_subscribers: bool) {
+        let mut active_map = self.producer_active.lock();
+        if let Some(active) = active_map.get_mut(browser_id) {
+            if *active {
+                *active = false;
+                self.captures_in_progress.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        drop(active_map);
+        self.active_stream_ids.lock().remove(browser_id);
+        self.producer_handles.lock().remove(browser_id);
+        if drop_subscribers {
+            self.subscribers.lock().remove(browser_id);
+        }
+    }
+
+    /// Completes a quarantined timed-out capture so its native-capture permit returns.
+    fn release_quarantine(&self, browser_id: &str) {
+        let coord_opt = self.quarantined_permits.lock().remove(browser_id);
+        if let Some(coord) = coord_opt {
+            let _ = coord.complete(Err(crate::browser::security::BrowserError::Internal(
+                "webview closed or quarantine reclaimed".into(),
+            )
+            .into()));
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BrowserRemoteService {
     manager: BrowserManager,
     driver_broker: Arc<RemoteDriverBroker>,
-    subscribers_per_browser: Arc<parking_lot::Mutex<HashMap<String, HashMap<String, ViewerInfo>>>>,
+    subscribers_per_browser: SubscribersPerBrowser,
     producer_active: Arc<parking_lot::Mutex<HashMap<String, bool>>>,
     producer_handles: Arc<parking_lot::Mutex<HashMap<String, tokio::task::AbortHandle>>>,
     active_stream_ids: Arc<parking_lot::Mutex<HashMap<String, u32>>>,
@@ -101,11 +152,7 @@ pub struct BrowserRemoteService {
     frame_broadcaster: FrameBroadcasters,
     snapshot_source: Arc<parking_lot::RwLock<Arc<dyn BrowserSnapshotSource>>>,
     native_capture_semaphore: Arc<tokio::sync::Semaphore>,
-    quarantined_permits: Arc<
-        parking_lot::Mutex<
-            HashMap<String, crate::browser::snapshot_source::SnapshotCallbackCoordinator>,
-        >,
-    >,
+    quarantined_permits: QuarantinedPermits,
 }
 
 pub static ACTIVE_REMOTE_SERVICE: parking_lot::RwLock<Option<Arc<BrowserRemoteService>>> =
@@ -200,12 +247,17 @@ impl BrowserRemoteService {
     }
 
     pub fn release_quarantine(&self, browser_id: &str) {
-        let coord_opt = self.quarantined_permits.lock().remove(browser_id);
-        if let Some(coord) = coord_opt {
-            let _ = coord.complete(Err(crate::browser::security::BrowserError::Internal(
-                "webview closed or quarantine reclaimed".into(),
-            )
-            .into()));
+        self.producer_stopper().release_quarantine(browser_id);
+    }
+
+    fn producer_stopper(&self) -> ProducerStopper {
+        ProducerStopper {
+            subscribers: Arc::clone(&self.subscribers_per_browser),
+            producer_active: Arc::clone(&self.producer_active),
+            producer_handles: Arc::clone(&self.producer_handles),
+            active_stream_ids: Arc::clone(&self.active_stream_ids),
+            captures_in_progress: Arc::clone(&self.captures_in_progress),
+            quarantined_permits: Arc::clone(&self.quarantined_permits),
         }
     }
 
@@ -411,7 +463,17 @@ impl BrowserRemoteService {
                 if let Some(handle) = self.producer_handles.lock().remove(browser_id) {
                     handle.abort();
                 }
+                self.frame_broadcaster.lock().remove(browser_id);
             }
+        }
+
+        let stopped = subs_map.get(browser_id).is_some_and(|subs| subs.is_empty());
+        drop(active_map);
+        drop(subs_map);
+        // The last viewer left a closed browser: no producer remains to capture it, so a
+        // capture quarantined on its webview, whose callback may never arrive, is released.
+        if stopped && self.manager.get_state(browser_id).is_err() {
+            self.release_quarantine(browser_id);
         }
 
         removed
@@ -450,15 +512,12 @@ impl BrowserRemoteService {
             let mut broadcasters = self.frame_broadcaster.lock();
             broadcasters
                 .entry(browser_id.clone())
-                .or_insert_with(|| tokio::sync::broadcast::channel(32).0)
+                .or_insert_with(|| tokio::sync::broadcast::channel(4).0)
                 .clone()
         };
 
         let subscribers_map = Arc::clone(&self.subscribers_per_browser);
-        let producer_active = Arc::clone(&self.producer_active);
-        let producer_handles = Arc::clone(&self.producer_handles);
-        let active_stream_ids = Arc::clone(&self.active_stream_ids);
-        let captures_in_progress = Arc::clone(&self.captures_in_progress);
+        let stopper = self.producer_stopper();
         let snapshot_source_holder = Arc::clone(&self.snapshot_source);
         let native_capture_semaphore = Arc::clone(&self.native_capture_semaphore);
         let quarantined_permits = Arc::clone(&self.quarantined_permits);
@@ -482,16 +541,7 @@ impl BrowserRemoteService {
                     had_receivers = true;
                 } else if had_receivers {
                     // All frame receivers disconnected: stop GUI capture immediately (R6-9)
-                    let mut active_map = producer_active.lock();
-                    if let Some(active) = active_map.get_mut(&browser_id_clone) {
-                        if *active {
-                            *active = false;
-                            captures_in_progress.fetch_sub(1, Ordering::SeqCst);
-                        }
-                    }
-                    active_stream_ids.lock().remove(&browser_id_clone);
-                    producer_handles.lock().remove(&browser_id_clone);
-                    subscribers_map.lock().remove(&browser_id_clone);
+                    stopper.stop(&browser_id_clone, true);
                     break;
                 }
 
@@ -508,15 +558,7 @@ impl BrowserRemoteService {
                 };
 
                 if !has_active_subscribers {
-                    let mut active_map = producer_active.lock();
-                    if let Some(active) = active_map.get_mut(&browser_id_clone) {
-                        if *active {
-                            *active = false;
-                            captures_in_progress.fetch_sub(1, Ordering::SeqCst);
-                        }
-                    }
-                    active_stream_ids.lock().remove(&browser_id_clone);
-                    producer_handles.lock().remove(&browser_id_clone);
+                    stopper.stop(&browser_id_clone, false);
                     break;
                 }
 
@@ -527,7 +569,15 @@ impl BrowserRemoteService {
 
                 let state = match manager.get_state(&browser_id_clone) {
                     Ok(s) => s,
-                    Err(_) => break,
+                    Err(_) => {
+                        // The session is gone: free the capture slot, and release a capture
+                        // quarantined on its webview, whose callback may never arrive. No
+                        // capture of this producer is in flight here. The viewers stay, so
+                        // their unsubscribe still releases any driver lease they hold.
+                        stopper.stop(&browser_id_clone, false);
+                        stopper.release_quarantine(&browser_id_clone);
+                        break;
+                    }
                 };
 
                 if !state.visible {
@@ -568,7 +618,12 @@ impl BrowserRemoteService {
                 // (instance_id, service_epoch, desktop_epoch, generation, viewport_revision)
                 let ticket_instance_id = match manager.get_instance_id(&browser_id_clone) {
                     Ok(id) => id,
-                    Err(_) => break,
+                    Err(_) => {
+                        // Session gone before this tick's capture started.
+                        stopper.stop(&browser_id_clone, false);
+                        stopper.release_quarantine(&browser_id_clone);
+                        break;
+                    }
                 };
                 let ticket_service_epoch = service_epoch;
                 let ticket_desktop_epoch = desktop_epoch.load(Ordering::SeqCst);
@@ -608,9 +663,11 @@ impl BrowserRemoteService {
                     )
                     .await;
 
+                // A timeout is the coordinator's typed flag (or the typed wait-timeout code),
+                // never the error text.
                 let is_timeout = match &snapshot_res {
                     Err(e) => {
-                        e.message.contains("timed out")
+                        coordinator.is_timed_out()
                             || e.code == crate::ipc::IpcErrorCode::BrowserWaitTimeout
                     }
                     _ => false,
@@ -636,7 +693,12 @@ impl BrowserRemoteService {
                 // Ticket was sampled before the await; require exact match on (instance_id, service_epoch, desktop_epoch, generation, viewport_revision)
                 let current_state = match manager.get_state(&browser_id_clone) {
                     Ok(s) => s,
-                    Err(_) => break,
+                    Err(_) => {
+                        // Session gone after this tick's capture completed.
+                        stopper.stop(&browser_id_clone, false);
+                        stopper.release_quarantine(&browser_id_clone);
+                        break;
+                    }
                 };
 
                 if !current_state.visible {
@@ -698,26 +760,30 @@ impl BrowserRemoteService {
                     geometry_source: "wkSnapshot".to_string(),
                 };
 
-                if let Ok(frame_bytes) = super::remote_bridge_protocol::encode_frame(
+                let frame_bytes = match super::remote_bridge_protocol::encode_frame(
                     format_byte,
                     seq,
                     &metadata,
                     &snapshot.bytes,
                 ) {
-                    if tx.send(frame_bytes).is_err() && had_receivers {
-                        // All frame receivers disconnected during send: stop GUI capture immediately (R6-9)
-                        let mut active_map = producer_active.lock();
-                        if let Some(active) = active_map.get_mut(&browser_id_clone) {
-                            if *active {
-                                *active = false;
-                                captures_in_progress.fetch_sub(1, Ordering::SeqCst);
-                            }
-                        }
-                        active_stream_ids.lock().remove(&browser_id_clone);
-                        producer_handles.lock().remove(&browser_id_clone);
-                        subscribers_map.lock().remove(&browser_id_clone);
-                        break;
+                    Ok(frame_bytes) => frame_bytes,
+                    Err(error) => {
+                        tracing::warn!(
+                            browser_id = %browser_id_clone,
+                            seq,
+                            image_width = snapshot.width,
+                            image_height = snapshot.height,
+                            image_bytes = snapshot.bytes.len(),
+                            %error,
+                            "dropped a remote browser frame that failed to encode"
+                        );
+                        continue;
                     }
+                };
+                if tx.send(frame_bytes).is_err() && had_receivers {
+                    // All frame receivers disconnected during send: stop GUI capture immediately (R6-9)
+                    stopper.stop(&browser_id_clone, true);
+                    break;
                 }
             }
         });
@@ -755,7 +821,7 @@ impl BrowserRemoteService {
             } else {
                 // Viewer is busy with an in-flight unacknowledged frame.
                 // Replace pending_frame with the latest frame only (drop older pending frames).
-                viewer.pending_frame = Some(frame_bytes.clone());
+                viewer.pending_frame = Some((seq, frame_bytes.clone()));
             }
         }
 
@@ -777,8 +843,8 @@ impl BrowserRemoteService {
         if viewer.unacked_seq == Some(seq) {
             viewer.unacked_seq = None;
             // Pop the pending latest frame if one was queued
-            if let Some(pending) = viewer.pending_frame.take() {
-                // Set pending seq placeholder (represented as 0 or next seq in caller)
+            if let Some((pending_seq, pending)) = viewer.pending_frame.take() {
+                viewer.unacked_seq = Some(pending_seq);
                 return Some(pending);
             }
         }
@@ -1090,10 +1156,32 @@ mod tests {
         let next_frame = service.acknowledge_frame(&b1, &sub1, 1);
         assert_eq!(next_frame, Some(frame3));
 
+        let frame4 = vec![10, 11, 12];
+        assert!(service.admit_frame(&b1, 4, frame4.clone()).unwrap().is_empty());
+        assert_eq!(service.acknowledge_frame(&b1, &sub1, 1), None);
+        assert_eq!(service.acknowledge_frame(&b1, &sub1, 3), Some(frame4));
+
         // 5. Oversized frame (> 2MiB) is permanently dropped
         let huge_frame = vec![0u8; MAX_FRAME_PAYLOAD_BYTES + 1];
         let admitted_huge = service.admit_frame(&b1, 4, huge_frame).unwrap();
         assert!(admitted_huge.is_empty());
+    }
+
+    #[test]
+    fn last_unsubscribe_closes_frame_channel_and_resubscribe_gets_a_new_channel() {
+        let (service, browser_id) = create_test_service();
+        let first = service.subscribe(&browser_id, "dev1", "v1").unwrap();
+        let second = service.subscribe(&browser_id, "dev2", "v2").unwrap();
+        let mut frames = service.subscribe_frames(&browser_id);
+        assert!(service.unsubscribe(&browser_id, &first));
+        assert!(matches!(frames.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+        assert!(service.unsubscribe(&browser_id, &second));
+        assert!(matches!(frames.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Closed)));
+        let third = service.subscribe(&browser_id, "dev1", "v3").unwrap();
+        let mut replacement = service.subscribe_frames(&browser_id);
+        service.frame_broadcaster.lock().get(&browser_id).unwrap().send(vec![7]).unwrap();
+        assert_eq!(replacement.try_recv().unwrap(), vec![7]);
+        assert!(service.unsubscribe(&browser_id, &third));
     }
 
     #[tokio::test]
@@ -1264,5 +1352,223 @@ mod tests {
             0,
             "Capture count must reach 0 on receiver disconnect"
         );
+    }
+
+    // unsubscribe locks subscribers and then producer_active. A producer stopping at the
+    // same time must never hold producer_active while it waits for subscribers, or the two
+    // threads deadlock.
+    #[test]
+    fn producer_stop_never_holds_producer_active_while_waiting_for_subscribers() {
+        let (service, b1) = create_test_service();
+        service.subscribe(&b1, "dev1", "v1").unwrap();
+        assert_eq!(service.active_capture_count(), 1);
+
+        // The unsubscribe side holds subscribers first.
+        let subs_guard = service.subscribers_per_browser.lock();
+        let stopper = service.producer_stopper();
+        let id = b1.clone();
+        let stop_thread = std::thread::spawn(move || stopper.stop(&id, true));
+
+        // The count drops while stop holds producer_active, so once it is 0 stop has
+        // finished with producer_active and moved on toward subscribers.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while service.active_capture_count() != 0 {
+            assert!(Instant::now() < deadline, "stop never updated producer_active");
+            std::thread::yield_now();
+        }
+
+        // The unsubscribe side's second lock must be free while stop waits.
+        let active_guard = service
+            .producer_active
+            .try_lock_for(std::time::Duration::from_secs(5));
+        let acquired = active_guard.is_some();
+        drop(active_guard);
+        drop(subs_guard);
+        stop_thread.join().unwrap();
+        assert!(
+            acquired,
+            "stop held producer_active while waiting for subscribers: lock-order deadlock"
+        );
+        assert_eq!(service.subscriber_count(&b1), 0);
+    }
+
+    // A snapshot whose native callback never arrives times out at once, so the producer
+    // quarantines it and keeps the shared native-capture permit.
+    struct NeverCallsBackSource {
+        started_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    impl BrowserSnapshotSource for NeverCallsBackSource {
+        fn capture_snapshot<'a>(
+            &'a self,
+            _webview_label: &'a str,
+            _options: SnapshotOptions,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>,
+        > {
+            Box::pin(async move {
+                Err(crate::ipc::IpcError::new(
+                    crate::ipc::IpcErrorCode::Unsupported,
+                    "only the coordinated capture is used",
+                ))
+            })
+        }
+
+        fn take_snapshot_coordinated<'a>(
+            &'a self,
+            _webview_label: &'a str,
+            _options: SnapshotOptions,
+            coordinator: crate::browser::snapshot_source::SnapshotCallbackCoordinator,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>,
+        > {
+            Box::pin(async move {
+                let rx = coordinator.attach_channel();
+                let _ = self.started_tx.send(());
+                crate::browser::snapshot_source::await_coordinator_completion(
+                    &coordinator,
+                    rx,
+                    std::time::Duration::from_millis(1),
+                )
+                .await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn removed_session_frees_capture_slot_and_quarantined_permit() {
+        let (service, b1) = create_test_service();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        service.set_snapshot_source(Arc::new(NeverCallsBackSource { started_tx }));
+
+        let sub = service.subscribe(&b1, "dev-gone", "v-gone").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+            .await
+            .expect("capture must start")
+            .expect("started channel open");
+
+        // The webview goes away with its callback still outstanding.
+        service.manager.remove_session(&b1);
+
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            service.native_capture_semaphore().acquire(),
+        )
+        .await
+        .expect("the quarantined native-capture permit must be released once the session is gone")
+        .expect("semaphore open");
+        drop(permit);
+
+        assert!(!service.is_producer_active(&b1));
+        assert_eq!(service.active_capture_count(), 0);
+        // The viewer is still known, so its unsubscribe completes normally.
+        assert!(service.unsubscribe(&b1, &sub));
+    }
+
+    #[test]
+    fn last_unsubscribe_of_a_closed_browser_releases_its_quarantined_capture() {
+        let (service, b1) = create_test_service();
+        let sub = service.subscribe(&b1, "dev-q", "v-q").unwrap();
+
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (coordinator, _rx) =
+            crate::browser::snapshot_source::SnapshotCallbackCoordinator::new();
+        let flag = Arc::clone(&released);
+        coordinator.set_permit_releaser(move || flag.store(true, Ordering::SeqCst));
+        coordinator.mark_timed_out();
+        service
+            .quarantined_permits
+            .lock()
+            .insert(b1.clone(), coordinator);
+
+        service.manager.remove_session(&b1);
+        assert!(service.unsubscribe(&b1, &sub));
+
+        assert!(released.load(Ordering::SeqCst));
+        assert!(!service.quarantined_permits.lock().contains_key(&b1));
+    }
+
+    #[test]
+    fn last_unsubscribe_of_a_live_browser_keeps_its_quarantined_capture() {
+        let (service, b1) = create_test_service();
+        let sub = service.subscribe(&b1, "dev-q", "v-q").unwrap();
+        let (coordinator, _rx) =
+            crate::browser::snapshot_source::SnapshotCallbackCoordinator::new();
+        coordinator.mark_timed_out();
+        service
+            .quarantined_permits
+            .lock()
+            .insert(b1.clone(), coordinator);
+
+        assert!(service.unsubscribe(&b1, &sub));
+        // The webview is still alive, so its late callback still releases the permit.
+        assert!(service.quarantined_permits.lock().contains_key(&b1));
+    }
+
+    // A capture error whose text mentions a timeout, but which is not the coordinator's
+    // timeout, already completed and released its permit; it must not be quarantined.
+    struct TimedOutTextErrorSource {
+        started_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    impl BrowserSnapshotSource for TimedOutTextErrorSource {
+        fn capture_snapshot<'a>(
+            &'a self,
+            _webview_label: &'a str,
+            _options: SnapshotOptions,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>,
+        > {
+            Box::pin(async move {
+                Err(crate::ipc::IpcError::new(
+                    crate::ipc::IpcErrorCode::Unsupported,
+                    "only the coordinated capture is used",
+                ))
+            })
+        }
+
+        fn take_snapshot_coordinated<'a>(
+            &'a self,
+            _webview_label: &'a str,
+            _options: SnapshotOptions,
+            coordinator: crate::browser::snapshot_source::SnapshotCallbackCoordinator,
+        ) -> crate::remote::browser_backend::BoxFuture<
+            'a,
+            Result<crate::browser::snapshot_source::BrowserSnapshot, crate::ipc::IpcError>,
+        > {
+            Box::pin(async move {
+                let _ = self.started_tx.send(());
+                let err = crate::ipc::IpcError::new(
+                    crate::ipc::IpcErrorCode::BrowserScreenshotFailed,
+                    "page load timed out",
+                );
+                let _ = coordinator.complete(Err(err.clone()));
+                Err(err)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_error_mentioning_timeout_is_not_quarantined() {
+        let (service, b1) = create_test_service();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        service.set_snapshot_source(Arc::new(TimedOutTextErrorSource { started_tx }));
+
+        let sub = service.subscribe(&b1, "dev-text", "v-text").unwrap();
+        // The second capture starts only after the first tick decided whether to quarantine.
+        for _ in 0..2 {
+            tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+                .await
+                .expect("capture must start")
+                .expect("started channel open");
+        }
+        assert!(
+            !service.quarantined_permits.lock().contains_key(&b1),
+            "a non-timeout capture error must not be quarantined"
+        );
+        service.unsubscribe(&b1, &sub);
     }
 }

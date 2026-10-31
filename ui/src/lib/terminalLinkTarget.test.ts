@@ -286,6 +286,8 @@ describe("terminalLinkTarget", () => {
       expect(localTokenPassed).toEqual({
         type: "file",
         path: "/tmp/cache/index.ts",
+        freshRemoteSnapshot: true,
+        remote: { workspaceId: "ws-ssh-1", path: "/remote/path/to/src/index.ts", sessionId: null },
         raw: "/remote/path/to/src/index.ts",
         line: 42,
         col: 10,
@@ -356,6 +358,8 @@ describe("terminalLinkTarget", () => {
       expect(openLocal).toHaveBeenCalledWith({
         type: "file",
         path: "/cache/paired-files/main.rs",
+        freshRemoteSnapshot: true,
+        remote: { workspaceId: "daemon:host-1:proj", path: "/home/u/proj/src/main.rs", sessionId: "daemon-session:host-1:abc" },
         raw: "src/main.rs:7",
         line: 7,
       });

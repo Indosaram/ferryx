@@ -88,4 +88,42 @@ describe("BrowserToolbar omnibox history", () => {
     fireEvent.focus(screen.getByLabelText("URL address bar"));
     expect(screen.queryByRole("listbox", { name: "Address bar history" })).not.toBeInTheDocument();
   });
+
+  it("keeps half-typed omnibox text when the page url changes, and syncs again after blur", () => {
+    const props = { onNavigate: vi.fn(), onReload: vi.fn() };
+    const { rerender } = render(<BrowserToolbar tab={tab} {...props} />);
+    const input = screen.getByLabelText("URL address bar") as HTMLInputElement;
+
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "docs.exa" } });
+    rerender(<BrowserToolbar tab={{ ...tab, url: "https://start.example.com/redirected" }} {...props} />);
+    expect(input.value).toBe("docs.exa");
+
+    fireEvent.blur(input);
+    rerender(<BrowserToolbar tab={{ ...tab, url: "https://start.example.com/later" }} {...props} />);
+    expect(input.value).toBe("https://start.example.com/later");
+  });
+
+  it("exposes the combobox pattern with an active descendant only while the list is open", () => {
+    render(<BrowserToolbar tab={tab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    const input = screen.getByRole("combobox", { name: "URL address bar" });
+    expect(input).toHaveAttribute("aria-autocomplete", "list");
+    expect(input).toHaveAttribute("aria-expanded", "false");
+    expect(input).not.toHaveAttribute("aria-controls");
+
+    fireEvent.focus(input);
+    const listbox = screen.getByRole("listbox", { name: "Address bar history" });
+    expect(input).toHaveAttribute("aria-expanded", "true");
+    expect(input.getAttribute("aria-controls")).toBe(listbox.id);
+    expect(input).not.toHaveAttribute("aria-activedescendant");
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const selected = screen.getByRole("option", { selected: true });
+    expect(selected.id).not.toBe("");
+    expect(input.getAttribute("aria-activedescendant")).toBe(selected.id);
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(input).not.toHaveAttribute("aria-controls");
+    expect(input).not.toHaveAttribute("aria-activedescendant");
+  });
 });

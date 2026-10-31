@@ -106,8 +106,10 @@ fn parse_json(input: &str) -> Result<Vec<ImportedCookie>, BrowserError> {
 fn parse_netscape(input: &str) -> Result<Vec<ImportedCookie>, BrowserError> {
     let mut cookies = Vec::new();
     for (line_number, raw_line) in input.lines().enumerate() {
-        let mut line = raw_line.trim();
-        if line.is_empty() || (line.starts_with('#') && !line.starts_with("#HttpOnly_")) {
+        // Only the leading side is trimmed: a cookie with an empty value ends the line with
+        // its field-separating tab, and trimming that tab drops the seventh field.
+        let mut line = raw_line.trim_start();
+        if line.trim().is_empty() || (line.starts_with('#') && !line.starts_with("#HttpOnly_")) {
             continue;
         }
         let mut http_only = false;
@@ -243,6 +245,19 @@ pub fn resolve_installed_browser_profile_dir(
     home_dir: Option<&std::path::Path>,
 ) -> Result<std::path::PathBuf, BrowserError> {
     let profile = profile_name.unwrap_or("Default");
+    // The profile name is joined onto the browser's data directory, so anything but a single
+    // plain path component (`..`, separators, an absolute path that `push` would swap in) would
+    // point the cookie read outside that directory.
+    let mut components = std::path::Path::new(profile).components();
+    let is_single_plain_component = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !profile.contains(['/', '\\']);
+    if !is_single_plain_component {
+        return Err(BrowserError::CookieImport(format!(
+            "invalid browser profile name: {profile:?}"
+        )));
+    }
     let mut base = match home_dir {
         Some(path) => path.to_path_buf(),
         None => {
@@ -318,6 +333,40 @@ pub fn parse_installed_profile_cookie_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn netscape_cookie_with_empty_value_keeps_its_seventh_field() {
+        let file = "example.com\tTRUE\t/\tFALSE\t0\tblank\t\n\
+                    example.com\tTRUE\t/\tFALSE\t0\tfull\tabc\n";
+        let cookies = parse_cookie_file(file).expect("empty value is a valid cookie");
+        assert_eq!(cookies.len(), 2);
+        assert_eq!(cookies[0].name, "blank");
+        assert_eq!(cookies[0].value, "");
+        assert_eq!(cookies[1].value, "abc");
+    }
+
+    #[test]
+    fn installed_profile_name_must_be_one_plain_path_component() {
+        let home = std::path::Path::new("/home/tester");
+        for bad in ["../x", "..", "a/b", "a\\b", "/etc", "", ".", "Default/.."] {
+            let err = resolve_installed_browser_profile_dir(
+                InstalledBrowserKind::Chrome,
+                Some(bad),
+                Some(home),
+            )
+            .expect_err(bad);
+            assert!(matches!(err, BrowserError::CookieImport(_)), "{bad:?}");
+        }
+        for good in ["Default", "Profile 1"] {
+            let dir = resolve_installed_browser_profile_dir(
+                InstalledBrowserKind::Chrome,
+                Some(good),
+                Some(home),
+            )
+            .expect(good);
+            assert!(dir.starts_with(home) && dir.ends_with(good));
+        }
+    }
 
     #[test]
     fn test_is_google_cookie_exclusion() {

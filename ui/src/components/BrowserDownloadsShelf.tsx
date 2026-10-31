@@ -46,6 +46,19 @@ export function sanitizeDownloadFilename(raw: string): string {
   return noLeadingDot.length > 0 ? noLeadingDot : "download";
 }
 
+/** Merges a registry list into the rendered records by id. A record already rendered from a
+ * newer `browser_download_updated` event wins over an older copy in the list, and records only
+ * known from events are kept. */
+export function mergeDownloadRecords(current: DownloadRecord[], incoming: DownloadRecord[]): DownloadRecord[] {
+  const currentById = new Map(current.map((record) => [record.id, record]));
+  const incomingIds = new Set(incoming.map((record) => record.id));
+  const merged = incoming.map((record) => {
+    const existing = currentById.get(record.id);
+    return existing && existing.updatedAtMs > record.updatedAtMs ? existing : record;
+  });
+  return [...current.filter((record) => !incomingIds.has(record.id)), ...merged];
+}
+
 export function extractDownloadName(filePath: string, url: string): string {
   if (filePath && filePath.trim()) {
     const fromPath = sanitizeDownloadFilename(filePath);
@@ -83,16 +96,20 @@ export function BrowserDownloadsShelf({ onClose, className = "", refreshToken = 
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
   const [loadErrorCode, setLoadErrorCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Overlapping list reads can resolve out of order; only the newest request may apply.
+  const fetchSeqRef = useRef(0);
 
   // A failed read must not look like an empty registry: the failure is kept and rendered as an
   // inline row, because "no downloads" and "the list could not be read" are different states.
   const fetchDownloads = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
     try {
       const records = await invoke<DownloadRecord[]>("cmd_browser_download_list");
-      setDownloads(records);
+      if (seq !== fetchSeqRef.current) return;
+      setDownloads((current) => mergeDownloadRecords(current, records));
       setLoadErrorCode(null);
     } catch (error) {
-      setLoadErrorCode(extractBrowserErrorCode(error));
+      if (seq === fetchSeqRef.current) setLoadErrorCode(extractBrowserErrorCode(error));
     }
   }, []);
 

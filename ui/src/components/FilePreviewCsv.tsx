@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { detectDelimiter, parseDelimited } from "../lib/csvParse";
-import { cn } from "../lib/cn";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { useLineWindow } from "../lib/useLineWindow";
 
 const MAX_DISPLAY_ROWS = 5000;
@@ -24,6 +24,14 @@ export function FilePreviewCsv({
   displayName: string;
 }) {
   const [showRaw, setShowRaw] = useState(false);
+  const [selectedCell, setSelectedCell] = useState<{ value: string; row: number; column: number } | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const detailRef = useRef<HTMLDialogElement | null>(null);
+  useEffect(() => {
+    setCopyFailed(false);
+    if (selectedCell) detailRef.current?.showModal();
+    else if (detailRef.current?.open) detailRef.current.close();
+  }, [selectedCell]);
 
   const delimiter = useMemo(() => detectDelimiter(displayName, text), [displayName, text]);
   const rows = useMemo(() => parseDelimited(text, delimiter), [text, delimiter]);
@@ -32,21 +40,31 @@ export function FilePreviewCsv({
   const totalBodyRows = rows.length > 1 ? rows.length - 1 : 0;
   const isTruncated = totalBodyRows > MAX_DISPLAY_ROWS;
   const bodyRows = useMemo(() => (rows.length > 1 ? rows.slice(1, 1 + MAX_DISPLAY_ROWS) : []), [rows]);
-  const columnCount = 1 + Math.max(headerRow?.length ?? 0, ...bodyRows.slice(0, 1).map((row) => row.length));
+  const columnWidths = useMemo(() => {
+    const widths: number[] = [];
+    for (const row of rows.slice(0, MAX_DISPLAY_ROWS + 1)) {
+      row.forEach((cell, index) => {
+        const longest = cell.split(/\r\n|\r|\n/).reduce((length, line) => Math.max(length, line.length + 2), 0);
+        widths[index] = Math.min(48, Math.max(widths[index] ?? 12, longest));
+      });
+    }
+    return widths;
+  }, [rows]);
+  const columnCount = 1 + columnWidths.length;
 
   const rawLines = useMemo(() => (showRaw ? text.split(/\r\n|\r|\n/) : []), [showRaw, text]);
 
-  // Windowing assumes a fixed row pitch, so windowed table cells show one line each
-  // (the full value stays in the cell's title and in the Raw view).
   const tableWindow = useLineWindow({
     count: bodyRows.length,
     enabled: !showRaw && bodyRows.length > CSV_TABLE_WINDOW_THRESHOLD,
     estimatedRowHeight: CSV_TABLE_ROW_HEIGHT,
+    contentKey: text,
   });
   const rawWindow = useLineWindow({
     count: rawLines.length,
     enabled: showRaw && rawLines.length > CSV_RAW_WINDOW_THRESHOLD,
     estimatedRowHeight: CSV_RAW_LINE_HEIGHT,
+    contentKey: text,
   });
   const tableWindowed = tableWindow.active;
 
@@ -109,8 +127,13 @@ export function FilePreviewCsv({
             <table
               data-testid="file-preview-csv"
               data-windowed={tableWindowed ? "true" : undefined}
-              className="selectable w-full border-collapse text-left text-[12px]"
+              className="selectable table-fixed border-collapse text-left text-[12px]"
+              style={{ width: `${6 + columnWidths.reduce((sum, width) => sum + width, 0)}ch`, minWidth: "100%" }}
             >
+              <colgroup>
+                <col style={{ width: "6ch" }} />
+                {columnWidths.map((width, index) => <col key={index} style={{ width: `${width}ch` }} />)}
+              </colgroup>
               {headerRow && (
                 <thead>
                   <tr className="border-b border-border">
@@ -142,30 +165,18 @@ export function FilePreviewCsv({
                       data-line-window-row=""
                       className="border-b border-border/50 hover:bg-accent/40"
                     >
-                      <td
-                        className={cn(
-                          "px-3 py-1.5 text-right font-mono text-muted-foreground select-none",
-                          tableWindowed && "leading-5",
-                        )}
-                      >
+                      <td className="px-3 py-1.5 text-right font-mono leading-5 text-muted-foreground select-none">
                         {rowIndex + 1}
                       </td>
-                      {row.map((cell, cellIndex) =>
-                        tableWindowed ? (
-                          <td key={cellIndex} title={cell} className="px-3 py-1.5 text-foreground">
-                            <div className="h-5 max-w-[48ch] overflow-hidden text-ellipsis whitespace-pre leading-5">
-                              {cell}
-                            </div>
-                          </td>
-                        ) : (
-                          <td
-                            key={cellIndex}
-                            className="px-3 py-1.5 text-foreground whitespace-pre-wrap"
-                          >
+                      {row.map((cell, cellIndex) => (
+                        <td key={cellIndex} className="px-3 py-1.5 text-foreground whitespace-pre-wrap break-words leading-5">
+                          <button type="button" className="selectable w-full text-left whitespace-pre-wrap break-words"
+                            aria-label={`View row ${rowIndex + 1}, column ${cellIndex + 1}`}
+                            onClick={() => setSelectedCell({ value: cell, row: rowIndex + 1, column: cellIndex + 1 })}>
                             {cell}
-                          </td>
-                        ),
-                      )}
+                          </button>
+                        </td>
+                      ))}
                     </tr>
                   );
                 })}
@@ -188,6 +199,21 @@ export function FilePreviewCsv({
           </div>
         </div>
       )}
+      <dialog ref={detailRef} onClose={() => setSelectedCell(null)}
+        className="max-h-[80vh] max-w-[90vw] rounded-md border border-border bg-card p-4 text-foreground"
+        aria-label="Cell contents">
+        {selectedCell && <>
+          <p className="mb-3 text-[12px]">Row {selectedCell.row}, column {selectedCell.column}</p>
+          <pre className="selectable max-h-[60vh] overflow-auto whitespace-pre-wrap break-words">{selectedCell.value}</pre>
+          <div className="mt-3 flex justify-end gap-3">
+            <button type="button" onClick={() => {
+              void copyTextToClipboard(selectedCell.value).then((copied) => setCopyFailed(!copied), () => setCopyFailed(true));
+            }}>Copy</button>
+            <button type="button" onClick={() => setSelectedCell(null)}>Close</button>
+          </div>
+          {copyFailed && <p role="alert">Could not copy the cell. Select its contents to copy manually.</p>}
+        </>}
+      </dialog>
     </div>
   );
 }

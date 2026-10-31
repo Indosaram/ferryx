@@ -39,7 +39,7 @@ export type LayoutAction =
   | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean }
   | { type: "CLOSE_TAB"; tabId: string; replacementTab?: WorkspaceTab }
   | { type: "ACTIVATE_TAB"; tabId: string }
-  | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null }
+  | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null; path?: string; remote?: import("../lib/filePreviewTypes").RemotePreviewOrigin }
   | { type: "REORDER_TAB"; tabId: string; targetIndex: number }
   | { type: "RENAME_TAB"; tabId: string; label: string }
   | { type: "SET_TAB_PINNED"; tabId: string; pinned: boolean }
@@ -229,9 +229,10 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
     case "UPDATE_FILE_TAB": {
       const tab = state.tabs.find((item) => item.id === action.tabId);
       if (!tab || tab.kind !== "file") return state;
+      const update = { line: action.line, col: action.col, ...(action.path ? { path: action.path } : {}), ...(action.remote ? { remote: action.remote } : {}) };
       const tabs = state.tabs.map((item) =>
         item.id === action.tabId && item.kind === "file"
-          ? { ...item, line: action.line, col: action.col }
+          ? { ...item, ...update }
           : item,
       );
       const group = findGroupContainingTab(state.tabGroups ?? {}, action.tabId);
@@ -250,8 +251,8 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       }
       const contentsByLeafId = { ...existing.contentsByLeafId };
       for (const [leafId, content] of Object.entries(contentsByLeafId)) {
-        if (content.kind === "file") {
-          contentsByLeafId[leafId] = { ...content, line: action.line, col: action.col };
+        if (content.kind === "file" && content.previewId === tab.previewId) {
+          contentsByLeafId[leafId] = { ...content, ...update };
         }
       }
       return normalizeLayoutInternal(
@@ -292,7 +293,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
       const label = action.label.trim();
       const target = state.tabs.find((tab) => tab.id === action.tabId);
       if (!target) return state;
-      if (isTerminalTab(target)) {
+      if (isTerminalTab(target) || target.kind === "file") {
         // A terminal tab's label is its automatic fallback; a user rename lives beside it so
         // live titles never overwrite it, and clearing the rename returns the tab to automatic.
         if (!label && target.customLabel === undefined) return state;
@@ -301,7 +302,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
           {
             ...state,
             tabs: state.tabs.map((tab) => {
-              if (tab.id !== action.tabId || !isTerminalTab(tab)) return tab;
+              if (tab.id !== action.tabId || (!isTerminalTab(tab) && tab.kind !== "file")) return tab;
               if (label) return { ...tab, customLabel: label };
               const { customLabel: _cleared, ...rest } = tab;
               return rest;
@@ -761,6 +762,8 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
         col?: number | null;
         workspaceId?: string | null;
         previewId?: string;
+        customLabel?: string;
+        remote?: import("../lib/filePreviewTypes").RemotePreviewOrigin;
       };
       return createFilePaneContent({
         path: file.path ?? "",
@@ -769,6 +772,8 @@ export function toPaneContent(raw: unknown, fallbackSessionId = ""): PaneContent
         col: file.col ?? null,
         workspaceId: file.workspaceId ?? null,
         previewId: file.previewId ?? "",
+        ...(file.remote ? { remote: file.remote } : {}),
+        ...(typeof file.customLabel === "string" ? { customLabel: file.customLabel } : {}),
       });
     }
     if (item.kind === "changes") {
@@ -813,6 +818,8 @@ export function defaultContentForTab(tab: WorkspaceTab, sessionIdOverride?: stri
       col: tab.col,
       workspaceId: tab.workspaceId,
       previewId: tab.previewId,
+      ...(tab.remote ? { remote: tab.remote } : {}),
+      ...(tab.customLabel !== undefined ? { customLabel: tab.customLabel } : {}),
     });
   }
   if (tab.kind === "changes") {

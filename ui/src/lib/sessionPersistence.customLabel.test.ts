@@ -42,6 +42,24 @@ function workspaceState(customLabel?: string): WorkspaceState {
 }
 
 describe("terminal tab custom label persistence", () => {
+  it("round-trips explicit file labels and remote provenance into the restored pane", () => {
+    const state = workspaceState();
+    const remote = { workspaceId: "daemon:host", path: "/srv/src/index.ts", sessionId: "remote-session" };
+    state.layout.tabs = [{
+      kind: "file", id: "file", label: "index.ts", customLabel: "src/index.ts",
+      path: "/cache/copy/index.ts", backendSessionId: "backend-1", line: null, col: null,
+      workspaceId: remote.workspaceId, previewId: "file", remote,
+    }];
+    state.layout.activeTabId = "file";
+    state.layout.primaryTabId = "file";
+    state.layout.layoutsByTabId = {};
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, ["backend-1"]);
+    expect(restored?.layout.tabs[0]).toMatchObject({ customLabel: "src/index.ts", remote });
+    const panes = restored?.layout.layoutsByTabId.file?.contentsByLeafId ?? {};
+    expect(Object.values(panes)).toContainEqual(expect.objectContaining({ kind: "file", customLabel: "src/index.ts", remote }));
+  });
+
   it("round-trips a user rename so it survives a restart", () => {
     const saved = serializeWorkspaceState("default", "/workspace/main", workspaceState("release build"));
     const restored = deserializeWorkspaceState("default", saved, ["backend-1"])!;

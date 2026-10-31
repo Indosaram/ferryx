@@ -194,4 +194,28 @@ describe("BrowserPane parity affordances", () => {
     expect(screen.queryByTestId("browser-download-needs-confirmation")).toBeNull();
     expect(screen.getByRole("button", { name: "Save as…" })).toBeTruthy();
   });
+
+  it("surfaces a rejected save dialog in the download prompt instead of an unhandled rejection", async () => {
+    dialogMocks.save.mockRejectedValueOnce({ code: "DIALOG_FAILED", message: "dialog unavailable" });
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save as…" }));
+
+    await waitFor(() => expect(screen.getByTestId("browser-download-prompt")).toHaveTextContent("DIALOG_FAILED"));
+    expect(browserMocks.downloadBrowserUrlWithSession).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a rejected open-in-system-browser as a pane alert", async () => {
+    browserMocks.openExternalUrl.mockRejectedValueOnce({ code: "OPEN_EXTERNAL_FAILED", message: "no handler" });
+    render(<BrowserPane tab={baseTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    await waitFor(() => expect(callbackState.download).not.toBeNull());
+    act(() => callbackState.download?.({ browserId: "browser-1", targetUrl: "https://example.com/files/a.zip" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /Open in system browser/i }));
+
+    const alert = await screen.findByTestId("browser-pane-alert");
+    expect(alert).toHaveTextContent("Open in system browser failed: OPEN_EXTERNAL_FAILED");
+  });
 });

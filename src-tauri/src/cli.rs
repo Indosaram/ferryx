@@ -3792,7 +3792,7 @@ fn format_browser_cli_response(
             .map_err(|error| error.to_string())
         }
         BrowserCliResponse::FileOpened { path } => Ok(format!("opened {path}")),
-        BrowserCliResponse::Error { code, message } => {
+        BrowserCliResponse::Error { code, message, .. } => {
             print_browser_cli_error(&code, &message);
             Err(message)
         }
@@ -3893,7 +3893,7 @@ pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
             println!("opened {path}");
             Ok(())
         }
-        BrowserCliResponse::Error { code, message } => Err(format!("{code}: {message}")),
+        BrowserCliResponse::Error { code, message, .. } => Err(format!("{code}: {message}")),
         other => Err(format!("unexpected response: {other:?}")),
     }
 }

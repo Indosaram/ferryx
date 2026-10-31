@@ -68,6 +68,20 @@ function getUtf8ByteLength(text: string | undefined): number {
   return typeof Buffer !== "undefined" ? Buffer.byteLength(text, "utf8") : text.length;
 }
 
+/** Best-effort `requestId` of a raw server frame that failed validation, so its request can be failed. */
+function extractRequestId(raw: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const id = (parsed as { requestId?: unknown }).requestId;
+      return typeof id === "string" ? id : null;
+    }
+  } catch {
+    // Not JSON: nothing to correlate.
+  }
+  return null;
+}
+
 const MAX_QUEUE_CAPACITY = 64;
 
 /** Thrown when the outgoing queue/byte budget is exhausted. */
@@ -239,6 +253,11 @@ export class BrowserClient {
         msg = parseServerMessage(data);
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
+        // A reply that fails validation must fail its request now, not after the request timeout.
+        const failedRequestId = extractRequestId(data);
+        if (failedRequestId) {
+          this.rejectPending(failedRequestId, error);
+        }
         for (const listener of this.errorListeners) {
           listener(error);
         }
@@ -286,6 +305,16 @@ export class BrowserClient {
         }
         case "browserDriverRevoked": {
           this.currentDriverState = "viewing";
+          const error = Object.assign(new Error(msg.reason ?? "Driver lease revoked"), {
+            code: "BROWSER_FORBIDDEN",
+            retryable: false,
+          });
+          for (const [requestId, pending] of this.pendingRequests) {
+            if (pending.expectedTypes.includes("browserResult")) {
+              this.writerQueue = this.writerQueue.filter((entry) => entry.id !== requestId);
+              this.rejectPending(requestId, error);
+            }
+          }
           for (const listener of this.driverRevokedListeners) {
             listener(msg);
           }

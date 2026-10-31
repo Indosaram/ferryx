@@ -386,4 +386,30 @@ describe("BrowserToolbar", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Shortcut listener failed: EVENT_LISTEN_FAILED");
   });
+
+  it("subscribes to native shortcuts once across re-renders with new inline callbacks", async () => {
+    const { rerender } = render(<BrowserToolbar tab={mockTab} onNavigate={() => undefined} onReload={() => undefined} />);
+    await waitFor(() => expect(browserNative.onBrowserShortcutRequested).toHaveBeenCalledTimes(1));
+
+    const latestReload = vi.fn();
+    rerender(<BrowserToolbar tab={{ ...mockTab, canGoForward: true }} onNavigate={() => undefined} onReload={() => undefined} />);
+    rerender(<BrowserToolbar tab={{ ...mockTab, canGoForward: true }} onNavigate={() => undefined} onReload={latestReload} />);
+    await act(async () => undefined);
+    expect(browserNative.onBrowserShortcutRequested).toHaveBeenCalledTimes(1);
+
+    // The single subscription still reaches the newest callback.
+    const listener = browserNative.onBrowserShortcutRequested.mock.calls[0][0] as (payload: { browserId: string; action: string }) => void;
+    act(() => listener({ browserId: "b-1", action: "reload" }));
+    expect(latestReload).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the zoom the backend actually applied", async () => {
+    browserNative.setBrowserZoom.mockResolvedValueOnce(1.25);
+    render(<BrowserToolbar tab={mockTab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+
+    fireEvent.click(screen.getByLabelText("Zoom in"));
+
+    expect(await screen.findByText("125%")).toBeInTheDocument();
+    expect(browserNative.setBrowserZoom).toHaveBeenCalledWith("b-1", 1.1);
+  });
 });

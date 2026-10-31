@@ -22,7 +22,10 @@ export function subscribeFilePreviews(listener: () => void): () => void {
 }
 
 function requestKey(request: FilePreviewOpenRequest): string {
-  return `${request.path}\0${request.backendSessionId}\0${request.line ?? ""}\0${request.col ?? ""}`;
+  const identity = request.remote
+    ? `${request.remote.workspaceId}\0${request.remote.path}`
+    : `${request.path}\0${request.backendSessionId}`;
+  return `${identity}\0${request.line ?? ""}\0${request.col ?? ""}`;
 }
 
 /**

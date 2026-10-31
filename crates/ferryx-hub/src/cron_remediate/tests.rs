@@ -672,3 +672,38 @@ async fn leaked_tokens_are_redacted_from_stored_chat_and_their_hashes_revoked() 
     assert_eq!(status(&pool, id).await.1.cause, "timeout");
     assert!(r.approve_rerun_with_token(id, LEAKED).await.is_err());
 }
+
+#[tokio::test]
+async fn a_delivered_digest_stops_repeating_its_cron_outcomes() {
+    let pool = crate::storage::memory().await.unwrap();
+    queue_outcome(&pool, 1, "job", "job: old needs you").await.unwrap();
+    let digest = crate::inbox::DIGEST_JOB_ID;
+    sqlx::query("INSERT INTO cron_runs(id, job_id, status, started_at, finished_at, output) VALUES('d1', ?, 'succeeded', ?, ?, 'digest')")
+        .bind(digest)
+        .bind(now_rfc3339())
+        .bind(now_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO cron_remediation_outcomes(problem_id, job_id, message, created_at) VALUES(2, 'job', 'job: after the digest', '2999-01-01T00:00:00Z')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json) VALUES(?, '0 9 * * *', '{}')")
+        .bind(digest)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    crate::schedule::remember_delivery(&pool, digest, Some("slack down")).await.unwrap();
+    let pending = || async {
+        sqlx::query_scalar::<_, String>("SELECT message FROM cron_remediation_outcomes WHERE delivered_at IS NULL ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(pending().await.len(), 2, "a failed delivery acknowledges nothing");
+
+    crate::schedule::remember_delivery(&pool, digest, None).await.unwrap();
+    assert_eq!(pending().await, vec!["job: after the digest".to_owned()]);
+}

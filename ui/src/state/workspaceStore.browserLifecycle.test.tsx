@@ -85,6 +85,30 @@ describe("useWorkspaceStore browser lifecycle", () => {
     expect(result.current.state.layout.activeTabId).toBeNull();
   });
 
+  it("still removes the browser tab when the native webview close rejects", async () => {
+    vi.mocked(browserTauri.closeBrowser).mockRejectedValue({ code: "BROWSER_CLOSE_FAILED", message: "close failed" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { result } = renderHook(() =>
+      useWorkspaceStore({ workspaceId: "workspace-1", initialWorktrees: [worktree], services }),
+    );
+
+    let tabId = "";
+    await act(async () => {
+      const created = await result.current.createBrowserTab();
+      if (created === null) throw new Error("expected createBrowserTab to return a tab id");
+      tabId = created;
+    });
+
+    await act(async () => {
+      await result.current.closeTab(tabId);
+    });
+
+    expect(browserTauri.closeBrowser).toHaveBeenCalledWith("browser-1");
+    expect(result.current.state.layout.tabs).toHaveLength(0);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("closes the native child webview when closing a browser pane leaf inside a split", async () => {
     const { result } = renderHook(() =>
       useWorkspaceStore({ workspaceId: "workspace-1", initialWorktrees: [worktree], services }),

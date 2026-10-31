@@ -239,7 +239,7 @@ fn macos_keypress_spec(keypress: &ParsedKeypress) -> Option<MacosKeypressSpec> {
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch_macos_keypress<R: tauri::Runtime>(
+async fn dispatch_macos_keypress<R: tauri::Runtime>(
     webview: &tauri::Webview<R>,
     keypress: &ParsedKeypress,
 ) -> Result<bool, BrowserError> {
@@ -264,8 +264,9 @@ fn dispatch_macos_keypress<R: tauri::Runtime>(
         modifiers.insert(NSEventModifierFlags::Shift);
     }
 
-    let dispatch_result = Arc::new(Mutex::new(None));
-    let result_slot = Arc::clone(&dispatch_result);
+    // `with_webview` runs the closure inline only on the main thread; from a tokio worker it
+    // is queued to the event loop, so the outcome must be awaited rather than read at once.
+    let (sender, receiver) = tokio::sync::oneshot::channel::<Result<(), BrowserError>>();
     webview
         .with_webview(move |platform_webview| unsafe {
             // SAFETY: Tauri invokes `with_webview` on this app-owned WebView's UI thread.
@@ -307,12 +308,13 @@ fn dispatch_macos_keypress<R: tauri::Runtime>(
                 native.keyUp(&key_up);
                 Ok(())
             })();
-            *result_slot.lock() = Some(outcome);
+            let _ = sender.send(outcome);
         })
         .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-    dispatch_result.lock().take().ok_or_else(|| {
-        BrowserError::AutomationFailed("native key dispatch did not execute".into())
-    })??;
+    tokio::time::timeout(std::time::Duration::from_secs(5), receiver)
+        .await
+        .map_err(|_| BrowserError::AutomationFailed("native key dispatch timed out".into()))?
+        .map_err(|_| BrowserError::AutomationFailed("native key dispatch did not execute".into()))??;
 
     Ok(true)
 }
@@ -1786,6 +1788,11 @@ pub async fn create_browser_session_with_opener<R: tauri::Runtime>(
                 return Err(BrowserError::CreateFailed(error.to_string()).into());
             }
         }
+    } else {
+        // No host window to attach to: a session without a webview would be picked as the
+        // active tab and fail every later command with WEBVIEW_NOT_FOUND.
+        discard_failed_session(manager, &state.browser_id);
+        return Err(BrowserError::CreateFailed("main window unavailable".into()).into());
     }
 
     if let Some(link) = opener.as_ref() {
@@ -1948,10 +1955,6 @@ pub async fn cmd_browser_create<R: tauri::Runtime>(
     create_browser_session_with_opener(&app, manager.inner(), request, opener).await
 }
 
-pub const fn browser_session_devtools_enabled() -> bool {
-    true
-}
-
 #[tauri::command]
 pub async fn cmd_browser_open_devtools<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -1959,12 +1962,9 @@ pub async fn cmd_browser_open_devtools<R: tauri::Runtime>(
     browser_id: String,
 ) -> Result<(), IpcError> {
     let state = manager.get_state(&browser_id)?;
-    let webview = app.get_webview(&state.webview_label).ok_or_else(|| {
-        IpcError::new(
-            IpcErrorCode::BrowserNotFound,
-            "browser webview is not open",
-        )
-    })?;
+    let webview = app
+        .get_webview(&state.webview_label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
     webview.open_devtools();
     Ok(())
 }
@@ -2068,16 +2068,6 @@ pub async fn cmd_browser_finish_element_pick<R: tauri::Runtime>(
         .unwrap_or(0);
     crate::remote::design_mode::shared_staging_store().stage(snapshot.clone());
     Ok(snapshot)
-}
-
-#[cfg(test)]
-mod devtools_tests {
-    use super::*;
-
-    #[test]
-    fn browser_sessions_enable_devtools() {
-        assert!(browser_session_devtools_enabled());
-    }
 }
 
 #[cfg(test)]
@@ -2261,29 +2251,35 @@ pub async fn navigate_browser_session_with_context<R: tauri::Runtime>(
     url: &str,
     context: crate::browser::security::BrowserSecurityContext,
 ) -> Result<(), IpcError> {
+    // Resolve the webview before recording the navigation: without one, nothing would load,
+    // and the session must not be left with a bumped generation and `loading = true`.
+    // The URL policy is checked first so a refused URL reports its policy error.
+    crate::browser::security::validate_url_with_context(url, context)?;
+    let label = manager.get_webview_label(browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(label.clone()))?;
     let valid_url = manager.update_url_with_context(browser_id, url, context)?;
     let state = manager.get_state(browser_id)?;
 
-    if let Some(webview) = app.get_webview(&state.webview_label) {
-        emit_browser_state(&webview, &state);
-        let parsed = valid_url.parse().map_err(|error| {
-            BrowserError::NavigationFailed(format!("invalid target URL: {error}"))
-        })?;
-        if let Err(error) = webview.navigate(parsed) {
-            let message = error.to_string();
-            if let Ok(error_state) = manager.update_navigation_state(
-                browser_id,
-                None,
-                None,
-                Some(false),
-                None,
-                None,
-                Some(message.clone()),
-            ) {
-                emit_browser_state(&webview, &error_state);
-            }
-            return Err(BrowserError::NavigationFailed(message).into());
+    emit_browser_state(&webview, &state);
+    let parsed = valid_url.parse().map_err(|error| {
+        BrowserError::NavigationFailed(format!("invalid target URL: {error}"))
+    })?;
+    if let Err(error) = webview.navigate(parsed) {
+        let message = error.to_string();
+        if let Ok(error_state) = manager.update_navigation_state(
+            browser_id,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            Some(message.clone()),
+        ) {
+            emit_browser_state(&webview, &error_state);
         }
+        return Err(BrowserError::NavigationFailed(message).into());
     }
     Ok(())
 }
@@ -2308,10 +2304,13 @@ pub(crate) fn history_navigation<R: tauri::Runtime>(
     browser_id: &str,
     forward: bool,
 ) -> Result<(), IpcError> {
-    let (state, dispatch) = manager.begin_history_dispatch(browser_id, forward)?;
+    // Resolve the webview before the dispatch records anything, so a missing webview
+    // leaves the session's loading state and generation untouched.
+    let label = manager.get_webview_label(browser_id)?;
     let webview = app
-        .get_webview(&state.webview_label)
-        .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        .get_webview(&label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(label.clone()))?;
+    let (state, dispatch) = manager.begin_history_dispatch(browser_id, forward)?;
     emit_browser_state(&webview, &state);
 
     if !dispatch {
@@ -2399,6 +2398,27 @@ pub async fn cmd_browser_go_forward<R: tauri::Runtime>(
     history_navigation(&app, manager.inner(), &browser_id, true)
 }
 
+/// Both cookie-import commands report an unknown target profile and a profile with no open
+/// tab with the same code and structured `reason`, so the settings UI handles them once.
+fn unsupported_cookie_import_profile(profile_id: &str) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::BrowserCookieImportFailed,
+        format!("unsupported profile: {profile_id}"),
+    )
+    .with_details(serde_json::json!({ "reason": "no-profile" }))
+}
+
+fn no_cookie_import_tab(profile_id: &BrowserProfileId) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::BrowserCookieImportFailed,
+        format!(
+            "open a browser tab using the {} profile before importing cookies",
+            profile_id.as_str()
+        ),
+    )
+    .with_details(serde_json::json!({ "reason": "no-tab" }))
+}
+
 #[tauri::command]
 pub async fn cmd_browser_import_cookies<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -2406,7 +2426,7 @@ pub async fn cmd_browser_import_cookies<R: tauri::Runtime>(
     request: ImportBrowserCookiesRequest,
 ) -> Result<ImportBrowserCookiesResult, IpcError> {
     let profile_id = BrowserProfileId::from_id(&request.profile_id)
-        .ok_or_else(|| BrowserError::UnsupportedProfile(request.profile_id.clone()))?;
+        .ok_or_else(|| unsupported_cookie_import_profile(&request.profile_id))?;
     let source = tokio::fs::read_to_string(&request.file_path)
         .await
         .map_err(|error| {
@@ -2430,11 +2450,7 @@ pub async fn cmd_browser_import_cookies<R: tauri::Runtime>(
     // privileged webview context, while still reporting success. The empty-target
     // error below is the correct outcome for every profile, Default included.
     if targets.is_empty() {
-        return Err(BrowserError::CookieImport(format!(
-            "open a browser tab using the {} profile before importing cookies",
-            profile_id.as_str()
-        ))
-        .into());
+        return Err(no_cookie_import_tab(&profile_id));
     }
 
     for target in targets {
@@ -2457,13 +2473,7 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
     request: ImportInstalledBrowserCookiesRequest,
 ) -> Result<ImportInstalledBrowserCookiesResult, IpcError> {
     let profile_id = BrowserProfileId::from_id(&request.profile_id)
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::BrowserCookieImportFailed,
-                format!("unsupported profile: {}", request.profile_id),
-            )
-            .with_details(serde_json::json!({ "reason": "no-profile" }))
-        })?;
+        .ok_or_else(|| unsupported_cookie_import_profile(&request.profile_id))?;
 
     let targets = manager
         .webview_labels_for_profile(&profile_id)
@@ -2472,14 +2482,7 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
         .collect::<Vec<_>>();
 
     if targets.is_empty() {
-        return Err(IpcError::new(
-            IpcErrorCode::BrowserCookieImportFailed,
-            format!(
-                "open a browser tab using the {} profile before importing cookies",
-                profile_id.as_str()
-            ),
-        )
-        .with_details(serde_json::json!({ "reason": "no-tab" })));
+        return Err(no_cookie_import_tab(&profile_id));
     }
 
     let home_dir = app.path().home_dir().map_err(|err| {
@@ -2487,7 +2490,7 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
             IpcErrorCode::BrowserCookieImportFailed,
             format!("failed to resolve home directory: {err}"),
         )
-        .with_details(serde_json::json!({ "reason": "no-profile" }))
+        .with_details(serde_json::json!({ "reason": "cookie-import-failed" }))
     })?;
 
     let kind = request.source;
@@ -2831,7 +2834,9 @@ pub(crate) fn cookie_header_from_cookies(
 /// set the webview would send: `HttpOnly` included, and never the current page's
 /// cookies replayed to a different origin. This stays on the async path because
 /// tauri documents that the cookie APIs deadlock on Windows when they are called
-/// from a synchronous command.
+/// from a synchronous command. The getter blocks until the main thread replies (and
+/// panics if the webview closed first), so it runs on a blocking thread where that
+/// panic surfaces as an internal error instead of tearing down an async worker.
 async fn download_cookie_header<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,
@@ -2853,15 +2858,16 @@ async fn download_cookie_header<R: tauri::Runtime>(
             format!("invalid download url `{}`: {error}", request.url),
         )
     })?;
-    let cookies = webview.cookies_for_url(url).map_err(|error| {
-        IpcError::new(
-            IpcErrorCode::BrowserDownloadFailed,
-            format!(
-                "failed to read session cookies for {}: {error}",
-                request.url
-            ),
-        )
-    })?;
+    let request_url = request.url.clone();
+    let cookies = crate::ipc::run_blocking(move || {
+        webview.cookies_for_url(url).map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::BrowserDownloadFailed,
+                format!("failed to read session cookies for {request_url}: {error}"),
+            )
+        })
+    })
+    .await?;
     Ok(cookie_header_from_cookies(&cookies))
 }
 
@@ -3149,7 +3155,7 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
     #[cfg(target_os = "macos")]
     if let BrowserAutomationAction::Keypress { key } = &request.action {
         let keypress = parse_keypress(key)?;
-        if dispatch_macos_keypress(&webview, &keypress)? {
+        if dispatch_macos_keypress(&webview, &keypress).await? {
             return Ok(());
         }
     }
@@ -3247,6 +3253,9 @@ async fn close_linked_popup<R: tauri::Runtime>(
     }
 }
 
+/// Shown in a refusal warning when the recipient tab has no recorded http origin.
+const UNKNOWN_ORIGIN: &str = "(unknown origin)";
+
 /// Delivers an opener's `popupHandle.postMessage(...)` into the child popup tab.
 async fn deliver_popup_handle_message<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -3293,28 +3302,26 @@ async fn deliver_popup_handle_message<R: tauri::Runtime>(
         .get_state(&popup_browser_id)
         .ok()
         .and_then(|state| crate::browser::popup::origin_of(&state.url));
-    let script = match (popup_origin.as_deref(), message.target_origin.as_deref()) {
-        (Some(popup_origin), Some(target_origin))
-            if !crate::browser::popup::target_origin_allows(popup_origin, target_origin) =>
+    let (script, target_dest) = match message.target_origin.as_deref() {
+        Some(target_origin)
+            if !crate::browser::popup::target_origin_permits(
+                popup_origin.as_deref(),
+                Some(target_origin),
+            ) =>
         {
-            crate::browser::popup::popup_message_rejected_script(
-                target_origin,
-                popup_origin,
-                &opener_origin,
+            (
+                crate::browser::popup::popup_message_rejected_script(
+                    target_origin,
+                    popup_origin.as_deref().unwrap_or(UNKNOWN_ORIGIN),
+                    &opener_origin,
+                ),
+                opener_browser_id,
             )
         }
-        _ => crate::browser::popup::popup_message_script(
-            &opener_origin,
-            &message.data,
+        _ => (
+            crate::browser::popup::popup_message_script(&opener_origin, &message.data),
+            popup_browser_id.as_str(),
         ),
-    };
-    let target_dest = match (popup_origin.as_deref(), message.target_origin.as_deref()) {
-        (Some(popup_origin), Some(target_origin))
-            if !crate::browser::popup::target_origin_allows(popup_origin, target_origin) =>
-        {
-            opener_browser_id
-        }
-        _ => &popup_browser_id,
     };
     if let Err(error) = eval_browser_session(app, manager, target_dest, &script).await {
         tracing::warn!(
@@ -3374,13 +3381,16 @@ async fn deliver_popup_opener_message<R: tauri::Runtime>(
         .get_state(&link.opener_browser_id)
         .ok()
         .and_then(|state| crate::browser::popup::origin_of(&state.url));
-    let script = match (opener_origin.as_deref(), message.target_origin.as_deref()) {
-        (Some(opener_origin), Some(target_origin))
-            if !crate::browser::popup::target_origin_allows(opener_origin, target_origin) =>
+    let script = match message.target_origin.as_deref() {
+        Some(target_origin)
+            if !crate::browser::popup::target_origin_permits(
+                opener_origin.as_deref(),
+                Some(target_origin),
+            ) =>
         {
             crate::browser::popup::opener_message_rejected_script(
                 target_origin,
-                opener_origin,
+                opener_origin.as_deref().unwrap_or(UNKNOWN_ORIGIN),
                 &popup_origin,
             )
         }
@@ -3428,11 +3438,26 @@ pub async fn close_browser_session<R: tauri::Runtime>(
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
+    // As an opener, this tab's pending closes and popup links can never be consumed again.
+    crate::browser::popup::forget_opener(browser_id);
+    // The link is removed before any await so a failed notification cannot leave it behind.
+    let popup_link = crate::browser::popup::unlink(browser_id);
+    // Take the tab off screen before notifying the opener, which can wait up to the eval
+    // timeout.
+    #[cfg(target_os = "linux")]
+    {
+        let browser_id_clone = browser_id.to_string();
+        let _ = app.run_on_main_thread(move || {
+            let _ = crate::browser::linux::implementation::detach_child(&browser_id_clone);
+        });
+    }
+    if let Some(webview) = app.get_webview(&session.webview_label) {
+        let _ = webview.close();
+    }
     // A closing popup is how the opener learns the popup is gone. Closing the tab -- by the
     // user, by the page, or by the host -- has to flip the handle's `closed`, or a library
-    // polling popup.closed never sees the cancel. The link is removed first so a failed
-    // notification cannot leave a stale link behind.
-    if let Some(link) = crate::browser::popup::unlink(browser_id) {
+    // polling popup.closed never sees the cancel.
+    if let Some(link) = popup_link {
         let script = crate::browser::popup::popup_closed_script(&link.handle);
         if let Err(error) =
             eval_browser_session(app, manager, &link.opener_browser_id, &script).await
@@ -3443,16 +3468,6 @@ pub async fn close_browser_session<R: tauri::Runtime>(
                 "notifying the opener that its popup closed failed"
             );
         }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let browser_id_clone = browser_id.to_string();
-        let _ = app.run_on_main_thread(move || {
-            let _ = crate::browser::linux::implementation::detach_child(&browser_id_clone);
-        });
-    }
-    if let Some(webview) = app.get_webview(&session.webview_label) {
-        let _ = webview.close();
     }
     Ok(())
 }
@@ -3547,20 +3562,40 @@ pub(crate) fn open_system_target(target: &std::ffi::OsStr) -> Result<(), IpcErro
     #[cfg(not(target_os = "windows"))]
     {
         #[cfg(target_os = "macos")]
-        let program = "open";
+        let candidates: &[(&str, &[&str])] = &[("open", &[])];
+        // Minimal and sandboxed Linux setups may ship `gio` without `xdg-open`.
         #[cfg(not(target_os = "macos"))]
-        let program = "xdg-open";
-        let status = std::process::Command::new(program)
-            .arg(target)
-            .status()
-            .map_err(|error| IpcError::internal(error.to_string()))?;
-        if !status.success() {
-            return Err(IpcError::internal(format!(
-                "system opener exited with {status}"
-            )));
-        }
-        Ok(())
+        let candidates: &[(&str, &[&str])] = &[("xdg-open", &[]), ("gio", &["open"])];
+        open_with_first_available(candidates, target)
     }
+}
+
+/// Runs the first opener in `candidates` that exists. Only a missing program falls through
+/// to the next one; an opener that ran and failed is reported as is.
+#[cfg(not(target_os = "windows"))]
+fn open_with_first_available(
+    candidates: &[(&str, &[&str])],
+    target: &std::ffi::OsStr,
+) -> Result<(), IpcError> {
+    let mut missing = Vec::new();
+    for (program, args) in candidates {
+        match std::process::Command::new(program).args(*args).arg(target).status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                return Err(IpcError::internal(format!(
+                    "system opener {program} exited with {status}"
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(*program);
+            }
+            Err(error) => return Err(IpcError::internal(error.to_string())),
+        }
+    }
+    Err(IpcError::internal(format!(
+        "no system opener is installed (tried {})",
+        missing.join(", ")
+    )))
 }
 
 #[tauri::command]
@@ -3870,13 +3905,18 @@ mod tests {
         let exits: Vec<&str> = source[start..end]
             .split("return Err(BrowserError::CreateFailed(")
             .collect();
-        assert_eq!(exits.len(), 4, "expected three CreateFailed exits after the queue");
+        assert_eq!(
+            exits.len(),
+            5,
+            "expected three CreateFailed exits after the queue and one for a missing main window"
+        );
         let discards = [
             "discard_failed_creation(app, manager, &state.browser_id);",
             "discard_timed_out_creation(app, manager, &state);",
             "discard_failed_creation(app, manager, &state.browser_id);",
+            "discard_failed_session(manager, &state.browser_id);",
         ];
-        for (before, discard) in exits[..3].iter().zip(discards) {
+        for (before, discard) in exits[..4].iter().zip(discards) {
             assert!(
                 before.trim_end().ends_with(discard),
                 "a creation error exit must call {discard} first"
@@ -3933,6 +3973,21 @@ mod tests {
             assert!(super::shell_execute_result(failure).is_err());
         }
         assert!(super::shell_execute_result(33).is_ok());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn system_opener_falls_back_when_the_first_program_is_missing() {
+        let target = std::ffi::OsStr::new("https://example.test/");
+        let missing = "ferryx-test-opener-that-does-not-exist";
+        let no_args: &[&str] = &[];
+        let falls_back: &[(&str, &[&str])] = &[(missing, no_args), ("true", no_args)];
+        let failed_first: &[(&str, &[&str])] = &[("false", no_args), ("true", no_args)];
+        let only_missing: &[(&str, &[&str])] = &[(missing, no_args)];
+        assert!(super::open_with_first_available(falls_back, target).is_ok());
+        // A program that ran and failed is reported, never skipped for the next one.
+        assert!(super::open_with_first_available(failed_first, target).is_err());
+        assert!(super::open_with_first_available(only_missing, target).is_err());
     }
 
     #[test]
@@ -4035,6 +4090,21 @@ mod tests {
             std::path::Path::new(manifest_dir).join("Cargo.toml")
         );
         assert!(resolved.is_file());
+    }
+
+    #[test]
+    fn wait_deadline_clamps_huge_timeouts_without_overflow() {
+        let now = tokio::time::Instant::now();
+        assert_eq!(wait_deadline(now, Some(std::time::Duration::MAX)), now + MAX_WAIT_TIMEOUT);
+        assert_eq!(
+            wait_deadline(now, Some(std::time::Duration::from_millis(u64::MAX))),
+            now + MAX_WAIT_TIMEOUT
+        );
+        assert_eq!(wait_deadline(now, None), now + DEFAULT_WAIT_TIMEOUT);
+        assert_eq!(
+            wait_deadline(now, Some(std::time::Duration::from_secs(2))),
+            now + std::time::Duration::from_secs(2)
+        );
     }
 
     #[test]
@@ -4152,17 +4222,42 @@ mod tests {
     }
 
     #[test]
+    fn cookie_script_rejects_attribute_injection() {
+        assert!(build_cookie_script("set", Some("k"), Some("v; domain=.evil.test"), None, None)
+            .is_err());
+        assert!(build_cookie_script("set", Some("k; path=/"), Some("v"), None, None).is_err());
+        assert!(build_cookie_script("set", Some("k"), Some("v\r\nX"), None, None).is_err());
+        assert!(build_cookie_script("set", Some("k"), Some("v"), Some("a.com; secure"), None)
+            .is_err());
+        assert!(build_cookie_script("clear", Some("k"), None, None, Some("/; domain=x")).is_err());
+        assert!(build_cookie_script("set", Some("k"), Some("a=b"), None, None).is_ok());
+    }
+
+    #[test]
+    fn cookie_get_filter_ignores_action_case() {
+        let entries = parse_document_cookie(r#""a=1; b=2""#);
+        assert_eq!(entries.len(), 2);
+        let filtered = filter_cookie_entries("GET", Some("b"), entries.clone());
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "b");
+        assert_eq!(filter_cookie_entries("set", Some("b"), entries).len(), 2);
+    }
+
+    #[test]
     fn test_storage_script() {
-        let get_s = build_storage_script("local", "get", Some("key1"), None).unwrap();
+        let script = |kind, action, key, value| {
+            build_storage_script_extended(kind, action, key, value, false, None, None)
+        };
+        let get_s = script("local", "get", Some("key1"), None).unwrap();
         assert!(get_s.contains("localStorage.getItem"));
 
-        let set_s = build_storage_script("session", "set", Some("key2"), Some("val2")).unwrap();
+        let set_s = script("session", "set", Some("key2"), Some("val2")).unwrap();
         assert!(set_s.contains("sessionStorage.setItem"));
 
-        let clear_k = build_storage_script("local", "clear", Some("key1"), None).unwrap();
+        let clear_k = script("local", "clear", Some("key1"), None).unwrap();
         assert!(clear_k.contains("localStorage.removeItem"));
 
-        let clear_all = build_storage_script("local", "clear", None, None).unwrap();
+        let clear_all = script("local", "clear", None, None).unwrap();
         assert!(clear_all.contains("localStorage.clear"));
     }
 
@@ -4174,8 +4269,16 @@ mod tests {
         let clear_domain = build_storage_script_extended(
             "local", "clear", None, None, false, None, Some("example.com")
         ).unwrap();
-        assert!(clear_domain.contains("location.hostname.includes"));
-        assert!(clear_domain.contains("example.com"));
+        assert!(
+            !clear_domain.contains("location.hostname.includes"),
+            "a domain scope must not match by substring"
+        );
+        assert!(clear_domain.contains(r#"h === d || h.endsWith("." + d)"#));
+        assert!(clear_domain.contains(r#""example.com""#));
+        let dotted = build_storage_script_extended(
+            "local", "clear", None, None, false, None, Some(".Example.COM")
+        ).unwrap();
+        assert!(dotted.contains(r#""example.com""#));
 
         let clear_url = build_storage_script_extended(
             "session", "clear", None, None, false, Some("https://example.com/app"), None
@@ -4299,6 +4402,30 @@ mod tests {
             .expect_err("creating a directory under a regular file must fail");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert!(err.message.contains("failed to create directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_browser_state_file_is_owner_only_and_replaces_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, b"old").expect("seed existing state");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_browser_state_file(&path, b"{\"v\":2}").expect("write state");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"v\":2}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "state file holds session cookies and must be owner-only");
+    }
+
+    #[test]
+    fn storage_restore_requires_the_saved_origin() {
+        assert!(same_web_origin("https://a.com/x", "https://a.com/y?q=1"));
+        assert!(!same_web_origin("https://b.com/", "https://a.com/"));
+        assert!(!same_web_origin("http://a.com/", "https://a.com/"));
+        assert!(!same_web_origin("https://a.com:8443/", "https://a.com/"));
+        assert!(!same_web_origin("about:blank", "about:blank"));
+        assert!(!same_web_origin("not a url", "not a url"));
     }
 
     #[test]
@@ -4502,6 +4629,26 @@ pub fn build_cookie_script(
     domain: Option<&str>,
     path: Option<&str>,
 ) -> Result<String, String> {
+    // Every part is spliced into one `document.cookie` assignment, where `;` starts a new
+    // attribute: a value like `v; domain=.x` would otherwise set attributes of its own.
+    fn check_cookie_part(label: &str, part: &str, extra: &[char]) -> Result<(), String> {
+        match part.chars().find(|c| *c == ';' || c.is_control() || extra.contains(c)) {
+            Some(c) => Err(format!("cookie {label} contains a forbidden character {c:?}")),
+            None => Ok(()),
+        }
+    }
+    if let Some(name) = name {
+        check_cookie_part("name", name, &['='])?;
+    }
+    if let Some(value) = value {
+        check_cookie_part("value", value, &[])?;
+    }
+    if let Some(domain) = domain {
+        check_cookie_part("domain", domain, &[])?;
+    }
+    if let Some(path) = path {
+        check_cookie_part("path", path, &[])?;
+    }
     match action.to_ascii_lowercase().as_str() {
         "get" | "list" => Ok("(() => { return document.cookie; })()".to_string()),
         "set" => {
@@ -4588,12 +4735,20 @@ pub fn build_storage_script_extended(
                 return Err("cannot specify both key and --all for storage clear".to_string());
             }
             let u_filter = url.map(|u| serde_json::to_string(u).unwrap_or_else(|_| "\"\"".into()));
-            let d_filter = domain.map(|d| serde_json::to_string(d).unwrap_or_else(|_| "\"\"".into()));
+            // A domain scope matches the host itself or a subdomain of it, never any host that
+            // merely contains the text (`example.com` must not match `notexample.com`).
+            let d_filter = domain.map(|d| {
+                let normalized = d.trim().trim_start_matches('.').to_ascii_lowercase();
+                let d_json = serde_json::to_string(&normalized).unwrap_or_else(|_| "\"\"".into());
+                format!(
+                    "((h, d) => h === d || h.endsWith(\".\" + d))(location.hostname.toLowerCase(), {d_json})"
+                )
+            });
 
             let scope_check = match (u_filter, d_filter) {
-                (Some(u), Some(d)) => format!("if (!location.href.includes({u}) || !location.hostname.includes({d})) return null;"),
+                (Some(u), Some(d)) => format!("if (!location.href.includes({u}) || !{d}) return null;"),
                 (Some(u), None) => format!("if (!location.href.includes({u})) return null;"),
-                (None, Some(d)) => format!("if (!location.hostname.includes({d})) return null;"),
+                (None, Some(d)) => format!("if (!{d}) return null;"),
                 (None, None) => "".to_string(),
             };
 
@@ -4610,15 +4765,6 @@ pub fn build_storage_script_extended(
         }
         other => Err(format!("unknown storage action: {other}")),
     }
-}
-
-pub fn build_storage_script(
-    kind: &str,
-    action: &str,
-    key: Option<&str>,
-    value: Option<&str>,
-) -> Result<String, String> {
-    build_storage_script_extended(kind, action, key, value, false, None, None)
 }
 
 pub fn parse_storage_result(raw: &str) -> Option<String> {
@@ -4668,6 +4814,18 @@ pub async fn wait_browser_session<R: tauri::Runtime>(
     wait_browser_session_with_timeout(app, manager, browser_id, cond, timeout).await
 }
 
+const DEFAULT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Upper bound on a single browser wait; remote and CLI callers pass unclamped `timeoutMs`.
+const MAX_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn wait_deadline(
+    now: tokio::time::Instant,
+    timeout: Option<std::time::Duration>,
+) -> tokio::time::Instant {
+    let timeout = timeout.unwrap_or(DEFAULT_WAIT_TIMEOUT).min(MAX_WAIT_TIMEOUT);
+    now.checked_add(timeout).unwrap_or(now)
+}
+
 pub async fn wait_browser_session_with_timeout<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,
@@ -4680,8 +4838,7 @@ pub async fn wait_browser_session_with_timeout<R: tauri::Runtime>(
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
     let script = build_wait_condition_script(&condition);
-    let timeout = timeout.unwrap_or_else(|| std::time::Duration::from_secs(15));
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = wait_deadline(tokio::time::Instant::now(), timeout);
     let interval = std::time::Duration::from_millis(250);
 
     loop {
@@ -4695,11 +4852,18 @@ pub async fn wait_browser_session_with_timeout<R: tauri::Runtime>(
 
         let remaining = deadline - now;
         let eval_timeout = remaining.min(std::time::Duration::from_secs(5));
-        if let Ok(Ok(res)) =
-            tokio::time::timeout(eval_timeout, eval_webview(webview.clone(), script.clone())).await
+        match tokio::time::timeout(eval_timeout, eval_webview(webview.clone(), script.clone()))
+            .await
         {
-            if parse_eval_boolean(&res) {
-                return Ok(());
+            Ok(Ok(res)) if parse_eval_boolean(&res) => return Ok(()),
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => {
+                // A failed or timed-out eval is retried only while the tab still exists; a
+                // closed tab reports that instead of a later BROWSER_WAIT_TIMEOUT.
+                let current = manager.get_state(browser_id)?;
+                if app.get_webview(&current.webview_label).is_none() {
+                    return Err(BrowserError::WebviewNotFound(current.webview_label).into());
+                }
             }
         }
 
@@ -4808,13 +4972,22 @@ pub async fn cookies_browser_session<R: tauri::Runtime>(
     let script = build_cookie_script(action, name, value, domain, path)
         .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e))?;
     let raw = eval_webview(webview, script).await?;
-    let mut entries = parse_document_cookie(&raw);
-    if action == "get" || action == "list" {
+    Ok(filter_cookie_entries(action, name, parse_document_cookie(&raw)))
+}
+
+/// Narrows a `get`/`list` result to the named cookie. The action matches case-insensitively,
+/// like `build_cookie_script`, so `GET name` filters the same way `get name` does.
+fn filter_cookie_entries(
+    action: &str,
+    name: Option<&str>,
+    mut entries: Vec<crate::browser::model::BrowserCookieEntry>,
+) -> Vec<crate::browser::model::BrowserCookieEntry> {
+    if action.eq_ignore_ascii_case("get") || action.eq_ignore_ascii_case("list") {
         if let Some(target_name) = name {
             entries.retain(|c| c.name == target_name);
         }
     }
-    Ok(entries)
+    entries
 }
 
 pub struct BrowserStorageParams<'a> {
@@ -4842,22 +5015,6 @@ pub async fn storage_browser_session_extended<R: tauri::Runtime>(
         .map_err(|e| IpcError::new(IpcErrorCode::InvalidArgument, e))?;
     let raw = eval_webview(webview, script).await?;
     Ok(parse_storage_result(&raw))
-}
-
-pub async fn storage_browser_session<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    manager: &BrowserManager,
-    browser_id: &str,
-    kind: &str,
-    action: &str,
-    key: Option<&str>,
-    value: Option<&str>,
-) -> Result<Option<String>, IpcError> {
-    storage_browser_session_extended(
-        app, manager, browser_id,
-        BrowserStorageParams { kind, action, key, value, clear_all: false, url: None, domain: None },
-    )
-    .await
 }
 
 /// Persistent state representation for saving and restoring browser state.
@@ -4920,13 +5077,18 @@ pub async fn save_browser_state_session<R: tauri::Runtime>(
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
 
-    // Read full cookie jar with attributes including HttpOnly via Webview::cookies()
-    let raw_cookies = webview.cookies().map_err(|e| {
-        IpcError::new(
-            IpcErrorCode::InternalError,
-            format!("failed to read cookies from webview: {e}"),
-        )
-    })?;
+    // Read full cookie jar with attributes including HttpOnly via Webview::cookies(); the
+    // getter blocks on the main thread's reply, so it runs off the async workers.
+    let cookie_webview = webview.clone();
+    let raw_cookies = crate::ipc::run_blocking(move || {
+        cookie_webview.cookies().map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::InternalError,
+                format!("failed to read cookies from webview: {e}"),
+            )
+        })
+    })
+    .await?;
     let cookies = raw_cookies
         .into_iter()
         .map(|c| crate::browser::state_cookies::PersistedCookie::from_cookie(&c))
@@ -4969,22 +5131,30 @@ pub(crate) fn write_browser_state_file(
     path: &std::path::Path,
     json_bytes: &[u8],
 ) -> Result<(), IpcError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+    use std::io::Write;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
             std::fs::create_dir_all(parent).map_err(|e| {
                 IpcError::new(
                     IpcErrorCode::InternalError,
                     format!("failed to create directory for state file: {e}"),
                 )
             })?;
+            parent
         }
-    }
-    std::fs::write(path, json_bytes).map_err(|e| {
+        _ => std::path::Path::new("."),
+    };
+    let write_error = |e: std::io::Error| {
         IpcError::new(
             IpcErrorCode::InternalError,
             format!("failed to write state file '{}': {e}", path.display()),
         )
-    })?;
+    };
+    // The state holds HttpOnly session cookies: tempfile creates the file owner-only (0600 on
+    // unix), and the rename publishes it complete or not at all.
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(write_error)?;
+    file.write_all(json_bytes).map_err(write_error)?;
+    file.persist(path).map_err(|e| write_error(e.error))?;
     Ok(())
 }
 
@@ -5036,6 +5206,19 @@ pub async fn load_browser_state_session<R: tauri::Runtime>(
     })?;
 
     let cookies_to_restore = prepare_restored_cookies(&persistent_state)?;
+    // Web storage is written into whatever origin the tab shows now; refuse to plant one
+    // site's storage into another's. Cookies carry their own domain and are unaffected.
+    let has_storage =
+        !persistent_state.local_storage.is_empty() || !persistent_state.session_storage.is_empty();
+    if has_storage && !same_web_origin(&state.url, &persistent_state.url) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidArgument,
+            format!(
+                "browser state was saved on '{}' but the tab shows '{}'; open the saved origin before loading it",
+                persistent_state.url, state.url
+            ),
+        ));
+    }
     for cookie in cookies_to_restore {
         let cookie_name = cookie.name().to_string();
         webview.set_cookie(cookie).map_err(|e| {
@@ -5063,6 +5246,18 @@ pub async fn load_browser_state_session<R: tauri::Runtime>(
     let full_script = script_parts.join("\n");
     let _ = eval_webview(webview, full_script).await?;
     Ok(())
+}
+
+/// True when both URLs parse and share a tuple (scheme, host, port) origin. Opaque origins
+/// (about:blank, data:, malformed URLs) never match.
+fn same_web_origin(a: &str, b: &str) -> bool {
+    match (url::Url::parse(a), url::Url::parse(b)) {
+        (Ok(a), Ok(b)) => {
+            let (a, b) = (a.origin(), b.origin());
+            a.is_tuple() && a == b
+        }
+        _ => false,
+    }
 }
 
 /// Trait hook for external daemon transport to execute authoritative desktop reclaim (R5-5).
@@ -5106,18 +5301,24 @@ impl DaemonReclaimTransport for ProductionDaemonReclaimTransport {
                 return Ok(lease.map(|l| l.lease_epoch).unwrap_or(1));
             }
 
-            // 2. Authoritative daemon-side reclaim: revoke control permissions & clear active selection
-            let devices = self
-                .daemon_client
-                .remote_list_devices()
-                .await
-                .unwrap_or_default();
+            // 2. Authoritative daemon-side reclaim: revoke control permissions & clear active selection.
+            // Every failure propagates: reporting a reclaim that left a device in control is a
+            // security-relevant false success. All revokes are attempted before the first error returns.
+            let devices = self.daemon_client.remote_list_devices().await?;
+            let mut first_error = None;
             for dev in devices {
                 if dev.permission == crate::remote::DevicePermission::Control {
-                    let _ = self.daemon_client.remote_revoke_device(&dev.id).await;
+                    if let Err(error) = self.daemon_client.remote_revoke_device(&dev.id).await {
+                        first_error.get_or_insert(error);
+                    }
                 }
             }
-            let _ = self.daemon_client.remote_set_active_selection(None).await;
+            if let Err(error) = self.daemon_client.remote_set_active_selection(None).await {
+                first_error.get_or_insert(error);
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
 
             let epoch = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5179,7 +5380,7 @@ pub async fn cmd_browser_remote_reclaim<R: tauri::Runtime>(
                 }
             } else {
                 return Err(IpcError::new(
-                    IpcErrorCode::Custom("BROWSER_UNAVAILABLE".into()),
+                    IpcErrorCode::BrowserHostUnavailable,
                     "DaemonReclaimTransport is not available in daemon mode",
                 ));
             }
@@ -5230,17 +5431,21 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
             use crate::remote::browser_backend::{BrowserCommandResult, RemoteBrowserError};
 
             if let Some(ref exp_gen) = ctx.document_generation {
-                if let Ok(expected) = exp_gen.parse::<u64>() {
-                    let st = self
-                        .manager
-                        .get_state(&ctx.browser_id)
-                        .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
-                    if st.generation != expected {
-                        return Err(RemoteBrowserError::Forbidden(format!(
-                            "Document generation fencing failed: expected {expected}, current {}",
-                            st.generation
-                        )));
-                    }
+                // A fence that cannot be parsed must refuse, never skip the check.
+                let expected = exp_gen.trim().parse::<u64>().map_err(|_| {
+                    RemoteBrowserError::InvalidRequest(format!(
+                        "invalid documentGeneration: {exp_gen}"
+                    ))
+                })?;
+                let st = self
+                    .manager
+                    .get_state(&ctx.browser_id)
+                    .map_err(|_| RemoteBrowserError::NotFound(ctx.browser_id.clone()))?;
+                if st.generation != expected {
+                    return Err(RemoteBrowserError::Forbidden(format!(
+                        "Document generation fencing failed: expected {expected}, current {}",
+                        st.generation
+                    )));
                 }
             }
 
@@ -5261,11 +5466,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         crate::browser::security::BrowserSecurityContext::Remote,
                     )
                     .await
-                    .map_err(|e| match e.code {
-                        IpcErrorCode::BrowserUrlSchemeDenied => RemoteBrowserError::Forbidden(e.message),
-                        IpcErrorCode::BrowserUrlInvalid => RemoteBrowserError::InvalidRequest(e.message),
-                        _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
-                    })?;
+                    .map_err(ipc_to_remote)?;
                     let state = self
                         .manager
                         .get_state(&ctx.browser_id)
@@ -5281,7 +5482,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                 }
                 "back" => {
                     history_navigation(&self.app, &self.manager, &ctx.browser_id, false)
-                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                        .map_err(ipc_to_remote)?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: None,
@@ -5289,24 +5490,43 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                 }
                 "forward" => {
                     history_navigation(&self.app, &self.manager, &ctx.browser_id, true)
-                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                        .map_err(ipc_to_remote)?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: None,
                     })
                 }
                 "reload" => {
+                    // Resolve the webview before marking the tab loading, so a missing
+                    // webview leaves no stuck `loading` state behind.
+                    let label = self
+                        .manager
+                        .get_webview_label(&ctx.browser_id)
+                        .map_err(|e| ipc_to_remote(e.into()))?;
+                    let webview = self
+                        .app
+                        .get_webview(&label)
+                        .ok_or_else(|| ipc_to_remote(BrowserError::WebviewNotFound(label).into()))?;
                     let state = self
                         .manager
                         .begin_reload(&ctx.browser_id)
-                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
-                    let webview = self
-                        .app
-                        .get_webview(&state.webview_label)
-                        .ok_or_else(|| RemoteBrowserError::NotFound(state.webview_label.clone()))?;
-                    webview
-                        .reload()
-                        .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                        .map_err(|e| ipc_to_remote(e.into()))?;
+                    emit_browser_state(&webview, &state);
+                    if let Err(error) = webview.reload() {
+                        let message = error.to_string();
+                        if let Ok(error_state) = self.manager.update_navigation_state(
+                            &ctx.browser_id,
+                            None,
+                            None,
+                            Some(false),
+                            None,
+                            None,
+                            Some(message.clone()),
+                        ) {
+                            emit_browser_state(&webview, &error_state);
+                        }
+                        return Err(RemoteBrowserError::ExecutionFailed(message));
+                    }
                     Ok(BrowserCommandResult {
                         success: true,
                         value: None,
@@ -5322,21 +5542,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         .manager
                         .get_geometry(&ctx.browser_id)
                         .unwrap_or((None, 1.0, 1));
-                    if let Some(vp_str) = p
-                        .get("viewportRevision")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| p.get("viewport_revision").and_then(|v| v.as_str()))
-                    {
-                        if let Ok(expected_vp) = vp_str.parse::<u64>() {
-                            if expected_vp != current_vp_rev {
-                                return Err(RemoteBrowserError::StaleFrame("viewport revision changed since frame capture".into()));
-                            }
-                        }
-                    } else if let Some(expected_vp) = p
-                        .get("viewportRevision")
-                        .or_else(|| p.get("viewport_revision"))
-                        .and_then(|v| v.as_u64())
-                    {
+                    if let Some(expected_vp) = expected_viewport_revision(p)? {
                         if expected_vp != current_vp_rev {
                             return Err(RemoteBrowserError::StaleFrame("viewport revision changed since frame capture".into()));
                         }
@@ -5508,7 +5714,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                     let (eval_res, truncated) =
                         eval_browser_session(&self.app, &self.manager, &ctx.browser_id, script)
                             .await
-                            .map_err(|e| RemoteBrowserError::ExecutionFailed(e.to_string()))?;
+                            .map_err(ipc_to_remote)?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::json!({
@@ -5531,15 +5737,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         selector,
                     )
                     .await
-                    .map_err(|e| match e.code {
-                        IpcErrorCode::BrowserAutomationTargetNotFound => {
-                            RemoteBrowserError::TargetNotFound(e.message)
-                        }
-                        IpcErrorCode::InvalidArgument => {
-                            RemoteBrowserError::InvalidRequest(e.message)
-                        }
-                        _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
-                    })?;
+                    .map_err(ipc_to_remote)?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: Some(serde_json::to_value(&res).unwrap_or_default()),
@@ -5559,10 +5757,7 @@ impl<R: tauri::Runtime> crate::remote::browser_backend::BrowserCommandExecutor
                         timeout,
                     )
                     .await
-                    .map_err(|e| match e.code {
-                        IpcErrorCode::BrowserWaitTimeout => RemoteBrowserError::WaitTimeout,
-                        _ => RemoteBrowserError::ExecutionFailed(e.to_string()),
-                    })?;
+                    .map_err(ipc_to_remote)?;
                     Ok(BrowserCommandResult {
                         success: true,
                         value: None,
@@ -5678,6 +5873,54 @@ pub(crate) fn remote_keypress_script(
             return JSON.stringify({{ ok: true }});
         }})()"#
     ))
+}
+
+/// The one mapping from a local browser error onto the remote error surface, by code only:
+/// every remote command reports a missing tab, a refused URL, a stale reference or a wait
+/// timeout the same way.
+fn ipc_to_remote(e: IpcError) -> crate::remote::browser_backend::RemoteBrowserError {
+    use crate::remote::browser_backend::RemoteBrowserError;
+    match e.code {
+        IpcErrorCode::BrowserNotFound
+        | IpcErrorCode::WebviewNotFound
+        | IpcErrorCode::BrowserTabNotFound => RemoteBrowserError::NotFound(e.message),
+        IpcErrorCode::BrowserUrlSchemeDenied => RemoteBrowserError::Forbidden(e.message),
+        // A stale snapshot means the document moved on, which the snapshot path already
+        // reports as a generation-fence refusal.
+        IpcErrorCode::BrowserStaleRef | IpcErrorCode::BrowserAutomationSnapshotStale => {
+            RemoteBrowserError::Forbidden(e.message)
+        }
+        IpcErrorCode::BrowserUrlInvalid
+        | IpcErrorCode::BrowserBoundsInvalid
+        | IpcErrorCode::InvalidArgument => RemoteBrowserError::InvalidRequest(e.message),
+        IpcErrorCode::BrowserInvalidReference | IpcErrorCode::BrowserAutomationTargetNotFound => {
+            RemoteBrowserError::TargetNotFound(e.message)
+        }
+        IpcErrorCode::BrowserWaitTimeout => RemoteBrowserError::WaitTimeout,
+        IpcErrorCode::BrowserHostUnavailable => RemoteBrowserError::Unavailable(e.message),
+        _ => RemoteBrowserError::ExecutionFailed(e.message),
+    }
+}
+
+/// Reads a point-click's `viewportRevision` fence. A present value that is not a
+/// non-negative integer (number or decimal string) is refused rather than skipped.
+fn expected_viewport_revision(
+    p: &serde_json::Value,
+) -> Result<Option<u64>, crate::remote::browser_backend::RemoteBrowserError> {
+    use crate::remote::browser_backend::RemoteBrowserError;
+    let Some(raw) = p
+        .get("viewportRevision")
+        .or_else(|| p.get("viewport_revision"))
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(None);
+    };
+    raw.as_u64()
+        .or_else(|| raw.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        .map(Some)
+        .ok_or_else(|| {
+            RemoteBrowserError::InvalidRequest(format!("invalid viewportRevision: {raw}"))
+        })
 }
 
 /// Maps a decoded fill/type failure onto the remote error surface.
@@ -5842,6 +6085,12 @@ pub fn build_fill_script(
                 return JSON.stringify({{ ok: true }});
             }})()"#
         ))
+    } else if raw_ref.is_some() {
+        // A snapshot ref without its snapshot cannot be resolved; never retarget the
+        // value to whatever element happens to be focused.
+        Err(RemoteBrowserError::InvalidRequest(
+            "remote fill requires snapshotId".into(),
+        ))
     } else {
         // Fallback to active element
         Ok(format!(
@@ -5874,6 +6123,16 @@ pub fn build_fill_script(
 mod r6_fill_tests {
     use super::*;
 
+    /// Builds a mock webview under a session's label so navigation has a target.
+    fn open_mock_webview(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        label: &str,
+    ) -> tauri::WebviewWindow<tauri::test::MockRuntime> {
+        tauri::WebviewWindowBuilder::new(app, label, Default::default())
+            .build()
+            .expect("mock webview")
+    }
+
     #[test]
     fn test_r6_10_fill_active_and_css_skip_snapshot_work() {
         // Mobile IME default: reference is "active", no snapshot_id
@@ -5891,6 +6150,21 @@ mod r6_fill_tests {
             !script.contains("querySelector"),
             "Active fill must not querySelector"
         );
+    }
+
+    #[test]
+    fn fill_with_ref_but_no_snapshot_is_rejected_not_retargeted() {
+        use crate::remote::browser_backend::RemoteBrowserError;
+        for params in [
+            serde_json::json!({ "ref": "e3", "value": "secret" }),
+            serde_json::json!({ "reference": "e3", "value": "secret" }),
+        ] {
+            let res = build_fill_script(None, "b1", &params);
+            assert!(
+                matches!(res, Err(RemoteBrowserError::InvalidRequest(_))),
+                "a ref without snapshotId must be InvalidRequest: {params}"
+            );
+        }
     }
 
     #[test]
@@ -5993,6 +6267,7 @@ mod r6_fill_tests {
             })
             .unwrap();
         assert!(crate::browser::popup::link(&popup.browser_id, "b-popup-nav-opener", "h1"));
+        let _webview = open_mock_webview(&app, &popup.webview_label);
         let refused = navigate_linked_popup(
             app.handle(),
             &manager,
@@ -6031,6 +6306,7 @@ mod r6_fill_tests {
                 visible: Some(true),
             })
             .unwrap();
+        let _webview = open_mock_webview(&app, &state.webview_label);
         let executor = GuiBrowserCommandExecutor::new(app.handle().clone(), Arc::clone(&manager));
         let res = executor
             .execute(BrowserCommandContext {
@@ -6062,6 +6338,291 @@ mod r6_fill_tests {
         navigate_browser_session(app.handle(), &manager, &state.browser_id, "file:///tmp/x.html")
             .await
             .expect("local navigate keeps the local file policy");
+    }
+
+    #[tokio::test]
+    async fn navigate_without_webview_fails_and_leaves_state_untouched() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-nav-no-webview".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let before = manager.get_state(&state.browser_id).unwrap();
+        let err = navigate_browser_session(app.handle(), &manager, &state.browser_id, "https://example.org/")
+            .await
+            .expect_err("navigation without a webview must fail");
+        assert_eq!(err.code, IpcErrorCode::WebviewNotFound);
+        let after = manager.get_state(&state.browser_id).unwrap();
+        assert_eq!(after.url, before.url);
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.loading, before.loading);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_reports_a_closed_tab_instead_of_timing_out() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-wait-closed".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let _webview = open_mock_webview(&app, &state.webview_label);
+        let handle = app.handle().clone();
+        let mut wait = Box::pin(wait_browser_session_with_timeout(
+            &handle,
+            &manager,
+            &state.browser_id,
+            crate::browser::model::BrowserWaitCondition::Selector { selector: "#never".into() },
+            Some(std::time::Duration::from_secs(60)),
+        ));
+        // The mock runtime drops every eval callback, so each poll's eval fails at once; with
+        // the tab still open the wait retries and parks on its poll interval.
+        assert!(futures_util::poll!(wait.as_mut()).is_pending());
+        app.get_webview(&state.webview_label)
+            .expect("webview is open")
+            .close()
+            .expect("close webview");
+        let err = tokio::time::timeout(std::time::Duration::from_secs(600), wait)
+            .await
+            .expect("the wait must settle")
+            .expect_err("a closed tab must fail the wait");
+        assert_eq!(err.code, IpcErrorCode::WebviewNotFound);
+    }
+
+    #[tokio::test]
+    async fn create_without_main_window_fails_and_registers_nothing() {
+        use tauri::Manager;
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        assert!(app.get_window("main").is_none(), "the mock app has no main window");
+        let manager = Arc::new(BrowserManager::new());
+        let err = create_browser_session(
+            app.handle(),
+            &manager,
+            crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-no-main".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            },
+        )
+        .await
+        .expect_err("creation without a main window must fail");
+        assert_eq!(err.code, IpcErrorCode::BrowserCreateFailed);
+        assert!(manager.get_state("b-no-main").is_err());
+        assert!(!CREATED_SESSION_IDS.lock().iter().any(|id| id == "b-no-main"));
+    }
+
+    #[tokio::test]
+    async fn state_load_refuses_storage_from_another_origin() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-state-origin".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://b.example/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let _webview = open_mock_webview(&app, &state.webview_label);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"browserId":"b-saved","url":"https://a.example/","localStorage":{"token":"secret"}}"#,
+        )
+        .expect("write state");
+        let err = load_browser_state_session(
+            app.handle(),
+            &manager,
+            &state.browser_id,
+            path.to_str().unwrap(),
+        )
+        .await
+        .expect_err("another origin's storage must not be restored here");
+        assert_eq!(err.code, IpcErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn history_navigation_without_webview_reports_webview_not_found_and_keeps_state() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-history-no-webview".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        manager
+            .update_url_with_context(
+                &state.browser_id,
+                "https://example.org/",
+                crate::browser::security::BrowserSecurityContext::Local,
+            )
+            .unwrap();
+        manager
+            .update_navigation_state(&state.browser_id, None, None, Some(false), None, None, None)
+            .unwrap();
+        let before = manager.get_state(&state.browser_id).unwrap();
+        let err = history_navigation(app.handle(), &manager, &state.browser_id, false)
+            .expect_err("history navigation without a webview must fail");
+        assert_eq!(err.code, IpcErrorCode::WebviewNotFound);
+        let after = manager.get_state(&state.browser_id).unwrap();
+        assert_eq!(after.url, before.url);
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.loading, before.loading);
+    }
+
+    #[tokio::test]
+    async fn remote_reload_without_webview_is_not_found_and_not_left_loading() {
+        use crate::remote::browser_backend::{
+            BrowserCommandContext, BrowserCommandExecutor, RemoteBrowserError,
+        };
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-remote-reload".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com/".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        manager
+            .update_navigation_state(&state.browser_id, None, None, Some(false), None, None, None)
+            .unwrap();
+        let before = manager.get_state(&state.browser_id).unwrap();
+        let executor = GuiBrowserCommandExecutor::new(app.handle().clone(), Arc::clone(&manager));
+        let res = executor
+            .execute(BrowserCommandContext {
+                browser_id: state.browser_id.clone(),
+                command: "reload".into(),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(res, Err(RemoteBrowserError::NotFound(_))),
+            "a missing webview must map to NotFound, got {res:?}"
+        );
+        let after = manager.get_state(&state.browser_id).unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert!(!after.loading);
+    }
+
+    #[test]
+    fn ipc_errors_map_to_remote_errors_by_code() {
+        use crate::remote::browser_backend::RemoteBrowserError;
+        let map = |code| ipc_to_remote(IpcError::new(code, "m"));
+        assert!(matches!(map(IpcErrorCode::BrowserNotFound), RemoteBrowserError::NotFound(_)));
+        assert!(matches!(map(IpcErrorCode::WebviewNotFound), RemoteBrowserError::NotFound(_)));
+        assert!(matches!(
+            map(IpcErrorCode::BrowserUrlSchemeDenied),
+            RemoteBrowserError::Forbidden(_)
+        ));
+        assert!(matches!(
+            map(IpcErrorCode::BrowserUrlInvalid),
+            RemoteBrowserError::InvalidRequest(_)
+        ));
+        assert!(matches!(
+            map(IpcErrorCode::BrowserInvalidReference),
+            RemoteBrowserError::TargetNotFound(_)
+        ));
+        assert!(matches!(map(IpcErrorCode::BrowserWaitTimeout), RemoteBrowserError::WaitTimeout));
+        assert!(matches!(
+            map(IpcErrorCode::BrowserAutomationFailed),
+            RemoteBrowserError::ExecutionFailed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn file_cookie_import_reports_profile_and_tab_failures_like_installed_import() {
+        use tauri::Manager;
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        app.manage(Arc::new(BrowserManager::new()));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("cookies.txt");
+        std::fs::write(&file, ".example.com\tTRUE\t/\tFALSE\t0\tsid\tabc\n")
+            .expect("write cookie file");
+        let import = |profile_id: &str| ImportBrowserCookiesRequest {
+            profile_id: profile_id.into(),
+            file_path: file.to_string_lossy().into_owned(),
+        };
+        let reason = |e: &IpcError| {
+            e.details
+                .as_ref()
+                .and_then(|d| d.get("reason"))
+                .and_then(|r| r.as_str())
+                .map(str::to_owned)
+        };
+
+        let bad = cmd_browser_import_cookies(
+            app.handle().clone(),
+            app.state::<Arc<BrowserManager>>(),
+            import("not a valid profile!"),
+        )
+        .await
+        .expect_err("an unknown profile must fail");
+        assert_eq!(bad.code, IpcErrorCode::BrowserCookieImportFailed);
+        assert_eq!(reason(&bad).as_deref(), Some("no-profile"));
+
+        let no_tab = cmd_browser_import_cookies(
+            app.handle().clone(),
+            app.state::<Arc<BrowserManager>>(),
+            import("default"),
+        )
+        .await
+        .expect_err("a profile with no open tab must fail");
+        assert_eq!(no_tab.code, IpcErrorCode::BrowserCookieImportFailed);
+        assert_eq!(reason(&no_tab).as_deref(), Some("no-tab"));
     }
 
     #[tokio::test]
@@ -6109,6 +6670,62 @@ mod r6_fill_tests {
         );
         assert!(!script.contains(r#"" a ""#), "raw padded key must not be dispatched");
         assert!(remote_keypress_script("\u{1b}").is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_executor_refuses_unparseable_document_generation_fence() {
+        use crate::remote::browser_backend::{
+            BrowserCommandContext, BrowserCommandExecutor, RemoteBrowserError,
+        };
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let state = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("b-remote-fence".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        let executor = GuiBrowserCommandExecutor::new(app.handle().clone(), Arc::clone(&manager));
+        let res = executor
+            .execute(BrowserCommandContext {
+                browser_id: state.browser_id.clone(),
+                command: "getState".into(),
+                document_generation: Some("abc".into()),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            matches!(res, Err(RemoteBrowserError::InvalidRequest(_))),
+            "an unparseable documentGeneration must refuse, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn viewport_revision_fence_refuses_unparseable_values() {
+        use crate::remote::browser_backend::RemoteBrowserError;
+        assert_eq!(expected_viewport_revision(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            expected_viewport_revision(&serde_json::json!({ "viewportRevision": "7" })).unwrap(),
+            Some(7)
+        );
+        assert_eq!(
+            expected_viewport_revision(&serde_json::json!({ "viewport_revision": 9 })).unwrap(),
+            Some(9)
+        );
+        for bad in [serde_json::json!("abc"), serde_json::json!(-1), serde_json::json!(1.5)] {
+            assert!(matches!(
+                expected_viewport_revision(&serde_json::json!({ "viewportRevision": bad })),
+                Err(RemoteBrowserError::InvalidRequest(_))
+            ));
+        }
     }
 
     /// Fill and click decode through one variant-based mapping: a typed refusal is
@@ -6173,9 +6790,9 @@ mod r6_fill_tests {
 
         // In daemon mode without transport or PureGuiMode flag, reclaim MUST be rejected!
         let res = cmd_browser_remote_reclaim(app.handle().clone()).await;
-        assert!(
-            res.is_err(),
-            "Must reject missing DaemonReclaimTransport in daemon mode"
+        assert_eq!(
+            res.expect_err("Must reject missing DaemonReclaimTransport in daemon mode").code,
+            IpcErrorCode::BrowserHostUnavailable
         );
     }
 
@@ -6198,6 +6815,31 @@ mod r6_fill_tests {
         assert!(
             res.is_ok(),
             "PureGuiMode(true) must allow local broker fallback"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn production_reclaim_transport_fails_when_daemon_is_unreachable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        // No daemon listens here, and an existing-only client never spawns one.
+        let daemon_client = Arc::new(crate::daemon::client::DaemonClient::existing_only_at(
+            directory.path().join("daemon.sock"),
+            std::time::Duration::ZERO,
+        ));
+        let remote_manager = Arc::new(crate::ipc::remote::RemoteGatewayManager::from_daemon(
+            Arc::clone(&daemon_client),
+        ));
+        let transport = ProductionDaemonReclaimTransport::new(remote_manager, daemon_client);
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            transport.reclaim_daemon_broker(),
+        )
+        .await
+        .expect("reclaim against an absent daemon must settle");
+        assert!(
+            res.is_err(),
+            "reclaim must not report success when the daemon could not revoke control, got {res:?}"
         );
     }
 
@@ -6339,4 +6981,37 @@ mod popup_handle_tests {
 
         crate::browser::popup::clear_all();
     }
+
+    #[tokio::test]
+    async fn closing_an_opener_drops_its_pending_closes_and_popup_links() {
+        let _guard = crate::browser::popup::registry_test_lock().lock().await;
+        crate::browser::popup::clear_all();
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        let manager = Arc::new(BrowserManager::new());
+        let opener = manager
+            .register_session(crate::browser::model::CreateBrowserRequest {
+                browser_id: Some("browser-opener-closing".into()),
+                workspace_id: Some("ws1".into()),
+                worktree_path: None,
+                url: "https://example.com".into(),
+                profile: None,
+                zoom_factor: None,
+                bounds: None,
+                visible: Some(true),
+            })
+            .unwrap();
+        crate::browser::popup::record_pending_close(&opener.browser_id, "never-created");
+        assert!(crate::browser::popup::link("browser-popup-orphan", &opener.browser_id, "p1"));
+
+        close_browser_session(app.handle(), &manager, &opener.browser_id)
+            .await
+            .expect("close the opener");
+
+        assert!(!crate::browser::popup::is_pending_close(&opener.browser_id, "never-created"));
+        assert_eq!(crate::browser::popup::lookup("browser-popup-orphan"), None);
+        crate::browser::popup::clear_all();
+    }
+
 }

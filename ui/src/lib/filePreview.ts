@@ -80,6 +80,8 @@ export type FilePreviewState =
       readonly payload: FilePreviewPayload;
       readonly remainingChildHandles: number;
       readonly notice: FilePreviewNotice | null;
+      readonly refreshing?: boolean;
+      readonly refreshFailure?: FilePreviewFailure;
     }
   | {
       readonly status: "failed";
@@ -190,6 +192,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
   const openExternalUrl = deps.openExternalUrl ?? defaultOpenExternalUrl;
 
   let generation = 0;
+  let openSequence = 0;
   let state: FilePreviewState = { status: "closed" };
   const listeners = new Set<() => void>();
 
@@ -232,27 +235,42 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
   }
 
   async function runOpen(source: FilePreviewSource, request: FilePreviewOpenRequest): Promise<void> {
-    const current = beginGeneration();
-    setState({ status: "loading", generation: current, source, request });
+    const { freshRemoteSnapshot, ...retainedRequest } = request;
+    request = retainedRequest;
+    const sequence = ++openSequence;
+    const preserved = request.remote && state.status === "ready" ? state : null;
+    const current = preserved ? generation : beginGeneration();
+    if (preserved) setState({ ...preserved, refreshing: true, refreshFailure: undefined });
+    else setState({ status: "loading", generation: current, source, request });
     try {
+      if (request.remote && !freshRemoteSnapshot) {
+        const remote = request.remote;
+        const fetched = await invoke<{ localPath: string; remotePath: string }>(
+          remote.workspaceId.startsWith("daemon:") ? "cmd_paired_file_fetch" : "cmd_remote_file_fetch",
+          { workspaceId: remote.workspaceId, path: remote.path, cwd: null, sessionId: null },
+        );
+        if (sequence !== openSequence) return;
+        request = { ...request, path: fetched.localPath, remote: { ...remote, path: fetched.remotePath } };
+      }
       const payload = await invoke<FilePreviewPayload>(FILE_PREVIEW_COMMANDS.open, {
-        ownerId: deps.ownerId,
+        ownerId: request.remote ? `${deps.ownerId ?? "remote-preview"}:${crypto.randomUUID()}` : deps.ownerId,
         path: request.path,
         backendSessionId: request.backendSessionId,
         workspaceId: source.workspaceId ?? null,
         line: request.line,
         col: request.col,
       });
-      if (current !== generation) {
+      if (sequence !== openSequence || current !== generation) {
         // Late reply from a superseded or closed request: release it and never
         // show it.
         release(payload.handle);
         return;
       }
+      const committedGeneration = preserved ? beginGeneration() : current;
       mainHandle = payload.handle;
       setState({
         status: "ready",
-        generation: current,
+        generation: committedGeneration,
         source,
         request,
         payload,
@@ -260,7 +278,13 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
         notice: null,
       });
     } catch (error) {
-      if (current !== generation) return;
+      if (sequence !== openSequence || current !== generation) return;
+      if (preserved) {
+        if (state.status === "ready") {
+          setState({ ...state, refreshing: false, refreshFailure: toFilePreviewFailure(error, "The remote file could not be refreshed.") });
+        }
+        return;
+      }
       setState({
         status: "failed",
         generation: current,
@@ -338,7 +362,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
         if (capabilityGeneration !== generation) return;
         const live = state;
         if (live.status !== "ready" || live.generation !== capabilityGeneration) return;
-        const resolvedPath = (live.payload as { resolvedPath?: string | null }).resolvedPath;
+        const resolvedPath = live.request.remote?.path ?? live.payload.resolvedPath;
         if (typeof resolvedPath === "string" && resolvedPath.length > 0) {
           const target = resolveMarkdownDocumentPath(resolvedPath, relativePath);
           window.dispatchEvent(
@@ -347,6 +371,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
                 source: live.source,
                 request: {
                   path: target,
+                  ...(live.request.remote ? { remote: { ...live.request.remote, path: target } } : {}),
                   backendSessionId: live.request.backendSessionId,
                   line: null,
                   col: null,
@@ -393,6 +418,7 @@ export function createFilePreviewController(deps: Partial<FilePreviewDeps> = {})
       await runOpen(snapshot.source, snapshot.request);
     },
     close: async () => {
+      openSequence += 1;
       beginGeneration();
       if (state.status !== "closed") setState({ status: "closed" });
     },
