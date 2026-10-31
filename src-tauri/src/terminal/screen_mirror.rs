@@ -50,6 +50,9 @@ pub struct ScreenMirror {
     program_status: Option<Arc<parking_lot::Mutex<ProgramStatusRecords>>>,
     /// The summary last handed out by [`Self::take_program_status`], to report only changes.
     published_summary: Option<ProgramStatusSummary>,
+    /// The revision of the newest program status update, 0 before any. Every record applied
+    /// so far carries this revision or an older one.
+    program_status_revision: u64,
 }
 
 /// A mirror's screen in transferable form: the size it was taken at and the VT bytes that
@@ -170,6 +173,7 @@ impl ScreenMirror {
             activity: Arc::new(Notify::new()),
             program_status: None,
             published_summary: None,
+            program_status_revision: 0,
         })
     }
 
@@ -236,28 +240,39 @@ impl ScreenMirror {
         self.update_program_status(ProgramStatusRecords::acknowledge)
     }
 
-    /// The foreground program exited: drops `working`/`blocked`/`idle` records. `None` when not
-    /// opted in, else whether the summary changed and the summary afterwards.
-    pub fn program_status_exited(&mut self) -> Option<(bool, ProgramStatusChange)> {
-        self.update_program_status(ProgramStatusRecords::program_exited)
+    /// The foreground program exited, as proven by evidence gathered while `through` was the
+    /// session's newest published revision: drops the `working`/`blocked`/`idle` records applied
+    /// by then, under this mirror's lock, and keeps any applied later. `None` when not opted in,
+    /// else whether the summary changed and the summary afterwards.
+    pub fn program_status_exited(&mut self, through: u64) -> Option<(bool, ProgramStatusChange)> {
+        self.update_program_status(|records| records.program_exited(through))
+    }
+
+    /// The revision of the newest program status update, 0 before any: evidence gathered after
+    /// reading it covers every record applied by then.
+    pub fn program_status_revision(&self) -> u64 {
+        self.program_status_revision
     }
 
     /// Applies `update` and returns whether the summary changed, with the summary afterwards
     /// under a revision taken here, while the caller holds this mirror's lock. A publisher
     /// drops a change only when it already applied a newer one, so unchanged summaries need no
-    /// re-publication.
+    /// re-publication. Records applied since the last update are stamped with that revision.
     fn update_program_status(
         &mut self,
         update: impl FnOnce(&mut ProgramStatusRecords),
     ) -> Option<(bool, ProgramStatusChange)> {
+        let revision = next_revision();
         let summary = {
             let mut records = self.program_status.as_ref()?.lock();
             update(&mut records);
+            records.stamp(revision);
             records.summary()
         };
+        self.program_status_revision = revision;
         let changed = summary != self.published_summary;
         self.published_summary = summary.clone();
-        Some((changed, ProgramStatusChange { revision: next_revision(), summary }))
+        Some((changed, ProgramStatusChange { revision, summary }))
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
