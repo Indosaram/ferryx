@@ -959,8 +959,10 @@ mod tests {
         let session = manager.get_session(&id).unwrap();
         // The output receiver exists before any action. Each marker is a protocol
         // handshake, not a timing delay; the agent then blocks silently in read.
+        // The marker is split in the command so its echo (by the tty before `stty -echo`
+        // applies, or by readline) cannot match: only the prompt drawn after the line ran can.
         session
-            .write_input(b"stty -echo; PS1='SHELL_READY>'\n")
+            .write_input(b"stty -echo; PS1='SHELL_''READY>'\n")
             .unwrap();
         output_until(&mut output, "SHELL_READY>").await;
         session
@@ -1556,10 +1558,13 @@ mod tests {
         let (shell_id, mut shell_output) = manager.spawn(shell_command, 80, 24).unwrap();
         let shell = manager.get_session(&shell_id).unwrap();
         // Each marker is a protocol handshake, not a timing delay: the shell owns the
-        // foreground exactly once it has printed its prompt.
+        // foreground exactly once it has printed its prompt. The marker is split in the
+        // command so the echoed command line cannot match it before `stty` has run: while
+        // `stty` runs it, not the shell, owns the foreground group, which a listing taken
+        // before it forked does not contain.
         for (session, output) in [(&agent, &mut agent_output), (&shell, &mut shell_output)] {
             session
-                .write_input(b"stty -echo; PS1='SHELL_READY>'\n")
+                .write_input(b"stty -echo; PS1='SHELL_''READY>'\n")
                 .unwrap();
             output_until(output, "SHELL_READY>").await;
         }
