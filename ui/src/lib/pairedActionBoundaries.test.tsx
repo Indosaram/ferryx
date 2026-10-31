@@ -59,11 +59,16 @@ it("paired shell recovery cannot spawn a local replacement", async () => {
   await expect(replaceExitedShellSession(session.id, { getSessions: () => ({ pane: session }), dispatch: vi.fn(), spawn })).rejects.toBeTruthy();
   expect(spawn).not.toHaveBeenCalled();
 });
-it("paired agent recovery cannot validate or spawn through local provider APIs", async () => {
-  const spawn = vi.fn();
+it("paired agent recovery resumes on the paired workspace, never on this machine", async () => {
+  const spawn = vi.fn().mockRejectedValue({ code: "SPAWN_FAILED", message: "remote spawn refused" });
   const agent = { ...session, agentType: "claude", providerSession: { key: "session_id" as const, id: "remote-provider" } };
-  await expect(reconnectAgentSession(agent.id, { getSessions: () => ({ pane: agent }), dispatch: vi.fn(), spawn, attach: vi.fn() })).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
-  expect(spawn).not.toHaveBeenCalled();
+  await expect(reconnectAgentSession(agent.id, { getSessions: () => ({ pane: agent }), dispatch: vi.fn(), spawn, attach: vi.fn() })).rejects.toMatchObject({ code: "SPAWN_FAILED" });
+  // The only spawn is addressed to the pane's own paired workspace, so its host starts the agent.
+  expect(spawn).toHaveBeenCalledOnce();
+  expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
+    workspaceId: session.workspaceId,
+    startup: expect.objectContaining({ kind: "agentResume", agentType: "claude" }),
+  }));
 });
 it("paired recovery never mounts local terminal or DAG tooling while proxy support is absent", () => {
   render(<TerminalPane session={session} active onReconnect={vi.fn()} onOpenNewShell={vi.fn()} />);

@@ -57,10 +57,19 @@ describe("SSH recovery", () => {
     expect(restored.layout.tabs[0].id).toBe("tab");
   });
 
-  it.each(["expired", "legacyLost"] as const)("keeps genuine %s loss distinct from a transport outage", stateName => {
+  it("keeps a confirmed expiry distinct from a transport outage", () => {
+    const state: WorkspaceState = { worktrees: [], activeWorktreePath: "/srv", layout: createLayoutState(), unreadTabIds: {}, unreadWorktreePaths: {}, sessions: { pane: session } };
+    const failure = { kind: "expired" as const, message: "remote process exited" };
+    const next = workspaceReducer(state, { type: "SESSION_REMOTE_STATUS", status: { ...sshAuthority, sessionId: "stable", state: "expired", generation: 3, failure, replayGap: null } });
+    // The pane keeps its identity and agent on a standby backend, to resume on the same host.
+    expect(next.sessions.pane).toMatchObject({ id: "pane", lifecycle: "exited", processState: "standby", remoteFailure: failure, agentSessionId: "agent-owned" });
+    expect(next.sessions.pane.backendSessionId).not.toBe("stable");
+  });
+
+  it.each(["expired", "legacyLost"] as const)("does not read an unconfirmed %s as process loss", stateName => {
     const state: WorkspaceState = { worktrees: [], activeWorktreePath: "/srv", layout: createLayoutState(), unreadTabIds: {}, unreadWorktreePaths: {}, sessions: { pane: session } };
     const next = workspaceReducer(state, { type: "SESSION_REMOTE_STATUS", status: { ...sshAuthority, sessionId: "stable", state: stateName, generation: 3, failure: null, replayGap: null } });
-    expect(next.sessions.pane).toMatchObject({ backendSessionId: "stable", lifecycle: "exited", remoteConnectionState: stateName, agentSessionId: "agent-owned" });
+    expect(next.sessions.pane).toMatchObject({ backendSessionId: "stable", lifecycle: session.lifecycle, remoteConnectionState: stateName, agentSessionId: "agent-owned" });
   });
 
   it("treats an unknown-to-this-daemon session as recoverable rather than dead", () => {
