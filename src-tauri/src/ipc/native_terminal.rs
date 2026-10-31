@@ -4144,6 +4144,48 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_after_a_completed_pass_rearms_idle_compression() {
+        use crate::native_terminal::compression::{COMPRESSION_IDLE_DELAY, COMPRESSION_STEP_INTERVAL};
+        use crate::native_terminal::{CompressionScheduler, CompressionStep};
+        use futures_util::FutureExt as _;
+        let state = NativeTerminalSurfaceHostState::default();
+        state.attach_test_session_for_liveness("scroll", 1, None).unwrap();
+        let slot = state.session_snapshot_slot("scroll").unwrap();
+        let history: Vec<u8> =
+            (0..20_000).flat_map(|i| format!("line {i}\r\n").into_bytes()).collect();
+        state.with_session_terminal("scroll", |term| term.feed(&history)).unwrap();
+
+        // Run one full idle pass, as the pump does, until it completes and disarms.
+        let mut scheduler = CompressionScheduler::default();
+        let start = std::time::Instant::now();
+        scheduler.mark_activity(start);
+        let mut now = start + COMPRESSION_IDLE_DELAY;
+        loop {
+            let step = state
+                .with_session_terminal("scroll", |term| scheduler.run_due_step(now, true, term))
+                .unwrap();
+            match step {
+                Some(CompressionStep::Pending) => now += COMPRESSION_STEP_INTERVAL,
+                Some(CompressionStep::Complete | CompressionStep::Unsupported) => break,
+                None => panic!("a due step must run"),
+            }
+        }
+        assert_eq!(scheduler.next_wakeup(now), None, "a completed pass disarms");
+
+        scroll_attached_native_terminal(&state, "scroll", ScrollViewport::Top).unwrap();
+        assert!(
+            slot.history_read().now_or_never().is_some(),
+            "scrolling into history must wake the pump"
+        );
+        // The pump answers that wake with `mark_activity` (surface_host.rs `history_read` arm).
+        scheduler.mark_activity(now);
+        if scheduler.is_supported() {
+            assert_eq!(scheduler.next_wakeup(now), Some(COMPRESSION_IDLE_DELAY));
+        }
+        state.teardown();
+    }
+
+    #[test]
     fn memory_for_attached_native_terminal_reports_resident_bytes() {
         // Given an attached session holding 1,000 lines.
         let state = NativeTerminalSurfaceHostState::default();

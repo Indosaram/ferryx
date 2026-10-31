@@ -3,6 +3,7 @@ import { Fragment, type ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
 import { AttentionInbox } from "../../features/ferryx/attention/AttentionInbox";
+import type { AttentionPrompts } from "../../features/ferryx/attention/attentionPrompts";
 import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
 import { IconButton } from "../ui/IconButton";
 import { SectionHeader } from "../ui/SectionHeader";
@@ -41,6 +42,10 @@ export type SidebarInbox = {
   /** Absent when this surface may not dismiss (the remote showing a desktop's published rows). */
   readonly onDismiss?: (row: AttentionRow) => void;
   readonly onDismissAll?: () => void;
+  /** Present where a needs-you row may answer its pane's prompt inline (the desktop). */
+  readonly prompts?: AttentionPrompts;
+  /** Working panes the Inbox lists only once the daemon reads a prompt on them (needs `prompts`). */
+  readonly candidates?: readonly AttentionRow[];
 };
 
 export type SidebarViewProps = {
@@ -186,7 +191,7 @@ export function SidebarView({
 
       {activeView === "supervisor" && supervisor ? supervisor.content : null}
 
-      {activeView === "inbox" && inbox ? <AttentionInbox rows={inbox.rows} onOpen={inbox.onOpen} {...(inbox.onDismiss ? { onDismiss: inbox.onDismiss } : {})} /> : null}
+      {activeView === "inbox" && inbox ? <AttentionInbox rows={inbox.rows} onOpen={inbox.onOpen} {...(inbox.onDismiss ? { onDismiss: inbox.onDismiss } : {})} {...(inbox.prompts ? { prompts: inbox.prompts } : {})} {...(inbox.candidates ? { candidates: inbox.candidates } : {})} /> : null}
 
       <div
         data-testid="worktree-region"

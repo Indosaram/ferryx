@@ -333,7 +333,7 @@ describe("workspace store native activity subscription", () => {
     });
 
     const openedTab = result.current.state.layout.tabs.find((candidate) => candidate.id === tabId);
-    const localSessionId = openedTab && openedTab.kind !== "browser" && openedTab.kind !== "file" ? openedTab.sessionId : "";
+    const localSessionId = openedTab && openedTab.kind !== "browser" && openedTab.kind !== "file" && openedTab.kind !== "changes" ? openedTab.sessionId : "";
     expect(localSessionId).not.toBe("");
 
     await waitFor(() => expect(nativeListeners.bell.size).toBeGreaterThan(0));
@@ -372,7 +372,7 @@ describe("workspace store native activity subscription", () => {
     });
 
     const tab1 = result.current.state.layout.tabs.find((candidate) => candidate.id === tab1Id);
-    const session1Id = tab1 && tab1.kind !== "browser" && tab1.kind !== "file" ? tab1.sessionId : "";
+    const session1Id = tab1 && tab1.kind !== "browser" && tab1.kind !== "file" && tab1.kind !== "changes" ? tab1.sessionId : "";
     expect(session1Id).not.toBe("");
 
     // Open a second tab so tab1 is inactive (backgrounded)

@@ -695,8 +695,8 @@ pub fn selection_range(
     NativeTerminalError::from_c_result(end_result, "ghostty_terminal_point_from_grid_ref(End)")?;
 
     let sb = super::viewport::query_scrollbar(handle)?;
-    let offset = sb.offset as u64;
-    let v_rows = sb.len as u64;
+    let offset = sb.offset;
+    let v_rows = sb.len;
     let start_y = start.y as u64;
     let end_y = end.y as u64;
 

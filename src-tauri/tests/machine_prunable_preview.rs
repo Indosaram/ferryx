@@ -21,7 +21,11 @@ async fn missing_checkout_rich_preview_http() {
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let gateway = tokio::spawn(async move { axum::serve(listener, create_remote_router(state)).with_graceful_shutdown(async { stopped.await.unwrap(); }).await.unwrap(); });
+    // Sessions are spawned only on unix; elsewhere the list stays empty.
+    #[cfg(unix)]
     let mut owned_sessions: Vec<String> = Vec::new();
+    #[cfg(not(unix))]
+    let owned_sessions: Vec<String> = Vec::new();
     let result = std::panic::AssertUnwindSafe(async {
         let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(40)).build().unwrap();
         let base = format!("http://{addr}/api/v1/workspace");
@@ -39,7 +43,10 @@ async fn missing_checkout_rich_preview_http() {
             let url = format!("{endpoint}/status?workspaceId={ws}&wsId={ws}&slug={slug}");
             let live: Value = serde_json::from_str(&client.get(&url).bearer_auth(&token).send().await.unwrap().text().await.unwrap()).unwrap();
             assert_eq!(live["dirtyCount"], 0);
+            #[cfg(unix)]
             let mut expected_sessions: Vec<String> = Vec::new();
+            #[cfg(not(unix))]
+            let expected_sessions: Vec<String> = Vec::new();
             #[cfg(unix)] {
                 let terminal = owner.terminal_service().clone();
                 let term = terminal.clone();

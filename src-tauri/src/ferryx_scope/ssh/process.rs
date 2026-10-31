@@ -417,7 +417,7 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        return process_windows::start(&root, &host);
+        process_windows::start(&root, &host)
     }
 
     #[cfg(not(windows))]
@@ -510,12 +510,14 @@ pub fn start(root: PathBuf, host: String) -> Result<(), String> {
     }
 }
 
+#[cfg(any(not(windows), test))]
 pub(crate) enum SpawnWait {
     Ready,
     Exited(String),
     Timeout,
 }
 
+#[cfg(any(not(windows), test))]
 /// Waits for the helper this start spawned to answer the handshake. A spawned helper that exits
 /// because it lost `runtime.lock` lost a race to a concurrent start for the same root (two
 /// sessions on one host reconnecting together): the winner is the helper we wanted, so keep

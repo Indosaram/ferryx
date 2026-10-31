@@ -337,14 +337,16 @@ impl FontManager {
         {
             let family = self.font_family.clone();
             crate::native_terminal::renderer::directwrite_raster::rasterize_to_alpha_buffer(
-                &family,
+                &crate::native_terminal::renderer::directwrite_raster::AlphaGlyphRequest {
+                    family: &family,
+                    width,
+                    height,
+                    font_size: effective_font_size,
+                    bold,
+                    italic,
+                },
                 text,
                 &mut buffer,
-                width,
-                height,
-                effective_font_size,
-                bold,
-                italic,
             );
         }
 
@@ -578,7 +580,7 @@ mod tests {
         let ink_sum: u64 = if bpp == 1 {
             mask.iter().map(|&px| px as u64).sum()
         } else {
-            mask.chunks_exact(4).map(|px| px[3] as u64).sum()
+            mask.as_chunks::<4>().0.iter().map(|px| px[3] as u64).sum()
         };
         let density = (ink_sum as f64) / 255.0 / 256.0;
 

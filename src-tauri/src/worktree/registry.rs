@@ -206,6 +206,29 @@ impl WorkspaceRegistry {
         Ok((manager, worktree))
     }
 
+    /// Resolves a checkout addressed by path for the Changes panel: the main checkout or any
+    /// worktree Git records for this repository, as long as it sits inside the project root
+    /// jail. Worktrees outside the root (external imports) are refused.
+    pub fn resolve_checkout_path(
+        &self,
+        workspace_id: &str,
+        path: &Path,
+    ) -> Result<PathBuf, WorktreeError> {
+        let manager = self.manager(workspace_id)?;
+        let canonical = manager.canonical_allowed_path(path)?;
+        if manager
+            .list_worktrees()?
+            .iter()
+            .any(|worktree| worktree.path == canonical && !worktree.bare)
+        {
+            Ok(canonical)
+        } else {
+            Err(WorktreeError::WorktreeNotFound {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
     pub(crate) fn resolve_deletion_worktree(
         &self,
         workspace_id: &str,

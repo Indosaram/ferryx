@@ -68,11 +68,11 @@ pub fn parse_kimi_wire(text: &str) -> Vec<ReferenceTurn> {
                     log.user(at, None, vec![ReferencePart::Text { text: prompt, phase: None }]);
                 }
             }
-            Some("ContentPart") => {
-                if payload.and_then(|payload| payload.get("type")).and_then(Value::as_str) == Some("text") {
-                    let text = payload.and_then(|payload| payload.get("text")).and_then(Value::as_str).unwrap_or("");
-                    log.stream_text(at.as_deref(), text, false);
-                }
+            Some("ContentPart")
+                if payload.and_then(|payload| payload.get("type")).and_then(Value::as_str) == Some("text") =>
+            {
+                let text = payload.and_then(|payload| payload.get("text")).and_then(Value::as_str).unwrap_or("");
+                log.stream_text(at.as_deref(), text, false);
             }
             _ => {}
         }

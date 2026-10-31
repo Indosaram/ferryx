@@ -544,6 +544,7 @@ fn local_ipc_availability(
 /// Local IPC framed provider connecting daemon to GUI process (§1.1, §4.4)
 pub struct LocalIpcBrowserBackend {
     socket_path: String,
+    #[cfg(unix)]
     local_credential: Option<String>,
     /// Bounds each unix-socket GUI round-trip step. Off unix the transport is the
     /// `Unavailable` stub, which never reads from the GUI.
@@ -569,8 +570,14 @@ impl LocalIpcBrowserBackend {
     pub const MAX_IMAGE_PAYLOAD: usize = 2 * 1024 * 1024; // 2 MiB
 
     pub fn new(socket_path: String, local_credential: Option<String>) -> Self {
+        // The credential authenticates the unix-socket handshake. Off unix the transport is the
+        // explicit `Unavailable` stub (see `send_framed_request`), which never sends a handshake,
+        // so there is nothing to authenticate and the value is not stored.
+        #[cfg(not(unix))]
+        let _ = local_credential;
         Self {
             socket_path,
+            #[cfg(unix)]
             local_credential,
             #[cfg(unix)]
             io_timeout: DEFAULT_IPC_IO_TIMEOUT,

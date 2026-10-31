@@ -133,6 +133,7 @@ pub(crate) fn panic_record(location: &str, thread: &str, payload: &str) -> Strin
 /// Formats the termination-signal record written by [`next_shutdown_signal`].
 ///
 /// Split out so the shape is testable without installing a process-wide handler.
+#[cfg(any(unix, test))]
 pub(crate) fn signal_record(signal: i32) -> String {
     format!("daemon_signal signal={signal} action=shutdown\n")
 }

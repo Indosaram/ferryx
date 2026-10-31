@@ -305,6 +305,7 @@ pub async fn cmd_cli_launcher_install() -> Result<CliLauncherStatus, IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use tempfile::TempDir;
 
     #[test]

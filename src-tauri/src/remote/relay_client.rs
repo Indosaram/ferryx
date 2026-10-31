@@ -1154,11 +1154,10 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_hdr_async(
                 tcp,
-                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                crate::remote::InspectHandshake(|request: &tokio_tungstenite::tungstenite::handshake::server::Request| {
                     assert_eq!(request.uri().path(), "/tunnel/control");
                     assert!(request.headers().get(AUTHORIZATION).is_none());
-                    Ok(response)
-                },
+                }),
             )
             .await
             .unwrap();

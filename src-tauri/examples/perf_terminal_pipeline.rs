@@ -261,7 +261,7 @@ fn history_measurements() {
         let snapshot = hub.subscribe_with_sequence("measure", None).unwrap().snapshot;
         assert!(snapshot.history.starts_with(MARKER));
         assert_eq!(snapshot.history.len(), MARKER.len() + groups * COMMAND.len());
-        assert!(snapshot.history[MARKER.len()..].chunks_exact(COMMAND.len()).all(|part| part == COMMAND));
+        assert!(snapshot.history[MARKER.len()..].as_chunks::<{ COMMAND.len() }>().0.iter().all(|part| part == COMMAND));
         measure(&format!("hub_snapshot_{image_budget}"), || {
             hub.subscribe_with_sequence("measure", None).unwrap().snapshot.history.len()
         });

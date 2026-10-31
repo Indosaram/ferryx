@@ -10,6 +10,7 @@ import { PhoneHomeView } from "../remote/home/PhoneHomeView";
 import { SupervisorSessionStrip } from "../remote/home/SupervisorSessionStrip";
 import type { PhoneDestination } from "../remote/home/usePhoneNavigation";
 import { WorktreesHome } from "../remote/home/WorktreesHome";
+import { remoteInboxEntries, useRemoteInbox } from "../remote/remoteInbox";
 import type { LanePauseResult } from "../remote/remoteSupervisor";
 import { RemoteWorkspaceMirror, type RemoteWorkspaceModel } from "../remote/RemoteSessionList";
 import { sidebarParitySections } from "./sidebarParityQa";
@@ -127,6 +128,14 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
   const [accountOpen, setAccountOpen] = useState(state === "account-delete");
   const machines = useMemo(() => machinesFor(state), [state]);
   const rows = useMemo(() => inboxRows(), []);
+  const inboxEntries = useMemo(
+    () => remoteInboxEntries({ model: { context: { ...model.context, terminalTabs: [] }, options: [] }, machineId: null, accountRows: rows }),
+    [model.context, rows],
+  );
+  const inbox = useRemoteInbox({
+    entries: inboxEntries,
+    transport: { read: async () => null, answer: async () => ({ ok: true }) },
+  });
   // The connected desktop's list plus an offline second machine, as an account phone sees them.
   const sidebarSections = useMemo(() => sidebarParitySections("desktop", { offlineMachine: true }), []);
   return (
@@ -141,7 +150,7 @@ export const PhoneHomeQaState: React.FC<{ state: string; model: RemoteWorkspaceM
           onSetPaused: pauseOk,
           onOpenLane: () => undefined,
         }}
-        inbox={{ rows, loading: false, onOpen: () => undefined }}
+        inbox={{ rows: inbox.rows, prompts: inbox.prompts, loading: false, onOpen: () => undefined }}
         worktrees={
           <WorktreesHome onOpenAccount={() => setAccountOpen(true)}>
             <RemoteWorkspaceMirror

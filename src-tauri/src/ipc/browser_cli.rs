@@ -1867,7 +1867,7 @@ fn start_browser_cli_server_at_path<R: tauri::Runtime>(
     let runtime_dir = port_path
         .parent()
         .ok_or_else(|| BrowserError::Internal("browser CLI socket path has no parent".into()))?;
-    fs::create_dir_all(&runtime_dir).map_err(|error| BrowserError::Internal(error.to_string()))?;
+    fs::create_dir_all(runtime_dir).map_err(|error| BrowserError::Internal(error.to_string()))?;
     let Some(endpoint_lock) = claim_browser_cli_endpoint(port_path)? else {
         tracing::info!(
             path = %port_path.display(),

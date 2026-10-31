@@ -5,6 +5,7 @@ use super::{
     backend::RemoteSessionBackend,
     machine_operation_journal::{Begin, Record},
     machine_protocol::*,
+    server::Refusal,
     state::RemoteGatewayState,
 };
 use axum::{
@@ -63,7 +64,7 @@ pub(super) async fn admit(
     headers: HeaderMap,
     mutation: bool,
     id: &str,
-) -> Result<Arc<Admission>, Response> {
+) -> Result<Arc<Admission>, Refusal> {
     let deadline = Instant::now() + Duration::from_secs(if mutation { 40 } else { 35 });
     admit_until(state, headers, mutation, id, deadline).await
 }
@@ -74,7 +75,7 @@ pub(super) async fn admit_until(
     mutation: bool,
     id: &str,
     deadline: Instant,
-) -> Result<Arc<Admission>, Response> {
+) -> Result<Arc<Admission>, Refusal> {
     let auth_permit = match tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
         AUTH_SLOTS.clone().acquire_owned(),
@@ -82,7 +83,7 @@ pub(super) async fn admit_until(
     .await
     {
         Ok(Ok(p)) => p,
-        _ => return Err(failure("TIMEOUT", id)),
+        _ => return Err(failure("TIMEOUT", id).into()),
     };
     let auth_state = state.clone();
     let auth_headers = headers.clone();
@@ -106,12 +107,12 @@ pub(super) async fn admit_until(
     .await
     {
         Ok(Ok(Ok(revoked))) => revoked,
-        Ok(Ok(Err(e))) => return Err(failure(&e, id)),
-        Ok(Err(_)) => return Err(failure("MACHINE_SERVICE_UNAVAILABLE", id)),
-        Err(_) => return Err(failure("TIMEOUT", id)),
+        Ok(Ok(Err(e))) => return Err(failure(&e, id).into()),
+        Ok(Err(_)) => return Err(failure("MACHINE_SERVICE_UNAVAILABLE", id).into()),
+        Err(_) => return Err(failure("TIMEOUT", id).into()),
     };
     let Some(services) = &state.machine_services else {
-        return Err(failure("MACHINE_SERVICE_UNAVAILABLE", id));
+        return Err(failure("MACHINE_SERVICE_UNAVAILABLE", id).into());
     };
     let slots = if mutation {
         &services.workspaces.project_mutations
@@ -143,7 +144,7 @@ where
         Ok(admission) => admission,
         Err(_) => match admit(state.clone(), headers.clone(), mutation, &id).await {
             Ok(a) => a,
-            Err(e) => return e,
+            Err(e) => return e.into(),
         },
     };
     let deadline = admission.deadline;

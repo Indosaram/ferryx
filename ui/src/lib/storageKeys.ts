@@ -21,6 +21,10 @@ export const UPDATE_CHANNEL_STORAGE_KEY = "ferryx.update.channel";
 export const PERMISSIONS_ONBOARDING_DISMISSED_STORAGE_KEY = "ferryx.permissions.onboarding-dismissed";
 export const SSH_CONFIG_PATH_STORAGE_KEY = "ferryx.ssh.configPath";
 export const REMOTE_INSTALLATION_ID_STORAGE_KEY = "ferryx.remote.installation-id";
+/** Remote terminal typing surface: "direct" (keystrokes stream) or "line" (edit, then send). */
+export const REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY = "ferryx.remote.terminalInputMode";
+/** Remote terminal "Keep screen on" (Screen Wake Lock) preference: "true" or "false". */
+export const REMOTE_KEEP_SCREEN_ON_STORAGE_KEY = "ferryx.remote.keepScreenOn";
 export const WORKTREE_DISK_UNUSED_DAYS_KEY = "ferryx.worktree-disk.unused-days";
 export const FILE_OPEN_TARGETS_STORAGE_KEY = "ferryx.fileOpen.targets";
 /** General > "Advanced features": shows the browser, DAG, supervisor and their settings. */

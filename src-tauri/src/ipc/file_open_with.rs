@@ -39,6 +39,18 @@ pub(crate) fn validate_local_file(path: &str) -> Result<PathBuf, IpcError> {
     Ok(p)
 }
 
+/// "Open with" hands the file to an arbitrary app, so a file fetched from a
+/// remote host gets the same refusal as the system opener: only passive
+/// documents may leave the preview.
+fn ensure_open_with_allowed(path: &Path, remote_files_root: Option<&Path>) -> Result<(), IpcError> {
+    crate::ipc::file_preview_contract::ensure_remote_cache_launchable(
+        path,
+        crate::ipc::file_link::EditorTarget::System,
+        remote_files_root,
+        false,
+    )
+}
+
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn desktop_entry_for_mime(contents: &str, mime: &str) -> Option<String> {
     let trimmed_mime = mime.trim();
@@ -258,7 +270,11 @@ fn get_linux_open_with_apps(file_path: &Path) -> Result<OpenWithApps, IpcError> 
 }
 
 #[tauri::command]
-pub async fn cmd_file_open_with_apps(path: String) -> Result<OpenWithApps, IpcError> {
+pub async fn cmd_file_open_with_apps<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    path: String,
+) -> Result<OpenWithApps, IpcError> {
+    crate::ipc::file_preview::ensure_trusted_window(webview.label())?;
     crate::ipc::run_blocking(move || {
         let file_path = validate_local_file(&path)?;
 
@@ -292,28 +308,40 @@ pub async fn cmd_file_open_with_apps(path: String) -> Result<OpenWithApps, IpcEr
 
 #[cfg(target_os = "macos")]
 fn launch_macos_open_with(file_path: &Path, app_id: &str) -> Result<(), IpcError> {
-    if !app_id.ends_with(".app") || !Path::new(app_id).is_dir() {
+    // Only an application LaunchServices itself offered for this file may be
+    // used; any other folder ending in ".app" is refused.
+    let offered = get_macos_open_with_apps(file_path)?;
+    if !offered.apps.iter().any(|app| app.id == app_id) {
         return Err(IpcError::new(
             IpcErrorCode::InvalidRequest,
             format!("invalid application bundle '{app_id}'"),
         ));
     }
 
-    std::process::Command::new("open")
+    // `open -a` returns as soon as LaunchServices accepts the request; waiting
+    // reaps it (no zombie) and surfaces its failure.
+    let status = std::process::Command::new("open")
         .arg("-a")
         .arg(app_id)
         .arg(file_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .status()
         .map_err(|e| {
             IpcError::new(
                 IpcErrorCode::IoError,
                 format!("failed to spawn open: {e}"),
             )
         })?;
-    Ok(())
+    if status.success() {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            IpcErrorCode::IoError,
+            format!("open -a exited with {status}"),
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -327,15 +355,17 @@ fn launch_linux_open_with(file_path: &Path, app_id: &str) -> Result<(), IpcError
 
     let stem = &app_id[..app_id.len() - ".desktop".len()];
 
-    let gtk_result = std::process::Command::new("gtk-launch")
+    // gtk-launch exits once the app is started; a non-zero exit (unknown id,
+    // no display) falls through to gio instead of reporting success.
+    let gtk_status = std::process::Command::new("gtk-launch")
         .arg(stem)
         .arg(file_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .status();
 
-    if gtk_result.is_ok() {
+    if gtk_status.is_ok_and(|status| status.success()) {
         return Ok(());
     }
 
@@ -345,21 +375,28 @@ fn launch_linux_open_with(file_path: &Path, app_id: &str) -> Result<(), IpcError
         .find(|candidate| candidate.is_file());
 
     if let Some(desktop_file) = full_desktop_path {
-        std::process::Command::new("gio")
+        let status = std::process::Command::new("gio")
             .arg("launch")
             .arg(&desktop_file)
             .arg(file_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn()
+            .status()
             .map_err(|e| {
                 IpcError::new(
                     IpcErrorCode::IoError,
                     format!("failed to launch application with gio: {e}"),
                 )
             })?;
-        Ok(())
+        if status.success() {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                IpcErrorCode::IoError,
+                format!("gio launch exited with {status}"),
+            ))
+        }
     } else {
         Err(IpcError::new(
             IpcErrorCode::IoError,
@@ -404,9 +441,16 @@ fn launch_fallback_open_with(_file_path: &Path, _app_id: &str) -> Result<(), Ipc
 }
 
 #[tauri::command]
-pub async fn cmd_file_open_with(path: String, app_id: String) -> Result<(), IpcError> {
+pub async fn cmd_file_open_with<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    path: String,
+    app_id: String,
+) -> Result<(), IpcError> {
+    crate::ipc::file_preview::ensure_trusted_window(webview.label())?;
+    let remote_files_root = crate::ipc::file_preview_contract::app_remote_files_root(&webview);
     crate::ipc::run_blocking(move || {
         let file_path = validate_local_file(&path)?;
+        ensure_open_with_allowed(&file_path, remote_files_root.as_deref())?;
 
         #[cfg(target_os = "macos")]
         {
@@ -441,6 +485,25 @@ pub async fn cmd_webview_print<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn open_with_refuses_active_files_fetched_from_a_remote_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::ipc::remote_file::remote_files_root(dir.path());
+        let fetched = root.join("abc").join("run.command");
+        std::fs::create_dir_all(fetched.parent().unwrap()).unwrap();
+        std::fs::write(&fetched, b"echo hi").unwrap();
+        let err = ensure_open_with_allowed(&fetched, Some(&root)).unwrap_err();
+        assert_eq!(err.details.unwrap()["reason"], "remoteFileNotLaunchable");
+
+        let notes = root.join("abc").join("notes.txt");
+        std::fs::write(&notes, b"hi").unwrap();
+        assert!(ensure_open_with_allowed(&notes, Some(&root)).is_ok());
+
+        let local = dir.path().join("run.command");
+        std::fs::write(&local, b"echo hi").unwrap();
+        assert!(ensure_open_with_allowed(&local, Some(&root)).is_ok());
+    }
 
     #[test]
     fn test_desktop_entry_for_mime_matches_semicolon_list() {

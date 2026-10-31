@@ -605,12 +605,15 @@ static REFERENCE_STAGING_LEDGER_LOCK: parking_lot::Mutex<()> = parking_lot::Mute
 fn ensure_reference_staging_base(base: &Path) -> Result<(), ScopeErrorCode> {
     let mut just_created = false;
     if std::fs::symlink_metadata(base).is_err() {
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt as _;
+            let mut builder = std::fs::DirBuilder::new();
             builder.mode(0o700);
-        }
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
         builder
             .create(base)
             .map_err(|_| reference_staging_failure_code())?;
@@ -680,12 +683,15 @@ fn check_reference_staging_base_with(
 }
 
 fn create_reference_staging_dir(dir: &Path) -> Result<(), ScopeErrorCode> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
-    }
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     builder
         .create(dir)
         .map_err(|_| reference_staging_failure_code())

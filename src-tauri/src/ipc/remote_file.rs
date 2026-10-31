@@ -8,9 +8,36 @@ use tauri::{AppHandle, Manager, Runtime};
 
 pub const REMOTE_FILE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+/// Printed by [`remote_read_command`] right before the file bytes, so output a
+/// login shell's startup files print first never becomes part of the file.
+const REMOTE_READ_MARKER: &[u8] = b"FERRYX-REMOTE-FILE:";
+/// Startup-file output tolerated in front of [`REMOTE_READ_MARKER`].
+const REMOTE_READ_NOISE_ALLOWANCE: usize = 64 * 1024;
+/// One fetch may need a password prompt plus 8 MiB (11 MiB base64 on Windows)
+/// over a slow link.
+const REMOTE_FETCH_DEADLINE: Duration = Duration::from_secs(120);
+/// Fetched copies older than this are pruned from the cache.
+const REMOTE_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Longest sanitized file stem kept in a cache file name.
+const CACHE_STEM_MAX_CHARS: usize = 100;
+/// Longest extension (dot excluded) kept in a cache file name.
+const CACHE_EXTENSION_MAX_CHARS: usize = 16;
+
 fn invalid_remote_path(message: impl Into<String>) -> IpcError {
     IpcError::new(IpcErrorCode::InvalidRequest, message.into())
         .with_details(serde_json::json!({ "reason": "invalidRemotePath" }))
+}
+
+/// The read command reaches the remote LOGIN shell, which may be fish: there a
+/// backslash escapes even inside single quotes, so a path holding one could end
+/// the quoting [`crate::ssh::direct::quote_posix`] applies and run as code.
+fn reject_backslash(path: &str) -> Result<(), IpcError> {
+    if path.contains('\\') {
+        return Err(invalid_remote_path(
+            "Remote POSIX paths containing a backslash are not supported",
+        ));
+    }
+    Ok(())
 }
 
 /// Normalizes a terminal path token into the remote file it names.
@@ -44,6 +71,7 @@ pub fn remote_target_path(input: &str, base: &str) -> Result<String, IpcError> {
         let suffix = segments.join("/");
         crate::ssh::direct::validate_remote_path(&format!("/{suffix}"))
             .map_err(|e| invalid_remote_path(e.message))?;
+        reject_backslash(&suffix)?;
         return Ok(if suffix.is_empty() {
             "~".to_string()
         } else {
@@ -89,6 +117,7 @@ pub fn remote_target_path(input: &str, base: &str) -> Result<String, IpcError> {
 
     crate::ssh::direct::validate_remote_path(&normalized)
         .map_err(|e| invalid_remote_path(e.message))?;
+    reject_backslash(&normalized)?;
 
     Ok(normalized)
 }
@@ -201,7 +230,8 @@ pub fn windows_remote_wire_limit() -> usize {
 }
 
 /// PowerShell script reading one remote file on a Windows host. Exits 3 when the
-/// target is not a regular file (matching [`remote_read_command`]), reads at most
+/// target is missing or a directory (matching [`remote_read_command`]); any other
+/// open failure, such as access denied, surfaces as an error. Reads at most
 /// `REMOTE_FILE_MAX_BYTES + 1` bytes, and prints them base64-encoded so the
 /// PowerShell text pipeline cannot transcode binary content. The path is passed as
 /// base64 data, never interpolated as PowerShell source.
@@ -217,9 +247,10 @@ pub fn windows_remote_read_script(remote_path: &str) -> String {
     };
     format!(
         "{resolve}; \
-         if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {{ exit 3 }}; \
+         if ([IO.Directory]::Exists($p)) {{ exit 3 }}; \
          $n={}; $buf=New-Object byte[] $n; $t=0; \
-         $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite); \
+         try {{ $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite) }} \
+         catch [IO.FileNotFoundException],[IO.DirectoryNotFoundException] {{ exit 3 }}; \
          try {{ while ($t -lt $n) {{ $r=$f.Read($buf,$t,$n-$t); if ($r -le 0) {{ break }}; $t+=$r }} }} \
          finally {{ $f.Dispose() }}; \
          [Console]::Out.Write([Convert]::ToBase64String($buf,0,$t))",
@@ -327,12 +358,150 @@ pub fn remote_cache_path(cache_root: &Path, workspace_id: &str, remote_path: &st
         .collect();
 
     let file_name = if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
-        "file"
+        "file".to_string()
     } else {
-        &sanitized
+        portable_cache_name(&sanitized)
     };
 
     remote_files_root(cache_root).join(dir_name).join(file_name)
+}
+
+/// Fits an ASCII-sanitized basename to every local filesystem: the stem is
+/// capped (a remote name can exceed the local 255-byte limit) and a Windows
+/// device name (`CON`, `nul.txt`, `COM1.log`) gains a `_` prefix.
+fn portable_cache_name(sanitized: &str) -> String {
+    let (stem, extension) = match sanitized.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty() && !ext.is_empty() && ext.len() <= CACHE_EXTENSION_MAX_CHARS =>
+        {
+            (stem, Some(ext))
+        }
+        _ => (sanitized, None),
+    };
+    let mut stem: String = stem.chars().take(CACHE_STEM_MAX_CHARS).collect();
+    let device = stem.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (device.len() == 4
+            && (device.starts_with("COM") || device.starts_with("LPT"))
+            && device.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        stem.insert(0, '_');
+    }
+    match extension {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    }
+}
+
+/// Writes one fetched file into the remote-files cache and returns where it
+/// landed. The temp file is quarantined before it becomes visible. When the
+/// previous copy cannot be replaced (Windows refuses while a viewer holds it
+/// open) the fetch is published under a fresh sibling directory instead. Stale
+/// copies and orphaned temp files are pruned first.
+pub(crate) fn write_cache_file(target: &Path, bytes: &[u8]) -> Result<PathBuf, IpcError> {
+    let io = |message: String| IpcError::new(IpcErrorCode::IoError, message);
+    let parent = target
+        .parent()
+        .ok_or_else(|| io("Missing parent directory for cache file".into()))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| io("Missing cache file name".into()))?;
+    if let Some(root) = parent.parent() {
+        prune_remote_cache(root, parent, REMOTE_CACHE_MAX_AGE, std::time::SystemTime::now());
+    }
+    std::fs::create_dir_all(parent)
+        .map_err(|e| io(format!("Failed to create cache directory: {e}")))?;
+
+    let temp = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(io(format!("Failed to write cached remote file: {error}")));
+    }
+    mark_downloaded(&temp);
+
+    let replace_error = match std::fs::rename(&temp, target) {
+        Ok(()) => return Ok(target.to_path_buf()),
+        Err(error) => error,
+    };
+    let fresh_dir = parent.join(uuid::Uuid::new_v4().simple().to_string());
+    let fresh = fresh_dir.join(name);
+    match std::fs::create_dir_all(&fresh_dir).and_then(|()| std::fs::rename(&temp, &fresh)) {
+        Ok(()) => Ok(fresh),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(io(format!(
+                "Failed to write cached remote file: {replace_error}; {error}"
+            )))
+        }
+    }
+}
+
+/// Removes cache files older than `max_age` (fetched secrets must not linger
+/// on local disk) and the directories they leave empty, except `keep`, the
+/// directory the caller is about to write into. Best effort: a file a viewer
+/// still holds open on Windows simply stays until the next prune.
+pub(crate) fn prune_remote_cache(
+    root: &Path,
+    keep: &Path,
+    max_age: Duration,
+    now: std::time::SystemTime,
+) {
+    fn walk(dir: &Path, depth: usize, keep: &Path, max_age: Duration, now: std::time::SystemTime) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                if depth < 2 {
+                    walk(&path, depth + 1, keep, max_age, now);
+                    if path != keep {
+                        let _ = std::fs::remove_dir(&path);
+                    }
+                }
+                continue;
+            }
+            let stale = meta
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > max_age);
+            if stale {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    walk(root, 0, keep, max_age, now);
+}
+
+/// Drops whatever the remote login shell printed before [`REMOTE_READ_MARKER`].
+fn strip_read_marker(bytes: &[u8]) -> Result<Vec<u8>, IpcError> {
+    bytes
+        .windows(REMOTE_READ_MARKER.len())
+        .position(|window| window == REMOTE_READ_MARKER)
+        .map(|at| bytes[at + REMOTE_READ_MARKER.len()..].to_vec())
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::ParseError,
+                "Remote file response is missing its start marker",
+            )
+        })
 }
 
 /// Shell command reading one remote file. Only the home-relative form produced
@@ -346,7 +515,8 @@ pub fn remote_read_command(remote_path: &str) -> String {
         crate::ssh::direct::quote_posix(remote_path)
     };
     format!(
-        "test -f {q} || exit 3; head -c {} -- {q}",
+        "test -f {q} || exit 3; printf {}; head -c {} -- {q}",
+        String::from_utf8_lossy(REMOTE_READ_MARKER),
         REMOTE_FILE_MAX_BYTES + 1
     )
 }
@@ -414,13 +584,17 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
         };
         let remote_path = remote_target_path(&path, base)?;
         let command = remote_read_command(&remote_path);
-        (remote_path, command, REMOTE_FILE_MAX_BYTES + 1)
+        (
+            remote_path,
+            command,
+            REMOTE_FILE_MAX_BYTES + 1 + REMOTE_READ_MARKER.len() + REMOTE_READ_NOISE_ALLOWANCE,
+        )
     };
     let plan = crate::ssh::direct::ssh_plan(&host, command, false)?;
 
-    let deadline = Duration::from_secs(30);
     let bytes_res =
-        crate::ssh::direct::bounded_output_with_limit(&plan, deadline, max_wire_bytes).await;
+        crate::ssh::direct::bounded_output_with_limit(&plan, REMOTE_FETCH_DEADLINE, max_wire_bytes)
+            .await;
 
     let bytes = match bytes_res {
         Ok(b) => b,
@@ -444,7 +618,7 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
     let bytes = if windows {
         decode_windows_payload(&bytes)?
     } else {
-        bytes
+        strip_read_marker(&bytes)?
     };
 
     ensure_within_limit(bytes.len(), REMOTE_FILE_MAX_BYTES)?;
@@ -456,52 +630,9 @@ pub async fn cmd_remote_file_fetch<R: Runtime>(
         )
     })?;
 
-    let local_target = remote_cache_path(&cache_root, &workspace_id, &remote_path);
-    let target_for_write = local_target.clone();
+    let target = remote_cache_path(&cache_root, &workspace_id, &remote_path);
     let byte_length = bytes.len() as u64;
-
-    run_blocking(move || {
-        let parent = target_for_write.parent().ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                "Missing parent directory for cache file",
-            )
-        })?;
-        std::fs::create_dir_all(parent).map_err(|e| {
-            IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Failed to create cache directory: {e}"),
-            )
-        })?;
-
-        let temp = target_for_write.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-        let write_result = (|| {
-            use std::io::Write;
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, &target_for_write)
-        })();
-
-        if let Err(error) = write_result {
-            let _ = std::fs::remove_file(&temp);
-            return Err(IpcError::new(
-                IpcErrorCode::IoError,
-                format!("Failed to write cached remote file: {error}"),
-            ));
-        }
-
-        mark_downloaded(&target_for_write);
-        Ok(())
-    })
-    .await?;
+    let local_target = run_blocking(move || write_cache_file(&target, &bytes)).await?;
 
     Ok(RemoteFileFetched {
         local_path: local_target.to_string_lossy().to_string(),
@@ -665,13 +796,115 @@ mod tests {
         assert_eq!(
             cmd,
             format!(
-                "test -f {target} || exit 3; head -c {} -- {target}",
+                "test -f {target} || exit 3; printf FERRYX-REMOTE-FILE:; head -c {} -- {target}",
                 REMOTE_FILE_MAX_BYTES + 1
             )
         );
         assert!(remote_read_command("~").starts_with("test -f \"$HOME\" || exit 3;"));
         // A "~" that is not the leading home marker stays inside single quotes.
         assert!(remote_read_command("/srv/~/x").starts_with("test -f '/srv/~/x' "));
+    }
+
+    #[test]
+    fn posix_paths_with_backslash_are_rejected_before_reaching_the_login_shell() {
+        // fish treats \' inside single quotes as an escaped quote, so this would
+        // close the quoting and run "touch /tmp/pwn" on the remote host.
+        let hostile = r"/x\'; touch /tmp/pwn; echo \'";
+        for (input, base) in [
+            (hostile, "/home/u"),
+            (r"a\b.txt", "/home/u"),
+            (r"~/x\y", "/home/u"),
+            ("rel.txt", r"/home/u\'"),
+        ] {
+            let err = remote_target_path(input, base).unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::InvalidRequest, "{input:?}");
+            assert_eq!(err.details.as_ref().unwrap()["reason"], "invalidRemotePath");
+        }
+    }
+
+    #[test]
+    fn read_marker_drops_login_shell_noise_and_keeps_binary_bytes() {
+        let mut wire = b"Welcome to host\nmotd FERRYX\n".to_vec();
+        wire.extend_from_slice(REMOTE_READ_MARKER);
+        let payload: Vec<u8> = (0..=255u8).chain(REMOTE_READ_MARKER.iter().copied()).collect();
+        wire.extend_from_slice(&payload);
+        assert_eq!(strip_read_marker(&wire).unwrap(), payload);
+        assert_eq!(
+            strip_read_marker(b"no marker").unwrap_err().code,
+            IpcErrorCode::ParseError
+        );
+    }
+
+    #[test]
+    fn cache_names_fit_local_filesystems() {
+        let cache_root = Path::new("/var/cache/ferryx");
+        let long = format!("/srv/{}.log", "a".repeat(300));
+        let name = remote_cache_path(cache_root, "ssh:ws", &long)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(name, format!("{}.log", "a".repeat(CACHE_STEM_MAX_CHARS)));
+        for (remote, expected) in [
+            ("/srv/CON", "_CON"),
+            ("/srv/nul.txt", "_nul.txt"),
+            ("/srv/com1.log", "_com1.log"),
+            ("/srv/LPT9.tar.gz", "_LPT9.tar.gz"),
+            ("/srv/console.txt", "console.txt"),
+            ("/srv/com10.txt", "com10.txt"),
+        ] {
+            let path = remote_cache_path(cache_root, "ssh:ws", remote);
+            assert_eq!(path.file_name().unwrap().to_str().unwrap(), expected, "{remote}");
+        }
+    }
+
+    #[test]
+    fn cache_write_falls_back_to_a_fresh_path_when_the_old_copy_cannot_be_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = remote_cache_path(dir.path(), "ssh:ws", "/srv/run.png");
+        assert_eq!(write_cache_file(&target, b"one").unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"one");
+        assert_eq!(write_cache_file(&target, b"two").unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"two");
+
+        // A rename onto a non-empty directory fails on every platform, standing
+        // in for Windows refusing to replace a file a viewer holds open.
+        let blocked = remote_cache_path(dir.path(), "ssh:ws", "/srv/held.pdf");
+        std::fs::create_dir_all(blocked.join("x")).unwrap();
+        let landed = write_cache_file(&blocked, b"three").unwrap();
+        assert_ne!(landed, blocked);
+        assert_eq!(landed.file_name(), blocked.file_name());
+        assert!(landed.starts_with(blocked.parent().unwrap()));
+        assert_eq!(std::fs::read(&landed).unwrap(), b"three");
+        let leftovers: Vec<_> = std::fs::read_dir(blocked.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn cache_prune_removes_stale_copies_and_orphaned_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = remote_files_root(dir.path());
+        let old = remote_cache_path(dir.path(), "ssh:ws", "/srv/.env");
+        write_cache_file(&old, b"SECRET=1").unwrap();
+        let orphan = old.parent().unwrap().join(".abc.tmp");
+        std::fs::write(&orphan, b"partial").unwrap();
+        let keep = remote_cache_path(dir.path(), "ssh:ws", "/srv/new.txt");
+        std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
+
+        let now = std::time::SystemTime::now();
+        prune_remote_cache(&root, keep.parent().unwrap(), REMOTE_CACHE_MAX_AGE, now);
+        assert!(old.exists(), "fresh copies stay");
+
+        let later = now + REMOTE_CACHE_MAX_AGE + Duration::from_secs(60);
+        prune_remote_cache(&root, keep.parent().unwrap(), REMOTE_CACHE_MAX_AGE, later);
+        assert!(!old.exists());
+        assert!(!orphan.exists());
+        assert!(!old.parent().unwrap().exists(), "emptied directories are removed");
+        assert!(keep.parent().unwrap().exists(), "the directory being written survives");
     }
 
     #[test]
@@ -732,7 +965,7 @@ mod tests {
         assert_eq!(
             cmd,
             format!(
-                "test -f '/path/with'\\''quote/file.txt' || exit 3; head -c {} -- '/path/with'\\''quote/file.txt'",
+                "test -f '/path/with'\\''quote/file.txt' || exit 3; printf FERRYX-REMOTE-FILE:; head -c {} -- '/path/with'\\''quote/file.txt'",
                 REMOTE_FILE_MAX_BYTES + 1
             )
         );

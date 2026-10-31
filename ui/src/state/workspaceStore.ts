@@ -54,6 +54,7 @@ import type {
   StructuredIpcError,
   TerminalLifecycle,
   TerminalLifecyclePayload,
+  ChangesTab,
   FileTab,
   SessionRecoveryState,
   TerminalSession,
@@ -684,6 +685,15 @@ export type SplitPaneOptions = {
 
 export type TabSplitEdge = "left" | "right" | "top" | "bottom";
 
+/** A backend session spawned by the caller before opening its tab. The daemon epoch and
+ *  incarnation are required for the pane's durable attach tuple, so callers must pass the
+ *  identity reported by the detailed spawn rather than a bare session id. */
+export type PreSpawnedBackend = {
+  sessionId: string;
+  daemonEpoch: string | null;
+  incarnation: string | null;
+};
+
 export {
   clearHmrWorkspaceState,
   getHmrWorkspaceState,
@@ -1281,15 +1291,15 @@ export function useWorkspaceStore({
   }, [dispatch, dispatchToOwner]);
 
   const createSpawnedTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
+    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string) => {
       await services.ensureTerminalEvents();
       // The detailed spawn is the only one that reports the session's incarnation and the daemon
       // epoch, and a pane without an incarnation can never form the durable seven-field attach
       // tuple, so its native surface attach fails until reconciliation happens to fill it in.
       // Use the detailed path wherever the transport provides it (the split path already does).
-      let daemonEpoch: string | null = null;
-      let incarnation: string | null = null;
-      let backendSessionId = backendSessionIdOverride;
+      let daemonEpoch: string | null = backendOverride?.daemonEpoch ?? null;
+      let incarnation: string | null = backendOverride?.incarnation ?? null;
+      let backendSessionId = backendOverride?.sessionId;
       if (!backendSessionId) {
         // Measured before the spawn: the new tab will fill the focused group's body.
         const grid = await measureFor(services, {
@@ -1347,16 +1357,16 @@ export function useWorkspaceStore({
   );
 
   const openTab = useCallback(
-    async (worktree: Worktree, label?: string, backendSessionIdOverride?: string, shell?: string) => {
+    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string) => {
       const capturedWorktreePath = worktree.path;
       switchDebug("terminal.open.start", {
         workspaceId,
         worktreePath: capturedWorktreePath,
         tabCount: stateRef.current.layout.tabs.length,
         sessionCount: Object.keys(stateRef.current.sessions).length,
-        backendOverride: backendSessionIdOverride ?? null,
+        backendOverride: backendOverride?.sessionId ?? null,
       });
-      const binding = await createSpawnedTab(worktree, label, backendSessionIdOverride, shell);
+      const binding = await createSpawnedTab(worktree, label, backendOverride, shell);
       // The active project can change while the spawn is in flight; landing this
       // tab now would inject one project's worktree into another's state, and
       // dropping it silently would orphan the backend PTY we just created.
@@ -1378,7 +1388,7 @@ export function useWorkspaceStore({
           worktreePath: capturedWorktreePath,
           backendSessionId: binding.session.backendSessionId,
         });
-        if (backendSessionIdOverride === undefined) {
+        if (backendOverride === undefined) {
           await closeBackendSession(binding.session, services);
         }
         return null;
@@ -1998,7 +2008,7 @@ export function useWorkspaceStore({
       const snapshot = stateRef.current;
       const sourceTab = snapshot.layout.tabs.find((tab) => tab.id === sourceTabId);
       const sourceLayout = snapshot.layout.layoutsByTabId[sourceTabId];
-      if (!sourceTab || sourceTab.kind === "browser" || !sourceLayout || collectLeafIds(sourceLayout.root).length <= 1) return null;
+      if (!sourceTab || !isTerminalTab(sourceTab) || !sourceLayout || collectLeafIds(sourceLayout.root).length <= 1) return null;
       const sessionId = sourceLayout.sessionIdsByLeafId[leafId];
       if (!sessionId || !snapshot.sessions[sessionId]) return null;
       const newTabId = createId("tab");
@@ -2035,6 +2045,11 @@ export function useWorkspaceStore({
       if (closingTab.kind === "file") {
         dispatch({ type: "CLOSE_TAB", tabId });
         releaseOrphanPreviews(stateRef.current);
+        return;
+      }
+
+      if (closingTab.kind === "changes") {
+        dispatch({ type: "CLOSE_TAB", tabId });
         return;
       }
 
@@ -2170,6 +2185,8 @@ export function useWorkspaceStore({
       const validWorktreePaths = new Set(worktrees.map((worktree) => worktree.path));
       const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(sessionWorktreePath(session)));
       dispatch({ type: "SET_WORKTREES", worktrees });
+      // Removing a worktree drops its parked layout, file tabs included.
+      releaseOrphanPreviews(stateRef.current);
       await Promise.allSettled(staleSessions.map((session) => closeBackendSession(session, services)));
     },
     [dispatch, services, workspaceId],
@@ -2319,9 +2336,12 @@ export function useWorkspaceStore({
       const snapshot = stateRef.current;
       const sourceWorktreePath = sessionWorktreePath(snapshot.sessions[source.sessionId]);
       const targetWorktreePath = sourceWorktreePath || snapshot.activeWorktreePath;
-      const existing = (targetWorktreePath === snapshot.activeWorktreePath ? snapshot.layout.tabs : []).find(
-        (tab) => tab.kind === "file" && tab.path === request.path && tab.backendSessionId === request.backendSessionId,
-      );
+      // An absolute path names one file whichever session (or the CLI, with no session) asked;
+      // only a relative path depends on the requesting session's cwd.
+      const absolute = /^(?:\/|\\\\|[a-zA-Z]:[\\/])/.test(request.path);
+      const sameFile = (tab: WorkspaceTab) =>
+        tab.kind === "file" && tab.path === request.path && (absolute || tab.backendSessionId === request.backendSessionId);
+      const existing = (targetWorktreePath === snapshot.activeWorktreePath ? snapshot.layout.tabs : []).find(sameFile);
       if (existing && existing.kind === "file") {
         retainFilePreview(existing.previewId, source, request);
         dispatch({
@@ -2335,9 +2355,7 @@ export function useWorkspaceStore({
 
       for (const [wtPath, parkedLayout] of Object.entries(snapshot.worktreeLayouts ?? {})) {
         if (sourceWorktreePath && wtPath !== sourceWorktreePath) continue;
-        const parkedTab = parkedLayout.tabs.find(
-          (tab) => tab.kind === "file" && tab.path === request.path && tab.backendSessionId === request.backendSessionId,
-        );
+        const parkedTab = parkedLayout.tabs.find(sameFile);
         if (parkedTab && parkedTab.kind === "file") {
           dispatch({ type: "SELECT_WORKTREE", path: wtPath });
           retainFilePreview(parkedTab.previewId, source, request);
@@ -2391,6 +2409,41 @@ export function useWorkspaceStore({
         }
       }
 
+      return tabId;
+    },
+    [dispatch],
+  );
+
+  /**
+   * Opens (or focuses) the Changes tab of a checkout in that worktree's layout. The main
+   * checkout and unmanaged worktrees have no identity; the backend resolves them by path.
+   */
+  const openChangesTab = useCallback(
+    (worktree: Worktree, ownerWorkspaceId: string): string | null => {
+      const identity = worktreeIdentity(worktree);
+      const snapshot = stateRef.current;
+      const isChangesFor = (tab: WorkspaceTab) =>
+        tab.kind === "changes" && tab.worktreePath === worktree.path && tab.workspaceId === ownerWorkspaceId;
+      if (snapshot.activeWorktreePath !== worktree.path && snapshot.worktrees.some((candidate) => candidate.path === worktree.path)) {
+        dispatch({ type: "SELECT_WORKTREE", path: worktree.path });
+      }
+      const current = stateRef.current;
+      const existing = (current.activeWorktreePath === worktree.path ? current.layout.tabs : current.worktreeLayouts?.[worktree.path]?.tabs ?? [])
+        .find(isChangesFor);
+      if (existing) {
+        dispatch({ type: "ACTIVATE_TAB", tabId: existing.id });
+        return existing.id;
+      }
+      const tabId = createId("tab");
+      const tab: ChangesTab = {
+        kind: "changes",
+        id: tabId,
+        label: "Changes",
+        workspaceId: ownerWorkspaceId,
+        worktreePath: worktree.path,
+        worktree: identity,
+      };
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab, targetWorktreePath: worktree.path });
       return tabId;
     },
     [dispatch],
@@ -2548,6 +2601,7 @@ export function useWorkspaceStore({
     openTab,
     createBrowserTab,
     openFilePreviewTab,
+    openChangesTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
@@ -2835,7 +2889,7 @@ export function selectTabActivitySummaries(state: WorkspaceState): Record<string
   const allTabs = getAllTabs(state);
 
   for (const tab of allTabs) {
-    if (tab.kind === "browser") continue;
+    if (!isTerminalTab(tab)) continue;
     const sessionIds = getTabSessionIds(state, tab.id);
     const activities = [...sessionIds]
       .map((sessionId) => activityBySessionId[sessionId])
@@ -2854,7 +2908,7 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
   const allTabs = getAllTabs(state);
 
   for (const tab of allTabs) {
-    if (tab.kind === "browser") continue;
+    if (!isTerminalTab(tab)) continue;
     const sessionIds = getTabSessionIds(state, tab.id);
     const worktreePaths = new Set<string>();
     for (const sessionId of sessionIds) {
@@ -4678,7 +4732,7 @@ function getTabWorktreePath(state: WorkspaceState, tabId: string): string | null
 
 function findTabIdForSession(state: WorkspaceState, sessionId: string): string | null {
   for (const tab of getAllTabs(state)) {
-    if (tab.kind === "browser") continue;
+    if (!isTerminalTab(tab)) continue;
     if (getTabSessionIds(state, tab.id).has(sessionId)) return tab.id;
   }
   return null;
@@ -4910,8 +4964,14 @@ function collectPreviewIds(state: { layout: LayoutState; worktreeLayouts?: Recor
   return ids;
 }
 
-function releaseOrphanPreviews(state: { layout: LayoutState; worktreeLayouts?: Record<string, LayoutState> }) {
+/** Releases controllers no layout references. The registry is process-wide while only one
+ * workspace is mounted, so previews parked in other workspaces' snapshots stay live. */
+function releaseOrphanPreviews(state: WorkspaceState) {
   const live = collectPreviewIds(state);
+  for (const [snapshotWorkspaceId, snapshot] of listWorkspaceSnapshots()) {
+    if (snapshotWorkspaceId === state.workspaceId) continue;
+    for (const id of collectPreviewIds(snapshot)) live.add(id);
+  }
   for (const id of listFilePreviewIds()) {
     if (!live.has(id)) void releaseFilePreview(id);
   }
