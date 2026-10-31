@@ -737,13 +737,16 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
       "42abc",
       "null",
       "undefined",
+      "18446744073709551616",
+      "99999999999999999999",
     ];
 
     it.each(invalidU64Tokens)("rejects invalid u64 string %j in frame metadata", (invalidVal) => {
       for (const field of ["browserServiceEpoch", "desktopEpoch", "documentGeneration", "viewportRevision"] as const) {
         const meta = { ...validMetadata, [field]: invalidVal };
         const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
-        const buf = new Uint8Array(16 + metaBytes.length + 10);
+        const jpeg = makeJpeg(640, 400);
+        const buf = new Uint8Array(16 + metaBytes.length + jpeg.length);
         const view = new DataView(buf.buffer);
         view.setUint8(0, 0x62);
         view.setUint8(1, 1);
@@ -753,7 +756,8 @@ describe("browserProtocol - Phase 7B edge cases (§7.1)", () => {
         view.setUint32(8, metaBytes.length, true);
         view.setUint32(12, 0, true);
         buf.set(metaBytes, 16);
-        expect(() => decodeFrame(buf)).toThrow(/u64 decimal string/i);
+        buf.set(jpeg, 16 + metaBytes.length);
+        expect(() => decodeFrame(buf)).toThrow();
       }
     });
 

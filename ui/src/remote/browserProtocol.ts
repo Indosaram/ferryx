@@ -82,7 +82,7 @@ function isFiniteNumber(val: unknown): val is number {
 }
 
 function isU64DecimalString(val: unknown): val is string {
-  return typeof val === "string" && U64_DECIMAL_REGEX.test(val);
+  return typeof val === "string" && U64_DECIMAL_REGEX.test(val) && BigInt(val) <= 18446744073709551615n;
 }
 
 function parseJpegDimensions(bytes: Uint8Array): { width: number; height: number } | null {
