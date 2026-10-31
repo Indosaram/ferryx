@@ -73,6 +73,85 @@ describe("remote terminal agent state bridge", () => {
     vi.restoreAllMocks();
   });
 
+  it("acknowledges a legacy outcome once after presentation is ready, not merely socket open", async () => {
+    await act(async () => {
+      render(<RemoteTerminal sessionId="s-ack" token="token" createWebSocket={fakeCreateWebSocket} />);
+    });
+    const socket = createdSockets[0];
+    expect(socket).toBeDefined();
+    const presentation = JSON.stringify({ type: "grid", rows: 20, cols: 80, cursor: hiddenCursor, lines: [] });
+    await act(async () => { socket.onopen?.(new Event("open")); });
+    expect(socket.send).not.toHaveBeenCalled();
+    await act(async () => { socket.onmessage?.({ data: presentation }); });
+    const acknowledgement = JSON.stringify({ type: "acknowledgeAgentOutcome" });
+    expect(socket.send.mock.calls).toEqual([[acknowledgement]]);
+    await act(async () => {
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.({ data: presentation });
+    });
+    expect(socket.send.mock.calls).toEqual([[acknowledgement]]);
+  });
+
+  it("acknowledges only after an attached frame matches the requested session and epoch", async () => {
+    let resolveConnected!: (socket: MockWebSocket) => void;
+    const connected = new Promise<MockWebSocket>((resolve) => { resolveConnected = resolve; });
+    await act(async () => {
+      render(<RemoteTerminal
+        sessionId="s-ack"
+        token="tunnel-device-token"
+        isAccountSession
+        daemonEpoch="101"
+        createWebSocket={(path) => {
+          const socket = new MockWebSocket(path);
+          resolveConnected(socket);
+          return socket;
+        }}
+      />);
+    });
+    const socket = await connected;
+    const frame = (sessionId: string, daemonEpoch: string) => ({
+      data: JSON.stringify({ type: "attached", generation: "9", target: { sessionId, daemonEpoch } }),
+    });
+    await act(async () => {
+      socket.onopen?.(new Event("open"));
+      socket.onmessage?.(frame("other", "101"));
+      socket.onmessage?.(frame("s-ack", "100"));
+    });
+    const acknowledgement = JSON.stringify({ type: "acknowledgeAgentOutcome", generation: "9" });
+    expect(socket.send).not.toHaveBeenCalledWith(acknowledgement);
+    await act(async () => { socket.onmessage?.(frame("s-ack", "101")); });
+    expect(socket.send).toHaveBeenCalledWith(acknowledgement);
+  });
+
+  it.each([true, false])("acknowledges new outcomes only for its current ready target (machine=%s)", async (machine) => {
+    await act(async () => {
+      render(<RemoteTerminal sessionId="s-ack" token="token" isAccountSession={machine} daemonEpoch="101" createWebSocket={fakeCreateWebSocket} />);
+    });
+    const socket = createdSockets[0];
+    const outcome = (sessionId: string, daemonEpoch: string, value: string | null = "done") => ({
+      data: JSON.stringify({ type: "agent_state", state: "idle", stateSource: "protocol", outcome: value,
+        target: { sessionId, daemonEpoch } }),
+    });
+    await act(async () => { socket.onmessage?.(outcome("s-ack", "101")); });
+    expect(socket.send).not.toHaveBeenCalled();
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify(machine
+        ? { type: "attached", generation: "9", target: { sessionId: "s-ack", daemonEpoch: "101" } }
+        : { type: "grid", rows: 20, cols: 80, cursor: hiddenCursor, lines: [] }) });
+    });
+    socket.send.mockClear();
+    await act(async () => {
+      socket.onmessage?.(outcome("other", "101"));
+      socket.onmessage?.(outcome("s-ack", "100"));
+      socket.onmessage?.(outcome("s-ack", "101", null));
+    });
+    expect(socket.send).not.toHaveBeenCalled();
+    await act(async () => { socket.onmessage?.(outcome("s-ack", "101", "error")); });
+    expect(socket.send.mock.calls).toEqual([[JSON.stringify({
+      type: "acknowledgeAgentOutcome", ...(machine ? { generation: "9" } : {}),
+    })]]);
+  });
+
   it("forwards non-grid string frames to the agent-state listener and keeps grid frames out of it", async () => {
     const frames: string[] = [];
     render(
