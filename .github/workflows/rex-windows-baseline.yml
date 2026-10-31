@@ -1,0 +1,39 @@
+name: rex-windows-baseline
+on:
+  push:
+    branches: ['ci/rex-winbaseline']
+jobs:
+  compare:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: ['a3beca3f', '1b25ce6a']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.revision }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Compare the failing Windows suites
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $root = (Get-Location).Path
+          git rev-parse HEAD | Out-File out/revision.log
+          git config --get core.autocrlf | Out-File out/autocrlf.log
+          Set-Location ui
+          $bun = (Get-Command bun).Source
+          $install = Start-Process -FilePath $bun -ArgumentList @('install', '--frozen-lockfile') -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$root/out/install.stdout.log" -RedirectStandardError "$root/out/install.stderr.log"
+          "INSTALL_EXIT $($install.ExitCode)" | Tee-Object "$root/out/gate.log"
+          if ($install.ExitCode -ne 0) { exit $install.ExitCode }
+          $tests = Start-Process -FilePath $bun -ArgumentList @('--bun', 'vitest', 'run', '--maxWorkers=1', 'src/App.test.tsx', 'src/components/NativeTerminalPane.test.tsx', 'src/lib/guestBridgeWindowClose.test.ts') -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$root/out/tests.stdout.log" -RedirectStandardError "$root/out/tests.stderr.log"
+          "TEST_EXIT $($tests.ExitCode)" | Tee-Object -Append "$root/out/gate.log"
+          exit $tests.ExitCode
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rex-windows-${{ matrix.revision }}
+          path: out
