@@ -1,0 +1,42 @@
+name: rex-ui-mainbase
+on:
+  push:
+    branches: ['ci/rexui-mainbase']
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c2c49463d724f285a88328ed51fd570ee0b85c4c
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: UI regression
+        shell: bash
+        run: |
+          mkdir -p out
+          cd ui
+          bun install --frozen-lockfile 2>&1 | tee ../out/install.log
+          set +e
+          status=0
+          run_gate() {
+            name="$1"
+            shift
+            "$@" 2>&1 | tee "../out/$name.log"
+            code=${PIPESTATUS[0]}
+            printf '%s_EXIT %s\n' "$name" "$code" | tee -a ../out/gate.log
+            if [ "$code" -ne 0 ]; then status=1; fi
+          }
+          run_gate TSC bun --bun tsc --noEmit
+          run_gate TSC_TEST bun --bun tsc --noEmit -p tsconfig.test.json
+          run_gate VITEST_TOUCHED bun --bun vitest run --maxWorkers=2 src/components/NativeTerminalPane src/remote/RemoteTerminal src/remote/RemoteApp.inventorySelection.test.tsx src/remote/RemoteApp.referenceChat.test.tsx
+          run_gate VITEST_FULL bun run test
+          run_gate BUILD bun run build
+          exit "$status"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rex-ui-repair
+          path: out
