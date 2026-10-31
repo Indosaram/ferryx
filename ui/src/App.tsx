@@ -142,6 +142,7 @@ import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLi
 import { getCachedSshHosts } from "./lib/sshHosts";
 import { reconnectAgentSession } from "./lib/agentReconnect";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegisteredProject } from "./lib/remoteProject";
+import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
 import { groupProjects } from "./lib/projectGrouping";
@@ -3384,7 +3385,8 @@ function WorkspaceApp({
         request: Parameters<typeof openFilePreviewTab>[1];
       }>).detail;
       if (!detail?.source || !detail.request) return;
-      openFilePreviewTab(detail.source, detail.request);
+      // A remote link was just re-fetched into the same cache path: re-read it.
+      openFilePreviewTab(detail.source, previewRequestForSource(detail.source, detail.request));
     };
     window.addEventListener("ferryx:open-file-preview", onOpenFilePreview);
     return () => window.removeEventListener("ferryx:open-file-preview", onOpenFilePreview);
