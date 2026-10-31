@@ -5045,6 +5045,14 @@ impl DaemonServer {
                 }
                 sampled_markers = markers;
                 last_snapshot_at = Some(now);
+                // Each session's newest OSC 7501 revision, read before the listing is requested:
+                // a report applied by then was written by a process that already existed, so a
+                // listing without any such process proves it gone. A report applied later is
+                // never released by this listing.
+                let requested_revisions: HashMap<String, u64> = sessions
+                    .iter()
+                    .map(|(id, _)| (id.clone(), server.protocol_reporters.newest(id)))
+                    .collect();
                 let capture = Arc::clone(&capture);
                 let observations = crate::ipc::run_blocking(move || {
                     // One process listing per tick. On Windows that listing is a full
@@ -5059,7 +5067,7 @@ impl DaemonServer {
                         .map(|(id, session)| {
                             let observation = match &snapshot {
                                 Ok(snapshot) => {
-                                    crate::terminal::foreground::inspect_with_snapshot(
+                                    crate::terminal::foreground::observe_with_snapshot(
                                         &session, snapshot,
                                     )
                                 }
@@ -5077,7 +5085,11 @@ impl DaemonServer {
                     Ok(observations) => {
                         for (id, observation) in observations {
                             match observation {
-                                Ok(observation) => {
+                                Ok(observed) => {
+                                    let observation = observed.map(|observed| observed.foreground);
+                                    let alone_after = observed
+                                        .filter(|observed| observed.shell_alone)
+                                        .and_then(|_| requested_revisions.get(&id).copied());
                                     let edge = transitions
                                         .entry(id.clone())
                                         .or_default()
@@ -5104,13 +5116,18 @@ impl DaemonServer {
                                     // A program that reported a transient OSC 7501 state may
                                     // never have been sampled as an agent (it lived shorter
                                     // than a tick, or is no agent at all), so it has no
-                                    // Released edge. The shell owning the foreground again,
-                                    // from a group other than the reporter's, ends it too.
+                                    // Released edge. The shell owning the foreground again from
+                                    // a group other than the reporter's ends it, and so does a
+                                    // listing requested after the report that shows the shell
+                                    // alone: that covers a reporter gone before its bytes were
+                                    // parsed (it reads as the shell's group) and ConPTY, which
+                                    // has no group at all.
                                     let reporter_gone =
                                         server.protocol_reporters.foreground_returned(
                                             &id,
                                             observation,
                                             sampled_markers.get(&id).copied().flatten(),
+                                            alone_after,
                                             || {
                                                 server
                                                     .terminal_service
