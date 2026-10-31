@@ -402,7 +402,7 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         name: "pair",
-        summary: "List paired devices, generate a pairing PIN, or approve a PIN",
+        summary: "List paired devices or approve a PIN; PIN generation is retired and requires account enrollment",
         output: "text",
         subcommands: &[
             sub!("list", &[], &[]),
