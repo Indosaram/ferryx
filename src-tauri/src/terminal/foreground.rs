@@ -1,5 +1,6 @@
 //! Positive process evidence only. Sampling frequency is not a state timeout.
 use super::PtySession;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Foreground {
@@ -47,6 +48,65 @@ impl ProcessTransition {
             // A non-agent, non-shell foreground says nothing about whether the agent came back.
             Foreground::Shell | Foreground::Other => None,
         }
+    }
+}
+
+/// The foreground process group that was in front when each session last reported a transient
+/// OSC 7501 record (`working`, `blocked` or `idle`).
+///
+/// [`ProcessTransition`] releases only after it has sampled an agent, and a reporting program can
+/// live shorter than one observation tick, or be no agent at all. Its records then outlive it and
+/// pin the pane to its last report. The group it reported from is the evidence instead: once the
+/// shell owns the foreground and is not that group, the reporting program is gone.
+#[derive(Default)]
+pub(crate) struct ProtocolReporters {
+    groups: parking_lot::Mutex<HashMap<String, u32>>,
+}
+
+impl ProtocolReporters {
+    /// A session's summary changed. A transient summary remembers the foreground `group` it was
+    /// reported from; anything else, or an unknown group, forgets the session.
+    pub(crate) fn reported(&self, session_id: &str, transient: bool, group: Option<u32>) {
+        let mut groups = self.groups.lock();
+        match group.filter(|_| transient) {
+            Some(group) => {
+                groups.insert(session_id.to_string(), group);
+            }
+            None => {
+                groups.remove(session_id);
+            }
+        }
+    }
+
+    /// Whether `current`, observed while `group` owned the foreground, is the shell taking the
+    /// foreground back from the process that reported. True once per report.
+    ///
+    /// `live_group` re-reads the foreground group under the same lock a report takes: a program
+    /// that started and reported after `current` was observed owns the foreground now, so its
+    /// fresh report is never mistaken for one the shell already took back.
+    pub(crate) fn foreground_returned(
+        &self,
+        session_id: &str,
+        current: Option<Foreground>,
+        group: Option<u32>,
+        live_group: impl FnOnce() -> Option<u32>,
+    ) -> bool {
+        let (Some(Foreground::Shell), Some(group)) = (current, group) else {
+            return false;
+        };
+        let mut groups = self.groups.lock();
+        if groups.get(session_id).is_some_and(|reporter| *reporter != group)
+            && live_group() == Some(group)
+        {
+            groups.remove(session_id);
+            return true;
+        }
+        false
+    }
+
+    /// Keeps only the sessions `live` accepts.
+    pub(crate) fn retain(&self, live: impl Fn(&str) -> bool) {
+        self.groups.lock().retain(|id, _| live(id));
     }
 }
 
@@ -888,6 +948,76 @@ mod tests {
             observer.observe(Some(Foreground::Agent { pid: 9, agent: "omo" })),
             Some(AgentProcessEdge::Observed)
         );
+    }
+
+    #[test]
+    fn a_reporter_never_sampled_as_an_agent_has_no_release_edge() {
+        // The live E2E gap: the reporter lived shorter than one tick (or was no agent), so the
+        // observer only ever saw the shell. No Released edge exists; ProtocolReporters covers it.
+        let mut observer = ProcessTransition::default();
+        assert_eq!(observer.observe(Some(Foreground::Shell)), None);
+        assert_eq!(observer.observe(Some(Foreground::Other)), None);
+        assert_eq!(observer.observe(Some(Foreground::Shell)), None);
+    }
+
+    #[test]
+    fn the_shell_regaining_the_foreground_from_a_reporter_releases_once() {
+        let reporters = ProtocolReporters::default();
+        reporters.reported("s", true, Some(200));
+        let shell = || Some(100);
+        assert!(reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        assert!(
+            !reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell),
+            "one release per report"
+        );
+        assert!(
+            !reporters.foreground_returned("other", Some(Foreground::Shell), Some(100), shell),
+            "a session that never reported has nothing to release"
+        );
+    }
+
+    #[test]
+    fn a_reporter_still_in_the_foreground_keeps_its_records() {
+        let reporters = ProtocolReporters::default();
+        reporters.reported("s", true, Some(200));
+        let live = || Some(200);
+        assert!(!reporters.foreground_returned("s", Some(Foreground::Other), Some(200), live));
+        assert!(!reporters.foreground_returned(
+            "s",
+            Some(Foreground::Agent { pid: 200, agent: "claude" }),
+            Some(200),
+            live
+        ));
+        assert!(
+            !reporters.foreground_returned("s", None, Some(100), live),
+            "unknown is no evidence"
+        );
+        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), None, live));
+        // The shell was observed, but the reporter took the foreground again since: not gone.
+        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), live));
+        assert!(
+            reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), || Some(100)),
+            "none of the above consumed the pending release"
+        );
+    }
+
+    #[test]
+    fn a_report_from_the_shell_itself_or_a_settled_record_is_not_released() {
+        let reporters = ProtocolReporters::default();
+        let shell = || Some(100);
+        // Reported from the shell's own group (a builtin): its next prompt is not an exit.
+        reporters.reported("s", true, Some(100));
+        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        // done/error (or a clear) stay until acknowledged, so there is nothing to release.
+        reporters.reported("s", true, Some(200));
+        reporters.reported("s", false, Some(200));
+        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        // An unknown reporter group is no evidence either.
+        reporters.reported("s", true, None);
+        assert!(!reporters.foreground_returned("s", Some(Foreground::Shell), Some(100), shell));
+        reporters.reported("gone", true, Some(200));
+        reporters.retain(|id| id != "gone");
+        assert!(!reporters.foreground_returned("gone", Some(Foreground::Shell), Some(100), shell));
     }
 
     /// The observer tick captures the process listing once and classifies every live session
