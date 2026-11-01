@@ -172,6 +172,17 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(container.textContent).toContain("Decline");
   });
 
+  it("stacks Approve and Decline as separate full-width 44px buttons with the safe choice emphasised", () => {
+    render(<ApprovalActionCard description="Run rm -rf dist?" onAccept={() => {}} onDecline={() => {}} />);
+    const approve = screen.getByTestId("approval-accept");
+    const decline = screen.getByTestId("approval-decline");
+    for (const button of [approve, decline]) expect(button).toHaveClass("min-h-11", "w-full");
+    expect(approve.parentElement).toHaveClass("flex-col", "gap-3");
+    expect(decline).toHaveClass("bg-chat-primary");
+    expect(approve).not.toHaveClass("bg-chat-primary");
+    expect(screen.getByText("Needs your approval")).toBeInTheDocument();
+  });
+
   it("renders user MobileChatMessage as a right-aligned accent bubble", () => {
     const { container } = render(
       <MobileChatMessage
@@ -454,7 +465,7 @@ describe("MobileChatComponents & MobileChatMessage", () => {
           },
         ]}
         approvalAction={{
-          title: "Action Required",
+          title: "Needs your approval",
           description: "Proceed with running rm -rf dist?",
           onAccept: vi.fn(),
           onDecline: vi.fn(),
@@ -467,7 +478,7 @@ describe("MobileChatComponents & MobileChatMessage", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
 
     const body = screen.getByTestId("assistant-message-body");
-    const approval = screen.getByText("Action Required");
+    const approval = screen.getByText("Needs your approval");
     expect(body.compareDocumentPosition(approval) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 

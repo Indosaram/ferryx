@@ -438,6 +438,8 @@ export const ThinkingBlock: React.FC<{ text: string; source?: "prose" }> = ({
 
 export interface ApprovalActionCardProps {
   title?: string;
+  /** Drawn inside a card that already shows the title: no shell, no header of its own. */
+  bare?: boolean;
   description: string;
   confirmLabel?: string;
   declineLabel?: string;
@@ -451,12 +453,13 @@ export interface ApprovalActionCardProps {
 }
 
 export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
-  title = "Action Required",
+  title = "Needs your approval",
+  bare = false,
   description,
   confirmLabel = "Approve",
   declineLabel = "Decline",
   allowCustomFeedback = true,
-  feedbackPlaceholder = "Add instructions or reason...",
+  feedbackPlaceholder = "Add instructions or a reason…",
   onAccept,
   onDecline,
   isSubmitting = false,
@@ -473,78 +476,81 @@ export const ApprovalActionCard: React.FC<ApprovalActionCardProps> = ({
     onDecline(feedback.trim() ? feedback.trim() : undefined, event);
   };
 
+  const actions = (
+    <>
+      {allowCustomFeedback && showFeedbackInput && (
+        <textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          placeholder={feedbackPlaceholder}
+          aria-label="Note for the agent"
+          rows={2}
+          disabled={isSubmitting}
+          className="w-full rounded-lg border border-chat-border bg-chat-screen px-3 py-2 text-base text-chat-foreground placeholder:text-chat-foreground-tertiary transition-colors resize-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+      )}
+
+      {/* stacked, full width and 12px apart: a slip off one never lands on the other; the safe
+          choice (decline) carries the primary emphasis */}
+      <div className="flex flex-col gap-3">
+        <button
+          type="button"
+          data-testid="approval-accept"
+          onClick={handleConfirm}
+          disabled={isSubmitting}
+          aria-busy={isSubmitting || undefined}
+          className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-chat-border bg-chat-surface-raised px-4 py-2 text-left text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          {isSubmitting ? (
+            <Loader2 aria-hidden="true" className="size-4 shrink-0 animate-spin motion-reduce:animate-none" />
+          ) : (
+            <Check aria-hidden="true" className="size-4 shrink-0" />
+          )}
+          <span className="min-w-0 break-words">{confirmLabel}</span>
+        </button>
+        <button
+          type="button"
+          data-testid="approval-decline"
+          onClick={handleDecline}
+          disabled={isSubmitting}
+          className="flex min-h-11 w-full items-center justify-center rounded-lg bg-chat-primary px-4 py-2 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span className="min-w-0 break-words">{declineLabel}</span>
+        </button>
+        {allowCustomFeedback && !showFeedbackInput && (
+          <button
+            type="button"
+            onClick={() => setShowFeedbackInput(true)}
+            className="flex min-h-11 w-full items-center justify-center rounded-lg px-4 text-sm text-chat-foreground-secondary transition-colors hover:bg-chat-row-hover hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Add a note
+          </button>
+        )}
+      </div>
+    </>
+  );
+
+  if (bare) {
+    return <div className={cn("space-y-3", className)}>{actions}</div>;
+  }
+
   return (
     <div
       className={cn(
-        "rounded-xl border border-status-warning/30 bg-chat-surface/90 shadow-md p-3.5 backdrop-blur-md my-2.5 space-y-3",
+        "rounded-xl border border-chat-border bg-chat-surface p-3.5 my-2.5 space-y-3",
         className
       )}
     >
-      <div className="flex items-start gap-2.5">
-        <div className="p-1 rounded-lg bg-status-warning/10 border border-status-warning/20 text-status-warning shrink-0 mt-0.5">
-          <AlertCircle className="w-4 h-4" />
-        </div>
-        <div className="space-y-0.5 min-w-0 flex-1">
-          <h4 className="text-xs font-semibold text-chat-foreground tracking-tight">
-            {title}
-          </h4>
-          <p className="text-xs text-chat-foreground-secondary leading-relaxed break-words">
-            {description}
-          </p>
-        </div>
+      <div className="space-y-1 min-w-0">
+        <h4 className="flex items-start gap-2 text-base font-semibold text-chat-foreground">
+          <AlertCircle aria-hidden="true" className="mt-1 size-4 shrink-0 text-status-warning" />
+          <span className="min-w-0 break-words">{title}</span>
+        </h4>
+        <p className="text-[0.9375rem] text-chat-foreground leading-relaxed break-words">
+          {description}
+        </p>
       </div>
-
-      {allowCustomFeedback && showFeedbackInput && (
-        <div className="relative">
-          <textarea
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            placeholder={feedbackPlaceholder}
-            rows={2}
-            disabled={isSubmitting}
-            className="w-full rounded-lg border border-chat-foreground/10 bg-chat-screen/50 px-2.5 py-1.5 text-xs text-chat-foreground placeholder:text-chat-foreground-tertiary focus:outline-none focus:border-status-warning/50 focus:ring-1 focus:ring-status-warning/30 transition-all resize-none"
-          />
-        </div>
-      )}
-
-      <div className="flex items-center justify-between gap-2 pt-1 border-t border-chat-foreground/10">
-        <div>
-          {allowCustomFeedback && !showFeedbackInput && (
-            <button
-              type="button"
-              onClick={() => setShowFeedbackInput(true)}
-              className="text-[11px] text-chat-foreground-secondary hover:text-chat-foreground underline decoration-chat-foreground-tertiary underline-offset-2 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
-            >
-              Add note...
-            </button>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={handleDecline}
-            disabled={isSubmitting}
-            className="px-3 py-1.5 rounded-lg border border-chat-foreground/10 bg-chat-surface-raised hover:bg-chat-surface-hover active:bg-chat-surface-raised text-xs font-medium text-chat-foreground-secondary hover:text-chat-foreground transition-all disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            {declineLabel}
-          </button>
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={isSubmitting}
-            aria-busy={isSubmitting || undefined}
-            className="px-3 py-1.5 rounded-lg border border-status-warning/40 bg-status-warning/20 hover:bg-status-warning/30 active:bg-status-warning/20 text-xs font-medium text-status-warning hover:text-chat-foreground shadow-xs transition-all flex items-center gap-1.5 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            {isSubmitting ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin motion-reduce:animate-none" />
-            ) : (
-              <Check className="w-3.5 h-3.5" />
-            )}
-            <span>{confirmLabel}</span>
-          </button>
-        </div>
-      </div>
+      {actions}
     </div>
   );
 };

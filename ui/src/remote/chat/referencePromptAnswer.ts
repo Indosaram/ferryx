@@ -181,7 +181,8 @@ export const REFERENCE_PROMPT_STALE_CODE = "REQUEST_CONFLICT";
 export const REFERENCE_PROMPT_CHANGED_CODE = "prompt_changed";
 
 /** What the card tells the user when the screen moved under its answer. */
-export const REFERENCE_PROMPT_STALE_MESSAGE = "the prompt changed — re-read";
+export const REFERENCE_PROMPT_STALE_MESSAGE =
+  "The question changed on your computer. Read it again before you answer.";
 
 /**
  * Was this failure the screen moving under the answer? A stale screen and a replayed answer are
