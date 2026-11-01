@@ -17,6 +17,15 @@ pub(crate) fn install_hosts(hosts: PairedHostService) {
     *HOSTS.write().unwrap_or_else(|e| e.into_inner()) = Some(hosts);
 }
 
+/// The installed inventory's paired hosts; empty before the hub opened or when it is unreadable.
+pub(crate) async fn paired_host_views() -> Vec<crate::paired_host::inventory::HostView> {
+    let hosts = HOSTS.read().unwrap_or_else(|e| e.into_inner()).clone();
+    match hosts {
+        Some(hosts) => hosts.list().await.unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
 /// [`move_supervisor_here`] with the installed inventory.
 pub async fn move_here_installed(state: &RemoteGatewayState, force: bool, by: &str) -> Result<bool, MoveError> {
     let hosts = HOSTS.read().unwrap_or_else(|e| e.into_inner()).clone();

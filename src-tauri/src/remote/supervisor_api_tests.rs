@@ -277,6 +277,58 @@ async fn a_request_on_standby_is_409_supervisor_standby_naming_the_holder() {
     }
 }
 
+/// Over the real routes: with a hub open, a standby still answers a phone's request,
+/// conversation and memory read 409 SUPERVISOR_STANDBY naming the holder, never its own state.
+#[tokio::test]
+async fn on_standby_the_phone_routes_answer_409_with_the_holder() {
+    let gateway = Gateway::start().await;
+    let (pool, goal_id, project_id) = populate(&gateway).await;
+    let token = gateway.authorized_machine_token();
+    crate::hub_runtime::stand_by_for_test(Some(("mach-b", "Laptop B")));
+
+    let pause = serde_json::json!({"requestId": "qa-standby-1", "projectId": project_id, "goalId": goal_id,
+        "expectedRevision": 1, "action": "pause", "payload": {"reason": "phone"}});
+    let request = gateway.post_to("/api/v1/supervisor/request", &token, &pause.to_string()).await;
+    let conversation = gateway
+        .get(&format!("/api/v1/supervisor/conversation?projectId={project_id}"), &token)
+        .await;
+    let memory = gateway.get("/api/v1/supervisor/memory", &token).await;
+    crate::hub_runtime::stand_by_for_test(None);
+
+    for (route, (status, _, body)) in [("request", request), ("conversation", conversation), ("memory", memory)] {
+        assert_eq!(status, 409, "{route}: {body}");
+        assert_eq!(body["error"]["code"], SUPERVISOR_STANDBY_CODE, "{route}: {body}");
+        assert_eq!(body["error"]["details"]["holderMachineId"], "mach-b", "{route}");
+        assert_eq!(body["error"]["details"]["holderLabel"], "Laptop B", "{route}");
+    }
+    assert_eq!(goal_row(&pool, &goal_id).await, ("ready".into(), 1), "the standby changed nothing");
+    gateway.stop().await;
+}
+
+/// Observations need the agent-control grant: a view-only device (only a mirror device can
+/// be view-only), a mirror Control device and a machine device outside the policy are refused
+/// 403 before the hub is consulted; an admitted machine Control device reaches it (503 here,
+/// no hub open).
+#[tokio::test]
+async fn only_an_admitted_machine_control_device_may_send_observations() {
+    let gateway = Gateway::start().await;
+    let view = gateway.token(DevicePermission::View, DeviceAccessScope::Mirror);
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let outsider = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    let control = gateway.authorized_machine_token();
+    let observation = serde_json::json!({"kind": "keystrokes", "sessionId": "pane-1", "nowMs": 1}).to_string();
+
+    for token in [&view, &mirror, &outsider] {
+        let (status, _, body) = gateway.post_to("/api/v1/supervisor/observe", token, &observation).await;
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+    }
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/observe", &control, &observation).await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], SUPERVISOR_UNAVAILABLE_CODE);
+    gateway.stop().await;
+}
+
 #[tokio::test]
 async fn the_capability_is_absent_while_the_hub_is_closed() {
     let gateway = Gateway::start().await;
