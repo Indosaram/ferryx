@@ -4140,10 +4140,16 @@ async fn authenticate_control_socket(
             ))
             .await
             .map_err(|error| error.to_string())?;
-        let auth = match socket.recv().await {
-            Some(Ok(Message::Text(text))) => serde_json::from_str::<ControlAuth>(&text)
-                .map_err(|_| "Invalid ControlAuth frame".to_string())?,
-            _ => return Err("Expected ControlAuth text frame".to_string()),
+        // Keepalives may precede the auth frame; the outer timeout still bounds the wait.
+        let auth = loop {
+            match socket.recv().await {
+                Some(Ok(Message::Text(text))) => {
+                    break serde_json::from_str::<ControlAuth>(&text)
+                        .map_err(|_| "Invalid ControlAuth frame".to_string())?
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                _ => return Err("Expected ControlAuth text frame".to_string()),
+            }
         };
         if auth.machine_id.is_empty() || state.validate_machine_token(&auth.machine_id) {
             return Err("Invalid or reserved machine ID".to_string());
@@ -8879,6 +8885,45 @@ mod tests {
         let (_, response) = authenticate(&base, &identity(39, "disk-machine"), true, false).await;
         assert!(!response.success);
         assert_eq!(state.inner.admission.lock()[&ip].failures, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_keepalive_before_control_auth_does_not_fail_the_handshake() {
+        let (base, server) = spawn_test_relay().await;
+        let identity = identity(45, "pinging-machine");
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("{base}/tunnel/control"))
+            .await
+            .unwrap();
+        let challenge: ControlChallenge = receive_json(&mut socket).await;
+        socket.send(TMessage::Ping(b"early".to_vec().into())).await.unwrap();
+        socket.send(TMessage::Pong(b"early".to_vec().into())).await.unwrap();
+        let auth = ControlAuth {
+            enrollment_token: Some("test-machine-token".into()),
+            machine_id: identity.machine_id.clone(),
+            display_name: identity.display_name.clone(),
+            public_key: identity.public_key.clone(),
+            timestamp: challenge.timestamp,
+            signature: crate::remote::auth::sign_control_challenge(
+                &identity,
+                "relay",
+                &challenge.nonce,
+                challenge.timestamp,
+            )
+            .unwrap(),
+        };
+        socket
+            .send(TMessage::Text(serde_json::to_string(&auth).unwrap().into()))
+            .await
+            .unwrap();
+        // The relay answers the Ping with a Pong; skip it to reach the auth response.
+        let response = loop {
+            match timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap() {
+                TMessage::Text(text) => break serde_json::from_str::<ControlAuthResponse>(&text).unwrap(),
+                _ => continue,
+            }
+        };
+        assert!(response.success, "{:?}", response.error);
         server.abort();
     }
 
