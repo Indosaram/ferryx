@@ -2091,6 +2091,8 @@ async fn browser_terminal_handler(
 }
 
 const BROWSER_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+/// Read buffer for one browser bridge's tunnel side.
+const BRIDGE_READ_BUFFER: usize = 64 * 1024;
 
 async fn browser_socket(
     state: RelayState,
@@ -2152,16 +2154,20 @@ async fn bridge_browser_socket(
     let (mut reader, mut writer) = tokio::io::split(tunnel_io);
     let tunnel = async {
         let result = async {
-        let mut buffer = vec![0; buffer_size];
+        // One read never needs to hold a whole message: tungstenite reassembles frames, so a
+        // small read buffer bounds per-socket memory without limiting message size.
+        let mut buffer = bytes::BytesMut::with_capacity(BRIDGE_READ_BUFFER);
         loop {
             tokio::select! {
-                count = reader.read(&mut buffer) => {
+                count = reader.read_buf(&mut buffer) => {
                     let count = count?;
                     if count == 0 {
                         timeout(TRANSFER_TIMEOUT, data.send(Message::Close(None))).await??;
                         return Ok::<(), anyhow::Error>(());
                     }
-                    timeout(TRANSFER_TIMEOUT, data.send(Message::Binary(buffer[..count].to_vec().into()))).await??;
+                    let chunk = buffer.split().freeze();
+                    buffer.reserve(BRIDGE_READ_BUFFER);
+                    timeout(TRANSFER_TIMEOUT, data.send(Message::Binary(chunk))).await??;
                 }
                 frame = data.recv() => match frame {
                     Some(Ok(Message::Binary(bytes))) => timeout(TRANSFER_TIMEOUT, writer.write_all(&bytes)).await??,
