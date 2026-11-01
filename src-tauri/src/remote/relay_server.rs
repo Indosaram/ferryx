@@ -177,9 +177,13 @@ enum PairingWait {
 }
 
 pub const RELAY_STAGE_HEADER: &str = "x-ferryx-relay-stage";
-/// Response headers a browser client may read across origins: the relay stage, and the
-/// replacement bearer token the host gateway answers after a transparent rotation.
-const RELAY_EXPOSED_HEADERS: &str = "x-ferryx-relay-stage, x-ferryx-rotated-token";
+/// Response headers a browser client may read across origins: the relay stage, the
+/// replacement bearer token the host gateway answers after a transparent rotation, and the
+/// e2e marker on attach allocations.
+const RELAY_EXPOSED_HEADERS: &str =
+    "x-ferryx-relay-stage, x-ferryx-rotated-token, x-ferryx-relay-e2e";
+/// Set on every response to an `?e2e=1` attach allocation.
+const RELAY_E2E_HEADER: &str = "x-ferryx-relay-e2e";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
 
@@ -2424,6 +2428,26 @@ async fn attach_session_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
+    body: Bytes,
+) -> Response {
+    // Every answer to an encrypted allocation request says this relay speaks e2e, so a client
+    // can tell this relay's 401 (a revoked token) from an older relay that lacks the route.
+    let e2e_requested = url::form_urlencoded::parse(query.as_deref().unwrap_or_default().as_bytes())
+        .any(|(key, value)| key == "e2e" && value == "1");
+    let mut response = attach_session(state, peer, headers, query, body).await;
+    if e2e_requested {
+        response
+            .headers_mut()
+            .insert(RELAY_E2E_HEADER, HeaderValue::from_static("1"));
+    }
+    response
+}
+
+async fn attach_session(
+    state: RelayState,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    query: Option<String>,
     body: Bytes,
 ) -> Response {
     let ip = peer_ip(peer);
@@ -7478,6 +7502,7 @@ mod tests {
             .await
             .expect("allocation request");
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[RELAY_E2E_HEADER], "1");
         let allocated: AttachSessionResponse = response.json().await.expect("allocation body");
         assert!(allocated.opaque, "an e2e allocation must be opaque");
         assert_eq!(allocated.machine_id, machine);
@@ -7856,6 +7881,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(unknown.headers()[RELAY_E2E_HEADER], "1");
+        // The account-only allocation (no e2e query) is not marked.
+        let plain = client
+            .post(format!("{http_base}/api/v1/attach/session"))
+            .bearer_auth(device_token)
+            .json(&serde_json::json!({ "machineId": "strict-machine" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(plain.headers().get(RELAY_E2E_HEADER).is_none());
         let stranger = client
             .post(format!("{http_base}/api/v1/attach/session?e2e=1"))
             .bearer_auth("not-a-device-token")
@@ -7869,6 +7904,12 @@ mod tests {
         });
         let stranger = stranger.unwrap();
         assert_eq!(stranger.status(), StatusCode::UNAUTHORIZED);
+        // A current relay marks even its refusal, so the client knows the token was revoked.
+        assert_eq!(stranger.headers()[RELAY_E2E_HEADER], "1");
+        assert!(stranger.headers()["access-control-expose-headers"]
+            .to_str()
+            .unwrap()
+            .contains(RELAY_E2E_HEADER));
         let body: serde_json::Value = stranger.json().await.unwrap();
         assert_eq!(body["code"], "UNAUTHORIZED");
 
