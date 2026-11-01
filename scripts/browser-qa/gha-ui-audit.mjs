@@ -12,6 +12,11 @@
 // that only debug builds accept (FERRYX_BROWSER_ENGINE_PUBLIC_KEY), installs it from
 // Settings > Browser, opens a Chromium tab, types into a fixture page and kills the engine.
 //
+// Agent automation: `ferryx browser snapshot` and act commands (fill, click with an
+// --expect-text postcondition, a click with a ref from before a reload) run against a local
+// agent fixture page in the system webview tab on every OS and, when the engine is installed,
+// in the Chromium engine tab; outcomes go to summary.agent.<engine>.
+//
 // Usage: bun scripts/browser-qa/gha-ui-audit.mjs --binary <path> --out <dir>
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
@@ -35,6 +40,10 @@ mkdirSync(ocrDir, { recursive: true });
 const isolation = join(process.env.RUNNER_TEMP ?? out, "ferryx-ui-audit-isolation");
 const dirs = Object.fromEntries(["data", "runtime", "session", "tmp", "home"].map((name) => [name, join(isolation, name)]));
 for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
+// Token-only CLI access, the documented Settings > Browser > Agent access switch: pairing needs
+// a click on an approval card per controller, which this run does not exercise.
+mkdirSync(join(dirs.data, "browser"), { recursive: true });
+writeFileSync(join(dirs.data, "browser", "agent-authority.json"), JSON.stringify({ settings: { requirePairing: false } }));
 
 const engineZip = process.env.FERRYX_UI_AUDIT_ENGINE_ZIP && existsSync(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
   ? resolve(process.env.FERRYX_UI_AUDIT_ENGINE_ZIP)
@@ -53,8 +62,10 @@ const summary = {
     "Controls are located from their own on-screen text: the address bar by its URL/about:blank text, Settings nav items in the column of 'General', the Advanced features switch from the row's pixels. Settings groups are reached with real mouse-wheel input: scroll until the exact heading (at the content column edge, nothing after it on the line) is read, turning around at the pane end, bounded by a step count.",
     "Page loads use a local fixture server (example.html, download.html), so results do not depend on the network.",
     "ui_check uses tesseract OCR on the step screenshot: pass = expected text visible, fail = not visible, unavailable = OCR missing.",
+    "Agent automation runs with Settings > Browser > Agent access 'require pairing' off (seeded agent-authority.json), so the CLI uses the transport token only.",
   ],
   engine: engineZip ? { zip: engineZip, checks: {} } : { skipped: "FERRYX_UI_AUDIT_ENGINE_ZIP not set or missing" },
+  agent: {},
   steps: [],
 };
 const writeSummary = () => writeFileSync(join(out, "summary.json"), JSON.stringify(summary, null, 2));
@@ -78,6 +89,13 @@ textarea{position:fixed;inset:40px;width:calc(100% - 80px);height:calc(100% - 80
 <script>t.addEventListener('input',()=>{document.title='typed:'+t.value})</script></body></html>`;
 const served = new Map([
   ["/fixture.html", { body: FIXTURE, type: "text/html" }],
+  ["/agent.html", {
+    body: `<!doctype html><html><head><title>agent-fixture</title><style>body{font:28px sans-serif;margin:60px;background:#fff}
+input,button{font:28px sans-serif;margin:12px 0;display:block}</style></head><body><h1>Agent fixture</h1>
+<input id=e aria-label=Email placeholder=Email><button id=b type=button>Save</button><p id=s>idle</p>
+<script>b.addEventListener('click',()=>{s.textContent='Saved '+e.value;document.title='saved:'+e.value})</script></body></html>`,
+    type: "text/html",
+  }],
   ["/example.html", {
     body: `<!doctype html><html><head><title>Example Domain</title><style>body{background:#eee;font:20px sans-serif;margin:0}
 div{width:600px;margin:15vh auto;padding:2em;background:#fdfdff;border-radius:.5em}h1{font-size:40px}</style></head>
@@ -690,6 +708,95 @@ function sessions() {
   }
 }
 
+/** The error code a failed CLI call printed (first JSON line on stderr). */
+function cliCode(result) {
+  for (const line of result.stderr.split("\n")) {
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.code) return parsed.code;
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Agent automation against /agent.html in tab `browserId`, through the CLI only: a ref from
+ * before a reload must fail as stale, then snapshot, fill the Email box, click Save with an
+ * --expect-text postcondition and read the page back. Recorded in summary.agent[engine].
+ */
+async function agentQa(engine, browserId) {
+  const record = { browser_id: browserId, checks: {} };
+  summary.agent[engine] = record;
+  if (!browserId) {
+    record.error = `no ${engine} browser tab listed`;
+    return { ok: false, stderr: record.error };
+  }
+  const id = ["--browser-id", browserId];
+  const load = (label) => {
+    const waited = cli("wait", ...id, "--text", "Agent fixture", "--timeout-ms", "20000");
+    record[label] = waited.ok ? "ok" : { status: waited.status, code: cliCode(waited), stderr: waited.stderr.slice(0, 500) };
+    return waited.ok;
+  };
+  const snapshot = (label) => {
+    const result = cli("snapshot", ...id);
+    try {
+      const parsed = JSON.parse(result.stdout);
+      const ref = (predicate) => parsed.elements.find(predicate)?.reference ?? null;
+      const taken = {
+        generation: parsed.generation,
+        isolated: parsed.isolated,
+        elements: parsed.elements.length,
+        save: ref((element) => element.tagName === "button" && /save/i.test(element.name)),
+        email: ref((element) => element.tagName === "input"),
+      };
+      record[label] = taken;
+      return taken;
+    } catch {
+      record[label] = { error: `snapshot not JSON (status ${result.status})`, code: cliCode(result), stderr: result.stderr.slice(0, 500) };
+      return null;
+    }
+  };
+  const act = (verb, taken, ...args) => {
+    const result = cli(verb, ...id, "--generation", String(taken.generation), ...args);
+    let outcome = null;
+    try {
+      outcome = JSON.parse(result.stdout);
+    } catch {}
+    return { ok: result.ok, status: result.status, outcome, code: result.ok ? null : cliCode(result), stderr: result.ok ? undefined : result.stderr.slice(0, 500) };
+  };
+
+  const navigated = cli("navigate", ...id, "--url", `${fixtureBase}/agent.html`);
+  record.navigate = navigated.ok ? "ok" : { status: navigated.status, code: cliCode(navigated), stderr: navigated.stderr.slice(0, 500) };
+  record.checks.fixture_loaded = navigated.ok && load("wait_loaded");
+
+  // A ref observed before a reload names a node of the old document.
+  const before = snapshot("snapshot_before_reload");
+  record.checks.snapshot = Boolean(before?.save && before?.email);
+  record.checks.isolated_world = before?.isolated ?? null;
+  if (before?.save) {
+    const reloaded = cli("reload", ...id);
+    record.reload = reloaded.ok ? "ok" : { status: reloaded.status, code: cliCode(reloaded) };
+    load("wait_reloaded");
+    record.stale_click = act("click", before, "--ref", before.save);
+    record.checks.stale_ref_refused = !record.stale_click.ok && ["BROWSER_STALE_REF", "BROWSER_INVALID_REFERENCE"].includes(record.stale_click.code);
+  }
+
+  const current = snapshot("snapshot");
+  if (current?.save && current?.email) {
+    record.fill = act("fill", current, "--ref", current.email, "--value", "agentqa");
+    record.checks.fill_dispatched = record.fill.ok && record.fill.outcome?.dispatched === true;
+    record.click = act("click", current, "--ref", current.save, "--expect-text", "Saved agentqa", "--expect-timeout-ms", "8000");
+    record.checks.click_applied = record.click.ok && record.click.outcome?.applied === true;
+    const read = cli("eval", ...id, "--script", "document.getElementById('s').textContent");
+    record.page_text = read.ok ? read.stdout.slice(0, 200) : { status: read.status, code: cliCode(read) };
+    record.checks.page_reflects_act = read.ok && read.stdout.includes("Saved agentqa");
+  }
+  const required = ["fixture_loaded", "snapshot", "stale_ref_refused", "fill_dispatched", "click_applied", "page_reflects_act"];
+  record.ok = required.every((name) => record.checks[name] === true);
+  writeSummary();
+  return { ok: record.ok, checks: record.checks, stderr: record.ok ? "" : `failed: ${required.filter((name) => record.checks[name] !== true).join(", ")}` };
+}
+
 let shotIndex = 0;
 function screenshot(name) {
   shotIndex += 1;
@@ -1068,6 +1175,27 @@ await step(
   [focus, ...typeUrl(`${fixtureBase}/example.html`), waitForText(["Domain", "illustrative"])],
   { any: ["Domain", "illustrative"] },
 );
+await step(
+  "agent-webview",
+  "Agent automation in the system webview tab (CLI): stale ref after reload refused, snapshot, fill Email, click Save with --expect-text, page shows 'Saved agentqa'; then back to the example page",
+  [
+    focus,
+    ["agent snapshot/act", () => {
+      const list = sessions().list;
+      const tab = list.find((entry) => entry.engine === "system") ?? list.at(-1);
+      return agentQa("webview", tab?.browserId ?? null);
+    }],
+    1500,
+    ["screenshot agent page", () => ({ ok: screenshot("agent-webview-page").ok })],
+    ["optional back to the example page", () => {
+      const browserId = summary.agent.webview?.browser_id;
+      if (!browserId) return { ok: false, stderr: "no tab" };
+      const result = cli("navigate", "--browser-id", browserId, "--url", `${fixtureBase}/example.html`);
+      return { ok: result.ok, stderr: result.stderr };
+    }],
+    2000,
+  ],
+);
 await step("settings-open", "Click the sidebar, Mod+, opens Settings (retried once after re-focusing the app)", [focus, chromeFocus, ["open Settings", openSettings], dismissStoreToast], {
   any: ["General", "Appearance"],
 });
@@ -1351,6 +1479,20 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
   );
   summary.engine.checks.typing_reaches_page = summary.steps.at(-1).ui_check?.result === "pass" || (summary.steps.at(-1).actions.at(-1)?.ok ?? false);
   await step(
+    "agent-chromium",
+    "Agent automation in the Chromium engine tab (CLI over DevTools, isolated world): stale ref after reload refused, snapshot, fill, click with --expect-text",
+    [
+      ["agent snapshot/act", () => {
+        const list = sessions().list;
+        const tab = list.find((entry) => entry.engine === "chromium") ?? (browserId ? { browserId } : null);
+        return agentQa("chromium", tab?.browserId ?? null);
+      }],
+      1500,
+    ],
+    { any: ["agentqa", "Saved"] },
+  );
+  summary.engine.checks.agent_automation = summary.agent.chromium?.ok ?? false;
+  await step(
     "chromium-tab-switch",
     "Mod+T (terminal tab) hides the engine view; Mod+Shift+[ returns to the Chromium tab",
     [focus, key("Mod+T", { key: "t", mods: ["mod"] }), 3000, ["screenshot hidden", () => ({ ok: screenshot("chromium-hidden-on-terminal-tab").ok })], key("Mod+Shift+[", { key: "bracketleft", mods: ["mod", "shift"] }), 3000],
@@ -1401,5 +1543,10 @@ for (const pid of enginePids()) {
 await sleep(1500);
 server.stop(true);
 writeSummary();
-console.log(JSON.stringify({ totals: summary.totals, ui_checks: summary.ui_checks, engine: summary.engine.checks ?? summary.engine.skipped }));
+console.log(JSON.stringify({
+  totals: summary.totals,
+  ui_checks: summary.ui_checks,
+  engine: summary.engine.checks ?? summary.engine.skipped,
+  agent: Object.fromEntries(Object.entries(summary.agent).map(([engine, record]) => [engine, { ok: record.ok ?? false, checks: record.checks }])),
+}));
 process.exit(0);
