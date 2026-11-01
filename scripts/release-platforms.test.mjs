@@ -22,6 +22,7 @@ import {
   finalizeMacosBundle,
   machoEntitlements,
   BUN_ENTITLEMENTS,
+  verifyMacosFfmpegBundle,
 } from "./lib/release-platforms.mjs";
 import { parseReceipt } from "./lib/release-contract.mjs";
 
@@ -1402,5 +1403,75 @@ test("machoEntitlements: only Contents/Resources/mhc/<triple>/bun/bun gets the b
     "com.apple.security.cs.allow-dyld-environment-variables",
   ]) {
     assert.ok(plist.includes(`<key>${key}</key>`), key);
+  }
+});
+
+test("remote builders: default builds carry no FFmpeg step, remote-desktop builds stage and check it first", () => {
+  const plan = {
+    commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
+    tag: "v2026.09.08.1", msixVersion: "2026.908.1.0", sourceDateEpoch: 1788868800,
+    channels: { nsisMigration: true },
+  };
+  const args = { workspaceDir: "/tmp/run", plan, hostConfig: { root: "/srv/rel" } };
+  for (const script of [createLinuxBuildScript(args), createWindowsBuildScript(args)]) {
+    assert.doesNotMatch(script, /ffmpeg|remote-desktop|FFMPEG_DIR/i);
+  }
+  assert.match(createLinuxBuildScript(args), /bun tauri build --bundles appimage,deb\n/);
+
+  const linux = createLinuxBuildScript({ ...args, features: ["remote-desktop"] });
+  assert.match(linux, /FERRYX_FFMPEG_OPENH264=0 bash "\$source_dir\/scripts\/build-ffmpeg-lgpl\.sh"/);
+  assert.match(linux, /stage-ffmpeg\.mjs" --target x86_64-unknown-linux-gnu --check/);
+  assert.match(linux, /bun tauri build --bundles appimage,deb --features remote-desktop -c "\$ffmpeg_overlay"/);
+  assert.ok(linux.indexOf("--check") < linux.indexOf("bun tauri build"), "payload check precedes the build");
+  assert.match(linux, /dpkg-deb -c /);
+  assert.match(linux, /grep 'usr\/lib\/Ferryx\/ffmpeg\/libavcodec/);
+  assert.match(linux, /'\/srv\/rel\/ffmpeg-cache'/);
+
+  const windows = createWindowsBuildScript({ ...args, features: ["remote-desktop"] });
+  assert.match(windows, /\$ffmpegScript = Join-Path \$sourceDir 'scripts\/build-ffmpeg-lgpl\.sh'/);
+  assert.match(windows, /& \$msysBash -lc \$ffmpegCmd ferryx-ffmpeg \$ffmpegScript \$ffmpegPrefix/);
+  assert.match(windows, /vcvars64\.bat/);
+  assert.match(windows, /stage-ffmpeg\.mjs'\) --target x86_64-pc-windows-msvc --prefix \$ffmpegPrefix --prune;/);
+  assert.doesNotMatch(windows, /BtbN|openh264/i, "Windows FFmpeg comes from the pinned source build only");
+  assert.ok(windows.indexOf("build-ffmpeg-lgpl.sh") < windows.indexOf("stage-ffmpeg.mjs"), "build precedes staging");
+  assert.match(windows, /stage-ffmpeg\.mjs'\) --target x86_64-pc-windows-msvc --check; if \(\$LASTEXITCODE -ne 0\)/);
+  assert.match(windows, /\$env:FFMPEG_DIR = Join-Path \$ffmpegPayload 'sdk'/);
+  assert.match(windows, /bun tauri build --no-bundle --features remote-desktop;/);
+  assert.match(windows, /-SkipSigning -FfmpegPayloadDir \$ffmpegPayload/);
+  assert.match(windows, /bun tauri build --bundles nsis --features remote-desktop -c \$nsisConfigPath;/);
+  assert.ok(windows.indexOf("--check") < windows.indexOf("tauri build"), "payload check precedes the build");
+});
+
+test("verifyMacosFfmpegBundle: fails closed on missing dylib, absolute install name or missing rpath", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-mac-ffmpeg-"));
+  try {
+    const appPath = join(tmp, "Ferryx.app");
+    const payloadDir = join(tmp, "payload");
+    mkdirSync(join(appPath, "Contents", "Frameworks"), { recursive: true });
+    mkdirSync(join(appPath, "Contents", "Resources", "ffmpeg-legal"), { recursive: true });
+    mkdirSync(join(appPath, "Contents", "MacOS"), { recursive: true });
+    mkdirSync(payloadDir, { recursive: true });
+    writeFileSync(join(payloadDir, "stage.json"), JSON.stringify({
+      runtime: { "libavutil.61.dylib": "a".repeat(64) },
+      legal: { "SOURCE.txt": "b".repeat(64) },
+    }));
+    writeFileSync(join(appPath, "Contents", "Frameworks", "libavutil.61.dylib"), "dylib");
+    writeFileSync(join(appPath, "Contents", "Resources", "ffmpeg-legal", "SOURCE.txt"), "src");
+    const otool = ({ id = "@rpath/libavutil.61.dylib", rpath = "@executable_path/../Frameworks", dep = "@rpath/libavutil.61.dylib" } = {}) =>
+      (command, args) => {
+        assert.equal(command, "otool");
+        if (args[0] === "-D") return { stdout: `${args[1]}:\n${id}\n` };
+        if (args[0] === "-l") return { stdout: `cmd LC_RPATH\n path ${rpath} (offset 12)\n` };
+        return { stdout: `${args[1]}:\n\t${dep} (compatibility version 61.0.0)\n` };
+      };
+    assert.deepEqual(verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool() }), ["libavutil.61.dylib"]);
+    assert.throws(() => verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool({ id: "/opt/ffmpeg/lib/libavutil.61.dylib" }) }), /install name/);
+    assert.throws(() => verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool({ rpath: "/usr/lib" }) }), /rpath/);
+    assert.throws(() => verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool({ dep: "/opt/ffmpeg/lib/libavutil.61.dylib" }) }), /non-@rpath/);
+    assert.throws(() => verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool({ dep: "/usr/lib/libSystem.B.dylib" }) }), /does not link FFmpeg/);
+    rmSync(join(appPath, "Contents", "Frameworks", "libavutil.61.dylib"));
+    assert.throws(() => verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool() }), /missing from the app bundle/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

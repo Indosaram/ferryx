@@ -184,6 +184,79 @@ Omitting `--nsis-migration` creates a Store-only Windows plan: it requires MSIX 
 NSIS artifact nor a `windows-x86_64` updater entry. Such a manifest does **not** update legacy
 NSIS clients. Use Store-only only after a separately approved end to legacy updater support.
 
+### Optional: remote desktop builds (LGPL FFmpeg payload)
+
+The remote desktop engine (`crates/ferryx-rd`, cargo feature `remote-desktop` in
+`src-tauri/Cargo.toml`, off by default) links FFmpeg 9 dynamically, so a release built with it
+must ship FFmpeg's shared libraries. Opt in at prepare time; the choice is recorded as
+`cargoFeatures` in `prepare-state.json` and every `build` stage reads it from there:
+
+```bash
+bun scripts/release-local.mjs prepare ... --features remote-desktop
+```
+
+Without `--features`, nothing below runs, `prepare-state.json` has no `cargoFeatures` key, and the
+bundles are byte-for-byte the same as before the feature existed (no payload is needed).
+
+With it, each host stages `src-tauri/resources/ffmpeg/payload/<triple>/` (gitignored) through
+`scripts/stage-ffmpeg.mjs` before building and runs `stage-ffmpeg.mjs --check` again right before
+`tauri build`. The build stops if the payload or its `build-receipt.txt` is missing, if the
+receipt does not name the pinned source tarball (`src-tauri/resources/ffmpeg/pin.json`), if the
+configuration contains `--enable-gpl`, `--enable-nonfree`, `--enable-libx264`, `--enable-libx265`,
+`--enable-libxvid`, `--enable-libfdk-aac` or `--enable-libopenh264`, or if any staged file differs
+from `stage.json`. No release payload contains OpenH264 on any OS.
+
+| Host | FFmpeg source | Where it lands | Load path |
+| --- | --- | --- | --- |
+| `macbook` | `scripts/build-ffmpeg-lgpl.sh` per slice (`FERRYX_FFMPEG_ARCH=arm64` / `x86_64`), lipo'd to universal; cached under `<root>/ffmpeg-cache/lgpl-<script sha>-<arch>` | `Ferryx.app/Contents/Frameworks/*.dylib` (`bundle.macOS.frameworks` overlay), legal files in `Contents/Resources/ffmpeg-legal/` | install names `@rpath/...`; `src-tauri/build.rs` adds `@executable_path/../Frameworks` (and the daemon-helper equivalents) when `CARGO_FEATURE_REMOTE_DESKTOP` is set |
+| `omaki` | `scripts/build-ffmpeg-lgpl.sh` with `FERRYX_FFMPEG_OPENH264=0`; cached under `<root>/ffmpeg-cache` | deb/AppImage `usr/lib/Ferryx/ffmpeg/*.so.N`, legal in `usr/lib/Ferryx/ffmpeg-legal/`; deb gains `libva2`, `libva-drm2` | `patchelf --set-rpath '$ORIGIN'` on each library; binary rpath `$ORIGIN/../lib/Ferryx/ffmpeg` |
+| `maho-win` | `scripts/build-ffmpeg-lgpl.sh` run by MSYS2 bash with `--toolchain=msvc` (NVENC, AMF, D3D11VA, Media Foundation `h264_mf`/`hevc_mf`; no OpenH264); cached under `<root>\ffmpeg-cache\lgpl-<script sha>-win64` | DLLs beside `ferryx.exe` in NSIS (resource overlay) and MSIX (`build-msix.ps1 -FfmpegPayloadDir`), legal in `ffmpeg-legal\`; headers + import libs in the payload's `sdk\` become `FFMPEG_DIR` for the link | Windows DLL search order (application dir) |
+
+The macOS FFmpeg dylibs are loose Mach-O files, so `finalizeMacosBundle` signs them with the
+hardened runtime before the outer app, and they are inside the notarized app and DMG with no
+extra steps. After bundling, `verifyMacosFfmpegBundle` checks the Frameworks dylibs, their
+`@rpath` install names, the binary's rpath and that the binary links FFmpeg only through
+`@rpath`. The Linux build checks with `dpkg-deb -c` that the libraries and receipt are in the deb.
+
+Prerequisites: macOS needs Xcode command line tools, `nasm` is optional (arm64 does not need it);
+Linux needs `nasm`, `pkg-config`, `libva-dev`, `patchelf`, a C toolchain and `make`. The first
+feature build compiles FFmpeg (tens of minutes per slice); later builds reuse the cache until
+`build-ffmpeg-lgpl.sh` changes.
+
+Windows (`maho-win`) prerequisites, one-time:
+
+- Visual Studio Build Tools with the "Desktop development with C++" workload (MSVC x64 and a
+  Windows SDK, which provides the Media Foundation and D3D11 headers). The build finds it with
+  `vswhere` and imports `vcvars64.bat` before calling MSYS2, so `cl.exe` and `link.exe` are on
+  the inherited `PATH`.
+- MSYS2 at `C:\msys64` (or set `FERRYX_MSYS2_ROOT`), with
+  `pacman -S --needed make nasm pkgconf diffutils tar xz curl`. Only its shell and Unix tools are
+  used; the compiler is MSVC (`--toolchain=msvc`), so the DLLs and `.lib` import libraries match
+  Rust's `x86_64-pc-windows-msvc`. Make sure MSYS2's `link.exe` (coreutils) does not shadow MSVC's:
+  the inherited `PATH` puts the Visual Studio directories first.
+- No GPU SDKs: NVENC and AMF are loaded at runtime from the display driver, and the build only
+  needs the pinned header packages that `build-ffmpeg-lgpl.sh` downloads.
+- `ffmpeg-sys-next` needs `libclang` for bindgen: set `LIBCLANG_PATH` to the LLVM install's
+  `bin` directory (on `maho-win`, `C:\Users\sook\ferryx-wt\.llvm\bin`) in the host config `path`
+  or the user environment.
+
+To stage by hand (for example to inspect a payload):
+
+```bash
+bash scripts/build-ffmpeg-lgpl.sh "$PWD/.ffmpeg" "$PWD/.ffmpeg-build"     # Linux: FERRYX_FFMPEG_OPENH264=0; Windows: MSYS2 shell with vcvars64 env
+bun scripts/stage-ffmpeg.mjs --target x86_64-unknown-linux-gnu --prefix "$PWD/.ffmpeg"
+bun scripts/stage-ffmpeg.mjs --target <triple> --check
+```
+
+**LGPL obligations per release.** Ship `THIRD_PARTY_NOTICES.md` with the release notes, and
+attach the corresponding FFmpeg source to the GitHub release: the tarball named in `pin.json`
+`source.url` (sha256 `source.sha256`); it is the source of all three platforms. Every bundle
+already carries `ffmpeg-legal/build-receipt.txt` (exact configure flags) and `SOURCE.txt` (source
+location and written offer). Never enable `--enable-gpl`, `--enable-nonfree` or
+`--enable-libopenh264`: the stage step refuses it. To move FFmpeg, update `ffmpeg_version` and
+`ffmpeg_sha256` in `build-ffmpeg-lgpl.sh` and `source` in `pin.json` together; the build caches
+are keyed on the script's hash, so every host rebuilds.
+
 ### 2. Preflight all three hosts
 
 ```bash
