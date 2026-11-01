@@ -79,6 +79,12 @@ desktop = [
 # classifier headless harness. Compile-time gated; never enabled in release
 # builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
 local-split-qa = []
+# Signs the macOS app with Apple's managed browser entitlement (com.apple.developer.web-browser).
+# Off by default: Apple grants it per team on request (docs/browser/APPLE_BROWSER_ENTITLEMENT.md),
+# and a provisioning profile without it makes the signed app fail to launch. Release with
+# `cargo tauri build --features apple-web-browser-entitlement --config entitlements/tauri.web-browser.conf.json`
+# (the bundler, not cargo, signs, so the config carries the entitlements file).
+apple-web-browser-entitlement = []
 # Todo 9 QA only: a genuinely incompatible daemon (DAEMON_PROTOCOL_VERSION 6) used as the old owner
 # against a normal build, so the update-pending path is exercised against a real process.
 qa-protocol-bump = ["local-split-qa"]

@@ -40,6 +40,12 @@ pub enum BrowserCliRequest {
         #[serde(default)]
         col: Option<u32>,
     },
+    /// A URL the OS asked a second Ferryx process to open (Ferryx as the default browser).
+    /// The running app opens it in a new browser tab.
+    #[serde(rename_all = "camelCase")]
+    OpenInboundUrl {
+        url: String,
+    },
     #[serde(rename_all = "camelCase")]
     Open {
         url: String,
@@ -1629,6 +1635,7 @@ pub enum BrowserCliResponse {
     FileOpened {
         path: String,
     },
+    InboundUrlOpened,
     Error {
         code: String,
         message: String,
@@ -2969,6 +2976,16 @@ async fn execute_request<R: tauri::Runtime>(
             BrowserCliResponse::RemoteAttached {
                 service_epoch: "1".into(),
                 protocol_version: protocol_version.unwrap_or(1),
+            }
+        }
+        BrowserCliRequest::OpenInboundUrl { url } => {
+            if crate::ipc::default_browser::deliver_inbound_url(app, &url) {
+                BrowserCliResponse::InboundUrlOpened
+            } else {
+                error_response(IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    "an inbound URL must be http or https",
+                ))
             }
         }
         BrowserCliRequest::OpenFile { path, line, col } => {

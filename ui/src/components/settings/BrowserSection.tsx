@@ -47,6 +47,7 @@ import { BrowserEngineGroup } from "./BrowserEngineGroup";
 import { SiteSettingsGroup } from "./SiteSettingsGroup";
 import { BrowserExtensionsGroup } from "./BrowserExtensionsGroup";
 import { BrowserAgentAccessGroup } from "./BrowserAgentAccessGroup";
+import { DefaultBrowserGroup } from "./DefaultBrowserGroup";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
 
 export function BrowserSection() {
@@ -363,6 +364,8 @@ export function BrowserSection() {
           </SettingRow>
         </div>
       </SettingsGroup>
+
+      <DefaultBrowserGroup />
 
       <BrowserEngineGroup />
       <BrowserExtensionsGroup />

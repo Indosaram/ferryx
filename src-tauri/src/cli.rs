@@ -3944,6 +3944,23 @@ pub fn run_browser_controllers_cli(
     Ok(())
 }
 
+/// Hands a URL the OS launched this process with to an already running Ferryx, which opens
+/// it in a browser tab. `Err` means no running app took it; the caller then starts the app.
+pub fn forward_inbound_url(url: String) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = runtime
+        .block_on(send_browser_cli_request(BrowserCliRequest::OpenInboundUrl { url }))
+        .map_err(|error| error.to_string())?;
+    match response {
+        BrowserCliResponse::InboundUrlOpened => Ok(()),
+        BrowserCliResponse::Error { code, message, .. } => Err(format!("{code}: {message}")),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
 pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()

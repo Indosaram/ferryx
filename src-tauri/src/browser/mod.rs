@@ -6,6 +6,8 @@ pub mod cef_engine;
 pub mod chromium_cookie_source;
 pub mod chromium_cookies;
 pub mod cookies;
+#[cfg(feature = "desktop")]
+pub mod default_browser;
 pub mod download;
 pub mod engine_install;
 pub mod extensions;
@@ -29,6 +31,7 @@ mod remote_service_tests;
 pub mod screenshot;
 pub mod security;
 pub mod site_permissions;
+pub mod sign_in_handoff;
 pub mod snapshot_source;
 #[cfg(test)]
 mod snapshot_source_tests;

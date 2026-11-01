@@ -137,6 +137,19 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
+            // The OS opens http(s) links with Ferryx once it is the default browser: a running
+            // app takes the URL over the browser CLI endpoint (the app's single-instance
+            // channel); otherwise this process starts the app with the URL queued for its UI.
+            if let Some(url) = ferryx_lib::browser::default_browser::inbound_url_from_args(&args) {
+                match forward_inbound_url(url.clone()) {
+                    Ok(()) => return,
+                    Err(error) => eprintln!("no running Ferryx took the link, starting one: {error}"),
+                }
+                ferryx_lib::browser::default_browser::queue_inbound_url(url);
+                let _ = raised_limit;
+                ferryx_lib::run();
+                return;
+            }
             // The app binary only opens a window when launched bare. Anything else is a command
             // typed into a terminal: starting the whole app runtime there spawns SSH supervisors and
             // shells under that terminal and never returns it.

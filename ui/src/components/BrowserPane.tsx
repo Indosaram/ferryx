@@ -32,6 +32,7 @@ import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
 import { BrowserBookmarkBar } from "./BrowserBookmarkBar";
 import { BrowserLibraryPanel, type BrowserLibraryView } from "./BrowserLibraryPanel";
+import { BrowserSignInHandoffBar } from "./BrowserSignInHandoffBar";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import { BrowserEngineFallbackNotice } from "./BrowserEngineFallbackNotice";
 import { BrowserMediaCaptureIndicator, BrowserPermissionPrompts } from "./BrowserPermissionPrompt";
@@ -476,6 +477,7 @@ export function BrowserPane({
           <BrowserMediaCaptureIndicator browserId={tab.browserId} />
         </div>
         <BrowserPermissionPrompts browserId={tab.browserId} />
+        <BrowserSignInHandoffBar tab={liveTab} />
         {findOpen ? (
           <div className="flex items-center gap-1.5 border-b border-border bg-popover px-3 py-1.5" data-testid="browser-find-bar">
             <input
