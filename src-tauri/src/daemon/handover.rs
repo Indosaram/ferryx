@@ -841,6 +841,62 @@ mod spawn_owner_tests {
         assert_eq!(HandoverManager::recorded_supervisor_lease(&legacy), None, "an abort record carries no lease");
     }
 
+    /// An abort decision never freezes the lease client: the predecessor keeps the hub and
+    /// keeps renewing, and nothing needs thawing.
+    #[test]
+    fn an_abort_decision_leaves_the_lease_client_renewing() {
+        let (_root, manager, _terminals, legacy) = committing_fixture();
+        let lease = lease_double(Some(7));
+        manager.set_supervisor_lease(Some(lease.clone()));
+        manager.abort_handover().expect("abort");
+        assert_eq!(manager.status(), HandoverStatus::Active);
+        assert_eq!(
+            HandoverManager::recorded_decision(&legacy).unwrap(),
+            Some(super::super::handover_transaction::HandoverState::Active)
+        );
+        assert!(!lease.frozen.load(Ordering::SeqCst), "an abort must not stop renewing");
+        assert!(!lease.thawed.load(Ordering::SeqCst));
+    }
+
+    /// Only a committed (Retired) record hands a lease over, even when an abort record was
+    /// written carrying one.
+    #[test]
+    fn only_a_retired_record_hands_over_its_supervisor_lease() {
+        use super::super::handover_transaction::{HandoverState, HandoverTransaction, SupervisorLeaseTransfer};
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("legacy.sock");
+        let identity = legacy.to_string_lossy().into_owned();
+        let lease = SupervisorLeaseTransfer { machine_id: "rec-a".into(), fence: 7, deadline_unix_ms: 1_800_000_105_000 };
+        let write = |state: HandoverState, rollback_reason: Option<&str>| {
+            let mut record = HandoverTransaction::new_simple(&identity, &identity, 1, 0, 0, 0, &identity);
+            record.state = state;
+            record.rollback_reason = rollback_reason.map(str::to_owned);
+            record.supervisor_lease = Some(lease.clone());
+            std::fs::write(legacy.with_extension("transaction"), serde_json::to_vec(&record).unwrap()).unwrap();
+        };
+
+        write(HandoverState::Active, Some("predecessor abort decision"));
+        assert_eq!(HandoverManager::recorded_decision(&legacy).unwrap(), Some(HandoverState::Active));
+        assert_eq!(HandoverManager::recorded_supervisor_lease(&legacy), None, "an abort hands nothing over");
+        let successor = HandoverManager::new(root.path().join("successor.sock"));
+        successor.adopt_recorded_supervisor_lease(&legacy);
+        assert_eq!(successor.take_handed_supervisor_lease(), None);
+
+        write(HandoverState::Retired, None);
+        assert_eq!(HandoverManager::recorded_supervisor_lease(&legacy), Some(lease));
+    }
+
+    /// A failed decision write thaws the frozen lease client only when no record reached the
+    /// disk; an unreadable or readable record keeps it frozen.
+    #[test]
+    fn only_a_missing_record_after_a_failed_decision_write_resumes_renewing() {
+        use super::super::handover_transaction::HandoverState;
+        assert!(HandoverManager::decision_missing(&Ok(None)));
+        assert!(!HandoverManager::decision_missing(&Err("unreadable record".into())), "it may be the commit");
+        assert!(!HandoverManager::decision_missing(&Ok(Some(HandoverState::Retired))), "the commit landed");
+        assert!(!HandoverManager::decision_missing(&Ok(Some(HandoverState::Active))));
+    }
+
     fn control_fixture() -> (Arc<HandoverManager>, Arc<TerminalService>) {
         let root = tempfile::tempdir().unwrap();
         let manager = Arc::new(HandoverManager::new(root.path().join("control.sock")));
@@ -1236,12 +1292,19 @@ impl HandoverManager {
         let written = Self::write_decision(&legacy, &transaction);
         // Renewing resumes only when no decision reached the disk: a record that landed despite
         // the error is the commit, and the successor renews that lease.
-        if written.is_err() && matches!(Self::recorded_decision(&legacy), Ok(None)) {
+        if written.is_err() && Self::decision_missing(&Self::recorded_decision(&legacy)) {
             if let Some(lease) = &lease {
                 lease.thaw_after_failed_handover();
             }
         }
         written
+    }
+
+    /// After a failed decision write: true only when no decision is on disk. An unreadable
+    /// record may still be a commit the successor reads, so the lease client stays frozen and
+    /// its hub stands down at the lease deadline rather than risk two holders of one fence.
+    fn decision_missing(recorded: &Result<Option<super::handover_transaction::HandoverState>, String>) -> bool {
+        matches!(recorded, Ok(None))
     }
 
     fn write_decision(
