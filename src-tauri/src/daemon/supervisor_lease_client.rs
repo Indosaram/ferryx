@@ -651,6 +651,8 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
     /// Executes actions in order; acks of sent requests go back into the machine with the
     /// request's send time and their actions run in the same burst (bounded). A standby whose
     /// owner stopped the hub never takes part in auto-promotion: only `explicit` acquires go out.
+    /// A standby that knows another holder asks the relay first and auto-acquires only when
+    /// its checkpoint state allows it ([`Self::auto_acquire_allowed`]).
     async fn execute(&self, actions: Vec<Action>, explicit: bool) {
         let mut queue: VecDeque<Action> = actions.into();
         let mut sends = 0;
@@ -662,6 +664,13 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
                 && !explicit
                 && matches!(self.state.role(), Role::Standby { .. })
                 && self.checkpoints.hub_stopped()
+            {
+                continue;
+            }
+            if matches!(action, Action::SendAcquire { force: false })
+                && !explicit
+                && matches!(self.state.role(), Role::Standby { holder_machine_id: Some(_), .. })
+                && !self.auto_acquire_allowed().await
             {
                 continue;
             }
@@ -763,6 +772,27 @@ impl<T: LeaseTransport + ?Sized, H: HubSwitch + ?Sized> Driver<T, H> {
         }
     }
 
+    /// Auto-promotion's condition, asked at the machine's acquire cadence (every renew period
+    /// while standby): the relay's view of the lease goes into the checkpoint state, which
+    /// allows the acquire only when the lease is free and records no checkpoint or this
+    /// machine's newest one, and the owner has not stopped the hub here. No answer: no acquire.
+    async fn auto_acquire_allowed(&self) -> bool {
+        if self.state.handed_over() {
+            return false;
+        }
+        let query = SupervisorLeaseRequest::SupervisorLeaseQuery(SupervisorLeaseQuery { request_id: request_id() });
+        match self.transport.call(query).await {
+            Ok(ack) => {
+                self.checkpoints.note_query(&ack);
+                self.checkpoints.may_auto_acquire()
+            }
+            Err(error) => {
+                tracing::debug!("supervisor lease query failed: {error}");
+                false
+            }
+        }
+    }
+
     async fn persist(&self, snapshot: PersistedLease) {
         let Some(path) = self.lease_file.clone() else { return };
         match crate::ipc::run_blocking(move || Ok(write_persisted(&path, &snapshot))).await {
@@ -806,6 +836,9 @@ mod tests {
         renew: Mutex<Result<SupervisorLeaseOutcome, LeaseCallError>>,
         /// Fence an acquire answers with (renewals answer 7, the fence they renew).
         acquire_fence: Mutex<u64>,
+        /// What a lease query answers (outcome, recorded checkpoint); `None` answers it like
+        /// an acquire.
+        query: Mutex<Option<(SupervisorLeaseOutcome, Option<String>)>>,
         delay: Duration,
     }
 
@@ -822,6 +855,7 @@ mod tests {
                 acquire: Mutex::new(Ok(SupervisorLeaseOutcome::Granted)),
                 renew: Mutex::new(Ok(SupervisorLeaseOutcome::Renewed)),
                 acquire_fence: Mutex::new(7),
+                query: Mutex::new(None),
                 delay,
             })
         }
@@ -845,6 +879,14 @@ mod tests {
                 .filter(|(_, r)| matches!(r, SupervisorLeaseRequest::SupervisorLeaseAcquire(_)))
                 .count()
         }
+
+        fn queries(&self) -> usize {
+            self.sent
+                .lock()
+                .iter()
+                .filter(|(_, r)| matches!(r, SupervisorLeaseRequest::SupervisorLeaseQuery(_)))
+                .count()
+        }
     }
 
     #[async_trait::async_trait]
@@ -855,6 +897,25 @@ mod tests {
 
         async fn call(&self, request: SupervisorLeaseRequest) -> Result<SupervisorLeaseAck, LeaseCallError> {
             let request_id = request.request_id().to_owned();
+            let scripted_query = match request {
+                SupervisorLeaseRequest::SupervisorLeaseQuery(_) => self.query.lock().clone(),
+                _ => None,
+            };
+            if let Some((outcome, checkpoint_id)) = scripted_query {
+                self.sent.lock().push((Instant::now(), request));
+                return Ok(SupervisorLeaseAck {
+                    request_id,
+                    outcome,
+                    fence: Some(7),
+                    holder_machine_id: Some("mach-b".into()),
+                    holder_label: Some("Laptop B".into()),
+                    expires_in_secs: None,
+                    previous_expires_in_secs: None,
+                    checkpoint_id,
+                    account_machine_count: Some(2),
+                    reason_code: None,
+                });
+            }
             let fence = if matches!(request, SupervisorLeaseRequest::SupervisorLeaseAcquire(_)) {
                 *self.acquire_fence.lock()
             } else {
@@ -1476,6 +1537,54 @@ mod tests {
         // The person's own request still goes out.
         handle.acquire(false).await;
         assert_eq!(relay.sent.lock().len(), sent + 1);
+        task.abort();
+    }
+
+    /// Auto-promotion asks the relay at the acquire cadence and acquires only when the
+    /// checkpoint state allows it: a lease recording another checkpoint sends no acquire; the
+    /// one this machine holds sends an unforced acquire carrying it.
+    #[tokio::test(start_paused = true)]
+    async fn a_standby_auto_acquires_only_when_its_checkpoint_matches_the_lease() {
+        let relay = FakeRelay::new(Some(true));
+        *relay.acquire.lock() = Ok(SupervisorLeaseOutcome::Refused);
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let cfg = config(clock, Some("acct"), None);
+        let checkpoints = Arc::clone(&cfg.checkpoints);
+        checkpoints.set_local(Some(checkpoint('c', true)));
+        let (handle, task) = spawn_supervisor_lease_client(cfg, Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| matches!(r, Role::Standby { holder_machine_id: Some(_), .. })).await;
+        let acquires = relay.acquires();
+
+        // The holder's lease is free but records another checkpoint: no acquire goes out.
+        *relay.query.lock() = Some((SupervisorLeaseOutcome::Released, Some("d".repeat(64))));
+        tokio::time::sleep(Duration::from_secs(lease::RENEW_SECS * 3)).await;
+        assert!(relay.queries() >= 2, "the standby asks the relay at its cadence");
+        assert_eq!(relay.acquires(), acquires, "a stale checkpoint never promotes");
+        assert!(!checkpoints.may_auto_acquire());
+        assert_eq!(
+            checkpoints.block_reason().map(|block| block.code().to_owned()).as_deref(),
+            Some("CHECKPOINT_STALE")
+        );
+        assert!(matches!(handle.state().role(), Role::Standby { .. }));
+
+        // It records this machine's checkpoint: the next tick acquires with it, unforced.
+        *relay.query.lock() = Some((SupervisorLeaseOutcome::Released, Some("c".repeat(64))));
+        *relay.acquire.lock() = Ok(SupervisorLeaseOutcome::Granted);
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        assert_eq!(relay.acquires(), acquires + 1);
+        let sent = relay.sent.lock();
+        let last_acquire = sent
+            .iter()
+            .rev()
+            .find_map(|(_, r)| match r {
+                SupervisorLeaseRequest::SupervisorLeaseAcquire(acquire) => Some(acquire.clone()),
+                _ => None,
+            })
+            .expect("an acquire was sent");
+        drop(sent);
+        assert_eq!(last_acquire.checkpoint_id, Some("c".repeat(64)));
+        assert!(!last_acquire.force, "auto-promotion is never forced");
         task.abort();
     }
 
