@@ -29,7 +29,7 @@ import { useTerminalSettings } from "../lib/terminalSettings";
 import { isTauriRuntime } from "../lib/tauri";
 import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
-import { remoteSocketUrl, SocketTicketError } from "./remoteClient";
+import { remoteSocketTarget, SocketTicketError } from "./remoteClient";
 import { userFacingError } from "./userFacingError";
 import { parseMachineAgentStateFrame } from "./remoteSessionInventory";
 import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
@@ -358,7 +358,7 @@ function terminalSocketUrl(
   transportUrl: string,
   signal: AbortSignal,
   followHostSize = false,
-): Promise<string> | string {
+): Promise<string | WebSocketLike> | string {
   const withGeometry = (socketUrl: string): string => {
     const url = new URL(socketUrl);
     url.searchParams.set("render", "grid");
@@ -378,7 +378,14 @@ function terminalSocketUrl(
     url.searchParams.set("token", token);
     return withGeometry(url.toString());
   }
-  return remoteSocketUrl(transportUrl, target, token, signal).then(withGeometry);
+  // The relay E2E registry decides the route: an encrypted tunnel socket when this base is
+  // registered, otherwise a ticketed URL (a relay refusing plaintext maps to RelayRepairRequiredError).
+  const query = new URLSearchParams({ render: "grid" });
+  if (!followHostSize) {
+    query.set("cols", String(geometry.cols));
+    query.set("rows", String(geometry.rows));
+  }
+  return remoteSocketTarget(transportUrl, `${target}?${query.toString()}`, token, signal);
 }
 
 async function accountTerminalSocketUrl(
@@ -1531,7 +1538,7 @@ export function RemoteTerminal({
         return;
       }
 
-      let syncOrPromiseUrl: string | Promise<string>;
+      let syncOrPromiseUrl: string | Promise<string | WebSocketLike>;
       try {
         syncOrPromiseUrl = terminalSocketUrl(
           socketRequest.sessionId,

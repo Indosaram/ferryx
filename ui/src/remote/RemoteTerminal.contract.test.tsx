@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RemoteTerminal } from "./RemoteTerminal";
+import { registerRelayE2E } from "./relayE2E";
 import { REMOTE_TERMINAL_FRAME_PREFIX, REMOTE_TERMINAL_FRAME_TERMINATOR } from "./remoteTerminalFrames";
 import { FALLBACK_PREFERENCES } from "../lib/terminalSettings";
 
@@ -3044,6 +3045,27 @@ describe("remote terminal grid contract", () => {
       expect(ticketCalls()).toHaveLength(2);
 
       view.unmount();
+    });
+
+    it("dials through the relay E2E registry when no createWebSocket is provided", async () => {
+      const ticketFetch = vi.fn(async () => Response.json({ ticket: "plaintext-ticket" }));
+      vi.stubGlobal("fetch", ticketFetch);
+      const base = "https://relay.example.test/host/machine-e2e";
+      const tunnelSocket = new MockWebSocket("tunnel://terminal");
+      const openWebSocket = vi.fn(async () => tunnelSocket);
+      const unregister = registerRelayE2E(base, { fetchLike: vi.fn(), openWebSocket });
+      try {
+        const view = render(<RemoteTerminal sessionId="session-e2e" token="relay-device-token" transportUrl={base} />);
+        await tunnelSocket.waitForHandlers();
+        expect(openWebSocket).toHaveBeenCalledWith(
+          "/api/v1/terminal/session-e2e?render=grid&cols=80&rows=20",
+          { Authorization: "Bearer relay-device-token" },
+        );
+        expect(ticketFetch).not.toHaveBeenCalled();
+        view.unmount();
+      } finally {
+        unregister();
+      }
     });
 
     it.each([401, 403])("treats a %s tunnel upgrade refusal as an auth denial and never auto-redials", async (status) => {
