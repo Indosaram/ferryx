@@ -1,0 +1,11 @@
+# Repository-wide cargo settings. [env] values never override a variable already set in the
+# environment, so release hosts and custom setups keep their own values.
+[env]
+# FFmpeg 9 for the default `remote-desktop` feature: the pinned LGPL SDK that
+# scripts/fetch-ffmpeg.mjs downloads (tauri dev/build run it automatically). Set FFMPEG_DIR to
+# use another FFmpeg 9 prefix (include/ + lib/) instead.
+FFMPEG_DIR = { value = "src-tauri/resources/ffmpeg/sdk", relative = true }
+# audiopus_sys vendors libopus with a pre-CMake-4 policy minimum.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+# Build the portable vendored static Opus instead of depending on a system libopus.
+OPUS_NO_PKG = "1"

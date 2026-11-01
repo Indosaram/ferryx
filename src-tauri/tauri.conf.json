@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "bun scripts/dev-frontend.mjs",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "bun scripts/fetch-mhc.mjs --from-env --prune && bun run --cwd ui build",
+    "beforeBuildCommand": "bun scripts/fetch-mhc.mjs --from-env --prune && bun scripts/fetch-ffmpeg.mjs --from-env && bun run --cwd ui build",
     "frontendDist": "../ui/dist"
   },
   "app": {

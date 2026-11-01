@@ -262,6 +262,8 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY);
+            #[cfg(feature = "remote-desktop")]
+            capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY);
             capabilities
         };
         handshake(&socket, &local_capabilities).await?;
