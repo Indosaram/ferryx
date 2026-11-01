@@ -3405,7 +3405,7 @@ async fn proxy_http(
         }
         // The relay's own refusals keep their status but carry the typed machine envelope, so
         // a client can tell "machine offline" from a missing route.
-        Ok(Err(status)) => relay_refusal(status).map_or(Err(status), Ok),
+        Ok(Err(status)) => relay_refusal(status).ok_or(status),
         Err(_) if mutation && forwarded.load(Ordering::SeqCst) => {
             Ok(reference_chat_outcome_unknown(&request_id))
         }
