@@ -410,12 +410,14 @@ jobs:
       - name: Build Frontend UI (required for Tauri asset embed)
         run: bun run --cwd ui build
 
+      # The default remote-desktop feature links the pinned LGPL FFmpeg SDK. Kept out of the cargo
+      # steps so they stay on the default shell (Windows: pwsh with Strawberry Perl, which the
+      # vendored OpenSSL build needs; Git Bash's perl lacks its modules).
+      - name: Fetch FFmpeg SDK (remote-desktop)
+        run: bun scripts/fetch-ffmpeg.mjs --target ${{ matrix.target }}
+
       - name: Cargo Check
-        # The default remote-desktop feature links the pinned LGPL FFmpeg SDK first.
-        shell: bash
-        run: |
-          bun scripts/fetch-ffmpeg.mjs --target ${{ matrix.target }}
-          cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
 
       # cargo check does not invoke link.exe, so it cannot catch mismatched Ghostty static and
       # import library directives. Link the Windows binary before allowing a release-tag PR through.
