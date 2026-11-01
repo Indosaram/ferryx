@@ -3046,6 +3046,33 @@ describe("remote terminal grid contract", () => {
       view.unmount();
     });
 
+    it.each([401, 403])("treats a %s tunnel upgrade refusal as an auth denial and never auto-redials", async (status) => {
+      vi.useFakeTimers();
+      const upgradeRefusal = Object.assign(new Error(`WEBSOCKET_UPGRADE_FAILED: server returned status ${status}`), {
+        code: "WEBSOCKET_UPGRADE_FAILED",
+        status,
+      });
+      const createWebSocket = vi.fn(() => Promise.reject(upgradeRefusal));
+      const view = render(
+        <RemoteTerminal
+          sessionId="session-upgrade-denied"
+          token="relay-device-token"
+          transportUrl="https://relay.example.test/host/machine-1"
+          createWebSocket={createWebSocket}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(connectionStatus()).toHaveTextContent("Blocked");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60000);
+      });
+      expect(createWebSocket).toHaveBeenCalledTimes(1);
+      view.unmount();
+    });
+
     it("transitions current snapshot to retryable after formerly-ready socket disconnects", async () => {
       vi.useFakeTimers();
       vi.stubGlobal("__task9Wire", {});

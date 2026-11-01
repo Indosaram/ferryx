@@ -1077,7 +1077,11 @@ export function RemoteTerminal({
         latestValidatedOutcome = null;
       }
 
-      const isAuthDenial = error instanceof SocketTicketError && error.isAuthDenial;
+      // A ticket refusal, a tunnel upgrade refusal, or an encrypted-session allocation refusal
+      // all carry the HTTP status; 401/403 cannot succeed on redial whatever the error class.
+      const deniedStatus = error && typeof error === "object" ? (error as { status?: unknown }).status : undefined;
+      const isAuthDenial = (error instanceof SocketTicketError && error.isAuthDenial)
+        || deniedStatus === 401 || deniedStatus === 403;
 
       if (isAuthDenial) {
         outcomeGatesRetry = true;
