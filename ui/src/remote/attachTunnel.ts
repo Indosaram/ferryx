@@ -332,7 +332,7 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
     return next;
   }
 
-  /** Closes the shared stream: after a timeout, abort, or cap violation its framing is unknown. */
+  /** Closes the shared stream: after a timeout, abort, parse failure or cap violation its framing is unknown. */
   function failTransport() {
     if (isClosed) return;
     isClosed = true;
@@ -374,7 +374,8 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
       signal?.addEventListener("abort", onAbort, { once: true });
       work().then(
         (value) => finish(() => resolve(value)),
-        (err) => finish(() => reject(err)),
+        // Any failure mid-response leaves unknown bytes in the buffer; never reuse the stream.
+        (err) => fail(err instanceof Error ? err : new Error(String(err))),
       );
     });
   }
@@ -570,7 +571,8 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
       return body;
     }
 
-    return new Uint8Array(0);
+    // Neither length nor chunked framing: the body bytes would be parsed as the next response.
+    throw new Error("HTTP_DESYNC: response has neither content-length nor chunked framing");
   }
 
   async function doFetch(

@@ -568,6 +568,46 @@ describe("attachTunnel HTTP shim deadlines and caps", () => {
     stream2.pushIncoming(`HTTP/1.1 200 OK\r\nContent-Length: ${MAX_TUNNEL_RESPONSE_BODY_BYTES + 1}\r\n\r\n`);
     await expect(req2).rejects.toThrow(/HTTP_BODY_TOO_LARGE/);
   });
+
+  it("closes the stream after a parse failure so a queued request never reads leftover bytes", async () => {
+    // Given a malformed response and a second request queued behind it
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const bad = transport.fetchLike("/bad");
+    const badResult = expect(bad).rejects.toThrow(/HTTP_MALFORMED_STATUS_LINE/);
+    const queued = transport.fetchLike("/next");
+    const queuedResult = expect(queued).rejects.toThrow(/STREAM_CLOSED/);
+    await stream.waitForWrites(1);
+
+    // When the server answers garbage followed by a valid-looking response
+    stream.pushIncoming("garbage\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+
+    // Then the stream is closed and the queued request does not consume the leftover bytes
+    await badResult;
+    await queuedResult;
+    expect(stream.closed).toBe(true);
+    expect(transport.isClosed).toBe(true);
+  });
+
+  it("treats a response with no length or chunked framing as a desync, not an empty body", async () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const req = transport.fetchLike("/unframed");
+    await stream.waitForWrites(1);
+    stream.pushIncoming("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody");
+    await expect(req).rejects.toThrow(/HTTP_DESYNC/);
+    expect(stream.closed).toBe(true);
+  });
+
+  it("still accepts a bodiless 204 without framing headers", async () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const req = transport.fetchLike("/empty");
+    await stream.waitForWrites(1);
+    stream.pushIncoming("HTTP/1.1 204 No Content\r\n\r\n");
+    expect((await req).status).toBe(204);
+    expect(stream.closed).toBe(false);
+  });
 });
 
 describe("attachTunnel security & validation constraints", () => {
