@@ -12,7 +12,7 @@ import {
 import { resolveAgentLogo } from "../lib/agentIcon";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
-import { closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
+import { browserTabIdForBrowserId, closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, onBrowserStateChanged, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
 import { closeTerminal, describeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
@@ -2336,6 +2336,7 @@ export function useWorkspaceStore({
         loading: browserState.loading,
         canGoBack: browserState.canGoBack,
         canGoForward: browserState.canGoForward,
+        engine: browserState.engine,
         zoomFactor: browserState.zoomFactor,
         loadError: browserState.loadError ?? null,
         profileId: browserState.profileId,
@@ -2512,6 +2513,7 @@ export function useWorkspaceStore({
         loading: browserState.loading,
         canGoBack: browserState.canGoBack,
         canGoForward: browserState.canGoForward,
+        engine: browserState.engine,
         zoomFactor: browserState.zoomFactor,
         loadError: browserState.loadError ?? null,
         profileId: browserState.profileId,
@@ -2563,6 +2565,50 @@ export function useWorkspaceStore({
     },
     [dispatch],
   );
+
+  // The tab bar and persisted layout read the tab record, which nothing else updates when the
+  // page changes on its own (a link, or a Chromium tab's own address bar). Keep url, title and
+  // engine current, and let the label follow the page title until the user renames the tab.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onBrowserStateChanged((payload) => {
+      const current = stateRef.current;
+      const tabs = [
+        ...current.layout.tabs,
+        ...Object.values(current.worktreeLayouts ?? {}).flatMap((layout) => layout.tabs),
+      ];
+      const tabId = browserTabIdForBrowserId(tabs, payload.browserId);
+      const tab = tabs.find((candidate) => candidate.id === tabId);
+      if (!tabId || tab?.kind !== "browser") return;
+      const title = payload.title?.trim() || null;
+      const labelFollowsTitle = tab.label === "Browser" || tab.label === (tab.title ?? "");
+      const updates: Partial<BrowserTab> = {
+        url: payload.url || tab.url,
+        title,
+        ...(payload.engine ? { engine: payload.engine } : {}),
+        ...(title && labelFollowsTitle ? { label: title } : {}),
+      };
+      if (
+        updates.url === tab.url &&
+        updates.title === (tab.title ?? null) &&
+        (updates.engine ?? tab.engine) === tab.engine &&
+        (updates.label ?? tab.label) === tab.label
+      ) {
+        return;
+      }
+      dispatch({ type: "UPDATE_BROWSER_TAB", tabId, browserId: payload.browserId, updates });
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch((error: unknown) => {
+      switchDebug("browser.state-listener.error", { error: String(error) });
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dispatch]);
 
   const openWorkspacePortInBrowser = useCallback(
     async (port: number) => {

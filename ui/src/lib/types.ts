@@ -401,7 +401,11 @@ export type BrowserState = {
   zoomFactor: number;
   loadError?: string | null;
   visible: boolean;
+  /** "chromium" tabs draw their own toolbar, menus and extension buttons. */
+  engine?: BrowserEngine;
 };
+
+export type BrowserEngine = "system" | "chromium";
 
 export type BrowserTab = {
   kind: "browser";
@@ -413,6 +417,7 @@ export type BrowserTab = {
   loading?: boolean;
   canGoBack?: boolean;
   canGoForward?: boolean;
+  engine?: BrowserEngine;
   zoomFactor?: number;
   loadError?: string | null;
   profileId?: string;

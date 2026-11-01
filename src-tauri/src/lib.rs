@@ -1362,6 +1362,22 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             if let tauri::WindowEvent::Destroyed = event {
                 handle_window_destroyed(window);
             }
+            // Chromium panes on macOS are separate windows that must follow the main one.
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Moved(_)
+                        | tauri::WindowEvent::Resized(_)
+                        | tauri::WindowEvent::Focused(true)
+                )
+            {
+                if let Some(manager) =
+                    window.try_state::<std::sync::Arc<crate::browser::BrowserManager>>()
+                {
+                    crate::ipc::browser::follow_main_window(window, manager.inner());
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::DragDrop(drag_event) = event {
                 if crate::ipc::debug::switch_debug_sink_enabled(
@@ -1838,6 +1854,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::browser::adoption::cmd_browser_session_adoption,
         cmd_browser_close,
         cmd_browser_list,
+        cmd_browser_engine_status,
+        cmd_browser_engine_install,
+        cmd_browser_engine_remove,
         cmd_browser_open_external,
         cmd_browser_remote_reclaim,
         cmd_browser_remote_revoke,

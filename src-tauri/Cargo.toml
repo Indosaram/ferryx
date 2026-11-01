@@ -113,6 +113,7 @@ ferryx-rd-net = { path = "../crates/ferryx-rd/ferryx-rd-net", optional = true, d
 ferryx-rd-host = { path = "../crates/ferryx-rd/ferryx-rd-host", optional = true, default-features = false }
 ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg"] }
 ferryx-rd-app = { path = "../crates/ferryx-rd/ferryx-rd-app", optional = true, features = ["ffmpeg"] }
+ferryx-browser-engine-protocol = { path = "../crates/browser-engine-protocol" }
 async-trait = "0.1"
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
@@ -145,6 +146,9 @@ blake2 = "0.10"
 rand = "0.8"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 sha2 = "0.10"
+# Unpacks the on-demand Chromium engine (browser/engine_install.rs). Same version the
+# updater plugin already builds.
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
 hmac = "=0.12.1"
 snow = "0.9"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
@@ -288,6 +292,8 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.

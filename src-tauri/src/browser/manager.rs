@@ -34,6 +34,7 @@ pub struct ManagedBrowserSession {
     pub creation_sequence: u64,
     /// Which guest -> host channel the platform installed for this tab.
     pub trusted_bridge: TrustedBridgeKind,
+    pub engine: BrowserEngine,
     history: Vec<String>,
     history_index: usize,
     /// Set once the platform reports real engine history flags. The shadow
@@ -61,6 +62,7 @@ fn browser_state(s: &ManagedBrowserSession) -> BrowserState {
         load_error: s.load_error.clone(),
         visible: s.visible,
         trusted_bridge: s.trusted_bridge,
+        engine: s.engine,
     }
 }
 
@@ -223,6 +225,7 @@ impl BrowserManager {
             map_revision: 0,
             creation_sequence,
             trusted_bridge: TrustedBridgeKind::Unavailable,
+            engine: BrowserEngine::System,
             history: vec![valid_url],
             history_index: 0,
             native_history_flags: false,
@@ -247,6 +250,20 @@ impl BrowserManager {
             .get(browser_id)
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
         Ok(s.bounds.clone())
+    }
+
+    /// Records the engine that draws this tab; set right after creation.
+    pub fn set_engine(
+        &self,
+        browser_id: &str,
+        engine: BrowserEngine,
+    ) -> Result<BrowserState, BrowserError> {
+        let mut guard = self.sessions.write();
+        let s = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        s.engine = engine;
+        Ok(browser_state(s))
     }
 
     pub fn is_visible(&self, browser_id: &str) -> Result<bool, BrowserError> {
