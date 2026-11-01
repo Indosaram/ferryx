@@ -19,7 +19,8 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 struct VaultState {
-    registration: Option<Registration>,
+    /// Keeps the DevTools observer registered for the browser's lifetime; dropped with the state.
+    _registration: Option<Registration>,
     main_frame: Option<String>,
     /// Frame id -> execution context id of its `ferryx-vault` world.
     contexts: HashMap<String, i64>,
@@ -55,7 +56,7 @@ pub(super) fn attach(browser: &mut Browser) {
     let mut observer = VaultObserver::new();
     let registration = host.add_dev_tools_message_observer(Some(&mut observer));
     STATES.with_borrow_mut(|states| {
-        states.insert(key, VaultState { registration, ..Default::default() })
+        states.insert(key, VaultState { _registration: registration, ..Default::default() })
     });
     let browser = browser.clone();
     send(&browser, "Page.enable", "{}");
