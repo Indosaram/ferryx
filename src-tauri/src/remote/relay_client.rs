@@ -1927,7 +1927,14 @@ mod tests {
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            let frame = socket.next().await.unwrap().unwrap();
+            // The control loop's first ping tick fires at once and may beat the registration;
+            // keepalives are not part of the pairing exchange.
+            let frame = loop {
+                let frame = socket.next().await.unwrap().unwrap();
+                if frame.is_text() {
+                    break frame;
+                }
+            };
             let registration: RegisterPairingPin =
                 serde_json::from_str(frame.to_text().unwrap()).unwrap();
             registered_tx.send(registration.clone()).unwrap();
