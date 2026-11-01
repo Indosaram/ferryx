@@ -133,6 +133,10 @@ pub fn to_physical(bounds: &LogicalRect, scale: f64) -> PhysicalRect {
 }
 
 fn send(profile: &str, command: &EngineCommand) -> bool {
+    #[cfg(test)]
+    if let Some(sent) = fake::send(profile, command) {
+        return sent;
+    }
     let result = {
         let mut engines = ENGINES.lock();
         let Some(engine) = engines.get_mut(profile) else {
@@ -285,9 +289,7 @@ fn read_events(stdout: std::process::ChildStdout, profile: &str, pid: u32, sink:
             }
             Event::Devtools { id, ok, result, .. } => {
                 // An answer goes to the call that asked for it, not to the tab's event sink.
-                if let Some(pending) = DEVTOOLS_CALLS.lock().remove(id) {
-                    let _ = pending.reply.send((*ok, result.clone()));
-                }
+                answer_devtools(*id, *ok, result.clone());
                 continue;
             }
             _ => {}
@@ -296,6 +298,13 @@ fn read_events(stdout: std::process::ChildStdout, profile: &str, pid: u32, sink:
     }
     // The engine is gone (it crashed, or Ferryx closed its stdin): its tabs went with it.
     engine_gone(profile, pid);
+}
+
+/// Hands an engine's DevTools answer to the call waiting for it (none after a timeout).
+fn answer_devtools(id: u32, ok: bool, result: String) {
+    if let Some(pending) = DEVTOOLS_CALLS.lock().remove(&id) {
+        let _ = pending.reply.send((ok, result));
+    }
 }
 
 /// Makes a window the engine opened on its own the window of the Ferryx tab `browser_id`.
@@ -440,6 +449,63 @@ pub fn repaint(browser_id: &str) {
         if platform::repaint(parent, handle) {
             send(&profile, &EngineCommand::Raise);
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fake {
+    //! In-process stand-in for engine processes, so the DevTools path (tab lookup, call ids,
+    //! command and event lines, answers, timeouts, a dying engine) runs in unit tests on every
+    //! OS without a Chromium engine.
+
+    use super::*;
+
+    /// Gets each command line Ferryx writes to the engine's stdin and returns the event lines
+    /// the engine prints in reply; `None` means the engine exits on that command.
+    pub(crate) type Handler = Arc<dyn Fn(&str) -> Option<Vec<String>> + Send + Sync>;
+
+    static HANDLERS: LazyLock<Mutex<HashMap<String, Handler>>> = LazyLock::new(Default::default);
+
+    /// Runs `handler` as the engine of `profile`, serving `tabs`.
+    pub(crate) fn install(profile: &str, tabs: &[&str], handler: Handler) {
+        HANDLERS.lock().insert(profile.to_string(), handler);
+        let mut known = TABS.lock();
+        for tab in tabs {
+            known.insert((*tab).to_string(), Tab { profile: profile.to_string(), handle: None });
+        }
+    }
+
+    /// Registers `tab` under `profile` while no engine runs for that profile.
+    pub(crate) fn orphan_tab(profile: &str, tab: &str) {
+        TABS.lock().insert(tab.to_string(), Tab { profile: profile.to_string(), handle: None });
+    }
+
+    /// Stops the stand-in of `profile`: its tabs and the calls waiting on it go with it.
+    pub(crate) fn remove(profile: &str) {
+        HANDLERS.lock().remove(profile);
+        exited(profile);
+    }
+
+    fn exited(profile: &str) {
+        DEVTOOLS_CALLS.lock().retain(|_, pending| pending.profile != profile);
+        TABS.lock().retain(|_, tab| tab.profile != profile);
+    }
+
+    /// `None` when no stand-in serves `profile` (the real engine path then runs).
+    pub(super) fn send(profile: &str, command: &EngineCommand) -> Option<bool> {
+        let handler = HANDLERS.lock().get(profile).cloned()?;
+        let Some(lines) = handler(&command.to_line()) else {
+            // The command was written, then the engine died before answering.
+            HANDLERS.lock().remove(profile);
+            exited(profile);
+            return Some(true);
+        };
+        for line in lines {
+            if let Some(Event::Devtools { id, ok, result, .. }) = Event::parse(&line) {
+                answer_devtools(id, ok, result);
+            }
+        }
+        Some(true)
     }
 }
 

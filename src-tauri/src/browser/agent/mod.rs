@@ -14,6 +14,8 @@ pub mod cdp;
 pub mod client;
 #[cfg(all(feature = "desktop", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub mod cef_backend;
+#[cfg(all(test, feature = "desktop", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+mod fake_cdp;
 pub(crate) mod platform;
 mod policy;
 #[cfg(feature = "desktop")]
