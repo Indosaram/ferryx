@@ -612,6 +612,7 @@ mod tests {
     fn click(browser_id: &str) -> BrowserCliRequest {
         BrowserCliRequest::Act {
             request: BrowserAutomationRequest {
+                postcondition: None,
                 browser_id: browser_id.into(),
                 generation: 1,
                 action: BrowserAutomationAction::Click { reference: "e1".into() },

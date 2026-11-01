@@ -63,3 +63,27 @@ controllers and their sites, revokes a site or a whole controller, and holds the
 Trusted input differs by engine: Chromium tabs get real clicks and keys (`isTrusted` true) on
 macOS and Windows; webview tabs keep the synthetic DOM path (trusted keypress only on macOS).
 Linux has no Chromium engine yet.
+
+## Observe and act (plan T4, C4)
+
+- `src-tauri/src/browser/agent/observe.js` is the one page script both engines run for
+  snapshot, element actions and act postconditions. Chromium engine tabs run it in an isolated
+  world (`Page.createIsolatedWorld`, cached per tab, replaced after a navigation). Webview tabs
+  run it in the page's world; it then takes every DOM and builtin function from a fresh
+  about:blank frame, so page code that overwrites `querySelector`, prototypes, `JSON` or
+  `Array.prototype` cannot steer it (known limit: the bootstrap itself uses a few page
+  functions once per call).
+- Refs are node identities (`<document token>.<n>`, WeakMap-held), not CSS selectors. A
+  replaced or removed node, a ref from another document, or a node whose tag, role or name
+  changed since the observe fails with `BROWSER_AUTOMATION_SNAPSHOT_STALE`; nothing lands on a
+  look-alike replacement. The host keeps each ref's fingerprint per document generation.
+- Observe returns role, accessible name (aria-labelledby, aria-label, label, title,
+  placeholder, text), disabled and checked state, open shadow roots, frame boundaries
+  (`frames`, never entered) and `truncated` past 1000 elements. Hidden elements and all field
+  values (passwords included) are left out.
+- Act returns `{dispatched, applied?}`. `applied` appears only when the request carried a
+  `postcondition` (text, selector, URL or load state, optional timeout; scripts and network idle
+  are refused) that the page did not already show before the act: true once the page matched,
+  false at the timeout. CLI:
+  `--expect-text|--expect-selector|--expect-url <value> [--expect-timeout-ms <ms>]` on any act
+  command.

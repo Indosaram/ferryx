@@ -382,6 +382,9 @@ where
     let mut args = args;
     *crate::ipc::browser_cli::CLI_CONTROLLER.lock() =
         crate::browser::agent::client::take_controller_option(&mut args)?;
+    // `--expect-text|--expect-selector|--expect-url <value> [--expect-timeout-ms <ms>]` on any
+    // act command: report `applied` once the page shows it.
+    *CLI_POSTCONDITION.lock() = take_postcondition_options(&mut args)?;
     if args.get(2).is_some_and(|arg| arg == "controllers") {
         return Err(BROWSER_CONTROLLERS_ROUTE.into());
     }
@@ -1708,6 +1711,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             reference,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Click { reference },
@@ -1720,6 +1724,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             value,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Fill { reference, value },
@@ -1731,6 +1736,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             key,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Keypress { key },
@@ -1742,6 +1748,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             reference,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Dblclick { reference },
@@ -1753,6 +1760,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             reference,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Hover { reference },
@@ -1764,6 +1772,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             reference,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Check { reference },
@@ -1775,6 +1784,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             reference,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Uncheck { reference },
@@ -1786,6 +1796,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             reference,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::ScrollIntoView { reference },
@@ -1798,6 +1809,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             value,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Select { reference, value },
@@ -1810,6 +1822,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             text,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Type { reference, text },
@@ -1823,6 +1836,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
             y,
         } => BrowserCliRequest::Act {
             request: crate::browser::BrowserAutomationRequest {
+                postcondition: None,
                 browser_id,
                 generation,
                 action: BrowserAutomationAction::Scroll { reference, x, y },
@@ -1876,6 +1890,7 @@ fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
         } => match (generation, reference) {
             (Some(generation), Some(reference)) => BrowserCliRequest::Act {
                 request: crate::browser::BrowserAutomationRequest {
+                    postcondition: None,
                     browser_id,
                     generation,
                     action: BrowserAutomationAction::Focus { reference },
@@ -3695,7 +3710,14 @@ fn format_browser_cli_response(
             BrowserCliCommand::Title { .. } => Ok(snapshot.title),
             _ => serde_json::to_string(&snapshot).map_err(|error| error.to_string()),
         },
-        BrowserCliResponse::Acted => Ok(serde_json::json!({ "type": "acted" }).to_string()),
+        BrowserCliResponse::Acted { outcome } => {
+            let mut printed = serde_json::json!({ "type": "acted" });
+            printed["dispatched"] = serde_json::json!(outcome.dispatched);
+            if let Some(applied) = outcome.applied {
+                printed["applied"] = serde_json::json!(applied);
+            }
+            Ok(printed.to_string())
+        }
         BrowserCliResponse::Opened { browser, adoption } => {
             serde_json::to_string(&serde_json::json!({
                 "type": "opened",
@@ -3905,6 +3927,65 @@ pub fn run_open_cli(command: OpenFileCliCommand) -> Result<(), String> {
     }
 }
 
+/// The act postcondition of the running CLI invocation (`--expect-*`).
+static CLI_POSTCONDITION: std::sync::LazyLock<parking_lot::Mutex<Option<BrowserWaitCondition>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Removes the `--expect-*` act options from `args`. At most one condition; the timeout only
+/// with a condition.
+fn take_postcondition_options(args: &mut Vec<String>) -> Result<Option<BrowserWaitCondition>, String> {
+    fn take(args: &mut Vec<String>, name: &str) -> Result<Option<String>, String> {
+        let Some(index) = args.iter().position(|arg| arg == name) else { return Ok(None) };
+        let value = args
+            .get(index + 1)
+            .filter(|value| !value.starts_with("--"))
+            .cloned()
+            .ok_or_else(|| format!("missing value for {name}"))?;
+        args.remove(index);
+        args.remove(index);
+        Ok(Some(value))
+    }
+    let mut conditions = Vec::new();
+    if let Some(text) = take(args, "--expect-text")? {
+        conditions.push(BrowserWaitCondition::Text { text });
+    }
+    if let Some(selector) = take(args, "--expect-selector")? {
+        conditions.push(BrowserWaitCondition::Selector { selector });
+    }
+    if let Some(fragment) = take(args, "--expect-url")? {
+        conditions.push(BrowserWaitCondition::UrlContains { fragment });
+    }
+    let timeout_ms = take(args, "--expect-timeout-ms")?
+        .map(|value| value.parse::<u64>().map_err(|_| "--expect-timeout-ms must be an unsigned integer".to_string()))
+        .transpose()?;
+    if conditions.len() > 1 {
+        return Err("give at most one of --expect-text, --expect-selector, --expect-url".into());
+    }
+    let Some(condition) = conditions.pop() else {
+        return match timeout_ms {
+            Some(_) => Err("--expect-timeout-ms needs --expect-text, --expect-selector or --expect-url".into()),
+            None => Ok(None),
+        };
+    };
+    Ok(Some(match timeout_ms {
+        Some(timeout_ms) => BrowserWaitCondition::WithTimeout { inner: Box::new(condition), timeout_ms },
+        None => condition,
+    }))
+}
+
+/// Attaches the invocation's `--expect-*` postcondition to an act request; other requests
+/// refuse it.
+fn with_cli_postcondition(request: BrowserCliRequest) -> Result<BrowserCliRequest, String> {
+    let Some(condition) = CLI_POSTCONDITION.lock().take() else { return Ok(request) };
+    match request {
+        BrowserCliRequest::Act { mut request } => {
+            request.postcondition = Some(condition);
+            Ok(BrowserCliRequest::Act { request })
+        }
+        _ => Err("--expect-* options apply to act commands only".into()),
+    }
+}
+
 /// `ferryx browser controllers ...` is parsed by [`parse_browser_controllers_cli`].
 const BROWSER_CONTROLLERS_ROUTE: &str = "`browser controllers` is handled by parse_browser_controllers_cli";
 
@@ -3953,7 +4034,7 @@ pub fn run_browser_cli(command: BrowserCliCommand) -> Result<(), String> {
         .map_err(|error| format!("failed to read current directory: {error}"))?;
     let home = cli_home_dir();
     let request = absolutize_browser_cli_paths(
-        browser_cli_request(command.clone()),
+        with_cli_postcondition(browser_cli_request(command.clone()))?,
         &cwd,
         home.as_deref(),
     );
@@ -5625,6 +5706,7 @@ mod tests {
             }),
             BrowserCliRequest::Act {
                 request: crate::browser::BrowserAutomationRequest {
+                    postcondition: None,
                     browser_id: "b-1".into(),
                     generation: 5,
                     action: BrowserAutomationAction::Focus {
@@ -5881,6 +5963,7 @@ mod tests {
             }),
             BrowserCliRequest::Act {
                 request: crate::browser::BrowserAutomationRequest {
+                    postcondition: None,
                     browser_id: "b-1".into(),
                     generation: 2,
                     action: BrowserAutomationAction::Click {
@@ -5899,6 +5982,7 @@ mod tests {
             }),
             BrowserCliRequest::Act {
                 request: crate::browser::BrowserAutomationRequest {
+                    postcondition: None,
                     browser_id: "b-1".into(),
                     generation: 3,
                     action: BrowserAutomationAction::Fill {
@@ -5917,6 +6001,7 @@ mod tests {
             }),
             BrowserCliRequest::Act {
                 request: crate::browser::BrowserAutomationRequest {
+                    postcondition: None,
                     browser_id: "b-1".into(),
                     generation: 4,
                     action: BrowserAutomationAction::Keypress {
@@ -6154,6 +6239,9 @@ mod tests {
             url: "https://example.com/page".into(),
             title: "Example Title".into(),
             elements: vec![],
+            truncated: false,
+            frames: vec![],
+            isolated: false,
         };
         let response = BrowserCliResponse::Snapshot {
             snapshot: snapshot.clone(),
@@ -8157,6 +8245,7 @@ mod tests {
                 browser_cli_request(command),
                 BrowserCliRequest::Act {
                     request: crate::browser::BrowserAutomationRequest {
+                        postcondition: None,
                         browser_id: "b-1".into(),
                         generation: 2,
                         action: expected_action,
@@ -8184,6 +8273,7 @@ mod tests {
             browser_cli_request(type_without_ref),
             BrowserCliRequest::Act {
                 request: crate::browser::BrowserAutomationRequest {
+                    postcondition: None,
                     browser_id: "b-1".into(),
                     generation: 3,
                     action: BrowserAutomationAction::Type {
@@ -8210,6 +8300,7 @@ mod tests {
             browser_cli_request(scroll_without_ref),
             BrowserCliRequest::Act {
                 request: crate::browser::BrowserAutomationRequest {
+                    postcondition: None,
                     browser_id: "b-1".into(),
                     generation: 3,
                     action: BrowserAutomationAction::Scroll {
@@ -8685,5 +8776,62 @@ mod tests {
         // `Some(..)` — this assertion then sees `Some("")` instead of `None` and
         // the download path would send an empty `Cookie:` header.
         assert_eq!(crate::ipc::browser::cookie_header_from_cookies(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod act_postcondition_cli_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn expect_options_become_one_postcondition_and_leave_the_rest() {
+        let mut list = args(&["ferryx", "browser", "click", "--expect-text", "Saved", "--expect-timeout-ms", "900", "--ref", "d.1"]);
+        let condition = take_postcondition_options(&mut list).expect("parsed");
+        assert_eq!(
+            condition,
+            Some(BrowserWaitCondition::WithTimeout {
+                inner: Box::new(BrowserWaitCondition::Text { text: "Saved".into() }),
+                timeout_ms: 900,
+            })
+        );
+        assert_eq!(list, args(&["ferryx", "browser", "click", "--ref", "d.1"]));
+        let mut none = args(&["ferryx", "browser", "click"]);
+        assert_eq!(take_postcondition_options(&mut none), Ok(None));
+    }
+
+    #[test]
+    fn conflicting_or_dangling_expect_options_are_refused() {
+        let mut two = args(&["--expect-text", "a", "--expect-url", "b"]);
+        assert!(take_postcondition_options(&mut two).is_err());
+        let mut timeout_only = args(&["--expect-timeout-ms", "5"]);
+        assert!(take_postcondition_options(&mut timeout_only).is_err());
+        let mut missing = args(&["--expect-selector"]);
+        assert!(take_postcondition_options(&mut missing).is_err());
+    }
+
+    #[test]
+    fn the_act_output_reports_dispatch_and_only_a_checked_effect() {
+        let command = BrowserCliCommand::Click { browser_id: "b".into(), generation: 1, reference: "d.1".into() };
+        let applied = crate::browser::model::BrowserActOutcome { dispatched: true, applied: Some(false) };
+        let printed: serde_json::Value = serde_json::from_str(
+            &format_browser_cli_response(&command, BrowserCliResponse::Acted { outcome: applied }).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(printed, serde_json::json!({ "type": "acted", "dispatched": true, "applied": false }));
+        let plain = crate::browser::model::BrowserActOutcome { dispatched: true, applied: None };
+        let printed: serde_json::Value = serde_json::from_str(
+            &format_browser_cli_response(&command, BrowserCliResponse::Acted { outcome: plain }).unwrap(),
+        )
+        .unwrap();
+        assert!(printed.get("applied").is_none());
+        // The wire form flattens the outcome beside the tag; an older response still parses.
+        let wire = serde_json::to_value(BrowserCliResponse::Acted { outcome: applied }).unwrap();
+        assert_eq!(wire, serde_json::json!({ "type": "acted", "dispatched": true, "applied": false }));
+        let old: BrowserCliResponse = serde_json::from_str(r#"{"type":"acted"}"#).unwrap();
+        assert_eq!(old, BrowserCliResponse::Acted { outcome: Default::default() });
     }
 }

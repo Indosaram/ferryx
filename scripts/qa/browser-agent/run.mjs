@@ -295,8 +295,7 @@ async function preflight(ctx) {
 // exist yet report NOT_IMPLEMENTED (a FAIL). Q1 and Q3 drive the CLI path (pairing, grants,
 // observe/act) on the configured engine; consent is always clicked in the real app via MahoRD.
 const PENDING = {
-  Q1: [['pipe/MCP form of the same flow (`ferryx browser pipe`)', 'T6'],
-    ['act postcondition text=Saved reported as applied=true', 'T4']],
+  Q1: [['pipe/MCP form of the same flow (`ferryx browser pipe`)', 'T6']],
   Q2: [['token-only legacy NDJSON, raw eval/get/cookies/state, malformed and >1 MiB frames, forged role, unauthorized RemoteAttach', 'T3,T6'],
     ['MCP tools/call without pairing; paired old-syntax CLI with default.json and --controller; missing default and revoke refusals', 'T6']],
   Q3: [['/redirect-other to 18762 stopped before commit (needs a navigation delegate check)', 'T4'],
@@ -382,8 +381,8 @@ const SCENARIO_BODIES = {
       const gen = String(form.generation);
       const fill = await runCli(ctx.binaries.cli, ['fill', '--browser-id', form.browserId, '--generation', gen, '--ref', name, '--value', 'Ferryx'], ctx.cliOptions());
       ev.assert('act:fill', fill.code === 0, { expected: 'acted', observed: fill.json ?? fill.stderr });
-      const click = await runCli(ctx.binaries.cli, ['click', '--browser-id', form.browserId, '--generation', gen, '--ref', submit], ctx.cliOptions());
-      ev.assert('act:click', click.code === 0, { expected: 'acted', observed: click.json ?? click.stderr });
+      const click = await runCli(ctx.binaries.cli, ['click', '--browser-id', form.browserId, '--generation', gen, '--ref', submit, '--expect-text', 'Saved', '--expect-timeout-ms', '10000'], ctx.cliOptions());
+      ev.assert('act:click-applied', click.code === 0 && click.json?.dispatched === true && click.json?.applied === true, { expected: 'dispatched and applied (Saved shown)', observed: click.json ?? click.stderr });
       const submitted = await events.waitFor((r) => r.kind === 'form-submit', { label: 'form submit' });
       ev.assert('fixture:one-submission', submitted.name === 'Ferryx' && fixtures.state().formSubmits.length === 1, { expected: 'one Name=Ferryx', observed: fixtures.state().formSubmits });
       const saved = await runCli(ctx.binaries.cli, ['wait', '--browser-id', form.browserId, '--text', 'Saved'], ctx.cliOptions());

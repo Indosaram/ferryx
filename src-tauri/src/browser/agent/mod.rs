@@ -16,6 +16,8 @@ pub mod client;
 pub mod cef_backend;
 pub(crate) mod platform;
 mod policy;
+#[cfg(feature = "desktop")]
+pub mod observe;
 mod protocol;
 pub mod redact;
 #[cfg(feature = "desktop")]

@@ -6,13 +6,17 @@
 //! Clicks and keys are trusted input (`Input.dispatch*Event`), unlike the synthetic DOM events
 //! the webview path has to use.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use serde_json::{json, Value};
 
-use super::cdp;
+use super::{cdp, observe};
 use crate::browser::cef_engine;
 use crate::browser::model::BrowserAutomationAction;
 use crate::browser::snapshot_source::{BrowserSnapshot, BrowserSnapshotSource, SnapshotFormat, SnapshotOptions};
@@ -35,46 +39,109 @@ pub async fn eval(browser_id: &str, script: &str) -> Result<String, BrowserError
     cdp::evaluate_result(&result)
 }
 
-async fn click_at(browser_id: &str, selector: &str, clicks: u32) -> Result<bool, BrowserError> {
-    let raw = eval(browser_id, &cdp::click_point_script(selector)?).await?;
-    let Some((x, y)) = cdp::click_point(&raw) else {
-        return Ok(false);
-    };
-    for event in cdp::mouse_click_events(x, y, clicks) {
-        call(browser_id, "Input.dispatchMouseEvent", event).await?;
+/// Agent scripts run in an isolated world of the tab's main frame: its globals and DOM
+/// wrappers are invisible to the page's scripts, so the ref store and the observer's helpers
+/// cannot be read or replaced by the page. CDP creates a new world per call, so its context
+/// is kept per tab until a navigation destroys it.
+static WORLDS: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(Default::default);
+const WORLD_NAME: &str = "ferryx-agent";
+
+async fn isolated_context(browser_id: &str) -> Result<i64, BrowserError> {
+    if let Some(context) = WORLDS.lock().get(browser_id).copied() {
+        return Ok(context);
     }
-    Ok(true)
+    let tree = call(browser_id, "Page.getFrameTree", json!({})).await?;
+    let frame = tree
+        .pointer("/frameTree/frame/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BrowserError::AutomationFailed("the page has no main frame".into()))?
+        .to_string();
+    let world = call(
+        browser_id,
+        "Page.createIsolatedWorld",
+        json!({ "frameId": frame, "worldName": WORLD_NAME }),
+    )
+    .await?;
+    let context = world
+        .get("executionContextId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| BrowserError::AutomationFailed("Page.createIsolatedWorld returned no context".into()))?;
+    WORLDS.lock().insert(browser_id.to_string(), context);
+    Ok(context)
 }
 
-/// Performs the trusted-input part of an action. Returns `false` when the action has no
-/// trusted form here (or a click target is covered), so the caller runs the DOM script.
-pub async fn act(
+/// Evaluates an agent script in the tab's isolated world. A context the last navigation
+/// destroyed is replaced once; any other failure is returned, never retried (an act must not
+/// run twice).
+pub async fn eval_isolated(browser_id: &str, script: &str) -> Result<String, BrowserError> {
+    let mut replaced = false;
+    loop {
+        let context = isolated_context(browser_id).await?;
+        let mut params = cdp::evaluate_params(script);
+        params["contextId"] = json!(context);
+        match call(browser_id, "Runtime.evaluate", params).await {
+            Ok(result) => return cdp::evaluate_result(&result),
+            Err(BrowserError::AutomationFailed(message)) if !replaced && cdp::is_lost_context(&message) => {
+                WORLDS.lock().remove(browser_id);
+                replaced = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Drops the tab's cached world (tab closed).
+pub fn forget(browser_id: &str) {
+    WORLDS.lock().remove(browser_id);
+}
+
+/// Runs an element action addressed by ref. Clicks are trusted mouse input at the element's
+/// center when nothing covers it; typing focuses the element and inserts the text as trusted
+/// input; everything else (and a covered click) runs the page-side action.
+pub async fn act_element(
     browser_id: &str,
     action: &BrowserAutomationAction,
-    selector: Option<&str>,
-) -> Result<bool, BrowserError> {
-    match (action, selector) {
-        (BrowserAutomationAction::Click { .. }, Some(selector)) => click_at(browser_id, selector, 1).await,
-        (BrowserAutomationAction::Dblclick { .. }, Some(selector)) => click_at(browser_id, selector, 2).await,
-        (BrowserAutomationAction::Keypress { key }, _) => {
+    expect: &str,
+) -> Result<(), BrowserError> {
+    let clicks = match action {
+        BrowserAutomationAction::Click { .. } => Some(1),
+        BrowserAutomationAction::Dblclick { .. } => Some(2),
+        _ => None,
+    };
+    if let (Some(clicks), Some(reference)) = (clicks, observe::action_reference(action)) {
+        let raw = eval_isolated(browser_id, &observe::point_script(reference, expect, true)).await?;
+        if let Some((x, y)) = observe::parse_point(&raw)? {
+            for event in cdp::mouse_click_events(x, y, clicks) {
+                call(browser_id, "Input.dispatchMouseEvent", event).await?;
+            }
+            return Ok(());
+        }
+    }
+    if let BrowserAutomationAction::Type { reference: Some(reference), text } = action {
+        let focus = BrowserAutomationAction::Focus { reference: reference.clone() };
+        let script = observe::act_script(&focus, expect, true)
+            .ok_or_else(|| BrowserError::AutomationFailed("focus addresses no element".into()))?;
+        observe::parse_act(&eval_isolated(browser_id, &script).await?)?;
+        call(browser_id, "Input.insertText", json!({ "text": text })).await?;
+        return Ok(());
+    }
+    let script = observe::act_script(action, expect, true)
+        .ok_or_else(|| BrowserError::AutomationFailed("the action addresses no element".into()))?;
+    observe::parse_act(&eval_isolated(browser_id, &script).await?)
+}
+
+/// Performs the trusted-input form of an action that addresses no element (keypress, typing
+/// into the focused element). Returns `false` when it has none, so the caller runs its script.
+pub async fn act(browser_id: &str, action: &BrowserAutomationAction) -> Result<bool, BrowserError> {
+    match action {
+        BrowserAutomationAction::Keypress { key } => {
             let keypress = crate::ipc::browser::parse_keypress(key)?;
             for event in cdp::key_events(&keypress) {
                 call(browser_id, "Input.dispatchKeyEvent", event).await?;
             }
             Ok(true)
         }
-        (BrowserAutomationAction::Type { text, .. }, selector) => {
-            if let Some(selector) = selector {
-                let selector = serde_json::to_string(selector)
-                    .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-                eval(
-                    browser_id,
-                    &format!(
-                        "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); return 'ok'; }})()"
-                    ),
-                )
-                .await?;
-            }
+        BrowserAutomationAction::Type { reference: None, text } => {
             call(browser_id, "Input.insertText", json!({ "text": text })).await?;
             Ok(true)
         }

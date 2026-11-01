@@ -40,18 +40,51 @@ pub async fn eval<R: tauri::Runtime>(
     crate::ipc::browser::eval_webview(webview, script).await
 }
 
-/// Runs the trusted-input form of an action in an engine tab. `Ok(false)` means the caller
-/// runs its DOM script instead (always for webview tabs).
-pub async fn trusted_act(
+/// Evaluates an agent script (`observe.js`): in an engine tab inside its isolated world, in a
+/// webview tab in the page's world (the script builds its own clean realm there).
+pub async fn eval_agent<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
     browser_id: &str,
-    action: &BrowserAutomationAction,
-    selector: Option<&str>,
-) -> Result<bool, BrowserError> {
+    script: String,
+) -> Result<String, BrowserError> {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     if is_engine_tab(browser_id) {
-        return super::cef_backend::act(browser_id, action, selector).await;
+        return super::cef_backend::eval_isolated(browser_id, &script).await;
     }
-    let _ = (browser_id, action, selector);
+    eval(app, manager, browser_id, script).await
+}
+
+/// Whether agent scripts in this tab run in an isolated world.
+pub fn agent_world_isolated(browser_id: &str) -> bool {
+    is_engine_tab(browser_id)
+}
+
+/// Runs an element action addressed by ref, bound to the fingerprint its observe recorded.
+pub async fn act_element<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    action: &BrowserAutomationAction,
+    expect: &str,
+) -> Result<(), BrowserError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if is_engine_tab(browser_id) {
+        return super::cef_backend::act_element(browser_id, action, expect).await;
+    }
+    let script = super::observe::act_script(action, expect, false)
+        .ok_or_else(|| BrowserError::AutomationFailed("the action addresses no element".into()))?;
+    super::observe::parse_act(&eval(app, manager, browser_id, script).await?)
+}
+
+/// Runs the trusted-input form of an action that addresses no element, in an engine tab.
+/// `Ok(false)` means the caller runs its DOM script instead (always for webview tabs).
+pub async fn trusted_act(browser_id: &str, action: &BrowserAutomationAction) -> Result<bool, BrowserError> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if is_engine_tab(browser_id) {
+        return super::cef_backend::act(browser_id, action).await;
+    }
+    let _ = (browser_id, action);
     Ok(false)
 }
 

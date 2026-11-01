@@ -527,6 +527,28 @@ impl BrowserManager {
             .ok_or_else(|| BrowserError::AutomationTargetNotFound(reference.to_string()))
     }
 
+    /// Records what an agent observe issued: each ref with the fingerprint (tag, role, name)
+    /// its node had. Shares the per-generation automation map, so navigation clears it.
+    pub fn record_observed_refs(
+        &self,
+        browser_id: &str,
+        generation: u64,
+        refs: Vec<(String, String)>,
+    ) -> Result<(), BrowserError> {
+        self.record_automation_targets(
+            browser_id,
+            generation,
+            refs.into_iter()
+                .map(|(reference, fingerprint)| BrowserAutomationTarget { reference, selector: fingerprint })
+                .collect(),
+        )
+    }
+
+    /// The fingerprint the current generation's observe recorded for `reference`.
+    pub fn observed_ref(&self, browser_id: &str, generation: u64, reference: &str) -> Result<String, BrowserError> {
+        self.automation_target(browser_id, generation, reference)
+    }
+
     pub fn assert_automation_generation(
         &self,
         browser_id: &str,
