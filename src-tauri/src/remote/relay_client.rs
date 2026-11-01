@@ -318,6 +318,10 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 /// Ceiling on the reconnect backoff delay.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// A control session must stay up this long before it counts as healthy and resets the
+/// backoff. A relay that accepts and then drops at once must not cause a reconnect storm.
+const HEALTHY_SESSION_UPTIME: Duration = Duration::from_secs(30);
+
 /// Notification pushed down the control channel when a client asks to open
 /// a new session against this daemon. Mirrors
 /// [`crate::remote::relay_server::IncomingSessionNotice`] - kept as a
@@ -646,30 +650,39 @@ impl RelayClient {
     pub async fn run(&self) {
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            match self.run_control_session().await {
-                Ok(()) => {
-                    // Clean shutdown (control socket closed normally).
-                    // Still reconnect - the daemon is expected to stay
-                    // tunneled for as long as it runs - but reset backoff
-                    // since the prior session was healthy.
-                    tracing::info!("relay control channel closed; reconnecting");
-                    backoff = INITIAL_BACKOFF;
-                    // A healthy session ended: return to the primary so a failover is
-                    // temporary and the standby is only used while the primary is down.
-                    self.active_endpoint
-                        .store(0, std::sync::atomic::Ordering::Release);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "relay control channel error: {err}; retrying in {:.1}s",
-                        backoff.as_secs_f64()
-                    );
-                    self.advance_endpoint();
-                }
+            let started = tokio::time::Instant::now();
+            let result = self.run_control_session().await;
+            backoff = self.next_backoff(started.elapsed(), backoff);
+            match result {
+                // Still reconnect - the daemon is expected to stay tunneled for as long
+                // as it runs.
+                Ok(()) => tracing::info!(
+                    "relay control channel closed; reconnecting in {:.1}s",
+                    backoff.as_secs_f64()
+                ),
+                Err(err) => tracing::warn!(
+                    "relay control channel error: {err}; retrying in {:.1}s",
+                    backoff.as_secs_f64()
+                ),
             }
 
             tokio::time::sleep(backoff).await;
             backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
+        }
+    }
+
+    /// Picks the delay before the next connect from how long the last session stayed up.
+    /// Only a session that lasted [`HEALTHY_SESSION_UPTIME`] resets the backoff and returns
+    /// to the primary (a failover is temporary); a session that dropped at once, cleanly or
+    /// not, keeps backing off and moves to the next endpoint.
+    fn next_backoff(&self, uptime: Duration, backoff: Duration) -> Duration {
+        if uptime >= HEALTHY_SESSION_UPTIME {
+            self.active_endpoint
+                .store(0, std::sync::atomic::Ordering::Release);
+            INITIAL_BACKOFF
+        } else {
+            self.advance_endpoint();
+            backoff
         }
     }
 
@@ -725,8 +738,7 @@ impl RelayClient {
                         ));
                     }
                     if let Err(err) = send_control(&mut write, Message::Ping(Vec::new().into())).await {
-                        tracing::warn!("relay control ping failed: {err}");
-                        break;
+                        return Err(err.context("relay control ping failed"));
                     }
                     continue;
                 }
@@ -735,8 +747,7 @@ impl RelayClient {
                         if request.ack.is_closed() { continue; }
                         let payload = serde_json::json!({"type": "AllocateSession", "opaque": request.opaque});
                         if let Err(err) = send_control(&mut write, Message::Text(payload.to_string().into())).await {
-                            tracing::warn!("relay attach allocation failed: {err}");
-                            break;
+                            return Err(err.context("relay attach allocation failed"));
                         }
                         pending_attach = Some(request);
                     }
@@ -1770,6 +1781,24 @@ mod tests {
         );
 
         client.advance_endpoint();
+        assert_eq!(client.active_relay_url(), "https://relay.example.com");
+    }
+
+    #[test]
+    fn only_a_session_that_stayed_up_resets_the_backoff() {
+        let client = RelayClient::new("https://relay.example.com", "tok")
+            .with_fallback_urls(["https://standby.example.com"]);
+        let grown = Duration::from_secs(8);
+
+        // Accepted and dropped at once: keep backing off and try the standby.
+        assert_eq!(client.next_backoff(Duration::from_secs(1), grown), grown);
+        assert_eq!(client.active_relay_url(), "https://standby.example.com");
+
+        // A session that stayed up was healthy: start over at the primary.
+        assert_eq!(
+            client.next_backoff(HEALTHY_SESSION_UPTIME, grown),
+            INITIAL_BACKOFF
+        );
         assert_eq!(client.active_relay_url(), "https://relay.example.com");
     }
 
