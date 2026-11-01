@@ -5624,7 +5624,9 @@ export const RemoteHostConnection: React.FC<{
           <p>
             {relayRepairConfirming
               ? "Signing in again removes this phone's current pairing. You'll pick your computer again after you sign in."
-              : "This phone's connection to your computer isn't fully encrypted. Sign in to your account to secure it."}
+              : relayRepairError
+                ? "Your relay requires encryption, and this phone can't connect until it's secured. Sign in to your Ferryx account to secure it."
+                : "This phone's connection to your computer isn't fully encrypted. Sign in to your account to secure it."}
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <button

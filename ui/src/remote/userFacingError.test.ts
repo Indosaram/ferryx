@@ -50,4 +50,9 @@ describe("userFacingError", () => {
       "The connection to your computer dropped. Reconnecting usually fixes this.",
     );
   });
+
+  it("blames the relay, not the computer, for allocation failures", () => {
+    expect(userFacingCode(new Coded("RELAY_TIMEOUT", "allocation timed out"))).toBe("RELAY_TIMEOUT");
+    expect(userFacingCode(new Coded("RELAY_UNREACHABLE", "could not reach the relay"))).toBe("RELAY_UNREACHABLE");
+  });
 });

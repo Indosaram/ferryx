@@ -323,7 +323,7 @@ describe("relay end-to-end encryption", () => {
       });
       const result = expect(
         allocateE2ESession(RELAY, "device-token", MACHINE, allocate as unknown as typeof fetch),
-      ).rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
+      ).rejects.toMatchObject({ code: "RELAY_TIMEOUT" });
 
       // When the allocation deadline passes
       await vi.advanceTimersByTimeAsync(15_000);
@@ -333,6 +333,15 @@ describe("relay end-to-end encryption", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("types an unreachable relay as RELAY_UNREACHABLE", async () => {
+    const allocate = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    await expect(
+      allocateE2ESession(RELAY, "device-token", MACHINE, allocate as unknown as typeof fetch),
+    ).rejects.toMatchObject({ code: "RELAY_UNREACHABLE" });
   });
 
   it("closes a socket whose upgrade finished after the connection was closed", async () => {

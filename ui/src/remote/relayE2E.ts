@@ -287,7 +287,7 @@ export async function allocateE2ESession(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), E2E_ALLOCATION_TIMEOUT_MS);
   const timedOut = () =>
-    new RelayE2EError("REQUEST_TIMEOUT", `Encrypted session allocation timed out after ${E2E_ALLOCATION_TIMEOUT_MS}ms`);
+    new RelayE2EError("RELAY_TIMEOUT", `Encrypted session allocation timed out after ${E2E_ALLOCATION_TIMEOUT_MS}ms`);
   let response: Response;
   let data: unknown = null;
   try {
@@ -304,6 +304,10 @@ export async function allocateE2ESession(
       });
     } catch (error) {
       if (controller.signal.aborted) throw timedOut();
+      // fetch rejects with a TypeError when the relay itself cannot be reached (DNS, TLS, CORS).
+      if (error instanceof TypeError) {
+        throw new RelayE2EError("RELAY_UNREACHABLE", `Encrypted session allocation could not reach the relay: ${error.message}`);
+      }
       throw error;
     }
     // The deadline covers the body too: a stalled body is a timeout, not a hang.
