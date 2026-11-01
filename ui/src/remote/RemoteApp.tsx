@@ -177,7 +177,6 @@ import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import { getOrCreateAttachKey } from "./accountAttach";
 import {
   openRelayE2ETransport,
-  RELAY_REPAIR_MESSAGE,
   registerRelayE2E,
   RelayRepairRequiredError,
   relayE2EState,
@@ -188,6 +187,12 @@ const REMOTE_ACTIVE_SELECTION_CHANGED_EVENT = "remote_active_selection_changed";
 /// How long a selection may stay unconfirmed before the picker is released for
 /// a retry. The desktop normally republishes within one refresh round-trip.
 const CONFIRMATION_TIMEOUT_MS = 6000;
+/** How long the foreground probe of the account tunnel may take before it counts as dead. */
+const TUNNEL_PROBE_TIMEOUT_MS = 5000;
+/** A dropped events socket is shown only once it stays down this long; brief blips stay quiet. */
+const CONNECTION_STRIP_DELAY_MS = 3000;
+/** How long a tapped phone alert waits for its session before it is reported as gone. */
+const ALERT_TAP_TIMEOUT_MS = 10000;
 
 type RemoteActiveSelectionEvent = {
   readonly workspaceId: string | null;
@@ -409,11 +414,17 @@ const CANDIDATE_PRIORITY: Record<CandidateEndpointType, number> = {
   tailscale: 20,
   relay: 10,
 };
+/** Transport detail, shown only behind the health label: how this phone reaches the computer. */
 const CONNECTION_BADGE_LABEL: Record<CandidateEndpointType, string> = {
-  relay: "Relay (Proxy)",
-  lan: "LAN (Direct)",
-  tailscale: "Tailscale (Direct)",
+  relay: "through Ferryx relay",
+  lan: "on your local network",
+  tailscale: "over Tailscale",
 };
+const CONNECTION_HEALTH_LABEL = {
+  connected: "Connected",
+  reconnecting: "Reconnecting...",
+  offline: "Offline",
+} as const;
 
 function directCandidate(type: "lan" | "tailscale", value: unknown): CandidateEndpoint | null {
   const url = normalizeDirectCandidateOrigin(value);
@@ -1273,6 +1284,8 @@ export const RemoteHostConnection: React.FC<{
   const [phoneAlertsOpen, setPhoneAlertsOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
   const [signedOutNotice, setSignedOutNotice] = useState<string | null>(null);
+  /** When the shell's events socket last went down; null while it is up. */
+  const [eventsDownSince, setEventsDownSince] = useState<number | null>(null);
   const creationSessionsRef = useRef<Set<string> | null>(null);
   const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height);
   useEffect(() => {
@@ -1465,6 +1478,7 @@ export const RemoteHostConnection: React.FC<{
   // A relay that refused plaintext (E2E_REQUIRED) for this base; reconnecting stops until re-pair.
   const [relayRepairErrorBase, setRelayRepairErrorBase] = useState<string | null>(null);
   const [relayRepairDismissedBase, setRelayRepairDismissedBase] = useState<string | null>(null);
+  const [relayRepairConfirming, setRelayRepairConfirming] = useState(false);
   const relayRepairError = relayRepairErrorBase !== null && relayRepairErrorBase === transportBaseUrl;
   const showRelayRepairNotice = relayRepairError
     || (relayE2EMode === REPAIR_REQUIRED && relayRepairDismissedBase !== transportBaseUrl);
@@ -2350,6 +2364,7 @@ export const RemoteHostConnection: React.FC<{
         if (!activeTunnelConnection && transport.url !== relayUrl) rollbackTransport();
         else {
           console.warn("Event socket connection failed", error);
+          setEventsDownSince((since) => since ?? Date.now());
           retry = setTimeout(connect, Math.min(10000, 1000 * 2 ** attempt) * (1 - 0.5 * Math.random()));
           attempt = Math.min(attempt + 1, 4);
         }
@@ -2367,6 +2382,7 @@ export const RemoteHostConnection: React.FC<{
       current.onopen = () => {
         if (disposed || socket !== current) return;
         attempt = 0;
+        setEventsDownSince(null);
         workspaceRefreshVersionRef.current += 1;
         // Pushes missed while the socket was down: every Inbox row reads its card again.
         inboxRefreshRef.current?.();
@@ -2387,6 +2403,7 @@ export const RemoteHostConnection: React.FC<{
       current.onclose = (event?: unknown) => {
         if (disposed || socket !== current) return;
         socket = null;
+        setEventsDownSince((since) => since ?? Date.now());
         const limitState = planLimitStateFromCloseEvent(event);
         if (limitState) {
           handlePlanLimit(limitState);
@@ -2416,6 +2433,7 @@ export const RemoteHostConnection: React.FC<{
       disposed = true;
       abort.abort();
       if (retry !== null) clearTimeout(retry);
+      setEventsDownSince(null);
       socket?.close();
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
@@ -2930,6 +2948,90 @@ export const RemoteHostConnection: React.FC<{
     // Enabled only without a plan-limit notice, so the notice this sets closes every socket.
     onPlanLimit: handlePlanLimit,
   });
+  /* A relay drops an idle tunnel (about 2 minutes) and a suspended phone can come back to a
+     socket that died silently. Coming back to the foreground or back online probes the active
+     tunnel and replaces a dead one before the user's next action meets STREAM_CLOSED. */
+  const [tunnelResume, setTunnelResume] = useState<"idle" | "reconnecting" | "failed">("idle");
+  const tunnelResumeInFlightRef = useRef(false);
+  const resumeTunnel = useCallback(async (force: boolean) => {
+    const current = activeTunnelConnection;
+    if (!current || !accountSessionToken || tunnelResumeInFlightRef.current) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    tunnelResumeInFlightRef.current = true;
+    try {
+      let alive = !current.isClosed;
+      if (alive && !force) {
+        alive = await Promise.race([
+          current.transport
+            .fetchLike("/api/v1/workspace/projects", { headers: { Authorization: `Bearer ${current.deviceToken}` } })
+            .then(() => true, () => false),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), TUNNEL_PROBE_TIMEOUT_MS)),
+        ]);
+      }
+      if (alive && !force) return;
+      setTunnelResume("reconnecting");
+      const machineId = current.machine.machineId;
+      const conn = await accountDiscoveryRef.current.acquireConnection(machineId);
+      if (accountSessionTokenRef.current !== accountSessionToken) {
+        conn?.close();
+        return;
+      }
+      if (!conn) {
+        setTunnelResume("failed");
+        return;
+      }
+      setActiveTunnelConnection(createAccountConnection({
+        relayUrl,
+        accountSessionToken,
+        machine: conn.machine,
+        deviceToken: conn.deviceToken,
+        httpTransport: conn.transport,
+        httpClose: conn.close,
+      }));
+      setToken(conn.deviceToken);
+      setTerminalRetryGeneration((generation) => generation + 1);
+      setTunnelResume("idle");
+    } finally {
+      tunnelResumeInFlightRef.current = false;
+    }
+  }, [activeTunnelConnection, accountSessionToken, relayUrl]);
+  useEffect(() => {
+    if (!activeTunnelConnection) {
+      setTunnelResume("idle");
+      return;
+    }
+    const onResume = () => void resumeTunnel(false);
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("online", onResume);
+    return () => {
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("online", onResume);
+    };
+  }, [activeTunnelConnection, resumeTunnel]);
+  const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine !== false);
+  useEffect(() => {
+    const update = () => setBrowserOnline(navigator.onLine !== false);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+  const [eventsDownLong, setEventsDownLong] = useState(false);
+  useEffect(() => {
+    if (eventsDownSince === null) {
+      setEventsDownLong(false);
+      return;
+    }
+    const timer = setTimeout(() => setEventsDownLong(true), CONNECTION_STRIP_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [eventsDownSince]);
+  const connectionHealth: "connected" | "reconnecting" | "offline" = !browserOnline
+    ? "offline"
+    : tunnelResume !== "idle" || eventsDownLong
+      ? "reconnecting"
+      : "connected";
   const phoneBack = phoneNav.back;
   // A selection backed out of on the Session screen ("Back to Worktrees") leaves no session to
   // show, so the screen returns to the home it came from.
@@ -4820,7 +4922,7 @@ export const RemoteHostConnection: React.FC<{
           CONNECTION_SHORT[transport.type] ||
           transport.type,
         transport: transport.type,
-        ariaLabel: `Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`,
+        ariaLabel: `${CONNECTION_HEALTH_LABEL[connectionHealth]} ${CONNECTION_BADGE_LABEL[transport.type]}`,
       };
   const mobileAttention = firstWaiting
     ? {
@@ -4997,24 +5099,18 @@ export const RemoteHostConnection: React.FC<{
           <span
             data-testid="remote-connection-badge"
             data-connection={transport.type}
-            aria-label={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
-            title={`Connection: ${CONNECTION_BADGE_LABEL[transport.type]}`}
-            className={`hidden h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px] font-medium leading-none sm:flex ${
-              transport.type === "relay"
-                ? "bg-status-idle/15 text-chat-foreground-secondary"
-                : "bg-status-success/15 text-status-success"
-            }`}
+            data-health={connectionHealth}
+            title={`${CONNECTION_HEALTH_LABEL[connectionHealth]} ${CONNECTION_BADGE_LABEL[transport.type]}`}
+            className="hidden h-5 shrink-0 items-center gap-1 rounded px-1.5 text-xs font-medium leading-none text-chat-foreground-secondary sm:flex"
           >
             <span
               className={`size-1.5 shrink-0 rounded-full ${
-                transport.type === "relay" ? "bg-status-idle" : "bg-status-success"
+                connectionHealth === "connected" ? "bg-status-success" : connectionHealth === "offline" ? "bg-destructive" : "bg-status-warning"
               }`}
               aria-hidden="true"
             />
-            <span className="hidden sm:inline">{CONNECTION_BADGE_LABEL[transport.type]}</span>
-            <span className="sm:hidden">
-              {transport.type === "relay" ? "Relay" : transport.type === "lan" ? "LAN" : "Tailscale"}
-            </span>
+            <span>{CONNECTION_HEALTH_LABEL[connectionHealth]}</span>
+            <span className="sr-only">{CONNECTION_BADGE_LABEL[transport.type]}</span>
           </span>
           {firstWaiting ? (
             <button
@@ -5104,29 +5200,73 @@ export const RemoteHostConnection: React.FC<{
         />
       ) : null}
 
+      {connectionHealth !== "connected" && token ? (
+        <div
+          data-testid="remote-connection-strip"
+          data-health={connectionHealth}
+          role="status"
+          className="mx-3 mt-2 flex min-h-11 items-center gap-3 rounded-lg bg-chat-surface-raised px-3 py-2 text-sm text-chat-foreground"
+        >
+          <span className="min-w-0 flex-1">
+            {connectionHealth === "offline"
+              ? "You're offline. Ferryx reconnects when you're back online."
+              : tunnelResume === "failed"
+                ? `Couldn't reconnect to ${activeTunnelConnection?.machine.displayName || "your computer"}.`
+                : `Reconnecting to ${activeTunnelConnection?.machine.displayName || "your computer"}...`}
+          </span>
+          {tunnelResume === "failed" ? (
+            <button
+              type="button"
+              data-testid="remote-connection-reconnect"
+              onClick={() => void resumeTunnel(true)}
+              className="flex h-11 shrink-0 items-center rounded-lg px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              Reconnect
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {showRelayRepairNotice ? (
         <div
           data-testid="relay-repair-notice"
           role={relayRepairError ? "alert" : "status"}
           data-code={REPAIR_REQUIRED}
-          className={`mx-3 mt-2 rounded-md border px-3 py-2 text-xs ${relayRepairError ? "border-destructive/50 text-destructive" : "border-border text-muted-foreground"}`}
+          className="mx-3 mt-2 rounded-lg bg-chat-surface-raised px-3 py-2 text-sm text-chat-foreground"
         >
-          <p>{RELAY_REPAIR_MESSAGE}</p>
-          <div className="mt-2 flex gap-2">
+          <p>
+            {relayRepairConfirming
+              ? "Signing in again removes this phone's current pairing. You'll pick your computer again after you sign in."
+              : "This phone's connection to your computer isn't fully encrypted. Sign in to your account to secure it."}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
-              className="rounded border border-border px-2 py-1 font-medium text-foreground"
+              className="flex h-11 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => {
+                if (!relayRepairConfirming) {
+                  setRelayRepairConfirming(true);
+                  return;
+                }
+                setRelayRepairConfirming(false);
                 setRelayRepairErrorBase(null);
                 disconnect();
               }}
             >
-              Re-pair through account
+              {relayRepairConfirming ? "Sign in again" : "Secure this phone"}
             </button>
-            {!relayRepairError ? (
+            {relayRepairConfirming ? (
               <button
                 type="button"
-                className="rounded px-2 py-1"
+                className="flex h-11 items-center rounded-lg px-4 text-sm font-medium text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                onClick={() => setRelayRepairConfirming(false)}
+              >
+                Cancel
+              </button>
+            ) : !relayRepairError ? (
+              <button
+                type="button"
+                className="flex h-11 items-center rounded-lg px-4 text-sm font-medium text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 onClick={() => setRelayRepairDismissedBase(transportBaseUrl)}
               >
                 Not now
