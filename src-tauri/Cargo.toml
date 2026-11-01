@@ -120,6 +120,7 @@ ferryx-rd-host = { path = "../crates/ferryx-rd/ferryx-rd-host", optional = true,
 ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg"] }
 ferryx-rd-app = { path = "../crates/ferryx-rd/ferryx-rd-app", optional = true, features = ["ffmpeg"] }
 ferryx-browser-engine-protocol = { path = "../crates/browser-engine-protocol" }
+ferryx-browser-import = { path = "../crates/ferryx-browser-import" }
 async-trait = "0.1"
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"], optional = true }
 serde = { version = "1.0", features = ["derive"] }

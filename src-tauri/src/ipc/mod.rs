@@ -16,6 +16,8 @@ pub mod browser_library;
 pub mod browser_system;
 #[cfg(feature = "desktop")]
 pub mod browser_extensions;
+#[cfg(feature = "desktop")]
+pub mod browser_import;
 pub mod browser_cli;
 #[cfg(feature = "desktop")]
 pub mod browser_engine;
@@ -111,6 +113,8 @@ mod tests;
 pub use agents::*;
 #[cfg(feature = "desktop")]
 pub use browser::*;
+#[cfg(feature = "desktop")]
+pub use browser_import::*;
 pub use cli_install::*;
 #[cfg(feature = "desktop")]
 pub use dag::*;

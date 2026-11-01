@@ -401,6 +401,12 @@ fn devtools_answer(method: &str, ok: bool, raw: &str) -> Result<serde_json::Valu
     Err(BrowserError::AutomationFailed(format!("{method}: {message}")))
 }
 
+/// Tells a running engine of `profile` to apply the cookie file Ferryx staged at `path`.
+/// Returns false when that engine is not running; it applies the file when it next starts.
+pub fn import_cookies(profile: &str, path: &Path) -> bool {
+    send(profile, &EngineCommand::ImportCookies { path: path.display().to_string() })
+}
+
 /// Brings the tab's window back into view after the page changed: Windows repaints the app's
 /// own windows around it, macOS puts the engine's windows back above the Ferryx window.
 pub fn repaint(browser_id: &str) {

@@ -1,0 +1,10 @@
+{
+  "encrypted": false,
+  "folders": [{"id": "folder-synthetic", "name": "Personal"}],
+  "items": [
+    {"id": "bw-json-login", "folderId": "folder-synthetic", "type": 1, "name": "Bitwarden JSON Login", "notes": "Synthetic note", "favorite": false, "fields": [{"name": "unsupported", "value": "synthetic", "type": 0}], "login": {"uris": [{"match": null, "uri": "https://bitwarden-json.example/login"}], "username": "bw-json@example.test", "password": "SYNTH-BITWARDEN-JSON-PASSWORD-001", "totp": "otpauth://totp/BitwardenJSON:bw-json?secret=SYNTHOTP"}},
+    {"id": "bw-json-duplicate", "type": 1, "name": "Bitwarden JSON Duplicate", "login": {"uris": [{"uri": "https://bitwarden-json.example/login"}], "username": "bw-json@example.test", "password": "SYNTH-BITWARDEN-JSON-PASSWORD-002"}},
+    {"id": "bw-json-blank", "type": 1, "name": "Bitwarden JSON Blank", "login": {"uris": [{"uri": "https://blank.bitwarden-json.example"}], "username": "blank-json@example.test", "password": ""}},
+    {"id": "bw-json-card", "type": 3, "name": "Unsupported Synthetic Card", "card": {"cardholderName": "Synthetic Only"}}
+  ]
+}

@@ -11,6 +11,8 @@
 /// Marks an engine stdout line as a protocol event.
 pub const EVENT_PREFIX: &str = "@ferryx ";
 
+pub mod cookies;
+
 /// What a site asks to use. On the wire a comma-separated list of the names below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PermissionKind {
@@ -112,6 +114,8 @@ pub enum Command {
     /// DevTools message API (no TCP port). `params` is a JSON object on one line; the answer
     /// is [`Event::Devtools`] with the same `id`.
     Devtools { tab: String, id: u32, method: String, params: String },
+    /// Applies (then deletes) a staged cookie file, see [`cookies`]. Not tab scoped.
+    ImportCookies { path: String },
 }
 
 /// Engine to Ferryx.
@@ -456,6 +460,7 @@ impl Command {
             Self::Devtools { tab, id, method, params } => {
                 format!("devtools {tab} {id} {method} {}", one_line(params))
             }
+            Self::ImportCookies { path } => format!("import-cookies {}", one_line(path)),
         }
     }
 
@@ -555,6 +560,7 @@ impl Command {
                     params: if params.is_empty() { "{}".to_string() } else { params.to_string() },
                 })
             }
+            "import-cookies" if !rest.is_empty() => Some(Self::ImportCookies { path: rest.to_string() }),
             _ => None,
         }
     }
@@ -773,6 +779,7 @@ mod tests {
                 method: "Runtime.evaluate".into(),
                 params: r#"{"expression":"document.title + ' x'","returnByValue":true}"#.into(),
             },
+            Command::ImportCookies { path: "/data/browser-cef/default/ferryx import.tsv".into() },
         ];
         for command in commands {
             assert_eq!(Command::parse(&command.to_line()), Some(command));

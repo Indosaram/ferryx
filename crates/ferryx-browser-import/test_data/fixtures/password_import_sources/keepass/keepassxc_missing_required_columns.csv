@@ -1,0 +1,2 @@
+Group,Title,Username,URL,Notes
+Internet,KeePassXC Missing Password,user@example.test,https://missing.keepassxc.example,SYNTH-KEEPASSXC-MISSING-PASSWORD-SHOULD-NOT-LEAK

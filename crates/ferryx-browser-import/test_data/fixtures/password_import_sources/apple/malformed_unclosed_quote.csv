@@ -1,0 +1,2 @@
+Title,URL,Username,Password,Notes,OTPAuth
+Malformed Apple,"https://malformed.apple-passwords.example,malformed-apple@example.test,SYNTH-APPLE-MALFORMED-PASSWORD,Synthetic unterminated note,otpauth://totp/MalformedApple?secret=SYNTHOTP

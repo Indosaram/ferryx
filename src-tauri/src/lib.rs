@@ -1914,6 +1914,10 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::browser::agent::service::cmd_browser_agent_revoke,
         crate::browser::agent::service::cmd_browser_agent_reclaim,
         crate::browser::agent::service::cmd_browser_agent_set_settings,
+        cmd_browser_import_sources,
+        cmd_browser_import_run,
+        cmd_browser_import_cancel,
+        cmd_browser_import_password_file,
     ]);
     builder.invoke_handler(move |invoke: tauri::ipc::Invoke<R>| {
         if invoke.message.command() == "cmd_retry_paired_session" {

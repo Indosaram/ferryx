@@ -1,0 +1,2 @@
+Title,URL,Username,Notes,OTPAuth
+Apple Missing Password,https://missing.apple-passwords.example,user@example.test,SYNTH-APPLE-MISSING-PASSWORD-SHOULD-NOT-LEAK,otpauth://totp/Missing

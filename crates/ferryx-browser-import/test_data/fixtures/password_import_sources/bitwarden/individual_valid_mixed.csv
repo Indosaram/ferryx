@@ -1,0 +1,4 @@
+folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+Personal,false,login,Bitwarden Login,Synthetic note,"unsupported_field:synthetic",0,https://bitwarden.example/login,bw-user@example.test,SYNTH-BITWARDEN-CSV-PASSWORD-001,otpauth://totp/Bitwarden:bw-user?secret=SYNTHOTP
+Personal,false,login,Bitwarden Duplicate,Synthetic duplicate,,0,https://bitwarden.example/login,bw-user@example.test,SYNTH-BITWARDEN-CSV-PASSWORD-002,
+Personal,false,login,Bitwarden Blank,Synthetic blank,,0,https://blank.bitwarden.example,blank-bw@example.test,,

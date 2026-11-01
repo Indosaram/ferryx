@@ -1,0 +1,4 @@
+Group,Title,Username,Password,URL,Notes
+Internet,KeePassXC Login,keepassxc-user@example.test,SYNTH-KEEPASSXC-PASSWORD-001,https://keepassxc.example/login,Synthetic note
+Internet,KeePassXC Duplicate,keepassxc-user@example.test,SYNTH-KEEPASSXC-PASSWORD-002,https://keepassxc.example/login,Synthetic duplicate
+Internet,KeePassXC Blank,blank-keepassxc@example.test,,https://blank.keepassxc.example,Synthetic blank

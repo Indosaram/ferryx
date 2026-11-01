@@ -1,0 +1,2 @@
+folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+Personal,false,login,Malformed Bitwarden Individual,"unterminated synthetic note,unsupported_field:synthetic,0,https://malformed.bitwarden.example,malformed-bw@example.test,SYNTH-BITWARDEN-CSV-MALFORMED-PASSWORD,otpauth://totp/Malformed?secret=SYNTHOTP
