@@ -787,8 +787,21 @@ impl SessionHub {
             screen_seed: self
                 .screen_seed()
                 .filter(|seed| seed.bytes.len() <= super::screen_mirror::MAX_HANDOVER_SEED_BYTES),
-            history_incomplete: self.history_incomplete,
+            history_incomplete: self.history_incomplete(),
         }
+    }
+
+    /// Whether a full replay still carries output lost to a gap. It stops doing so once the
+    /// screen was redrawn, or once retention evicted the gap seam: the lost output then lies
+    /// before the replay's start like any other evicted output. Without the second case a pane
+    /// that never clears the whole screen (an inline TUI such as an agent's) stayed unreadable
+    /// for good after one reconnect gap.
+    pub(crate) fn history_incomplete(&self) -> bool {
+        self.history_incomplete
+            && self
+                .buffer
+                .retained_start_sequence()
+                .is_none_or(|start| start < self.buffer.gap_floor)
     }
 
     /// The mirrored screen, when it can stand in for retained replay.
@@ -875,6 +888,9 @@ pub struct TerminalOutputHub {
     exits: Arc<parking_lot::Mutex<HashMap<String, ExitStatusSlot>>>,
     capacity: usize,
     retention: retained_history::RetentionBudget,
+    /// Receives program status summary changes; installed by the daemon at startup.
+    program_status_publisher:
+        Arc<RwLock<Option<Arc<dyn super::program_status_ingest::ProgramStatusPublisher>>>>,
 }
 
 impl Default for TerminalOutputHub {
@@ -903,6 +919,96 @@ impl TerminalOutputHub {
             exits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             capacity,
             retention,
+            program_status_publisher: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Installs where program status summary changes of opted-in sessions are published.
+    pub(crate) fn set_program_status_publisher(
+        &self,
+        publisher: Arc<dyn super::program_status_ingest::ProgramStatusPublisher>,
+    ) {
+        *self.program_status_publisher.write() = Some(publisher);
+    }
+
+    /// Makes the session's screen mirror its OSC 7501 consumer and support query replier. Only
+    /// for sessions this daemon answers for: local PTYs and SSH bridge sessions, never a paired
+    /// proxy. Returns false when the session or its mirror is missing or the parser refused.
+    pub fn enable_program_status(&self, session_id: &str) -> bool {
+        let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
+            return false;
+        };
+        let hub = session_hub.read();
+        let Some(screen) = hub.screen.as_ref() else {
+            return false;
+        };
+        let enabled = screen.lock().enable_program_status();
+        enabled
+    }
+
+    /// The session was seen: drops its `done`/`error` program status and publishes the summary
+    /// afterwards. `None` when the session did not opt in, else that summary.
+    pub fn acknowledge_program_outcome(
+        &self,
+        session_id: &str,
+    ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
+        self.update_program_status(session_id, |screen| screen.acknowledge_program_status())
+    }
+
+    /// The session's foreground program exited, as proven by evidence gathered while `through`
+    /// was its newest published revision: drops the transient program status applied by then
+    /// and publishes the summary afterwards. `None` when the session did not opt in, else that
+    /// summary.
+    pub fn program_exited(
+        &self,
+        session_id: &str,
+        through: u64,
+    ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
+        self.update_program_status(session_id, |screen| screen.program_status_exited(through))
+    }
+
+    /// The revision of the session's newest program status update, 0 before any or when the
+    /// session has no mirror. Read before a process listing is requested, it bounds the records
+    /// that listing's evidence covers.
+    pub fn program_status_revision(&self, session_id: &str) -> u64 {
+        let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
+            return 0;
+        };
+        let hub = session_hub.read();
+        hub.screen
+            .as_ref()
+            .map_or(0, |screen| screen.lock().program_status_revision())
+    }
+
+    /// Runs a record update under the screen lock and, when the summary changed, publishes the
+    /// revisioned result after every lock is released, through the same path as live feeds.
+    fn update_program_status(
+        &self,
+        session_id: &str,
+        update: impl FnOnce(
+            &mut super::screen_mirror::ScreenMirror,
+        ) -> Option<(bool, super::program_status_ingest::ProgramStatusChange)>,
+    ) -> Option<Option<super::program_status::ProgramStatusSummary>> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let (changed, change) = {
+            let hub = session_hub.read();
+            let mut screen = hub.screen.as_ref()?.lock();
+            update(&mut screen)
+        }?;
+        if changed {
+            self.publish_program_status(session_id, &change);
+        }
+        Some(change.summary)
+    }
+
+    fn publish_program_status(
+        &self,
+        session_id: &str,
+        change: &super::program_status_ingest::ProgramStatusChange,
+    ) {
+        let publisher = self.program_status_publisher.read().clone();
+        if let Some(publisher) = publisher {
+            publisher.publish(session_id, change);
         }
     }
 
@@ -1012,7 +1118,7 @@ impl TerminalOutputHub {
             }
         }
         if let Some(screen) = hub.screen.as_ref() {
-            screen.lock().feed(GAP_SEAM);
+            screen.lock().feed_replay(GAP_SEAM);
         }
         hub.replay_gap = Some(gap.clone());
         hub.history_incomplete = true;
@@ -1028,12 +1134,28 @@ impl TerminalOutputHub {
         Some(boundary)
     }
 
+    /// Publishes a chunk for a caller that does not write the session's input. Any OSC 7501 query
+    /// reply the chunk produced is dropped; output pumps of sessions that opted into program
+    /// status use [`Self::publish_with_replies`].
     pub fn publish_with_read_timestamp(
         &self,
         session_id: &str,
         chunk_bytes: Vec<u8>,
         metrics_read_unix_micros: Option<u64>,
     ) -> Option<OutputChunk> {
+        self.publish_with_replies(session_id, chunk_bytes, metrics_read_unix_micros)
+            .map(|(chunk, _replies)| chunk)
+    }
+
+    /// Publishes a chunk and returns the OSC 7501 support query replies it produced, for the
+    /// caller to write to the session's input. Returned after every hub and screen lock is
+    /// released; a program status summary change is published the same way.
+    pub fn publish_with_replies(
+        &self,
+        session_id: &str,
+        chunk_bytes: Vec<u8>,
+        metrics_read_unix_micros: Option<u64>,
+    ) -> Option<(OutputChunk, Vec<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -1043,9 +1165,11 @@ impl TerminalOutputHub {
         let chunk = hub
             .buffer
             .push_with_read_timestamp(chunk_bytes, metrics_read_unix_micros)?;
-        if let Some(screen) = hub.screen.as_ref() {
-            screen.lock().feed(&chunk.bytes);
-        }
+        let ingest = hub.screen.as_ref().map(|screen| {
+            let mut screen = screen.lock();
+            screen.feed(&chunk.bytes);
+            screen.take_program_status()
+        });
         hub.replay_gap = None;
         if hub.history_incomplete && resets_whole_screen(&chunk.bytes) {
             hub.history_incomplete = false;
@@ -1066,6 +1190,16 @@ impl TerminalOutputHub {
             let _ = hub.raw_sender.send(chunk.bytes.to_vec());
         }
         drop(hub);
+        let ingest = ingest.unwrap_or_default();
+        if let Some(revision) = ingest.transient_applied {
+            let publisher = self.program_status_publisher.read().clone();
+            if let Some(publisher) = publisher {
+                publisher.transient_applied(session_id, revision);
+            }
+        }
+        if let Some(change) = ingest.summary.as_ref() {
+            self.publish_program_status(session_id, change);
+        }
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::terminal::qa_liveness::observe_published_output(
             session_id,
@@ -1073,7 +1207,7 @@ impl TerminalOutputHub {
             Arc::clone(&chunk.bytes),
         );
 
-        Some(chunk)
+        Some((chunk, ingest.replies))
     }
 
     pub fn record_initial_size(&self, session_id: &str, cols: u16, rows: u16) {
@@ -1123,6 +1257,21 @@ impl TerminalOutputHub {
         Some(sequence)
     }
 
+    /// Text of the session's mirrored visible screen. The hub and mirror locks are held only
+    /// while the rows are copied out; trimming and gap-seam removal run after they are released.
+    pub fn visible_screen_text(
+        &self,
+        session_id: &str,
+    ) -> Option<super::screen_mirror::VisibleScreen> {
+        let session_hub = self.sessions.read().get(session_id).cloned()?;
+        let rows = {
+            let hub = session_hub.read();
+            let screen = hub.screen.as_ref()?.lock();
+            screen.visible_rows()
+        }?;
+        Some(rows.into_screen())
+    }
+
     pub fn subscribe(&self, session_id: &str) -> Option<(Vec<u8>, broadcast::Receiver<Vec<u8>>)> {
         let session_hub = {
             let sessions = self.sessions.read();
@@ -1142,7 +1291,7 @@ impl TerminalOutputHub {
         Some((history, rx))
     }
 
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) fn observe_for_test(
         &self,
         session_id: &str,
@@ -1202,7 +1351,7 @@ impl TerminalOutputHub {
             history,
             history_segments: Vec::new(),
             gap,
-            history_incomplete: hub.history_incomplete,
+            history_incomplete: hub.history_incomplete(),
         };
         let ended = hub.ended;
         drop(hub);
@@ -1365,7 +1514,7 @@ impl TerminalOutputHub {
                     .map(|point| (point.cols, point.rows))
                     .unwrap_or((80, 24));
                 super::screen_mirror::ScreenMirror::new(cols, rows).map(|mut mirror| {
-                    mirror.feed(&buffer.retained.replay());
+                    mirror.feed_replay(&buffer.retained.replay());
                     mirror
                 })
             }

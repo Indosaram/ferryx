@@ -181,6 +181,8 @@ export interface PairedMachineRowProps extends PairedStatusInput {
   onMenuDetails?: () => void;
   onCheck: () => void;
   onForget: () => void;
+  /** Present only when this build supports remote desktop; adds "Open remote desktop". */
+  onOpenRemoteDesktop?: () => void;
   rowRef: (node: HTMLDivElement | null) => void;
   detailsRef: (node: HTMLButtonElement | null) => void;
   menuTriggerRef?: (node: HTMLButtonElement | null) => void;
@@ -209,6 +211,9 @@ export function PairedMachineRow(props: PairedMachineRowProps) {
       disabledReason={reason}
       menuItems={[
         { label: "Details", onSelect: props.onMenuDetails ?? props.onDetails },
+        ...(props.onOpenRemoteDesktop
+          ? [{ label: "Open remote desktop", onSelect: props.onOpenRemoteDesktop, disabled: busy || host.authStatus !== "paired" }]
+          : []),
         { label: "Check capabilities", onSelect: props.onCheck, disabled: busy || !host.generation || !nativeReady },
         { label: "Forget credentials…", onSelect: props.onForget, disabled: busy || !host.generation, destructive: true },
       ]}

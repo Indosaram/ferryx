@@ -14,6 +14,7 @@ vi.mock("../lib/browserTauri", () => ({
   closeBrowser: (browserId: string) => closeBrowserMock(browserId),
   navigateBrowser: vi.fn(async () => undefined),
   reloadBrowser: vi.fn(async () => undefined),
+  onBrowserStateChanged: vi.fn(async () => () => undefined),
 }));
 
 function gitWorktree(path: string, slug: string, wsId: string): Worktree {

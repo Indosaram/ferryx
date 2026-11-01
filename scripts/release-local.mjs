@@ -48,6 +48,7 @@ function sha256(value) {
 export const STORE_MSIX_NAME = "Ferryx_x64.msix";
 export const STORE_PRODUCT_ID = "9NLHQL5JNLM4";
 
+
 /** Typed refusal raised when a Windows build lacks the Store-ingestion MSIX at the plan version. */
 export class StoreMsixError extends Error {
   constructor(code, message) {

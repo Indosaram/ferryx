@@ -33,7 +33,7 @@ export function EmptyWorkspaceView({ onNewTerminal, onNewBrowserTab }: EmptyWork
         {advancedFeatures ? (
           <button
             type="button"
-            onClick={onNewBrowserTab}
+            onClick={() => onNewBrowserTab()}
             data-shortcut="tab.newBrowser"
             className="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent/50"
           >

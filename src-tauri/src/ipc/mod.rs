@@ -59,6 +59,10 @@ pub mod remote_auto_trust;
 #[cfg(feature = "desktop")]
 pub mod remote_drop;
 pub mod remote_file;
+#[cfg(all(feature = "desktop", feature = "remote-desktop"))]
+pub mod remote_desktop_host;
+#[cfg(feature = "desktop")]
+pub mod remote_desktop;
 #[cfg(feature = "desktop")]
 pub mod session;
 pub mod ssh;

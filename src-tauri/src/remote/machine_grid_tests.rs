@@ -502,6 +502,40 @@ async fn machine_terminal_preserves_raw_mode_and_rejects_scroll() {
 }
 
 #[tokio::test]
+async fn machine_terminal_tags_only_acknowledgement_rejections() {
+    let fixture = MachineTestFixture::new().await;
+    let mut socket = open_ws(
+        fixture.server.addr,
+        &format!("/api/v1/terminal/{}?daemonEpoch={}", fixture.session_id, fixture.epoch),
+        Some(&fixture.token),
+    )
+    .await;
+    let Attached::Attached { generation, .. } = read_attached_frame(&mut socket).await;
+    let stale = (generation.0 + 1).to_string();
+
+    let stale_ack = serde_json::json!({"type": "acknowledgeAgentOutcome", "generation": stale});
+    socket
+        .send(Message::Text(stale_ack.to_string().into()))
+        .await
+        .expect("send stale acknowledgement");
+    let error = read_error_control_matching(&mut socket).await;
+    assert_eq!(error["code"], "INVALID_CONTROL_OR_GENERATION");
+    assert_eq!(error["op"], "acknowledgeAgentOutcome");
+
+    let stale_resize = serde_json::json!({"type": "resize", "generation": stale, "cols": 80, "rows": 24});
+    socket
+        .send(Message::Text(stale_resize.to_string().into()))
+        .await
+        .expect("send stale resize");
+    let error = read_error_control_matching(&mut socket).await;
+    assert_eq!(error["code"], "INVALID_CONTROL_OR_GENERATION");
+    assert!(error.get("op").is_none(), "{error}");
+
+    let _ = socket.close(None).await;
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn machine_grid_controller_fencing_and_revocation() {
     let fixture = MachineTestFixture::new().await;
     let path = format!(

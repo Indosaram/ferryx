@@ -599,6 +599,31 @@ fn write_response(resp: DaemonResponse) -> Result<(), IpcError> {
     }
 }
 
+/// Maps a daemon's outcome acknowledgement reply by its structured code, keeping
+/// the code in the details so the desktop can tell the failures apart.
+pub(crate) fn acknowledge_outcome_response(resp: DaemonResponse) -> Result<(), IpcError> {
+    match resp {
+        DaemonResponse::AcknowledgeAgentOutcomeOk => Ok(()),
+        DaemonResponse::Error { message, code, .. } => {
+            let kind = match code.as_deref() {
+                Some("SESSION_NOT_FOUND") => IpcErrorCode::SessionNotFound,
+                Some("OUTCOME_ACK_NO_MIRROR" | "OUTCOME_ACK_UNSUPPORTED") => IpcErrorCode::Unsupported,
+                Some("OUTCOME_ACK_UNCERTAIN") => IpcErrorCode::Timeout,
+                Some("OUTCOME_ACK_UNREACHABLE") => IpcErrorCode::HostUnavailable,
+                _ => IpcErrorCode::InternalError,
+            };
+            let error = IpcError::new(kind, message);
+            Err(match code {
+                Some(code) => error.with_details(json!({ "code": code })),
+                None => error,
+            })
+        }
+        _ => Err(IpcError::internal(
+            "Unexpected daemon acknowledge agent outcome response",
+        )),
+    }
+}
+
 /// A daemon that serves the prompt requests types every failure, so an untyped error is a daemon
 /// that predates them.
 fn agent_prompt_failure(response: DaemonResponse) -> IpcError {
@@ -636,6 +661,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::DescribeSession { .. }
             | DaemonRequest::DiscoverAgentSession { .. }
             | DaemonRequest::ResetAgentState { .. }
+            | DaemonRequest::AcknowledgeAgentOutcome { .. }
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::RemoteSetWindowFocused { .. }
@@ -690,6 +716,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::DescribeSession { .. } => "describeSession",
         DaemonRequest::DiscoverAgentSession { .. } => "discoverAgentSession",
         DaemonRequest::ResetAgentState { .. } => "resetAgentState",
+        DaemonRequest::AcknowledgeAgentOutcome { .. } => "acknowledgeAgentOutcome",
         DaemonRequest::Attach { .. } => "attach",
         DaemonRequest::SaveSession { .. } => "saveSession",
         DaemonRequest::LoadSession => "loadSession",
@@ -782,6 +809,9 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
+        DaemonRequest::RemoteDesktopHostGet => "remoteDesktopHostGet",
+        DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
+        DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",
     }
 }
 
@@ -975,12 +1005,15 @@ const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// pane to start the turn (up to the 120s turn-start maximum), so the client must outlast it
 /// and let the daemon report the outcome. Matches the CLI's `GOAL_CLI_TIMEOUT`.
 const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const REMOTE_DESKTOP_SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // A cancel stops the worker's pane before it answers.
         DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
+        DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }
@@ -3961,6 +3994,16 @@ impl DaemonClient {
         }
     }
 
+    /// Drops the session's OSC 7501 `done`/`error` outcome once the user has seen it.
+    pub async fn acknowledge_agent_outcome(&self, session_id: &str) -> Result<(), IpcError> {
+        acknowledge_outcome_response(
+            self.send_request(DaemonRequest::AcknowledgeAgentOutcome {
+                session_id: session_id.to_string(),
+            })
+            .await?,
+        )
+    }
+
     /// Streams desktop-directed remote events (the gateway lives in the daemon,
     /// so this is the only path a remote-issued request has to reach the GUI).
     /// The returned receiver closes when the daemon goes away.
@@ -5739,6 +5782,31 @@ mod tests {
     use crate::daemon::protocol::{
         DaemonRequest, DaemonResponse, DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
     };
+
+    #[test]
+    fn outcome_acknowledgement_errors_keep_the_daemon_code() {
+        use crate::remote::backend::OutcomeAckError;
+        assert!(acknowledge_outcome_response(DaemonResponse::AcknowledgeAgentOutcomeOk).is_ok());
+        for (code, expected) in [
+            (Some("SESSION_NOT_FOUND"), IpcErrorCode::SessionNotFound),
+            (Some(OutcomeAckError::NoMirror.code()), IpcErrorCode::Unsupported),
+            (Some(OutcomeAckError::Unsupported.code()), IpcErrorCode::Unsupported),
+            (Some(OutcomeAckError::Uncertain(String::new()).code()), IpcErrorCode::Timeout),
+            (Some(OutcomeAckError::Unreachable(String::new()).code()), IpcErrorCode::HostUnavailable),
+            (Some(OutcomeAckError::Rejected(String::new()).code()), IpcErrorCode::InternalError),
+            (None, IpcErrorCode::InternalError),
+        ] {
+            let error = acknowledge_outcome_response(DaemonResponse::Error {
+                message: "refused".into(),
+                code: code.map(str::to_owned),
+                details: None,
+            })
+            .unwrap_err();
+            assert_eq!(error.code, expected, "{code:?}");
+            assert_eq!(error.message, "refused");
+            assert_eq!(error.details.as_ref().map(|details| &details["code"]), code.map(|code| json!(code)).as_ref(), "{code:?}");
+        }
+    }
 
     #[test]
     fn a_goal_approval_outlasts_the_turn_start_wait_and_other_requests_keep_fifteen_seconds() {

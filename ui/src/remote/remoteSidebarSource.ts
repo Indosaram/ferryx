@@ -101,7 +101,8 @@ const ACTIVITY_FLAGS = ["hasWorking", "hasWaiting", "hasDone", "hasUnread"] as c
 function isActivitySummary(value: unknown): boolean {
   const a = objectOf(value);
   return a !== null && ACTIVITY_COUNTS.every((field) => typeof a[field] === "number") &&
-    ACTIVITY_FLAGS.every((field) => typeof a[field] === "boolean") && (a.agentType === undefined || isString(a.agentType));
+    ACTIVITY_FLAGS.every((field) => typeof a[field] === "boolean") && (a.agentType === undefined || isString(a.agentType)) &&
+    (a.outcome === undefined || a.outcome === "done" || a.outcome === "error");
 }
 
 const isActivityRecord = (value: unknown) => {
@@ -127,6 +128,7 @@ function isAttentionRow(value: unknown): boolean {
     (r.state === "needs-you" || r.state === "done") && isString(r.who) &&
     isOptional(r.location, isString) && isOptional(r.text, isString) && isOptional(r.at, isFiniteNumber) &&
     isOptional(r.supervisorLabel, isString) && isOptional(r.backendSessionId, isString) &&
+    isOptional(r.kind, (kind) => kind === "permission" || kind === "question" || kind === "auth") &&
     isOptional(r.worktreeSlug, isNullableString);
 }
 

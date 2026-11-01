@@ -61,6 +61,30 @@ const SESSION_PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PENDING_SESSIONS: usize = 100;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TRANSFER_TIMEOUT: Duration = Duration::from_secs(3600);
+/// Lifetime of a spliced remote desktop session. A viewer watches for hours, and the bytes stay
+/// end to end encrypted (TLS-PSK inside Noise), so only the one-day ceiling of the maho relay
+/// protocol applies.
+const REMOTE_DESKTOP_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What an opaque session carries, as the allocating client declared it. Only its lifetime
+/// differs; the relay never parses the spliced frames either way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionKind {
+    #[default]
+    Http,
+    RemoteDesktop,
+}
+
+impl SessionKind {
+    /// How long a spliced session of this kind may live.
+    pub fn lifetime(self) -> Duration {
+        match self {
+            SessionKind::Http => SESSION_TRANSFER_TIMEOUT,
+            SessionKind::RemoteDesktop => REMOTE_DESKTOP_SESSION_TIMEOUT,
+        }
+    }
+}
 const PAIRING_CLAIM_LEASE_DURATION: Duration = Duration::from_secs(45);
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
@@ -343,6 +367,8 @@ struct WaitingHalf {
     /// True when the allocation asked for the encrypted attach path. The relay then only
     /// ever splices frames for this session and never parses them.
     opaque: bool,
+    /// Declared at allocation; selects the splice lifetime.
+    session_kind: SessionKind,
     notify: Option<oneshot::Sender<WebSocket>>,
     active: bool,
     /// Armed by the suspension sweeper when the owning account's grace period ended. A live
@@ -1192,6 +1218,20 @@ impl RelayState {
         generation: Option<u64>,
         opaque: bool,
     ) -> bool {
+        self.issue_session_of_kind(machine_token, session_id, generation, opaque, SessionKind::Http)
+    }
+
+    /// [`Self::issue_session`] for a declared [`SessionKind`]. The kind is recorded in the same
+    /// registry insertion the daemon's notice races against, so either half sees it. A plain
+    /// session is parsed by the relay and always keeps the default kind.
+    pub fn issue_session_of_kind(
+        &self,
+        machine_token: &str,
+        session_id: &str,
+        generation: Option<u64>,
+        opaque: bool,
+        session_kind: SessionKind,
+    ) -> bool {
         let channels = self.inner.control_channels.lock();
         let Some(channel) = channels.get(machine_token) else {
             return false;
@@ -1222,12 +1262,23 @@ impl RelayState {
                 created_at: Instant::now(),
                 kind: None,
                 opaque,
+                session_kind: if opaque { session_kind } else { SessionKind::Http },
                 notify: None,
                 active: false,
                 suspension: new_suspension_signal(),
             },
         );
         true
+    }
+
+    /// The lifetime a splice of `session_id` gets; the default for an unknown session.
+    fn session_lifetime(&self, session_id: &str) -> Duration {
+        self.inner
+            .pending_sessions
+            .lock()
+            .get(session_id)
+            .map_or(SessionKind::Http, |waiting| waiting.session_kind)
+            .lifetime()
     }
 
     /// Reserve before upgrade so concurrent duplicates receive HTTP 409.
@@ -1574,6 +1625,7 @@ impl RelayState {
                     notify: Some(tx),
                     active: false,
                     opaque: false,
+                    session_kind: SessionKind::Http,
                     suspension: new_suspension_signal(),
                 },
             );
@@ -2047,6 +2099,9 @@ async fn pair_exchange_handler(
 #[serde(rename_all = "camelCase")]
 pub struct AttachSessionRequest {
     pub machine_id: String,
+    /// Absent from older clients, which get the default lifetime.
+    #[serde(default)]
+    pub session_kind: SessionKind,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2055,6 +2110,10 @@ pub struct AttachSessionResponse {
     pub session_id: String,
     pub machine_id: String,
     pub opaque: bool,
+    /// Echoes the honoured kind, so a client can tell this relay from one that predates kinds
+    /// (which omits the field and cuts every session at the default lifetime).
+    #[serde(default)]
+    pub session_kind: SessionKind,
 }
 
 /// Reads the allocation query: absent or empty means the account-only allocation, `e2e=1`
@@ -2277,7 +2336,13 @@ async fn attach_session_handler(
     }
 
     let session_id = uuid::Uuid::new_v4().to_string();
-    if !state.issue_session(&request.machine_id, &session_id, Some(channel.generation), true) {
+    if !state.issue_session_of_kind(
+        &request.machine_id,
+        &session_id,
+        Some(channel.generation),
+        true,
+        request.session_kind,
+    ) {
         return crate::account::service::ApiError::new(
             StatusCode::CONFLICT,
             "MACHINE_OFFLINE",
@@ -2290,6 +2355,7 @@ async fn attach_session_handler(
         session_id,
         machine_id: request.machine_id,
         opaque: true,
+        session_kind: request.session_kind,
     })
     .into_response()
 }
@@ -2644,7 +2710,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // the machine's own gateway authenticates, fences the target and enforces the
             // read-only policy, exactly as it does for a direct caller.
             | ("GET", ["reference-chat", _, "history" | "screen" | "prompt" | "files"])
-            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files"])
+            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files" | "acknowledge-outcome"])
             | ("GET" | "DELETE", ["reference-chat", _, "files", _])
             // Agent control. Reads and mutations are separate paths so a dropped mutation
             // reply is outcome-unknown and a dropped wait stays a timeout.
@@ -2750,7 +2816,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         // `prompt` and the staged-file routes all deserialize the host's own
         // `ReferenceChatReadQuery`, so they admit exactly its fields. A mutation's target
         // travels in its own envelope body, so its query must stay empty.
-        ["reference-chat", _, "history" | "screen" | "prompt"] => reference_chat_read_fields,
+        ["reference-chat", _, "history" | "screen" | "prompt" | "acknowledge-outcome"] => reference_chat_read_fields,
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
         ["agent-control", "events"] => &["after"],
@@ -4109,10 +4175,11 @@ fn upgrade_half(
         session_id,
         generation,
     };
+    let lifetime = guard.state.session_lifetime(&guard.session_id);
     Ok(ws
         .max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_half_socket(socket, guard, outcome, kind)))
+        .on_upgrade(move |socket| handle_half_socket(socket, guard, outcome, kind, lifetime)))
 }
 
 /// Registers `socket` as one half of `session_id`'s pairing. If the
@@ -4126,6 +4193,7 @@ async fn handle_half_socket(
     mut guard: SessionGuard,
     outcome: PairingOutcome,
     kind: HalfKind,
+    lifetime: Duration,
 ) {
     match outcome {
         PairingOutcome::HandOff(tx) => {
@@ -4224,7 +4292,7 @@ async fn handle_half_socket(
                 )
                 .await
             };
-            match timeout(SESSION_TRANSFER_TIMEOUT, transfer).await {
+            match timeout(lifetime, transfer).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "relay session failed"),
                 Err(error) => tracing::warn!(%error, "relay session lifetime exceeded"),
@@ -6116,6 +6184,46 @@ mod tests {
             .claim_pairing("127.0.0.3".parse().unwrap(), &request, None)
             .expect("live control identity must be able to complete the exchange");
         assert_eq!(claim.machine_id, machine);
+    }
+
+    #[test]
+    fn session_kind_selects_the_splice_lifetime() {
+        assert_eq!(SessionKind::Http.lifetime(), Duration::from_secs(3600));
+        assert!(SessionKind::RemoteDesktop.lifetime() > Duration::from_secs(3600));
+        assert_eq!(SessionKind::default(), SessionKind::Http);
+
+        let state = test_state(vec![]);
+        let machine = "kind-machine";
+        let (tx, _rx) = mpsc::channel(4);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 1, tx });
+        assert!(state.issue_session_of_kind(machine, "rd", Some(1), true, SessionKind::RemoteDesktop));
+        assert!(state.issue_session(machine, "http", Some(1), true));
+        // A plain session is parsed by the relay and can never be given the long lifetime.
+        assert!(state.issue_session_of_kind(machine, "plain", Some(1), false, SessionKind::RemoteDesktop));
+        assert_eq!(state.session_lifetime("rd"), SessionKind::RemoteDesktop.lifetime());
+        assert_eq!(state.session_lifetime("http"), SessionKind::Http.lifetime());
+        assert_eq!(state.session_lifetime("plain"), SessionKind::Http.lifetime());
+        assert_eq!(state.session_lifetime("unknown"), SessionKind::Http.lifetime());
+    }
+
+    #[test]
+    fn attach_session_kind_is_optional_on_the_wire() {
+        // An older client sends no kind and an older relay echoes none: both read as Http.
+        let old: AttachSessionRequest =
+            serde_json::from_str(r#"{"machineId":"m"}"#).expect("old request");
+        assert_eq!(old.session_kind, SessionKind::Http);
+        let rd: AttachSessionRequest =
+            serde_json::from_str(r#"{"machineId":"m","sessionKind":"remoteDesktop"}"#)
+                .expect("rd request");
+        assert_eq!(rd.session_kind, SessionKind::RemoteDesktop);
+        let old_reply: AttachSessionResponse =
+            serde_json::from_str(r#"{"sessionId":"s","machineId":"m","opaque":true}"#)
+                .expect("old reply");
+        assert_eq!(old_reply.session_kind, SessionKind::Http);
     }
 
     #[test]

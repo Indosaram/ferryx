@@ -1696,24 +1696,192 @@ fn spawn_pipe_guarded_cat() -> (tokio::process::Child, std::os::unix::io::RawFd)
 }
 
 /// Spawns a child that does not exit when its stdin closes, plus a duplicate of its stdout
-/// pipe handle.
+/// pipe handle and a probe that proves the child is alive.
 ///
 /// `cat` cannot be used where stdin EOF must be ruled out: it exits by itself once the
 /// transferred stdin pipe closes, which would make "still alive" assertions vacuous.
+///
+/// The child is a shell that answers SIGUSR1 on its own probe pipe (fd 3). Its sleeps run
+/// with stdio and fd 3 closed, so only the shell holds the stdout and probe pipes: once it is
+/// gone both reach EOF. The function returns only after the shell has installed its trap,
+/// because an untrapped SIGUSR1 would terminate it. The loop is bounded so that a test that
+/// fails before its cleanup cannot leave the shell running for good.
 #[cfg(unix)]
-fn spawn_pipe_guarded_sleeper(seconds: u32) -> (tokio::process::Child, std::os::unix::io::RawFd) {
-    let child = tokio::process::Command::new("/bin/sh")
+fn spawn_pipe_guarded_sleeper() -> (
+    tokio::process::Child,
+    std::os::unix::io::RawFd,
+    LivenessProbe,
+) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let (read, write) = cloexec_pipe();
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
         .arg("-c")
-        .arg(format!("exec sleep {seconds}"))
+        .arg(
+            "trap 'echo alive >&3' USR1; echo ready >&3; \
+             n=0; while [ \"$n\" -lt 300 ]; do n=$((n + 1)); \
+             sleep 1 </dev/null >/dev/null 2>&1 3>&- & wait $!; done",
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn sleeper child");
-    use std::os::unix::io::AsRawFd;
+        .stderr(Stdio::piped());
+    // SAFETY: the hook runs between fork and exec and calls only async-signal-safe functions.
+    // It hands the probe's write end to the child as fd 3 without close-on-exec.
+    unsafe {
+        command.pre_exec(move || {
+            let installed = if write == 3 {
+                libc::fcntl(3, libc::F_SETFD, 0)
+            } else {
+                libc::dup2(write, 3)
+            };
+            if installed < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let child = command.spawn().expect("spawn sleeper child");
+    // SAFETY: the child holds its own copy; this one is no longer used.
+    unsafe { libc::close(write) };
+    // SAFETY: `read` is an open descriptor owned by nothing else.
+    let replies = unsafe { OwnedFd::from_raw_fd(read) };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    assert_eq!(
+        read_probe_reply(replies.as_raw_fd(), deadline).as_deref(),
+        Some(&b"ready\n"[..]),
+        "sleeper must announce its trap"
+    );
     let stdout = child.stdout.as_ref().expect("child stdout");
     let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
-    (child, duped)
+    let probe = LivenessProbe {
+        pid: child.id().expect("child id"),
+        replies,
+    };
+    (child, duped, probe)
+}
+
+/// A pipe whose two ends are close-on-exec from the start where the platform allows it, so a
+/// child that another test forks meanwhile cannot inherit the probe's write end.
+#[cfg(unix)]
+fn cloexec_pipe() -> (std::os::unix::io::RawFd, std::os::unix::io::RawFd) {
+    let mut fds = [0; 2];
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    // SAFETY: `pipe2` writes two new descriptors into `fds`.
+    let created = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    // macOS has no `pipe2`; std itself sets close-on-exec right after `pipe` there.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let created = {
+        // SAFETY: `pipe` writes two new descriptors into `fds`, which are owned here.
+        let created = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if created == 0 {
+            // SAFETY: both descriptors were just created and are owned here.
+            unsafe {
+                libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+                libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+        created
+    };
+    assert_eq!(created, 0, "create probe pipe");
+    (fds[0], fds[1])
+}
+
+/// Reads one probe message, or `None` at EOF, on error, or once `deadline` passes.
+///
+/// Interrupted calls are retried. Every message is a single `echo` of a few bytes, which a
+/// pipe delivers whole, so one read returns exactly one message.
+#[cfg(unix)]
+fn read_probe_reply(fd: std::os::unix::io::RawFd, deadline: std::time::Instant) -> Option<Vec<u8>> {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let timeout_ms = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        if ready == 0 {
+            return None;
+        }
+        let mut buf = [0u8; 64];
+        // SAFETY: `buf` is live and `fd` is readable (data or EOF).
+        let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if read < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        return (read > 0).then(|| buf[..read as usize].to_vec());
+    }
+}
+
+/// Positive proof that a sleeper from [`spawn_pipe_guarded_sleeper`] is running.
+#[cfg(unix)]
+struct LivenessProbe {
+    pid: u32,
+    replies: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl LivenessProbe {
+    /// Asks the child to answer and waits for the answer.
+    ///
+    /// Only a running shell executes its trap, so an answer proves the child is alive now. A
+    /// child that was killed - even one still dying and not yet a zombie - never answers, and
+    /// its probe pipe reaches EOF once it is gone, so a regression that kills it too early
+    /// fails here instead of passing as "not exited yet".
+    ///
+    /// The probe pipe must be quiet before signalling: a child that is already gone has closed
+    /// it (EOF reads as readable), and its pid may belong to another process by now, so it is
+    /// never signalled; a leftover reply would be just as wrong. The blocking wait is bounded,
+    /// runs off the async worker, and reads its own duplicate of the pipe, so dropping this
+    /// future mid-wait never leaves a thread reading a descriptor number that was reused.
+    async fn answers(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        let fd = self.replies.as_raw_fd();
+        if probe_readable(fd) {
+            return false;
+        }
+        let waiter = self.replies.try_clone().expect("duplicate probe pipe");
+        // SAFETY: plain signal to the test's own child, whose probe pipe is still open.
+        if unsafe { libc::kill(self.pid as i32, libc::SIGUSR1) } != 0 {
+            return false;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let reply =
+            tokio::task::spawn_blocking(move || read_probe_reply(waiter.as_raw_fd(), deadline))
+                .await
+                .expect("probe wait");
+        reply.as_deref() == Some(&b"alive\n"[..])
+    }
+}
+
+/// True when the probe pipe holds a reply or its writer is gone, without reading it.
+#[cfg(unix)]
+fn probe_readable(fd: std::os::unix::io::RawFd) -> bool {
+    loop {
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, zero timeout.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+        if ready < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return ready != 0;
+    }
 }
 
 /// Spawns a `sleep` child with a non-piped stdin, i.e. one `from_child` must reject.
@@ -1731,17 +1899,6 @@ fn spawn_stdinless_sleeper() -> (tokio::process::Child, std::os::unix::io::RawFd
     let stdout = child.stdout.as_ref().expect("child stdout");
     let duped = dup_fd(stdout.as_raw_fd()).expect("dup stdout fd");
     (child, duped)
-}
-
-/// True while the test child is still running.
-///
-/// `waitpid(WNOHANG)` returns `0` only for a process that has not exited: an exited child is
-/// either reported (and reaped here) or already reaped, so this cannot be satisfied by a
-/// zombie that someone else should have been keeping alive.
-#[cfg(unix)]
-fn child_still_running(pid: u32) -> bool {
-    let mut status = 0;
-    unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) == 0 }
 }
 
 /// Event barrier: bounded wait for the duplicated child-stdout pipe to reach EOF.
@@ -1878,7 +2035,7 @@ async fn ssh_bridge_child_exit_on_cancellation_with_event_barrier() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ssh_bridge_imported_connection_has_no_kill_rights() {
-    let (child, stdout_fd) = spawn_pipe_guarded_sleeper(300);
+    let (child, stdout_fd, probe) = spawn_pipe_guarded_sleeper();
     let pid = child.id().expect("child id");
     let mut conn = BridgeConnection::from_child(child).expect("from_child");
 
@@ -1891,7 +2048,7 @@ async fn ssh_bridge_imported_connection_has_no_kill_rights() {
 
     // Detaching releases the handle without signalling the child.
     assert!(
-        child_still_running(pid),
+        probe.answers().await,
         "child must survive predecessor detach"
     );
 
@@ -1902,7 +2059,7 @@ async fn ssh_bridge_imported_connection_has_no_kill_rights() {
     assert_eq!(imported.child_id(), Some(pid));
     imported.close().await.expect("close imported");
     assert!(
-        child_still_running(pid),
+        probe.answers().await,
         "imported close must not kill a child owned by another process"
     );
 
@@ -1940,7 +2097,7 @@ async fn ssh_bridge_ownership_ordering_detach_rollback_commit() {
     // Part 2: Commit ordering - detach releases the local handle without killing it, and the
     // successor can never kill a child it does not own.
     {
-        let (child, stdout_fd) = spawn_pipe_guarded_sleeper(300);
+        let (child, stdout_fd, probe) = spawn_pipe_guarded_sleeper();
         let pid = child.id().expect("child id");
         let mut conn = BridgeConnection::from_child(child).expect("from_child");
 
@@ -1953,7 +2110,7 @@ async fn ssh_bridge_ownership_ordering_detach_rollback_commit() {
 
         // Barrier check: child MUST NOT be killed by predecessor death!
         assert!(
-            child_still_running(pid),
+            probe.answers().await,
             "predecessor death must not kill detached child"
         );
 
@@ -1962,7 +2119,7 @@ async fn ssh_bridge_ownership_ordering_detach_rollback_commit() {
         assert_eq!(successor.child_id(), Some(pid));
         drop(successor);
         assert!(
-            child_still_running(pid),
+            probe.answers().await,
             "successor drop must not kill a child it does not own"
         );
 
@@ -2148,14 +2305,13 @@ async fn ssh_bridge_setup_failure_ends_the_child() {
         eof,
         "setup failure must end the child and close its stdout pipe"
     );
-    assert!(
-        !child_still_running(pid),
-        "setup failure must not leave the child running"
-    );
+    // A dying process closes its descriptors before it turns into a zombie, so at the EOF
+    // barrier `waitpid(WNOHANG)` may still report it running. The bounded reap wait proves the
+    // exit instead: it succeeds only once the child has exited.
     let reaped = wait_for_child_reaped(pid).await;
     assert!(
         reaped,
-        "child PID {pid} must be reaped after a setup failure"
+        "setup failure must end child PID {pid} and let it be reaped"
     );
 }
 /// Hosts supervisor mode inside the test binary, whose harness cannot take custom argv.

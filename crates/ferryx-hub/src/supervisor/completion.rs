@@ -58,7 +58,7 @@ use crate::goals::contract::{self, Contract};
 use crate::goals::converge::{self, ConvergenceOutcome, RequirementVerdict};
 use crate::goals::evidence::{requirement_check_ref, verifier_signal, EvidenceBundle};
 use crate::goals::loop_driver::{verification_instruction, wrap_instruction};
-use crate::goals::types::{Decision, GoalError, GoalMode, RequirementStatus};
+use crate::goals::types::{Decision, GoalError, GoalMode, RequirementStatus, StopReason};
 use crate::goals::{assess, evidence, turns};
 use crate::judge::Judge;
 use crate::lanes::state::{self, LaneStatus, GOAL_CONVERGED_REASON};
@@ -340,8 +340,17 @@ impl CompletionDriver {
                     .iter()
                     .map(|gap| gap.summary.as_str())
                     .collect();
-                let detail = format!("{}: {}", reason.as_str(), gaps.join("; "));
-                self.hold(&goal, RunState::AwaitingOwner, detail).await
+                let summary = gaps.join("; ");
+                let detail = format!("{}: {summary}", reason.as_str());
+                let held = self.hold(&goal, RunState::AwaitingOwner, detail).await;
+                // The model gave up on the goal: it ends unconverged. A stop for the owner's
+                // decision (high stakes) is not a failure of the lessons.
+                if reason == StopReason::NoFurtherProgress
+                    && matches!(held, Ok(Verification::Held { .. }))
+                {
+                    self.lessons_hurt(&goal.goal_id, &summary).await;
+                }
+                held
             }
             Decision::Continue {
                 instruction,
@@ -490,6 +499,20 @@ impl CompletionDriver {
         self.correct(goal, &instruction, unmet).await
     }
 
+    /// The goal ended without converging: its injected lessons hurt, and the judge is asked
+    /// once whether `summary` teaches a lesson. Lesson bookkeeping never fails the decision.
+    async fn lessons_hurt(&self, goal_id: &str, summary: &str) {
+        match super::lessons::goal_failed(&self.pool, &self.judge, goal_id, summary).await {
+            Ok(Some(lesson)) => {
+                tracing::info!(goal = %goal_id, lesson = %lesson.id, "a lesson was recorded");
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, goal = %goal_id, "lesson outcome or reflection failed");
+            }
+        }
+    }
+
     /// Moves a still-verifying goal at the decision's revision to a hold.
     async fn hold(
         &self,
@@ -567,6 +590,7 @@ impl CompletionDriver {
             .await?
             .map(|binding| binding.host_id)
             .unwrap_or_default();
+        let asked = instruction.trim().to_owned();
         let instruction = format!(
             "{}\n\n{}",
             instruction.trim(),
@@ -649,6 +673,12 @@ impl CompletionDriver {
             tx.commit().await?;
             super::changes::announce(&goal.goal_id);
             wakes::poke();
+            // The turn budget ran out with requirements unproven: the goal ends unconverged.
+            if detail.starts_with(TURN_LIMIT) {
+                let summary =
+                    format!("{asked} (the turn budget ran out with {unproven} unproven)");
+                self.lessons_hurt(&goal.goal_id, &summary).await;
+            }
             return Ok(Verification::Held {
                 state: RunState::AwaitingOwner,
                 detail,
@@ -789,6 +819,9 @@ impl CompletionDriver {
         .await?;
         tx.commit().await?;
         super::changes::announce(&goal.goal_id);
+        if let Err(error) = super::lessons::goal_completed(&self.pool, &goal.goal_id).await {
+            tracing::warn!(%error, goal = %goal.goal_id, "injected lessons were not marked helped");
+        }
         wakes::poke();
         self.clear_retry(&goal.goal_id);
         if let Err(error) = state::transition(

@@ -1,7 +1,7 @@
-//! Slack `/omo-*` commands. The grammar matches the gateway's twenty commands.
+//! Slack `/omo-*` commands: the gateway's twenty, plus the owner's report rules and lessons.
 use super::session::SessionKey;
 
-pub const COMMANDS: [(&str, &str); 20] = [
+pub const COMMANDS: [(&str, &str); 22] = [
     ("model", "/omo-model <name>"),
     ("reset", "/omo-reset [confirm]"),
     ("stop", "/omo-stop"),
@@ -28,6 +28,8 @@ pub const COMMANDS: [(&str, &str); 20] = [
         "huddle",
         "/omo-huddle join <huddle link or channel id> | leave | status | speak <text> | transcript",
     ),
+    ("rules", "/omo-rules [list | close <number>]"),
+    ("lessons", "/omo-lessons [list | retire <number> | pin <number>]"),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,7 +119,37 @@ pub enum SlackCommand {
     Pair(String),
     Sessions(SessionsCommand),
     Huddle(HuddleAction),
+    Rules(ListAction),
+    Lessons(ListAction),
     Help,
+}
+
+/// An action on a numbered list the owner sees (`/omo-rules`, `/omo-lessons`). Numbers are
+/// 1-based positions in the last `list`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListAction {
+    List,
+    Close(usize),
+    Retire(usize),
+    Pin(usize),
+}
+
+fn parse_list_action(text: &str, verbs: &[&str]) -> Option<ListAction> {
+    let (verb, rest) = split_word(text);
+    let verb = verb.to_ascii_lowercase();
+    if verb.is_empty() || verb == "list" {
+        return rest.is_empty().then_some(ListAction::List);
+    }
+    if !verbs.contains(&verb.as_str()) {
+        return None;
+    }
+    let number: usize = rest.trim_start_matches('#').parse().ok().filter(|n| *n > 0)?;
+    match verb.as_str() {
+        "close" => Some(ListAction::Close(number)),
+        "retire" => Some(ListAction::Retire(number)),
+        "pin" => Some(ListAction::Pin(number)),
+        _ => None,
+    }
 }
 
 pub fn parse_command(command: &str, text: &str) -> Result<SlackCommand, String> {
@@ -209,6 +241,12 @@ pub fn parse_command(command: &str, text: &str) -> Result<SlackCommand, String> 
             .map(SlackCommand::Sessions)
             .ok_or_else(usage),
         "huddle" => parse_huddle(text).ok_or_else(usage),
+        "rules" => parse_list_action(text, &["close"])
+            .map(SlackCommand::Rules)
+            .ok_or_else(usage),
+        "lessons" => parse_list_action(text, &["retire", "pin"])
+            .map(SlackCommand::Lessons)
+            .ok_or_else(usage),
         _ => Ok(SlackCommand::Help),
     }
 }
@@ -375,8 +413,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_twenty_commands_parse_and_sessions_are_scoped() {
-        assert_eq!(COMMANDS.len(), 20);
+    fn the_commands_parse_and_sessions_are_scoped() {
+        assert_eq!(COMMANDS.len(), 22);
+        assert_eq!(
+            parse_command("/omo-rules", "").unwrap(),
+            SlackCommand::Rules(ListAction::List)
+        );
+        assert_eq!(
+            parse_command("/omo-rules", "close #2").unwrap(),
+            SlackCommand::Rules(ListAction::Close(2))
+        );
+        assert!(parse_command("/omo-rules", "close 0").is_err());
+        assert!(parse_command("/omo-rules", "retire 1").is_err());
+        assert_eq!(
+            parse_command("/omo-lessons", "pin 3").unwrap(),
+            SlackCommand::Lessons(ListAction::Pin(3))
+        );
+        assert_eq!(
+            parse_command("/omo-lessons", "retire 1").unwrap(),
+            SlackCommand::Lessons(ListAction::Retire(1))
+        );
+        assert!(parse_command("/omo-lessons", "close 1").is_err());
         assert!(parse_command("/omo-model", "")
             .unwrap_err()
             .contains("Usage"));

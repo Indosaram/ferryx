@@ -121,7 +121,8 @@ pub async fn prune_older_than(
     let chat_outbox = delete_before(
         pool,
         "DELETE FROM chat_outbox
-          WHERE delivered_at IS NOT NULL AND julianday(created_at) < julianday(?)",
+          WHERE (delivered_at IS NOT NULL OR cancelled_at IS NOT NULL)
+            AND julianday(created_at) < julianday(?)",
         &cut,
     )
     .await?;
@@ -194,6 +195,43 @@ mod tests {
         assert_eq!(parse_cron_runs_retention_days(None).unwrap(), 14);
         assert_eq!(parse_cron_runs_retention_days(Some("0")).unwrap(), 0);
         assert!(parse_cron_runs_retention_days(Some("-1")).is_err());
+    }
+
+    #[tokio::test]
+    async fn finished_digest_rows_are_pruned_without_losing_pending_delivery() {
+        // Given old delivered, cancelled, and pending digests with child receipts.
+        let pool = crate::storage::memory().await.unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z").unwrap().with_timezone(&Utc);
+        let old = (now - TimeDelta::days(40)).to_rfc3339();
+        let mut pending = 0;
+        for (day, delivered, cancelled) in [
+            ("2026-09-18", Some(&old), None),
+            ("2026-09-19", None, Some(&old)),
+            ("2026-09-20", None, None),
+        ] {
+            let id = sqlx::query("INSERT INTO chat_outbox(session_key, platform, text, created_at, delivered_at, cancelled_at) VALUES('owner', 'slack', 'digest', ?, ?, ?)")
+                .bind(&old).bind(delivered).bind(cancelled).execute(&pool).await.unwrap().last_insert_rowid();
+            sqlx::query("INSERT INTO report_digest_deliveries(day, outbox_id) VALUES(?, ?)")
+                .bind(day).bind(id).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO report_delivery_parts(outbox_id, report_id, report_json) VALUES(?, ?, '{}')")
+                .bind(id).bind(day).execute(&pool).await.unwrap();
+            if delivered.is_none() && cancelled.is_none() { pending = id; }
+        }
+
+        // When retention removes finished rows.
+        let report = prune_older_than(&pool, 30, 14, now).await.unwrap();
+
+        // Then both finished digests and their children are gone; pending work remains.
+        assert_eq!(report.chat_outbox, 2);
+        let outbox: Vec<i64> = sqlx::query_scalar("SELECT id FROM chat_outbox")
+            .fetch_all(&pool).await.unwrap();
+        let receipts: Vec<i64> = sqlx::query_scalar("SELECT outbox_id FROM report_digest_deliveries")
+            .fetch_all(&pool).await.unwrap();
+        let parts: Vec<i64> = sqlx::query_scalar("SELECT outbox_id FROM report_delivery_parts")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(outbox, vec![pending]);
+        assert_eq!(receipts, vec![pending]);
+        assert_eq!(parts, vec![pending]);
     }
 
     #[tokio::test]

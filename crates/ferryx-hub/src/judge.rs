@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::SqlitePool;
 
 use serde::{Deserialize, Serialize};
@@ -21,10 +21,28 @@ pub enum Purpose {
     InboxClass,
     /// omo-gateway cron remediation: the root cause of a failed cron job.
     CronCause,
+    /// Whether a cron rerun's output proves that the requested work completed.
+    CronOutcome,
     /// Supervisor goal loop: grades a settled turn against the lane's goal contract.
     GapAssess,
     /// Supervisor goal loop: the blind second check before a lane is called complete.
     ConvergenceCheck,
+    /// Owner reporting: whether an owner message objects to or restores a kind of report.
+    ReportFeedback,
+    /// Owner reporting: whether a borderline report body is internal progress text.
+    ReportLeak,
+    /// Immediate owner action/result versus deferred information.
+    ReportSalience,
+    /// Whether a same-turn report adds meaningful information for the owner.
+    ReportNovelty,
+    /// Owner reporting: whether a bot message promises later work.
+    Commitment,
+    /// Owner reporting: whether a new owner directive supersedes an older one.
+    DirectiveConflict,
+    /// Owner reporting: which owner memory directive, if any, governs delivering one report.
+    ReportDirective,
+    /// Lesson ledger: rules learned from a closed goal or an objected report.
+    LessonReflect,
 }
 
 /// The fixed instruction of every engine choice call: its stable prompt prefix.
@@ -39,30 +57,54 @@ impl Purpose {
             Self::KibitzerWake => "kibitzer_wake",
             Self::InboxClass => "inbox_class",
             Self::CronCause => "cron_cause",
+            Self::CronOutcome => "cron_outcome",
             Self::GapAssess => "gap_assess",
             Self::ConvergenceCheck => "convergence_check",
+            Self::ReportFeedback => "report_feedback",
+            Self::ReportLeak => "report_leak",
+            Self::ReportSalience => "report_salience",
+            Self::ReportNovelty => "report_novelty",
+            Self::Commitment => "commitment",
+            Self::DirectiveConflict => "directive_conflict",
+            Self::ReportDirective => "report_directive",
+            Self::LessonReflect => "lesson_reflect",
         }
     }
 
     /// omo `Purpose::capped_choice`: the answer once the day's jev calls are used up.
     pub fn capped_choice(self) -> &'static str {
         match self {
+            Self::CronOutcome => "unverified",
+            Self::ReportNovelty => "new_information",
             Self::InboxClass => "unclassified",
             Self::EventWake | Self::KibitzerWake | Self::OwnerIntent => "wake",
-            Self::CronCause => "needs_owner_login_or_quota",
+            Self::CronCause => "unknown",
             Self::DoneDiff => "diff_gate_failed",
             Self::GapAssess | Self::ConvergenceCheck => "judge_unavailable",
+            Self::ReportFeedback | Self::Commitment | Self::DirectiveConflict => "none",
+            Self::ReportLeak => "owner_facing",
+            Self::ReportSalience => "action",
+            // Never an offered option: the outbound gate records "unchecked" rather than guess.
+            Self::ReportDirective => "unchecked",
+            Self::LessonReflect => "no_lesson",
         }
     }
 
     /// omo `Purpose::conservative_choice`: the answer when neither jev nor the fallback can.
     pub fn conservative_choice(self) -> &'static str {
         match self {
+            Self::CronOutcome => "unverified",
+            Self::ReportNovelty => "new_information",
             Self::InboxClass => "owner_must_act",
             Self::EventWake | Self::KibitzerWake | Self::OwnerIntent => "wake",
-            Self::CronCause => "needs_owner_login_or_quota",
+            Self::CronCause => "unknown",
             Self::DoneDiff => "diff_gate_failed",
             Self::GapAssess | Self::ConvergenceCheck => "judge_unavailable",
+            Self::ReportFeedback | Self::Commitment | Self::DirectiveConflict => "none",
+            Self::ReportLeak => "owner_facing",
+            Self::ReportSalience => "action",
+            Self::ReportDirective => "unchecked",
+            Self::LessonReflect => "no_lesson",
         }
     }
 
@@ -191,7 +233,7 @@ impl Breaker {
     }
 
     /// Records a failed call; returns the owner alert when this failure opened the breaker
-    /// (at most one alert per KST day, as omo).
+    /// (at most one alert per owner-local day, as omo).
     pub fn failure(
         &mut self,
         trigger: bool,
@@ -212,10 +254,16 @@ impl Breaker {
             return None;
         }
         self.last_alert_day = Some(today);
-        Some(format!(
-            "판정기(typesafe-judge) 차단: {BREAKER_FAILURES}회 연속 인증/요청한도 실패로 30분간 사용 중지. 마지막 오류: {}",
-            scrub_for_external(reason).chars().take(200).collect::<String>()
-        ))
+        let reason = scrub_for_external(reason).chars().take(200).collect::<String>();
+        Some(if crate::locale::current().is_korean() {
+            format!(
+                "판정기(typesafe-judge) 차단: {BREAKER_FAILURES}회 연속 인증/요청한도 실패로 30분간 사용 중지. 마지막 오류: {reason}"
+            )
+        } else {
+            format!(
+                "Judge (typesafe-judge) paused for 30 minutes after {BREAKER_FAILURES} consecutive auth/rate-limit failures. Last error: {reason}"
+            )
+        })
     }
 
     pub fn success(&mut self) {
@@ -261,8 +309,9 @@ fn default_fallback() -> Option<Arc<dyn crate::lanes::kibitzer::ModelTurn>> {
     )))
 }
 
-fn kst_today() -> NaiveDate {
-    (Utc::now() + chrono::Duration::hours(9)).date_naive()
+/// Today in the owner's time zone: daily caps and breaker alerts reset at the owner's midnight.
+fn owner_today() -> NaiveDate {
+    crate::locale::current().local_date(Utc::now())
 }
 
 /// omo's daily jev call cap (`OMON_JEV_DAILY_CAP`).
@@ -293,13 +342,13 @@ fn supervisor_budget_from_env() -> Option<usize> {
         .filter(|budget| *budget > 0)
 }
 
-/// The start of today (KST) as stored in `judge_calls.created_at`.
-fn kst_day_start() -> String {
-    kst_today()
-        .and_hms_opt(0, 0, 0)
-        .map(|at| at.and_utc() - chrono::Duration::hours(9))
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339()
+/// The start of the owner's today as stored in `judge_calls.created_at`.
+fn owner_day_start() -> String {
+    owner_day_start_at(&crate::locale::current(), Utc::now())
+}
+
+fn owner_day_start_at(locale: &crate::locale::OwnerLocale, now: DateTime<Utc>) -> String {
+    locale.day_start(locale.local_date(now)).to_rfc3339()
 }
 
 /// omo `OMON_JEV_ENABLED`: only 0/false/no turn typesafe-judge off.
@@ -325,9 +374,14 @@ pub fn parse_json_loose(raw: &str) -> Option<serde_json::Value> {
         .find_map(|candidate| serde_json::from_str(candidate).ok())
 }
 
+/// A scripted `choice` answer: `(purpose, state, options) -> selected`. See [`Judge::scripted`].
+pub type ScriptedAnswer = Arc<dyn Fn(Purpose, &str, &[&str]) -> String + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Judge {
     typesafe: BTreeMap<String, String>,
+    /// Replay/test seam: answers every `choice` call from a script ([`Judge::scripted`]).
+    scripted: Option<ScriptedAnswer>,
     /// When set, a missing binary uses this choice instead of spawning a model.
     offline_fallback: Option<String>,
     /// Skips the binary. Tests use this so a machine with typesafe-judge installed
@@ -353,6 +407,7 @@ impl Judge {
     pub fn from_config(typesafe: BTreeMap<String, String>) -> Self {
         Self {
             typesafe,
+            scripted: None,
             offline_fallback: None,
             forced: None,
             forced_noul: None,
@@ -376,6 +431,19 @@ impl Judge {
         }
     }
 
+    /// Replay and test seam: every `choice` call is answered by `answer(purpose, state,
+    /// options)` instead of a model, so a replay binary can answer each call from audited
+    /// ground truth. No binary, pool or fallback model is used and no `judge_calls` row is
+    /// written. An answer outside `options` is an error. The hub itself never builds one.
+    pub fn scripted(
+        answer: impl Fn(Purpose, &str, &[&str]) -> String + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            scripted: Some(Arc::new(answer)),
+            ..Self::bare()
+        }
+    }
+
     /// A scripted `noul` score, so the dispatcher can be tested without typesafe-judge.
     pub fn forced_noul(score: f64) -> Self {
         Self {
@@ -388,6 +456,7 @@ impl Judge {
     pub(crate) fn bare() -> Self {
         Self {
             typesafe: BTreeMap::new(),
+            scripted: None,
             offline_fallback: None,
             forced: None,
             forced_noul: None,
@@ -588,7 +657,17 @@ impl Judge {
                 "forced judge choice {selected} is not an option"
             )));
         }
+        if let Some(answer) = &self.scripted {
+            let selected = answer(purpose, state, options);
+            if options.contains(&selected.as_str()) {
+                return Ok(Choice::new(selected));
+            }
+            return Err(HubError::message(format!(
+                "scripted judge choice {selected} is not an option"
+            )));
+        }
         let start = Instant::now();
+        let instructions_hash = crate::report_gate::state_hash(instructions);
         let open = self.breaker_state().open_until(Instant::now());
         let error = if !self.jev_enabled {
             HubError::message("typesafe-judge is disabled (OMON_JEV_ENABLED)")
@@ -601,21 +680,39 @@ impl Judge {
             let (jev_today, _) = self.counts_today().await;
             if jev_today >= self.jev_cap {
                 let capped = purpose.capped_choice();
-                self.record_call(purpose, 0, &format!("capped:{capped}"), false)
-                    .await;
+                self.record_call(
+                    purpose,
+                    0,
+                    &format!("capped:{capped}"),
+                    false,
+                    &instructions_hash,
+                )
+                .await;
                 return Ok(Choice::capped(capped));
             }
             let result = self.run_typesafe(state, instructions, options).await;
             self.record(&result).await;
             match result {
                 Ok(choice) => {
-                    self.record_call(purpose, elapsed_ms(start), &choice.selected, false)
-                        .await;
+                    self.record_call(
+                        purpose,
+                        elapsed_ms(start),
+                        &choice.selected,
+                        false,
+                        &instructions_hash,
+                    )
+                    .await;
                     return Ok(choice);
                 }
                 Err(error) => {
-                    self.record_call(purpose, elapsed_ms(start), "failed", false)
-                        .await;
+                    self.record_call(
+                        purpose,
+                        elapsed_ms(start),
+                        "failed",
+                        false,
+                        &instructions_hash,
+                    )
+                    .await;
                     error
                 }
             }
@@ -639,8 +736,15 @@ impl Judge {
         } else {
             "choice"
         };
-        self.record_kind(purpose, kind, elapsed_ms(fallback_start), &outcome, true)
-            .await;
+        self.record_row(
+            purpose,
+            kind,
+            elapsed_ms(fallback_start),
+            &outcome,
+            true,
+            Some(&instructions_hash),
+        )
+        .await;
         if options.contains(&choice.selected.as_str()) {
             Ok(choice)
         } else {
@@ -732,6 +836,11 @@ impl Judge {
         for (key, value) in typesafe_env(&self.typesafe) {
             command.env(key, value);
         }
+        for (key, flag) in [("TYPESAFE_URL", "--url"), ("TYPESAFE_MODEL", "--model")] {
+            if let Some(value) = self.typesafe.get(key) {
+                command.arg(flag).arg(value);
+            }
+        }
         let output = tokio::time::timeout(Duration::from_secs(5), command.output())
             .await
             .map_err(|_| HubError::message("typesafe-judge noul timed out"))?
@@ -803,10 +912,11 @@ impl Judge {
                 })
             })
         } else {
+            // No configured background model: the fallback turn runs on the default model.
             let small = crate::model_policy::background_model();
             tokio::time::timeout(
                 FALLBACK_TIMEOUT,
-                model.complete_with(&prompt, Some(&small), &[]),
+                model.complete_with(&prompt, small.as_deref(), &[]),
             )
             .await
         };
@@ -830,7 +940,7 @@ impl Judge {
         selected.map_or(conservative, Choice::fallback)
     }
 
-    /// Today's (KST) jev and omo fallback calls, capped answers excluded (omo
+    /// Today's (owner-local) jev and omo fallback calls, capped answers excluded (omo
     /// `query_persisted_counts`). Supervisor engine (`mhc_`) rows are not fallback calls.
     async fn counts_today(&self) -> (usize, usize) {
         let Some(pool) = &self.pool else {
@@ -842,7 +952,7 @@ impl Judge {
                 COALESCE(SUM(CASE WHEN used_fallback = 1 AND outcome NOT LIKE 'capped%' AND substr(kind, 1, 4) <> 'mhc_' THEN 1 ELSE 0 END), 0)
              FROM judge_calls WHERE created_at >= ?",
         )
-        .bind(kst_day_start())
+        .bind(owner_day_start())
         .fetch_one(pool)
         .await;
         match counts {
@@ -854,7 +964,7 @@ impl Judge {
         }
     }
 
-    /// Today's (KST) supervisor engine turns, budget refusals and capped answers excluded.
+    /// Today's (owner-local) supervisor engine turns, budget refusals and capped answers excluded.
     async fn supervisor_turns_today(&self) -> usize {
         let Some(pool) = &self.pool else {
             return 0;
@@ -864,7 +974,7 @@ impl Judge {
               WHERE created_at >= ? AND substr(kind, 1, 4) = 'mhc_'
                 AND outcome NOT LIKE 'budget%' AND outcome NOT LIKE 'capped%'",
         )
-        .bind(kst_day_start())
+        .bind(owner_day_start())
         .fetch_one(pool)
         .await;
         match count {
@@ -876,9 +986,25 @@ impl Judge {
         }
     }
 
-    async fn record_call(&self, purpose: Purpose, ms: u64, outcome: &str, used_fallback: bool) {
-        self.record_kind(purpose, "choice", ms, outcome, used_fallback)
-            .await;
+    /// A `choice` call's row, with the hash of the instructions it was asked under, so a
+    /// decision can be traced to the owner rules and examples assembled into them.
+    async fn record_call(
+        &self,
+        purpose: Purpose,
+        ms: u64,
+        outcome: &str,
+        used_fallback: bool,
+        instructions_hash: &str,
+    ) {
+        self.record_row(
+            purpose,
+            "choice",
+            ms,
+            outcome,
+            used_fallback,
+            Some(instructions_hash),
+        )
+        .await;
     }
 
     async fn record_kind(
@@ -889,12 +1015,25 @@ impl Judge {
         outcome: &str,
         used_fallback: bool,
     ) {
+        self.record_row(purpose, kind, ms, outcome, used_fallback, None)
+            .await;
+    }
+
+    async fn record_row(
+        &self,
+        purpose: Purpose,
+        kind: &str,
+        ms: u64,
+        outcome: &str,
+        used_fallback: bool,
+        instructions_hash: Option<&str>,
+    ) {
         let Some(pool) = &self.pool else {
             return;
         };
         let inserted = sqlx::query(
-            "INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at)
-             VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO judge_calls(id, purpose, kind, ms, outcome, used_fallback, created_at, instructions_hash)
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(purpose.as_str())
@@ -903,6 +1042,7 @@ impl Judge {
         .bind(outcome)
         .bind(used_fallback)
         .bind(Utc::now().to_rfc3339())
+        .bind(instructions_hash)
         .execute(pool)
         .await;
         if let Err(error) = inserted {
@@ -924,7 +1064,7 @@ impl Judge {
                         is_breaker_trigger(&reason),
                         &reason,
                         Instant::now(),
-                        kst_today(),
+                        owner_today(),
                     )
                 }
             }
@@ -933,8 +1073,15 @@ impl Judge {
             // Without a pool the opening would be invisible; always log it.
             tracing::warn!(alert = %message, "judge circuit breaker opened");
             if let Some((pool, owner)) = ALERTS.get() {
-                if let Err(error) = crate::owner_alert::notify_owner(pool, owner, &message).await {
-                    tracing::warn!(%error, "judge breaker alert was not sent");
+                // Delivery itself asks the judge. Queue the fault for the normal outbox
+                // drain instead of recursively entering delivery from inside judgment.
+                let report = crate::report_gate::Report::new(
+                    uuid::Uuid::new_v4().to_string(), "hub",
+                    format!("hub:{}", crate::report_gate::state_hash(&message)),
+                    crate::report_gate::Salience::Action, &message,
+                );
+                if let Err(error) = crate::report_gate::queue(pool, owner, &report, false).await {
+                    tracing::warn!(%error, "judge breaker alert was not queued");
                 }
             }
         }
@@ -969,6 +1116,11 @@ impl Judge {
         }
         for (key, value) in typesafe_env(&self.typesafe) {
             command.env(key, value);
+        }
+        for (key, flag) in [("TYPESAFE_URL", "--url"), ("TYPESAFE_MODEL", "--model")] {
+            if let Some(value) = self.typesafe.get(key) {
+                command.arg(flag).arg(value);
+            }
         }
         let output = tokio::time::timeout(Duration::from_secs(5), command.output())
             .await
@@ -1025,7 +1177,7 @@ mod tests {
             .unwrap();
         assert!(alert.contains("30분"));
         assert_eq!(breaker.open_until(start), Some(start + BREAKER_OPEN));
-        // It closes after 30 minutes; reopening the same KST day does not alert again.
+        // It closes after 30 minutes; reopening the same owner-local day does not alert again.
         let later = start + BREAKER_OPEN + Duration::from_secs(1);
         assert_eq!(breaker.open_until(later), None);
         for _ in 0..5 {
@@ -1039,6 +1191,30 @@ mod tests {
         }
         fresh.success();
         assert_eq!(fresh.failure(true, "429", start, day), None);
+    }
+
+    #[test]
+    fn the_breaker_alert_and_daily_caps_follow_the_owner_locale() {
+        let english = crate::locale::with(crate::locale::OwnerLocale::english_utc(), || {
+            let mut breaker = Breaker::default();
+            let day = NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+            (0..BREAKER_FAILURES)
+                .filter_map(|_| breaker.failure(true, "429", Instant::now(), day))
+                .last()
+                .unwrap()
+        });
+        assert!(english.starts_with("Judge (typesafe-judge) paused for 30 minutes"), "{english}");
+        assert!(!english.chars().any(crate::locale::is_hangul), "{english}");
+        // 2026-10-31T16:30Z is already Nov 1 in Seoul but still Oct 31 in UTC.
+        let at = DateTime::parse_from_rfc3339("2026-10-31T16:30:00Z").unwrap().with_timezone(&Utc);
+        assert_eq!(
+            owner_day_start_at(&crate::locale::OwnerLocale::korean(), at),
+            "2026-10-31T15:00:00+00:00"
+        );
+        assert_eq!(
+            owner_day_start_at(&crate::locale::OwnerLocale::english_utc(), at),
+            "2026-10-31T00:00:00+00:00"
+        );
     }
 
     #[tokio::test]
@@ -1080,14 +1256,51 @@ mod tests {
     fn script(body: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fx-jev-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("typesafe-judge");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let (name, contents) = if cfg!(windows) {
+            ("typesafe-judge.cmd", format!("@echo off\r\n{body}\r\n"))
+        } else {
+            ("typesafe-judge", format!("#!/bin/sh\n{body}\n"))
+        };
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_endpoint_and_model_reach_the_public_cli() {
+        let bin = script(r#"
+mode=$1
+shift
+url=
+model=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --url) url=$2; shift ;;
+    --model) model=$2; shift ;;
+    --api-key) exit 3 ;;
+  esac
+  shift
+done
+[ "$url" = "https://judge.example.test/v1/systemone" ] || exit 4
+[ "$model" = "jev-test" ] || exit 5
+[ "$TYPESAFE_API_KEY" = "test-key" ] || exit 6
+if [ "$mode" = "choice" ]; then echo hold; else echo 0.8; fi
+"#);
+        let mut judge = Judge::bare().with_bin(bin.clone());
+        judge.typesafe = BTreeMap::from([
+            ("TYPESAFE_URL".into(), "https://judge.example.test/v1/systemone".into()),
+            ("TYPESAFE_MODEL".into(), "jev-test".into()),
+            ("TYPESAFE_API_KEY".into(), "test-key".into()),
+        ]);
+        assert_eq!(judge.run_typesafe("state", "instructions", &["wake", "hold"]).await.unwrap().as_str(), "hold");
+        assert_eq!(judge.run_noul("state", "instructions").await.unwrap(), 0.8);
+        std::fs::remove_dir_all(bin.parent().unwrap()).unwrap();
     }
 
     async fn calls(pool: &SqlitePool) -> Vec<(String, String, i64)> {
@@ -1123,6 +1336,35 @@ mod tests {
         );
     }
 
+    /// A choice row carries the hash of the instructions it was asked under, so an inbox
+    /// decision can be traced to the owner rules and examples that were in force.
+    #[tokio::test]
+    async fn a_choice_row_records_its_instructions_hash() {
+        let pool = crate::storage::memory().await.unwrap();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_bin(script("echo hold"))
+            .with_caps(50, 50);
+        for instructions in ["rules v1", "rules v2"] {
+            judge
+                .choice(Purpose::InboxClass, "s", instructions, &["wake", "hold"])
+                .await
+                .unwrap();
+        }
+        let hashes: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT instructions_hash FROM judge_calls ORDER BY rowid")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            hashes,
+            [
+                Some(crate::report_gate::state_hash("rules v1")),
+                Some(crate::report_gate::state_hash("rules v2")),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn a_failed_jev_call_falls_back_to_a_small_model_json_turn_then_its_cap() {
         let pool = crate::storage::memory().await.unwrap();
@@ -1145,7 +1387,7 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert!(sent[0].starts_with(&format!(
             "{}|You are a strict JSON classifier",
-            crate::model_policy::background_model()
+            crate::model_policy::background_model().unwrap_or_default()
         )));
         assert!(sent[0].contains("\"options\":[\"owner_must_act\""));
         // The day's one fallback turn is used: the conservative answer, marked capped.
@@ -1241,7 +1483,7 @@ mod tests {
             breaker
                 .lock()
                 .unwrap()
-                .failure(true, "401 Unauthorized", Instant::now(), kst_today());
+                .failure(true, "401 Unauthorized", Instant::now(), owner_today());
         }
         assert!(breaker.lock().unwrap().open_until(Instant::now()).is_some());
         breaker

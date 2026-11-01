@@ -744,6 +744,23 @@ async fn admit_scoped(
     } else {
         GoalMode::Supervised
     };
+    let mut instruction = worker_instruction(work, source.body, &scope);
+    let mut injected_lessons = Vec::new();
+    match super::lessons::injection_block_with_ids(
+        pool,
+        super::lessons::LessonDomain::Goal,
+        &scope.project_id,
+    )
+    .await
+    {
+        Ok(Some((block, ids))) => {
+            instruction.push_str("\n\n");
+            instruction.push_str(&block);
+            injected_lessons = ids;
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "lessons were not injected"),
+    }
     let request = AdmitRequest {
         supervisor_id: identity.supervisor_id.clone(),
         owner_principal: identity.owner_principal.clone(),
@@ -758,7 +775,7 @@ async fn admit_scoped(
         },
         title: work.title.trim().to_owned(),
         cwd: scope.cwd.clone(),
-        instruction: worker_instruction(work, source.body, &scope),
+        instruction,
         requirements: work.requirements.clone(),
         mode,
         turn_limit: scope.turn_limit,
@@ -775,6 +792,10 @@ async fn admit_scoped(
     if admission.duplicate {
         // Admitted concurrently between the replay check and this transaction.
         return admitted(pool, admission.receipt, true).await;
+    }
+    let subject = super::lessons::goal_subject(&admission.receipt.goal_id);
+    if let Err(error) = super::lessons::note_injected(pool, &subject, &injected_lessons).await {
+        tracing::warn!(%error, %subject, "injected lessons were not recorded");
     }
     if terms.owner_hold.is_none() {
         super::dispatcher::poke();

@@ -19,7 +19,7 @@ use crate::storage::now_rfc3339;
 pub const KAKAO_FIRST: Duration = Duration::from_secs(120);
 pub const KAKAO_EVERY: Duration = Duration::from_secs(120);
 pub const GITHUB_EVERY: Duration = Duration::from_secs(300);
-pub const MAIL_ACCOUNT_DEFAULT: &str = "freedomzero91@gmail.com";
+
 /// Updates stay in: security, billing and account notices land there. The prefilter drops the
 /// rest of the Updates tab.
 pub const MAIL_FILTER: &str = "is:unread -category:promotions -category:social";
@@ -110,11 +110,22 @@ pub fn is_mail_event_line(line: &str) -> bool {
     !trimmed.is_empty() && !trimmed.starts_with('#')
 }
 
-pub fn mail_account_from(raw: Option<&str>) -> String {
+/// The mail account from `OMON_MAIL_ACCOUNT`. There is no default: unset or blank, the mail
+/// source is off.
+pub fn mail_account_from(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(MAIL_ACCOUNT_DEFAULT)
-        .to_owned()
+        .map(str::to_owned)
+}
+
+/// The configured mail account; `None` (logged once per process) when it is not set.
+pub fn mail_account() -> Option<String> {
+    let account = mail_account_from(crate::hub_env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
+    if account.is_none() {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| tracing::info!("OMON_MAIL_ACCOUNT is not set; the mail inbox source is off"));
+    }
+    account
 }
 
 pub fn mail_list_args(account: &str, cursor: Option<&str>) -> Vec<String> {
@@ -691,11 +702,12 @@ pub async fn fetch_kind(
     match kind {
         SourceKind::Imessage => fetch_imessage_with("imsg", cursor).await.map(Some),
         SourceKind::Mail => {
-            let account =
-                mail_account_from(crate::hub_env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
+            let Some(account) = mail_account() else {
+                return Ok(None);
+            };
             fetch_mail_with("zele", cursor, &account).await.map(Some)
         }
-        SourceKind::Kakao => fetch_kakao(cursor).await.map(Some),
+        SourceKind::Kakao => fetch_kakao(cursor).await,
         SourceKind::Github => {
             if !github_enabled_from(
                 crate::hub_env::var("OMON_GITHUB_SOURCE_ENABLED")
@@ -761,14 +773,26 @@ async fn fetch_gateway(
     Ok(Some((items, newest)))
 }
 
-pub async fn fetch_kakao(cursor: Option<&str>) -> Result<(Vec<SourceItem>, String)> {
-    let base = crate::hub_env::var("OMON_PIRATETALK_URL")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_owned())
+/// The PirateTalk (KakaoTalk bridge) base URL from `OMON_PIRATETALK_URL`. There is no default:
+/// unset or blank, the KakaoTalk source is off.
+pub fn piratetalk_url_from(raw: Option<&str>) -> Option<String> {
+    raw.map(|value| value.trim().trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "https://indo.taila0cef2.ts.net".to_owned());
+}
+
+/// One collection pass of the KakaoTalk source; `None` when `OMON_PIRATETALK_URL` is not set
+/// (logged once per process).
+pub async fn fetch_kakao(cursor: Option<&str>) -> Result<Option<(Vec<SourceItem>, String)>> {
+    let Some(base) = piratetalk_url_from(crate::hub_env::var("OMON_PIRATETALK_URL").ok().as_deref())
+    else {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| {
+            tracing::info!("OMON_PIRATETALK_URL is not set; the KakaoTalk inbox source is off");
+        });
+        return Ok(None);
+    };
     let rooms = crate::hub_env::var("OMON_INBOX_KAKAO_ROOMS").ok();
-    fetch_kakao_at(&base, rooms.as_deref(), cursor).await
+    fetch_kakao_at(&base, rooms.as_deref(), cursor).await.map(Some)
 }
 
 pub async fn fetch_kakao_at(
@@ -1049,7 +1073,9 @@ async fn run_imsg_once(
 }
 
 async fn run_mail_once(sender: &tokio::sync::mpsc::Sender<InboxWatcherEvent>) -> WatcherExit {
-    let account = mail_account_from(crate::hub_env::var("OMON_MAIL_ACCOUNT").ok().as_deref());
+    let Some(account) = mail_account() else {
+        return WatcherExit::Stop;
+    };
     let args = mail_watch_command(&account);
     run_lines(
         "zele",
@@ -1310,7 +1336,15 @@ mod tests {
         assert_eq!(parse_imsg_watch_line(r#"{"rowid":12}"#), Some(12));
         assert!(!is_mail_event_line("# Watching inbox every 60s"));
         assert!(is_mail_event_line("{\"id\":\"m1\"}"));
-        assert_eq!(mail_account_from(None), MAIL_ACCOUNT_DEFAULT);
+        assert_eq!(mail_account_from(None), None);
+        assert_eq!(mail_account_from(Some(" ")), None);
+        assert_eq!(mail_account_from(Some(" me@example.com ")).as_deref(), Some("me@example.com"));
+        assert_eq!(piratetalk_url_from(None), None);
+        assert_eq!(piratetalk_url_from(Some("  ")), None);
+        assert_eq!(
+            piratetalk_url_from(Some(" https://bridge.example/ ")).as_deref(),
+            Some("https://bridge.example")
+        );
         assert_eq!(KAKAO_FIRST, Duration::from_secs(120));
         assert_eq!(GITHUB_EVERY, Duration::from_secs(300));
         assert!(github_enabled_from(Some("on")));
@@ -1410,7 +1444,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ferryx-inbox-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let script = root.join("source");
+        let script = root.join(if cfg!(windows) { "source.cmd" } else { "source" });
         std::fs::write(
             &script,
             "#!/bin/sh\nif [ \"$1\" = chats ]; then printf '%s\\n' '[{\"id\":7,\"last_message_at\":\"2026-10-22T02:00:00Z\",\"name\":\"Ada\"}]'; elif [ \"$1\" = history ]; then printf '%s\\n' '[{\"id\":\"4\",\"text\":\"ping the owner\",\"created_at\":\"2026-10-22T02:00:00Z\",\"is_from_me\":false}]'; elif [ \"$1\" = mail ]; then printf '%s\\n' '{\"items\":[{\"id\":\"m1\",\"snippet\":\"hello\",\"date\":\"2026-10-22T01:00:00Z\"}]}'; elif [ \"$2\" = graphql ]; then printf '%s\\n' '{\"data\":{\"search\":{\"nodes\":[]}}}'; else printf '%s\\n' '[]'; fi\n",
@@ -1424,6 +1458,27 @@ mod tests {
             std::fs::set_permissions(&script, perms).unwrap();
         }
         let program = script.to_string_lossy().into_owned();
+        #[cfg(windows)]
+        std::fs::write(&script, r#"@echo off
+if "%~1"=="chats" goto chats
+if "%~1"=="history" goto history
+if "%~1"=="mail" goto mail
+if "%~2"=="graphql" goto graphql
+echo []
+exit /b 0
+:chats
+echo [{"id":7,"last_message_at":"2026-10-22T02:00:00Z","name":"Ada"}]
+exit /b 0
+:history
+echo [{"id":"4","text":"ping the owner","created_at":"2026-10-22T02:00:00Z","is_from_me":false}]
+exit /b 0
+:mail
+echo {"items":[{"id":"m1","snippet":"hello","date":"2026-10-22T01:00:00Z"}]}
+exit /b 0
+:graphql
+echo {"data":{"search":{"nodes":[]}}}
+exit /b 0
+"#.replace('\n', "\r\n")).unwrap();
         let (items, _) = fetch_imessage_with(&program, None).await.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].snippet, "ping the owner");

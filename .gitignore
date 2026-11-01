@@ -4,6 +4,7 @@ src-tauri/target/
 **/*.rs.bk
 Cargo.lock
 !/src-tauri/Cargo.lock
+!/crates/ferryx-rd/Cargo.lock
 
 # Node
 node_modules/
@@ -51,3 +52,9 @@ keystore.properties
 /src-tauri/resources/mhc/payload/*
 !/src-tauri/resources/mhc/payload/.gitkeep
 /src-tauri/resources/mhc/.staging-*
+
+# LGPL FFmpeg for the remote-desktop feature: the dev/CI SDK fetched by scripts/fetch-ffmpeg.mjs
+# and the release payload staged by scripts/stage-ffmpeg.mjs (never committed)
+/src-tauri/resources/ffmpeg/sdk/
+/src-tauri/resources/ffmpeg/.staging-*
+/src-tauri/resources/ffmpeg/payload/

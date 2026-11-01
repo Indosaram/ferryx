@@ -1362,6 +1362,22 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             if let tauri::WindowEvent::Destroyed = event {
                 handle_window_destroyed(window);
             }
+            // Chromium panes on macOS are separate windows that must follow the main one.
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Moved(_)
+                        | tauri::WindowEvent::Resized(_)
+                        | tauri::WindowEvent::Focused(true)
+                )
+            {
+                if let Some(manager) =
+                    window.try_state::<std::sync::Arc<crate::browser::BrowserManager>>()
+                {
+                    crate::ipc::browser::follow_main_window(window, manager.inner());
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::WindowEvent::DragDrop(drag_event) = event {
                 if crate::ipc::debug::switch_debug_sink_enabled(
@@ -1627,6 +1643,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::paired_host::cmd_retry_paired_session,
+        crate::ipc::remote_desktop::cmd_rd_supported,
         crate::ipc::file_preview::cmd_file_preview_open,
         crate::ipc::file_preview::cmd_file_preview_open_child,
         crate::ipc::file_preview::cmd_file_preview_open_child_document,
@@ -1787,6 +1804,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_agents_detect,
         cmd_agent_session_discover,
         cmd_agent_state_reset,
+        cmd_agent_acknowledge_outcome,
         ipc::agent_integration::cmd_agent_integration_get,
         ipc::agent_integration::cmd_daemon_supervisor_get,
         ipc::agent_integration::cmd_daemon_supervisor_set,
@@ -1836,6 +1854,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::browser::adoption::cmd_browser_session_adoption,
         cmd_browser_close,
         cmd_browser_list,
+        cmd_browser_engine_status,
+        cmd_browser_engine_install,
+        cmd_browser_engine_remove,
         cmd_browser_open_external,
         cmd_browser_remote_reclaim,
         cmd_browser_remote_revoke,
@@ -1853,6 +1874,28 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         if invoke.message.command() == "cmd_retry_paired_session" {
             let handler: Box<tauri::ipc::InvokeHandler<R>> =
                 Box::new(tauri::generate_handler![crate::ipc::paired_host::cmd_retry_paired_session]);
+            return handler(invoke);
+        }
+        // Feature-gated outside the product list: a cfg attribute inside it would also end the
+        // bracketed list that registry readers such as the UI updater tests parse.
+        #[cfg(feature = "remote-desktop")]
+        if matches!(
+            invoke.message.command(),
+            "cmd_rd_connect"
+                | "cmd_rd_input"
+                | "cmd_rd_disconnect"
+                | "cmd_rd_host_state"
+                | "cmd_rd_host_set"
+                | "cmd_rd_host_respond"
+        ) {
+            let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+                crate::ipc::remote_desktop::commands::cmd_rd_connect,
+                crate::ipc::remote_desktop::commands::cmd_rd_input,
+                crate::ipc::remote_desktop::commands::cmd_rd_disconnect,
+                crate::ipc::remote_desktop_host::cmd_rd_host_state,
+                crate::ipc::remote_desktop_host::cmd_rd_host_set,
+                crate::ipc::remote_desktop_host::cmd_rd_host_respond,
+            ]);
             return handler(invoke);
         }
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]

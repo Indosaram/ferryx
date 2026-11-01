@@ -5,9 +5,9 @@ import type { AgentPrompt, AgentPromptAnswer } from "../../../lib/tauri";
 
 import { cn } from "../../../lib/cn";
 import {
-  ATTENTION_KIND_LABEL,
   ATTENTION_STATE_LABEL,
   ATTENTION_STATE_SHORT_LABEL,
+  attentionKindLabel,
   countAttentionRows,
   formatAttentionTime,
   groupAttentionRows,
@@ -363,7 +363,7 @@ function AttentionInboxRow({
             data-testid={row.supervisorLabel ? "attention-row-supervisor" : undefined}
             className={cn("min-w-0 truncate rounded px-1.5 py-px text-[10.5px] font-semibold", row.supervisorLabel ? "" : "shrink-0", KIND[row.state])}
           >
-            {row.supervisorLabel ?? ATTENTION_KIND_LABEL[row.state]}
+            {row.supervisorLabel ?? attentionKindLabel(row)}
           </span>
         </span>
         {row.text ? (

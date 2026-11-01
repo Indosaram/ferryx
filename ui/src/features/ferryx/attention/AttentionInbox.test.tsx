@@ -127,4 +127,19 @@ describe("AttentionInbox", () => {
     expect(empty).toHaveTextContent("Nobody is waiting on you.");
     expect(empty).not.toHaveTextContent(/\d+ (open )?sessions?/);
   });
+
+  it("labels a needs-you row by the program's blocked kind and keeps the plain label without one", () => {
+    render(<AttentionInbox rows={[row({ id: "p", state: "needs-you", kind: "permission" }), waiting]} onOpen={vi.fn()} now={NOW} />);
+    const needsYou = screen.getByRole("region", { name: "Needs input" });
+    expect(within(needsYou).getByText("Permission")).toBeInTheDocument();
+    expect(within(needsYou).getByText("Waiting")).toBeInTheDocument();
+  });
+
+  it("renders HTML in a program's detail as literal text", () => {
+    const { container } = render(
+      <AttentionInbox rows={[row({ id: "h", state: "needs-you", kind: "question", text: "<b>x</b>" })]} onOpen={vi.fn()} now={NOW} />,
+    );
+    expect(screen.getByTestId("attention-row-text").textContent).toBe("<b>x</b>");
+    expect(container.querySelector("b")).toBeNull();
+  });
 });

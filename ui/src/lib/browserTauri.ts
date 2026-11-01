@@ -35,6 +35,7 @@ export type BrowserSessionCreatedPayload = {
     zoomFactor: number;
     loadError?: string | null;
     visible: boolean;
+    engine?: import("./types").BrowserEngine;
   };
   workspaceId?: string | null;
 };
@@ -426,6 +427,24 @@ export async function listBrowsers(): Promise<BrowserSessionSummary[]> {
   return invoke<BrowserSessionSummary[]>("cmd_browser_list");
 }
 
+/** The on-demand Chromium engine: "unsupported" on platforms without a build. */
+export type BrowserEngineStatus =
+  | { state: "unsupported" }
+  | { state: "notInstalled" }
+  | { state: "installed"; version: string };
+
+export async function getBrowserEngineStatus(): Promise<BrowserEngineStatus> {
+  return invoke<BrowserEngineStatus>("cmd_browser_engine_status");
+}
+
+export async function installBrowserEngine(): Promise<BrowserEngineStatus> {
+  return invoke<BrowserEngineStatus>("cmd_browser_engine_install");
+}
+
+export async function removeBrowserEngine(): Promise<BrowserEngineStatus> {
+  return invoke<BrowserEngineStatus>("cmd_browser_engine_remove");
+}
+
 export async function importBrowserCookies(profileId: string, filePath: string): Promise<number> {
   const result = await invoke<{ importedCount: number }>("cmd_browser_import_cookies", {
     request: { profileId, filePath },
@@ -592,6 +611,20 @@ export function onBrowserPopupCloseRequested(
   listener: (payload: BrowserCloseRequestedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<BrowserCloseRequestedPayload>(BROWSER_CLOSE_REQUESTED_EVENT, (event) => listener(event.payload));
+}
+
+export type BrowserStateChangedPayload = {
+  browserId: string;
+  url: string;
+  title?: string | null;
+  engine?: import("./types").BrowserEngine;
+};
+
+/** The host's view of a browser tab changed: url, title, loading or navigation state. */
+export function onBrowserStateChanged(
+  listener: (payload: BrowserStateChangedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserStateChangedPayload>("browser_state_changed", (event) => listener(event.payload));
 }
 
 export const BROWSER_TAB_SWITCH_EVENT = "browser_tab_switch";

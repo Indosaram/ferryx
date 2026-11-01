@@ -1803,6 +1803,11 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
         gateway: Some(Arc::clone(server.remote_state())),
     });
     let hub = Hub::open(config.clone(), bridge.clone()).await.map_err(|error| error.to_string())?;
+    let directive_judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env())
+        .with_pool(hub.pool.clone());
+    ferryx_hub::owner_directives::current(&hub.pool, &directive_judge)
+        .await
+        .map_err(|error| format!("owner directives initialization failed: {error}"))?;
     if let Err(error) = ferryx_hub::chat::reply::flush_pending(&hub.pool).await {
         tracing::warn!(%error, "stored chat replies were not flushed");
     }
@@ -2303,6 +2308,8 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     }
     // omo-gateway's lead is the owner's Slack DM session, not a lane name: action-loop items,
     // owner alerts and cron problems queued for "meta" were never delivered.
+    // There is no built-in owner: without one (HubConfig::load logged the config error) the
+    // owner DM cannot be found or opened, so the lead is OMON_LANE_DEFAULT_LEAD or the fallback.
     let lead_fallback = launch
         .config
         .meta_session_id
@@ -2313,7 +2320,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         .owner_slack_id
         .clone()
         .filter(|owner| !owner.trim().is_empty())
-        .unwrap_or_else(|| ferryx_hub::config::DEFAULT_SLACK_OWNER_ID.to_owned());
+        .unwrap_or_default();
     if ferryx_hub::autonomy::action_loop_enabled() {
         let action_pool = launch.hub.pool.clone();
         let (owner, fallback) = (lead_owner.clone(), lead_fallback.clone());
@@ -2591,6 +2598,34 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                             let reply = ferryx_hub::control::approve_rerun_reply(problem).await;
                             let mut stream = reader.into_inner();
                             let _ = stream.write_all(reply.as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportStatus(id)) => {
+                            let reply = ferryx_hub::control::report_status_reply(&launch.hub.pool, id).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportAdopt(request)) => {
+                            let reply = ferryx_hub::report_adoption::reply(&launch.hub.pool, &request).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::ReportMutate(request)) => {
+                            let reply = ferryx_hub::report_mutation::reply(&launch.hub.pool, &request).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
+                            return;
+                        }
+                        Ok(ferryx_hub::control::ControlOp::Report(request)) => {
+                            let reply = ferryx_hub::control::report_reply(
+                                &launch.hub.pool,
+                                &launch.hub.owner_session().storage_key(),
+                                &request,
+                            ).await;
+                            let mut stream = reader.into_inner();
+                            let _ = stream.write_all(format!("{reply}\n").as_bytes()).await;
                             return;
                         }
                         Err(_) => "{\"status\":\"failed\",\"error\":\"expected stop, start, status, approve_rerun, cutover, rollback, or intake\"}\n",

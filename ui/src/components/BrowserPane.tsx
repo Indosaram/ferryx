@@ -46,6 +46,7 @@ type BrowserStateChangedPayload = {
   canGoForward: boolean;
   zoomFactor: number;
   loadError?: string | null;
+  engine?: BrowserTab["engine"];
 };
 
 function suggestedDownloadName(url: string): string {
@@ -164,6 +165,7 @@ export function BrowserPane({
         canGoBack: payload.canGoBack,
         canGoForward: payload.canGoForward,
         zoomFactor: payload.zoomFactor,
+        engine: payload.engine ?? current.engine,
         loadError: payload.loadError ?? null,
       }));
       // Private-profile tabs are incognito: never persist their URLs or titles,
@@ -399,7 +401,10 @@ export function BrowserPane({
   return (
     <div className="flex flex-col w-full h-full bg-[#4b4b4b] overflow-hidden">
       <div ref={toolbarRef}>
-        <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} />
+        {/* A Chromium tab draws its own toolbar (address bar, extensions, menu) inside the pane. */}
+        {liveTab.engine === "chromium" ? null : (
+          <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} />
+        )}
         {findOpen ? (
           <div className="flex items-center gap-1.5 border-b border-border bg-popover px-3 py-1.5" data-testid="browser-find-bar">
             <input

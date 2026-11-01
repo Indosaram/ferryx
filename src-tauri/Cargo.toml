@@ -1,6 +1,6 @@
 [package]
 name = "ferryx"
-version = "2026.1030.1"
+version = "2026.1101.1"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
 authors = ["Ferryx Contributors"]
 license-file = "../LICENSE"
@@ -55,7 +55,7 @@ required-features = ["desktop"]
 tauri-build = { version = "2", features = [] }
 
 [features]
-default = ["desktop", "hub-slack", "hub-discord", "hub-voice"]
+default = ["desktop", "hub-slack", "hub-discord", "hub-voice", "remote-desktop"]
 # The Tauri GUI stack: tauri and its plugins, rodio playback, and on Linux GTK, WebKitGTK and
 # JavaScriptCore. `ferryx-cli`, `ferryx-relay` and `ferryx-account` build without it
 # (`--no-default-features`), so the Linux CLI links none of the desktop libraries.
@@ -95,9 +95,27 @@ native-terminal = [
 hub-slack = ["ferryx-hub/hub-slack"]
 hub-discord = ["ferryx-hub/hub-discord"]
 hub-voice = ["ferryx-hub/hub-voice"]
+# Remote desktop (ferryx-rd engine): the daemon-owned host, the gateway RD routes and the GUI
+# client. Part of every desktop build. It links FFmpeg 9 (the pinned LGPL SDK that
+# scripts/fetch-ffmpeg.mjs fetches and .cargo/config.toml points FFMPEG_DIR at), Opus and the
+# platform capture stacks, so the headless `ferryx-cli`, `ferryx-relay` and `ferryx-account`
+# builds use `--no-default-features` to leave it out.
+remote-desktop = [
+    "dep:ferryx-rd-proto",
+    "dep:ferryx-rd-net",
+    "dep:ferryx-rd-host",
+    "dep:ferryx-rd-decode",
+    "dep:ferryx-rd-app",
+]
 
 [dependencies]
 ferryx-hub = { path = "../crates/ferryx-hub" }
+ferryx-rd-proto = { path = "../crates/ferryx-rd/ferryx-rd-proto", optional = true }
+ferryx-rd-net = { path = "../crates/ferryx-rd/ferryx-rd-net", optional = true, default-features = false }
+ferryx-rd-host = { path = "../crates/ferryx-rd/ferryx-rd-host", optional = true, default-features = false }
+ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg"] }
+ferryx-rd-app = { path = "../crates/ferryx-rd/ferryx-rd-app", optional = true, features = ["ffmpeg"] }
+ferryx-browser-engine-protocol = { path = "../crates/browser-engine-protocol" }
 async-trait = "0.1"
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
@@ -130,6 +148,9 @@ blake2 = "0.10"
 rand = "0.8"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 sha2 = "0.10"
+# Unpacks the on-demand Chromium engine (browser/engine_install.rs). Same version the
+# updater plugin already builds.
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
 hmac = "=0.12.1"
 snow = "0.9"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
@@ -273,6 +294,8 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
@@ -314,5 +337,21 @@ strip = "none"
 # A Linux debug binary is ~900 MB, and unoptimized sha2 takes ~14 s to hash it, past the
 # 10 s readiness bound. `test` inherits this from `dev`.
 [profile.dev.package.sha2]
+opt-level = 3
+
+# ffmpeg-sys-next (default feature `remote-desktop`) runs bindgen over the FFmpeg headers in its
+# build script. On Windows an unoptimized bindgen overflows the build script's 1 MiB main
+# thread stack (STATUS_STACK_OVERFLOW); optimized frames are small enough.
+[profile.dev.package.bindgen]
+opt-level = 3
+
+# The remote desktop viewer (default feature `remote-desktop`) converts every decoded NV12 frame to RGB
+# and encodes it as JPEG. Unoptimized, that costs over a second per desktop-sized frame, so a
+# dev build presents about one frame per second. Optimizing just these packages keeps the
+# viewer at its frame-rate cap.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.ferryx-rd-app]
 opt-level = 3
 

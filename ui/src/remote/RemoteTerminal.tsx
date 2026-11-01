@@ -31,6 +31,7 @@ import { BUILD_STAMP } from "../lib/buildStamp";
 import { composeJamoRuns, isUncomposedJamoRun } from "./hangulComposition";
 import { remoteSocketUrl, SocketTicketError } from "./remoteClient";
 import { userFacingError } from "./userFacingError";
+import { parseMachineAgentStateFrame } from "./remoteSessionInventory";
 import { MAX_OUTBOUND_BUFFER_BYTES } from "../lib/terminalTransport/remoteTransport";
 import { buildAttachSocketUrl, getOrCreateAttachKey, type AttachKeyPair } from "./accountAttach";
 import {
@@ -966,6 +967,31 @@ export function RemoteTerminal({
     let identityConfirmed = false;
     let outcomeGatesRetry = false;
     let latestValidatedOutcome: TerminalOutcomeFrame | null = null;
+    // An outcome is only acknowledged while the user can see it; a hidden tab keeps
+    // the latest one pending and acknowledges it when it becomes visible again.
+    let outcomeAckPending = false;
+    const acknowledgeOutcome = (
+      socket: Pick<WebSocketLike, "send">,
+      generation: string | null,
+    ) => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        outcomeAckPending = true;
+        return;
+      }
+      outcomeAckPending = false;
+      socket.send(JSON.stringify({
+        type: "acknowledgeAgentOutcome",
+        ...(machineTransport ? { generation } : {}),
+      }));
+    };
+    const flushPendingOutcomeAck = () => {
+      if (disposed || !outcomeAckPending) return;
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== 1 || !isTerminalReadyRef.current || createLocalSocket) return;
+      const generation = machineGenerationRef.current;
+      if (machineTransport && generation === null) return;
+      acknowledgeOutcome(socket, generation);
+    };
     let observedSocketId: string | null = null;
     let staleCompletionsRejected = 0;
     let exitSettlements: number | null = null;
@@ -1280,6 +1306,24 @@ export function RemoteTerminal({
           if (!data.startsWith('{"type":"grid')) {
             try {
               const parsed = JSON.parse(data);
+              if (parsed?.type === "agent_state") {
+                const state = parseMachineAgentStateFrame(parsed);
+                const epoch = daemonEpoch == null ? null : String(daemonEpoch).trim();
+                if (
+                  state?.outcome &&
+                  state.sessionId === socketRequest.sessionId &&
+                  (!epoch || state.daemonEpoch === epoch) &&
+                  isTerminalReadyRef.current &&
+                  socket.readyState === 1 &&
+                  !createLocalSocket
+                ) {
+                  const generation = machineGenerationRef.current;
+                  if (!machineTransport || generation !== null) {
+                    acknowledgeOutcome(socket, generation);
+                  }
+                }
+                return;
+              }
               if (parsed?.type === "remoteStatus" && typeof parsed.generation === "string") {
                 generationRef.current = parsed.generation;
                 lastSentGenerationRef.current = null;
@@ -1370,6 +1414,7 @@ export function RemoteTerminal({
                   backoffAttempt = 0;
                   setConnected(true);
                   machineGenerationRef.current = parsed.generation;
+                  acknowledgeOutcome(socket, parsed.generation);
                   lastSentMachineGenerationRef.current = null;
                   flushOutboundBuffer();
                   requestResizeRef.current();
@@ -1399,6 +1444,9 @@ export function RemoteTerminal({
             isTerminalReadyRef.current = true;
             backoffAttempt = 0;
             setConnected(true);
+            if (!createLocalSocket) {
+              acknowledgeOutcome(socket, null);
+            }
             flushOutboundBuffer();
           }
           setGrid((current) => applyGridFrame(current, frame));
@@ -1566,6 +1614,7 @@ export function RemoteTerminal({
     dial();
     window.addEventListener("online", recover);
     document.addEventListener("visibilitychange", recover);
+    document.addEventListener("visibilitychange", flushPendingOutcomeAck);
 
     return () => {
       cancelAttemptObservation();
@@ -1574,6 +1623,7 @@ export function RemoteTerminal({
       observation?.dispose();
       window.removeEventListener("online", recover);
       document.removeEventListener("visibilitychange", recover);
+      document.removeEventListener("visibilitychange", flushPendingOutcomeAck);
       wheelRemainderRowsRef.current = 0;
       lastSentGenerationRef.current = null;
       generationRef.current = null;

@@ -90,6 +90,19 @@ export function SidebarWorktreeRow({
         >
           {node.label}
         </span>
+        {live.outcome && !live.supervisorTyping && !(touch && (busy || statusText)) ? (
+          <span
+            data-testid="worktree-outcome-mark"
+            data-outcome={live.outcome}
+            className={cn(
+              "ml-auto shrink-0 leading-none",
+              touch ? "text-xs" : "text-[10px]",
+              live.outcome === "error" ? "text-destructive" : "text-status-success",
+            )}
+          >
+            {live.outcome}
+          </span>
+        ) : null}
         {touch && (busy || statusText) ? (
           <span data-testid="worktree-row-reason" className="ml-auto inline-flex min-w-0 shrink-0 items-center gap-1 truncate text-xs text-chat-foreground-secondary">
             {busy ? <LoaderCircle aria-hidden="true" className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" /> : null}
@@ -108,7 +121,7 @@ export function SidebarWorktreeRow({
             state={live.slot}
             host={node.hostLabel ?? undefined}
             title={slotTitle}
-            className="ml-auto min-w-0 truncate"
+            className={cn("min-w-0 truncate", live.outcome ? null : "ml-auto")}
             density={density}
             data-testid={live.slot ? "worktree-status-dot" : "remote-machine-badge"}
           />

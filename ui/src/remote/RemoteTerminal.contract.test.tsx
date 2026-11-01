@@ -149,6 +149,8 @@ function establishReady(ws = socket()) {
       }),
     });
   });
+  expect(ws.send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
+  ws.send.mockClear();
 }
 
 describe("remote terminal grid contract", () => {
@@ -194,7 +196,7 @@ describe("remote terminal grid contract", () => {
       });
     });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
-    expect(socket().send).not.toHaveBeenCalled();
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
   });
 
   it("fences owner outcomes and coalesces Retry through the socket owner", async () => {
@@ -455,7 +457,7 @@ describe("remote terminal grid contract", () => {
       });
     });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Live"));
-    expect(socket().send).not.toHaveBeenCalled();
+    expect(socket().send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
   });
 
   it("builds account tunnel socket URL with daemonEpoch and render=grid but no client geometry", async () => {
@@ -1208,6 +1210,8 @@ describe("remote terminal grid contract", () => {
     });
     expect(onSocketLifecycle).toHaveBeenCalledWith("session-123", "open");
     expect(surface().querySelectorAll("[data-grid-line]")).toHaveLength(frameRows);
+    expect(current.send.mock.calls).toEqual([[JSON.stringify({ type: "acknowledgeAgentOutcome" })]]);
+    current.send.mockClear();
 
     fireEvent.wheel(surface(), { deltaMode, deltaY });
 

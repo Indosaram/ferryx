@@ -75,6 +75,7 @@ import { showNotificationPermissionHint } from "./lib/notificationPermissionHint
 import { getCurrentVersion } from "./lib/updater";
 import { GettingStartedChecklist } from "./components/onboarding/GettingStartedChecklist";
 import { DaemonConnectionBanner } from "./components/DaemonConnectionBanner";
+import { RemoteDesktopConsentDialog } from "./components/settings/remote/RemoteDesktopHostSection";
 import { InsecureTransportBanner } from "./components/InsecureTransportBanner";
 import type { SectionId } from "./components/settings/types";
 import type { MachineProjectTarget, RemoteContext } from "./lib/machineNavigation";
@@ -843,6 +844,7 @@ function WorkspaceApp({
     createBrowserTab,
     openFilePreviewTab,
     openChangesTab,
+    openRemoteDesktopTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab,
@@ -3210,6 +3212,13 @@ function WorkspaceApp({
     setAddProjectTarget(undefined);
     setIsAddProjectOpen(true);
   }, []);
+  const handleOpenRemoteDesktop = useCallback((hostId: string, label: string) => {
+    if (activeRemoteHostRef.current) return;
+    setIsSettingsOpen(false);
+    setSettingsInitialSection(undefined);
+    setSettingsRemoteContext(undefined);
+    openRemoteDesktopTab(hostId, label);
+  }, [openRemoteDesktopTab]);
   // Settings > Remote hands one machine to Add Project; the dialog routes pairedDaemon to its form.
   const handleOpenMachineProject = useCallback((target: MachineProjectTarget) => {
     if (activeRemoteHostRef.current) return;
@@ -4324,6 +4333,7 @@ function WorkspaceApp({
         >
           <SettingsDialog open initialSection={settingsInitialSection} onClose={handleCloseSettings}
             onOpenSshProject={handleOpenSshProject} onOpenMachineProject={handleOpenMachineProject}
+            onOpenRemoteDesktop={handleOpenRemoteDesktop}
             remoteContext={settingsRemoteContext} />
         </Suspense>
       ) : null}
@@ -4332,6 +4342,7 @@ function WorkspaceApp({
           <SystemResourcesDialog onClose={() => setIsResourcesOpen(false)} />
         </Suspense>
       ) : null}
+      <RemoteDesktopConsentDialog />
       {!activeRemoteHost && onboardingSteps && onboardingSteps.length > 0 ? (
         <Suspense fallback={null}>
           <WelcomeWizard

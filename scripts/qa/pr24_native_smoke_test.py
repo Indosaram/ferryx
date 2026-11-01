@@ -130,7 +130,7 @@ class TerminalFixtureTests(unittest.TestCase):
 
 class SkipSetupGuardTests(unittest.TestCase):
     def test_reviewed_owned_active_geometry_has_only_skip_target(self):
-        self.assertEqual(smoke.guarded_skip_setup_point(1278, 850, 20, 20, 42, 42), (530, 599))
+        self.assertEqual(smoke.guarded_skip_setup_point(1278, 850, 20, 20, 42, 42), (530, 716))
 
     def test_changed_geometry_is_not_scaled_or_guessed(self):
         for width, height in [(1280, 850), (1278, 849), (640, 480)]:

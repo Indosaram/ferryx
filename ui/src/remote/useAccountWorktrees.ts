@@ -18,6 +18,7 @@ import { getOrCreateInstallationId } from "../lib/storageKeys";
 import { type RemoteContextOption } from "./RemoteSessionList";
 import {
   applySessionActivity,
+  acknowledgeSessionOutcome,
   mergeSessionInventory,
   observationsFromContextTabs,
   parseInventoryEvent,
@@ -86,6 +87,8 @@ export interface UseAccountWorktreesResult {
   noteSessionsPayload: (machineId: string, raw: unknown) => void;
   /** Records observed agent activity for one session without inventing rows. */
   noteSessionActivity: (machineId: string, observation: SessionActivityObservation) => void;
+  /** Drops one session's done/error mark locally: the user opened it. */
+  acknowledgeOutcome: (machineId: string, sessionId: string) => void;
   /** Records published desktop context tabs as activity observations. */
   noteContextTabs: (machineId: string, tabs: unknown) => void;
   retryMachine: (machineId: string) => Promise<void>;
@@ -666,6 +669,14 @@ export function useAccountWorktrees(
     });
   }, []);
 
+  const acknowledgeOutcome = useCallback((machineId: string, sessionId: string) => {
+    setSessionInventories((prev) => {
+      const current = prev[machineId];
+      const next = acknowledgeSessionOutcome(current ?? null, sessionId);
+      return next && next !== current ? { ...prev, [machineId]: next } : prev;
+    });
+  }, []);
+
   const noteContextTabs = useCallback((machineId: string, tabs: unknown) => {
     const observations = observationsFromContextTabs(tabs);
     if (observations.length === 0) return;
@@ -861,6 +872,7 @@ export function useAccountWorktrees(
     noteSessionActivity,
     noteContextTabs,
     retryMachine,
+    acknowledgeOutcome,
     acquireConnection,
     closeAllExcept,
     peekConnection,

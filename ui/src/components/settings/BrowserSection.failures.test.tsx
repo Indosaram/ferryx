@@ -14,6 +14,7 @@ vi.mock("../../lib/browserTauri", async (importOriginal) => ({
   setBrowserZoom: vi.fn(async () => {
     throw new Error("zoom refused");
   }),
+  getBrowserEngineStatus: vi.fn(async () => ({ state: "unsupported" as const })),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({

@@ -32,5 +32,7 @@ describe("EmptyWorkspaceView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new browser tab/i }));
     expect(onNewBrowserTab).toHaveBeenCalledTimes(1);
+    // The click event must not reach the handler, whose first argument is the URL to open.
+    expect(onNewBrowserTab).toHaveBeenCalledWith();
   });
 });

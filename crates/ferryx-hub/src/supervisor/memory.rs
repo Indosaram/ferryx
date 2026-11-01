@@ -34,7 +34,8 @@ pub const MEMORY_CONTENT_RETAINED: &str = "MEMORY_CONTENT_RETAINED";
 pub const MEMORY_REFUSED: &str = "MEMORY_REFUSED";
 
 /// Line prefixes an owner uses to mark text as an exception for this one task. Such a line is
-/// task context only: it is never sent to learning.
+/// task context only: it is never sent to learning. Inbound parsing is language-tolerant: every
+/// form is accepted whatever the owner's configured language.
 pub const TASK_ONLY_PREFIXES: [&str; 6] = [
     "once:",
     "this time only:",
@@ -658,4 +659,21 @@ pub async fn recent_ingests(pool: &SqlitePool, limit: i64) -> Result<Vec<Value>,
                 "projectId": project, "text": body, "state": state, "error": error, "createdAt": at})
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_only_prefixes_are_recognized_in_every_owner_language() {
+        let text = "Remember the staging host.\nOnce: skip the e2e suite\n이번만: 커밋 생략";
+        let expected = (
+            "Remember the staging host.".to_owned(),
+            vec!["skip the e2e suite".to_owned(), "커밋 생략".to_owned()],
+        );
+        assert_eq!(split_task_only(text), expected);
+        let english = crate::locale::with(crate::locale::OwnerLocale::english_utc(), || split_task_only(text));
+        assert_eq!(english, expected);
+    }
 }

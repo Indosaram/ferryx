@@ -10,6 +10,7 @@
         "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
+        "acceptFirstMouse": true,
         "hiddenTitle": false,
         "titleBarStyle": "Visible",
         "transparent": false
