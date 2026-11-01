@@ -32,14 +32,18 @@ pub const LAST_RUN_KEY: &str = "supervisor_memory_import_last_run";
 
 /// Markers of text the hub or a harness wrote, never the owner: a supervisor dispatch, an
 /// untrusted fence around relayed chat text, a lane brief and its completion claim, an
-/// injected AGENTS.md block, and the summary that opens a compacted, continued session.
-const HUB_MARKERS: [&str; 6] = [
+/// injected AGENTS.md block, the summary that opens a compacted, continued session, and the
+/// lane event batch, channel context and channel topic a legacy Slack turn carries.
+const HUB_MARKERS: [&str; 9] = [
     "Owner request (verbatim):",
     "```untrusted",
     "[CLAIM_DONE]",
     "Claim completion with a standalone line",
     "# AGENTS.md instructions",
     "This session is being continued",
+    "[LANE_EVENT]",
+    "[Recent channel context]",
+    "[Channel Topic]",
 ];
 
 /// Token prefixes of credentials (OpenAI/Anthropic keys, GitHub tokens, Slack bot and app

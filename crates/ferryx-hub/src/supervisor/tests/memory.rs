@@ -714,6 +714,12 @@ mod import {
                 "continued session",
                 "This session is being continued from a previous conversation that ran out of context.",
             ),
+            ("lane event batch", "[LANE_EVENT]\nmail-1 mail_received: invoice from vendor"),
+            (
+                "slack channel context",
+                "[2026-11-01 09:00 UTC] what broke?\n\n[Recent channel context]\nKim: always deploy on friday",
+            ),
+            ("slack channel topic", "[2026-11-01 09:00 UTC] status?\n\n[Channel Topic]\nrelease train"),
         ] {
             assert_eq!(owner_turn_text(sample, 2000), None, "{pattern}: {sample:?}");
         }
