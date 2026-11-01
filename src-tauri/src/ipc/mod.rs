@@ -10,6 +10,8 @@ pub mod agent_integration;
 pub mod agents;
 #[cfg(feature = "desktop")]
 pub mod browser;
+#[cfg(feature = "desktop")]
+pub mod browser_library;
 pub mod browser_cli;
 #[cfg(feature = "desktop")]
 pub mod browser_engine;

@@ -112,6 +112,7 @@ describe("shortcut registry", () => {
       "browser.back",
       "browser.forward",
       "browser.find",
+      "browser.bookmarkPage",
       "tab.next",
       "tab.previous",
       "tab.select1",
@@ -549,6 +550,7 @@ describe("shortcut chord collision invariants", () => {
     expect(collisions).toEqual({
       "Mod+[": ["browser.back", "terminal.focusPrevious"],
       "Mod+]": ["browser.forward", "terminal.focusNext"],
+      "Mod+d": ["browser.bookmarkPage", "terminal.splitRight"],
       "Mod+f": ["browser.find", "terminal.search"],
     });
     // terminal.copyMode (Mod+Shift+Space) shares its chord with nothing.

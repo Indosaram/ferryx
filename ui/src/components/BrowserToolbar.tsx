@@ -12,6 +12,11 @@ import {
   History as HistoryIcon,
   Bug,
   MousePointer2,
+  Star,
+  Search as SearchIcon,
+  AppWindow,
+  Bookmark as BookmarkIcon,
+  Library as LibraryIcon,
 } from "lucide-react";
 import {
   BROWSER_SHORTCUT_EVENT,
@@ -39,13 +44,21 @@ import {
 } from "../lib/browserTauri";
 import { BrowserDesignFeedbackPopover } from "./BrowserDesignFeedbackPopover";
 import {
-  BROWSER_HISTORY_EVENT,
-  clearBrowserHistory,
-  loadBrowserHistory,
-  searchBrowserHistory,
-  type BrowserHistoryEntry,
-} from "../lib/browserHistory";
-import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, useBrowserSettings } from "../lib/browserSettings";
+  addBookmark,
+  clearAllBrowserHistory,
+  deleteBookmark,
+  fetchSearchSuggestions,
+  findBookmarkByUrl,
+  listHostHistory,
+  onBrowserLibraryChanged,
+  openBrowserLibrary,
+  rankOmniboxSuggestions,
+  useBookmarks,
+  type HostHistoryEntry,
+  type OmniboxSuggestion,
+} from "../lib/browserLibrary";
+import { requestSwitchToBrowserTab } from "../lib/browserLibrarySync";
+import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, searchUrlFor, useBrowserSettings } from "../lib/browserSettings";
 import { isHardReloadSupportedPlatform } from "../lib/shortcuts";
 import type { BrowserTab } from "../lib/types";
 
@@ -74,6 +87,8 @@ interface BrowserToolbarProps {
   onToggleElementPick?: () => void;
   elementPicking?: boolean;
   designFeedbackTargets?: DesignFeedbackTarget[];
+  /** Other open browser tabs, offered by the omnibox as "switch to tab". */
+  openTabs?: Array<{ browserId: string; url: string; title: string | null }>;
 }
 
 export function BrowserToolbar({
@@ -85,6 +100,7 @@ export function BrowserToolbar({
   onToggleElementPick,
   elementPicking: elementPickingProp,
   designFeedbackTargets = [],
+  openTabs = [],
 }: BrowserToolbarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const omniboxId = useId();
@@ -98,7 +114,12 @@ export function BrowserToolbar({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [omniboxOpen, setOmniboxOpen] = useState(false);
   const [selectedHistoryIndex, setSelectedHistoryIndex] = useState(-1);
-  const [historyEntries, setHistoryEntries] = useState<BrowserHistoryEntry[]>(loadBrowserHistory);
+  // Recent pages (host store) for the History menu and for the omnibox before typing.
+  const [historyEntries, setHistoryEntries] = useState<HostHistoryEntry[]>([]);
+  // Host matches for the typed text, ranked by frecency.
+  const [historyMatches, setHistoryMatches] = useState<HostHistoryEntry[]>([]);
+  const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
+  const { tree: bookmarkTree } = useBookmarks();
   const [snapshotCapability, setSnapshotCapability] = useState<BrowserSnapshotCapability | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [designSnapshot, setDesignSnapshot] = useState<BrowserDesignSnapshot | null>(null);
@@ -114,10 +135,19 @@ export function BrowserToolbar({
   // keeps the control as-is; a reported capability enables picking only when `pick` is true.
   const elementPickSupported = snapshotCapability === null || snapshotCapability.pick === true;
 
-  const omniboxEntries = useMemo(() => {
-    if (!settings.rememberBrowsingHistory) return [];
-    return searchBrowserHistory(historyEntries, historyQuery, 8);
-  }, [historyEntries, historyQuery, settings.rememberBrowsingHistory]);
+  const omniboxEntries: OmniboxSuggestion[] = useMemo(() => {
+    const typed = historyQuery.trim();
+    const history = settings.rememberBrowsingHistory ? (typed ? historyMatches : historyEntries) : [];
+    if (!typed && history.length === 0) return [];
+    return rankOmniboxSuggestions(historyQuery, {
+      history,
+      bookmarks: bookmarkTree.bookmarks,
+      tabs: openTabs,
+      searchSuggestions: typed && settings.searchSuggestions ? searchSuggestions : [],
+      currentBrowserId: tab.browserId,
+    }, 8);
+  }, [bookmarkTree.bookmarks, historyEntries, historyMatches, historyQuery, openTabs, searchSuggestions, settings.rememberBrowsingHistory, settings.searchSuggestions, tab.browserId]);
+  const currentBookmark = useMemo(() => findBookmarkByUrl(bookmarkTree, tab.url), [bookmarkTree, tab.url]);
 
   useEffect(() => {
     if (elementPickingProp !== undefined) setElementPicking(elementPickingProp);
@@ -143,15 +173,76 @@ export function BrowserToolbar({
     setZoomFactor(tab.zoomFactor ?? 1.0);
   }, [tab.browserId, tab.zoomFactor]);
 
+  // History lives in the host store; any window's visit refreshes the recent list.
+  const refreshRecentHistory = useRef(() => undefined as void);
+  refreshRecentHistory.current = () => {
+    if (!settings.rememberBrowsingHistory) {
+      setHistoryEntries([]);
+      return;
+    }
+    void Promise.resolve()
+      .then(() => listHostHistory("", undefined, 50))
+      .then((entries) => setHistoryEntries(entries ?? []))
+      .catch(() => setHistoryEntries([]));
+  };
   useEffect(() => {
-    const syncHistory = () => setHistoryEntries(loadBrowserHistory());
-    window.addEventListener(BROWSER_HISTORY_EVENT, syncHistory);
-    window.addEventListener("storage", syncHistory);
+    refreshRecentHistory.current();
+  }, [settings.rememberBrowsingHistory]);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    void Promise.resolve()
+      .then(() => onBrowserLibraryChanged((kind) => {
+        if (kind === "history") refreshRecentHistory.current();
+      }))
+      .then((cleanup) => {
+        if (disposed) cleanup?.();
+        else unlisten = cleanup;
+      })
+      .catch(() => undefined);
     return () => {
-      window.removeEventListener(BROWSER_HISTORY_EVENT, syncHistory);
-      window.removeEventListener("storage", syncHistory);
+      disposed = true;
+      unlisten?.();
     };
   }, []);
+
+  // Typed text: host history matches, and (opt-in) search-engine suggestions. The latest query
+  // wins; a failed or offline suggest call leaves local suggestions only.
+  useEffect(() => {
+    const query = historyQuery.trim();
+    if (!query) {
+      setHistoryMatches([]);
+      setSearchSuggestions([]);
+      return;
+    }
+    let stale = false;
+    if (settings.rememberBrowsingHistory) {
+      void Promise.resolve()
+        .then(() => listHostHistory(query, undefined, 50))
+        .then((entries) => { if (!stale) setHistoryMatches(entries ?? []); })
+        .catch(() => { if (!stale) setHistoryMatches([]); });
+    }
+    if (settings.searchSuggestions) {
+      void Promise.resolve()
+        .then(() => fetchSearchSuggestions(settings.searchEngine, query))
+        .then((items) => { if (!stale) setSearchSuggestions(items ?? []); })
+        .catch(() => { if (!stale) setSearchSuggestions([]); });
+    }
+    return () => {
+      stale = true;
+    };
+  }, [historyQuery, settings.rememberBrowsingHistory, settings.searchEngine, settings.searchSuggestions]);
+
+  const toggleBookmark = async () => {
+    if (!/^(https?|file):/i.test(tab.url)) return;
+    try {
+      if (currentBookmark) await deleteBookmark(currentBookmark.id);
+      else await addBookmark(tab.title?.trim() || tab.url, tab.url);
+      setActionError(null);
+    } catch (error) {
+      setActionError(actionFailureMessage("Bookmark", error));
+    }
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -221,8 +312,8 @@ export function BrowserToolbar({
 
   // The shortcut listener must not re-subscribe on every render (parents pass inline callbacks),
   // so it reads the latest handlers through a ref instead of depending on them.
-  const shortcutHandlersRef = useRef({ onReload, goBack: handleGoBack, goForward: handleGoForward });
-  shortcutHandlersRef.current = { onReload, goBack: handleGoBack, goForward: handleGoForward };
+  const shortcutHandlersRef = useRef({ onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark });
+  shortcutHandlersRef.current = { onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark };
 
   useEffect(() => {
     const runShortcut = (action: BrowserShortcutAction) => {
@@ -234,7 +325,10 @@ export function BrowserToolbar({
           setHistoryQuery("");
           setHistoryOpen(false);
           setSelectedHistoryIndex(-1);
-          if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
+          setOmniboxOpen(true);
+          break;
+        case "bookmark-page":
+          void handlers.toggleBookmark();
           break;
         case "reload":
           handlers.onReload();
@@ -326,10 +420,27 @@ export function BrowserToolbar({
     onNavigate(url);
   };
 
+  const acceptSuggestion = (suggestion: OmniboxSuggestion) => {
+    if (suggestion.kind === "tab" && suggestion.browserId) {
+      inputDirtyRef.current = false;
+      setInputUrl(tab.url);
+      setHistoryQuery("");
+      setOmniboxOpen(false);
+      setSelectedHistoryIndex(-1);
+      requestSwitchToBrowserTab(suggestion.browserId);
+      return;
+    }
+    if (suggestion.kind === "search" && suggestion.query) {
+      navigateFromAddress(searchUrlFor(settings.searchEngine, suggestion.query));
+      return;
+    }
+    navigateFromAddress(suggestion.url);
+  };
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (selectedHistoryIndex >= 0 && selectedHistoryIndex < omniboxEntries.length) {
-      navigateFromAddress(omniboxEntries[selectedHistoryIndex].url);
+      acceptSuggestion(omniboxEntries[selectedHistoryIndex]);
       return;
     }
     if (!inputUrl.trim()) return;
@@ -344,7 +455,7 @@ export function BrowserToolbar({
       setSelectedHistoryIndex(-1);
       return;
     }
-    if (!settings.rememberBrowsingHistory || omniboxEntries.length === 0) return;
+    if (omniboxEntries.length === 0) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       setOmniboxOpen(true);
@@ -412,7 +523,7 @@ export function BrowserToolbar({
   };
 
   const toggleHistory = () => {
-    setHistoryEntries(loadBrowserHistory());
+    refreshRecentHistory.current();
     setOmniboxOpen(false);
     setHistoryOpen((open) => !open);
   };
@@ -424,7 +535,7 @@ export function BrowserToolbar({
 
   const setRememberHistory = (remember: boolean) => {
     if (!remember) {
-      clearBrowserHistory();
+      void clearAllBrowserHistory().catch((error: unknown) => setActionError(actionFailureMessage("Clear history", error)));
       setHistoryQuery("");
       setOmniboxOpen(false);
     }
@@ -432,7 +543,7 @@ export function BrowserToolbar({
   };
 
   const hardReloadSupported = isHardReloadSupportedPlatform();
-  const omniboxListOpen = settings.rememberBrowsingHistory && omniboxOpen && omniboxEntries.length > 0;
+  const omniboxListOpen = omniboxOpen && omniboxEntries.length > 0;
   const omniboxOptionId = (index: number) => `${omniboxId}-option-${index}`;
 
   const handleReload = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -488,14 +599,14 @@ export function BrowserToolbar({
               setHistoryQuery("");
               setHistoryOpen(false);
               setSelectedHistoryIndex(-1);
-              if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
+              setOmniboxOpen(true);
             }}
             onChange={(event) => {
               inputDirtyRef.current = true;
               setInputUrl(event.target.value);
               setHistoryQuery(event.target.value);
               setSelectedHistoryIndex(-1);
-              if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
+              setOmniboxOpen(true);
             }}
             onBlur={() => {
               inputDirtyRef.current = false;
@@ -515,6 +626,18 @@ export function BrowserToolbar({
             }
             className="w-full bg-background border border-border rounded px-2.5 py-1 text-xs text-foreground focus:outline-none focus:border-primary font-mono"
           />
+          <button
+            type="button"
+            onClick={() => void toggleBookmark()}
+            disabled={!/^(https?|file):/i.test(tab.url)}
+            title={currentBookmark ? "Remove bookmark" : "Bookmark this page"}
+            aria-label={currentBookmark ? "Remove bookmark" : "Bookmark this page"}
+            aria-pressed={Boolean(currentBookmark)}
+            data-shortcut="browser.bookmarkPage"
+            className="ml-1 p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
+          >
+            <Star className={`w-3.5 h-3.5 ${currentBookmark ? "fill-current text-amber-400" : ""}`} />
+          </button>
         </form>
 
         <div className="flex items-center gap-0.5 border-l border-border/70 pl-1.5">
@@ -613,7 +736,7 @@ export function BrowserToolbar({
       ) : null}
 
       {omniboxListOpen ? (
-        <div id={omniboxListId} role="listbox" aria-label="Address bar history" className="border-t border-border/70 bg-popover px-3 py-1">
+        <div id={omniboxListId} role="listbox" aria-label="Address bar suggestions" className="border-t border-border/70 bg-popover px-3 py-1">
           {omniboxEntries.map((entry, index) => (
             <button
               key={entry.id}
@@ -621,12 +744,24 @@ export function BrowserToolbar({
               type="button"
               role="option"
               aria-selected={selectedHistoryIndex === index}
+              data-suggestion-kind={entry.kind}
               onMouseDown={(event) => event.preventDefault()}
-              onClick={() => navigateFromHistory(entry.url)}
+              onClick={() => acceptSuggestion(entry)}
               className={`flex w-full items-center gap-3 rounded px-2 py-1.5 text-left ${selectedHistoryIndex === index ? "bg-accent" : "hover:bg-accent/60"}`}
             >
+              {entry.kind === "search" ? (
+                <SearchIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              ) : entry.kind === "tab" ? (
+                <AppWindow className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              ) : entry.bookmarked ? (
+                <BookmarkIcon className="size-3 shrink-0 text-amber-400" aria-hidden="true" />
+              ) : (
+                <HistoryIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              )}
               <span className="min-w-0 flex-1 truncate text-xs">{entry.title || entry.url}</span>
-              <span className="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">{entry.url}</span>
+              <span className="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">
+                {entry.kind === "tab" ? `Switch to tab · ${entry.url}` : entry.url}
+              </span>
             </button>
           ))}
         </div>
@@ -640,11 +775,19 @@ export function BrowserToolbar({
               {historyEntries.length === 0 ? (
                 <div className="px-3 py-4 text-center text-[11px] text-muted-foreground">No browsing history yet.</div>
               ) : historyEntries.slice(0, 20).map((entry) => (
-                <button key={entry.id} type="button" role="menuitem" onClick={() => navigateFromHistory(entry.url)} className="block w-full px-3 py-2 text-left hover:bg-accent">
+                <button key={entry.url} type="button" role="menuitem" onClick={() => navigateFromHistory(entry.url)} className="block w-full px-3 py-2 text-left hover:bg-accent">
                   <div className="truncate text-xs font-medium text-foreground">{entry.title || entry.url}</div>
                   <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{entry.url}</div>
                 </button>
               ))}
+            </div>
+            <div className="flex border-t border-border">
+              <button type="button" role="menuitem" onClick={() => { setHistoryOpen(false); openBrowserLibrary({ browserId: tab.browserId, view: "history" }); }} className="flex flex-1 items-center gap-1.5 px-3 py-2 text-left text-[11px] hover:bg-accent">
+                <HistoryIcon className="size-3" aria-hidden="true" /> Show all history
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setHistoryOpen(false); openBrowserLibrary({ browserId: tab.browserId, view: "bookmarks" }); }} className="flex flex-1 items-center gap-1.5 px-3 py-2 text-left text-[11px] hover:bg-accent">
+                <LibraryIcon className="size-3" aria-hidden="true" /> Bookmarks manager
+              </button>
             </div>
             <label className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
               <span>Remember browsing history</span>

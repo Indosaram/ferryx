@@ -14,7 +14,7 @@ import {
   type BrowserProfile,
   type BrowserSettingsState,
 } from "../../lib/browserSettings";
-import { clearBrowserHistory } from "../../lib/browserHistory";
+import { clearAllBrowserHistory } from "../../lib/browserLibrary";
 import {
   extractBrowserErrorCode,
   focusBrowser,
@@ -328,15 +328,35 @@ export function BrowserSection() {
               onCheckedChange={(checked) => void update({ restoreTabsOnLaunch: checked })}
             />
           </SettingRow>
-          <SettingRow label="Remember browsing history" description="Keep up to 100 recently visited built-in browser pages across Ferryx restarts.">
+          <SettingRow label="Remember browsing history" description="Keep the pages you visit in the built-in browser (never private tabs). Turning this off clears it.">
             <Switch
               id="browser-remember-history"
               aria-label="Remember browsing history"
               checked={settings.rememberBrowsingHistory}
               onCheckedChange={(checked) => {
-                if (!checked) clearBrowserHistory();
+                if (!checked) {
+                  void clearAllBrowserHistory().catch((error: unknown) => {
+                    setActionError(`Clear browsing history failed: ${extractBrowserErrorCode(error)}`);
+                  });
+                }
                 void update({ rememberBrowsingHistory: checked });
               }}
+            />
+          </SettingRow>
+          <SettingRow label="Show bookmarks bar" description="Show your bookmarks below the address bar.">
+            <Switch
+              id="browser-show-bookmark-bar"
+              aria-label="Show bookmarks bar"
+              checked={settings.showBookmarkBar}
+              onCheckedChange={(checked) => void update({ showBookmarkBar: checked })}
+            />
+          </SettingRow>
+          <SettingRow label="Search suggestions" description="Send what you type in the address bar to your search engine for suggestions. Off: only bookmarks, history and open tabs.">
+            <Switch
+              id="browser-search-suggestions"
+              aria-label="Search suggestions"
+              checked={settings.searchSuggestions}
+              onCheckedChange={(checked) => void update({ searchSuggestions: checked })}
             />
           </SettingRow>
         </div>

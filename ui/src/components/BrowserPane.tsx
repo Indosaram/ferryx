@@ -9,6 +9,7 @@ import {
   downloadBrowserUrlWithSession,
   extractBrowserErrorCode,
   findBrowser,
+  listBrowsers,
   onBrowserDownloadRequested,
   onBrowserShortcutRequested,
   openExternalUrl,
@@ -21,10 +22,16 @@ import {
   type BrowserReloadOptions,
   type DesignFeedbackTarget,
 } from "../lib/browserTauri";
-import { recordBrowserHistory } from "../lib/browserHistory";
-import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
+import {
+  BROWSER_LIBRARY_OPEN_EVENT,
+  useBookmarks,
+  type BrowserLibraryOpenDetail,
+} from "../lib/browserLibrary";
+import { PRIVATE_BROWSER_PROFILE, useBrowserSettings } from "../lib/browserSettings";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
+import { BrowserBookmarkBar } from "./BrowserBookmarkBar";
+import { BrowserLibraryPanel, type BrowserLibraryView } from "./BrowserLibraryPanel";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
 import { BrowserEngineFallbackNotice } from "./BrowserEngineFallbackNotice";
 import { BrowserMediaCaptureIndicator, BrowserPermissionPrompts } from "./BrowserPermissionPrompt";
@@ -112,6 +119,12 @@ export function BrowserPane({
   // The download registry emits no lifecycle event of its own, so every shelf refresh is driven
   // by an explicit signal: the page's `browser_download_requested` event, or a finished save.
   const [downloadsRefreshToken, setDownloadsRefreshToken] = useState(0);
+  // The Library (bookmarks manager / history page) replaces the page view while open; the
+  // native page view is hidden then, because DOM cannot be drawn over it.
+  const [libraryView, setLibraryView] = useState<BrowserLibraryView | null>(null);
+  const [openTabs, setOpenTabs] = useState<Array<{ browserId: string; url: string; title: string | null }>>([]);
+  const { settings: browserSettings } = useBrowserSettings();
+  const { tree: bookmarkTree } = useBookmarks();
   const updateBoundsRef = useRef<() => void>(() => undefined);
   // Latest find request wins: async find/clear responses can resolve out of order, so a stale
   // response for a superseded or cleared query must not overwrite the current result.
@@ -120,7 +133,7 @@ export function BrowserPane({
   // The browser surface must yield (hide) whenever a global modal/search surface is mounted, then
   // be restored only if this owner is itself visible. Mirrors NativeTerminalPane's occlusion fix.
   const surfaceVisible = useNativeTerminalVisibility();
-  const maskAwareVisible = visible && surfaceVisible;
+  const maskAwareVisible = visible && surfaceVisible && libraryView === null;
 
   useEffect(() => {
     const previous = previousTabRef.current;
@@ -170,20 +183,8 @@ export function BrowserPane({
         engine: payload.engine ?? current.engine,
         loadError: payload.loadError ?? null,
       }));
-      // Private-profile tabs are incognito: never persist their URLs or titles,
-      // even when the global "remember browsing history" setting is on.
-      if (
-        tab.profileId !== PRIVATE_BROWSER_PROFILE.id &&
-        !payload.loading &&
-        !payload.loadError &&
-        payload.url
-      ) {
-        recordBrowserHistory({
-          browserId: payload.browserId,
-          url: payload.url,
-          title: payload.title ?? null,
-        });
-      }
+      // History is recorded host-side from the same state change (both engines), and never for
+      // private-profile tabs; see src-tauri/src/browser/library/recorder.rs.
     };
 
     void listen<BrowserStateChangedPayload>("browser_state_changed", (event) => {
@@ -248,6 +249,34 @@ export function BrowserPane({
       window.removeEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
     };
   }, [tab.browserId]);
+
+  useEffect(() => {
+    const openLibrary = (event: Event) => {
+      const detail = (event as CustomEvent<BrowserLibraryOpenDetail>).detail;
+      if (detail?.browserId === tab.browserId) setLibraryView(detail.view);
+    };
+    window.addEventListener(BROWSER_LIBRARY_OPEN_EVENT, openLibrary);
+    return () => window.removeEventListener(BROWSER_LIBRARY_OPEN_EVENT, openLibrary);
+  }, [tab.browserId]);
+
+  // Open tabs for the omnibox "switch to tab" rows; private tabs are never offered elsewhere.
+  const isPrivatePane = tab.profileId === PRIVATE_BROWSER_PROFILE.id;
+  useEffect(() => {
+    if (!visible) return;
+    let disposed = false;
+    void Promise.resolve()
+      .then(() => listBrowsers())
+      .then((sessions) => {
+        if (disposed || !Array.isArray(sessions)) return;
+        setOpenTabs(sessions
+          .filter((session) => isPrivatePane || session.profileId !== PRIVATE_BROWSER_PROFILE.id)
+          .map((session) => ({ browserId: session.browserId, url: session.url, title: session.title ?? null })));
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [isPrivatePane, liveTab.url, visible]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -404,7 +433,10 @@ export function BrowserPane({
       <div ref={toolbarRef}>
         {/* A Chromium tab draws its own toolbar (address bar, extensions, menu) inside the pane. */}
         {liveTab.engine === "chromium" ? null : (
-          <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} />
+          <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} openTabs={openTabs} />
+        )}
+        {liveTab.engine === "chromium" || !browserSettings.showBookmarkBar ? null : (
+          <BrowserBookmarkBar tree={bookmarkTree} onOpen={onNavigate} />
         )}
         {/* Shown for both engines: the Chromium tab hides the Ferryx toolbar. */}
         <div className="flex justify-end px-3 empty:hidden">
@@ -513,6 +545,17 @@ export function BrowserPane({
           onNavigate(url);
         }}
       >
+        {libraryView ? (
+          <BrowserLibraryPanel
+            view={libraryView}
+            onViewChange={setLibraryView}
+            onOpen={(url) => {
+              setLibraryView(null);
+              onNavigate(url);
+            }}
+            onClose={() => setLibraryView(null)}
+          />
+        ) : null}
         {liveTab.loadError ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-8" data-testid="browser-load-error">
             <div className="max-w-lg rounded-lg border border-border bg-card p-5 shadow-lg">

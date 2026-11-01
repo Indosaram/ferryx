@@ -37,6 +37,7 @@ export type ShortcutActionId =
   | "browser.back"
   | "browser.forward"
   | "browser.find"
+  | "browser.bookmarkPage"
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.unsplit"
@@ -146,6 +147,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Find in browser page",
     group: "Tabs",
     binding: { key: "f", mod: true },
+    source: "ferryx",
+  },
+  {
+    id: "browser.bookmarkPage",
+    title: "Bookmark this page",
+    group: "Tabs",
+    binding: { key: "d", mod: true },
     source: "ferryx",
   },
   {
@@ -560,7 +568,7 @@ export type ShortcutConflict =
   | { readonly kind: "reserved"; readonly chord: ReservedChord };
 
 /** Terminal actions App disables while a browser surface owns shortcuts, so they may share browser chords. */
-const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>(["terminal.focusNext", "terminal.focusPrevious", "terminal.search"]);
+const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>(["terminal.focusNext", "terminal.focusPrevious", "terminal.search", "terminal.splitRight"]);
 
 function surfacesAreExclusive(a: ShortcutActionId, b: ShortcutActionId): boolean {
   return (a.startsWith("browser.") && BROWSER_EXCLUSIVE_TERMINAL_ACTIONS.has(b))

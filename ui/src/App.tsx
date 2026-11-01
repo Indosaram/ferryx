@@ -190,6 +190,7 @@ import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspa
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { emptySidebarWorkspaceIds, worktreeHasOpenTabs } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
+import { BROWSER_SWITCH_TO_TAB_EVENT, useBrowserLibrarySync, type BrowserSwitchToTabDetail } from "./lib/browserLibrarySync";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
@@ -3698,6 +3699,20 @@ function WorkspaceApp({
     };
   }, [handleSelectTerminalTab, reportRuntimeError]);
 
+  useBrowserLibrarySync(isTauriRuntime(), reportRuntimeError);
+
+  // The omnibox offers open tabs; picking one shows that tab instead of loading the page again.
+  useEffect(() => {
+    const switchToTab = (event: Event) => {
+      const { browserId } = (event as CustomEvent<BrowserSwitchToTabDetail>).detail ?? {};
+      if (!browserId) return;
+      const owner = stateRef.current.layout.tabs.find((tab) => tab.kind === "browser" && tab.browserId === browserId);
+      if (owner) handleSelectTerminalTab(owner.id);
+    };
+    window.addEventListener(BROWSER_SWITCH_TO_TAB_EVENT, switchToTab);
+    return () => window.removeEventListener(BROWSER_SWITCH_TO_TAB_EVENT, switchToTab);
+  }, [handleSelectTerminalTab]);
+
   // Terminal links and markdown editors route through routeHttpLink, which needs a live
   // opener to reach the built-in browser; without this registration every link silently
   // falls back to the system browser.
@@ -3816,6 +3831,16 @@ function WorkspaceApp({
 
     void onSplitRightMenu(() => {
       if (activeRemoteHostRef.current) return;
+      // The macOS window monitor claims Mod+D before the DOM sees it; on a browser tab it means
+      // "bookmark this page".
+      const current = stateRef.current.layout;
+      const activeTab = current.tabs.find((tab) => tab.id === current.activeTabId);
+      if (activeTab?.kind === "browser") {
+        window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, {
+          detail: { browserId: activeTab.browserId, action: "bookmark-page" },
+        }) satisfies BrowserShortcutDomEvent);
+        return;
+      }
       handleSplitActive("horizontal");
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -3920,6 +3945,10 @@ function WorkspaceApp({
         handleReopenClosedBrowserTab();
         return;
       }
+      if (action === "bookmark-page") {
+        // The sending tab's BrowserToolbar handles this event itself (it owns the star).
+        return;
+      }
       if ((action as string) === "zoom-in") {
         const targetId = payload.browserId || shortcutBrowserId;
         if (targetId) void handleBrowserZoom(targetId, "in");
@@ -4012,6 +4041,7 @@ function WorkspaceApp({
         "browser.back": browserShortcutsActive ? () => dispatchBrowserShortcut("back") : undefined,
         "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
         "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
+        "browser.bookmarkPage": browserShortcutsActive ? () => dispatchBrowserShortcut("bookmark-page") : undefined,
         "tab.next": () => handleCycleTab(1),
         "tab.previous": () => handleCycleTab(-1),
         "tab.select1": () => handleSelectTerminalTabByIndex(0),
@@ -4032,7 +4062,8 @@ function WorkspaceApp({
         "workspace.select7": () => handleSelectWorktreeByIndex(6),
         "workspace.select8": () => handleSelectWorktreeByIndex(7),
         "workspace.select9": () => handleSelectWorktreeByIndex(8),
-        "terminal.splitRight": () => handleSplitActive("horizontal"),
+        // Mod+D bookmarks the page while a browser owns shortcuts (browser.bookmarkPage).
+        "terminal.splitRight": browserShortcutsActive ? undefined : () => handleSplitActive("horizontal"),
         "terminal.splitDown": () => handleSplitActive("vertical"),
         "terminal.unsplit": handleUnsplitActive,
         "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),

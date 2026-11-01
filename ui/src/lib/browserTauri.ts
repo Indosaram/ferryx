@@ -71,6 +71,7 @@ export interface DownloadRecord {
 
 export type BrowserShortcutAction =
   | "focus-address"
+  | "bookmark-page"
   | "reload"
   | "reload-hard"
   | "back"

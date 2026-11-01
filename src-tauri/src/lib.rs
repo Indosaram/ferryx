@@ -1880,6 +1880,21 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         dag_watch_ssh_project,
         dag_unwatch_project,
         dag_discover_watch_roots,
+        ipc::browser_library::cmd_browser_bookmarks_get,
+        ipc::browser_library::cmd_browser_bookmark_add,
+        ipc::browser_library::cmd_browser_bookmark_folder_create,
+        ipc::browser_library::cmd_browser_bookmark_update,
+        ipc::browser_library::cmd_browser_bookmark_move,
+        ipc::browser_library::cmd_browser_bookmark_delete,
+        ipc::browser_library::cmd_browser_bookmarks_import,
+        ipc::browser_library::cmd_browser_history_list,
+        ipc::browser_library::cmd_browser_history_suggest,
+        ipc::browser_library::cmd_browser_history_delete,
+        ipc::browser_library::cmd_browser_history_clear,
+        ipc::browser_library::cmd_browser_history_import,
+        ipc::browser_library::cmd_browser_history_migrate_legacy,
+        ipc::browser_library::cmd_browser_history_set_enabled,
+        ipc::browser_library::cmd_browser_search_suggest,
     ]);
     builder.invoke_handler(move |invoke: tauri::ipc::Invoke<R>| {
         if invoke.message.command() == "cmd_retry_paired_session" {

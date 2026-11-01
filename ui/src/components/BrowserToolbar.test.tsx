@@ -41,10 +41,24 @@ vi.mock(import("../lib/shortcuts"), async (importOriginal) => {
   };
 });
 
+const hostHistory = vi.hoisted(() => ({ entries: [] as unknown[] }));
+
+vi.mock("@tauri-apps/api/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tauri-apps/api/core")>();
+  return {
+    ...actual,
+    invoke: vi.fn(async (command: string) => {
+      if (command === "cmd_browser_history_list") return hostHistory.entries;
+      throw { code: "UNSUPPORTED", message: `${command} is not mocked` };
+    }),
+  };
+});
+
 afterEach(cleanup);
 
 beforeEach(() => {
   window.localStorage.clear();
+  hostHistory.entries = [];
   browserNative.openExternalUrl.mockReset();
   browserNative.setBrowserZoom.mockReset();
   browserNative.setBrowserZoom.mockResolvedValue(1.1);
@@ -213,15 +227,13 @@ describe("BrowserToolbar", () => {
   });
 
   it("shows recent browsing history and navigates the native browser when an entry is selected", async () => {
-    window.localStorage.setItem("ferryx.browser.history", JSON.stringify([
-      {
-        id: "history-1",
-        browserId: "b-1",
-        url: "https://example.com/previous",
-        title: "Previous page",
-        visitedAt: 1787490000000,
-      },
-    ]));
+    hostHistory.entries = [{
+      url: "https://example.com/previous",
+      title: "Previous page",
+      visitCount: 1,
+      lastVisitedAt: 1787490000000,
+      frecency: 100,
+    }];
 
     const onNavigate = vi.fn();
     render(
@@ -233,7 +245,7 @@ describe("BrowserToolbar", () => {
     );
 
     fireEvent.click(screen.getByLabelText("History"));
-    expect(screen.getByText("Previous page")).toBeInTheDocument();
+    expect(await screen.findByText("Previous page")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Previous page"));
     await waitFor(() => {
       expect(onNavigate).toHaveBeenCalledWith("https://example.com/previous");

@@ -24,6 +24,9 @@ export type BrowserSettingsState = {
   localhostWorktreeLabels: boolean;
   profiles: BrowserProfile[];
   defaultProfileId: string;
+  /** Opt-in: ask the search engine for suggestions as the user types (sends typed text). */
+  searchSuggestions: boolean;
+  showBookmarkBar: boolean;
 };
 
 export const DEFAULT_BROWSER_PROFILE: BrowserProfile = { id: "default", name: "Default" };
@@ -34,7 +37,7 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   homePage: "",
   searchEngine: "duckduckgo",
   defaultZoom: 100,
-  restoreTabsOnLaunch: false,
+  restoreTabsOnLaunch: true,
   rememberBrowsingHistory: true,
   openLinksInBuiltInBrowser: true,
   linkClickTarget: "builtin",
@@ -44,6 +47,8 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   localhostWorktreeLabels: true,
   profiles: [DEFAULT_BROWSER_PROFILE, PRIVATE_BROWSER_PROFILE],
   defaultProfileId: DEFAULT_BROWSER_PROFILE.id,
+  searchSuggestions: false,
+  showBookmarkBar: true,
 };
 
 export const BROWSER_SETTINGS_EVENT = "ferryx:browser-settings";
@@ -189,6 +194,12 @@ export function normalizeBrowserSettings(value: unknown): BrowserSettingsState {
       : DEFAULT_BROWSER_SETTINGS.localhostWorktreeLabels,
     profiles,
     defaultProfileId: profileIds.has(requestedDefault) ? requestedDefault : DEFAULT_BROWSER_PROFILE.id,
+    searchSuggestions: typeof source.searchSuggestions === "boolean"
+      ? source.searchSuggestions
+      : DEFAULT_BROWSER_SETTINGS.searchSuggestions,
+    showBookmarkBar: typeof source.showBookmarkBar === "boolean"
+      ? source.showBookmarkBar
+      : DEFAULT_BROWSER_SETTINGS.showBookmarkBar,
   };
 }
 
@@ -206,6 +217,8 @@ function settingsForPersistence(settings: BrowserSettingsState): Partial<Browser
     "showTerminalLinkActions",
     "localhostWorktreeLabels",
     "defaultProfileId",
+    "searchSuggestions",
+    "showBookmarkBar",
   ];
   for (const key of scalarKeys) {
     if (settings[key] !== DEFAULT_BROWSER_SETTINGS[key]) {
