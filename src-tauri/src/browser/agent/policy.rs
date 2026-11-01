@@ -687,6 +687,7 @@ mod tests {
             (
                 BrowserCliRequest::Act {
                     request: BrowserAutomationRequest {
+                        postcondition: None,
                         browser_id: id(),
                         generation: 1,
                         action: BrowserAutomationAction::Click {

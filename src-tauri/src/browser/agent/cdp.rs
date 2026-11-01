@@ -43,25 +43,9 @@ pub fn evaluate_result(result: &Value) -> Result<String, BrowserError> {
     }
 }
 
-/// Script that scrolls the element into view and returns the viewport point a real click
-/// lands on, or `null` when something else covers that point or the element has no box.
-pub fn click_point_script(selector: &str) -> Result<String, BrowserError> {
-    let selector = serde_json::to_string(selector)
-        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-    Ok(format!(
-        "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); \
-element.scrollIntoView({{ behavior: 'instant', block: 'center', inline: 'center' }}); \
-const rect = element.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return null; \
-const x = rect.left + rect.width / 2; const y = rect.top + rect.height / 2; \
-const hit = document.elementFromPoint(x, y); if (!hit || !(hit === element || element.contains(hit))) return null; \
-return {{ x, y }}; }})()"
-    ))
-}
-
-/// Reads the point [`click_point_script`] returned (already decoded from its JSON text).
-pub fn click_point(value: &str) -> Option<(f64, f64)> {
-    let value: Value = serde_json::from_str(value).ok()?;
-    Some((value.get("x")?.as_f64()?, value.get("y")?.as_f64()?))
+/// Whether a DevTools failure means the evaluation context is gone (the page navigated).
+pub fn is_lost_context(message: &str) -> bool {
+    message.contains("Cannot find context with specified id") || message.contains("Execution context was destroyed")
 }
 
 /// The `Input.dispatchMouseEvent` calls of one trusted left click at a viewport point:
@@ -194,11 +178,9 @@ mod tests {
     }
 
     #[test]
-    fn a_click_is_a_move_then_press_and_release_at_the_element_center() {
-        let script = click_point_script("#a\"b").unwrap();
-        assert!(script.contains(r##"document.querySelector("#a\"b")"##));
-        assert_eq!(click_point(r#"{"x":10.5,"y":20}"#), Some((10.5, 20.0)));
-        assert_eq!(click_point("null"), None);
+    fn a_click_is_a_move_then_press_and_release_and_a_lost_context_is_recognized() {
+        assert!(is_lost_context("Runtime.evaluate: Cannot find context with specified id"));
+        assert!(!is_lost_context("Runtime.evaluate timed out in the Chromium engine"));
         let events = mouse_click_events(10.5, 20.0, 2);
         let kinds: Vec<&str> = events.iter().map(|event| event["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["mouseMoved", "mousePressed", "mouseReleased", "mousePressed", "mouseReleased"]);

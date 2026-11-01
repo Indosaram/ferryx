@@ -1,7 +1,7 @@
 use crate::browser::{
     browser_find_script, browser_guest_bridge_script, cookie_from_imported, download_url_to_path,
     parse_browser_find_callback, parse_browser_guest_action, parse_cookie_file,
-    BrowserAutomationAction, BrowserAutomationElement, BrowserAutomationRequest,
+    BrowserAutomationAction, BrowserAutomationRequest,
     BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserDialogEntry,
     BrowserDialogHandleRequest, BrowserDialogPolicyRequest, BrowserDownloadRequest,
     BrowserDownloadRequestedPayload, BrowserElementPickedPayload, BrowserError, BrowserFindResult,
@@ -324,31 +324,10 @@ async fn dispatch_macos_keypress<R: tauri::Runtime>(
     Ok(true)
 }
 
-fn automation_script(
-    action: &BrowserAutomationAction,
-    selector: Option<&str>,
-) -> Result<String, BrowserError> {
+/// The page script for an action that addresses no element (keypress, window scroll, typing
+/// into the focused element). Element actions go through `observe.js` by ref instead.
+fn automation_script(action: &BrowserAutomationAction) -> Result<String, BrowserError> {
     match action {
-        BrowserAutomationAction::Click { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.click(); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Fill { value, .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            let value = serde_json::to_string(value)
-                .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); element.value = {value}; element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); return 'ok'; }})()"
-            ))
-        }
         BrowserAutomationAction::Keypress { key } => {
             let parsed = parse_keypress(key)?;
             let key = serde_json::to_string(&parsed.key)
@@ -361,101 +340,21 @@ fn automation_script(
                 "(() => {{ const target = document.activeElement || document.body || document.documentElement; const init = {{ bubbles: true, cancelable: true, key: {key}, metaKey: {meta_key}, ctrlKey: {ctrl_key}, altKey: {alt_key}, shiftKey: {shift_key} }}; const keydown = new KeyboardEvent('keydown', init); const notPrevented = target ? target.dispatchEvent(keydown) : true; const keyup = new KeyboardEvent('keyup', init); if (target) {{ target.dispatchEvent(keyup); }} if (!notPrevented) {{ throw new Error('keydown prevented'); }} return 'ok'; }})()"
             ))
         }
-        BrowserAutomationAction::Dblclick { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.dispatchEvent(new MouseEvent('dblclick', {{ bubbles: true, cancelable: true, view: window }})); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Hover { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.dispatchEvent(new MouseEvent('mouseover', {{ bubbles: true, cancelable: true, view: window }})); element.dispatchEvent(new MouseEvent('mouseenter', {{ bubbles: false, cancelable: false, view: window }})); element.dispatchEvent(new MouseEvent('mousemove', {{ bubbles: true, cancelable: true, view: window }})); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Focus { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Check { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); if (!element.checked) {{ element.checked = true; element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} if (element.getAttribute('aria-checked') === 'false') {{ element.setAttribute('aria-checked', 'true'); }} return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Uncheck { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); if (element.checked) {{ element.checked = false; element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} if (element.getAttribute('aria-checked') === 'true') {{ element.setAttribute('aria-checked', 'false'); }} return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::ScrollIntoView { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.scrollIntoView({{ behavior: 'instant', block: 'center', inline: 'center' }}); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Select { value, .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            let value_json = serde_json::to_string(value)
-                .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); let matched = false; if (element.tagName === 'SELECT') {{ for (const opt of element.options) {{ if (opt.value === {value_json} || opt.text === {value_json}) {{ opt.selected = true; matched = true; break; }} }} }} if (!matched && element.value !== undefined) {{ element.value = {value_json}; }} element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Scroll { x, y, .. } => {
+        BrowserAutomationAction::Scroll { reference: None, x, y } => {
             let dx = x.unwrap_or(0);
             let dy = y.unwrap_or(0);
-            if let Some(sel) = selector {
-                let selector = serde_json::to_string(sel)
-                    .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-                Ok(format!(
-                    "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.scrollBy({{ left: {dx}, top: {dy}, behavior: 'instant' }}); return 'ok'; }})()"
-                ))
-            } else {
-                Ok(format!(
-                    "(() => {{ window.scrollBy({{ left: {dx}, top: {dy}, behavior: 'instant' }}); return 'ok'; }})()"
-                ))
-            }
+            Ok(format!(
+                "(() => {{ window.scrollBy({{ left: {dx}, top: {dy}, behavior: 'instant' }}); return 'ok'; }})()"
+            ))
         }
-        BrowserAutomationAction::Type { text, .. } => {
+        BrowserAutomationAction::Type { reference: None, text } => {
             let text_json = serde_json::to_string(text)
                 .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            if let Some(sel) = selector {
-                let selector = serde_json::to_string(sel)
-                    .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-                Ok(format!(
-                    "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return 'ok'; }})()"
-                ))
-            } else {
-                Ok(format!(
-                    "(() => {{ const element = document.activeElement || document.body; if (!element) throw new Error('element disappeared'); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return 'ok'; }})()"
-                ))
-            }
+            Ok(format!(
+                "(() => {{ const element = document.activeElement || document.body; if (!element) throw new Error('element disappeared'); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return 'ok'; }})()"
+            ))
         }
+        _ => Err(BrowserError::AutomationFailed("element actions are addressed by ref".into())),
     }
 }
 
@@ -470,34 +369,19 @@ mod automation_tests {
     }
 
     #[test]
-    fn fill_script_encodes_untrusted_values_as_json_strings() {
-        let script = automation_script(
-            &BrowserAutomationAction::Fill {
-                reference: "e1".into(),
-                value: "hello'); window.bad = true; //".into(),
-            },
-            Some("#email"),
-        )
-        .expect("build fill script");
-
-        assert!(script.contains("element.value = \"hello'); window.bad = true; //\""));
-        assert!(!script.contains("element.value = hello');"));
-    }
-
-    #[test]
-    fn click_requires_snapshot_selector() {
-        let error = automation_script(
-            &BrowserAutomationAction::Click {
-                reference: "e1".into(),
-            },
-            None,
-        )
-        .expect_err("click requires resolved snapshot target");
-
-        assert_eq!(
-            error,
-            BrowserError::AutomationFailed("missing snapshot selector".into())
-        );
+    fn untargeted_actions_encode_text_as_json_and_element_actions_need_a_ref() {
+        let typed = automation_script(&BrowserAutomationAction::Type {
+            reference: None,
+            text: "hello'); window.bad = true; //".into(),
+        })
+        .expect("type into the focused element");
+        assert!(typed.contains("const str = \"hello'); window.bad = true; //\""));
+        let scroll = automation_script(&BrowserAutomationAction::Scroll { reference: None, x: Some(0), y: Some(200) })
+            .expect("window scroll");
+        assert!(scroll.contains("window.scrollBy({ left: 0, top: 200"));
+        let error = automation_script(&BrowserAutomationAction::Click { reference: "d1.1".into() })
+            .expect_err("element actions go through observe.js");
+        assert_eq!(error, BrowserError::AutomationFailed("element actions are addressed by ref".into()));
     }
 
     #[test]
@@ -790,12 +674,9 @@ mod automation_tests {
         for (input, expected_key, expected_meta, expected_ctrl, expected_alt, expected_shift) in
             cases
         {
-            let script = automation_script(
-                &BrowserAutomationAction::Keypress {
-                    key: input.to_string(),
-                },
-                None,
-            )
+            let script = automation_script(&BrowserAutomationAction::Keypress {
+                key: input.to_string(),
+            })
             .unwrap_or_else(|err| panic!("failed to build script for '{input}': {err:?}"));
 
             assert!(
@@ -867,173 +748,13 @@ mod automation_tests {
         ];
 
         for input in invalid_cases {
-            let res = automation_script(
-                &BrowserAutomationAction::Keypress {
-                    key: input.to_string(),
-                },
-                None,
-            );
+            let res = automation_script(&BrowserAutomationAction::Keypress {
+                key: input.to_string(),
+            });
             assert!(
                 res.is_err(),
                 "keypress input '{input}' should fail validation, but succeeded with: {:?}",
                 res.ok()
-            );
-        }
-    }
-
-    #[test]
-    fn extended_automation_actions_script_generation() {
-        // dblclick
-        let dblclick = automation_script(
-            &BrowserAutomationAction::Dblclick {
-                reference: "row1".into(),
-            },
-            Some("#row1"),
-        )
-        .expect("dblclick script");
-        assert!(dblclick.contains("querySelector(\"#row1\")"));
-        assert!(dblclick.contains("new MouseEvent('dblclick'"));
-
-        // hover
-        let hover = automation_script(
-            &BrowserAutomationAction::Hover {
-                reference: "menu".into(),
-            },
-            Some(".menu-trigger"),
-        )
-        .expect("hover script");
-        assert!(hover.contains("querySelector(\".menu-trigger\")"));
-        assert!(hover.contains("mouseover"));
-        assert!(hover.contains("mouseenter"));
-        assert!(hover.contains("mousemove"));
-
-        // focus
-        let focus = automation_script(
-            &BrowserAutomationAction::Focus {
-                reference: "input".into(),
-            },
-            Some("#email"),
-        )
-        .expect("focus script");
-        assert!(focus.contains("querySelector(\"#email\")"));
-        assert!(focus.contains("element.focus()"));
-
-        // check
-        let check = automation_script(
-            &BrowserAutomationAction::Check {
-                reference: "chk".into(),
-            },
-            Some("#accept-terms"),
-        )
-        .expect("check script");
-        assert!(check.contains("querySelector(\"#accept-terms\")"));
-        assert!(check.contains("element.checked = true"));
-        assert!(check.contains("new Event('change'"));
-
-        // uncheck
-        let uncheck = automation_script(
-            &BrowserAutomationAction::Uncheck {
-                reference: "chk".into(),
-            },
-            Some("#accept-terms"),
-        )
-        .expect("uncheck script");
-        assert!(uncheck.contains("querySelector(\"#accept-terms\")"));
-        assert!(uncheck.contains("element.checked = false"));
-        assert!(uncheck.contains("new Event('change'"));
-
-        // scroll-into-view
-        let scroll_into_view = automation_script(
-            &BrowserAutomationAction::ScrollIntoView {
-                reference: "footer".into(),
-            },
-            Some("#site-footer"),
-        )
-        .expect("scrollIntoView script");
-        assert!(scroll_into_view.contains("querySelector(\"#site-footer\")"));
-        assert!(scroll_into_view.contains("element.scrollIntoView"));
-
-        // select
-        let select = automation_script(
-            &BrowserAutomationAction::Select {
-                reference: "country".into(),
-                value: "US".into(),
-            },
-            Some("#country-select"),
-        )
-        .expect("select script");
-        assert!(select.contains("querySelector(\"#country-select\")"));
-        assert!(select.contains("opt.value === \"US\""));
-        assert!(select.contains("new Event('change'"));
-
-        // scroll (with and without element selector)
-        let scroll_elem = automation_script(
-            &BrowserAutomationAction::Scroll {
-                reference: Some("pane".into()),
-                x: Some(10),
-                y: Some(50),
-            },
-            Some("#scroll-pane"),
-        )
-        .expect("scroll elem script");
-        assert!(scroll_elem.contains("querySelector(\"#scroll-pane\")"));
-        assert!(scroll_elem.contains("element.scrollBy({ left: 10, top: 50"));
-
-        let scroll_win = automation_script(
-            &BrowserAutomationAction::Scroll {
-                reference: None,
-                x: Some(0),
-                y: Some(200),
-            },
-            None,
-        )
-        .expect("scroll window script");
-        assert!(scroll_win.contains("window.scrollBy({ left: 0, top: 200"));
-
-        // type (with and without element selector)
-        let type_elem = automation_script(
-            &BrowserAutomationAction::Type {
-                reference: Some("txt".into()),
-                text: "hello".into(),
-            },
-            Some("#name-input"),
-        )
-        .expect("type elem script");
-        assert!(type_elem.contains("querySelector(\"#name-input\")"));
-        assert!(type_elem.contains("element.focus()"));
-        assert!(type_elem.contains("new KeyboardEvent('keydown'"));
-        assert!(type_elem.contains("element.value = (element.value || '') + ch"));
-
-        let type_active = automation_script(
-            &BrowserAutomationAction::Type {
-                reference: None,
-                text: "world".into(),
-            },
-            None,
-        )
-        .expect("type active script");
-        assert!(type_active.contains("document.activeElement || document.body"));
-        assert!(type_active.contains("element.focus()"));
-    }
-
-    #[test]
-    fn extended_automation_actions_require_snapshot_selector() {
-        let require_selector = vec![
-            BrowserAutomationAction::Dblclick { reference: "e1".into() },
-            BrowserAutomationAction::Hover { reference: "e1".into() },
-            BrowserAutomationAction::Focus { reference: "e1".into() },
-            BrowserAutomationAction::Check { reference: "e1".into() },
-            BrowserAutomationAction::Uncheck { reference: "e1".into() },
-            BrowserAutomationAction::ScrollIntoView { reference: "e1".into() },
-            BrowserAutomationAction::Select { reference: "e1".into(), value: "v".into() },
-        ];
-
-        for action in require_selector {
-            let error = automation_script(&action, None)
-                .expect_err("action requiring element must fail without selector");
-            assert_eq!(
-                error,
-                BrowserError::AutomationFailed("missing snapshot selector".into())
             );
         }
     }
@@ -3395,48 +3116,51 @@ pub async fn browser_automation_snapshot<R: tauri::Runtime>(
     manager: &Arc<BrowserManager>,
     browser_id: String,
 ) -> Result<BrowserAutomationSnapshot, IpcError> {
+    use crate::browser::agent::{observe, page, redact};
     let state = manager.get_state(&browser_id)?;
-    // Both engines: the Chromium engine over its DevTools API, the system webview directly.
-    let result = crate::browser::agent::page::eval(
-        &app,
-        manager,
+    // Both engines run observe.js: a Chromium engine tab in an isolated world over its
+    // DevTools API, a system webview tab directly.
+    let isolated = page::agent_world_isolated(&browser_id);
+    let raw = page::eval_agent(&app, manager, &browser_id, observe::observe_script(isolated)).await?;
+    let observation = observe::parse_observation(&raw)?;
+    // The record is bound to the generation read before the observe: a navigation in between
+    // makes it stale instead of pairing refs with the next document.
+    manager.record_observed_refs(
         &browser_id,
-        AUTOMATION_SNAPSHOT_SCRIPT.to_string(),
-    )
-    .await?;
-    let snapshot_json: String = serde_json::from_str(&result).map_err(|error| {
-        BrowserError::AutomationFailed(format!("invalid snapshot callback result: {error}"))
-    })?;
-    let snapshot: AutomationSnapshotResult =
-        serde_json::from_str(&snapshot_json).map_err(|error| {
-            BrowserError::AutomationFailed(format!("invalid snapshot response: {error}"))
-        })?;
-    let targets = snapshot
-        .elements
-        .iter()
-        .map(|element| BrowserAutomationTarget {
-            reference: element.reference.clone(),
-            selector: element.selector.clone(),
-        })
-        .collect();
-    manager.record_automation_targets(&browser_id, state.generation, targets)?;
+        state.generation,
+        observation
+            .elements
+            .iter()
+            .map(|element| (element.reference.clone(), element.fingerprint()))
+            .collect(),
+    )?;
 
     Ok(BrowserAutomationSnapshot {
         browser_id,
         generation: state.generation,
         // What an agent observes never carries credentials the page shows or the URL holds.
-        url: crate::browser::agent::redact::redact_url(&snapshot.url),
-        title: crate::browser::agent::redact::redact_text(&snapshot.title).into_owned(),
-        elements: snapshot
+        url: redact::redact_url(&observation.url),
+        title: redact::redact_text(&observation.title).into_owned(),
+        elements: observation
             .elements
             .into_iter()
-            .map(|element| BrowserAutomationElement {
-                reference: element.reference,
-                role: element.role,
-                name: crate::browser::agent::redact::redact_text(&element.name).into_owned(),
-                tag_name: element.tag_name,
+            .map(|element| {
+                let mut element = element.into_element();
+                element.name = redact::redact_text(&element.name).into_owned();
+                element
             })
             .collect(),
+        truncated: observation.truncated,
+        frames: observation
+            .frames
+            .into_iter()
+            .map(|mut frame| {
+                frame.title = redact::redact_text(&frame.title).into_owned();
+                frame.src = redact::redact_url(&frame.src);
+                frame
+            })
+            .collect(),
+        isolated,
     })
 }
 
@@ -3445,7 +3169,7 @@ pub async fn cmd_browser_automation_act<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, Arc<BrowserManager>>,
     request: BrowserAutomationRequest,
-) -> Result<(), IpcError> {
+) -> Result<crate::browser::model::BrowserActOutcome, IpcError> {
     browser_automation_act(app, manager.inner(), request).await
 }
 
@@ -3475,60 +3199,76 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: &Arc<BrowserManager>,
     request: BrowserAutomationRequest,
-) -> Result<(), IpcError> {
-    let selector = match &request.action {
-        BrowserAutomationAction::Click { reference }
-        | BrowserAutomationAction::Fill { reference, .. }
-        | BrowserAutomationAction::Dblclick { reference }
-        | BrowserAutomationAction::Hover { reference }
-        | BrowserAutomationAction::Focus { reference }
-        | BrowserAutomationAction::Check { reference }
-        | BrowserAutomationAction::Uncheck { reference }
-        | BrowserAutomationAction::ScrollIntoView { reference }
-        | BrowserAutomationAction::Select { reference, .. } => {
-            Some(manager.automation_target(&request.browser_id, request.generation, reference)?)
+) -> Result<crate::browser::model::BrowserActOutcome, IpcError> {
+    use crate::browser::agent::{observe, page};
+    let isolated = page::agent_world_isolated(&request.browser_id);
+    // A postcondition is checked for shape before anything is dispatched.
+    let postcondition = request
+        .postcondition
+        .as_ref()
+        .map(|condition| observe::postcondition_script(condition, isolated))
+        .transpose()?;
+    // The ref must come from this generation's observe (checked before the page is touched);
+    // the page then checks the node is the one it named, still attached and unchanged.
+    let expect = observe::action_reference(&request.action)
+        .map(|reference| manager.observed_ref(&request.browser_id, request.generation, reference))
+        .transpose()?;
+    // A postcondition the page already shows says nothing about this act: it is sampled
+    // first, and such an act reports no `applied` at all instead of a false success.
+    let already = match &postcondition {
+        Some((script, _)) => {
+            let raw = page::eval_agent(&app, manager, &request.browser_id, script.clone()).await?;
+            observe::parse_check(&raw)?
         }
-        BrowserAutomationAction::Scroll {
-            reference: Some(reference),
-            ..
-        }
-        | BrowserAutomationAction::Type {
-            reference: Some(reference),
-            ..
-        } => {
-            Some(manager.automation_target(&request.browser_id, request.generation, reference)?)
-        }
-        BrowserAutomationAction::Scroll { reference: None, .. }
-        | BrowserAutomationAction::Type { reference: None, .. }
-        | BrowserAutomationAction::Keypress { .. } => {
-            manager.assert_automation_generation(&request.browser_id, request.generation)?;
-            // A Chromium engine tab has trusted key input on every platform.
-            let engine_tab = crate::browser::agent::page::is_engine_tab(&request.browser_id);
-            #[cfg(target_os = "windows")]
-            if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
-                windows_keypress_capability()?;
-            }
-            #[cfg(target_os = "linux")]
-            if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
-                linux_keypress_capability()?;
-            }
-            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-            let _ = engine_tab;
-            None
-        }
+        None => false,
     };
-    let state = manager.get_state(&request.browser_id)?;
-    // Chromium engine tabs: trusted input over the engine's DevTools API (clicks, keys,
-    // typing); anything else runs the same DOM script as the system webview.
-    if crate::browser::agent::page::is_engine_tab(&request.browser_id) {
-        if !crate::browser::agent::page::trusted_act(&request.browser_id, &request.action, selector.as_deref())
-            .await?
-        {
-            let script = automation_script(&request.action, selector.as_deref())?;
-            crate::browser::agent::page::eval(&app, manager, &request.browser_id, script).await?;
+    match expect {
+        Some(expect) => page::act_element(&app, manager, &request.browser_id, &request.action, &expect).await?,
+        None => dispatch_untargeted_act(&app, manager, &request).await?,
+    }
+    let applied = match postcondition {
+        Some(_) if already => None,
+        Some((script, timeout_ms)) => Some(
+            await_postcondition(
+                &app,
+                manager,
+                &request.browser_id,
+                script,
+                timeout_ms.map(std::time::Duration::from_millis),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    Ok(crate::browser::model::BrowserActOutcome { dispatched: true, applied })
+}
+
+/// Actions that address no element: a keypress, a window scroll, typing into whatever has
+/// focus. They are fenced by the document generation only.
+async fn dispatch_untargeted_act<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    request: &BrowserAutomationRequest,
+) -> Result<(), IpcError> {
+    manager.assert_automation_generation(&request.browser_id, request.generation)?;
+    // A Chromium engine tab has trusted key input on every platform.
+    let engine_tab = crate::browser::agent::page::is_engine_tab(&request.browser_id);
+    #[cfg(target_os = "windows")]
+    if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
+        windows_keypress_capability()?;
+    }
+    #[cfg(target_os = "linux")]
+    if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
+        linux_keypress_capability()?;
+    }
+    if engine_tab {
+        if !crate::browser::agent::page::trusted_act(&request.browser_id, &request.action).await? {
+            let script = automation_script(&request.action)?;
+            crate::browser::agent::page::eval(app, manager, &request.browser_id, script).await?;
         }
         return Ok(());
     }
+    let state = manager.get_state(&request.browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
@@ -3541,9 +3281,42 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
         }
     }
 
-    let script = automation_script(&request.action, selector.as_deref())?;
+    let script = automation_script(&request.action)?;
     let _ = eval_webview(webview, script).await?;
     Ok(())
+}
+
+/// Whether the page reaches an act's postcondition before the timeout: `false` on timeout,
+/// never an error for a page that simply did not change. Navigations are expected here (a
+/// submit loads the next page), so a failed evaluation is retried until the deadline, as
+/// `wait` does; only a closed tab ends it early. A page condition has no event to subscribe
+/// to, so it is re-checked on a short interval.
+async fn await_postcondition<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    script: String,
+    timeout: Option<std::time::Duration>,
+) -> Result<bool, IpcError> {
+    let deadline = wait_deadline(tokio::time::Instant::now(), timeout);
+    let interval = std::time::Duration::from_millis(250);
+    loop {
+        match crate::browser::agent::page::eval_agent(app, manager, browser_id, script.clone()).await {
+            Ok(raw) => match crate::browser::agent::observe::parse_check(&raw) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                // An invalid selector never matches; say so instead of waiting it out.
+                Err(error) => return Err(error.into()),
+            },
+            Err(BrowserError::NotFound(id)) => return Err(BrowserError::NotFound(id).into()),
+            Err(_) => {}
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        tokio::time::sleep(interval.min(remaining)).await;
+    }
 }
 
 /// Navigates the popup tab an opener created for one of its handles.
@@ -3818,6 +3591,8 @@ pub async fn close_browser_session<R: tauri::Runtime>(
         .remove_session(browser_id)
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
     crate::browser::agent::service::tab_closed(browser_id);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    crate::browser::agent::cef_backend::forget(browser_id);
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
     crate::browser::site_permissions::forget_browser(browser_id);

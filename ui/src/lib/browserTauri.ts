@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { loadBrowserSettings, resolveSupportedBrowserProfileId } from "./browserSettings";
 import type {
+  BrowserActOutcome,
   BrowserAutomationRequest,
   BrowserAutomationSnapshot,
   BrowserSessionSummary,
@@ -584,8 +585,8 @@ export async function browserAutomationSnapshot(
 
 export async function browserAutomationAct(
   request: BrowserAutomationRequest,
-): Promise<void> {
-  return invoke<void>("cmd_browser_automation_act", { request });
+): Promise<BrowserActOutcome> {
+  return invoke<BrowserActOutcome>("cmd_browser_automation_act", { request });
 }
 
 export type BrowserOpenerLink = { browserId: string; handle: string };

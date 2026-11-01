@@ -1568,7 +1568,12 @@ pub enum BrowserCliResponse {
     Snapshot {
         snapshot: BrowserAutomationSnapshot,
     },
-    Acted,
+    /// `dispatched`/`applied` are flattened into the response; an old client that reads only
+    /// `type` still sees `acted`.
+    Acted {
+        #[serde(flatten)]
+        outcome: crate::browser::model::BrowserActOutcome,
+    },
     Opened {
         browser: BrowserSessionSummary,
         adoption: crate::browser::adoption::BrowserAdoption,
@@ -2441,9 +2446,11 @@ async fn execute_request<R: tauri::Runtime>(
                 Err(error) => error_response(error),
             }
         }
-        BrowserCliRequest::Act { request } => {
+        BrowserCliRequest::Act { mut request } => {
+            // A postcondition wait is bounded like `wait`, inside the CLI's response timeout.
+            request.postcondition = request.postcondition.map(clamp_cli_wait_condition);
             match browser_automation_act(app.clone(), manager, request).await {
-                Ok(()) => BrowserCliResponse::Acted,
+                Ok(outcome) => BrowserCliResponse::Acted { outcome },
                 Err(error) => error_response(error),
             }
         }
