@@ -104,17 +104,16 @@ struct HubMoveImport {
 impl cp::MoveImport for HubMoveImport {
     async fn import(&self, archive: &std::path::Path) -> Result<(), MoveError> {
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-        let options = ferryx_hub::checkpoint_import::ImportOptions {
+        let options = || ferryx_hub::checkpoint_import::ImportOptions {
             memory_root: home.join(".omo").join("memory").join("agents"),
             env_file: ferryx_hub::hub_env::env_file_path().unwrap_or_else(|| home.join(".ferryx/hub/env")),
             profile_omo_jsonc: None,
             now_ts: crate::hub_runtime::unix_now() as i64,
             write_private: ferryx_hub::checkpoint_import::default_private_writer(),
         };
-        ferryx_hub::checkpoint_import::import(archive, &self.hub_dir, &self.machine_id, &self.paired, options)
+        import_replacing_local(archive, &self.hub_dir, &self.machine_id, &self.paired, options)
             .await
-            .map(|_| ())
-            .map_err(|error| MoveError::new(409, error.code(), error.to_string()))
+            .map_err(|error| MoveError::new(409, &error.code, error.message))
     }
 
     async fn discard(&self) {
@@ -123,6 +122,48 @@ impl cp::MoveImport for HubMoveImport {
             tracing::warn!(%error, "the staged checkpoint import was not discarded");
         }
     }
+}
+
+/// A refused or failed import or archive: its stable code and message.
+#[derive(Debug)]
+struct ReplaceError {
+    code: String,
+    message: String,
+}
+
+/// Todo 7's staged import into `hub_dir`. When this hub holds another supervisor (the import
+/// refuses `SUPERVISOR_IDENTITY_MISMATCH`), the local one is replaced: its database is first
+/// archived as `hub.sqlite.pre-lease-<ts>` (plan todo 13, its open goals stay adoptable),
+/// then the import runs once more. A matching identity imports without an archive.
+async fn import_replacing_local(
+    archive: &std::path::Path,
+    hub_dir: &std::path::Path,
+    machine_id: &str,
+    paired: &[ferryx_hub::checkpoint::PairedHostMapping],
+    options: impl Fn() -> ferryx_hub::checkpoint_import::ImportOptions,
+) -> Result<(), ReplaceError> {
+    use ferryx_hub::checkpoint_import::import;
+    let failed = |error: ferryx_hub::checkpoint_import::ImportError| ReplaceError {
+        code: error.code().to_owned(),
+        message: error.to_string(),
+    };
+    let refused = match import(archive, hub_dir, machine_id, paired, options()).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.code() == ferryx_hub::checkpoint::SUPERVISOR_IDENTITY_MISMATCH => error,
+        Err(error) => return Err(failed(error)),
+    };
+    let dir = hub_dir.to_owned();
+    let now = options().now_ts;
+    let archived = tokio::task::spawn_blocking(move || ferryx_hub::adoption::archive_before_replace(&dir, now))
+        .await
+        .map_err(|error| ReplaceError { code: "INTERNAL_ERROR".into(), message: error.to_string() })?
+        .map_err(|error| ReplaceError { code: "STORAGE".into(), message: error.to_string() })?;
+    match archived {
+        Some(path) => tracing::info!(archive = %path.display(), "the local supervisor was archived before its replacement"),
+        // Already archived (or no database): the import still refuses only for another reason.
+        None => tracing::debug!(error = %refused, "the local supervisor was archived before"),
+    }
+    import(archive, hub_dir, machine_id, paired, options()).await.map(|_| ()).map_err(failed)
 }
 
 /// The lease client as a move drives it.
@@ -235,5 +276,65 @@ pub async fn pull_from_holder() {
             Err(error) => tracing::warn!(code = %error.code, "pulled supervisor checkpoint not stored: {}", error.message),
         },
         Err(error) => tracing::debug!(code = %error.code, "supervisor checkpoint not pulled: {}", error.message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000;
+
+    async fn provisioned_hub(dir: &std::path::Path, owner: &str) -> ferryx_hub::goals::SqlitePool {
+        std::fs::create_dir_all(dir).unwrap();
+        let pool = ferryx_hub::storage::connect(&dir.join("hub.sqlite")).await.unwrap();
+        ferryx_hub::supervisor::provision_owner(&pool, owner, "ferryx", "github.com/example/ferryx", "local", "/repo/.git")
+            .await
+            .unwrap();
+        pool
+    }
+
+    /// Replacing a local supervisor that has another identity archives it before the
+    /// import (todo 13's `archive_before_replace`), then stages the checkpoint.
+    #[tokio::test]
+    async fn a_move_onto_another_local_supervisor_archives_it_before_the_import() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let pool = provisioned_hub(&source, "owner:u1").await;
+        let exported = ferryx_hub::checkpoint::export(
+            &pool,
+            &ferryx_hub::checkpoint::ExportRequest::new(
+                source.clone(),
+                "machine-a".into(),
+                root.path().join("checkpoint.tar.zst"),
+                ferryx_hub::checkpoint_import::default_private_writer(),
+            ),
+        )
+        .await
+        .unwrap();
+        pool.close().await;
+        let target = root.path().join("target");
+        provisioned_hub(&target, "owner:u1").await.close().await;
+        let options = || ferryx_hub::checkpoint_import::ImportOptions {
+            memory_root: root.path().join("memory-agents"),
+            env_file: target.join("env"),
+            profile_omo_jsonc: None,
+            now_ts: NOW,
+            write_private: ferryx_hub::checkpoint_import::default_private_writer(),
+        };
+        let archives = || {
+            std::fs::read_dir(&target)
+                .unwrap()
+                .filter(|entry| {
+                    entry.as_ref().unwrap().file_name().to_string_lossy().starts_with(ferryx_hub::adoption::ARCHIVE_PREFIX)
+                })
+                .count()
+        };
+
+        import_replacing_local(&exported.path, &target, "machine-b", &[], options).await.unwrap();
+
+        assert!(target.join(format!("{}{NOW}", ferryx_hub::adoption::ARCHIVE_PREFIX)).is_file(), "archived first");
+        assert!(target.join(ferryx_hub::checkpoint_import::INCOMING_DB).exists(), "the checkpoint is staged");
+        assert_eq!(archives(), 1);
     }
 }
