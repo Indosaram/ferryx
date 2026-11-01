@@ -626,6 +626,7 @@ fn request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::supervisor_lease as lease;
     use crate::daemon::supervisor_lease_role::RELAY_LEASE_UNSUPPORTED;
     use crate::remote::protocol::SupervisorLeaseOutcome;
     use parking_lot::Mutex;
@@ -1054,6 +1055,77 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_stale_fence_stand_down_releases_and_stops_renewing() {
+        a_stale_fence_stand_down_case().await;
+    }
+
+    fn checkpoint(id: char, pulled: bool) -> crate::supervisor_checkpoint::StoredCheckpoint {
+        crate::supervisor_checkpoint::StoredCheckpoint { id: id.to_string().repeat(64), at: 1, pulled }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn renews_report_a_published_checkpoint_and_a_move_release_reserves_the_target() {
+        let relay = FakeRelay::new(Some(true));
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let cfg = config(clock, Some("acct"), None);
+        let checkpoints = Arc::clone(&cfg.checkpoints);
+        let (handle, task) = spawn_supervisor_lease_client(cfg, Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| *r == Role::Holder { fence: 7 }).await;
+        checkpoints.publish(checkpoint('a', false));
+        let published = "a".repeat(64);
+
+        tokio::time::sleep(Duration::from_secs(lease::RENEW_SECS + 1)).await;
+
+        assert!(relay.sent.lock().iter().any(|(_, r)| matches!(
+            r,
+            SupervisorLeaseRequest::SupervisorLeaseRenew(SupervisorLeaseRenew { checkpoint_id: Some(id), .. }) if *id == published
+        )));
+        assert!(handle.release_to("mach-b").await, "the fake relay released");
+        assert!(relay.sent.lock().iter().any(|(_, r)| matches!(
+            r,
+            SupervisorLeaseRequest::SupervisorLeaseRelease(SupervisorLeaseRelease {
+                fence: 7,
+                checkpoint_id: Some(id),
+                reserved_for: Some(target),
+                ..
+            }) if *id == published && target == "mach-b"
+        )));
+        assert_eq!(handle.state().role(), Role::standby_unknown());
+        task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_standby_with_the_hub_stopped_does_not_auto_promote() {
+        let relay = FakeRelay::new(Some(true));
+        *relay.acquire.lock() = Ok(SupervisorLeaseOutcome::Refused);
+        let hub = Arc::new(FakeHub::default());
+        let (clock, _) = test_clock();
+        let cfg = config(clock, Some("acct"), None);
+        let checkpoints = Arc::clone(&cfg.checkpoints);
+        checkpoints.set_local(Some(checkpoint('b', true)));
+        let (handle, task) = spawn_supervisor_lease_client(cfg, Arc::clone(&relay), Arc::clone(&hub)).await;
+        wait_role(&handle, |r| matches!(r, Role::Standby { holder_label: Some(_), .. })).await;
+        assert!(relay.sent.lock().iter().any(|(_, r)| matches!(
+            r,
+            SupervisorLeaseRequest::SupervisorLeaseAcquire(SupervisorLeaseAcquire { checkpoint_id: Some(id), force: false, .. })
+                if *id == "b".repeat(64)
+        )), "a standby asks with its newest checkpoint, never forced");
+        assert_eq!(
+            checkpoints.block_reason().map(|block| block.code().to_owned()).as_deref(),
+            Some("LEASE_HELD")
+        );
+
+        checkpoints.set_hub_stopped(true);
+        let sent = relay.sent.lock().len();
+        tokio::time::sleep(Duration::from_secs(lease::RENEW_SECS * 4)).await;
+        assert_eq!(relay.sent.lock().len(), sent, "a stopped machine does not take part");
+        // The person's own request still goes out.
+        handle.acquire(false).await;
+        assert_eq!(relay.sent.lock().len(), sent + 1);
+        task.abort();
+    }
+
+    async fn a_stale_fence_stand_down_case() {
         use crate::agent_control::fence::SupervisorFenceSource;
         let relay = FakeRelay::new(Some(true));
         let hub = Arc::new(FakeHub::default());

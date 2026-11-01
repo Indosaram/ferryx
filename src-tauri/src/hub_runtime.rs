@@ -449,6 +449,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         Some("env") => return hub_env_cli(&args[3.min(args.len())..]),
         Some("cron") => return hub_cron_cli(&args[3.min(args.len())..]),
         Some("lease") => return hub_lease_cli(&args[3.min(args.len())..]),
+        Some("move-here") => return hub_move_here_cli(&args[3.min(args.len())..]),
         Some("migrate") => {}
         _ => {
             eprintln!("usage: ferryx hub migrate [--from-omo <db>] [--cwd <dir>] [--imported-from <db>] [--dry-run]");
@@ -459,6 +460,7 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
             );
             eprintln!("       ferryx hub cron list | ferryx hub cron model <job-id> <provider/model | --clear> | ferryx hub cron approve-rerun <problem-id>");
             eprintln!("       ferryx hub lease reset-capability");
+            eprintln!("       ferryx hub move-here [--force [--confirm]]");
             return 2;
         }
     }
@@ -684,6 +686,70 @@ fn hub_lease_cli(args: &[String]) -> i32 {
         _ => {
             eprintln!("usage: ferryx hub lease reset-capability");
             2
+        }
+    }
+}
+
+/// Parses `move-here` flags: `--force` alone is refused; it needs `--confirm` (the person
+/// read what a forced takeover loses). `Err` is the usage exit.
+fn move_here_flags(args: &[String]) -> Result<(bool, bool), String> {
+    let (mut force, mut confirm) = (false, false);
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--confirm" => confirm = true,
+            other => return Err(format!("unknown argument {other}")),
+        }
+    }
+    if confirm && !force {
+        return Err("--confirm only confirms --force".to_owned());
+    }
+    Ok((force, confirm))
+}
+
+/// `ferryx hub move-here [--force [--confirm]]`: moves the supervisor to this machine. A
+/// forced takeover is only sent after `--confirm`; without it the daemon is asked unforced
+/// and its `SUPERVISOR_FORCE_REQUIRED` warning (what will be lost) is printed.
+fn hub_move_here_cli(args: &[String]) -> i32 {
+    let (force, confirm) = match move_here_flags(args) {
+        Ok(flags) => flags,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("usage: ferryx hub move-here [--force [--confirm]]");
+            return 2;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("runtime: {error}");
+            return 1;
+        }
+    };
+    let request = DaemonRequest::SupervisorMoveHere { force: force && confirm };
+    match runtime.block_on(DaemonClient::new().send_request(request)) {
+        Ok(DaemonResponse::SupervisorMoveHereOk { moved: true }) => {
+            println!("the supervisor runs on this machine now");
+            0
+        }
+        Ok(DaemonResponse::SupervisorMoveHereOk { moved: false }) => {
+            println!("the supervisor already runs on this machine");
+            0
+        }
+        Ok(DaemonResponse::Error { message, code, .. }) => {
+            eprintln!("{}: {message}", code.as_deref().unwrap_or("ERROR"));
+            if code.as_deref() == Some(crate::supervisor_checkpoint::SUPERVISOR_FORCE_REQUIRED) {
+                eprintln!("run 'ferryx hub move-here --force --confirm' to take over anyway");
+            }
+            1
+        }
+        Ok(other) => {
+            eprintln!("unexpected daemon response: {other:?}");
+            1
+        }
+        Err(error) => {
+            eprintln!("daemon: {}", error.message);
+            1
         }
     }
 }
@@ -1147,6 +1213,7 @@ where
         tracing::warn!(%error, "hub start did not clear the stopped flag");
         return Err(HubStartError::Storage(error.to_string()));
     }
+    crate::supervisor_checkpoint::shared().set_hub_stopped(false);
     let mut slot = running.lock().await;
     if slot.is_some() {
         return Ok(false);
@@ -1249,6 +1316,10 @@ async fn promote_generation() -> Option<Generation> {
         .database_path
         .clone()
         .unwrap_or_else(ferryx_hub::hub::default_database_path);
+    // A takeover granted against a pulled checkpoint stages it first (todo 7's import).
+    if let Some(dir) = database.parent() {
+        crate::supervisor_move::import_pending(dir).await;
+    }
     if close_for_staged_swap(&launch.hub.pool, &database).await {
         // Hub::open applies the staged swap before its pool exists.
         match Hub::open(launch.config.clone(), launch.bridge.clone()).await {
@@ -1314,8 +1385,129 @@ async fn spawn_lease_client(
     // Supervisor inputs are stamped with this lease's fence, checked right before each send.
     let source: Arc<dyn crate::agent_control::fence::SupervisorFenceSource> = Arc::new(handle.state().clone());
     crate::agent_control::fence::install_source(Some(source));
+    let machine_handle = handle.clone();
+    crate::supervisor_move::install_hosts(server.paired_hosts().clone());
+    HUB_TASKS.track(&spawn_checkpoint_publisher());
     let gate: Arc<dyn LeaseGate> = Arc::new(handle);
+    *LEASE_HANDLE.write().unwrap_or_else(|e| e.into_inner()) = Some(machine_handle.clone());
     Some(gate)
+}
+
+/// The lease client handle a move drives, installed with the lease gate.
+static LEASE_HANDLE: std::sync::RwLock<Option<crate::daemon::supervisor_lease_client::SupervisorLeaseHandle>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn lease_handle() -> Option<crate::daemon::supervisor_lease_client::SupervisorLeaseHandle> {
+    LEASE_HANDLE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The hub directory of the open hub (where `hub.sqlite` lives); `None` before it opened.
+pub(crate) fn open_hub_dir() -> Option<std::path::PathBuf> {
+    supervisor_launch().map(|launch| hub_dir(&launch))
+}
+
+fn hub_dir(launch: &HubLaunch) -> std::path::PathBuf {
+    let database = launch.config.database_path.clone().unwrap_or_else(ferryx_hub::hub::default_database_path);
+    database.parent().map(std::path::Path::to_path_buf).unwrap_or_default()
+}
+
+/// Exports the running hub as this holder's newest checkpoint and records it for the next
+/// renew (and the release). Returns its id.
+async fn publish_checkpoint(launch: &HubLaunch) -> Result<String, String> {
+    use crate::supervisor_checkpoint as cp;
+    let dir = cp::checkpoint_dir().ok_or("the Ferryx data directory cannot be resolved")?;
+    let machine_id = lease_machine_id().await;
+    let tmp = dir.join(format!(".export-{}.partial", uuid::Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&dir).await.map_err(|error| error.to_string())?;
+    let mut request = ferryx_hub::checkpoint::ExportRequest::new(
+        hub_dir(launch),
+        machine_id,
+        tmp.clone(),
+        ferryx_hub::checkpoint_import::default_private_writer(),
+    );
+    request.env_file = ferryx_hub::hub_env::env_file_path();
+    request.memory_root = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".omo").join("memory").join("agents"));
+    let exported = ferryx_hub::checkpoint::export(&launch.hub.pool, &request).await;
+    let result = match exported {
+        Ok(exported) => {
+            let store = cp::CheckpointStore::new(dir);
+            let id = exported.checkpoint_id.clone();
+            let saved = tokio::task::spawn_blocking(move || {
+                let bytes = std::fs::read(&exported.path)?;
+                store.save(&exported.checkpoint_id, &bytes, unix_now(), false)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|saved| saved.map_err(|error| error.to_string()));
+            saved.map(|entry| {
+                cp::shared().publish(entry);
+                id
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    };
+    let _ = tokio::fs::remove_file(&tmp).await;
+    result
+}
+
+/// This machine's lease id (the enrollment's machine record id; `local` without one).
+pub(crate) async fn lease_machine_id() -> String {
+    crate::ipc::run_blocking(|| Ok(crate::account::enroll_client::load_enrollment_record()))
+        .await
+        .ok()
+        .flatten()
+        .map_or_else(|| "local".to_owned(), |record| record.machine_record_id)
+}
+
+/// The holder side of a move (`POST /api/v1/supervisor/release-to`): stops the generation,
+/// publishes the final checkpoint and releases the lease reserved for `target`. Returns the
+/// final checkpoint id.
+pub async fn release_supervisor_to(target: &str) -> Result<Option<String>, crate::supervisor_checkpoint::MoveError> {
+    use crate::supervisor_checkpoint::MoveError;
+    let (Some(handle), Some(launch), Some((_, running))) = (lease_handle(), supervisor_launch(), supervisor_view()) else {
+        return Err(MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the supervisor hub is not open in this daemon"));
+    };
+    if !handle.is_holder_now() {
+        return Err(MoveError::new(409, crate::supervisor_checkpoint::SUPERVISOR_STANDBY, "this machine does not run the supervisor"));
+    }
+    stand_down(&running).await;
+    let id = publish_checkpoint(&launch)
+        .await
+        .map_err(|error| MoveError::new(500, "CHECKPOINT_EXPORT_FAILED", error))?;
+    if !handle.release_to(target).await {
+        return Err(MoveError::new(503, "SUPERVISOR_UNAVAILABLE", "the relay did not release the supervisor lease"));
+    }
+    tracing::info!(target, checkpoint = %id, "supervisor released to another machine");
+    Ok(Some(id))
+}
+
+/// Every [`crate::supervisor_checkpoint::PUBLISH_EVERY`] while this machine holds the lease:
+/// a fresh checkpoint for the standbys, reported on the next renew.
+fn spawn_checkpoint_publisher() -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(crate::supervisor_checkpoint::PUBLISH_EVERY);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticks.tick().await;
+        loop {
+            ticks.tick().await;
+            let holder = lease_handle().is_some_and(|handle| handle.is_holder_now());
+            let Some(launch) = supervisor_launch() else { continue };
+            if holder {
+                if let Err(error) = publish_checkpoint(&launch).await {
+                    tracing::warn!(%error, "supervisor checkpoint was not published");
+                }
+            } else {
+                crate::supervisor_move::pull_from_holder().await;
+            }
+        }
+    })
 }
 
 /// A person starts the stopped hub from another surface. `by` names who, as for a lane pause.
@@ -2160,6 +2352,13 @@ pub async fn start(server: Arc<DaemonServer>) -> Result<(), String> {
     let forced_on = std::env::var("FERRYX_HUB").ok().as_deref() == Some("on");
     let persisted_stop = ferryx_hub::control::is_stopped(&hub.pool).await.unwrap_or(true);
     let stopped = !forced_on && persisted_stop;
+    // Only machines whose owner has not stopped the hub take part in auto-promotion.
+    crate::supervisor_checkpoint::shared().set_hub_stopped(persisted_stop);
+    if let Some(dir) = crate::supervisor_checkpoint::checkpoint_dir() {
+        let store = crate::supervisor_checkpoint::CheckpointStore::new(dir);
+        let newest = tokio::task::spawn_blocking(move || store.newest()).await.ok().flatten();
+        crate::supervisor_checkpoint::shared().set_local(newest);
+    }
     // This daemon owns the hub from here; a later handover commit ends it again.
     server.handover_manager.on_commit(retire_for_handover);
     // The supervisor lease decides which of the owner's machines runs the hub. Without a relay
@@ -2862,6 +3061,9 @@ fn serve_control(running: Arc<tokio::sync::Mutex<Option<Generation>>>, launch: H
                     let reply = match ferryx_hub::control::parse_control(&line) {
                         Ok(ferryx_hub::control::ControlOp::Stop) => {
                             let persisted = ferryx_hub::control::mark_stopped(&launch.hub.pool).await;
+                            if persisted.is_ok() {
+                                crate::supervisor_checkpoint::shared().set_hub_stopped(true);
+                            }
                             if let Some(generation) = running.lock().await.take() {
                                 for task in &generation.tasks {
                                     task.abort();
@@ -3662,6 +3864,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_staged_database_replaces_the_hub_database_on_promotion() {
+        a_staged_database_case().await;
+    }
+
+    #[test]
+    fn move_here_force_needs_the_explicit_confirm() {
+        let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        assert_eq!(move_here_flags(&args(&[])), Ok((false, false)));
+        assert_eq!(move_here_flags(&args(&["--force"])), Ok((true, false)), "force alone is not sent forced");
+        assert_eq!(move_here_flags(&args(&["--force", "--confirm"])), Ok((true, true)));
+        assert!(move_here_flags(&args(&["--confirm"])).is_err());
+        assert!(move_here_flags(&args(&["--yes"])).is_err());
+    }
+
+    async fn a_staged_database_case() {
         use ferryx_hub::supervisor as sv;
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join("hub.sqlite");

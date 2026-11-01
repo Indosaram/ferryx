@@ -4182,6 +4182,11 @@ impl DaemonServer {
         &self.remote_state
     }
 
+    /// This daemon's paired-host inventory (a supervisor move reaches the holder through it).
+    pub(crate) fn paired_hosts(&self) -> &crate::paired_host::service::PairedHostService {
+        &self.paired_hosts
+    }
+
     pub fn session_service(&self) -> &Arc<DaemonSessionService> {
         &self.session_service
     }
@@ -7611,6 +7616,16 @@ impl DaemonServer {
                             message: error.to_string(),
                             code: Some(error.code().into()),
                             details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorMoveHere { force }) => {
+                    match crate::supervisor_move::move_supervisor_here(self.remote_state(), &self.paired_hosts, force, "desktop").await {
+                        Ok(moved) => DaemonResponse::SupervisorMoveHereOk { moved },
+                        Err(error) => DaemonResponse::Error {
+                            message: error.message,
+                            code: Some(error.code),
+                            details: Some(serde_json::Value::Object(error.details)),
                         },
                     }
                 }

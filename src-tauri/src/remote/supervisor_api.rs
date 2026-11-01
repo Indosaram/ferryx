@@ -276,3 +276,102 @@ pub(crate) async fn http_memory_post(
 #[cfg(test)]
 #[path = "supervisor_api_tests.rs"]
 mod tests;
+
+/// The machine error envelope a move refusal answers with (`SUPERVISOR_STANDBY` details
+/// `{holderMachineId, holderLabel}`, `SUPERVISOR_FORCE_REQUIRED` details
+/// `{holderLabel, checkpointAt}`).
+fn move_refusal(error: crate::supervisor_checkpoint::MoveError) -> Response {
+    let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    machine_error_with_details(status, &error.code, &error.message, error.details)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct MoveBody {
+    #[serde(default)]
+    force: bool,
+}
+
+/// `POST /api/v1/supervisor/move` on the target machine: `{force}` -> `{moved}`. Only a
+/// machine Control device the agent-control policy admits may move the supervisor.
+pub(crate) async fn http_move(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<MoveBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = body else {
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the move body must be {force}");
+    };
+    let by = format!("remote:{}", device.id);
+    match crate::supervisor_move::move_here_installed(&state, body.force, &by).await {
+        Ok(moved) => no_store(serde_json::json!({ "moved": moved })),
+        Err(error) => move_refusal(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct ReleaseToBody {
+    target_machine_id: String,
+}
+
+/// `POST /api/v1/supervisor/release-to` on the holder, reached by the move target over the
+/// paired encrypted channel: stops the hub, publishes the final checkpoint and releases the
+/// lease reserved for `targetMachineId`. Answers `{checkpointId}`.
+pub(crate) async fn http_release_to(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<ReleaseToBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
+        return response;
+    }
+    let Ok(Json(body)) = body else {
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the body must be {targetMachineId}");
+    };
+    match crate::hub_runtime::release_supervisor_to(&body.target_machine_id).await {
+        Ok(checkpoint_id) => no_store(serde_json::json!({ "checkpointId": checkpoint_id })),
+        Err(error) => move_refusal(error),
+    }
+}
+
+/// `GET /api/v1/supervisor/checkpoint`: this machine's newest checkpoint archive, its id in
+/// [`crate::supervisor_checkpoint::CHECKPOINT_ID_HEADER`]. Agent-control device grant
+/// required (403 otherwise); 404 when none was published.
+pub(crate) async fn http_checkpoint(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, false) {
+        return response;
+    }
+    let Some(dir) = crate::supervisor_checkpoint::checkpoint_dir() else {
+        return machine_error_with_details(StatusCode::NOT_FOUND, "NOT_FOUND", "no supervisor checkpoint", serde_json::Map::new());
+    };
+    let store = crate::supervisor_checkpoint::CheckpointStore::new(dir);
+    let read = tokio::task::spawn_blocking(move || {
+        let newest = store.newest()?;
+        let bytes = std::fs::read(store.path_of(&newest.id)).ok()?;
+        Some((newest.id, bytes))
+    })
+    .await
+    .ok()
+    .flatten();
+    match read {
+        Some((id, bytes)) => (
+            StatusCode::OK,
+            [
+                (header::CACHE_CONTROL, "no-store".to_owned()),
+                (header::CONTENT_TYPE, "application/zstd".to_owned()),
+                (header::HeaderName::from_static(crate::supervisor_checkpoint::CHECKPOINT_ID_HEADER), id),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => machine_error_with_details(StatusCode::NOT_FOUND, "NOT_FOUND", "no supervisor checkpoint", serde_json::Map::new()),
+    }
+}

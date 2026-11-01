@@ -893,6 +893,12 @@ pub enum DaemonRequest {
     SupervisorEngine {
         request: SupervisorEngineAction,
     },
+    /// Move the supervisor to this machine (`ferryx hub move-here`, the desktop move button).
+    /// `force` takes over from an unreachable holder whose last checkpoint this machine lacks.
+    SupervisorMoveHere {
+        #[serde(default)]
+        force: bool,
+    },
     /// One unified supervisor request envelope `{requestId, projectId?, goalId?,
     /// expectedRevision?, action, payload}`, served by the hub's shared request service.
     /// Gated by `supervisorRequestV1`. The actor is server-derived; `cli` only says whether
@@ -1498,6 +1504,10 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     SupervisorEngineOk {
         snapshot: serde_json::Value,
+    },
+    /// Whether `SupervisorMoveHere` moved the supervisor here (false: it already ran here).
+    SupervisorMoveHereOk {
+        moved: bool,
     },
     /// The shared service's receipt for a `SupervisorRequestV1`.
     #[serde(rename = "supervisorRequestV1Ok", rename_all = "camelCase")]

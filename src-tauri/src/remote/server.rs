@@ -7900,6 +7900,19 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(
+            "/api/v1/supervisor/move",
+            post(supervisor_api::http_move).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/release-to",
+            post(supervisor_api::http_release_to).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route("/api/v1/supervisor/checkpoint", get(supervisor_api::http_checkpoint))
+        .route(
             "/api/v1/supervisor/fence",
             post(agent_control_service::http_supervisor_fence).layer(
                 axum::extract::DefaultBodyLimit::max(

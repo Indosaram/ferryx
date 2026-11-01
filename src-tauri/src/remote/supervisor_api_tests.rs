@@ -509,3 +509,40 @@ async fn the_legacy_pause_route_pauses_a_supervisor_goal_through_the_shared_serv
     assert_eq!(goal_row(&pool, &goal_id).await, ("ready".into(), 2));
     gateway.stop().await;
 }
+
+#[tokio::test]
+async fn the_checkpoint_and_move_routes_refuse_a_device_without_the_agent_control_grant() {
+    let gateway = Gateway::start().await;
+    let token = gateway.token(DevicePermission::Control, DeviceAccessScope::Machine);
+    gateway.state().agent_control_policy.restrict_to(["another-device"]);
+
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &token).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+    for (path, request) in [
+        ("/api/v1/supervisor/move", r#"{"force":false}"#),
+        ("/api/v1/supervisor/release-to", r#"{"targetMachineId":"mach-b"}"#),
+    ] {
+        let (status, _, body) = gateway.post_to(path, &token, request).await;
+        assert_eq!(status, 403, "{path}: {body}");
+        assert_eq!(body["error"]["code"], "FORBIDDEN");
+    }
+    let mirror = gateway.token(DevicePermission::Control, DeviceAccessScope::Mirror);
+    let (status, _, body) = gateway.get("/api/v1/supervisor/checkpoint", &mirror).await;
+    assert_eq!(status, 403, "{body}");
+    gateway.stop().await;
+}
+
+#[tokio::test]
+async fn a_move_without_an_open_hub_is_unavailable() {
+    let gateway = Gateway::start().await;
+    let token = gateway.authorized_machine_token();
+
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/move", &token, r#"{"force":false}"#).await;
+
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "SUPERVISOR_UNAVAILABLE");
+    let (status, _, body) = gateway.post_to("/api/v1/supervisor/move", &token, r#"{"forced":true}"#).await;
+    assert_eq!(status, 400, "{body}");
+    gateway.stop().await;
+}
