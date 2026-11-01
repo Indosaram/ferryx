@@ -1368,7 +1368,7 @@ async fn a_process_without_the_engine_reports_not_running_instead_of_another_mod
     assert!(installed().is_none());
     let fault = installed_engine_snapshot().await.unwrap_err();
     assert_eq!(fault.code(), "MHC_NOT_RUNNING");
-    assert!(configured_model().is_none());
+    assert!(configured_model().await.is_none());
     let fault = InstalledModel
         .complete_typed("question", TurnContext::Retained)
         .await
@@ -1388,6 +1388,23 @@ async fn a_process_without_the_engine_reports_not_running_instead_of_another_mod
         ),
         "{judged:?}"
     );
+}
+
+/// The judge's model decision reads the hub env file on the blocking pool, never on the
+/// runtime thread, even on a single-threaded runtime; a read that cannot finish counts as
+/// not configured. No engine is installed in tests.
+#[tokio::test(flavor = "current_thread")]
+async fn the_configured_model_reads_the_shared_sources_off_the_runtime() {
+    let runtime_thread = std::thread::current().id();
+    let model = configured_model_with(move || {
+        assert_ne!(std::thread::current().id(), runtime_thread, "read on the runtime thread");
+        true
+    })
+    .await
+    .expect("a configured hub has the engine model");
+    assert!(model.is_supervisor_engine());
+    assert!(configured_model_with(|| false).await.is_none());
+    assert!(configured_model_with(|| panic!("the hub env file read failed")).await.is_none());
 }
 
 #[tokio::test]
