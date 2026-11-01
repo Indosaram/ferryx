@@ -3304,6 +3304,9 @@ async fn proxy_http(
     };
     // Set once the request is handed to a fresh channel: from then on the host may act on it.
     let forwarded = std::sync::atomic::AtomicBool::new(false);
+    // Set once any attached data channel (pooled or fresh) carries the request, so a budget
+    // that runs out afterwards is an upstream timeout rather than a pairing timeout.
+    let attached = std::sync::atomic::AtomicBool::new(false);
     raw.extend(body);
     let head = method == Method::HEAD;
     let max_response = if path
@@ -3322,6 +3325,7 @@ async fn proxy_http(
             if let Some((socket, control_generation)) =
                 state.take_pooled_data(machine, expected_generation)
             {
+                attached.store(true, Ordering::SeqCst);
                 // An idle channel can die silently (a NAT drops it): bound the wait for its
                 // first response byte, then replay this safe request on a fresh channel.
                 match http_round_trip(socket, &raw, head, max_response, Some(POOLED_FIRST_RESPONSE_TIMEOUT)).await {
@@ -3340,6 +3344,7 @@ async fn proxy_http(
             .open_session_channel_at(machine, expected_generation)
             .await?;
         forwarded.store(true, Ordering::SeqCst);
+        attached.store(true, Ordering::SeqCst);
         match http_round_trip(socket, &raw, head, max_response, None).await {
             Ok((response, reusable)) => {
                 if let Some(socket) = reusable {
@@ -3379,6 +3384,11 @@ async fn proxy_http(
         Ok(Err(status)) => relay_refusal(status).map_or(Err(status), Ok),
         Err(_) if mutation && forwarded.load(Ordering::SeqCst) => {
             Ok(reference_chat_outcome_unknown(&request_id))
+        }
+        // The budget ran out before a data channel ever carried the request: the machine
+        // never attached, which is a pairing timeout, not a slow upstream.
+        Err(_) if !attached.load(Ordering::SeqCst) => {
+            Ok(relay_timeout_response(RELAY_STAGE_DATA_PAIRING_TIMEOUT))
         }
         Err(_) => {
             Ok(relay_timeout_response(RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT))
@@ -10572,6 +10582,39 @@ mod tests {
         assert!(relay_refusal(StatusCode::GONE).is_some());
         assert_eq!(relay_refusal(StatusCode::SERVICE_UNAVAILABLE).unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(relay_refusal(StatusCode::BAD_GATEWAY).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_budget_spent_before_any_channel_attached_reports_the_pairing_stage() {
+        tokio::time::pause();
+        let state = test_state(vec![]);
+        let (generation, mut notices, _grants) =
+            state.register_control_channel("machine_stage_budget".into());
+        // A short agent-control wait's budget runs out before the pairing timeout, while the
+        // machine never attaches a data channel.
+        let path = "/api/v1/agent-control/sessions/s1/wait?timeoutMs=1000";
+        let budget = agent_control_wait_budget(path).expect("wait path has its own budget");
+        assert!(budget < SESSION_PAIRING_TIMEOUT, "the budget must expire before pairing does");
+        let http_fut = proxy_http(
+            &state,
+            "machine_stage_budget",
+            Some(generation),
+            Method::GET,
+            path,
+            HeaderMap::new(),
+            Vec::new(),
+        );
+        tokio::pin!(http_fut);
+        tokio::select! {
+            res = &mut http_fut => panic!("completed prematurely: {:?}", res.map(|r| r.status())),
+            n = notices.recv() => { n.expect("session notice"); }
+        }
+        let res = http_fut.await.expect("stage timeout is a response");
+        assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            res.headers().get(RELAY_STAGE_HEADER).and_then(|v| v.to_str().ok()),
+            Some(RELAY_STAGE_DATA_PAIRING_TIMEOUT)
+        );
     }
 
     #[tokio::test]
