@@ -36,7 +36,9 @@ impl Hub {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let pool = crate::storage::connect(&path).await?;
+        // A checkpoint import staged `hub.sqlite.incoming`: swap it in before the pool exists.
+        let pool =
+            crate::checkpoint_import::open_with_staged_swap(&path, Utc::now().timestamp()).await?;
         if config.import_invoked {
             if let Some(source) = &config.import_from {
                 import_once(&pool, source).await?;

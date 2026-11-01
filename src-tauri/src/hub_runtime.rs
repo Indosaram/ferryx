@@ -3404,6 +3404,8 @@ pub fn run_mcp() -> i32 {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // A plain open: only the daemon's hub open swaps in a staged checkpoint import. This
+        // process runs beside the daemon, whose pool may hold the database.
         let pool = match ferryx_hub::storage::connect(&path).await {
             Ok(pool) => pool,
             Err(error) => {
