@@ -30,6 +30,16 @@ export async function startFrontend({ build = true, cacheDir } = {}) {
 }
 
 if (import.meta.main) {
+  // Tauri starts cargo only once the dev server answers, so the FFmpeg SDK that the
+  // remote-desktop feature links is in place before the first compile.
+  if (process.env.FERRYX_DEV_FETCH_FFMPEG !== "0") {
+    const fetched = spawnSync(["bun", fileURLToPath(new URL("./fetch-ffmpeg.mjs", import.meta.url)), "--from-env"], {
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    if (fetched.exitCode !== 0) process.exit(fetched.exitCode);
+  }
   const noBuild = process.env.FERRYX_DEV_FRONTEND_NO_BUILD === "1";
   const cacheDir = process.env.FERRYX_DEV_CACHE_DIR || undefined;
   await startFrontend({ build: !noBuild, cacheDir });

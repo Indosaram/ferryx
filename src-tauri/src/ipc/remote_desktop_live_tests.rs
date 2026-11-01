@@ -5,7 +5,7 @@
 //!
 //! Ignored by default: it needs a capturable display (an interactive desktop session with
 //! screen capture permission). Run it with
-//! `cargo test --manifest-path src-tauri/Cargo.toml --features remote-desktop --lib
+//! `cargo test --manifest-path src-tauri/Cargo.toml --lib
 //! ipc::remote_desktop::live_tests -- --ignored --nocapture`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};

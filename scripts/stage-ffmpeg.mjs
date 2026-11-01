@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Stages the LGPL FFmpeg 9 shared libraries that a `--features remote-desktop` build of Ferryx
+ * Stages the LGPL FFmpeg 9 shared libraries that Ferryx (default feature `remote-desktop`)
  * loads at runtime, into src-tauri/resources/ffmpeg/payload/<triple> (gitignored).
  *
  * Source: on every OS a prefix made by scripts/build-ffmpeg-lgpl.sh from the tarball pinned in
@@ -15,8 +15,8 @@
  *   stage.json                 sha256 of every runtime and legal file
  *   tauri.ffmpeg.conf.json     `tauri build -c` overlay that bundles runtime/ and legal/
  *
- * Releases without the feature never run this script and never pass the overlay, so their bundles
- * are unchanged. `--check` re-verifies a staged payload and fails closed on any mismatch.
+ * Every desktop release runs this script and passes the overlay. `--check` re-verifies a staged
+ * payload and fails closed on any mismatch.
  *
  * Usage:
  *   bun scripts/stage-ffmpeg.mjs --target <triple|universal-apple-darwin> [--prefix [<triple>=]<dir>]...

@@ -140,8 +140,8 @@ fn main() {
     }
 }
 
-/// `--features remote-desktop` links FFmpeg's shared libraries, which releases bundle next to the
-/// app (scripts/stage-ffmpeg.mjs). Teach the loader where they live:
+/// The `remote-desktop` feature (on by default) links FFmpeg's shared libraries, which releases
+/// bundle next to the app (scripts/stage-ffmpeg.mjs). Teach the loader where they live:
 /// - macOS: `Contents/Frameworks` of the app (`@executable_path/../Frameworks`), the same dir
 ///   from the daemon helper `Contents/Helpers/Ferryx Daemon.app/Contents/MacOS`, and `<dir of
 ///   the staged helper bundle>/ffmpeg` for a daemon generation staged outside the app.
@@ -149,11 +149,15 @@ fn main() {
 ///   to a staged daemon executable.
 /// - Windows needs nothing: the DLLs sit beside ferryx.exe.
 ///
-/// Builds without the feature emit nothing, so their binaries are unchanged.
+/// Dev and test builds (`debug` profile) load FFmpeg from `FFMPEG_DIR` instead, which
+/// .cargo/config.toml points at the SDK of scripts/fetch-ffmpeg.mjs: an absolute rpath to its
+/// `lib` dir on macOS and Linux, and its DLLs copied beside the binaries on Windows. Release
+/// builds never get the absolute rpath. Builds without the feature emit nothing.
 fn remote_desktop_rpath() {
     if std::env::var_os("CARGO_FEATURE_REMOTE_DESKTOP").is_none() {
         return;
     }
+    println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     let rpaths: &[&str] = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("macos") => &[
             "@executable_path/../Frameworks",
@@ -165,5 +169,54 @@ fn remote_desktop_rpath() {
     };
     for rpath in rpaths {
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{rpath}");
+    }
+    if std::env::var("PROFILE").as_deref() == Ok("debug") {
+        if let Some(dir) = std::env::var_os("FFMPEG_DIR").map(std::path::PathBuf::from) {
+            dev_ffmpeg_runtime(&dir);
+        }
+    }
+}
+
+/// Makes the `FFMPEG_DIR` libraries loadable by every dev/test binary of this package.
+fn dev_ffmpeg_runtime(ffmpeg_dir: &std::path::Path) {
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") | Ok("linux") => {
+            let lib = ffmpeg_dir.join("lib");
+            println!("cargo:rerun-if-changed={}", lib.display());
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
+        }
+        Ok("windows") => {
+            let bin = ffmpeg_dir.join("bin");
+            println!("cargo:rerun-if-changed={}", bin.display());
+            let Ok(entries) = std::fs::read_dir(&bin) else {
+                // A release SDK (headers and import libraries only): the DLLs ship with the bundle.
+                return;
+            };
+            let dlls: Vec<std::path::PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("dll")))
+                .collect();
+            // OUT_DIR is <target>/[<triple>/]<profile>/build/<pkg>-<hash>/out: binaries run from
+            // <profile>, test binaries from <profile>/deps, and Windows loads DLLs from the exe dir.
+            let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+            let profile_dir = out_dir
+                .ancestors()
+                .nth(3)
+                .expect("OUT_DIR lies under the profile dir");
+            for dest in [profile_dir.to_path_buf(), profile_dir.join("deps")] {
+                std::fs::create_dir_all(&dest).expect("create target dir for FFmpeg DLLs");
+                for dll in &dlls {
+                    let target = dest.join(dll.file_name().expect("DLL file name"));
+                    if let Err(err) = std::fs::copy(dll, &target) {
+                        // A running dev binary keeps its DLLs locked; the copy it loaded is current.
+                        if !target.is_file() {
+                            panic!("copy {} to {}: {err}", dll.display(), target.display());
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
