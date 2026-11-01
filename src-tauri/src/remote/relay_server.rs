@@ -3776,9 +3776,17 @@ pub fn relay_router_with_grant_key(state: RelayState, account_public_key: Option
 /// `primary` serves a writable account store, `standby` a read-only replica, and `relay` has
 /// no embedded account service.
 async fn healthz_handler(State(state): State<RelayState>) -> Response {
-    let role = match state.inner.account_state.lock().as_ref() {
-        Some(account) if account.is_read_only() => "standby",
-        Some(_) => "primary",
+    // `is_read_only` touches the filesystem: run it off the async worker and without holding
+    // the account-state lock every `/host/...` request also takes.
+    let role = match state.account_state() {
+        Some(account) => match crate::ipc::run_blocking(move || Ok(account.is_read_only())).await {
+            Ok(true) => "standby",
+            Ok(false) => "primary",
+            Err(error) => {
+                tracing::warn!(%error, "healthz could not read the account store role");
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        },
         None => "relay",
     };
     let mut response = Json(serde_json::json!({ "ok": true, "role": role })).into_response();
