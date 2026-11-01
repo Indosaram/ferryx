@@ -1310,13 +1310,16 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
         let current = sessions();
         const chromium = current.list.find((entry) => entry.engine === "chromium") ?? current.list.at(-1);
         browserId = chromium?.browserId ?? null;
-        if (browserId && chromium.title !== "fixture-ready") {
+        // Whether the typed URL loaded the page, before any CLI fallback.
+        const typed = chromium?.title === "fixture-ready";
+        summary.engine.fixture_loaded_by = typed ? "typed-url" : "cli-navigate";
+        if (browserId && !typed) {
           cli("navigate", "--browser-id", browserId, "--url", `${fixtureBase}/fixture.html`);
           await sleep(5000);
           current = sessions();
         }
         const titles = current.list.map((entry) => entry.title);
-        return { ok: titles.includes("fixture-ready"), titles, cli: current.raw.ok ? "ok" : current.raw.stderr, stderr: titles.includes("fixture-ready") ? "" : "fixture title not reported" };
+        return { ok: titles.includes("fixture-ready"), via: summary.engine.fixture_loaded_by, title_after_typing: chromium?.title ?? null, titles, cli: current.raw.ok ? "ok" : current.raw.stderr, stderr: titles.includes("fixture-ready") ? "" : "fixture title not reported" };
       }],
     ],
     { any: ["Ferryx", "fixture:", "CEF"] },
