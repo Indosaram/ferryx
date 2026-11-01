@@ -60,12 +60,10 @@ fn usable(host: &HostView) -> bool {
         && host.unavailable_reason.is_none()
 }
 
+/// A paired host is the holder only by machine id: a display label is the owner's free text
+/// and two machines may share one.
 fn is_holder(host: &HostView, holder: &Holder) -> bool {
-    holder
-        .machine_id
-        .as_deref()
-        .is_some_and(|id| host.machine_id == id || host.host_id == id)
-        || holder.label.as_deref().is_some_and(|label| host.display_label == label)
+    holder.machine_id.as_deref().is_some_and(|id| host.machine_id == id)
 }
 
 impl HolderLink {
@@ -385,6 +383,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(account.grants.lock().len(), 1);
+    }
+
+    /// A paired host is the holder by machine id only: another machine that shares the
+    /// holder's display label is never forwarded to.
+    #[tokio::test]
+    async fn a_host_sharing_the_holders_label_is_not_the_holder() {
+        let link = HolderLink::new();
+        let hosts = FakeHosts::default();
+        hosts.hosts.lock().push(host("mach-x", AuthStatus::Paired));
+        assert_eq!(hosts.hosts.lock()[0].display_label, holder().label.unwrap());
+        let account = FakeAccount { session: false, grants: parking_lot::Mutex::new(Vec::new()) };
+        let refused = link
+            .forward(&holder(), &hosts, &account, Operation::SupervisorObserve { observation: Value::Null })
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ferryx_hub::holder::SUPERVISOR_STANDBY);
+        assert!(hosts.sent.lock().is_empty(), "nothing went to the look-alike host");
+        assert_eq!(link.pairing_state(), "not paired to holder");
     }
 
     #[tokio::test]

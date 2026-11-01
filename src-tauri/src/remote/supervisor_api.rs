@@ -25,9 +25,11 @@ pub(crate) const SUPERVISOR_STANDBY_CODE: &str = "SUPERVISOR_STANDBY";
 pub(crate) const SUPERVISOR_OBSERVE_CAPABILITY: &str = "supervisorObserveV1";
 
 /// `POST /api/v1/supervisor/observe`: a standby's observation of its own panes (keystrokes,
-/// relayed input, worker report), applied here as if local with `host_id` the sender machine.
+/// relayed input, worker report), applied here as if local with `host_id` the paired host key
+/// this holder binds the sender machine's panes under.
 /// Same grant as agent control: a machine Control device the policy admits. The sender is the
-/// device's machine (its installation id), never a body field.
+/// device's machine (its installation id), never a body field; a view-only or mirror device
+/// is refused (403) before the body is read.
 pub(crate) async fn http_observe(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -40,8 +42,8 @@ pub(crate) async fn http_observe(
     let Ok(Json(observation)) = body else {
         return reference_chat_error(ScopeErrorCode::InvalidRequest, "the body must be one observation");
     };
-    let host_id = device.installation_id.clone().unwrap_or_else(|| device.id.clone());
-    match crate::hub_runtime::apply_observation(&host_id, observation).await {
+    let hosts = crate::supervisor_move::paired_host_views().await;
+    match crate::hub_runtime::apply_observation(device.installation_id.as_deref(), &hosts, observation).await {
         Ok(value) => no_store(value),
         Err(failure) => service_refusal(&failure),
     }
