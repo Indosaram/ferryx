@@ -629,6 +629,9 @@ const ENROLLMENT_TOKEN_REQUIRED: &str = "Enrollment token required for private r
 
 const ADMISSION_WINDOW: Duration = Duration::from_secs(60);
 const CONTROL_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an authenticated control socket may send nothing (not even a Ping) before the
+/// relay treats it as half-open.
+const CONTROL_READ_IDLE: Duration = Duration::from_secs(60);
 const DEVICE_TOKEN_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_CACHED_DEVICE_TOKENS: usize = 1_000;
 const REJECTED_DEVICE_TOKEN_TTL: Duration = Duration::from_secs(30);
@@ -4270,8 +4273,20 @@ async fn handle_control_socket(
         }
     }
     let mut suspension = state.control_suspension_receiver(generation);
+    // The daemon pings every 15 s. A socket that sends nothing at all for this long is
+    // half-open, and must stop being offered sessions it will never answer.
+    let mut read_deadline = tokio::time::Instant::now() + CONTROL_READ_IDLE;
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(read_deadline) => {
+                tracing::warn!("relay control socket idle; closing");
+                let close_frame = axum::extract::ws::CloseFrame {
+                    code: axum::extract::ws::close_code::AWAY,
+                    reason: "control channel idle".into(),
+                };
+                let _ = timeout(TRANSFER_TIMEOUT, socket.send(Message::Close(Some(close_frame)))).await;
+                break;
+            }
             reason = next_suspension_reason(&mut suspension) => {
                 // The owner's grace period ended: end the tunnel with the exact reason
                 // instead of leaving a live control channel behind for a stopped account.
@@ -4315,6 +4330,7 @@ async fn handle_control_socket(
                 }
             }
             incoming = socket.recv() => {
+                read_deadline = tokio::time::Instant::now() + CONTROL_READ_IDLE;
                 if let Some(id) = pending_alias.clone() {
                     if state.bind_control_alias_for(&own_channel, &own_grant, id) {
                         pending_alias = None;
@@ -8924,6 +8940,25 @@ mod tests {
             }
         };
         assert!(response.success, "{:?}", response.error);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_silent_control_socket_is_closed_and_unregistered() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (mut daemon, auth) = authenticate(&base, &identity(46, "silent_machine"), false, false).await;
+        assert!(auth.success);
+        control_barrier(&mut daemon).await;
+        assert!(state.inner.control_channels.lock().contains_key("silent_machine"));
+        // Paused time auto-advances to the idle deadline once the relay waits on it.
+        tokio::time::pause();
+        assert_close(daemon.next().await, 1001, "control channel idle");
+        tokio::time::resume();
+        // The relay drops the socket only after unregistering it, so the stream's end is the
+        // signal that the registration is gone.
+        while let Some(Ok(_)) = timeout(Duration::from_secs(5), daemon.next()).await.unwrap() {}
+        assert!(!state.inner.control_channels.lock().contains_key("silent_machine"));
         server.abort();
     }
 
