@@ -452,10 +452,25 @@ export type ChangesTab = {
   pinned?: boolean;
 };
 
-export type WorkspaceTab = TerminalTab | BrowserTab | FileTab | ChangesTab;
+/** Remote desktop viewer of one paired host (`HostView.host_id`). Holds no PTY session. */
+export type RemoteDesktopTab = {
+  kind: "remoteDesktop";
+  id: string;
+  label: string;
+  hostId: string;
+  /**
+   * Always "": the viewer owns no frontend terminal session (the same "no PTY" marker that
+   * non-terminal leaves use in `sessionIdsByLeafId`). Typed as the literal so code that narrows
+   * away browser/file/changes tabs can still read `sessionId` as a string.
+   */
+  sessionId: "";
+  pinned?: boolean;
+};
+
+export type WorkspaceTab = TerminalTab | BrowserTab | FileTab | ChangesTab | RemoteDesktopTab;
 
 export function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
-  return tab.kind !== "browser" && tab.kind !== "file" && tab.kind !== "changes";
+  return tab.kind !== "browser" && tab.kind !== "file" && tab.kind !== "changes" && tab.kind !== "remoteDesktop";
 }
 
 export type CreateBrowserRequest = {
@@ -600,7 +615,22 @@ export type ChangesPaneContent = {
   readonly worktree: WorktreeIdentity | null;
 };
 
-export type PaneContent = TerminalPaneContent | BrowserPaneContent | DagPaneContent | FilePaneContent | ChangesPaneContent;
+export type RemoteDesktopPaneContent = {
+  readonly kind: "remoteDesktop";
+  readonly hostId: string;
+};
+
+export type PaneContent =
+  | TerminalPaneContent
+  | BrowserPaneContent
+  | DagPaneContent
+  | FilePaneContent
+  | ChangesPaneContent
+  | RemoteDesktopPaneContent;
+
+export function createRemoteDesktopPaneContent(hostId: string): RemoteDesktopPaneContent {
+  return { kind: "remoteDesktop", hostId };
+}
 
 export function createChangesPaneContent(changes: Omit<ChangesPaneContent, "kind">): ChangesPaneContent {
   return { kind: "changes", workspaceId: changes.workspaceId, worktreePath: changes.worktreePath, worktree: changes.worktree };
@@ -950,7 +980,10 @@ export interface PersistedBrowserTabState {
 export interface PersistedTab {
   id: string;
   label: string;
-  kind?: "terminal" | "browser" | "file" | "changes";
+  kind?: "terminal" | "browser" | "file" | "changes" | "remoteDesktop";
+  remoteDesktop?: {
+    hostId: string;
+  };
   changes?: {
     workspaceId: string;
     worktreePath: string;

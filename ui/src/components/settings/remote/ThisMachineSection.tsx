@@ -1,4 +1,5 @@
 import { RemoteAccessSection } from "../RemoteAccessSection";
+import { RemoteDesktopHostSection } from "./RemoteDesktopHostSection";
 
 /** Open by default: the summary text "Access to This Machine" is pinned by SettingsDialog tests. */
 export function ThisMachineSection() {
@@ -12,6 +13,7 @@ export function ThisMachineSection() {
         <summary className="cursor-pointer text-[13px] font-medium">Access to This Machine</summary>
         <RemoteAccessSection hideTitle />
       </details>
+      <RemoteDesktopHostSection />
     </section>
   );
 }

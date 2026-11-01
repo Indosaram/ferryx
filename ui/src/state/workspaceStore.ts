@@ -58,6 +58,7 @@ import type {
   TerminalLifecyclePayload,
   ChangesTab,
   FileTab,
+  RemoteDesktopTab,
   SessionRecoveryState,
   TerminalSession,
   TerminalTab,
@@ -2063,6 +2064,12 @@ export function useWorkspaceStore({
         return;
       }
 
+      // The pane disconnects its viewer session on unmount; no backend PTY to dispose.
+      if (closingTab.kind === "remoteDesktop") {
+        dispatch({ type: "CLOSE_TAB", tabId });
+        return;
+      }
+
       // A browser can live as pane content inside a terminal-kind tab (e.g. after a
       // browser tab was dragged into this tab's split); collect its ids so the native
       // child webviews are torn down with the tab instead of leaking.
@@ -2442,6 +2449,24 @@ export function useWorkspaceStore({
     [dispatch],
   );
 
+  /** Opens (or focuses) the remote desktop viewer of a paired host in the active layout. */
+  const openRemoteDesktopTab = useCallback(
+    (hostId: string, label: string): string => {
+      const existing = stateRef.current.layout.tabs.find(
+        (tab) => tab.kind === "remoteDesktop" && tab.hostId === hostId,
+      );
+      if (existing) {
+        dispatch({ type: "ACTIVATE_TAB", tabId: existing.id });
+        return existing.id;
+      }
+      const tabId = createId("tab");
+      const tab: RemoteDesktopTab = { kind: "remoteDesktop", id: tabId, label, hostId, sessionId: "" };
+      dispatch({ type: "ADD_TAB_WITH_SESSION", tab });
+      return tabId;
+    },
+    [dispatch],
+  );
+
   const adoptBrowserSession = useCallback(
     (
       browserState: BrowserState | BrowserSessionCreatedPayload["browser"],
@@ -2595,6 +2620,7 @@ export function useWorkspaceStore({
     createBrowserTab,
     openFilePreviewTab,
     openChangesTab,
+    openRemoteDesktopTab,
     adoptBrowserSession,
     duplicateBrowserTab,
     navigateBrowserTab: navigateBrowserTabAction,
