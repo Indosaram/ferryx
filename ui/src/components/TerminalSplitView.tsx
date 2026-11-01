@@ -54,6 +54,7 @@ import {
 import { BrowserPane } from "./BrowserPane";
 import { FilePreviewPane } from "./FilePreviewPane";
 import { ChangesPanel } from "./ChangesPanel";
+import { RemoteDesktopPane } from "./RemoteDesktopPane";
 import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
@@ -1474,6 +1475,15 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   worktree={content.worktree}
                   worktreePath={content.worktreePath}
                   active={tabVisible}
+                />
+              );
+            case "remoteDesktop":
+              return (
+                <RemoteDesktopPane
+                  hostId={content.hostId}
+                  label={tab.label}
+                  visible={tabVisible}
+                  occluded={showsDropFeedback}
                 />
               );
             case "dag": {

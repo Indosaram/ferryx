@@ -30,6 +30,7 @@ import {
 } from "../../remote/accountSession";
 import { getOrCreateAttachKey } from "../../remote/accountAttach";
 import { getAgentIntegration, toIpcError } from "../../lib/tauri";
+import { useRemoteDesktopSupported } from "../../lib/remoteDesktop";
 import { AccountSignIn } from "./AccountSignIn";
 import { AddMachineModal, type AddMachineMethod } from "./AddMachineModal";
 import { AccountBar } from "./remote/AccountBar";
@@ -38,7 +39,7 @@ import { DiscoveredList } from "./remote/DiscoveredList";
 import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent } from "./remote/MachineDrawer";
 import { MachineList } from "./remote/MachineList";
 import { MachineApprovalCard } from "./remote/MachineApprovalCard";
-import { PairedMachineRow, SshMachineRow, sshRowStatus } from "./remote/MachineRow";
+import { PairedMachineRow, pairedDisplayName, SshMachineRow, sshRowStatus } from "./remote/MachineRow";
 import { ThisMachineSection } from "./remote/ThisMachineSection";
 import {
   accountErrorMessage,
@@ -59,6 +60,8 @@ export interface RemoteSectionProps {
   legacySsh?: boolean;
   onOpenProject?: (target: MachineProjectTarget, context: RemoteContext) => void;
   onOpenSshProject?: (hostId: string) => void;
+  /** Opens a remote desktop pane for a paired host; the action shows only when RD is supported. */
+  onOpenRemoteDesktop?: (hostId: string, label: string) => void;
   store?: RemoteHostStore;
   inventory?: typeof pairedHostInventory;
   negotiate?: (context: PairedHostContext) => Promise<unknown>;
@@ -73,6 +76,7 @@ export function RemoteSection({
   legacySsh = false,
   onOpenProject,
   onOpenSshProject,
+  onOpenRemoteDesktop,
   store = remoteHostStore,
   inventory = pairedHostInventory,
   negotiate = defaultNegotiate,
@@ -85,6 +89,7 @@ export function RemoteSection({
   const accountOrigin = accountOriginProp ?? configuredOrigin;
   const [accountOriginDraft, setAccountOriginDraft] = useState(accountOrigin);
   const [accountOriginError, setAccountOriginError] = useState<string | null>(null);
+  const remoteDesktopSupported = useRemoteDesktopSupported();
   const [accountToken, setAccountToken] = useState<string | null>(() => {
     if (accountSessionTokenProp !== undefined) return accountSessionTokenProp;
     return getStoredAccountSessionToken(accountOrigin);
@@ -708,6 +713,9 @@ export function RemoteSection({
                 onConnect={() => void handleConnectAccountMachine(host)}
                 onCheck={() => void handleCheckPaired(host)}
                 onForget={() => { openDrawer(key, true); setConfirmForget({ hostId: host.hostId, generation: host.generation! }); }}
+                onOpenRemoteDesktop={remoteDesktopSupported && onOpenRemoteDesktop
+                  ? () => onOpenRemoteDesktop(host.hostId, pairedDisplayName(host))
+                  : undefined}
               />
             );
           }

@@ -886,6 +886,142 @@ pub struct PairedDagStream {
     pub lease: CredentialLease,
 }
 
+/// Gateway socket target of the remote desktop byte bridge.
+pub const REMOTE_DESKTOP_STREAM_TARGET: &str = "/api/v1/remote-desktop/stream";
+
+/// The relay lifetime class of a socket opened for `ticket_target`: the remote desktop
+/// bridge is a long-lived stream, every other socket keeps the default.
+fn relay_session_kind(ticket_target: &str) -> crate::remote::relay_server::SessionKind {
+    if ticket_target == REMOTE_DESKTOP_STREAM_TARGET {
+        crate::remote::relay_server::SessionKind::RemoteDesktop
+    } else {
+        crate::remote::relay_server::SessionKind::Http
+    }
+}
+/// Largest bridge message: one channel byte plus a TCP chunk of at most 60000 bytes or one
+/// UDP datagram, with headroom.
+pub const REMOTE_DESKTOP_MAX_FRAME_BYTES: usize = 256 * 1024;
+const REMOTE_DESKTOP_PAIR_MAX_BYTES: usize = 64 * 1024;
+
+impl MachineClient {
+    /// `POST /api/v1/remote-desktop/pair` on a Machine-scope paired host and returns the
+    /// raw JSON body. A token the host rotates on this request is not adopted: the
+    /// inventory belongs to the daemon, and the previous token stays valid until expiry.
+    pub async fn remote_desktop_pair(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<Vec<u8>> {
+        let (host, lease) = service.capture_operation(host_id, generation).await?;
+        if host.grant_scope != GrantScope::Machine {
+            return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
+        }
+        let route = Route {
+            method: Method::POST,
+            segments: vec!["remote-desktop".to_owned(), "pair".to_owned()],
+            query: vec![],
+            body: Some(b"{}".to_vec()),
+            capability: None,
+            request_id: None,
+            response_limit: REMOTE_DESKTOP_PAIR_MAX_BYTES,
+            // The host creates or returns the same record for this device.
+            idempotent: true,
+            budget_secs: Some(30),
+        };
+        let (bytes, _rotated) = self.http_rotating(&host, &lease, &route).await?;
+        Ok(bytes)
+    }
+
+    /// Opens the remote desktop byte-bridge socket on a Machine-scope paired host, over
+    /// the direct adapter when one is published and the end-to-end relay tunnel otherwise.
+    /// The gateway authorizes this route with the bearer itself (no socket ticket), so the
+    /// direct attempt sends only the Authorization header.
+    pub async fn remote_desktop_stream(
+        &self,
+        service: &PairedHostService,
+        host_id: String,
+        generation: Epoch,
+    ) -> Result<super::secure_http::PairedSocket> {
+        let (host, lease) = service.capture_operation(host_id, generation).await?;
+        if host.grant_scope != GrantScope::Machine {
+            return Err(ClientError::local("MACHINE_ACCESS_REQUIRED"));
+        }
+        let segments = ["api", "v1", "remote-desktop", "stream"].map(str::to_owned);
+        let base = super::direct_client::request_base(&host)?;
+        let direct = match base.direct_epoch {
+            Some(epoch) => match self.remote_desktop_direct_socket(&base.url, &lease).await {
+                Ok(socket) => Some(socket),
+                Err(error) if super::direct_client::is_transport_failure(&error) => {
+                    super::direct_client::report_direct_loss(&host, epoch);
+                    None
+                }
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        let socket = match direct {
+            Some(socket) => socket,
+            None => {
+                let relay = Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
+                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+                self.open_relay_socket(
+                    &host,
+                    &lease,
+                    &relay,
+                    &segments,
+                    &[],
+                    REMOTE_DESKTOP_STREAM_TARGET,
+                    REMOTE_DESKTOP_MAX_FRAME_BYTES,
+                )
+                .await?
+            }
+        };
+        service
+            .current_generation(host.host_id.clone(), generation)
+            .await?;
+        Ok(socket)
+    }
+
+    async fn remote_desktop_direct_socket(
+        &self,
+        base: &Url,
+        lease: &CredentialLease,
+    ) -> Result<super::secure_http::PairedSocket> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut url = base.clone();
+        url.path_segments_mut()
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?
+            .extend(["api", "v1", "remote-desktop", "stream"]);
+        let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
+        url.set_scheme(scheme)
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|_| ClientError::local("INVALID_REQUEST"))?;
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", lease.token()?)
+                .parse()
+                .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+        );
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(REMOTE_DESKTOP_MAX_FRAME_BYTES))
+            .max_frame_size(Some(REMOTE_DESKTOP_MAX_FRAME_BYTES));
+        let mut cancelled = lease.cancellation();
+        tokio::select! { biased;
+            _ = cancelled.changed() => Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
+            result = tokio::time::timeout(
+                Duration::from_secs(15),
+                super::secure_http::connect_net_websocket(request, config),
+            ) => result
+                .map_err(|_| ClientError::local("TIMEOUT"))?
+                .map_err(|_| ClientError::local("HOST_UNAVAILABLE")),
+        }
+    }
+}
+
 /// `/api/v1/{segments}?{query}` exactly as the gateway sees it, percent-encoded the same
 /// way the network path encodes it.
 fn gateway_path(segments: &[String], query: &[(String, String)]) -> Result<String> {
@@ -1111,6 +1247,7 @@ impl MachineClient {
             machine_id: &host.machine_id,
             attach,
             bearer: &bearer,
+            session_kind: relay_session_kind(ticket_target),
         };
         let mut cancelled = lease.cancellation();
         let result = tokio::select! { biased;
@@ -1370,6 +1507,7 @@ impl MachineClient {
             machine_id: &host.machine_id,
             attach,
             bearer: &bearer,
+            session_kind: crate::remote::relay_server::SessionKind::Http,
         };
         let mut cancellation = lease.cancellation();
         let response = tokio::select! { biased;

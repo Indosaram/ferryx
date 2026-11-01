@@ -185,7 +185,167 @@ pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, Ru
             tracing::info!(source = %source_exe.display(), "No bundled mhc next to the daemon source; hub turns use mhc on PATH");
         }
     }
+    #[cfg(feature = "remote-desktop")]
+    stage_ffmpeg(&generation, source_exe, &staged.key);
     Ok(staged)
+}
+
+/// Dir inside a macOS/Linux generation holding the FFmpeg shared libraries a `remote-desktop`
+/// build links. build.rs points the staged executable's rpath at it (`@executable_path/../../../
+/// ffmpeg` from the staged helper bundle, `$ORIGIN/ffmpeg` on Linux). Windows has no rpath: the
+/// DLLs go beside the staged `ferryx.exe`.
+#[cfg(feature = "remote-desktop")]
+pub const FFMPEG_DIR: &str = "ffmpeg";
+
+/// Whether `file_name` is one of FFmpeg's shared libraries on `target_os`
+/// (`std::env::consts::OS` spelling). Windows install dirs hold many other DLLs, so the match is
+/// on FFmpeg's own library names; versioned symlink names (`libavcodec.so.62`) match too.
+#[cfg(feature = "remote-desktop")]
+pub fn is_ffmpeg_library(file_name: &str, target_os: &str) -> bool {
+    const STEMS: [&str; 8] = [
+        "avcodec", "avformat", "avutil", "avdevice", "avfilter", "swscale", "swresample", "postproc",
+    ];
+    match target_os {
+        "windows" => {
+            let lower = file_name.to_ascii_lowercase();
+            lower.ends_with(".dll")
+                && STEMS.iter().any(|stem| {
+                    lower
+                        .strip_prefix(stem)
+                        .is_some_and(|rest| rest.starts_with('-') || rest == ".dll")
+                })
+        }
+        "macos" | "linux" => {
+            let library = if target_os == "macos" {
+                file_name.ends_with(".dylib")
+            } else {
+                file_name.contains(".so")
+            };
+            library
+                && STEMS.iter().any(|stem| {
+                    file_name
+                        .strip_prefix("lib")
+                        .and_then(|rest| rest.strip_prefix(stem))
+                        .is_some_and(|rest| rest.starts_with('.'))
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Where an install (or an already staged generation) keeps the FFmpeg libraries, relative to
+/// the directory of `executable`: macOS app `Contents/Frameworks` (from `Contents/MacOS` or from
+/// the helper's `Contents/Helpers/Ferryx Daemon.app/Contents/MacOS`) or a staged `<key>/ffmpeg`;
+/// Linux deb/AppImage `usr/lib/Ferryx/ffmpeg` or a staged `<key>/ffmpeg`; Windows the exe dir.
+#[cfg(feature = "remote-desktop")]
+pub fn ffmpeg_source_candidates(executable: &Path, target_os: &str) -> Vec<PathBuf> {
+    let Some(exe_dir) = executable.parent() else {
+        return Vec::new();
+    };
+    match target_os {
+        "macos" => vec![
+            exe_dir.join("../Frameworks"),
+            exe_dir.join("../../../../Frameworks"),
+            exe_dir.join("../../..").join(FFMPEG_DIR),
+        ],
+        "linux" => vec![
+            exe_dir.join("../lib/Ferryx").join(FFMPEG_DIR),
+            exe_dir.join(FFMPEG_DIR),
+        ],
+        "windows" => vec![exe_dir.to_path_buf()],
+        _ => Vec::new(),
+    }
+}
+
+/// The FFmpeg libraries in `dir`, sorted; empty when there are none or `dir` is unreadable.
+#[cfg(feature = "remote-desktop")]
+pub fn ffmpeg_libraries_in(dir: &Path, target_os: &str) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut libraries: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_ffmpeg_library(name, target_os))
+        })
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    libraries.sort();
+    libraries
+}
+
+/// Copies the FFmpeg libraries into the generation so the staged daemon can load them after the
+/// app moves or is replaced. Missing libraries are logged, not fatal: a development build links
+/// the system FFmpeg.
+#[cfg(feature = "remote-desktop")]
+fn stage_ffmpeg(generation: &Path, source_exe: &Path, key: &str) {
+    let os = std::env::consts::OS;
+    let found = std::env::current_exe()
+        .ok()
+        .into_iter()
+        .chain(std::iter::once(source_exe.to_path_buf()))
+        .flat_map(|exe| ffmpeg_source_candidates(&exe, os))
+        .map(|dir| ffmpeg_libraries_in(&dir, os))
+        .find(|libraries| !libraries.is_empty());
+    let Some(libraries) = found else {
+        tracing::warn!(source = %source_exe.display(), "No bundled FFmpeg libraries next to the daemon source; the staged daemon relies on a system FFmpeg");
+        return;
+    };
+    if let Err(error) = ensure_ffmpeg(generation, &libraries, os) {
+        tracing::error!(%error, generation = %key, "Could not stage the FFmpeg libraries; the staged daemon may fail to start");
+    }
+}
+
+/// Places `libraries` where the staged executable loads them from: beside it on Windows,
+/// `<generation>/ffmpeg` elsewhere (temp dir, then rename; an existing dir is kept).
+#[cfg(feature = "remote-desktop")]
+pub fn ensure_ffmpeg(generation: &Path, libraries: &[PathBuf], target_os: &str) -> Result<(), RuntimeStageError> {
+    let copy = |source: &PathBuf, dir: &Path| -> Result<(), RuntimeStageError> {
+        let Some(name) = source.file_name() else {
+            return Ok(());
+        };
+        let target = dir.join(name);
+        if target.is_file() {
+            return Ok(());
+        }
+        fs::copy(source, &target)
+            .map(|_| ())
+            .map_err(io_error(format!("copy {} to {}", source.display(), target.display())))
+    };
+    if target_os == "windows" {
+        for library in libraries {
+            copy(library, generation)?;
+        }
+        return sync_dir(generation).map_err(io_error(format!("sync {}", generation.display())));
+    }
+    let destination = generation.join(FFMPEG_DIR);
+    if !ffmpeg_libraries_in(&destination, target_os).is_empty() {
+        return Ok(());
+    }
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let tmp = generation.join(format!(
+        "{FFMPEG_DIR}{TMP_MARKER}{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = fs::create_dir_all(&tmp)
+        .map_err(io_error(format!("create {}", tmp.display())))
+        .and_then(|()| libraries.iter().try_for_each(|library| copy(library, &tmp)))
+        .and_then(|()| sync_dir(&tmp).map_err(io_error(format!("sync {}", tmp.display()))))
+        .and_then(|()| match fs::rename(&tmp, &destination) {
+            Ok(()) => sync_dir(generation).map_err(io_error(format!("sync {}", generation.display()))),
+            // Another stager won the rename.
+            Err(_) if !ffmpeg_libraries_in(&destination, target_os).is_empty() => Ok(()),
+            Err(error) => Err(io_error(format!("rename {} to {}", tmp.display(), destination.display()))(error)),
+        });
+    if tmp.exists() {
+        remove_tmp_dir(&tmp);
+    }
+    result
 }
 
 /// Copies this platform's bundled mhc payload (`<mhc>/<host triple>`: the mhc release folder and

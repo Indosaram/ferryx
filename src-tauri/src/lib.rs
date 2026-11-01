@@ -1627,6 +1627,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,
         crate::ipc::paired_host::cmd_retry_paired_session,
+        crate::ipc::remote_desktop::cmd_rd_supported,
         crate::ipc::file_preview::cmd_file_preview_open,
         crate::ipc::file_preview::cmd_file_preview_open_child,
         crate::ipc::file_preview::cmd_file_preview_open_child_document,
@@ -1854,6 +1855,28 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         if invoke.message.command() == "cmd_retry_paired_session" {
             let handler: Box<tauri::ipc::InvokeHandler<R>> =
                 Box::new(tauri::generate_handler![crate::ipc::paired_host::cmd_retry_paired_session]);
+            return handler(invoke);
+        }
+        // Feature-gated outside the product list: a cfg attribute inside it would also end the
+        // bracketed list that registry readers such as the UI updater tests parse.
+        #[cfg(feature = "remote-desktop")]
+        if matches!(
+            invoke.message.command(),
+            "cmd_rd_connect"
+                | "cmd_rd_input"
+                | "cmd_rd_disconnect"
+                | "cmd_rd_host_state"
+                | "cmd_rd_host_set"
+                | "cmd_rd_host_respond"
+        ) {
+            let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+                crate::ipc::remote_desktop::commands::cmd_rd_connect,
+                crate::ipc::remote_desktop::commands::cmd_rd_input,
+                crate::ipc::remote_desktop::commands::cmd_rd_disconnect,
+                crate::ipc::remote_desktop_host::cmd_rd_host_state,
+                crate::ipc::remote_desktop_host::cmd_rd_host_set,
+                crate::ipc::remote_desktop_host::cmd_rd_host_respond,
+            ]);
             return handler(invoke);
         }
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]

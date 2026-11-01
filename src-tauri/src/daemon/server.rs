@@ -4067,6 +4067,20 @@ impl DaemonServer {
                 payload,
             });
         }));
+        // Remote desktop consent prompts and session changes reach the GUI the same way; the
+        // GUI re-emits `rd-host-consent` and `rd-host-state-changed` as Tauri events.
+        #[cfg(feature = "remote-desktop")]
+        {
+            let rd_tx = remote_event_tx.clone();
+            remote_state
+                .remote_desktop
+                .set_event_sink(Arc::new(move |event, payload| {
+                    let _ = rd_tx.send(DaemonRemoteEvent {
+                        event: event.to_string(),
+                        payload,
+                    });
+                }));
+        }
 
         // A prompt card that appears, moves or goes away (answered on the phone, say) reaches the
         // desktop Inbox as `agentPromptChanged`, so its rows re-read the prompt without waiting
@@ -4246,6 +4260,46 @@ impl DaemonServer {
 
     pub fn session_service(&self) -> &Arc<DaemonSessionService> {
         &self.session_service
+    }
+
+    /// Serves `RemoteDesktopHost{Get,Set,Respond}`. The host may block (disk, capture probe,
+    /// thread join), so every call runs on a blocking worker.
+    #[cfg(feature = "remote-desktop")]
+    async fn handle_remote_desktop(&self, request: DaemonRequest) -> DaemonResponse {
+        let host = Arc::clone(&self.remote_state.remote_desktop);
+        let outcome = tokio::task::spawn_blocking(move || match request {
+            DaemonRequest::RemoteDesktopHostSet { enabled, allow_input, allow_clipboard } => {
+                host.set(enabled, allow_input, allow_clipboard)
+            }
+            DaemonRequest::RemoteDesktopHostRespond { request_id, approve } => {
+                host.respond(&request_id, approve)
+            }
+            _ => Ok(host.state()),
+        })
+        .await;
+        match outcome {
+            Ok(Ok(state)) => DaemonResponse::RemoteDesktopHostState { state },
+            Ok(Err(error)) => DaemonResponse::Error {
+                message: error.message,
+                code: Some(error.code.into()),
+                details: None,
+            },
+            Err(error) => DaemonResponse::Error {
+                message: format!("Remote desktop task failed: {error}"),
+                code: Some("INTERNAL_ERROR".into()),
+                details: None,
+            },
+        }
+    }
+
+    /// A daemon built without the feature answers with a typed refusal, never a malformed reply.
+    #[cfg(not(feature = "remote-desktop"))]
+    async fn handle_remote_desktop(&self, _request: DaemonRequest) -> DaemonResponse {
+        DaemonResponse::Error {
+            message: "This Ferryx build does not include remote desktop".into(),
+            code: Some("RD_UNSUPPORTED".into()),
+            details: None,
+        }
     }
 
     pub(crate) async fn describe_session_identity(&self, session_id: &str) -> DaemonResponse {
@@ -6146,6 +6200,13 @@ impl DaemonServer {
         self.spawn_foreground_observer();
         self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
         self.spawn_paired_host_route_forwarder();
+        // Restart the remote desktop host the owner left enabled. Capture setup may block, so it
+        // runs on a blocking worker and never delays readiness.
+        #[cfg(feature = "remote-desktop")]
+        {
+            let host = Arc::clone(&self.remote_state.remote_desktop);
+            drop(tokio::task::spawn_blocking(move || host.restore()));
+        }
         crate::daemon::agent_extension::install_agent_state_extension_if_enabled(
             &self.agent_integration,
         );
@@ -7679,8 +7740,15 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
+                    #[cfg(feature = "remote-desktop")]
+                    capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY.into());
                     DaemonResponse::CapabilitiesOk { capabilities }
                 },
+                Ok(request @ (DaemonRequest::RemoteDesktopHostGet
+                    | DaemonRequest::RemoteDesktopHostSet { .. }
+                    | DaemonRequest::RemoteDesktopHostRespond { .. })) => {
+                    self.handle_remote_desktop(request).await
+                }
                 Ok(DaemonRequest::GetAgentIntegration) => DaemonResponse::AgentIntegrationOk {
                     enabled: self.agent_integration.enabled(),
                 },

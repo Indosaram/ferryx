@@ -809,6 +809,9 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
+        DaemonRequest::RemoteDesktopHostGet => "remoteDesktopHostGet",
+        DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
+        DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",
     }
 }
 
@@ -1002,12 +1005,15 @@ const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// pane to start the turn (up to the 120s turn-start maximum), so the client must outlast it
 /// and let the daemon report the outcome. Matches the CLI's `GOAL_CLI_TIMEOUT`.
 const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const REMOTE_DESKTOP_SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // A cancel stops the worker's pane before it answers.
         DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
+        DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }

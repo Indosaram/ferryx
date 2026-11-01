@@ -30,6 +30,11 @@
 
 .PARAMETER IconsDir
     Optional explicit path to icons directory containing required PNG assets.
+
+.PARAMETER FfmpegPayloadDir
+    Optional staged FFmpeg payload (src-tauri/resources/ffmpeg/payload/x86_64-pc-windows-msvc, from
+    scripts/stage-ffmpeg.mjs) for a --features remote-desktop build. Its DLLs are placed beside
+    ferryx.exe and its legal files under ffmpeg-legal/, each verified against stage.json.
 #>
 param (
     [Parameter(Mandatory = $true)]
@@ -44,7 +49,8 @@ param (
     [switch]$SkipSigning = $false,
     [string]$CertThumbprint = $null,
     [string]$ManifestTemplate = $null,
-    [string]$IconsDir = $null
+    [string]$IconsDir = $null,
+    [string]$FfmpegPayloadDir = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -318,6 +324,28 @@ try {
     }
     New-Item -ItemType Directory -Path (Join-Path $stagingDir "mhc") | Out-Null
     Copy-Item -LiteralPath $mhcSource -Destination (Join-Path $stagingDir "mhc/$mhcTriple") -Recurse
+
+    # remote-desktop builds: LGPL FFmpeg DLLs beside ferryx.exe, fail closed on any hash mismatch.
+    if ($FfmpegPayloadDir) {
+        $ffmpegManifestPath = Join-Path $FfmpegPayloadDir "stage.json"
+        if (-not (Test-Path -LiteralPath $ffmpegManifestPath -PathType Leaf)) {
+            throw "ERROR: FFmpeg payload not staged: $ffmpegManifestPath (run: bun scripts/stage-ffmpeg.mjs --target x86_64-pc-windows-msvc)"
+        }
+        $ffmpegManifest = Get-Content -LiteralPath $ffmpegManifestPath -Raw | ConvertFrom-Json
+        New-Item -ItemType Directory -Path (Join-Path $stagingDir "ffmpeg-legal") | Out-Null
+        foreach ($part in @(@{ Dir = "runtime"; Dest = $stagingDir }, @{ Dir = "legal"; Dest = (Join-Path $stagingDir "ffmpeg-legal") })) {
+            $entries = @($ffmpegManifest.($part.Dir).PSObject.Properties)
+            if ($entries.Count -eq 0) { throw "ERROR: FFmpeg stage.json lists no $($part.Dir) files" }
+            foreach ($entry in $entries) {
+                $file = Join-Path (Join-Path $FfmpegPayloadDir $part.Dir) $entry.Name
+                if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
+                    (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.Value) {
+                    throw "ERROR: FFmpeg payload file missing or SHA256 mismatch: $file"
+                }
+                Copy-Item -LiteralPath $file -Destination (Join-Path $part.Dest $entry.Name)
+            }
+        }
+    }
 
     # Locate and copy icon assets
     $iconSource = $null

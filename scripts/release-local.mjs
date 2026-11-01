@@ -48,6 +48,21 @@ function sha256(value) {
 export const STORE_MSIX_NAME = "Ferryx_x64.msix";
 export const STORE_PRODUCT_ID = "9NLHQL5JNLM4";
 
+/** Optional cargo features a release may enable; each one is recorded in prepare-state.json. */
+export const RELEASE_FEATURES = Object.freeze(["remote-desktop"]);
+
+/** Validates a `--features a,b` value; returns a sorted, de-duplicated list. */
+export function parseReleaseFeatures(value) {
+  if (value === undefined || value === null || value === "") return [];
+  const features = [...new Set(String(value).split(",").map((name) => name.trim()).filter(Boolean))].sort();
+  for (const name of features) {
+    if (!RELEASE_FEATURES.includes(name)) {
+      throw new Error(`Unsupported release feature '${name}'; allowed: ${RELEASE_FEATURES.join(", ")}`);
+    }
+  }
+  return features;
+}
+
 /** Typed refusal raised when a Windows build lacks the Store-ingestion MSIX at the plan version. */
 export class StoreMsixError extends Error {
   constructor(code, message) {
@@ -281,6 +296,7 @@ export function prepareRelease({
   commit = "HEAD",
   outDir,
   nsisMigration = false,
+  features = [],
   changelog = generateChangelog,
 }) {
   assertNotInCI("prepare");
@@ -293,6 +309,7 @@ export function prepareRelease({
   // New releases must use vYYYY.MMDD.N (scripts/release-tag-policy.mjs); checked before any
   // config, git, or build work so a malformed tag stops the run immediately.
   assertReleaseTag(tag);
+  const cargoFeatures = parseReleaseFeatures(features.join(","));
 
   const resolvedOutDir = resolve(outDir);
   if (existsSync(resolvedOutDir)) {
@@ -417,6 +434,8 @@ export function prepareRelease({
     sourceDateEpoch,
     ghosttyPin,
     updaterPublicKey: updaterPubkey,
+    // Only present when a feature is on, so default releases keep the exact prior state file.
+    ...(cargoFeatures.length > 0 ? { cargoFeatures } : {}),
   };
 
   const sourceInputs = {
@@ -478,7 +497,7 @@ export async function buildRelease({
   if (!host) throw new Error("Missing required argument: --host");
 
   const resolvedRunDir = resolve(runDir);
-  validatePreparedRun(resolvedRunDir, configPath);
+  const { state } = validatePreparedRun(resolvedRunDir, configPath);
   const config = loadHostConfig(configPath);
 
   return buildHost({
@@ -487,6 +506,7 @@ export async function buildRelease({
     runDir: resolvedRunDir,
     approveNotarization,
     runner,
+    features: parseReleaseFeatures((state.cargoFeatures ?? []).join(",")),
   });
 }
 
@@ -905,7 +925,7 @@ async function main() {
 Usage: release-local <subcommand> [options]
 
 Subcommands:
-  prepare --config <json> --tag <date> --commit <sha-or-ref> --out <new-run-dir> [--nsis-migration]
+  prepare --config <json> --tag <date> --commit <sha-or-ref> --out <new-run-dir> [--nsis-migration] [--features remote-desktop]
   preflight --config <json> [--plan <path>]
   build --config <json> --run <dir> --host macbook|omaki|maho-win [--approve-notarization]
   assemble --run <dir> [--pubkey <fixture-key>]
@@ -927,7 +947,8 @@ Subcommands:
         const commit = options.get("commit") || "HEAD";
         const outDir = options.get("out");
         const nsisMigration = flags.has("nsis-migration");
-        const result = prepareRelease({ configPath, tag, commit, outDir, nsisMigration });
+        const features = parseReleaseFeatures(options.get("features"));
+        const result = prepareRelease({ configPath, tag, commit, outDir, nsisMigration, features });
         console.log(`Release run prepared successfully at ${result.outDir}`);
         console.log(JSON.stringify(result.plan, null, 2));
         break;
